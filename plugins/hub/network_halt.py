@@ -65,6 +65,18 @@ class HaltError(ValueError):
     """A record that fails its signature or shape check, or a refused act."""
 
 
+# A halt, a resume (proposal, confirmation, local lift) and a revocation each need a person's
+# confirmation, which the caller states with ``confirmed: true`` after asking.
+CONFIRMED_ACTIONS = frozenset({"halt", "propose_resume", "confirm_resume", "resume_local", "confirm_revoke"})
+CONFIRM_REFUSAL = "A person has to confirm this first: use the Halt and Resume view, or kollab --hub halt."
+
+
+def require_confirmed(action: str, payload: Any) -> None:
+    """Refuse a halt, resume or revoke act whose payload lacks ``confirmed: true``."""
+    if action in CONFIRMED_ACTIONS and not (isinstance(payload, dict) and payload.get("confirmed") is True):
+        raise HaltError(CONFIRM_REFUSAL)
+
+
 # --------------------------------------------------------------- signing
 
 
@@ -495,6 +507,12 @@ class TakeResult:
     lifted: list[str] = field(default_factory=list)
 
 
+# ponytail: the dedup records (seen, parents, owners, claims, resumes) are capped when stored; the ones
+# dropped are the arbitrary-oldest by hash, so a very old superseded order could be taken twice. Add an
+# issued_at to those records if that ever matters.
+MAX_BOOK_ENTRIES = 2048
+
+
 class HaltBook:
     """One machine's record of one network's orders (part of ``halt.json``)."""
 
@@ -516,17 +534,33 @@ class HaltBook:
         }
 
     def to_json(self) -> dict[str, Any]:
+        """The stored form; the dedup records are capped (``MAX_BOOK_ENTRIES``), never an active halt's or a head's."""
+        protected = set(self.halts) | set(self.proposals) | set(self.heads.values()) | self.lifted | self.local_lifts
+        protected |= {self.parents.get(h, "") for h in self.heads.values()} - {""}
+
+        def keep(keys: Iterable[str]) -> set[str]:
+            ordered = sorted(keys)
+            kept = {k for k in ordered if k in protected}
+            room = max(0, MAX_BOOK_ENTRIES - len(kept))
+            return kept | (set([k for k in ordered if k not in kept][-room:]) if room else set())
+
+        seen = keep(self.seen)
+        parents = keep(self.parents)
+        owners = keep(self.owners)
+        newest = sorted(self.resumes, key=lambda h: (int(self.resumes[h].get("issued_at") or 0), h))
+        resumes = set(newest[-MAX_BOOK_ENTRIES:]) | (set(newest) & protected)
+        claims = keep(self.claims)
         return {
-            "seen": sorted(self.seen),
+            "seen": sorted(seen),
             "heads": self.heads,
-            "parents": self.parents,
+            "parents": {k: v for k, v in self.parents.items() if k in parents},
             "halts": self.halts,
             "proposals": self.proposals,
-            "resumes": self.resumes,
+            "resumes": {k: v for k, v in self.resumes.items() if k in resumes},
             "lifted": sorted(self.lifted),
             "local_lifts": sorted(self.local_lifts),
-            "owners": self.owners,
-            "claims": {k: sorted(v) for k, v in self.claims.items()},
+            "owners": {k: v for k, v in self.owners.items() if k in owners},
+            "claims": {k: sorted(v) for k, v in self.claims.items() if k in claims},
         }
 
     def active(self) -> dict[str, dict]:
@@ -567,6 +601,11 @@ class HaltBook:
             return TakeResult(False, "already seen")
         if order["action"] == "halt" and not halt_allowed(view):
             return TakeResult(False, "fewer than two counting machines here")
+        if order["action"] == "resume" and any(
+            o["issuer"] == issuer and int(o.get("issued_at") or 0) > int(order.get("issued_at") or 0)
+            for o in self.proposals.values()
+        ):
+            return TakeResult(False, "a newer proposal from this issuer is open")
         self.seen.add(h)
         sup = order.get("supersedes")
         if sup:
@@ -994,7 +1033,8 @@ def select_sweep(
     for p in procs:
         if p.pid in chosen or p.pid in protected or _is_tmux(p):
             continue
-        tag = p.env.get("KOLLAB_AGENT_PID", "")
+        # KOLLAB_AGENT_PID: a tool shell's children; KOLLAB_OWNER_PID: a /terminal pane (it keeps no tool-shell tag)
+        tag = p.env.get("KOLLAB_AGENT_PID", "") or p.env.get("KOLLAB_OWNER_PID", "")
         if tag and tag in stopped_agents:
             chosen[p.pid] = p
     return list(chosen.values())

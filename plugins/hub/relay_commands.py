@@ -846,18 +846,22 @@ class RelayCommands:
                 if opts.get("revoke"):
                     revoke = [await self._resolve_peer_key(opts["revoke"])]
                 result = await self.agent_bridge.hub_halt_act(
-                    "halt", {"reason": opts.get("reason", ""), "revoke": revoke}
+                    "halt", {"reason": opts.get("reason", ""), "revoke": revoke, "confirmed": True}
                 )
                 return (
                     f"Halt {result.get('hash', '')[:8]} recorded. The halt listener stops this "
                     "machine's agents and tells every member online."
                 )
             if opts.get("local"):
-                return (await self.agent_bridge.hub_halt_act("resume_local", {})).get("line", "")
+                return (await self.agent_bridge.hub_halt_act("resume_local", {"confirmed": True})).get("line", "")
             if opts.get("confirm"):
-                result = await self.agent_bridge.hub_halt_act("confirm_resume", {"hash": opts["confirm"]})
+                result = await self.agent_bridge.hub_halt_act(
+                    "confirm_resume", {"hash": opts["confirm"], "confirmed": True}
+                )
                 return f"Resume confirmed: lifts {len(result.get('lifted') or [])} halts"
-            result = await self.agent_bridge.hub_halt_act("propose_resume", {})
+            result = await self.agent_bridge.hub_halt_act(
+                "propose_resume", {"confirmed": True}
+            )
             return f"{result.get('hash', '')[:8]}\n{RESUME_PROPOSED}"
         except (RelayError, ValueError) as exc:
             return f"connect: {exc}"

@@ -1085,10 +1085,11 @@ class HaltLink:
         return self.client.control.halt_members()
 
     async def hub_halt_act(self, action: str, payload: dict) -> dict:
-        from .network_halt import HaltError
+        from .network_halt import HaltError, require_confirmed
         from .relay_state import RelayError
 
         try:
+            require_confirmed(action, payload)
             result = self.client.control.halt_act(action, payload)
         except HaltError as error:
             raise RelayError(str(error)) from None
@@ -1219,7 +1220,8 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
         try:
             act = await _via_owner(
                 folder, control, "halt", root,
-                {"reason": opts.get("reason", ""), "revoke": revoke, "revoke_here_only": bool(opts.get("here-only"))},
+                {"reason": opts.get("reason", ""), "revoke": revoke, "revoke_here_only": bool(opts.get("here-only")),
+                 "confirmed": True},  # the typed command is the person's confirmation
             )
         except Exception as error:
             print(str(error))
@@ -1248,6 +1250,7 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
         payload, action = {"hash": opts["confirm"]}, "confirm_resume"
     else:
         payload, action = {}, "propose_resume"
+    payload["confirmed"] = True  # the typed command is the person's confirmation
     try:
         result = await _act(folder, control, action, payload, root)
     except Exception as error:

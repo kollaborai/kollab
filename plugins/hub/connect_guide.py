@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .device_names import display_name
+from .network_control import NETWORK_MISMATCH_LINE
 
 # Machine-global, not per workspace: one answer covers every project. Tests set
 # the variable so they never write the real marker.
@@ -59,6 +60,7 @@ JOIN_FAILURE_REASONS = {
     "transport": "could not reach the relay; check the connection",
     "invalid_response": "the relay sent a reply this device could not verify",
     "internal": "this device hit an unexpected error; see the kollab log",
+    "network_mismatch": NETWORK_MISMATCH_LINE,
     "update_required": "this version of kollab is too old for that relay; run kollab --upgrade",
 }
 
@@ -67,6 +69,21 @@ def join_failure_reason(code: Any) -> str:
     """One short line saying why a join failed, for a fixed failure code."""
     reason = JOIN_FAILURE_REASONS.get(code) if isinstance(code, str) else None
     return reason or "the relay did not accept the request"
+
+
+def join_check_text(result: Any) -> str:
+    """What a person checks after a join: the founder machine and, while fewer
+    than two machines count, the warning. "" for a result that has neither."""
+    if not isinstance(result, dict):
+        return ""
+    parts = []
+    fingerprint = result.get("founder_fingerprint")
+    if isinstance(fingerprint, str) and fingerprint:
+        parts.append(f"Founder machine {fingerprint}: check it matches the one on the device that gave you the code.")
+    warning = result.get("warning")
+    if isinstance(warning, str) and warning:
+        parts.append(warning)
+    return " ".join(parts)
 
 
 def marker_path() -> Path:

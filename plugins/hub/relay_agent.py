@@ -2917,11 +2917,15 @@ class RelayAgentBridge:
 
     async def hub_halt_act(self, action: str, payload: dict | None = None) -> dict:
         from .halt_runtime import tool_shell_refusal
-        from .network_halt import HaltError
+        from .network_halt import HaltError, require_confirmed
 
         if action in CONTROL_ACTIONS and tool_shell_refusal():  # an agent's shell never drives the controls
             raise RelayError(tool_shell_refusal())
         payload = dict(payload or {})
+        try:
+            require_confirmed(action, payload)
+        except HaltError as error:
+            raise RelayError(str(error)) from None
         if action in ("halt", "propose_resume"):
             payload["peer_heads"] = await self._peer_heads()
         try:

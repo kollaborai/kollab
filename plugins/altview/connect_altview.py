@@ -154,6 +154,8 @@ class ConnectOutcome:
     # A second line: for an approved join what happens to settings and logins,
     # for a failed one why.
     note: str = ""
+    # Third line of an approved join: the founder machine and the one-machine warning.
+    check: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, ConnectStatus):
@@ -180,14 +182,21 @@ class ConnectOutcome:
             or ConnectAltView._filter_text(self.note, 200) != self.note
         ):
             raise ValueError("outcome note must be one short printable line")
+        if self.check and (
+            self.status is not ConnectStatus.APPROVED
+            or not isinstance(self.check, str)
+            or len(self.check) > 400
+            or ConnectAltView._filter_text(self.check, 400) != self.check
+        ):
+            raise ValueError("outcome check must be short printable text")
 
     @classmethod
     def pending(cls, receipt_id: str) -> ConnectOutcome:
         return cls(ConnectStatus.PENDING, receipt_id)
 
     @classmethod
-    def approved(cls, detail: str = "", note: str = "") -> ConnectOutcome:
-        return cls(ConnectStatus.APPROVED, detail=detail, note=note)
+    def approved(cls, detail: str = "", note: str = "", check: str = "") -> ConnectOutcome:
+        return cls(ConnectStatus.APPROVED, detail=detail, note=note, check=check)
 
     @classmethod
     def connected(cls, detail: str = "") -> ConnectOutcome:
@@ -403,7 +412,10 @@ class ConnectAltView(AltView):
         if self._validation_error:
             self._write_line(2, y + 5, self._validation_error, width, _bad)
         self._write_line(2, y + 7, "tab switch  enter submit  esc cancel", width, paint_keys)
-        hints = ["no code? run /connect code on a device already on the network"]
+        hints = [
+            "no code? run /connect code on a device already on the network",
+            "using another relay? press tab and type its domain",
+        ]
         if self._on_attach is not None:
             hints.append(
                 f"first device? an empty code plus enter starts a network on {self.domain}"
@@ -473,6 +485,10 @@ class ConnectAltView(AltView):
         if outcome is not None and outcome.note:
             for line in textwrap.wrap(outcome.note, max(10, width - 3)):
                 self._write_line(2, row, line, width, _dim)
+                row += 1
+        if outcome is not None and outcome.check:
+            for line in textwrap.wrap(outcome.check, max(10, width - 3)):
+                self._write_line(2, row, line, width, paint_tip)
                 row += 1
         if self._stage == "waiting":
             if self._wait_note:
@@ -1089,6 +1105,12 @@ class ConnectScreenAltView(AltView):
             result = self._on_halt()  # read-only windows reach Halt and Resume too (R3-F8)
             if inspect.isawaitable(result):
                 await result
+            # The nested view's exit thawed the main loop, which can write its prompt over this
+            # screen; draw the whole frame again.
+            invalidate = getattr(self._renderer, "invalidate_render_cache", None)
+            if callable(invalidate):
+                invalidate()
+            self.request_render()
             return False
         if self._note:
             return False

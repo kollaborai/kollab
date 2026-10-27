@@ -746,3 +746,65 @@ def test_f4_7_the_newest_opt_out_record_decides_whatever_the_order(net):
     assert net.view().counts(c.mk)
     net.roster.opt_outs = [old]
     assert not net.view().counts(c.mk)
+
+
+# ------------------------------------------------- F5: pruning and late proposals
+
+
+def test_a_late_older_proposal_never_replaces_a_newer_one(net):
+    for n in range(8):  # both hash orders
+        book = nh.HaltBook(net.id)
+        h = halt(net.prod, net)
+        book.take(h, net.view(), is_member=net.member)
+        lifts = [nh.order_hash(h)]
+        old = resume(net.founder, net, lifts, reason=f"old{n}", issued_at=100)
+        new = resume(net.founder, net, lifts, reason=f"new{n}", issued_at=200)
+        assert book.take(new, net.view(), is_member=net.member).taken
+        late = book.take(old, net.view(), is_member=net.member)
+        assert not late.taken and "newer" in late.reason
+        assert list(book.open_proposals()) == [nh.order_hash(new)]
+
+
+def test_the_stored_book_is_capped_but_keeps_active_halts_and_heads(net, monkeypatch):
+    monkeypatch.setattr(nh, "MAX_BOOK_ENTRIES", 50)
+    book = nh.HaltBook(net.id)
+    h = halt(net.prod, net)
+    book.take(h, net.view(), is_member=net.member)
+    hh = nh.order_hash(h)
+    head = "0" * 64  # sorts before every junk hash below, so only protection keeps it
+    book.heads["some-issuer"] = head
+    book.seen.add(head)
+    for i in range(500):
+        junk = f"{'f' * 60}{i:04x}"
+        book.seen.add(junk)
+        book.parents[junk] = ""
+        book.owners[junk] = "f" * 64
+        book.resumes[junk] = {"issued_at": i, "lifts": []}
+    data = book.to_json()
+    for key in ("seen", "parents", "owners", "resumes"):
+        assert len(data[key]) <= 50 + 8, key
+    assert hh in data["seen"] and hh in data["halts"] and head in data["heads"].values() and head in data["seen"]
+    assert data["resumes"]  # the newest ones stay
+    assert max(int(v["issued_at"]) for v in data["resumes"].values()) == 499
+    again = nh.HaltBook(net.id, data)
+    assert hh in again.active()
+    assert again.take(h, net.view(), is_member=net.member).reason == "already seen"
+
+
+def test_terminal_session_processes_of_a_stopped_agent_are_swept(install):
+    """/terminal panes carry KOLLAB_OWNER_PID (not the tool-shell tag, so a person's pane keeps its controls)."""
+    py = f"{install.prefix}/bin/python"
+    agent = proc(60, [py, "-m", "kollabor_cli_main"], ppid=1)
+    pane = proc(61, ["npm", "run", "dev"], env={"KOLLAB_OWNER_PID": "60"}, ppid=1)
+    other = proc(62, ["npm", "run", "dev"], env={"KOLLAB_OWNER_PID": "999"}, ppid=1)
+    got = nh.select_sweep([agent, pane, other], install=install, scopes=[["/work/a"]])
+    assert {p.pid for p in got} == {60, 61}
+
+
+def test_terminal_panes_get_the_owner_tag_but_not_the_tool_shell_tag(monkeypatch):
+    from plugins import terminal_plugin as tp
+
+    monkeypatch.setenv("KOLLAB_TOOL_SHELL", "1")
+    env = tp._filter_env({"PATH": "/bin", "KOLLAB_TOOL_SHELL": "1", "KOLLAB_AGENT_PID": "5"})
+    assert env["KOLLAB_OWNER_PID"] == str(os.getpid())
+    assert "KOLLAB_TOOL_SHELL" not in env and "KOLLAB_AGENT_PID" not in env

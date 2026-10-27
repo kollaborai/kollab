@@ -896,3 +896,53 @@ Limits: the anchor is made by the machine that issued the code, so a compromised
 code the person types still names its own network; the person compares the founder fingerprint.
 A 40-bit anchor can be ground by an attacker who picks a founder key (about 2^40 key generations).
 Not run: a live two-device join.
+
+## Review fixes F5
+
+Unit tests only; nothing was halted, swept or killed on the host; no Docker or tmux run (the lead does the
+proof). Each item: failing test first, fix, mutation check on the fixed line (all KILLED unless noted).
+
+- L1 join result display: `founder_fingerprint` and `warning` now travel (`kollabor/state/interface.py:
+  enrollment_result`, `plugin._run_connect_enrollment`) and show after a join: terminal form
+  (`ConnectOutcome.check`, third line, `connect_guide.join_check_text`) and the web Join action message
+  (`ConnectJoinPanel._outcome`). `network_mismatch` has its plain line in `JOIN_FAILURE_REASONS`
+  (`NETWORK_MISMATCH_LINE`). Only the 12-hex fingerprint is shown, never the full founder key. Test:
+  `tests/unit/test_join_result_display.py`.
+- L2 server-side confirmation: `network_halt.require_confirmed` (halt, propose_resume, confirm_resume,
+  resume_local, confirm_revoke need `confirmed: true`). Checked in the daemon (`RelayAgentBridge.hub_halt_act`,
+  which also serves the `connect_proxy` op), in the halt listener (`HaltLink.hub_halt_act`, i.e. `halt.sock act`)
+  and in both halt panels (so the engine route `/network/halt/{panel}/actions/{action}` answers a plain refusal
+  without it). The typed CLI and `/connect halt|resume` pass it; `HaltScreen` passes it after its second press;
+  the web client adds it in `PanelHost` (`confirmedPayload`, halt panels, actions with `confirm`). `Propose
+  Resume` is now a `confirm` action. `withdraw`, `confirm_machine`, `confirm_founder`, `make_bootstrap`, count
+  and no_count are not gated (not named in the item). `kollab -p "/connect revoke X"` is untouched (not a
+  `halt_act`). Tests: `test_halt_confirmed.py`, engine `test_panels_routes.py`, `halt-panels.test.ts`. `dist` rebuilt.
+- L3 `HaltBook.to_json` caps `seen`, `parents`, `owners`, `claims` and `resumes` at `MAX_BOOK_ENTRIES` (2048);
+  active halts, open proposals, lifted and local-lifted hashes, heads and the heads' parents are always kept;
+  resumes keep the newest by `issued_at`. Dropped entries are the lowest hashes, so a very old superseded order
+  could be taken twice (comment `ponytail:` in the file). A resume proposal older (`issued_at`) than the same
+  issuer's open one is refused (`a newer proposal from this issuer is open`).
+- L4 Confirm Founder: one row per candidate (`founder:<key>`, fingerprint in the detail), action sends that key.
+- L5 (not reproduced in tmux; unit tests only): the stray `❯` came from the nested pop in `AltViewStackManager`
+  (`_restore_main_ui` thaws the main loop while the Connect screen is still on the stack). Fix stays in the
+  screens: after the halt view closes, `ConnectScreenAltView` invalidates its render cache and repaints. Stale
+  data: `plugin.open_halt` reused the cached session (`push(..., reuse=False)` now) and `ConnectHaltAltView.
+  on_enter` loads before the first frame. Not fixed: the stack manager still restores the main UI on every
+  nested pop (packages/kollabor-tui); any other nested view has the same flash. The `reuse=False` line has no
+  unit test (it sits in a closure); the lead's tmux pass should reopen `h` after a resume.
+- L6 (a) `/connect code` in a window attached to a daemon: the window sends `""`, the daemon (`_run_connect_
+  enrollment_offer`) and the state handler now accept it as "my own network" (window-side the default is `""`
+  when attached). I did not reproduce the original empty-domain path live; the daemon now cannot refuse an empty
+  domain. (b) The code form already had an editable domain (Tab); it now says so ("using another relay? press
+  tab and type its domain") and the guided Join starts on the relay domain this device already knows, else
+  kollabor.ai. A join code still does not carry its relay domain.
+- L7 `/terminal` panes now carry `KOLLAB_OWNER_PID` (the agent's pid); `select_sweep` stops a pane whose owner
+  was stopped. It is a different tag from `KOLLAB_AGENT_PID` on purpose: a person's pane keeps no tool-shell
+  tag and so may run network controls. Voice/LiveKit workers are NOT covered: they are children of the engine
+  process (`voice_livekit.py`), which one machine shares across folders and which the sweep deliberately never
+  kills (`--web-ui` engine exempt). Stopping them needs an engine API that closes the voice sessions of a
+  folder's chats (`voice_session_router`), called from the halt listener; not built.
+
+Tests added: `test_join_result_display.py` (8), `test_halt_confirmed.py` (16), `test_connect_offer_domain.py`
+(4), plus new cases in `test_network_halt.py` (+4), `test_panels_connect_halt.py` (+4), engine
+`test_panels_routes.py`, `halt-panels.test.ts` (+1).

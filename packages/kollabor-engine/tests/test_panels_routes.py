@@ -450,12 +450,19 @@ async def test_halt_route_needs_no_session_and_uses_the_folder_context(client, m
     got = await client.get("/network/halt/connect-halt", params={"folder": str(tmp_path)})
     assert got.status_code == 200 and got.headers["cache-control"] == "no-store"
     assert got.json()["panel"] == "connect-halt" and seen == [str(tmp_path.resolve())]
-    acted = await client.post(
+    refused = await client.post(
         "/network/halt/connect-halt-new/actions/halt",
         params={"folder": str(tmp_path)},
         json={"changes": {"reason": "why"}},
     )
+    assert refused.json()["ok"] is False and "confirm" in refused.json()["message"].lower()
+    assert not [s for s in seen if isinstance(s, tuple)]  # nothing reached the executor
+    acted = await client.post(
+        "/network/halt/connect-halt-new/actions/halt",
+        params={"folder": str(tmp_path)},
+        json={"changes": {"reason": "why"}, "confirmed": True},
+    )
     assert acted.status_code == 200 and acted.json()["open"]["panel"] == "connect-halt"
-    assert ("halt", {"reason": "why"}) in seen
+    assert ("halt", {"reason": "why", "confirmed": True}) in seen
     assert (await client.get("/network/halt/connect", params={"folder": str(tmp_path)})).status_code == 404
     assert (await client.get("/network/halt/connect-halt", params={"folder": "relative"})).status_code == 400

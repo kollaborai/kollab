@@ -21,6 +21,7 @@ from plugins.hub.connect_guide import (
     DEFAULT_DOMAIN,
     JOIN_FAILURE_REASONS,
     NO_NETWORK_LINE,
+    join_check_text,
 )
 from plugins.hub.device_names import (
     TRUST_LEVELS,
@@ -28,6 +29,7 @@ from plugins.hub.device_names import (
     validate_trust,
 )
 from plugins.hub.network_control import ONE_COUNTING_LINE
+from plugins.hub.network_halt import CONFIRM_REFUSAL, CONFIRMED_ACTIONS
 from plugins.hub.relay_commands import NO_NETWORK, network_label
 
 from .base import (
@@ -358,7 +360,9 @@ class ConnectJoinPanel:
                 poll=make_poll("join_status", {"receipt_id": receipt, "domain": domain}, POLL_SECONDS),
             )
         if status == "approved":
-            text = " ".join(t for t in (outcome.get("detail"), outcome.get("note")) if t)
+            text = " ".join(
+                t for t in (outcome.get("detail"), outcome.get("note"), join_check_text(outcome)) if t
+            )
             return ok_result(text or f"Joined {domain}.")
         if status == "rejected":
             return error_result("The other device rejected this join request.")
@@ -662,10 +666,12 @@ class ConnectHaltPanel:
                 "group": "Unconfirmed Machines",
                 "actions": ["confirm_machine"] if counts and machine != me and outside else [],
             })
-        if snap.get("founder_unaccepted"):
-            key = snap["founder_unaccepted"]
+        # one row per founder a person could accept, each with its own key (two candidates need a pick)
+        for key in dict.fromkeys([snap.get("founder_unaccepted") or "", *(snap.get("founder_candidates") or [])]):
+            if not key:
+                continue
             rows.append({
-                "id": "founder:",
+                "id": f"founder:{key}",
                 "label": f"Founder {names.machine(key)}",
                 "detail": f"fingerprint {key[:16]}",
                 "group": "Founder",
@@ -697,7 +703,7 @@ class ConnectHaltPanel:
         if snap.get("halt_allowed"):
             toolbar.append({"id": "halt_new", "label": "Halt Network…"})
         if halted and not own_open:
-            toolbar.append({"id": "propose_resume", "label": "Propose Resume"})
+            toolbar.append({"id": "propose_resume", "label": "Propose Resume", "confirm": True})
         if not halted and counts and not snap.get("opted_out"):
             toolbar.append({"id": "no_count", "label": "Do Not Count Here", "confirm": True})
         if not halted and snap.get("opted_out"):
@@ -717,7 +723,9 @@ class ConnectHaltPanel:
         "founder": ("confirm_founder",),
         "bootstrap": ("make_bootstrap",),
     }
-    _PAYLOAD_KEY = {"proposal": "hash", "revoke": "key", "machine": "machine", "bootstrap": "machine"}
+    _PAYLOAD_KEY = {
+        "proposal": "hash", "revoke": "key", "machine": "machine", "bootstrap": "machine", "founder": "founder",
+    }
     _TOOLBAR = ("propose_resume", "no_count", "count", "resume_local")
 
     async def act(self, ctx: Any, action: str, payload: dict) -> dict:
@@ -730,6 +738,10 @@ class ConnectHaltPanel:
             if action not in self._ROW_ACTIONS.get(kind, ()):
                 raise unknown_action(self.name, action)
             args = {self._PAYLOAD_KEY[kind]: key} if kind in self._PAYLOAD_KEY else {}
+        if action in CONFIRMED_ACTIONS:
+            if payload.get("confirmed") is not True:  # the client sends it after the person confirms
+                return error_result(CONFIRM_REFUSAL)
+            args["confirmed"] = True
         try:
             outcome = await ctx.hub_halt_act(action, args)
         except Exception as exc:  # noqa: BLE001 - halt errors are operator-safe text
@@ -820,6 +832,9 @@ class ConnectHaltNewPanel:
         args: dict = {"reason": reason}
         if revoke != "none":
             args["revoke"] = [revoke]
+        if payload.get("confirmed") is not True:  # the client sends it after the person confirms
+            return error_result(CONFIRM_REFUSAL)
+        args["confirmed"] = True
         try:
             await ctx.hub_halt_act("halt", args)
         except Exception as exc:  # noqa: BLE001

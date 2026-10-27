@@ -77,6 +77,12 @@ def enrollment_result(
         note = result.get("note")
         if isinstance(note, str) and len(note) <= 200 and note.isprintable():
             approved["note"] = note
+        # What the person checks after joining: the founder machine's short
+        # fingerprint and the one-machine warning (plain display strings).
+        for extra, limit in (("founder_fingerprint", 32), ("warning", 200)):
+            value = result.get(extra)
+            if isinstance(value, str) and 0 < len(value) <= limit and value.isprintable():
+                approved[extra] = value
         return approved
     if allow_failed and status == "failed":
         failed = {"status": "failed"}

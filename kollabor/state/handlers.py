@@ -550,8 +550,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         domain = params.get("domain")
         if (
             set(params) != {"domain"}
-            or not isinstance(domain, str)
-            or not domain
+            or not isinstance(domain, str)  # "" = the daemon's own network
             or len(domain) > 253
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):

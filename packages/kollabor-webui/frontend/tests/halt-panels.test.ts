@@ -76,3 +76,11 @@ test("with no chat open the halt panels still reach the engine (session-less)", 
   api.haltFolder = "/f";
   assert.equal(api.panelPath("", "connect-halt"), "/network/halt/connect-halt?folder=%2Ff");
 });
+
+test("a confirmed halt panel action carries confirmed: true, nothing else does", async () => {
+  const { confirmedPayload } = await import("../src/components/panels/confirm.ts");
+  assert.deepEqual(confirmedPayload(true, true, { id: "proposal:h" }), { id: "proposal:h", confirmed: true });
+  assert.deepEqual(confirmedPayload(true, true), { confirmed: true });
+  assert.deepEqual(confirmedPayload(true, false, { id: "x" }), { id: "x" });
+  assert.deepEqual(confirmedPayload(false, true, { id: "x" }), { id: "x" });
+});

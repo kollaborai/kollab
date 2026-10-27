@@ -24,6 +24,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
+import { SESSIONLESS_PANELS } from "@/api";
+import { confirmedPayload } from "./confirm";
 import { serializeDraft, type Draft } from "./FieldRenderer";
 import { FormPanel } from "./FormPanel";
 import { NetworkPanel, type NetworkSection } from "./NetworkPanel";
@@ -581,12 +583,20 @@ export function PanelHost({
     const networkRoot = root?.kind === "picker" ? root : undefined;
     const networkPicker = Boolean(networkRoot && panel.kind === "picker" && (name === "connect" || name === "connect-knocks"));
     const networkKnocksTab = networkPicker && name === "connect-knocks" && state.views.length === 2;
+    // Halt, resume and revoke actions reach this point only after the person's second press (confirm.ts).
+    const sure = (action: PanelAction, payload: Record<string, unknown> = {}) =>
+      confirmedPayload(SESSIONLESS_PANELS.has(name), action.confirm, payload);
     const onRowAction = (action: PanelAction, row: PanelRow) =>
-      void runAction(tab, name, action.id, {
-        id: row.id,
-        ...(action.payload_key ? { [action.payload_key]: row.id } : {}),
-      });
-    const onToolbarAction = (action: PanelAction) => void runAction(tab, name, action.id);
+      void runAction(
+        tab,
+        name,
+        action.id,
+        sure(action, {
+          id: row.id,
+          ...(action.payload_key ? { [action.payload_key]: row.id } : {}),
+        }),
+      );
+    const onToolbarAction = (action: PanelAction) => void runAction(tab, name, action.id, sure(action));
     const onControlChange = (field: PanelField, value: unknown, resetDraft = false) =>
       void runAction(tab, name, field.action || field.path, { [field.path]: value }, {
         reset: resetDraft,
@@ -656,7 +666,7 @@ export function PanelHost({
                 tab,
                 name,
                 action.id,
-                {
+                sure(action, {
                   changes: formChanges(panel, top.draft),
                   ...(target ? { target } : {}),
                   ...(panel.context ? { context: panel.context } : {}),

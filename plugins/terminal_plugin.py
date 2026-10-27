@@ -61,6 +61,7 @@ def _filter_env(env: dict) -> dict:
         if any(pat in upper for pat in sensitive_patterns):
             continue
         filtered[key] = value
+    filtered["KOLLAB_OWNER_PID"] = str(os.getpid())  # a halt stops this agent's panes with it
     return filtered
 
 

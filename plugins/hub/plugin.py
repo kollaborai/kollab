@@ -10970,6 +10970,8 @@ class HubPlugin(BasePlugin):
             domain = (
                 parts[1]
                 if len(parts) == 2
+                else ""  # attached: the daemon owns the network, so it names the domain
+                if self._attached()
                 else self._relay_network_domain() or "kollabor.ai"
             )
             return await self._open_connect_screen(domain, code_only=True)
@@ -11158,7 +11160,7 @@ class HubPlugin(BasePlugin):
         """The notice, then the path the person picks (constitution, Story 1)."""
         from plugins.altview.connect_altview import ConnectGuideAltView
 
-        from .connect_guide import DEFAULT_DOMAIN, mark_guide_seen
+        from .connect_guide import mark_guide_seen
 
         try:
             startup = getattr(self, "_startup_task", None)
@@ -11177,7 +11179,7 @@ class HubPlugin(BasePlugin):
             elif view.answer == "new_network":
                 text = await self._guided_new_network()
             elif view.answer == "join":
-                text = await self._open_connect_altview(DEFAULT_DOMAIN)
+                text = await self._guided_join()
             else:
                 return
             if text:
@@ -11187,6 +11189,12 @@ class HubPlugin(BasePlugin):
         except Exception as exc:
             # The type only: nothing in this flow holds a code, but a message might.
             logger.warning("Connect guide failed: %s", type(exc).__name__)
+
+    async def _guided_join(self) -> str:
+        """The code form, on the relay this device already knows, else kollabor.ai (Tab edits the domain)."""
+        from .connect_guide import DEFAULT_DOMAIN
+
+        return await self._open_connect_altview(self._relay_network_domain() or DEFAULT_DOMAIN)
 
     async def _connect_has_network(self) -> bool:
         """Whether this device shares a network with another device, asked the way bare
@@ -11377,7 +11385,7 @@ class HubPlugin(BasePlugin):
                 ConnectOutcome,
             )
 
-            from .connect_guide import post_join_line
+            from .connect_guide import join_check_text, post_join_line
 
             def outcome_of(result, domain: str):
                 if not isinstance(result, dict):
@@ -11399,6 +11407,8 @@ class HubPlugin(BasePlugin):
                         return ConnectOutcome.approved(
                             result.get("detail") or self._joined_line(domain),
                             post_join_line() if note is None else note,
+                            join_check_text(result),
+
                         )
                     except (TypeError, ValueError):
                         return ConnectOutcome.approved()
@@ -11561,11 +11571,15 @@ class HubPlugin(BasePlugin):
 
                     line = JoinLine(self._primary_name)
                     self._say_join_line(line)
-                    return {
+                    approved = {
                         "status": "approved",
                         "detail": self._joined_line(domain),
                         "note": line.text(),
                     }
+                    for extra in ("founder_fingerprint", "warning"):
+                        if isinstance(result.get(extra), str):
+                            approved[extra] = result[extra]
+                    return approved
                 except Exception:
                     return {"status": "approved"}
             if status == "rejected":
@@ -11709,7 +11723,7 @@ class HubPlugin(BasePlugin):
                 return halt_state_line(*(await _halt_data(halt_ctx)))
 
             async def open_halt() -> None:
-                await stack_mgr.push(ConnectHaltAltView(halt_ctx), "connect-halt")
+                await stack_mgr.push(ConnectHaltAltView(halt_ctx), "connect-halt", reuse=False)
 
             # Another window owns the relay: a code, a request and a decision
             # all live there, so this screen shows what the shared state says
@@ -11836,7 +11850,15 @@ class HubPlugin(BasePlugin):
         return {**failed, "reason": reason} if reason else failed
 
     async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:
-        """Create a one-device enrollment offer in the owning relay daemon."""
+        """Create a one-device enrollment offer in the owning relay daemon.
+
+        An empty domain means this daemon's own network: a window attached to it
+        often cannot tell which that is.
+        """
+        if isinstance(domain, str) and not domain:
+            from .connect_guide import DEFAULT_DOMAIN
+
+            domain = self._relay_network_domain() or DEFAULT_DOMAIN
         ok, offered = await self._connect_via_owner("offer", {"domain": domain})
         if ok:
             return offered if isinstance(offered, dict) else {"error": "connect offer could not be created"}

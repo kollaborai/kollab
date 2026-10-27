@@ -49,7 +49,8 @@ class HaltScreen:
             self.message = f"press again to {action['label']}"
             return
         self.armed = ""
-        result = await (panel or ConnectHaltPanel()).act(self.ctx, action["id"], payload)
+        # past the arm step the person has pressed twice (or the action needs no second press)
+        result = await (panel or ConnectHaltPanel()).act(self.ctx, action["id"], {**payload, "confirmed": True})
         self.message = result.get("message") or ""
         nxt = result.get("panel") or result.get("open")
         if isinstance(nxt, dict) and nxt.get("kind") == "picker":
@@ -165,6 +166,10 @@ class ConnectHaltAltView(AltView):
 
     async def on_enter(self, renderer: Any) -> None:
         self._renderer = renderer
+        try:
+            await self.screen.load()  # fresh data before the first frame, never an earlier snapshot
+        except Exception:  # the panel itself reports an unreachable network
+            pass
         self.spawn_background_task(self._poll(), "halt-poll")
 
     async def _poll(self) -> None:

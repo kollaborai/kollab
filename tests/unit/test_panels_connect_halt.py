@@ -82,8 +82,8 @@ async def test_proposal_waiting_on_the_proposer_and_on_another_machine():
     other = await HALTP.describe(Ctx(snap(active=[HALT], proposals=[{**prop, "machine": MAC, "signers": [MAC]}])), {})
     assert other["rows"][0]["actions"] == ["confirm_resume"]
     ctx = Ctx(snap(active=[HALT], proposals=[{**prop, "machine": MAC, "signers": [MAC]}]))
-    out = await HALTP.act(ctx, "confirm_resume", {"id": "proposal:" + "p" * 64})
-    assert ctx.acts == [("confirm_resume", {"hash": "p" * 64})]
+    out = await HALTP.act(ctx, "confirm_resume", {"id": "proposal:" + "p" * 64, "confirmed": True})
+    assert ctx.acts == [("confirm_resume", {"hash": "p" * 64, "confirmed": True})]
     assert out["ok"] and out["message"] == "Resume confirmed: lifts 1 halt."
 
 
@@ -133,16 +133,16 @@ async def test_halt_new_form_sends_reason_and_revoke_then_opens_the_halt_screen(
     assert form["actions"] == [{"id": "halt", "label": "Halt Network", "confirm": True}]
     assert form["context"] and form["sections"][0]["fields"][1]["options"] == ["none", F_MAC, F_PROD]
     ctx = Ctx(snap())
-    out = await NEWP.act(ctx, "halt", {"changes": {"reason": "  stop  now ", "revoke": F_PROD}})
-    assert ctx.acts == [("halt", {"reason": "stop now", "revoke": [F_PROD]})]
+    out = await NEWP.act(ctx, "halt", {"changes": {"reason": "  stop  now ", "revoke": F_PROD}, "confirmed": True})
+    assert ctx.acts == [("halt", {"reason": "stop now", "revoke": [F_PROD], "confirmed": True})]
     assert out["open"]["panel"] == "connect-halt"
-    bad = await NEWP.act(Ctx(snap(), fail="a halt needs two machines"), "halt", {})
+    bad = await NEWP.act(Ctx(snap(), fail="a halt needs two machines"), "halt", {"confirmed": True})
     assert not bad["ok"] and bad["message"] == "A halt needs two machines."
 
 
 @pytest.mark.asyncio
 async def test_propose_message_is_the_spec_line():
-    out = await HALTP.act(Ctx(snap(active=[HALT])), "propose_resume", {})
+    out = await HALTP.act(Ctx(snap(active=[HALT])), "propose_resume", {"confirmed": True})
     assert out["message"] == PROPOSED_LINE
 
 
@@ -187,13 +187,13 @@ async def test_tui_view_draws_the_panel_and_confirms_twice():
     await screen.key("Enter")
     assert ctx.acts == [] and screen.message == "press again to Confirm Resume"
     await screen.key("Enter")
-    assert ctx.acts == [("confirm_resume", {"hash": "p" * 64})]
+    assert ctx.acts == [("confirm_resume", {"hash": "p" * 64, "confirmed": True})]
     await screen.key("", "n")
     for ch in "oops":
         await screen.key("", ch)
     await screen.key("Enter")
     await screen.key("Enter")
-    assert ctx.acts[-1] == ("halt", {"reason": "oops"})
+    assert ctx.acts[-1] == ("halt", {"reason": "oops", "confirmed": True})
     assert await screen.key("Escape") is True
 
 
@@ -273,3 +273,78 @@ async def test_f4_a_network_with_one_counting_machine_says_so_in_the_state_line(
     p = await HALTP.describe(Ctx(snap(halt_allowed=False)), {})
     state = summary(p)["Network State"]
     assert state == "Running. This network has one machine that counts; a halt needs a second one."
+
+
+@pytest.mark.asyncio
+async def test_two_founder_candidates_get_one_row_each_with_its_own_key():
+    a, b = "d" * 64, "e" * 64
+    ctx = Ctx(snap(founder="", founder_unaccepted=a, founder_candidates=[a, b]))
+    p = await HALTP.describe(ctx, {})
+    rows = [r for r in p["rows"] if r["group"] == "Founder"]
+    assert [r["id"] for r in rows] == [f"founder:{a}", f"founder:{b}"]
+    assert all(r["actions"] == ["confirm_founder"] for r in rows)
+    assert rows[0]["detail"].endswith(a[:16]) and rows[1]["detail"].endswith(b[:16])
+    out = await HALTP.act(ctx, "confirm_founder", {"id": f"founder:{b}", "confirmed": True})
+    assert out["ok"] and ("confirm_founder", {"founder": b}) in ctx.acts
+
+
+@pytest.mark.asyncio
+async def test_one_held_founder_still_gets_a_single_row():
+    a = "d" * 64
+    p = await HALTP.describe(Ctx(snap(founder="", founder_unaccepted=a, founder_candidates=[])), {})
+    assert [r["id"] for r in p["rows"] if r["group"] == "Founder"] == [f"founder:{a}"]
+
+
+# ---------------------------------------------------- F5: the TUI halt view (L5)
+
+
+class _Renderer:
+    def __init__(self):
+        self.lines = []
+
+    def get_terminal_size(self):
+        return (100, 30)
+
+    def clear_screen(self):
+        self.lines = []
+
+    def write_at(self, x, y, text, color=""):
+        self.lines.append(text)
+
+
+@pytest.mark.asyncio
+async def test_the_connect_screen_repaints_when_the_halt_view_closes():
+    """After `h` and Esc the main loop thaws and can write its prompt over the screen (slice C3 shot 4)."""
+    from kollabor_tui.key_parser import KeyPress, KeyType
+    from plugins.altview.connect_altview import ConnectScreenAltView
+
+    async def on_halt():
+        return None
+
+    view = ConnectScreenAltView(domain="home.test", code_only=False, on_halt=on_halt)
+    paints = []
+    view.request_render = lambda: paints.append(1)
+    await view.handle_input(KeyPress(name="h", code=ord("h"), char="h", type=KeyType.PRINTABLE))
+    assert paints, "no repaint requested after the halt view closed"
+
+
+@pytest.mark.asyncio
+async def test_a_reopened_halt_view_draws_fresh_data_on_its_first_frame():
+    """Slice C3 shot 5: the view showed the earlier snapshot after the network resumed."""
+    from plugins.altview.connect_halt_altview import ConnectHaltAltView
+
+    ctx = Ctx(snap(active=[HALT]))
+    first = ConnectHaltAltView(ctx)
+    r1 = _Renderer()
+    await first.on_enter(r1)
+    await first.render_frame(0.0)
+    assert any("Halted" in line for line in r1.lines)
+    await first.on_suspend()
+    ctx.s = snap()  # the network resumed meanwhile
+    second = ConnectHaltAltView(ctx)
+    r2 = _Renderer()
+    await second.on_enter(r2)
+    await second.render_frame(0.0)
+    text = " ".join(r2.lines)
+    assert "Running" in text and "Halted" not in text
+    await second.on_suspend()
