@@ -1119,3 +1119,43 @@ All destructive steps ran in Docker (`ks5-*`, `--rm` containers); nothing halted
 ### Docker objects left
 
 Images `ks5-img:dev` (e2d05db0564f), `ks4-img:dev` (604dc663a21c), `kollab-killswitch:dev`; network `ks-net` (reused, subnet fixed in `seed_home.sh`); stopped `ks-m1`, `ks-m2`, `ks-m3`, `ks-relay` from D1. All `ks5-*` containers were `--rm` and are gone. The Bash hook refuses container and image removal, so Marco removes the images and the old containers.
+
+## D6 proof (fix 73838fe2; images `ks6-img:dev` 8768080d3b15 from `git archive fdffe77b`, `ks6-img:fix` 4fcf55de191b from `git archive 73838fe2`)
+
+All destructive steps ran in Docker (`ks6-*`, `--rm`); nothing halted, swept or revoked on the host. `ks6-img:dev` reproduced the bug, `ks6-img:fix` carries the fix and every later check. Both include rounds 5, 6 and F8. New harness helper: `tests/docker/kill_switch/halt_ctx.py` (`snap | members | act <action> [json]` through the halt listener when one runs, else the folder's agent).
+
+### Bug found and fixed: a revocation could not reach two signatures while the network was halted
+
+Spec: "A halt's `--revoke <device>` is the issuing machine's revocation record; a second machine confirms it the same way", and "While a halt from this network is active, both signers are machine-wide halted by construction" (`docs/specs/network-sync-and-control.md`, "Revocation"). Revocation records travel only in member lists (`accept_membership`, `relay_client.py`), but a halted machine runs only the halt listener, whose `HaltSync.tick` (`network_control.py`) sends `halt_payload()` = the halt book. So records never merged and no revocation could complete during a halt (after a resume the records still sit in the control file, so it was "not while halted", not "never").
+
+Reproduced on `ks6-img:dev` (5 machines, m1 founder, m2 bootstrap, m3 counting, m4 and m5 not): `halt --revoke m3-work` from m1, then `confirm_revoke m3` on m2 while halted. 60 s later m1 listed signer m1 only, m2 listed signer m2 only, m5 listed none (`pending_revocations` stuck, never applied).
+
+Fix (commit 73838fe2): `NetworkControl.halt_payload()` adds the machine's `revocations` records (capped at `MAX_RECORDS`); `halt_merge()` runs them through the same `learn()` filter as member lists, then `apply_revocations()` (the loop that lived in `RelayClient.accept_membership`, now shared) revokes every key two counting machines name. Test `tests/unit/test_network_control.py::test_revocation_quorum_completes_over_the_halt_exchange` (fails before the fix, a primary is still never revoked on peers' word). Mutations killed: `apply_revocations()` removed from `halt_merge` (fails), `revocations` removed from the payload (fails). 508 passed in the kill-switch, halt, members, trust and revoke unit selection.
+
+### Proof table
+
+| Check | Result | Observed |
+|---|---|---|
+| Revoke m3 from ONE machine with no halt (m2 signs, `ks6-img:dev`, m1 to m4 counting) | PASS | within 40 s all four machines show `pending a2073b` with signer `aab1bc` only; m1 still lists m4 |
+| Second counting machine signs (m3, no halt) | PASS | m1, m2, m3 pending `[]` and m4 gone from their remote agents; m4 (the target) still showed itself pending |
+| Revocation during a halt, before the fix | FAIL, reproduced | see above |
+| Revocation during a halt, after the fix (`ks6-img:fix`, halt `ffc00a42`, target m3) | PASS | before m2 signs: m1, m2, m4, m5 all show `pending f6d1f2`, signers `[b912d5]` (m1), m3 still `ok` on m4 and m5. After m2 signs (`confirm_revoke` over the listener): pending `[]` on all four, `halt_members` marks `m3-work` revoked on m1, m2, m4 and m5 |
+| Never on the primary from peers alone | UNIT ONLY | the new test; live needs two counting peers that are not the primary and both signing, and this network had only m2 besides it |
+| Halt from secondary m2 (`kollab --hub halt`, real tmux terminal), `halt e15424ca` | PASS | m1 `halted`, m2 `halted, 1 agents stopped`; m1 `halt.json` `stopped`: koordinator (detached daemon pid 25), `pid 60` (TUI in tmux), lapis, sapphire (the two `--no-daemon` TUIs), `pid 1187` |
+| Tool child tagged `KOLLAB_AGENT_PID=25`, own session, argv `sleep 7771` (no "kollab") | PASS, tag set by hand | pid 1187 (ppid 1, sid 1187) gone, listed in `stopped`. Not started by a model-driven shell tool |
+| TUI agent from a login-shell tmux session (`bash -l` 1210, `kollab --no-daemon` 1500) | PASS | 1500 gone, `bash -l` 1210 alive |
+| tmux server started by a tagged tool shell (round-6 repro): server 1190, pane shells 1191 and 1207, `sleep 7772`/`7773` as the vim stand-ins; the second pane created later by an untagged shell | PASS | server, both pane shells and both sleeps alive after the halt (all carry `KOLLAB_AGENT_PID=25`) |
+| `bash -c` wrapper agent sharing the login shell's process group (`set +m`; login shell 1225 leads group 1225; wrapper 2070 and `kollab` 2071 in group 1225; sibling `sleep 7774` stands in for vim) | PASS | 2070 and 2071 gone, login shell 1225 and `sleep 7774` alive |
+| `resume --local` with a failing act leaves a valid `halt.json` untouched | PASS, act forced to fail | real tmux terminal, valid `halt.json` (sha `cd4da4a3d3962ae2`): `hr._act` replaced by a function raising; `cli_control("resume", ["--local"])` printed `act failed (forced)`, exit 1; sha unchanged, no `.bad`, no `halt.json` rewrite |
+
+### Unproven / left
+
+- vim itself was not installed in the image: `sleep` children stand in for it, so "vim survives" means "a long-running child of the pane shell or login shell survives".
+- The tool child's tag was set by hand (no model in the container). A tool shell that really sets the tag (`shell_executor.py`, `process_manager.py`) was not driven.
+- `resume --local` failing act: tried a real failure first (listener stopped with SIGSTOP, then run from a folder outside the halt). Both times the listener still answered and the lift succeeded, so the failure was forced in-process. A failure produced by a real dead peer or disk error was not reproduced.
+- A revocation applying on the primary from peers alone is covered by the unit test only.
+- A real running engine process and the web UI `Count Here` press are still unproven (carried over from D5).
+
+### Docker objects left
+
+Images `ks6-img:dev` (8768080d3b15), `ks6-img:fix` (4fcf55de191b), plus `ks5-img:dev`, `ks4-img:dev`, `ks3-img:dev`, `kollab-killswitch:dev`; network `ks-net` (reused); stopped `ks-m1`, `ks-m2`, `ks-m3`, `ks-relay` from D1. Every `ks6-*` container was `--rm` and is gone (`ks6-relay`, `ks6-m1` to `ks6-m5`). The Bash hook refuses image and container removal, so Marco removes them.
