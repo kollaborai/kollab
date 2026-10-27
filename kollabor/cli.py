@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import difflib
+import json
 import logging
 import os
 import re
@@ -1400,6 +1401,8 @@ def _print_hub_help() -> None:
     print("  agents | list              alias for status")
     print("  stop <name|all>            send shutdown signal to an agent")
     print("  kill <name|all>            alias for stop")
+    print("  halt [--reason <text>] [--revoke <device>]   halt the network (a person's terminal only)")
+    print("  resume [--confirm <8-hex> | --local]         propose, confirm or lift here only")
     print(
         "  capture <name> [lines] [--raw]  readable transcript; --raw keeps terminal output"
     )
@@ -1446,6 +1449,113 @@ def _print_hub_health(health: Optional[dict]) -> None:
         print(line)
 
 
+async def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
+    import time as _time
+
+    from plugins.hub.presence import pid_alive
+
+    if not pid:
+        return True
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if not pid_alive(pid):
+            return True
+        await asyncio.sleep(0.1)
+    return not pid_alive(pid)
+
+
+def _cleanup_presence_for_pid(presence_dir: Path, pid: int) -> None:
+    if not pid:
+        return
+    for f in presence_dir.glob("*.json"):
+        try:
+            with open(f) as fh:
+                d = json.load(fh)
+            if d.get("pid") == pid:
+                socket_path = d.get("socket_path", "")
+                f.unlink(missing_ok=True)
+                if socket_path:
+                    try:
+                        Path(socket_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                break
+        except Exception:
+            pass
+
+
+async def stop_agent_record(
+    agent: dict, reason: str, *, presence_dir: Optional[Path] = None, kill=None
+) -> tuple[bool, str]:
+    """The stop ladder: graceful shutdown over the socket, SIGTERM, then SIGKILL.
+
+    ``kill(pid, sig)`` defaults to ``os.kill``; the halt sweep passes one that
+    signals the whole process group (``halt_runtime.group_kill``).
+    """
+    from plugins.hub.messenger import AgentMessenger
+    from plugins.hub.presence import get_presence_dir
+
+    kill = kill or os.kill
+    presence_dir = presence_dir or get_presence_dir()
+    desig = agent.get("identity", "?")
+    sock = agent.get("socket_path", "")
+    pid = int(agent.get("pid") or 0)
+
+    def cleanup() -> None:
+        _cleanup_presence_for_pid(presence_dir, pid)
+
+    async def hard_kill() -> tuple[bool, str]:
+        # Uncatchable, so a wedged event loop that swallowed the graceful
+        # shutdown *and* SIGTERM still dies here (`stop all` reaps a hung
+        # coordinator instead of giving up).
+        if not pid:
+            return False, f"failed to stop {desig} (no pid)"
+        try:
+            kill(pid, 9)  # SIGKILL
+        except (OSError, ProcessLookupError):
+            cleanup()
+            return True, f"stopped {desig}"
+        if await _wait_for_pid_exit(pid, timeout=STOP_KILL_SECONDS):
+            cleanup()
+            return True, f"stopped {desig} (SIGKILL — was unresponsive)"
+        return False, f"failed to stop {desig} (pid {pid} survived SIGKILL)"
+
+    # systemd/launchd start a `kollab service` agent again; say so.
+    if sock and (await AgentMessenger.request_status(sock, timeout=1.0)).get("service"):
+        desig += " (a kollab service: it restarts; `kollab service uninstall` stops it for good)"
+
+    shutdown_acked = False
+    if sock:
+        shutdown_acked = await AgentMessenger.signal_shutdown(sock, reason=reason)
+
+    if shutdown_acked:
+        if await _wait_for_pid_exit(pid, timeout=STOP_GRACE_SECONDS):
+            cleanup()
+            return True, f"stopped {desig}"
+        try:
+            kill(pid, 15)  # SIGTERM
+        except (OSError, ProcessLookupError):
+            cleanup()
+            return True, f"stopped {desig}"
+        if await _wait_for_pid_exit(pid, timeout=STOP_TERM_SECONDS):
+            cleanup()
+            return True, f"stopped {desig} (SIGTERM after graceful timeout)"
+        return await hard_kill()
+
+    if pid:
+        try:
+            kill(pid, 15)  # SIGTERM
+        except (OSError, ProcessLookupError):
+            cleanup()
+            return True, f"stopped {desig}"
+        if await _wait_for_pid_exit(pid, timeout=STOP_TERM_SECONDS):
+            cleanup()
+            return True, f"stopped {desig} (SIGTERM fallback)"
+        return await hard_kill()
+
+    return False, f"failed to stop {desig}"
+
+
 async def _handle_cli_hub(hub_args: list) -> None:
     """Handle --hub CLI commands without starting the TUI.
 
@@ -1464,7 +1574,6 @@ async def _handle_cli_hub(hub_args: list) -> None:
     """
     import json
     import os
-    from pathlib import Path
     from typing import List
 
     _apply_hub_project_scope_from_config()
@@ -1557,98 +1666,8 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
         return pid_alive(pid)  # a zombie is not alive: the window may not have reaped it
 
-    async def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
-        import time as _time
-
-        if not pid:
-            return True
-        deadline = _time.monotonic() + timeout
-        while _time.monotonic() < deadline:
-            if not _pid_alive(pid):
-                return True
-            await asyncio.sleep(0.1)
-        return not _pid_alive(pid)
-
-    def _cleanup_presence_for_pid(pid: int) -> None:
-        if not pid:
-            return
-        for f in presence_dir.glob("*.json"):
-            try:
-                with open(f) as fh:
-                    d = json.load(fh)
-                if d.get("pid") == pid:
-                    socket_path = d.get("socket_path", "")
-                    f.unlink(missing_ok=True)
-                    if socket_path:
-                        try:
-                            Path(socket_path).unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                    break
-            except Exception:
-                pass
-
-    async def _hard_kill(pid: int, desig: str) -> tuple[bool, str]:
-        """Final SIGKILL fallback. Uncatchable, so a wedged event loop that
-        swallowed the graceful shutdown *and* SIGTERM still dies here. This is
-        what lets `stop all` reap a hung coordinator instead of giving up."""
-        if not pid:
-            return False, f"failed to stop {desig} (no pid)"
-        try:
-            os.kill(pid, 9)  # SIGKILL
-        except (OSError, ProcessLookupError):
-            _cleanup_presence_for_pid(pid)
-            return True, f"stopped {desig}"
-        if await _wait_for_pid_exit(pid, timeout=STOP_KILL_SECONDS):
-            _cleanup_presence_for_pid(pid)
-            return True, f"stopped {desig} (SIGKILL — was unresponsive)"
-        return False, f"failed to stop {desig} (pid {pid} survived SIGKILL)"
-
     async def _stop_agent_record(agent: dict, reason: str) -> tuple[bool, str]:
-        desig = agent.get("identity", "?")
-        sock = agent.get("socket_path", "")
-        pid = int(agent.get("pid") or 0)
-        # systemd/launchd start a `kollab service` agent again; say so.
-        if sock and (await AgentMessenger.request_status(sock, timeout=1.0)).get(
-            "service"
-        ):
-            desig += " (a kollab service: it restarts; `kollab service uninstall` stops it for good)"
-
-        shutdown_acked = False
-        if sock:
-            shutdown_acked = await AgentMessenger.signal_shutdown(sock, reason=reason)
-
-        if shutdown_acked:
-            if await _wait_for_pid_exit(pid, timeout=STOP_GRACE_SECONDS):
-                _cleanup_presence_for_pid(pid)
-                return True, f"stopped {desig}"
-
-            try:
-                os.kill(pid, 15)  # SIGTERM
-            except (OSError, ProcessLookupError):
-                _cleanup_presence_for_pid(pid)
-                return True, f"stopped {desig}"
-
-            if await _wait_for_pid_exit(pid, timeout=STOP_TERM_SECONDS):
-                _cleanup_presence_for_pid(pid)
-                return True, f"stopped {desig} (SIGTERM after graceful timeout)"
-
-            return await _hard_kill(pid, desig)
-
-        if pid:
-            try:
-                os.kill(pid, 15)  # SIGTERM
-            except (OSError, ProcessLookupError):
-                _cleanup_presence_for_pid(pid)
-                return True, f"stopped {desig}"
-
-            if await _wait_for_pid_exit(pid, timeout=STOP_TERM_SECONDS):
-                _cleanup_presence_for_pid(pid)
-                return True, f"stopped {desig} (SIGTERM fallback)"
-
-            return await _hard_kill(pid, desig)
-
-        return False, f"failed to stop {desig}"
+        return await stop_agent_record(agent, reason, presence_dir=presence_dir)
 
     # --- config helpers for on/off/user ---
     from kollabor_config.config_utils import get_existing_global_config_path
@@ -1748,6 +1767,15 @@ async def _handle_cli_hub(hub_args: list) -> None:
             else None
         )
         _print_hub_health(health)
+
+    elif subcmd in ("halt", "resume"):
+        # Kill switch (spec section 1 "Commands"); kollabor_cli_main routes
+        # these here before argparse so `--reason "<text>"` survives.
+        from plugins.hub.halt_runtime import cli_control
+
+        code = await cli_control(subcmd, rest)
+        if code:
+            sys.exit(code)
 
     elif subcmd in ("stop", "kill"):
         if not rest:

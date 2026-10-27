@@ -634,12 +634,16 @@ def revocation_ok(record: Any, network: str) -> bool:
     )
 
 
-def revocations_to_apply(records: Iterable[dict], view: Counting, *, protected: Iterable[str] = ()) -> set[str]:
+def revocations_to_apply(
+    records: Iterable[dict], view: Counting, *, protected: Iterable[str] = (), orders: Iterable[dict] = ()
+) -> set[str]:
     """Keys whose revocation this machine applies on other machines' word.
 
     ``protected`` holds this device's primary and the folder key that admitted
     it (PR #346's ``state.inviter``): never revoked on any peer's word.
     A key naming a machine key revokes every folder key bound to it.
+    ``orders`` are halts this machine took: each ``revoke`` entry counts as a
+    revocation record from the order's issuer (spec "Data").
     """
     protected = set(protected)
     for folder, machine in view.folder_machine.items():
@@ -652,6 +656,14 @@ def revocations_to_apply(records: Iterable[dict], view: Counting, *, protected: 
         if view.machine_of(r["by"]) != r["machine"]:
             continue
         signers.setdefault(r["revoked"], set()).add(r["machine"])
+    for order in orders:
+        if not order_ok(order, view.network) or order.get("action") != "halt":
+            continue
+        if view.machine_of(order["issuer"]) != order["machine"]:
+            continue
+        for key in order["revoke"]:
+            if isinstance(key, str) and KEY.fullmatch(key):
+                signers.setdefault(key, set()).add(order["machine"])
     out: set[str] = set()
     revoked_machines = view.revoked
     for key, machines in signers.items():

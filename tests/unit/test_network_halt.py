@@ -572,3 +572,17 @@ def test_revoked_or_unapproved_issuer_is_refused(net):
     assert book.take(halt(net.prod, net), net.view(), is_member=lambda f: False).reason.startswith("issuer is not")
     net.roster.revoked_machines.add(net.prod.mk)
     assert book.take(halt(net.prod, net), net.view(), is_member=net.member).reason == "issuer is revoked"
+
+
+def test_a_halts_revoke_entry_counts_as_its_issuers_revocation(net):
+    c = net.admit(net.founder, "c")
+    net.confirm(net.prod, c)
+    target = net.admit(net.founder, "target")
+    order = halt(net.prod, net, revoke=[target.fk()])
+    assert nh.revocations_to_apply([], net.view(), orders=[order]) == set()  # one machine
+    both = nh.revocations_to_apply([rev(c, net, target.fk())], net.view(), orders=[order])
+    assert target.fk() in both
+    forged = {**order, "revoke": [target.fk(), c.fk()]}  # not what prod signed
+    assert nh.revocations_to_apply([rev(c, net, target.fk())], net.view(), orders=[forged]) == set()
+    as_resume = resume(net.prod, net, [], revoke=[target.fk()])
+    assert nh.revocations_to_apply([rev(c, net, target.fk())], net.view(), orders=[as_resume]) == set()

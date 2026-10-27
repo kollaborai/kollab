@@ -2841,7 +2841,60 @@ class RelayAgentBridge:
             transport=self.secure_transport,
             online=self._members_online,
         )
+        self.commands.client.control.on_halt_change = self._halt_changed
         return self.halt_sync
+
+    def _halt_changed(self, network: str) -> None:
+        """A halt became active here: hand it to the listener (spec step 1), which sweeps us too."""
+        from . import halt_runtime as hr
+        from .network_halt import halt_scope
+
+        control = self._network_control()
+        if not control.halt_book().active():
+            return
+        try:
+            if network in (hr.read_halt().get("scopes") or {}):
+                return  # the listener already holds it
+        except (OSError, ValueError):
+            pass
+        order = {
+            "network": network,
+            "scope": halt_scope(control.view(), control.machine_hex, [str(self.workspace)]),
+            "folder": str(self.workspace),
+        }
+
+        async def go() -> None:
+            try:
+                await hr.hand_off(order)
+            except Exception as error:
+                logger.warning("network halt: hand-off failed (%s)", type(error).__name__)
+
+        try:
+            asyncio.get_running_loop().create_task(go(), name="kollab-halt-hand-off")
+        except RuntimeError:
+            asyncio.run(go())
+
+    async def _peer_heads(self) -> list[str]:
+        """Before issuing: ask members online for this folder's latest order (spec "Data")."""
+        from .network_control import HALT_METHOD, REQUEST_SECONDS
+
+        if self.secure_transport is None:
+            return []
+        control = self._network_control()
+        me = self.commands.client.public_key
+
+        async def ask(key: str):
+            try:
+                reply = await self.secure_transport.request(
+                    key, HALT_METHOD, control.halt_payload(), timeout=REQUEST_SECONDS
+                )
+                control.halt_merge(reply)
+                return (reply.get("heads") or {}).get(me)
+            except Exception:
+                return None
+
+        heads = await asyncio.gather(*(ask(k) for k in self._members_online()))
+        return [h for h in heads if isinstance(h, str)]
 
     # The three calls the halt panels use (spec "The Halt Listener"); the
     # listener (slice B) serves the same names over its own links.
@@ -2856,6 +2909,9 @@ class RelayAgentBridge:
     async def hub_halt_act(self, action: str, payload: dict | None = None) -> dict:
         from .network_halt import HaltError
 
+        payload = dict(payload or {})
+        if action in ("halt", "propose_resume"):
+            payload["peer_heads"] = await self._peer_heads()
         try:
             result = self._network_control().halt_act(action, payload)
         except HaltError as error:

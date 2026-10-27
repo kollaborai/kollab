@@ -189,3 +189,112 @@ Uncommitted, on `main`'s working tree; the coordinating session commits.
 - `Count Here` again (undo `Do Not Count Here`) has no signed record; each
   machine speaks for its own opt-outs: what it sends replaces what others heard
   about it, and others never re-add a machine's opt-out to that machine.
+
+## Slice B (handoff steps 4-6): listener, hand-off, sweep, waiters, CLI
+
+Uncommitted, on `main`'s working tree; the coordinating session commits.
+
+### Files
+
+- `plugins/hub/halt_runtime.py` (new): entry capture (`capture_entry`, `ENTRY`),
+  `boot_decision`/`boot_check`, `run_waiter` (+ `_StatusSocket`, presence
+  `halted-<pid>.json` with `state: halted`), `run_interactive` (plain text
+  view over `halt.sock`: `c` Confirm Resume, `p` Propose Resume, Esc exits),
+  `write_lock`/`update_halt` (`private/halt.write.lock`), `listener_running`/
+  `start_listener` (`kollab_argv() + --halt-listener`, own session, tool vars
+  stripped), `hand_off`/`sock_call`, `candidate_pids` (`pgrep -f kollab`),
+  `sweep` (presence agents + `select_sweep`), `group_kill`, `HaltListener`
+  (lock, `halt.sock` 0600, `take_halt` records scope -> sweeps -> notes
+  stopped -> opens links, `tick` hands back and exits), `HaltLink`
+  (allowlist before dispatch, `network_halt` via `HaltSync`, `network_members`
+  via `MembershipSync`, `hub_halt_*`), `open_relay_link` (relay-owner lock of
+  the first in-scope folder, `RelayCommands` + `SecureConversationTransport`,
+  no plugins), CLI `cli_control`, `member_lines`, `parse_flags`.
+- `kollabor_cli_main.py`: `capture_entry()` first, `--halt-listener`,
+  `boot_check()`, `--hub halt|resume` routed before argparse (so
+  `--reason "two words"` survives `nargs="*"`).
+- `kollabor/cli.py`: the stop ladder hoisted to module level as
+  `stop_agent_record(agent, reason, *, presence_dir, kill)` (closure delegates;
+  the listener passes `group_kill`); `--hub halt|resume` branch beside `stop`;
+  hub help lines.
+- `plugins/hub/network_control.py`: `halt_locked()` (re-entrant per instance)
+  around `save_halt_book`, `halt_merge`, `halt_act`; `_protected()` adds the
+  managed-config record's `primary_key`; `revocations_to_apply` passes the
+  book's halts as `orders`.
+- `plugins/hub/network_halt.py`: `revocations_to_apply(..., orders=())`: each
+  verified halt's `revoke` entry counts as its issuer machine's revocation.
+- `plugins/hub/relay_agent.py`: `on_halt_change` -> `_halt_changed` hands the
+  halt to the listener (scope from `halt_scope`); `_peer_heads` asks members
+  online for this folder's chain head before `halt`/`propose_resume`.
+- `plugins/hub/relay_commands.py` + `plugin.py`: `/connect halt|resume`.
+- Tests: `tests/unit/test_halt_runtime.py` (new, 46),
+  `test_network_halt.py` (+1), `test_hub_enrollment_commands.py` (palette set
+  gains `halt`, `resume`).
+
+### Verified
+
+- `KOLLAB_NO_KEYRING=1 uv run pytest -q tests/unit/test_halt_runtime.py
+  test_network_halt.py test_network_halt_guard.py test_network_control.py
+  test_network_members.py test_hub_stop_lifecycle.py
+  test_hub_enrollment_commands.py test_connect_command_fixes.py
+  test_relay_enrollment.py` -> 214 passed. Adjacent (attach/daemon/hub CLI/
+  panels connect/relay agent bridge) -> 131 passed.
+- `ruff check` clean on every touched file except pre-existing E501s in
+  `plugins/hub/plugin.py` (lines 8193-15080, not mine).
+- Mutation check: 18 rule-line mutations (boot table, exit 75, exemptions,
+  waiter env, hand-back order, waiter skip, inner allowlist, member lines,
+  guard, write lock, tick, scope record, CLI protect, revoke-as-record);
+  2 survived first pass: a dead boot rule (deleted) and the waiter-env filter
+  (test now passes an inherited `KOLLAB_HALT_WAITER`; killed). Script:
+  session scratchpad `mutate_b.py`. `__pycache__` cleared after.
+- Assumption 13 (read only): `~/.local/bin/kollab` is a Mach-O pex scie; two
+  live binary kollab processes carry `SCIE=~/.local/bin/kollab`
+  (`read_process`, nothing signalled). Their argv0 is the pex venv python, so
+  `pgrep -f SCIE` finds nothing; candidates come from `pgrep -f kollab` (41
+  here).
+- Assumption 14 (scratch dirs): listener takes `WorkspaceRelayOwner`, a second
+  owner is refused while held, `release()` removes the record, a restarted
+  owner takes it again.
+
+### Not done
+
+- No live, tmux or real-link pass; `open_relay_link`/`HaltLink.start` never ran
+  against a relay (assumption 1 is a lead from `MembershipContext`, not
+  proven). Next: tmux spec with two isolated HOMEs on a scratch network.
+- Voice device service + LiveKit workers and `/terminal` sessions are not swept
+  (only kollab processes of this install, presence agents and tagged
+  descendants).
+- Folder discovery: workspace dirs are hashed, so the listener knows a
+  network's folders only from the hand-off and live presence. A non-counting
+  machine's scope is just the handing-off folder; a restarted listener with a
+  `"machine"` scope reopens no link until a hand-off names a folder.
+- CLI acks: `halted` means the `network_halt` exchange delivered, not that the
+  peer finished its sweep (peers do not report stop counts). `resume --confirm`
+  does not print each machine's not-restarted agents; the stopped list is
+  recorded but not printed.
+- Waiter attach socket answers `get_status` and refuses everything else; the
+  engine's session create against it is unverified.
+- Interactive view is plain text (slice C builds the TUI view).
+- Enrollment recovery path still joins without `machine`.
+- `halt_snapshot` pending revocations do not include halt-order revokes yet.
+
+### Risks
+
+- The listener imports `kollabor.cli` for the stop ladder (heavy import, no
+  model, no plugins).
+- `group_kill` signals the target's process group unless that group holds the
+  listener's own group or a protected pid; an agent sharing a terminal job with
+  something else takes it down too (spec intent).
+- `pgrep -f kollab` misses a kollab that renamed itself (spec limit).
+
+### Spec errors found
+
+- `halt.lock` cannot be both the listener's lifetime lock and the lock around
+  every `halt.json` write (daemons would block for the whole halt). Built:
+  `halt.lock` = listener identity, `halt.write.lock` = writes.
+- "Marked lifted" had no field: built as `halt.json` `scopes[network]`
+  removed by the listener after hand-back; waiters exec when no scope holds
+  their folder.
+- `/connect halt|resume` cannot use the TTY guard: they run inside the daemon
+  (stdin `/dev/null`) and `source_agent` names the session's agent, not a
+  model. Guarded by the HIGH risk pattern; the CLI keeps the TTY/tool-shell guard.

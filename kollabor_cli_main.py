@@ -144,6 +144,19 @@ _prepend_dev_workspace_paths()
 
 def cli_main():
     """Run the interactive app, its headless account-free relay, or `kollab service`."""
+    # Kill switch (spec section 1, "Waiters"): keep argv and the full
+    # environment before anything pops KOLLAB_SERVICE or the detached flag,
+    # then hold, refuse or wait when this folder is halted.
+    from plugins.hub import halt_runtime
+
+    halt_runtime.capture_entry()
+    if sys.argv[1:2] == [halt_runtime.LISTENER_FLAG]:
+        return halt_runtime.listener_main()
+    halt_runtime.boot_check()
+    if sys.argv[1:2] == ["--hub"] and sys.argv[2:3] in (["halt"], ["resume"]):
+        import asyncio
+
+        return asyncio.run(halt_runtime.cli_control(sys.argv[2], sys.argv[3:])) or None
     if sys.argv[1:2] == ["acp"]:
         from kollabor.acp_stdio import isolated_stdout
         protocol = isolated_stdout()

@@ -11,6 +11,7 @@ halt panels use (``halt_snapshot``, ``halt_act``, ``halt_members``).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import time
@@ -70,6 +71,7 @@ class NetworkControl:
         # Slice B: the listener's sweep. Called with the network id whenever a
         # halt becomes active (or is lifted) on this machine.
         self.on_halt_change: Callable[[str], None] | None = None
+        self._halt_lock_depth = 0
         self._load()
 
     # ------------------------------------------------------------ storage
@@ -312,9 +314,26 @@ class NetworkControl:
     def _own_opt_outs(self) -> list[dict]:
         return list(self._fresh().get("own_opt_outs", []))
 
-    def revocations_to_apply(self) -> set[str]:
+    def _protected(self) -> set[str]:
+        """Never revoked on a peer's word: the inviter, this folder, and the device's primary."""
         protected = {k for k in (self.client.state.inviter, self.client.public_key) if k}
-        return nh.revocations_to_apply(self._fresh().get("revocations", []), self.view(), protected=protected)
+        try:
+            from kollabor_config.managed_config import read_managed_config
+
+            record = read_managed_config()
+            if record is not None and record.primary_key:
+                protected.add(record.primary_key)
+        except Exception:
+            pass
+        return protected
+
+    def revocations_to_apply(self) -> set[str]:
+        return nh.revocations_to_apply(
+            self._fresh().get("revocations", []),
+            self.view(),
+            protected=self._protected(),
+            orders=self.halt_book().halts.values(),
+        )
 
     def sign_revocation(self, key: str) -> None:
         rec = nh.revocation(self.client._store.key, self.machine, self.network_id(), key, int(time.time()))
@@ -348,9 +367,29 @@ class NetworkControl:
 
     def save_halt_book(self, book: nh.HaltBook) -> None:
         hf = self._halt_file()
-        data = hf.read()  # ponytail: read-modify-write; two daemons can race. Lock under halt.lock in slice B.
-        data.setdefault("networks", {})[book.network] = book.to_json()
-        hf.write(data)
+        with self.halt_locked():
+            data = hf.read()
+            data.setdefault("networks", {})[book.network] = book.to_json()
+            hf.write(data)
+
+    @contextlib.contextmanager
+    def halt_locked(self):
+        """``halt.write.lock`` around a read-modify-write of the halt book (re-entrant here)."""
+        from .halt_runtime import write_lock
+
+        if self._halt_lock_depth:
+            self._halt_lock_depth += 1
+            try:
+                yield
+            finally:
+                self._halt_lock_depth -= 1
+            return
+        with write_lock(self._halt_file().dir.parent):
+            self._halt_lock_depth = 1
+            try:
+                yield
+            finally:
+                self._halt_lock_depth = 0
 
     def _is_member(self, key: str) -> bool:
         return key == self.client.public_key or key in self.client.members()
@@ -361,12 +400,13 @@ class NetworkControl:
     def halt_merge(self, payload: Any) -> list[str]:
         if not isinstance(payload, dict):
             raise RelayError("invalid halt payload")
-        book = self.halt_book()
-        before = set(book.active())
-        view = self.view()
-        lifted = book.merge(payload, view, is_member=self._is_member)
-        book.drop_revoked(view)
-        self.save_halt_book(book)
+        with self.halt_locked():
+            book = self.halt_book()
+            before = set(book.active())
+            view = self.view()
+            lifted = book.merge(payload, view, is_member=self._is_member)
+            book.drop_revoked(view)
+            self.save_halt_book(book)
         if set(book.active()) != before:
             self._halt_changed()
         return lifted
@@ -424,6 +464,10 @@ class NetworkControl:
         ]
 
     def halt_act(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self.halt_locked():
+            return self._halt_act(action, payload)
+
+    def _halt_act(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
         data = self._fresh()
         view = self.view()

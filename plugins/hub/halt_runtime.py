@@ -1,0 +1,1108 @@
+"""The kill switch on one machine: halt.json lock, listener, hand-off, sweep, waiters, CLI.
+
+Spec: ``docs/specs/network-sync-and-control.md`` section 1 ("Halt, On Each
+Machine That Takes It", "The Halt Listener", "Waiters", "Resume", "Commands").
+The rules live in ``network_halt.py``; this module runs them on this machine.
+
+``halt.json`` keeps, beside each network's halt book (``networks``):
+
+- ``scopes``: ``{network id: "machine" | [folders]}`` for every network whose
+  halt is in force here. Only the listener removes an entry, after it handed
+  that network's link back; a folder is "marked lifted" when no scope holds it.
+- ``stopped``: what the sweep stopped (``identity``, ``folder``, ``service``).
+
+Locks: ``private/halt.lock`` is held by the one listener for its whole life
+(its identity); ``private/halt.write.lock`` serializes every
+read-modify-write of ``halt.json`` (two daemons merging at once).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import fcntl
+import json
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+LOCK = "halt.lock"
+WRITE_LOCK = "halt.write.lock"
+SOCK = "halt.sock"
+HALT_JSON = "halt.json"
+POLL_SECONDS = 5.0
+LISTENER_IDLE_SECONDS = 2.0
+LISTENER_FLAG = "--halt-listener"
+WAITER_ENV = "KOLLAB_HALT_WAITER"
+HALTED_LINE = "Network halted by {device}. Resume needs a person on two machines: Settings → Network."
+RESUME_PROPOSED = (
+    "Resume proposed. A person on another machine confirms it: /connect resume there, "
+    "or Settings → Network → Confirm Resume."
+)
+
+# Argv at process entry, before cli_main pops KOLLAB_SERVICE or the detached flag.
+ENTRY: dict[str, Any] = {}
+
+
+def capture_entry(argv: list[str] | None = None, env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Keep the launch's argv and full environment; the first call wins."""
+    if not ENTRY:
+        ENTRY["argv"] = list(sys.argv if argv is None else argv)
+        ENTRY["env"] = dict(os.environ if env is None else env)
+    return ENTRY
+
+
+# ------------------------------------------------------------- files
+
+
+def kollab_root(root: Path | None = None) -> Path:
+    if root is not None:
+        return Path(root)
+    from kollabor_config.config_utils import get_config_directory
+
+    return Path(get_config_directory())
+
+
+def private_dir(root: Path | None = None) -> Path:
+    d = kollab_root(root) / "private"
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if d.is_symlink():
+        raise OSError("private dir is a link")
+    return d
+
+
+def _lock_fd(path: Path) -> int:
+    return os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+
+
+@contextlib.contextmanager
+def write_lock(root: Path | None = None) -> Iterator[None]:
+    """``halt.write.lock`` around a read-modify-write of ``halt.json``."""
+    fd = _lock_fd(private_dir(root) / WRITE_LOCK)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def read_halt(root: Path | None = None) -> dict[str, Any]:
+    from .network_halt import HaltFile
+
+    return HaltFile(kollab_root(root)).read()
+
+
+def update_halt(fn: Callable[[dict[str, Any]], Any], root: Path | None = None) -> Any:
+    """Read, change and write ``halt.json`` under the write lock."""
+    from .network_halt import HaltFile
+
+    with write_lock(root):
+        hf = HaltFile(kollab_root(root))
+        data = hf.read()
+        out = fn(data)
+        hf.write(data)
+        return out
+
+
+def active_scopes(data: dict[str, Any]) -> list:
+    return list((data.get("scopes") or {}).values())
+
+
+def folder_halted(folder: str, data: dict[str, Any]) -> bool:
+    from .network_halt import in_scope
+
+    scopes = active_scopes(data)
+    return bool(scopes) and in_scope(folder, scopes)
+
+
+def halted_line(data: dict[str, Any]) -> str:
+    """The waiter/launch line, naming the issuer of the newest active halt."""
+    newest: dict = {}
+    for net in (data.get("scopes") or {}):
+        book = (data.get("networks") or {}).get(net) or {}
+        for order in (book.get("halts") or {}).values() if isinstance(book.get("halts"), dict) else []:
+            if order.get("issued_at", 0) >= newest.get("issued_at", -1):
+                newest = order
+    device = newest.get("device") or (newest.get("machine") or "another machine")[:8]
+    return HALTED_LINE.format(device=device)
+
+
+# ----------------------------------------------------------- listener lock
+
+
+def listener_running(root: Path | None = None) -> bool:
+    """Whether a listener holds ``halt.lock`` (never takes it for long)."""
+    fd = _lock_fd(private_dir(root) / LOCK)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)  # closing drops a lock we just took
+    return False
+
+
+def start_listener(root: Path | None = None, *, spawn: Callable[[list[str]], Any] | None = None) -> bool:
+    """Start a detached ``kollab --halt-listener`` unless one runs. True if started."""
+    if listener_running(root):
+        return False
+    from kollabor.binary import kollab_argv
+
+    argv = [*kollab_argv(), LISTENER_FLAG]
+    if spawn is not None:
+        spawn(argv)
+        return True
+    env = {k: v for k, v in os.environ.items() if k not in ("KOLLAB_TOOL_SHELL", "KOLLAB_AGENT_PID")}
+    subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+        env=env,
+    )
+    return True
+
+
+# ------------------------------------------------------------- halt.sock
+
+
+def sock_path(root: Path | None = None) -> Path:
+    return private_dir(root) / SOCK
+
+
+async def sock_call(request: dict, root: Path | None = None, timeout: float = 30.0) -> dict:
+    reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(sock_path(root))), timeout)
+    try:
+        writer.write(json.dumps(request).encode() + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout)
+        reply = json.loads(line or b"{}")
+        return reply if isinstance(reply, dict) else {}
+    finally:
+        writer.close()
+
+
+async def wait_for_listener(root: Path | None = None, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with contextlib.suppress(OSError, asyncio.TimeoutError, ValueError):
+            if (await sock_call({"op": "ping"}, root, timeout=2.0)).get("ok"):
+                return True
+        await asyncio.sleep(0.2)
+    return False
+
+
+async def hand_off(order: dict, root: Path | None = None, *, spawn=None) -> dict:
+    """Pass a recorded halt to the listener over ``halt.sock``, starting one if needed."""
+    start_listener(root, spawn=spawn)
+    if not await wait_for_listener(root):
+        raise OSError("the halt listener did not start")
+    return await sock_call({"op": "halt", **order}, root, timeout=120.0)
+
+
+# ----------------------------------------------------------- boot check
+
+EXEMPT_FLAGS = frozenset({"--hub", "--version", "-V", "--help", "-h", "--attach", "--web-ui", LISTENER_FLAG})
+EXEMPT_COMMANDS = frozenset({"service", "relay", "mcp"})
+EXIT_FLAGS = frozenset({"-p", "--pipe"})
+
+
+def boot_decision(argv: list[str], env: dict[str, str], folder: str, data: dict[str, Any]) -> str:
+    """What a launch does under a halt: ``run``, ``exit`` (75), ``waiter`` or ``interactive``.
+
+    ``argv``/``env`` are the ones captured at entry; ``--detached`` decides in
+    the forked child (its env carries ``KOLLAB_DETACHED_CHILD``) or a service.
+    """
+    from kollabor.daemon import DETACHED_CHILD_ENV, SERVICE_ENV
+
+    args = argv[1:]
+    if args[:1] and args[0] in EXEMPT_COMMANDS:
+        return "run"
+    if any(a in EXEMPT_FLAGS or a.split("=", 1)[0] in EXEMPT_FLAGS for a in args):
+        return "run"
+    detached = "--detached" in args or "-d" in args
+    service = env.get(SERVICE_ENV) == "1"
+    child = env.get(DETACHED_CHILD_ENV) == "1"
+    if detached and not (child or service):
+        return "run"  # the parent forks; the child checks
+    if not folder_halted(folder, data):
+        return "run"
+    if args[:1] == ["acp"] or any(a in EXIT_FLAGS for a in args):
+        return "exit"
+    if detached or service or child:
+        return "waiter"
+    return "interactive"
+
+
+def boot_check(argv: list[str] | None = None, env: dict[str, str] | None = None, *, root: Path | None = None) -> None:
+    """Run at process entry: cheap when no halt is in force (one stat)."""
+    entry = capture_entry(argv, env)
+    path = kollab_root(root) / "private" / HALT_JSON
+    if not path.exists():
+        return
+    try:
+        data = read_halt(root)
+    except (OSError, ValueError) as error:
+        logger.warning("halt check: halt.json unreadable (%s)", type(error).__name__)
+        return
+    folder = os.getcwd()
+    decision = boot_decision(entry["argv"], entry["env"], folder, data)
+    if decision == "run":
+        return
+    from .network_halt import EX_TEMPFAIL
+
+    if decision == "exit":
+        print(halted_line(data), file=sys.stderr)
+        raise SystemExit(EX_TEMPFAIL)
+    start_listener(root)
+    if decision == "waiter":
+        run_waiter(entry["argv"], entry["env"], folder, root=root)
+    else:
+        raise SystemExit(run_interactive(folder, root=root))
+
+
+# ---------------------------------------------------------------- waiter
+
+
+def waiter_identity(argv: list[str]) -> str:
+    for flag in ("--as", "--agent"):
+        if flag in argv and argv.index(flag) + 1 < len(argv):
+            return argv[argv.index(flag) + 1].rsplit("/", 1)[-1]
+    return f"halted-{os.getpid()}"
+
+
+def restart_argv(argv: list[str]) -> list[str]:
+    from kollabor.binary import kollab_argv
+
+    return [*kollab_argv(), *argv[1:]]
+
+
+def run_waiter(
+    argv: list[str],
+    env: dict[str, str],
+    folder: str,
+    *,
+    root: Path | None = None,
+    execve: Callable[[str, list[str], dict[str, str]], Any] = os.execve,
+    sleep: Callable[[float], Any] = time.sleep,
+    max_polls: int | None = None,
+) -> None:
+    """Hold the launch until its folder is marked lifted, then exec it again."""
+    os.environ[WAITER_ENV] = "1"
+    presence, server = _waiter_presence(argv, folder, root)
+    polls = 0
+    try:
+        while True:
+            try:
+                data = read_halt(root)
+            except (OSError, ValueError):
+                data = {}
+            if not folder_halted(folder, data):
+                break
+            if not listener_running(root):
+                start_listener(root)
+            polls += 1
+            if max_polls is not None and polls >= max_polls:
+                return
+            sleep(POLL_SECONDS)
+    finally:
+        if server is not None:
+            server.stop()
+        if presence is not None:
+            presence.unlink(missing_ok=True)
+    new_argv = restart_argv(argv)
+    execve(new_argv[0], new_argv, {k: v for k, v in env.items() if k != WAITER_ENV})
+
+
+class _StatusSocket:
+    """An attach socket that answers ``get_status`` with the halt and refuses turns."""
+
+    def __init__(self, path: Path, identity: str, root: Path | None):
+        import socket
+        import threading
+
+        self.path = path
+        path.unlink(missing_ok=True)
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.bind(str(path))
+        os.chmod(path, 0o600)
+        self.sock.listen(8)
+        self.identity = identity
+        self.root = root
+        self.closed = False
+        threading.Thread(target=self._serve, daemon=True, name="kollab-halt-waiter").start()
+
+    def answer(self, request: dict) -> dict:
+        try:
+            line = halted_line(read_halt(self.root))
+        except (OSError, ValueError):
+            line = HALTED_LINE.format(device="another machine")
+        if request.get("action") == "get_status":
+            return {"type": "status", "identity": self.identity, "state": "halted", "halted": line}
+        return {"type": "error", "error": line}
+
+    def _serve(self) -> None:
+        while not self.closed:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.settimeout(5)
+                    raw = conn.makefile("rb").readline(65536)
+                    request = json.loads(raw or b"{}")
+                    reply = self.answer(request if isinstance(request, dict) else {})
+                    conn.sendall(json.dumps(reply).encode() + b"\n")
+                except (OSError, ValueError):
+                    continue
+
+    def stop(self) -> None:
+        self.closed = True
+        with contextlib.suppress(OSError):
+            self.sock.close()
+        self.path.unlink(missing_ok=True)
+
+
+def _waiter_presence(argv: list[str], folder: str, root: Path | None) -> tuple[Path | None, _StatusSocket | None]:
+    try:
+        from .presence import get_presence_dir, get_socket_dir
+
+        identity = waiter_identity(argv)
+        sock = get_socket_dir() / f"halted-{os.getpid()}.sock"
+        server = _StatusSocket(sock, identity, root)
+        record = get_presence_dir() / f"halted-{os.getpid()}.json"
+        record.write_text(
+            json.dumps(
+                {
+                    "identity": identity,
+                    "pid": os.getpid(),
+                    "socket_path": str(sock),
+                    "project": folder,
+                    "state": "halted",
+                    "started_at": time.time(),
+                }
+            )
+        )
+        return record, server
+    except Exception as error:  # a waiter without presence still waits
+        logger.warning("halt waiter: no presence (%s)", type(error).__name__)
+        return None, None
+
+
+# ------------------------------------------------------- interactive view
+
+
+def render_view(snapshot: dict) -> list[str]:
+    lines = []
+    active = snapshot.get("active") or []
+    if active:
+        for h in active:
+            lines.append(f"Network State: Halted by {h.get('device') or h['machine'][:8]}: {h.get('reason') or ''}")
+    else:
+        lines.append("Network State: Running")
+    lines.append(f"This Machine: {'counts' if snapshot.get('counts') else 'does not count yet'}")
+    online = snapshot.get("members_online") or []
+    lines.append(f"Online Now: {', '.join(online) if online else 'none'}")
+    for p in snapshot.get("proposals") or []:
+        lines.append(f"Resume proposed {p['hash'][:8]} ({p.get('confirmations', 0)} confirmations)")
+    for k in snapshot.get("pending_revocations") or []:
+        lines.append(f"{k[:8]} revoked, waiting for a second machine")
+    lines.append("")
+    lines.append("c Confirm Resume   p Propose Resume   Esc exit")
+    return lines
+
+
+def run_interactive(folder: str, *, root: Path | None = None, read_key: Callable[[], str] | None = None) -> int:
+    """The halted interactive launch: no model, the connect-halt state over ``halt.sock``.
+
+    ponytail: plain text and three keys; slice C builds the real TUI view.
+    """
+    try:
+        data = read_halt(root)
+    except (OSError, ValueError):
+        data = {}
+    print(halted_line(data))
+    read_key = read_key or _read_key
+
+    async def call(req: dict) -> dict:
+        if not await wait_for_listener(root, timeout=5.0):
+            return {"error": "the halt listener is not running"}
+        return await sock_call(req, root)
+
+    while True:
+        snap = asyncio.run(call({"op": "describe", "folder": folder}))
+        if snap.get("error"):
+            print(snap["error"])
+        for line in render_view(snap.get("snapshot") or {}):
+            print(line)
+        key = read_key()
+        if key in ("\x1b", "q", ""):
+            return 0
+        action = None
+        if key == "p":
+            action = ("propose_resume", {})
+        elif key == "c" and (snap.get("snapshot") or {}).get("proposals"):
+            action = ("confirm_resume", {"hash": snap["snapshot"]["proposals"][0]["hash"]})
+        if action:
+            reply = asyncio.run(call({"op": "act", "folder": folder, "action": action[0], "payload": action[1]}))
+            print(reply.get("error") or reply.get("line") or "done")
+
+
+def _read_key() -> str:
+    import termios
+    import tty
+
+    if not os.isatty(0):
+        return ""
+    old = termios.tcgetattr(0)
+    try:
+        tty.setraw(0)
+        return os.read(0, 1).decode(errors="replace")
+    finally:
+        termios.tcsetattr(0, termios.TCSADRAIN, old)
+
+
+# ----------------------------------------------------------------- sweep
+
+
+def candidate_pids() -> list[int]:
+    """Cheap first pass: processes whose command line names kollab.
+
+    A binary install's processes run the pex venv's python with the kollab
+    console script in argv, so the name still matches; ``select_sweep`` then
+    decides by ``SCIE`` or ``sys.prefix`` (``SCIE`` never shows in a command line).
+    """
+    out = subprocess.run(["pgrep", "-f", "kollab"], capture_output=True, text=True, timeout=10)
+    pids = {int(p) for p in out.stdout.split() if p.isdigit()}
+    pids.discard(os.getpid())
+    return sorted(pids)
+
+
+def descendants(pids: Iterable[int], all_procs: Iterable) -> set[int]:
+    """Children (any depth) of ``pids`` among ``all_procs``: tagged CLIs agents started."""
+    procs = list(all_procs)
+    out = set(pids)
+    grew = True
+    while grew:
+        grew = False
+        for p in procs:
+            if p.ppid in out and p.pid not in out:
+                out.add(p.pid)
+                grew = True
+    return out
+
+
+async def sweep(
+    scopes: list,
+    *,
+    agents: list[dict],
+    procs: list,
+    stop: Callable[[dict], Awaitable[tuple[bool, str]]],
+    protect: Iterable[int],
+    install=None,
+) -> list[tuple[dict, bool, str]]:
+    """Stop what a halt stops here (``select_sweep``), each with ``stop``.
+
+    ``agents`` are presence records (waiters, state ``halted``, are skipped);
+    ``procs`` are ``Proc`` rows already read; ``protect`` holds the listener,
+    the issuing CLI and its ancestors.
+    """
+    from .network_halt import Install, in_scope, select_sweep
+
+    protect = set(protect)
+    in_scope_agents = [
+        a for a in agents
+        if a.get("state") != "halted" and int(a.get("pid") or 0) not in protect
+        and in_scope(str(a.get("project") or "/nonexistent-folder"), scopes)
+    ]
+    chosen = select_sweep(
+        procs,
+        install=install or Install.current(),
+        scopes=scopes,
+        agent_pids=[int(a["pid"]) for a in in_scope_agents if a.get("pid")],
+        protect=protect,
+    )
+    by_pid = {int(a.get("pid") or 0): a for a in in_scope_agents}
+    records = [by_pid.get(p.pid) or {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd} for p in chosen]
+    for a in in_scope_agents:  # an agent presence lists that is not in the process rows
+        if int(a.get("pid") or 0) not in {p.pid for p in chosen}:
+            records.append(a)
+    results = await asyncio.gather(*(stop(r) for r in records))
+    return [(r, ok, msg) for r, (ok, msg) in zip(records, results)]
+
+
+def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
+    """``os.kill`` that takes the whole process group, unless it holds a protected pid."""
+    protect = set(protect)
+
+    def kill(pid: int, sig: int) -> None:
+        try:
+            pgid = os.getpgid(pid)
+        except OSError:
+            pgid = 0
+        mine = os.getpgid(0)
+        guarded = {os.getpgid(p) for p in protect if _alive(p)}
+        if pgid > 1 and pgid != mine and pgid not in guarded:
+            os.killpg(pgid, sig)
+        else:
+            os.kill(pid, sig)
+
+    return kill
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+# -------------------------------------------------------------- listener
+
+
+class HaltListener:
+    """``kollab --halt-listener``: model-less, one per machine, never swept.
+
+    Holds ``halt.lock``, serves ``halt.sock`` (hand-off and the halt panels),
+    opens the links of networks in scope, hands them back on resume, and exits
+    when no halt is left.
+    """
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        stop: Callable[[dict], Awaitable[tuple[bool, str]]] | None = None,
+        processes: Callable[[], list] | None = None,
+        agents: Callable[[], list[dict]] | None = None,
+        open_link: Callable[[str, Path], Awaitable[Any]] | None = None,
+        idle: float = LISTENER_IDLE_SECONDS,
+    ):
+        self.root = root
+        self._stop = stop
+        self._processes = processes
+        self._agents = agents
+        self._open_link = open_link or open_relay_link
+        self.idle = idle
+        self.links: dict[str, Any] = {}  # network id -> HaltLink
+        self.folders: dict[str, set[str]] = {}  # network id -> folders seen here
+        self._lock_fd: int | None = None
+        self._server: asyncio.AbstractServer | None = None
+        self._done = asyncio.Event()
+
+    # lock --------------------------------------------------------------
+
+    def take_lock(self) -> bool:
+        fd = _lock_fd(private_dir(self.root) / LOCK)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return False
+        self._lock_fd = fd
+        return True
+
+    def drop_lock(self) -> None:
+        fd, self._lock_fd = self._lock_fd, None
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    # run ---------------------------------------------------------------
+
+    async def run(self) -> int:
+        if not self.take_lock():
+            return 0  # another listener runs
+        path = sock_path(self.root)
+        path.unlink(missing_ok=True)
+        old = os.umask(0o177)
+        try:
+            self._server = await asyncio.start_unix_server(self._client, path=str(path))
+        finally:
+            os.umask(old)
+        os.chmod(path, 0o600)
+        try:
+            await self._reopen_links()
+            while not self._done.is_set():
+                await self.tick()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._done.wait(), self.idle)
+        finally:
+            for net in list(self.links):
+                await self.hand_back(net, mark=False)
+            self._server.close()
+            path.unlink(missing_ok=True)
+            self.drop_lock()
+        return 0
+
+    async def tick(self) -> None:
+        """Hand back networks whose halts are all lifted; exit when none is left."""
+        data = read_halt(self.root)
+        for net in list((data.get("scopes") or {})):
+            book = (data.get("networks") or {}).get(net)
+            if not _book_active(net, book):
+                await self.hand_back(net)
+        if not (read_halt(self.root).get("scopes") or {}):
+            self._done.set()
+
+    async def _reopen_links(self) -> None:
+        """A listener started by a waiter after a reboot takes the links again."""
+        data = read_halt(self.root)
+        for net, scope in (data.get("scopes") or {}).items():
+            if isinstance(scope, list) and scope:
+                self.folders.setdefault(net, set()).update(scope)
+            await self.open_links(net)
+
+    # socket ------------------------------------------------------------
+
+    async def _client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            line = await asyncio.wait_for(reader.readline(), 30)
+            request = json.loads(line or b"{}")
+            reply = await self.handle(request if isinstance(request, dict) else {})
+        except Exception as error:  # never let one caller take the listener down
+            reply = {"ok": False, "error": str(error) or type(error).__name__}
+        writer.write(json.dumps(reply).encode() + b"\n")
+        with contextlib.suppress(Exception):
+            await writer.drain()
+            writer.close()
+
+    async def handle(self, request: dict) -> dict:
+        """``halt.sock``: the hand-off and the two halt panels, nothing else."""
+        op = request.get("op")
+        if op == "ping":
+            return {"ok": True}
+        if op == "halt":
+            return await self.take_halt(request)
+        if op in ("describe", "act", "members", "status"):
+            link = self._link_for(request.get("folder"), request.get("network"))
+            if link is None:
+                return {"ok": False, "error": "no halted network holds that folder"}
+            if op == "describe":
+                return {"ok": True, "snapshot": await link.hub_halt_snapshot()}
+            if op == "members":
+                return {"ok": True, "members": await link.hub_halt_members()}
+            if op == "status":
+                return {"ok": True, "acked": link.acked(), "members": await link.hub_halt_members()}
+            result = await link.hub_halt_act(str(request.get("action")), request.get("payload") or {})
+            await self.tick()
+            return {"ok": True, **result}
+        return {"ok": False, "error": "unknown halt.sock call"}
+
+    def _link_for(self, folder: Any, network: Any) -> Any:
+        from .network_halt import in_scope
+
+        if isinstance(network, str) and network in self.links:
+            return self.links[network]
+        if isinstance(folder, str):
+            data = read_halt(self.root)
+            for net, scope in (data.get("scopes") or {}).items():
+                if net in self.links and in_scope(folder, [scope]):
+                    return self.links[net]
+        return next(iter(self.links.values()), None) if len(self.links) == 1 else None
+
+    # halt --------------------------------------------------------------
+
+    async def take_halt(self, order: dict) -> dict:
+        """Step 2 to 4: record scope, sweep, open links."""
+        net, scope, folder = order.get("network"), order.get("scope"), order.get("folder")
+        if not isinstance(net, str) or not (scope == "machine" or isinstance(scope, list)):
+            return {"ok": False, "error": "invalid hand-off"}
+        if isinstance(folder, str):
+            self.folders.setdefault(net, set()).add(folder)
+        agents = self._agents() if self._agents else _live_agents()
+        for a in agents:
+            if a.get("project"):
+                self._remember_folder(a["project"])
+
+        def record(data: dict) -> None:
+            data.setdefault("scopes", {})[net] = scope
+
+        update_halt(record, self.root)
+        protect = {os.getpid(), *(int(p) for p in order.get("protect") or [] if str(p).isdigit())}
+        stop = self._stop or _default_stop(protect, self.root)
+        procs = self._processes() if self._processes else _read_candidates()
+        scopes = active_scopes(read_halt(self.root))
+        results = await sweep(scopes, agents=agents, procs=procs, stop=stop, protect=protect)
+        stopped = [
+            {"identity": r.get("identity", "?"), "folder": r.get("project", ""), "service": bool(r.get("service"))}
+            for r, ok, _ in results if ok
+        ]
+
+        def note(data: dict) -> None:
+            known = {(s.get("identity"), s.get("folder")) for s in data.get("stopped", [])}
+            data.setdefault("stopped", []).extend(s for s in stopped if (s["identity"], s["folder"]) not in known)
+
+        update_halt(note, self.root)
+        await self.open_links(net)
+        return {"ok": True, "stopped": [m for _, _, m in results], "count": len(stopped)}
+
+    def _remember_folder(self, folder: str) -> None:
+        for net in self._networks_of(folder):
+            self.folders.setdefault(net, set()).add(folder)
+
+    def _networks_of(self, folder: str) -> list[str]:
+        try:
+            from .membership_runtime import Memberships
+
+            return [_network_of(folder, m.state_dir) for m in Memberships(Path(folder)).list()]
+        except Exception:
+            return []
+
+    async def open_links(self, net: str) -> None:
+        """Take the relay-owner lock of the network's first in-scope folder (swept already)."""
+        from .network_halt import in_scope
+
+        if net in self.links:
+            return
+        scopes = active_scopes(read_halt(self.root))
+        folders = sorted(f for f in self.folders.get(net, ()) if in_scope(f, scopes))
+        for folder in folders:
+            state_dir = _state_dir_for(folder, net)
+            if state_dir is None:
+                continue
+            link = await self._open_link(folder, state_dir)
+            if link is not None:
+                self.links[net] = link
+                return
+
+    async def hand_back(self, net: str, *, mark: bool = True) -> None:
+        """R3-F9: close the link and release the owner lock, then mark the folders lifted."""
+        link = self.links.pop(net, None)
+        if link is not None:
+            await link.close()  # releases the relay-owner lock
+        if mark:
+            def lift(data: dict) -> None:
+                (data.get("scopes") or {}).pop(net, None)
+
+            update_halt(lift, self.root)
+
+
+def _book_active(net: str, book: Any) -> bool:
+    if not isinstance(book, dict):
+        return False
+    from .network_halt import HaltBook
+
+    return bool(HaltBook(net, book).active())
+
+
+def _live_agents() -> list[dict]:
+    from .presence import live_agents_on_machine
+
+    return [data for _hub, data in live_agents_on_machine()]
+
+
+def _read_candidates() -> list:
+    from .network_halt import read_process
+
+    out = []
+    for pid in candidate_pids():
+        p = read_process(pid)
+        if p is not None:
+            out.append(p)
+    return out
+
+
+def _default_stop(protect: set[int], root: Path | None):
+    from kollabor.cli import stop_agent_record
+
+    kill = group_kill(protect)
+
+    async def stop(agent: dict) -> tuple[bool, str]:
+        return await stop_agent_record(agent, "network halt", kill=kill)
+
+    return stop
+
+
+def _network_of(folder: str, state_dir: Path) -> str:
+    from .relay_commands import RelayCommands
+
+    return RelayCommands(Path(folder), state_dir=state_dir).client.network_id()
+
+
+def _state_dir_for(folder: str, net: str) -> Path | None:
+    from .membership_runtime import Memberships
+
+    for m in Memberships(Path(folder)).list():
+        try:
+            if _network_of(folder, m.state_dir) == net:
+                return m.state_dir
+        except Exception:
+            continue
+    return None
+
+
+class HaltLink:
+    """One network's relay link held by the listener: allowlist first, halt book only."""
+
+    def __init__(self, folder: Path, state_dir: Path, owner, commands, transport):
+        from .network_control import HaltSync
+
+        self.folder, self.state_dir, self.owner = folder, state_dir, owner
+        self.commands, self.transport = commands, transport
+        self.client = commands.client
+        self.sync = HaltSync(client=self.client, transport=transport, online=self.online)
+        self.resume_task: asyncio.Task | None = None
+
+    def online(self) -> dict[str, str]:
+        """Approved peers on the relay now (``RelayAgentBridge._config_online_peers``)."""
+        try:
+            if self.client.status().get("state") != "online":
+                return {}
+            approved = set(self.client.state.approvals)
+            return {p["key"]: p["session"] for p in self.client.peers() if p["key"] in approved}
+        except Exception:
+            return {}
+
+    async def start(self) -> None:
+        self.client.set_request_handler(self.receive)
+        self.resume_task = asyncio.create_task(self.commands.resume(), name="kollab-halt-link")
+        self.sync.start()
+
+    async def receive(self, peer: str, method: str, payload: Any) -> Any:
+        from .network_halt import listener_allows
+        from .relay_state import RelayError
+
+        stranger = peer in self.client.state.links
+        member = peer in self.client.members()
+        if not listener_allows(stranger=stranger, member=member, method=method, inner="network_halt"):
+            raise RelayError("this machine is halted")
+        if method == "secure_identity":
+            return self.transport.identity_response(peer, payload)
+
+        async def inner(peer: str, inner_method: str, inner_payload: Any) -> Any:
+            if not listener_allows(stranger=stranger, member=member, method=method, inner=inner_method):
+                raise RelayError("this machine is halted")
+            if inner_method == "network_halt":
+                return await self.sync.receive(peer, inner_payload)
+            from .network_members import MembershipSync
+
+            return await MembershipSync(client=self.client, transport=self.transport, online=self.online).receive(
+                peer, inner_payload
+            )
+
+        return await self.transport.handle_packet(peer, payload, inner)
+
+    def acked(self) -> list[str]:
+        return sorted(self.sync._delivered)
+
+    async def hub_halt_snapshot(self) -> dict:
+        return self.client.control.halt_snapshot(set(self.online()))
+
+    async def hub_halt_members(self) -> list[dict]:
+        return self.client.control.halt_members()
+
+    async def hub_halt_act(self, action: str, payload: dict) -> dict:
+        from .network_halt import HaltError
+        from .relay_state import RelayError
+
+        try:
+            result = self.client.control.halt_act(action, payload)
+        except HaltError as error:
+            raise RelayError(str(error)) from None
+        self.sync._delivered.clear()
+        self.sync._retry_at.clear()
+        return result
+
+    async def close(self) -> None:
+        await self.sync.close()
+        task, self.resume_task = self.resume_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            self.client.set_request_handler(None)
+            await self.commands.close()
+        self.owner.release()
+
+
+async def open_relay_link(folder: str, state_dir: Path) -> HaltLink | None:
+    """Assumption 1: a membership's link with no plugins and no model."""
+    from .relay_commands import RelayCommands
+    from .relay_owner import WorkspaceRelayOwner
+    from .secure_conversation import SecureConversationTransport
+
+    owner = WorkspaceRelayOwner(Path(folder), state_dir)
+    if not owner.acquire(str(sock_path()), "halt-listener"):
+        return None  # its owner still runs: the sweep did not stop it
+    try:
+        commands = RelayCommands(Path(folder), state_dir=state_dir, agent_bridge=None)
+        transport = SecureConversationTransport(commands.client, commands.client._store.key.encode())
+        link = HaltLink(Path(folder), state_dir, owner, commands, transport)
+        await link.start()
+        return link
+    except Exception:
+        owner.release()
+        raise
+
+
+def listener_main() -> int:
+    """``kollab --halt-listener``."""
+    logging.basicConfig(level=logging.WARNING)
+    for sig in (signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, signal.SIG_IGN)
+    return asyncio.run(HaltListener().run())
+
+
+# ------------------------------------------------------------------- CLI
+
+
+def parse_flags(rest: list[str], flags: dict[str, bool]) -> dict[str, Any]:
+    """``--reason x``, ``--revoke d``, ``--confirm h``, ``--local``; unknown is an error."""
+    out: dict[str, Any] = {}
+    i = 0
+    while i < len(rest):
+        name = rest[i]
+        if name not in flags:
+            raise ValueError(f"unknown option {name}")
+        if flags[name]:
+            if i + 1 >= len(rest):
+                raise ValueError(f"{name} needs a value")
+            out[name.lstrip("-")] = rest[i + 1]
+            i += 2
+        else:
+            out[name.lstrip("-")] = True
+            i += 1
+    return out
+
+
+def member_lines(members: list[dict], acked: Iterable[str], own_folder: str, stopped: int) -> list[str]:
+    """One line per member; one that has not answered is never printed as done."""
+    acked = set(acked)
+    lines = []
+    for m in members:
+        name = m.get("name") or m.get("folder", "")[:8]
+        if m.get("folder") == own_folder:
+            lines.append(f"{name}: halted, {stopped} agents stopped")
+        elif m.get("folder") in acked:
+            lines.append(f"{name}: halted")
+        else:
+            lines.append(f"{name}: offline, halts on reconnect")
+    return lines
+
+
+async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None, root: Path | None = None) -> int:
+    """``kollab --hub halt|resume``. Returns the exit code; prints the spec's lines."""
+    from .network_halt import ancestors, network_control_refusal
+
+    refusal = network_control_refusal()
+    if refusal:
+        print(refusal)
+        return 1
+    folder = folder or os.getcwd()
+    try:
+        if subcmd == "halt":
+            opts = parse_flags(rest, {"--reason": True, "--revoke": True})
+        else:
+            opts = parse_flags(rest, {"--confirm": True, "--local": False})
+    except ValueError as error:
+        print(f"{error}\nusage: kollab --hub halt [--reason <text>] [--revoke <device>]\n"
+              "       kollab --hub resume [--confirm <8-hex> | --local]")
+        return 2
+    control = _folder_control(folder)
+    if control is None:
+        print("This folder is not on a network.")
+        return 1
+    if subcmd == "halt":
+        revoke = [k for k in [_device_key(control, opts.get("revoke"))] if k]
+        if opts.get("revoke") and not revoke:
+            print(f"no member device named {opts['revoke']}")
+            return 1
+        try:
+            act = control.halt_act("halt", {"reason": opts.get("reason", ""), "revoke": revoke})
+        except Exception as error:
+            print(str(error))
+            return 1
+        scope = _scope_for(control, folder)
+        reply = await hand_off(
+            {"network": control.network_id(), "scope": scope, "folder": folder,
+             "hash": act.get("hash"), "protect": sorted(ancestors(os.getpid()))},
+            root,
+        )
+        print(f"Halt {str(act.get('hash', ''))[:8]} recorded.")
+        status = await _await_acks(folder, root)
+        for line in member_lines(status.get("members") or control.halt_members(), status.get("acked") or [],
+                                 control.client.public_key, int(reply.get("count") or 0)):
+            print(line)
+        return 0
+    if opts.get("local"):
+        payload, action = {}, "resume_local"
+    elif opts.get("confirm"):
+        payload, action = {"hash": opts["confirm"]}, "confirm_resume"
+    else:
+        payload, action = {}, "propose_resume"
+    try:
+        result = await _act(folder, control, action, payload, root)
+    except Exception as error:
+        print(str(error))
+        return 1
+    if action == "resume_local":
+        print(result.get("line"))
+    elif action == "confirm_resume":
+        print(f"Resume confirmed: lifts {len(result.get('lifted') or [])} halts")
+    else:
+        snap = control.halt_snapshot()
+        for h in snap.get("active") or []:
+            print(f"  {h['hash'][:8]} {h.get('reason') or ''}")
+        print(RESUME_PROPOSED)
+    return 0
+
+
+async def _act(folder: str, control, action: str, payload: dict, root: Path | None) -> dict:
+    """Through the listener while it holds the network, else on this folder's own record."""
+    if listener_running(root):
+        reply = await sock_call({"op": "act", "folder": folder, "action": action, "payload": payload}, root)
+        if not reply.get("ok"):
+            raise RuntimeError(reply.get("error") or "the halt listener refused")
+        return reply
+    return control.halt_act(action, payload)
+
+
+async def _await_acks(folder: str, root: Path | None, seconds: float = 10.0) -> dict:
+    deadline = time.monotonic() + seconds
+    status: dict = {}
+    while time.monotonic() < deadline:
+        with contextlib.suppress(OSError, ValueError, asyncio.TimeoutError):
+            status = await sock_call({"op": "status", "folder": folder}, root, timeout=5.0)
+        members = status.get("members") or []
+        if members and len(set(status.get("acked") or [])) >= len(members) - 1:
+            break
+        await asyncio.sleep(1.0)
+    return status
+
+
+def _folder_control(folder: str):
+    from .relay_commands import RelayCommands
+
+    try:
+        return RelayCommands(Path(folder)).client.control
+    except Exception:
+        return None
+
+
+def _device_key(control, name: Any) -> str:
+    if not isinstance(name, str) or not name:
+        return ""
+    for m in control.halt_members():
+        if name in (m.get("name"), m.get("folder")):
+            return m["folder"]
+    return ""
+
+
+def _scope_for(control, folder: str):
+    from .network_halt import halt_scope
+
+    return halt_scope(control.view(), control.machine_hex, [folder])

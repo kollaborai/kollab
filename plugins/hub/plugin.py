@@ -254,6 +254,8 @@ CONNECT_SUBCOMMANDS = [
     ),
     SubcommandInfo("deny", "<device> [agent]", "Revoke a device's access"),
     SubcommandInfo("revoke", "<device>", "Remove a device or peer"),
+    SubcommandInfo("halt", '[--reason "text"] [--revoke <device>]', "Halt the network"),
+    SubcommandInfo("resume", "[--confirm <hash> | --local]", "Propose or confirm a resume"),
     SubcommandInfo("leave", "[domain]", "Disconnect and stop reconnecting"),
     SubcommandInfo(
         "primary", "<network>", "Choose which network's primary manages this device"

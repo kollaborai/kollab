@@ -823,6 +823,43 @@ class RelayCommands:
         if result != "stored":
             raise RelayError(f"links not declared ({result})")
 
+    async def _halt_command(self, head: str, rest: str) -> str:
+        """``/connect halt [--reason ...] [--revoke <device>]`` and ``/connect resume [--confirm h|--local]``."""
+        import shlex
+
+        from .halt_runtime import RESUME_PROPOSED, parse_flags
+
+        if self.agent_bridge is None:
+            return "connect: halting requires a running Kollab Hub session"
+        try:
+            if head == "halt":
+                opts = parse_flags(shlex.split(rest), {"--reason": True, "--revoke": True})
+            else:
+                opts = parse_flags(shlex.split(rest), {"--confirm": True, "--local": False})
+        except ValueError as exc:
+            return f"connect: {exc}"
+        try:
+            if head == "halt":
+                revoke = []
+                if opts.get("revoke"):
+                    revoke = [await self._resolve_peer_key(opts["revoke"])]
+                result = await self.agent_bridge.hub_halt_act(
+                    "halt", {"reason": opts.get("reason", ""), "revoke": revoke}
+                )
+                return (
+                    f"Halt {result.get('hash', '')[:8]} recorded. The halt listener stops this "
+                    "machine's agents and tells every member online."
+                )
+            if opts.get("local"):
+                return (await self.agent_bridge.hub_halt_act("resume_local", {})).get("line", "")
+            if opts.get("confirm"):
+                result = await self.agent_bridge.hub_halt_act("confirm_resume", {"hash": opts["confirm"]})
+                return f"Resume confirmed: lifts {len(result.get('lifted') or [])} halts"
+            result = await self.agent_bridge.hub_halt_act("propose_resume", {})
+            return f"{result.get('hash', '')[:8]}\n{RESUME_PROPOSED}"
+        except (RelayError, ValueError) as exc:
+            return f"connect: {exc}"
+
     async def resume(self) -> None:
         delay = 1.0
         while (
@@ -1001,6 +1038,12 @@ class RelayCommands:
             )
         if head == "status":
             return await self.format_status()
+        if head in ("halt", "resume"):
+            # Typed by a person: `source_agent` names the session's agent, not an
+            # LLM. A model reaches these only through its terminal tool
+            # (`kollab --hub halt`, refused by KOLLAB_TOOL_SHELL) and the HIGH
+            # risk pattern on `/connect (revoke|halt|resume)`.
+            return await self._halt_command(head, rest)
         if head == "revoke":
             here_only = rest.endswith(" --here-only")
             rest = rest.removesuffix(" --here-only").strip()
