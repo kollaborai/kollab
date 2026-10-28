@@ -1,5 +1,14 @@
 # Network Sync and Control
 
+**Implementation review, 2026-10-27:** the current kill-switch draft is blocked
+for unattended use. Delayed competing revocations can diverge; secondary
+membership halt and operator routing are incomplete; handoff scope and protected
+PIDs are caller-controlled and concurrent handoffs can narrow a hold; and the
+process sweep does not bind signals to the selected process identity. A detached
+`env -i` process can lift its local halt. The rules below are the intended
+contract, not evidence that the implementation satisfies it. See the review on
+PR #361 and `docs/handoff/kill-switch-phase1.md` for the earlier test evidence.
+
 Status: draft for Marco's review, revised 2026-10-26 after adversarial review
 rounds 1 to 3 (`network-sync-and-control.review.md`). Round 1 findings are
 cited R1 to R21, round 2 follow-ups R2b, R3b..., new round 2 findings N1 to

@@ -1,6 +1,15 @@
 # Network Kill Switch
 
-Stop every agent on every one of your devices with one command. Agents and
+**Status: draft and unsafe for unattended operation.** Review of the current
+implementation found that delayed competing revocations can leave members with
+different trust state; secondary networks are not fully routed; halt handoffs
+can widen or narrow the intended scope; and process identifiers can be reused
+before a signal is sent. A detached process using `env -i` can also lift its
+local halt. These issues need fixes and isolated multi-device proof before the
+switch can be relied on. The behavior below describes the intended design, not
+a guarantee established by the current implementation.
+
+The intended switch stops agents on your devices with one command. Agents and
 skills stay on disk; only running processes stop. Contacts you accepted from a
 knock are never part of it: only members of your own network can halt or be
 halted.
