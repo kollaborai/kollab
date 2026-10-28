@@ -126,9 +126,11 @@ each side has two signers revokes both sides everywhere: that is the price
 of having no clock and no order to fight over, and the two-machine floor
 still holds under each key alone. What can still happen (everywhere the
 same, so not a divergence): revocations that each pass the floor alone can
-together leave fewer than two counting machines; two counting machines can
-revoke any non-protected member on a coordinated pair of signatures,
-including one made long before; and there is no way to withdraw a signature.
+together leave fewer than two counting machines — on a three-machine network
+a mutual crossing dissolves it to one counting machine; two counting
+machines can revoke any non-protected member on a coordinated pair of
+signatures, including one made long before; and there is no way to withdraw
+a signature.
 
 Lifting a halt from an agent's terminal tool is refused. That refusal guards
 against an agent's own shell by accident; it is not a wall against another

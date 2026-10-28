@@ -216,16 +216,17 @@ def test_tool_shells_are_recorded_pruned_capped_and_published(monkeypatch):
     monkeypatch.setattr(se, "TOOL_SHELL_LISTENERS", [lambda: calls.append(1)])
     dead = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
     dead.wait()
-    se.record_tool_shell(dead.pid, 1.0)
+    se.record_tool_shell(dead.pid, time.time())  # F15a: real starts, or the reuse check drops the row
     live = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
     try:
-        se.record_tool_shell(live.pid, 2.0)
-        assert se.TOOL_SHELLS == [[live.pid, 2.0, os.getpid()]] and calls == [1, 1]  # the dead shell's group is gone
-        for i in range(100):
-            se.record_tool_shell(live.pid, float(i))
+        se.record_tool_shell(live.pid, time.time())
+        assert [e[0] for e in se.TOOL_SHELLS] == [live.pid] and calls == [1, 1]  # the dead shell's group is gone
+        for _ in range(100):
+            se.record_tool_shell(live.pid, time.time())
         assert len(se.TOOL_SHELLS) == se.MAX_TOOL_SHELLS
         me = AgentRuntime(name="lapis", identity="lapis", agent_id="a1").to_presence_dict()
-        assert me["tool_shells"][-1] == [live.pid, 99.0, os.getpid()] and len(me["tool_shells"]) == se.MAX_TOOL_SHELLS
+        assert me["tool_shells"][-1][0] == live.pid and me["tool_shells"][-1][2] == os.getpid()
+        assert len(me["tool_shells"]) == se.MAX_TOOL_SHELLS
         peer = AgentRuntime(name="ruby", identity="ruby", agent_id="a2", pid=1).to_presence_dict()
         assert peer["tool_shells"] == []  # only this process's own shells
     finally:
@@ -249,7 +250,12 @@ def test_shell_executor_records_each_tool_shell(monkeypatch):
 # ------------------------------------------------------------------ NEW-2
 
 
-def test_new_2_crossing_revocations_keep_two_counting_machines():
+def test_new_2_a_crossing_on_three_machines_is_one_answer_everywhere():
+    """F15a: keys are judged one by one, so a mutual crossing on a three-machine network revokes both
+    sides and dissolves it to one counting machine — deterministic on every machine. The F11-F14
+    answer (one winner, by key order or by local completion order) is exactly what let two machines
+    that heard different orders keep opposite revocations; the aggregate floor cannot survive that
+    fix (test_kill_switch_f15a proves the four-machine floor still holds per key)."""
     from tests.unit.test_network_halt import Net, rev
 
     net = Net()
@@ -262,7 +268,7 @@ def test_new_2_crossing_revocations_keep_two_counting_machines():
     records = [rev(b, net, a.fk()), rev(c, net, a.fk()), rev(a, net, c.fk()), rev(b, net, c.fk())]
     out = nh.revocations_to_apply(records, view)
     gone = {view.machine_of(k) for k in out}
-    assert len(gone) == 1 and len(view.counting - gone) >= 2
+    assert gone == {a.mk, c.mk}
     assert out == nh.revocations_to_apply(list(reversed(records)), view)  # same answer on every machine
 
 
