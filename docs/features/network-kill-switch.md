@@ -1,13 +1,14 @@
 # Network Kill Switch
 
 **Status: draft and unsafe for unattended operation.** Review of the current
-implementation found that delayed competing revocations can leave members with
-different trust state; secondary networks are not fully routed; halt handoffs
-can widen or narrow the intended scope; and process identifiers can be reused
-before a signal is sent. A detached process using `env -i` can also lift its
-local halt. These issues need fixes and isolated multi-device proof before the
-switch can be relied on. The behavior below describes the intended design, not
-a guarantee established by the current implementation.
+implementation found that competing revocations can leave members with
+different trust state (every machine computes the same answer from the same
+signed records, but coordinated signers can still revoke together), secondary
+networks are not fully routed, and a detached process using `env -i` can lift
+its local halt. Halt hand-off scope, protected pids and per-signal process
+identity were reworked in F15b (listener-derived, unit-tested) but still need
+isolated multi-device proof. The behavior below describes the intended design,
+not a guarantee established by the current implementation.
 
 The intended switch stops agents on your devices with one command. Agents and
 skills stay on disk; only running processes stop. Contacts you accepted from a
@@ -81,10 +82,20 @@ is stopped only when its readable environment carries the agent's tag and
 its parent is pid 1 (or Linux `systemd --user`). One odd presence file (NaN,
 junk) never stops the halt: if the sweep itself fails, the agents are still
 stopped, but only pids that are a kollab of this install and in scope by
-their own folder (never the folder a presence file claims), and SIGKILL only
-goes to a pid whose start time is still within 5 seconds of the one read
-before SIGTERM. Every step of a halt is guarded on its own; the reply lists
-each error, and a malformed scope holds the whole machine.
+their own folder (never the folder a presence file claims), and every signal
+(SIGTERM and SIGKILL, in the stop ladder and the fallback) goes only to a
+pid still matching the start time (within 5 seconds), executable and command
+line read when it was selected; a pid that became another process is
+reported "not killed: identity changed" and left alone. Every step of a halt
+is guarded on its own; the reply lists each error, and a malformed scope
+holds the whole machine.
+
+A halt hand-off derives its scope and its protected pids on the machine that
+takes it: the roster (machine-wide when this machine counts, else this
+machine's folders of the network), the halt book and the folders it already
+holds, and the socket caller's process chain. Nothing in the request sets a
+scope or protects a pid, a hand-off can only widen the hold, and an agent,
+tool shell or unknown caller is not shielded by its own hand-off.
 
 What survives a halt (stop these by hand):
 
