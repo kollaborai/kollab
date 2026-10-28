@@ -75,6 +75,90 @@ async def test_a_member_device_opens_an_agent_under_trust_open_with_no_command(d
     right.commands.client.revoke(left.commands.client.public_key)
     await right.network_attach.recheck()
     assert not right.network_attach._channels
+@pytest.mark.asyncio
+async def test_a_member_device_opens_an_agent_under_trust_open_with_no_command(devices):
+    left, right, notices = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    writer.write(b"hello\n")
+    await writer.drain()
+    assert await reader.readline() == b"HELLO\n"
+    assert notices == ["left-box opened sapphire from the network"]
+
+    # Revoked: the rules say no, so the device closes the agent it held open.
+    right.commands.client.revoke(left.commands.client.public_key)
+    await right.network_attach.recheck()
+    assert not right.network_attach._channels
+
+
+# ------------------------------------------------------- F19: no attach under a halt
+
+
+def _haltable(taker, other) -> None:
+    """Give each control its own machine key (the fixture shares the real device
+    key), enroll ``taker`` as the founder's bootstrap member, and take the halt."""
+    from nacl.signing import SigningKey
+
+    from plugins.hub import network_halt as nh
+
+    rc = taker.commands.client.control
+    lc = other.commands.client.control
+    rc._machine = SigningKey.generate()
+    lc._machine = SigningKey.generate()
+    lc.found()
+    lc._fresh().setdefault("members", {})[rc.client.public_key] = rc.own_row()
+    rc._fresh().setdefault("members", {})[lc.client.public_key] = lc.own_row()
+    for k in ("founder", "founder_confirmed", "net", "room_bound"):
+        rc._fresh()[k] = lc._fresh()[k]
+    lc.halt_act("make_bootstrap", {"machine": rc.machine_hex})
+    # the live enrollment writes the founder-signed admission row on the member
+    pick = lc._fresh()["bootstrap_pick"]
+    rc._fresh()["admission"] = {
+        "network": pick["network"],
+        "admitter": pick["admitter"],
+        "machine": pick["machine"],
+        "bootstrap": True,
+        "sig": pick["sig"],
+    }
+    lc.learn("peer", rc.halt_payload())
+    assert {m for m in lc.view().counting} == {rc.machine_hex, lc.machine_hex}
+    rc.halt_act("halt", {"reason": "test halt", "confirmed": True})
+
+
+@pytest.mark.asyncio
+async def test_a_halted_network_refuses_new_attach_channels(devices):
+    """A halted machine's secondaries refuse joins: the gate fires before trust is even read."""
+    left, right, _ = devices
+    control = right.commands.client.control
+    _haltable(right, left)
+    assert control.halt_book().active()
+    with pytest.raises(AttachRefused, match="is halted"):
+        await _open(left, right)
+    # resume: proposed on the halted machine, confirmed on the second machine
+    control.halt_act("propose_resume", {"confirmed": True})
+    proposal = next(iter(control.halt_book().proposals))
+    peer_control = left.commands.client.control
+    peer_control.learn("peer", control.halt_payload())
+    peer_control.halt_act("confirm_resume", {"hash": proposal, "confirmed": True})
+    control.learn("peer", peer_control.halt_payload())
+    assert not control.halt_book().active()
+    assert await _open(left, right)
+
+
+@pytest.mark.asyncio
+async def test_an_attach_opened_before_the_halt_is_withdrawn_by_the_recheck(devices, monkeypatch):
+    """The channel from before the halt dies at its next _allowed() recheck (no new state)."""
+    left, right, notices = devices
+    opened = await _open(left, right)
+    reader, _ = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+
+    _haltable(right, left)
+    await right.network_attach.recheck()
+    assert not right.network_attach._channels
+    assert await asyncio.wait_for(reader.read(), 5) == b""
+
 
 
 @pytest.mark.asyncio

@@ -767,6 +767,16 @@ class RelayAgentBridge:
         here, there = self.device_name(), self._peer_name(peer)
         if peer in state.links or peer not in self.commands.client.state.approvals:
             raise AttachRefused(f"{there} is not a member of {here}'s network")
+        # F19: a halted network admits no new attach channels. The halt book is
+        # this folder's own state (a plain file read, works with the relay down);
+        # the requester side runs through this same method, so both ends refuse.
+        # Opened-before-the-halt channels die at their next _allowed() recheck,
+        # which calls back into here (network_attach.py).
+        if self.commands.client.control.halt_book().active():
+            raise AttachRefused(
+                f"{here}'s network is halted: no attach channels while the halt "
+                "holds (lift it with /connect resume)"
+            )
         trust = self.effective_trust(peer)
         if trust == "manual":
             raise AttachRefused(
