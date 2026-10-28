@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from kollabor_agent.voice_admission import (
@@ -37,6 +38,8 @@ class EngineSessionForVoice(Protocol):
 
     async def cancel_owned_turn(self, request_id: str) -> dict[str, Any]: ...
 
+    def cancel_turn(self, voice_turn_id: str | None = None) -> None: ...
+
 
 class VoiceSessionLookup(Protocol):
     """Resolve only sessions the authenticated owner is allowed to control."""
@@ -60,16 +63,23 @@ class EngineSessionRouter:
         self,
         binding: VoiceSessionBinding,
         transcript: VoiceTranscriptSnapshot,
+        *,
+        extra_context: Mapping[str, Any] | None = None,
     ) -> AdmissionReceipt:
         self._validate_final(binding, transcript)
         session = await self._get_session(binding)
-        context = VoiceTurnContext(
-            source="livekit_voice",
-            voice_session_id=binding.voice_session_id,
-            voice_provider_profile_id=binding.voice_provider_profile_id,
-            voice_prompt_revision=binding.voice_prompt_revision,
-            voice_tool_policy=binding.voice_tool_policy,
-        ).model_dump(mode="json")
+        # extra_context carries this turn's voice-only settings to the daemon; it
+        # can add keys but never replace the identity fields.
+        context = {
+            **(extra_context or {}),
+            **VoiceTurnContext(
+                source="livekit_voice",
+                voice_session_id=binding.voice_session_id,
+                voice_provider_profile_id=binding.voice_provider_profile_id,
+                voice_prompt_revision=binding.voice_prompt_revision,
+                voice_tool_policy=binding.voice_tool_policy,
+            ).model_dump(mode="json"),
+        }
 
         async def submit() -> AdmissionReceipt:
             # This callback runs only after RuntimeHost checks the stored

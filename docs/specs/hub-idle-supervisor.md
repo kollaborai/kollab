@@ -44,6 +44,8 @@ Decisions:
   compaction finishes). Alerts are throttled by
   `supervisor_alert_cooldown`.
 
+- `retry_handoff` / `alert_handoff_unacked` — see handoff reliability.
+
 Turn evidence comes from the display tap: `turn_complete` stamps
 `last_turn_end` and resets the wake counter; `error` records the error
 text. The loop stamps `last_turn_end` at boot so a fresh start needs
@@ -56,18 +58,57 @@ shown while healthy too, not only on alert), published to attached web
 clients as a `supervisor_alert` semantic event, and sent through the
 configured notifier channel when one exists.
 
+## handoff reliability
+
+A tagged assignment (`hub_msg` with `task_id` that reads as a request) to
+a local agent is tracked on the ledger (`begin_handoff` in
+`supervisor.py`): the card named by `task_id` is created, or claimed for
+the assignee when still open, and gets a `data.handoff = "sent"`
+checkpoint. The card stays visible (`/hub status` lists `handoff awaiting
+ack`) until the assignee proves receipt: the receiving agent's inbound
+path acknowledges it (`ack_handoff`), or any later checkpoint does
+(claim, progress note, completion).
+
+No acknowledgement within `supervisor_handoff_ack_timeout`: the
+supervisor resends the directive once (`retry_handoff`, routed like any
+hub message so an offline assignee gets it in its mailbox). Still none
+after another window: one `alert_handoff_unacked`, through the same
+surfaces as a stalled coordinator. Markers live in the card's own
+checkpoints, so nothing new is stored; an unacknowledged card that stays
+silent then follows the ordinary stall nudge and requeue path. Untagged
+assignments are unchanged (the receiver mints an open card).
+
+## failed dispatch surfacing
+
+A `hub_msg` that does not reach its target tells the sender in the tool
+result and is kept in a bounded list that `/hub status` prints on every
+agent as `dispatch failures` (this is what `kollab --hub status` shows):
+
+- rejected by the router (cooldown, waiting state, network refusal, mesh
+  policy): the result is an error naming the target and reason;
+- target offline and queued in its mailbox: `queued for X (offline)`;
+- live agent whose socket send failed and fell back to its mailbox:
+  `queued for X (socket send failed ...)`, no longer `delivered to X`;
+- target unknown: the existing `warning: 'X' is not online` result.
+
 ## configuration
 
 `plugins.hub.*`: `supervisor_enabled` (true), `supervisor_poll_interval`
 (10s), `supervisor_stall_threshold` (900s), `supervisor_wake_cooldown`
 (120s), `supervisor_max_reassignments` (3), `supervisor_wake_inefficacy`
-(3), `supervisor_alert_cooldown` (900s).
+(3), `supervisor_alert_cooldown` (900s), `supervisor_handoff_ack_timeout`
+(120s).
 
 ## tests
 
 - `tests/unit/test_hub_supervisor_wake_path.py` — wake delivery, nudge
   routing, wake-efficacy alerting, alert cooldown, error quoting,
   undelivered-nudge alert, status section.
+- `tests/unit/test_hub_handoff_reliability.py` — handoff tracking,
+  single resend, single alert, acknowledgement paths, and failed-dispatch
+  surfacing (rejection, offline, socket failure).
+- `packages/kollabor-webui/frontend/tests/supervisor-alerts.test.ts` —
+  alert selection for the web banner.
 - `tests/unit/test_hub_idle_acceptance.py` — open work never idles past
   the wake cooldown.
 - `tests/tmux/specs/hub_supervisor_status.json` — `/hub status` shows
@@ -78,5 +119,5 @@ configured notifier channel when one exists.
 - Goal awareness: `/goal` state lives in the engine per conversation and
   is not visible to the hub plugin; a goal-aware wake would cross that
   boundary. Deferred (tracked in issue #283).
-- A dedicated Web UI banner for supervisor alerts: the semantic event is
-  published; a frontend surface would render it.
+- Web UI banner: `SupervisorAlertBanner.tsx` renders the published
+  `supervisor_alert` events; mounting it in `App.tsx` is a separate step.

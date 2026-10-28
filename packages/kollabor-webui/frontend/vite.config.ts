@@ -180,6 +180,7 @@ const mainConfig = defineConfig({
       "tests/history-cache.test.ts",
       "tests/phone-frame.test.ts",
       "tests/build-provenance.test.ts",
+      "tests/voice-turn-groups.test.ts",
     ],
     environment: "node",
   },

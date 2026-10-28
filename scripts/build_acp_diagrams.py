@@ -93,7 +93,6 @@ def fig_overview():
     for i, (name, sub, cmd, harness) in enumerate((
         ("claude", "brain: Claude Code", "claude-agent-acp", "Claude Code"),
         ("codex", "brain: Codex", "codex-acp", "Codex"),
-        ("gemini", "brain: Gemini CLI", "gemini --acp", "Gemini CLI"),
     )):
         y = 196 + i * 56
         o.append(line(495, y + 23, 530, y + 23, "ln med"))
@@ -108,7 +107,7 @@ def fig_overview():
     o.append(t(276, 450, "every agent above is agent@laptop on your other devices", "dimf", 11.5))
     return svg(W, 474,
                "Kollab speaks ACP both ways: an ACP client such as Zed drives a kollab agent "
-               "through kollab acp, and kollab runs Claude Code, Codex and Gemini CLI as hub members over "
+               "through kollab acp, and kollab runs Claude Code and Codex as hub members over "
                "ACP; the network makes every one of them reachable from your other devices.",
                "".join(o), 760)
 
@@ -147,7 +146,7 @@ def fig_ownership():
     for x, title, sub, items, foot, foot_cls in (
         (20, "kollab owns the agent", "every kollab agent has these, claude too", KOLLAB_OWNS,
          "kollab decides these", "sealf"),
-        (660, "the harness owns the brain", "Claude Code, Codex, Gemini CLI, …", HARNESS_OWNS,
+        (660, "the harness owns the brain", "Claude Code, Codex, …", HARNESS_OWNS,
          "kollab sees these only through ACP", "warnf"),
     ):
         panel(o, x, 52, 320, 372, title, sub)

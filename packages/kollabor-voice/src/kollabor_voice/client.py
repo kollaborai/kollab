@@ -122,6 +122,8 @@ class VoiceClient:
             try:
                 os.kill(int(data["pid"]), 0)
             except ProcessLookupError:
+                if data.get("state") == "error":
+                    return data  # it exited after writing why
                 return {
                     **data,
                     "state": "error",
@@ -150,14 +152,14 @@ class VoiceClient:
                 return await self.call("status")
             except (OSError, asyncio.TimeoutError, ValueError):
                 state = self.setup_status()
+                if state.get("state") == "error":
+                    if state.get("updated_at", 0) >= launched:
+                        raise VoiceError(
+                            "setup_failed", state.get("detail", "Voice setup failed")
+                        )
+                    # An earlier run's failure: this one has not written yet.
+                    state = {"state": "starting", "detail": "Starting the voice service"}
                 progress(state)
-                if (
-                    state.get("state") == "error"
-                    and state.get("updated_at", 0) >= launched
-                ):
-                    raise VoiceError(
-                        "setup_failed", state.get("detail", "Voice setup failed")
-                    )
                 await asyncio.sleep(0.3)
         raise VoiceError("setup_timeout", "Voice setup timed out")
 
@@ -168,17 +170,15 @@ class VoiceClient:
         owner_epoch: str,
         producer_id: str,
         token: str,
-        review: dict | None = None,
     ):
-        """Agent adapter. Use an explicitly delegated capability; never claim capture."""
-        from .speech_review import SpeechDecision, format_decision
+        """Agent adapter. Use an explicitly delegated capability; never claim capture.
 
-        decision = format_decision(text) or (
-            SpeechDecision.from_wire(review)
-            if review is not None
-            else await self.review_speech(text, owner_epoch, token)
-        )
-        if decision.decision != "speak":
+        Only the spoken-format rules gate the text: no classifier reviews it.
+        """
+        from .speech_review import format_decision
+
+        decision = format_decision(text)
+        if decision:
             return {
                 "status": decision.decision,
                 "review": decision.to_wire(),
@@ -194,6 +194,7 @@ class VoiceClient:
         )
 
     async def review_speech(self, text, epoch, token):
+        """The on-demand spoken-style classifier op; voice itself never calls it."""
         from .speech_review import SpeechDecision, format_decision
 
         fixed = format_decision(text)

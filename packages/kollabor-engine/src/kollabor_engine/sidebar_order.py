@@ -1,4 +1,4 @@
-"""Engine-owned ordering for sidebar agent rows.
+"""Engine-owned ordering for sidebar agents and device groups.
 
 The store at ``~/.kollab/hub/sidebar-order.json`` is shared by every Web UI
 client connected to this engine. Revisions prevent stale clients from replacing

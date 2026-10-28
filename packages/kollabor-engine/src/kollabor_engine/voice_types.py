@@ -96,6 +96,9 @@ class VoiceSessionView(_FrozenModel):
     generation: Generation
     detail: str | None = None
     retryable: bool = False
+    # Disclosure: transcript text goes to a non-local LLM endpoint.
+    remote_llm: bool = False
+    remote_llm_host: str | None = None
 
 
 class VoiceSessionBinding(_FrozenModel):
@@ -142,6 +145,16 @@ class VoiceTranscriptSnapshot(_FrozenModel):
 
 # A final user transcript is a validated projection, not a second wire schema.
 FinalTranscript = VoiceTranscriptSnapshot
+
+
+class VoiceTurnRequest(VoiceTranscriptSnapshot):
+    """A /turns body: the final transcript, or kind "greeting" (a hidden instruction turn).
+
+    ``talk_over``: the user started it while the agent was still talking.
+    """
+
+    kind: Literal["speech", "greeting"] = "speech"
+    talk_over: bool = False
 
 
 class VoiceTurnContext(_FrozenModel):

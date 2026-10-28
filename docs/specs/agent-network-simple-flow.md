@@ -115,7 +115,14 @@ joining through them) and of the ones it revoked. A member approves a device
 that a member it already approved names, on the same network; the relay path
 and the mesh path use that one set. Revoking a device drops it on every member,
 and drops devices only it named. A revoked device stays out until a person on a
-member accepts it again. Approval is not a grant: `agents` and `manual` trust
+member accepts it again. One exception: a device never revokes its own primary
+(the inviter whose join code it used, `inviter` in the relay state) on another
+member's list, so one compromised device cannot cut the network off from its
+primary. Only a person on that device revokes it (`/connect revoke`); the
+primary's own revocations, and a member's revocation of any other device, apply
+as before. A second member agreeing was the alternative; it needs per-voucher
+claim state, and a lost primary is rare enough to revoke on each device by hand.
+Approval is not a grant: `agents` and `manual` trust
 work exactly as before. Accepted strangers, below, are not members.
 
 **Member lists are dated.** A list is signed by the device that sends it, one
@@ -1345,8 +1352,7 @@ opens **Settings > PhoneLink**, chooses **Link a Phone**, scans an expiring QR
 with the phone camera, compares the pairing codes and approves on the computer.
 The phone can bookmark the opened app in the same browser. The computer stays awake and
 online. No WireGuard app, personal server, key entry or router changes belong
-to the normal flow. Manual WireGuard access is optional and collapsed under
-**Advanced Settings**.
+to the flow, and there is no manual WireGuard option.
 
 A phone is an app controller, not a joined agent-network device. It gets an
 isolated private room and its own identity, local approval, and revocation.

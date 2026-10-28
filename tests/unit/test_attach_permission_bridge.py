@@ -1,6 +1,7 @@
 """Attach-mode permission prompt bridge tests."""
 
 import asyncio
+import copy
 
 from kollabor.llm.permissions.attach_bridge import (
     PERMISSION_RESPONSE_RPC_METHOD,
@@ -16,7 +17,7 @@ class FakeDisplayTap:
         self.events = []
 
     def publish(self, event):
-        self.events.append(event)
+        self.events.append(copy.deepcopy(event))  # as sent: a real tap serializes it
 
 
 class FakeRpcServer:
@@ -242,6 +243,7 @@ def _prompting_app(detached):
 
         async def request_confirmation(self, **kwargs):
             asked.append(kwargs["details"])
+            self.timeout = kwargs["timeout"]
             return ConfirmationResponse.APPROVE_ONCE
 
     app = SimpleNamespace(
@@ -273,6 +275,7 @@ def test_a_detached_daemon_sends_its_prompts_to_the_attached_window():
 
     assert response is ConfirmationResponse.APPROVE_ONCE
     assert asked == [{"tool": "shell"}]
+    assert app._attach_permission_bridge.timeout is None  # a parked prompt's card stays open
 
 
 def _prompt(bridge, display_tap, tool_id="terminal_0", timeout=1):
@@ -690,6 +693,7 @@ def test_an_attached_window_receives_acp_prompts_without_detached_mode():
     )
     assert response is ConfirmationResponse.APPROVE_ONCE
     assert asked == [{"source": "acp", "tool_type": "acp", "acp_options": []}]
+    assert app._attach_permission_bridge.timeout == 300  # ACP's never parks
 
 
 def test_attach_permission_timeout_cleans_pending_and_broadcasts_denial():
@@ -708,3 +712,216 @@ def test_attach_permission_timeout_cleans_pending_and_broadcasts_denial():
         assert display_tap.events[-1]["type"] == "permission_denied"
 
     asyncio.run(run_bridge())
+
+
+class QuietBus:
+    async def emit_with_hooks(self, *args, **kwargs):
+        return {}
+
+
+def _confirm_all_manager():
+    from kollabor_agent.permissions.manager import PermissionManager
+    from kollabor_agent.permissions.risk_assessor import RiskAssessor
+    from kollabor_events.dict_utils import deep_merge
+    from kollabor_events.permissions_config import PERMISSION_CONFIG_DEFAULTS
+    from kollabor_events.permissions_models import RiskAssessmentRules
+
+    config = deep_merge(
+        PERMISSION_CONFIG_DEFAULTS,
+        {"kollabor": {"permissions": {"approval_mode": "confirm_all"}}},
+    )
+    return PermissionManager(
+        config=config,
+        risk_assessor=RiskAssessor(rules=RiskAssessmentRules(), config=config),
+        event_bus=QuietBus(),
+    )
+
+
+SHELL_CALL = {"id": "t1", "type": "terminal", "name": "terminal", "command": "ls"}
+
+
+def test_an_acp_stop_answers_every_open_prompt_cancelled():
+    # An ACP Stop ends the turn, so no prompt may keep holding it, and every
+    # window closes the prompt it shows.
+    async def run_bridge():
+        bridge, display_tap = AttachPermissionBridge(), FakeDisplayTap()
+        prompts = [_prompt(bridge, display_tap, "terminal_0"), _prompt(bridge, display_tap, "terminal_1")]
+        await asyncio.sleep(0)
+        bridge.cancel_pending()
+        answers = await asyncio.gather(*prompts)
+        return answers, [event for event in display_tap.events if event["type"] != "permission_request"]
+
+    answers, closed = asyncio.run(run_bridge())
+    assert answers == [ConfirmationResponse.CANCEL, ConfirmationResponse.CANCEL]
+    assert closed == [
+        {"type": "permission_denied", "tool_id": "terminal_0", "outcome": "cancelled"},
+        {"type": "permission_denied", "tool_id": "terminal_1", "outcome": "cancelled"},
+    ]
+
+
+def test_an_acp_stop_refuses_the_tool_its_turn_waits_to_approve():
+    # ACP's Stop while a tool waits for approval: the tool is refused at once
+    # instead of holding the turn for 5 minutes.
+    from kollabor_agent.permissions import handle_confirmation_response
+
+    async def scenario():
+        bridge, display_tap = AttachPermissionBridge(), FakeDisplayTap()
+        manager = _confirm_all_manager()
+
+        async def ask(details):
+            response = await bridge.request_confirmation(
+                display_tap=display_tap, rpc_server=FakeRpcServer(), details=dict(details), timeout=300
+            )
+            return await handle_confirmation_response(manager, details, response)
+
+        manager.set_confirmation_callback(ask, cancel=bridge.cancel_pending)
+        check = asyncio.create_task(manager.check_permission(dict(SHELL_CALL)))
+        for _ in range(100):
+            if bridge._pending:
+                break
+            await asyncio.sleep(0)
+        assert bridge._pending  # the prompt is open
+        manager.cancel_confirmations()
+        return await asyncio.wait_for(check, 1)
+
+    decision = asyncio.run(scenario())
+    assert not decision.allowed and decision.reason == "User cancelled operation"
+
+
+async def _waiting_prompt(manager, bridge, display_tap, *, stopping=False):
+    """A Confirm All check on the real bridge, waiting on its open prompt."""
+    from types import SimpleNamespace
+
+    from kollabor_agent.permissions import handle_confirmation_response
+
+    async def ask(details):
+        response = await bridge.request_confirmation(
+            display_tap=display_tap, rpc_server=FakeRpcServer(), details=dict(details), timeout=None
+        )
+        return await handle_confirmation_response(manager, details, response)
+
+    manager.set_confirmation_callback(
+        ask, cancel=bridge.cancel_pending, park=bridge.park, settle=bridge.try_settle_response
+    )
+    manager.set_tool_executor(SimpleNamespace(is_cancelled=lambda: stopping))
+    check = asyncio.create_task(manager.check_permission(dict(SHELL_CALL)))
+    for _ in range(100):
+        if bridge._pending or check.done():
+            break
+        await asyncio.sleep(0)
+    return check
+
+
+def test_a_stop_leaves_its_prompt_open_and_the_tool_asks_for_a_yes():
+    # A Stop while a tool waits for approval ends the turn at once, and the
+    # card stays open: Allow, or the user's yes, runs it later.
+    from kollabor_agent.yes_approval import NEEDS_YES
+
+    async def scenario():
+        bridge, display_tap, manager = AttachPermissionBridge(), FakeDisplayTap(), _confirm_all_manager()
+        check = await _waiting_prompt(manager, bridge, display_tap)
+        assert bridge._pending  # the prompt is open
+        manager.park_confirmations()
+        decision = await asyncio.wait_for(check, 1)
+        await asyncio.sleep(0.01)
+        return decision, set(bridge._pending), list(display_tap.events)
+
+    decision, pending, events = asyncio.run(scenario())
+    assert not decision.allowed and decision.reason == NEEDS_YES
+    assert pending == {"t1"}  # its card is still open
+    assert events[-1] == {"type": "permission_parked", "tool_id": "t1"}
+
+
+def test_a_prompt_unanswered_for_5_minutes_parks(monkeypatch):
+    from kollabor_agent.permissions import manager as manager_module
+    from kollabor_agent.yes_approval import NEEDS_YES
+
+    monkeypatch.setattr(manager_module, "PARK_AFTER_SECONDS", 0.01)
+
+    async def scenario():
+        bridge, display_tap, manager = AttachPermissionBridge(), FakeDisplayTap(), _confirm_all_manager()
+        check = await _waiting_prompt(manager, bridge, display_tap)
+        decision = await asyncio.wait_for(check, 1)
+        await asyncio.sleep(0.01)
+        return decision, set(bridge._pending), list(display_tap.events)
+
+    decision, pending, events = asyncio.run(scenario())
+    assert decision.reason == NEEDS_YES  # the model asks for the OK in its reply
+    assert pending == {"t1"}
+    assert events[-1] == {"type": "permission_parked", "tool_id": "t1"}
+
+
+def test_a_prompt_asked_while_its_turn_stops_shows_and_parks():
+    from kollabor_agent.yes_approval import NEEDS_YES
+
+    async def scenario():
+        bridge, display_tap, manager = AttachPermissionBridge(), FakeDisplayTap(), _confirm_all_manager()
+        check = await _waiting_prompt(manager, bridge, display_tap, stopping=True)
+        decision = await asyncio.wait_for(check, 1)
+        await asyncio.sleep(0.01)
+        return decision, set(bridge._pending), list(display_tap.events)
+
+    decision, pending, events = asyncio.run(scenario())
+    assert decision.reason == NEEDS_YES
+    # The card shows; terminals are told before it opens, so none shows it.
+    assert [event["type"] for event in events] == ["permission_request", "permission_parked"]
+    assert events[0]["details"]["parked"] is True
+    assert pending == {"t1"}
+
+
+def test_a_parked_prompt_closes_in_a_terminal_without_an_answer():
+    # Its turn went on: a key typed for the next message must not answer it.
+    async def run_client():
+        bridge, layout, rpc = AttachPermissionBridge(), WaitingLayoutManager(), FakeRpcClient()
+        shown = asyncio.create_task(
+            bridge.handle_client_event(
+                rpc_client=rpc, layout_manager=layout,
+                event={"type": "permission_request", "details": {"tool_id": "t1"}},
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert layout.shown == ["t1"]
+        bridge.handle_client_resolution(
+            layout_manager=layout, event={"type": "permission_parked", "tool_id": "t1"}
+        )
+        await asyncio.wait_for(shown, 1)
+        parked = AttachPermissionBridge()
+        await parked.handle_client_event(
+            rpc_client=rpc, layout_manager=layout,
+            event={"type": "permission_request", "details": {"tool_id": "t2", "parked": True}},
+        )
+        return rpc.calls, layout
+
+    calls, layout = asyncio.run(run_client())
+    assert calls == []  # no answer sent from the terminal
+    assert layout.shown == ["t1"]  # the one asked while its turn stopped never showed
+
+
+def test_a_parked_prompts_answer_says_it_was_parked():
+    # The web's answer stream ends on a parked prompt's Deny: no turn follows.
+    async def run_bridge():
+        bridge, display_tap = AttachPermissionBridge(), FakeDisplayTap()
+        prompt = _prompt(bridge, display_tap, "t1", timeout=None)
+        await asyncio.sleep(0)
+        bridge.park("t1")
+        bridge.park("t1")  # announced once
+        bridge.try_settle_response("t1", ConfirmationResponse.DENY)
+        return await prompt, display_tap.events
+
+    answer, events = asyncio.run(run_bridge())
+    assert answer is ConfirmationResponse.DENY
+    assert [event["type"] for event in events] == ["permission_request", "permission_parked", "permission_denied"]
+    assert events[-1] == {"type": "permission_denied", "tool_id": "t1", "parked": True}
+
+
+def test_a_terminal_never_shows_a_prompt_its_turn_already_left_open():
+    from types import SimpleNamespace
+
+    from kollabor.application import TerminalLLMChat
+
+    layout = FakeLayoutManager()
+    app = SimpleNamespace(renderer=SimpleNamespace(layout_manager=layout))
+    parked = asyncio.run(TerminalLLMChat._show_terminal_permission_prompt(app, {"parked": True}))
+    assert parked is ConfirmationResponse.CANCEL and not hasattr(layout, "details")
+    shown = asyncio.run(TerminalLLMChat._show_terminal_permission_prompt(app, {"tool_id": "t2"}))
+    assert shown is ConfirmationResponse.APPROVE_ONCE and layout.details == {"tool_id": "t2"}

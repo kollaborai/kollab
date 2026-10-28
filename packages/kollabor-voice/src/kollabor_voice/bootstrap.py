@@ -16,7 +16,13 @@ from pathlib import Path
 from .control import atomic_json, manifest, prepare_root, service_root
 
 
-def ensure_runtime(root, pins, imports, progress, detail="Preparing voice support"):
+def ensure_runtime(
+    root,
+    pins,
+    imports,
+    progress,
+    detail="Installing voice support (first time only, a few minutes)",
+):
     """Install and verify a pinned, isolated runtime; caller serializes setup."""
     signature = hashlib.sha256(json.dumps(pins).encode()).hexdigest()[:16]
     runtime = root / "runtimes" / signature
@@ -45,7 +51,8 @@ def ensure_runtime(root, pins, imports, progress, detail="Preparing voice suppor
             if sys.version_info[:2] not in {(3, 12), (3, 13)}:
                 if not uv:
                     raise RuntimeError(
-                        "Voice support needs Python 3.12/3.13 or uv to prepare its runtime"
+                        "uv is not installed. Install it with brew install uv, "
+                        "then try again."
                     )
                 interpreter = "3.12"
             cmd = (
@@ -73,6 +80,22 @@ def ensure_runtime(root, pins, imports, progress, detail="Preparing voice suppor
         )
         atomic_json(marker, {"requirements": pins})
     return python
+
+
+def prepared_runtime_python(root=None):
+    """The service runtime's interpreter if setup finished for the current pins, else None.
+
+    Same signature/marker rule as ensure_runtime, without installing anything.
+    """
+    pins = manifest()["runtime"]
+    signature = hashlib.sha256(json.dumps(pins).encode()).hexdigest()[:16]
+    runtime = (root or service_root()) / "runtimes" / signature
+    python = runtime / "bin/python"
+    try:
+        ready = json.loads((runtime / "ready.json").read_text())
+    except (ValueError, OSError):
+        return None
+    return python if ready.get("requirements") == pins and python.exists() else None
 
 
 def main() -> None:
@@ -103,7 +126,8 @@ def main() -> None:
         python = ensure_runtime(
             root,
             pins,
-            "import faster_whisper, kokoro_onnx, sounddevice, numpy",
+            "import faster_whisper, kokoro_onnx, sounddevice, numpy, livekit.rtc, "
+            "livekit.agents, livekit.plugins.silero, livekit.local_inference",
             progress,
         )
         progress("starting", "Starting shared voice service")

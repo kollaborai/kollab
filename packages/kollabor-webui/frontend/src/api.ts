@@ -106,8 +106,9 @@ export type HistoryMessage = {
 export type TurnError = { message: string; history_length: number };
 
 
-const configuredHistoryPageSize = Number(import.meta.env.VITE_HISTORY_PAGE_SIZE);
-const configuredHistoryPageBytes = Number(import.meta.env.VITE_HISTORY_MAX_PAGE_BYTES);
+// import.meta.env exists only under Vite; node:test imports this module without it.
+const configuredHistoryPageSize = Number(import.meta.env?.VITE_HISTORY_PAGE_SIZE);
+const configuredHistoryPageBytes = Number(import.meta.env?.VITE_HISTORY_MAX_PAGE_BYTES);
 export const HISTORY_MAX_PAGE_SIZE = 100;
 export const HISTORY_PAGE_SIZE = Number.isInteger(configuredHistoryPageSize) && configuredHistoryPageSize > 0
   ? Math.min(configuredHistoryPageSize, HISTORY_MAX_PAGE_SIZE)
@@ -649,7 +650,8 @@ export type PanelField = {
   action?: string | null;
 };
 
-export type PanelSection = { id: string; title: string; fields: PanelField[] };
+/** `open`: starts expanded even in a long form. */
+export type PanelSection = { id: string; title: string; open?: boolean; fields: PanelField[] };
 
 export type PanelAction = {
   id: string;
@@ -1177,9 +1179,11 @@ export class EngineApi {
   }
 
   /**
-   * Follow the daemon's existing turn after a browser reload. The endpoint is
-   * SSE and terminates at turn_complete; callers provide an AbortSignal so a
-   * session switch can stop the reconnect without leaking a subscription.
+   * Follow the daemon's session after a browser reload. The endpoint is SSE
+   * and runs across turns (a queued turn's first events follow the last
+   * turn_complete at once); it ends after the engine's idle timeout or a
+   * daemon exit. Callers provide an AbortSignal so a session switch can stop
+   * the reconnect without leaking a subscription.
    * onOpen runs once the engine holds the subscription (it subscribes before
    * it answers): an event that fired earlier is gone, so a caller that may
    * have missed one reloads then.

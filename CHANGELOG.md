@@ -7,51 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- PhoneLink: the connection service no longer supplies the phone app. A small
-  loader fetches it from your computer over the encrypted session and runs it
-  only after the computer's signature on the app files checks out against the
-  host key in the QR; a tampered or mismatched app is refused. Both screens show
-  the computer's fingerprint beside a longer 12-character pairing code, each
-  phone shows when it was last seen, and Revoke removes a phone in one tap.
-  The loader is installable to the Home Screen and opens its verified copy.
-- Build: `kollab --version` shows the source branch and short SHA before the
-  version line. The Web UI and signed PhoneLink app show the same identity;
-  Python wheels and binaries embed the full SHA.
-- Web: PhoneLink shows Open on This Phone and Copy Link under the QR code, so a phone can link itself with the same invitation (five minutes, still approved on the computer).
-- Hub: the idle supervisor now proves its wakes work. Wakes that produce no
-  completed coordinator turn are counted; once enough land while the
-  coordinator is stalled, an alert names the blocker (including the last turn
-  error) in `/hub status`, the log, attached web clients, and the configured
-  notifier channel. Undelivered worker nudges surface there too instead of
-  vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
-
-### Changed
-- Voice: the voice package no longer imports `kollabor_ai`, which its Python 3.12 runtime cannot
-  install. The host-side helper that shows stored voice turns as screens draw them
-  (`turn_display_texts`) now lives in `kollabor_ai.response_channels`, and a voice-package
-  test fails if a service module imports a host package. Fixes #301.
-- Web: PhoneLink starts with the newest 50 conversation messages, caches bounded
-  history pages locally, loads older messages on scroll, and fetches full tool
-  output only after Show more. Negotiated compressed PhoneLink frames carry the
-  150 KB first-page budget within the three-round-trip synthetic relay check.
-
-- Web: Sidebar agents use smaller avatars, clearer names and status text, consistent group spacing, and neutral selection colors shared with the rest of the app.
+### Security
+- Hub capture (`/hub capture`, `kollab --hub capture`, the `hub_capture` tool)
+  redacts private keys, `NAME=secret` lines and auth headers; only `--raw`
+  shows them. The `hub_capture` tool asks permission (#340).
+- Capture works across devices: `agent@device` on one of this network's
+  devices is captured through the network attach, as that device's trust
+  allows. A contact's agents (a knock) are never capturable.
+  `plugins.hub.disallow_cross_device_capture` (off by default) turns
+  cross-device capture off on this device (#340).
+- A capture is a read: the device running the captured agent no longer posts
+  "opened ... from the network" and "closed ..." lines for it (it logs the
+  capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
-- Context-compaction emergency recovery prioritizes the latest human request,
-  excludes non-intended, group, and other-agent hub notices plus standalone HUD
-  and stale assignments, preserves direct-to-agent requests without TaskLedger
-  IDs, and caps the wrapped recovery message at 8,000 characters.
-- Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
+- Web UI help is a hover, not a link: the "Learn about profiles", "Learn more
+  about workspaces" and PhoneLink "How It Works" links are gone. Hovering
+  Manage Profiles, the workspace picker's Use button or PhoneLink's connection
+  line shows a small info icon, and after a moment a card says what it does.
+  On a touch screen the icon is always shown and a tap on it opens the card.
+  The cards open below their control so they never cover the text they explain.
+  The sidebar's Learn button still opens the Learn topics.
+- Voice in the web UI with no speech model yet no longer says to look in
+  Settings: it says "Voice needs a speech model on this computer." as a plain
+  notice, with an "Install speech model (2.5 GB, one time)" button that selects
+  Parakeet v3 for this device and starts voice again, which downloads it. On a
+  Mac without Apple silicon it says voice needs an Apple silicon Mac.
+- With an ACP profile, input from agent and skill generation and other
+  internal callers goes through ACP admission instead of the native queue; an
+  unavailable ACP is refused. Agent and skill generation, which need the
+  native tools, say so and keep the form open (#340).
 
-### Removed
-- Web: WireGuard phone access is removed; PhoneLink is the way to connect a
-  phone. The manual peer settings, engine routes, and host apply helper are
-  gone; old `KOLLAB_PHONE_ACCESS_*` environment settings and leftover state are
-  ignored.
+## [0.18.5] - 2026-10-26
 
-## [0.18.0] - 2026-10-21
+### Fixed
+- A Web UI voice room whose page was closed now ends after a minute without
+  it: its worker stops and gives the voice service back. A reload within that
+  minute rejoins the same room (#336).
+- A voice start replaces an idle voice service that still runs an older
+  Kollab's code, so a release that changes voice takes effect without
+  stopping the service by hand. `/voice status` shows the service's code
+  (#336).
+- The Engine asks its own LiveKit server who is in a room directly, never
+  through `HTTP_PROXY` or the system proxy, which could keep a closed room
+  alive or end one still in use (#336).
+
+## [0.18.4] - 2026-10-26
+
+### Fixed
+- Voice in the Web UI connects after the chat's agent restarts. It stayed on
+  "Starting" until the Web UI was restarted: an earlier voice room still held
+  the voice service, which then reported itself as starting, so the new room
+  waited for 20 minutes and gave up (#333).
+
+## [0.18.3] - 2026-10-26
+
+### Fixed
+- Voice in Trust All runs tools as a typed turn does. It asked for a spoken yes
+  before each command and refused anything off the voice list, though Trust All
+  means no approvals (#331).
+- Voice: a yes in your own words counts, such as "Yes, run it." or "Okay, you
+  don't have to ask, just do it". Only a bare "yes" did, so the agent kept asking.
+  "Thanks" is still no yes, and a yes with a new request is a normal turn (#331).
+- Voice: a recursive `grep` inside the project (`grep -rn`, `--include=`) runs
+  as a read-only command instead of being refused (#331).
+
+## [0.18.2] - 2026-10-25
+
+### Fixed
+- Kollab.app opened from the Dock or Finder runs with your login shell's PATH.
+  Voice in the Web UI said `livekit-server` was not installed when Homebrew had
+  it, and agents' shell commands missed your tools (#329).
+
+## [0.18.1] - 2026-10-25
+
+### Changed
+- Voice: Parakeet v3 is the default transcription engine on Apple silicon Macs,
+  since voice in the Web UI transcribes only with it. Whisper Base stays the
+  default elsewhere and transcribes while Parakeet downloads (2.5 GB, once). A
+  saved choice is kept.
+
+### Fixed
+- Voice: turning voice on in the Web UI now sets voice up when it is not installed
+  yet, as `/voice on` does in the terminal. The first start installs voice support
+  and starts the voice service, and the voice bar shows each step. It used to stop
+  with "Voice support is not set up yet", pointing to a Settings control that did
+  not exist. A voice service left running by an older Kollab is replaced unless a
+  chat is using it, Stop works while voice starts, and Settings > Voice opens on
+  whether voice is installed.
+- Voice: when voice cannot start in the Web UI, the voice bar gives the reason,
+  such as Whisper being the chosen transcription engine, instead of "Voice worker
+  exited before joining."
+
+## [0.18.0] - 2026-10-25
 
 ### Added
 - Web: PhoneLink has its own Settings tab, expiring QR invitations, local phone
@@ -77,18 +125,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Confirm before removing an override and show progress while saving or
   removing it.
 - Web: Sidebar agents are grouped by workspace and can be manually ordered within local and remote workspace groups.
+- PhoneLink: the connection service no longer supplies the phone app. A small
+  loader fetches it from your computer over the encrypted session and runs it
+  only after the computer's signature on the app files checks out against the
+  host key in the QR; a tampered or mismatched app is refused. Both screens show
+  the computer's fingerprint beside a longer 12-character pairing code, each
+  phone shows when it was last seen, and Revoke removes a phone in one tap.
+  The loader is installable to the Home Screen and opens its verified copy.
+- Build: `kollab --version` shows the source branch and short SHA before the
+  version line. The Web UI and signed PhoneLink app show the same identity;
+  Python wheels and binaries embed the full SHA.
+- Web: PhoneLink shows Open on This Phone and Copy Link under the QR code, so a phone can link itself with the same invitation (five minutes, still approved on the computer).
+- Hub: the idle supervisor now proves its wakes work. Wakes that produce no
+  completed coordinator turn are counted; once enough land while the
+  coordinator is stalled, an alert names the blocker (including the last turn
+  error) in `/hub status`, the log, attached web clients, and the configured
+  notifier channel. Undelivered worker nudges surface there too instead of
+  vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
+- Hub: a task handed to an agent with a task id stays on the ledger as
+  "handoff awaiting ack" in `/hub status` until the agent acknowledges it;
+  unacknowledged after two minutes it is resent once, then alerted. Failed
+  sends are listed in `/hub status`, and a message that fell back to the
+  mailbox reports "queued for" instead of "delivered to".
+- Hub: email wake. New mail in one IMAP inbox becomes a direct hub message
+  that wakes the configured agent (read-only, IDLE). Guide:
+  `docs/guides/email-wake-setup.md`.
+- Web: hub supervisor alerts show as a dismissible banner above the chat.
 
 ### Changed
-- ACP: the built-in `gemini-cli` profile forwards `GEMINI_API_KEY` and
-  `GOOGLE_API_KEY` to the Gemini CLI child; other provider keys stay filtered
-  and other ACP profiles are unchanged.
-- ACP: Gemini missing-auth guidance now lists API-key and Vertex AI setup
-  routes; live qualification remains open.
 - Hub: Dream Model selects a provider-supported model for dreaming. A blank
   override uses the shared fast model, then the active session model.
-
 - Hub capture commands show a bounded readable transcript by default; `--raw`
   keeps the previous terminal output.
+- Voice: the voice package no longer imports `kollabor_ai`, which its Python 3.12 runtime cannot
+  install. The host-side helper that shows stored voice turns as screens draw them
+  (`turn_display_texts`) now lives in `kollabor_ai.response_channels`, and a voice-package
+  test fails if a service module imports a host package. Fixes #301.
+- Web: PhoneLink starts with the newest 50 conversation messages, caches bounded
+  history pages locally, loads older messages on scroll, and fetches full tool
+  output only after Show more. Negotiated compressed PhoneLink frames carry the
+  150 KB first-page budget within the three-round-trip synthetic relay check.
+- Web: Sidebar agents use smaller avatars, clearer names and status text, consistent group spacing, and neutral selection colors shared with the rest of the app.
 
 ### Fixed
 - Web: disconnecting or revoking a phone closes buffered assistant streams without leaving event subscriptions running. Explicit Stop still cancels the agent turn.
@@ -105,9 +182,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Engine: model-requested context compaction stages the new history before
   resuming the same turn, rather than ending before the follow-up response.
 - Bound automatic compaction to recent live hub tasks, expose its pause/recovery state in the TUI and Web UI (terminal states are re-announced at the start of the next turn so a banner is never missed), add a Learn topic, and use OAuth model context-window metadata when available instead of an unrelated generic model limit.
+- Web: the open chat shows messages from other agents or windows while a turn
+  is running and re-syncs after every reconnect; a tool card shown mid-turn
+  picks up its result when the turn finishes.
+- Web: a stopped turn no longer leaves the agent's gem acting out a dead tool
+  call.
+- Web: a window watching an ACP agent's turn that started elsewhere streams its
+  reply and tools live, keeps a stopped reply on screen until the stored one
+  replaces it, and streams a turn queued right behind it. Prose the agent sends
+  after a cancel is neither shown nor stored. The reply shows no stray "2 / 2"
+  branch picker once it is stored, and it no longer blanks out and retypes, or
+  shows twice, when rows land before it.
+- Hub: the Telegram bridge wakes its target agent, and disconnecting the email
+  bridge no longer waits out an IMAP IDLE.
+- Context-compaction emergency recovery prioritizes the latest human request,
+  excludes non-intended, group, and other-agent hub notices plus standalone HUD
+  and stale assignments, preserves direct-to-agent requests without TaskLedger
+  IDs, and caps the wrapped recovery message at 8,000 characters.
+- Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
+- Voice: a spoken reply no longer pauses about a second between sentences; each
+  sentence's silent lead-in is cut to a short breath.
+- Chat: a reply you stop keeps the text shown so far, also when you stop it
+  while its tools run.
+- Voice: talking over a reply keeps only the part that was played, marked
+  interrupted, and the voice room stays up while the chat reloads to show it.
+  A reply that ran tools is cut where you stopped it and the unheard rest is
+  dropped, a reply you talked over before it was heard goes, the saved
+  conversation keeps the cut, and a typed reply is never touched.
+- Voice: talking over a reply while its tool waits on your approval or runs a
+  long command no longer stalls the agent's connection: the stop, the approval
+  answer and the next turn all still get through.
+- Chat: a resumed conversation sends a saved reply that only ran tools as
+  nothing, not as an empty message, which the Anthropic API rejects.
+- Voice: a reply after a round of hub messages alone is spoken again; with a
+  provider that does not stream it stayed silent.
+- Voice: every reply speaks its last sentence, which was dropped, so a short
+  reply such as the answer after a talk-over is heard. The latency line keeps
+  Hear, Think and Speak when the reply's Total arrives.
+- Voice: while the voice room is on, the chat follows the conversation to the
+  latest turn. The greeting shows as a message of its own instead of running
+  into the reply before it, and the latency line wraps rather than being cut
+  off on a phone or a narrow window.
+
+### Removed
+- ACP: the retired Gemini CLI is gone: the built-in `gemini-cli` profile and
+  its Apps catalog entry are removed.
 
 ### Security
-- Restrict WebUI token bootstrap and phone APIs to exact private interface/phone-peer subnets; validate Host/Origin, disable forwarded-header trust, and never persist or redisclose client private keys.
+- Web UI: its API and engine routes answer only clients on the private
+  subnets of the interfaces it binds, from the same origin; a request with an
+  unknown Host or any forwarded-client header is refused.
 
 ## [0.17.0] - 2026-10-19
 

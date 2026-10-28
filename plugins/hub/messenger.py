@@ -363,6 +363,7 @@ class AgentSocketServer:
         on_shutdown: Optional[Callable] = None,
         on_input_inject: Optional[Callable] = None,
         on_network_status: Optional[Callable] = None,
+        on_health_status: Optional[Callable] = None,
         on_network_send: Optional[Callable] = None,
         on_network_attach: Optional[Callable] = None,
         on_connect_proxy: Optional[Callable] = None,
@@ -381,6 +382,7 @@ class AgentSocketServer:
         # Agent network CLI (docs/specs/agent-network-simple-flow.md): local
         # operator only, same gate as get_output/get_status below.
         self._on_network_status = on_network_status
+        self._on_health_status = on_health_status
         self._on_network_send = on_network_send
         self._on_network_attach = on_network_attach
         # /connect from a window that does not own the relay: the owner runs it.
@@ -1648,6 +1650,41 @@ class AgentSocketServer:
                     writer.write(resp.encode())
                     await writer.drain()
 
+                elif action == "health_status":
+                    # `kollab --hub status` asks for the handoff health
+                    # sections (issue #283): the same lines `/hub status`
+                    # renders here. Local operator only, like network_status.
+                    sections: Dict[str, List[str]] = {
+                        "supervisor": [],
+                        "dispatch": [],
+                    }
+                    if self._on_health_status:
+                        try:
+                            result = self._on_health_status()
+                            if asyncio.iscoroutine(result):
+                                result = await result
+                            if isinstance(result, dict):
+                                sections = {
+                                    "supervisor": [
+                                        str(line)
+                                        for line in result.get("supervisor", [])
+                                    ],
+                                    "dispatch": [
+                                        str(line)
+                                        for line in result.get("dispatch", [])
+                                    ],
+                                }
+                        except Exception as exc:
+                            logger.debug(f"health_status callback error: {exc}")
+                    resp = (
+                        json.dumps(
+                            {"type": "health_status", **sections}, default=str
+                        )
+                        + "\n"
+                    )
+                    writer.write(resp.encode())
+                    await writer.drain()
+
                 elif action == "connect_proxy":
                     # A daemon that lost the workspace lock asks the relay owner
                     # to run one /connect operation. Local operator only (the
@@ -1692,7 +1729,9 @@ class AgentSocketServer:
                     # (plugins/hub/network_attach.py): answers a one-shot
                     # socket the caller attaches on like any agent socket.
                     # Local operator only, same as network_send.
-                    reply = await self._network_attach_reply(str(msg_data.get("to", "") or ""))
+                    reply = await self._network_attach_reply(
+                        str(msg_data.get("to", "") or ""), quiet=msg_data.get("quiet") is True
+                    )
                     writer.write((json.dumps(reply) + "\n").encode())
                     await writer.drain()
 
@@ -1736,11 +1775,11 @@ class AgentSocketServer:
         except Exception as e:
             logger.debug(f"Connection handler error: {e}")
 
-    async def _network_attach_reply(self, to: str) -> dict:
+    async def _network_attach_reply(self, to: str, *, quiet: bool = False) -> dict:
         if not self._on_network_attach:
             return {"type": "error", "msg": "this agent cannot open agents from the network"}
         try:
-            path = await self._on_network_attach(to)
+            path = await (self._on_network_attach(to, quiet=True) if quiet else self._on_network_attach(to))
         except Exception as exc:
             return {"type": "error", "msg": str(exc) or type(exc).__name__}
         return {"type": "network_attach", "socket_path": path}
@@ -1923,35 +1962,30 @@ class AgentSocketServer:
                     # because rpc frames use "action", not "type".
                     if msg.get("action") == "rpc_request":
                         if self._rpc_server is not None:
+                            # Requests answer in the order they came (a Stop
+                            # sent after a Send runs after it), so no handler
+                            # may wait on a turn: a talk-over's cut is queued
+                            # on its turn instead (record_interrupted_voice_reply).
                             try:
                                 reply = await self._rpc_server.handle_wire(msg)
-                                line = json.dumps(reply, default=str) + "\n"
-                                async with write_lock:
-                                    writer.write(line.encode("utf-8"))
-                                    await writer.drain()
                             except Exception as exc:
                                 logger.warning(
                                     "rpc request failed on attached connection: %s",
                                     exc,
                                     exc_info=True,
                                 )
-                                error_reply = {
+                                reply = {
                                     "action": "rpc_reply",
                                     "request_id": msg.get("request_id", ""),
                                     "error": repr(exc),
                                     "error_kind": "handler",
                                 }
-                                try:
-                                    async with write_lock:
-                                        writer.write(
-                                            (
-                                                json.dumps(error_reply, default=str)
-                                                + "\n"
-                                            ).encode("utf-8")
-                                        )
-                                        await writer.drain()
-                                except Exception:
-                                    pass
+                            # A failed write is a closed connection: the
+                            # read loop's handler below ends it.
+                            line = json.dumps(reply, default=str) + "\n"
+                            async with write_lock:
+                                writer.write(line.encode("utf-8"))
+                                await writer.drain()
                         else:
                             # No RpcServer wired; return handler error so the
                             # client doesn't hang forever waiting for a reply.
@@ -2807,6 +2841,48 @@ class AgentMessenger:
                     pass
 
     @staticmethod
+    async def request_health_status(
+        socket_path: str,
+        timeout: float = 3.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> Optional[dict]:
+        """Ask a local agent for its supervisor and dispatch-failure lines.
+
+        Issue #283: `kollab --hub status` prints the same handoff health
+        sections `/hub status` shows in that agent. Returns None on any
+        transport failure or malformed response -- the caller prints nothing
+        extra in that case.
+        """
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
+            )
+            req = json.dumps({"action": "health_status"}) + "\n"
+            writer.write(req.encode())
+            await writer.drain()
+
+            resp_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+
+            if resp_line:
+                resp = json.loads(resp_line.decode().strip())
+                if isinstance(resp, dict) and resp.get("type") == "health_status":
+                    return resp
+            return None
+        except Exception as exc:
+            logger.debug("health_status request failed for %s: %s", socket_path, exc)
+            return None
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
     async def request_connect_proxy(
         socket_path: str,
         op: str,
@@ -2910,9 +2986,11 @@ class AgentMessenger:
 
     @staticmethod
     async def request_network_attach(
-        socket_path: str, handle: str, *, timeout: float = 60.0
+        socket_path: str, handle: str, *, timeout: float = 60.0, quiet: bool = False
     ) -> dict:
         """Ask a local agent's daemon to open agent@device through the network.
+
+        ``quiet`` is a capture: the far device posts no open/close line.
 
         Answers ``{"type": "network_attach", "socket_path": ...}``, a one-shot
         socket to attach on like any agent socket, ``{"type": "error",
@@ -2924,7 +3002,10 @@ class AgentMessenger:
         writer = None
         try:
             reader, writer = await AgentMessenger._open(socket_path, timeout=5.0)
-            writer.write((json.dumps({"action": "network_attach", "to": handle}) + "\n").encode())
+            request = {"action": "network_attach", "to": handle}
+            if quiet:
+                request["quiet"] = True
+            writer.write((json.dumps(request) + "\n").encode())
             await writer.drain()
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
             reply = json.loads(line.decode().strip()) if line else None

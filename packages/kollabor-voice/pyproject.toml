@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-voice"
-version = "0.18.0"
+version = "0.18.5"
 description = "Shared local voice service with automatic setup, durable transcription and sentence playback"
 # Lower than the rest: the voice service runs this code in its own runtime,
 # prepared on Python 3.12 or 3.13 for its ML wheels (bootstrap.py).

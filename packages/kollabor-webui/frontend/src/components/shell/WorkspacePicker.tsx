@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { LearnMoreLink } from "@/components/learn/LearnMoreLink";
+import { HoverHelp } from "@/components/ui/hover-help";
 
 type Listing = { path: string; name: string; parent: string | null; dirs: string[] };
 
@@ -192,18 +192,21 @@ export function WorkspacePicker({
           ) : null}
         </div>
         {listing ? (
-          <Button
-            type="button"
-            size="sm"
-            className={cn("w-full min-w-0", listing.path === chosen && "opacity-80")}
-            onClick={() => choose(listing.path)}
+          <HoverHelp
+            className="w-full"
+            side="bottom"
+            text="New sessions start in this folder. Each folder keeps its own sessions and local agents."
           >
-            <span className="truncate">Use {listing.name}</span>
-          </Button>
+            <Button
+              type="button"
+              size="sm"
+              className={cn("min-w-0 flex-1", listing.path === chosen && "opacity-80")}
+              onClick={() => choose(listing.path)}
+            >
+              <span className="truncate">Use {listing.name}</span>
+            </Button>
+          </HoverHelp>
         ) : null}
-        <div className="border-t border-border/70 pt-2">
-          <LearnMoreLink topicId="workspaces" className="min-h-7 text-xs" onNavigate={() => setOpen(false)} />
-        </div>
       </PopoverContent>
     </Popover>
   );

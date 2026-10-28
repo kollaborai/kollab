@@ -1,4 +1,7 @@
-"""`/voice classifier`: each decision on the left, what it saw and said on the right."""
+"""The classifier decision screen: each decision on the left, what it saw and said on the right.
+
+It stays for other classifier features; voice no longer feeds or opens it (#301).
+"""
 
 from types import SimpleNamespace
 
@@ -127,95 +130,38 @@ def test_without_a_trace_the_request_and_errors_still_show():
 
 
 @pytest.mark.asyncio
-async def test_voicemode_classifier_opens_the_screen_on_the_voice_plugin():
+async def test_voicemode_has_no_classifier_subcommand_and_opens_no_screen():
     from kollabor.commands.system_commands.handlers.voicemode import VoiceModeCommandHandler
 
     pushed = []
 
     async def push(view, name, reuse=True):
-        pushed.append((view, name, reuse))
-        return True
+        pushed.append(name)
 
-    plugin = SimpleNamespace(classifier_name="laya")
+    plugin = SimpleNamespace()
     services = {"voice_plugin": plugin, "altview_stack_manager": SimpleNamespace(push=push)}
     bus = SimpleNamespace(get_service=services.get, register_service=services.__setitem__)
     handler = VoiceModeCommandHandler(None, bus)
 
-    result = await handler.handle_voicemode(SimpleNamespace(args=["classifier"]))
-
-    assert result.success and result.message == ""
-    [(view, name, reuse)] = pushed
-    # By name: other tests re-import plugins.*, so the class object can differ.
-    assert type(view).__name__ == "VoiceClassifierAltView" and view.plugin is plugin
-    assert (name, reuse) == ("voice-classifier", False)
+    for args in (["classifier"], ["classifier", "qwen"]):
+        result = await handler.handle_voicemode(SimpleNamespace(args=args))
+        assert not result.success and "classifier" not in result.message.lower()
+    assert pushed == []
 
 
-@pytest.mark.asyncio
-async def test_the_plugin_logs_each_call_and_echo_for_the_screen():
-    import asyncio
-    import time
-    from unittest.mock import AsyncMock
-
-    from kollabor_voice.store import utc
-
+def test_the_voice_plugin_keeps_no_classifier_log_or_switch():
     from plugins.voice_plugin import VoicePlugin
     from tests.unit.test_voice_plugin_lifecycle import FakeBus
 
     plugin = VoicePlugin(event_bus=FakeBus(), config={})
-    plugin.classifier_name = "provider"
-    plugin.requested = True
-    plugin._state = {"classifier": {"state": "ready"}}
-    plugin._lease = {"epoch": "e", "token": "t"}
-    plugin._client = SimpleNamespace(call=AsyncMock())
-    now = time.time()
-    echo = {
-        "event_id": "echo",
-        "text": "Yes, I can hear you.",
-        "started_at": utc(now - 4),
-        "ended_at": utc(now - 3),
-        "playback_overlap": [{"reply_id": "r", "text": "Yes, I can hear you."}],
-    }
-    request = {
-        "event_id": "ask",
-        "text": "Please check the README.",
-        "started_at": utc(now - 1),
-        "ended_at": utc(now),
-    }
-    plugin._pending = [echo, request]
-
-    async def provider(records, transcript_context=None):
-        return records
-
-    async def deliver(data):
-        plugin.requested = False
-        return {"status": "queued"}
-
-    plugin._observe_with_provider = provider
-    plugin._deliver = deliver
-    await asyncio.wait_for(asyncio.create_task(plugin._observe_loop()), 1)
-
-    dropped, decided = plugin.classifier_log()
-    assert dropped["echo"] and [r["event_id"] for r in dropped["records"]] == ["echo"]
-    assert decided["classifier"] == "provider" and decided["seconds"] is not None
-    assert decided["decision"]["decision"] == "respond"
-    assert decided["delivered"] == ["ask"] and not decided.get("error")
-    assert dropped["seq"] < decided["seq"]
+    for name in ("classifier_log", "set_classifier", "observe_records", "classifier_name"):
+        assert not hasattr(plugin, name), name
 
 
-@pytest.mark.asyncio
-async def test_a_failed_classifier_call_is_logged_with_its_error():
-    from plugins.voice_plugin import VoicePlugin
-    from tests.unit.test_voice_plugin_lifecycle import FakeBus
-
-    plugin = VoicePlugin(event_bus=FakeBus(), config={})
-    plugin.classifier_name = "provider"
-
-    async def provider(records, transcript_context=None):
-        raise RuntimeError("provider unreachable")
-
-    plugin._observe_with_provider = provider
-    with pytest.raises(RuntimeError):
-        await plugin.observe_records([{"event_id": "a", "text": "hi"}])
-
-    [entry] = plugin.classifier_log()
-    assert entry["error"] == "provider unreachable" and entry["decision"] is None
+def test_the_screen_reads_the_log_of_any_object_that_has_one():
+    view = VoiceClassifierAltView()
+    view.set_plugin(
+        SimpleNamespace(classifier_name="laya", classifier_log=lambda: [UNSURE])
+    )
+    view._refresh()
+    assert [entry["seq"] for entry in view.entries] == [2]

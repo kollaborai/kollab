@@ -111,7 +111,7 @@ def test_legacy_resume_preview_only_displays_the_screen_field():
 
 @pytest.mark.asyncio
 async def test_resumed_voice_turns_show_what_the_user_said():
-    from kollabor_voice.observer import voice_preamble
+    from kollabor_voice.voice_context import voice_preamble
 
     from kollabor.state.local import LocalStateService
     from plugins.resume_conversation_plugin import ResumeConversationPlugin

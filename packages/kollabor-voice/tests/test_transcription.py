@@ -16,8 +16,13 @@ np = pytest.importorskip(
 )
 
 from kollabor_voice import speech_settings, transcription  # noqa: E402
-from kollabor_voice.classifiers import load_preferences, save_preferences  # noqa: E402
 from kollabor_voice.control import manifest  # noqa: E402
+from kollabor_voice.speech_settings import (  # noqa: E402
+    load_speech_preferences as load_preferences,
+)
+from kollabor_voice.speech_settings import (  # noqa: E402
+    save_speech_preferences as save_preferences,
+)
 from kollabor_voice.transcription import (  # noqa: E402
     ParakeetWorker,
     TranscriptionEngine,
@@ -64,7 +69,13 @@ def parakeet(monkeypatch):
     return FakeParakeet
 
 
-def test_whisper_is_the_default_and_gets_the_names(root):
+def test_parakeet_is_the_default_on_apple_silicon(root, monkeypatch):
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
+    assert load_preferences(root)["stt_engine"] == "parakeet"
+
+
+def test_whisper_is_the_default_elsewhere_and_gets_the_names(root, monkeypatch):
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: False)
     whisper = Mock(return_value=("Aquamarine, hi.", "en"))
     engine = TranscriptionEngine(root, whisper)
     engine.configure()
@@ -254,6 +265,7 @@ async def test_service_switches_engines_from_preferences_without_restart(
         def synthesize(self, text):
             return np.zeros(16, np.float32), 24000
 
+    save_preferences({"stt_engine": "whisper"}, root)
     service = VoiceService(
         root, load_assets=lambda *args: {}, load_models=lambda _: Models()
     )

@@ -185,3 +185,49 @@ test("peering at the screen eases in from upright and sits back now and then", (
   const leans = Array.from({ length: 100 }, (_, i) => peer(i * 0.05).lean);
   assert.ok(Math.min(...leans.slice(20)) < 0, "sits back");
 });
+
+test("a tool's look holds the stage and a thinking blip between calls never shows", async () => {
+  const { stageActivity, TOOL_HOLD, TOOL_GAP } = await import("../src/components/gems/gem-animation.ts");
+  type A = "typing" | "thinking" | "error" | "idle";
+  const tool = (a: string) => a === "typing";
+  const want = (st: ReturnType<typeof stageActivity<A>>["stage"], next: A, now: number) =>
+    stageActivity(st, next, now, tool(st.activity), next === "error");
+  let st = { activity: "typing" as A, since: 0, queued: null as A | null, queuedAt: 0 };
+
+  // A call that lands in 50 ms: the thinking blip waits...
+  let r = want(st, "thinking", 0.05);
+  assert.equal(r.switched, false);
+  assert.equal(r.stage.queued, "thinking");
+  assert.ok(r.stage.queuedAt >= TOOL_HOLD);
+  // ...and the next call arrives before the hold ends: the blip never happened.
+  r = want(r.stage, "typing", 0.2);
+  assert.equal(r.switched, false);
+  assert.equal(r.stage.queued, null);
+
+  // 20 rapid start/result pairs never switch the stage away from the tool.
+  let switches = 0;
+  st = r.stage;
+  for (let i = 0; i < 20; i += 1) {
+    const t = 0.3 + i * 0.04;
+    for (const next of ["thinking", "typing"] as A[]) {
+      r = want(st, next, t + (next === "typing" ? 0.02 : 0));
+      st = r.stage;
+      if (r.switched) switches += 1;
+    }
+  }
+  assert.equal(switches, 0);
+  assert.equal(st.activity, "typing");
+
+  // Once the hold is over, thinking still waits the gap, then takes over.
+  r = want(st, "thinking", TOOL_HOLD + 1);
+  assert.equal(r.switched, false);
+  assert.equal(r.stage.queuedAt, TOOL_HOLD + 1 + TOOL_GAP);
+});
+
+test("an error cuts a tool's hold short and nothing holds the stage from idle", async () => {
+  const { stageActivity } = await import("../src/components/gems/gem-animation.ts");
+  const typing = { activity: "typing", since: 0, queued: null, queuedAt: 0 };
+  assert.equal(stageActivity(typing, "error", 0.1, true, true).switched, true);
+  const idle = { activity: "idle", since: 0, queued: null, queuedAt: 0 };
+  assert.equal(stageActivity(idle, "typing", 0.1, false, false).switched, true);
+});

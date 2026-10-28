@@ -33,20 +33,24 @@ class Engine:
         if device == "cuda" and not torch.cuda.is_available():
             raise ValueError("CUDA is unavailable; choose auto or cpu in /voice config")
         self.device, self.cfg = device, config["vibevoice_cfg"]
-        kwargs = (
-            {"revision": config["model_revision"]}
-            if config["vibevoice_model"] == config["default_model"]
-            else {}
-        )
-        self.processor = VibeVoiceStreamingProcessor.from_pretrained(
-            config["vibevoice_model"], **kwargs
-        )
+        model = config["vibevoice_model"]
+        if model == config["default_model"]:
+            # Pin Microsoft's files by fetching that revision and loading the local
+            # copy: a revision kwarg would also reach the processor's Qwen tokenizer,
+            # a repo where that sha does not exist.
+            from huggingface_hub import snapshot_download
+
+            model = snapshot_download(
+                model,
+                revision=config["model_revision"],
+                allow_patterns=["*.json", "*.safetensors"],
+            )
+        self.processor = VibeVoiceStreamingProcessor.from_pretrained(model)
         self.model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
-            config["vibevoice_model"],
+            model,
             torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
             attn_implementation="sdpa",
             device_map=None,
-            **kwargs,
         ).to(
             device
         )

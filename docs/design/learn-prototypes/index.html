@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Learn · Interactive studies</title>
+<style>
+*{box-sizing:border-box}:root{color-scheme:dark;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#080808;color:#eee;font-size:13px}
+body{margin:0;overflow:hidden}header{height:48px;display:flex;align-items:center;justify-content:center;padding:6px 12px}nav{display:flex;gap:3px;padding:3px;background:#151515;border-radius:10px}
+button{font:inherit;color:#aaa;background:transparent;border:0;border-radius:7px;min-height:30px;padding:5px 15px;cursor:pointer}button:hover{background:#232323;color:#eee}button[aria-selected=true]{color:#f4f4f4;background:#303030}:focus-visible{outline:2px solid #aaa;outline-offset:2px}
+main{height:calc(100svh - 48px)}iframe{display:block;width:100%;height:100%;border:0;background:#080808}iframe[hidden]{display:none}
+</style>
+</head>
+<body>
+<header><nav role="tablist" aria-label="Learning concepts">
+<button id="walkthrough-tab" role="tab" aria-selected="true" aria-controls="walkthrough-view" data-view="walkthrough">Walkthrough</button>
+<button id="map-tab" role="tab" aria-selected="false" aria-controls="map-view" data-view="map" tabindex="-1">System map</button>
+</nav></header>
+<main>
+<iframe id="walkthrough-view" role="tabpanel" aria-labelledby="walkthrough-tab" title="Interactive Kollab walkthrough" src="walkthrough/"></iframe>
+<iframe id="map-view" role="tabpanel" aria-labelledby="map-tab" title="Explorable Kollab system map" src="map/" hidden></iframe>
+</main>
+<script>
+const tabs=[...document.querySelectorAll('[data-view]')];
+function select(view,focus=false){
+if(!['walkthrough','map'].includes(view))view='walkthrough';
+for(const tab of tabs){const active=tab.dataset.view===view;tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;document.getElementById(tab.getAttribute('aria-controls')).hidden=!active;if(active&&focus)tab.focus()}
+const url=new URL(location.href);url.searchParams.set('view',view);history.replaceState(null,'',url);
+}
+tabs.forEach(tab=>{tab.addEventListener('click',()=>select(tab.dataset.view));tab.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();select(event.key==='Home'?'walkthrough':event.key==='End'?'map':tab.dataset.view==='walkthrough'?'map':'walkthrough',true)})});
+select(new URLSearchParams(location.search).get('view'));
+</script>
+</body>
+</html>

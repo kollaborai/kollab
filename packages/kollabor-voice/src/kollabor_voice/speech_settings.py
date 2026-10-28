@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import platform
 import sys
 from pathlib import Path
 
-from .control import manifest
+from .control import atomic_json, manifest, service_root
 
 # Cosine score at or above which a segment is the enrolled user (speaker.py).
 # Measured false accepts and rejects: bench/README.md.
@@ -18,9 +19,13 @@ SPEAKER_THRESHOLD = 0.45
 STT_ENGINES = {"whisper": "Whisper Base", "parakeet": "Parakeet v3"}
 TTS_ENGINES = {"kokoro": "Kokoro", "vibevoice": "VibeVoice"}
 
+# Earlier microphone lines sent to the agent beside a new utterance.
+DEFAULT_CONTEXT_LINES = 10
+MAX_CONTEXT_LINES = 50
+
 
 def apple_silicon():
-    """MLX, which Parakeet v3 and the Qwen classifier run on, needs an Apple silicon Mac."""
+    """MLX, which Parakeet v3 runs on, needs an Apple silicon Mac."""
     return sys.platform == "darwin" and platform.machine() == "arm64"
 
 
@@ -67,7 +72,8 @@ def speech_defaults():
     if (installed / "config.json").is_file():
         model = str(installed)
     return {
-        "stt_engine": "whisper",
+        # Voice in the web UI transcribes only with Parakeet (map_readiness).
+        "stt_engine": "parakeet" if apple_silicon() else "whisper",
         "tts_engine": "kokoro",
         "kokoro_voice": "af_heart",
         "kokoro_speed": 1.0,
@@ -82,6 +88,7 @@ def speech_defaults():
         "echo_cancellation": False,
         "speaker_gate": False,
         "speaker_threshold": SPEAKER_THRESHOLD,
+        "context_lines": DEFAULT_CONTEXT_LINES,
     }
 
 
@@ -120,6 +127,9 @@ def speech_errors(preferences, *, check_files=False):
             or abs((value - low) / step - round((value - low) / step)) > 1e-6
         ):
             errors[key] = f"Choose {low}–{high} in steps of {step}"
+    lines = preferences.get("context_lines")
+    if type(lines) is not int or not 1 <= lines <= MAX_CONTEXT_LINES:
+        errors["context_lines"] = f"Choose a whole number from 1 to {MAX_CONTEXT_LINES}"
     for key in ("vibevoice_model", "vibevoice_prompt"):
         value = preferences.get(key)
         if not isinstance(value, str) or len(value.encode()) > 4096 or "\x00" in value:
@@ -140,6 +150,59 @@ def speech_errors(preferences, *, check_files=False):
                     "Choose an existing absolute .pt voice prompt, or leave blank for the preset"
                 )
     return errors
+
+
+def load_speech_preferences(root=None):
+    """Read validated voice settings; a bad stored value falls back to its default."""
+    try:
+        value = json.loads(((root or service_root()) / "preferences.json").read_text())
+    except (OSError, ValueError):
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    defaults = speech_defaults()
+    preferences = {**defaults, **{key: value[key] for key in defaults if key in value}}
+    for key in speech_errors(preferences):
+        preferences[key] = defaults[key]
+    return preferences
+
+
+def save_speech_preferences(changes, root=None):
+    """Publish one validated speech update without losing unrelated preference keys."""
+    # The voice runtime is POSIX-only, but reading its settings must work elsewhere.
+    import fcntl
+
+    defaults = speech_defaults()
+    if not isinstance(changes, dict) or set(changes) - set(defaults):
+        raise ValueError("Unknown speech preference")
+
+    path = (root or service_root()) / "preferences.json"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (path.parent / "preferences.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            stored = json.loads(path.read_text())
+        except FileNotFoundError:
+            stored = {}
+        except ValueError as exc:
+            raise ValueError(
+                "Voice preferences are unreadable; repair preferences.json before saving"
+            ) from exc
+        if not isinstance(stored, dict):
+            raise ValueError("Voice preferences must be an object")
+
+        speech = {
+            **defaults,
+            **{key: value for key, value in stored.items() if key in defaults},
+            **changes,
+        }
+        errors = speech_errors(speech, check_files=True)
+        if errors:
+            raise ValueError(
+                "; ".join(f"{key}: {error}" for key, error in errors.items())
+            )
+        atomic_json(path, {**stored, **changes})
+    return load_speech_preferences(root)
 
 
 def speech_key(preferences):

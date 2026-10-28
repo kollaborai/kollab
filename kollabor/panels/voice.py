@@ -4,20 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from kollabor_voice.classifiers import (
-    CLASSIFIERS,
-    LOCAL_CLASSIFIERS,
-    MAX_CONTEXT_LINES,
-    available_classifiers,
-    load_preferences,
-)
+from kollabor_voice.bootstrap import prepared_runtime_python
 from kollabor_voice.control import service_root
 from kollabor_voice.speech_settings import (
     KOKORO_VOICES,
+    MAX_CONTEXT_LINES,
     STT_ENGINES,
     TTS_ENGINES,
     available_stt_engines,
     speech_errors,
+)
+from kollabor_voice.speech_settings import (
+    load_speech_preferences as load_preferences,
 )
 
 from .base import PanelError, error_result, make_field, ok_result, unknown_action
@@ -36,6 +34,16 @@ def voice_plugin(ctx):
     return plugin
 
 
+def setup_status() -> str:
+    from kollabor_voice.client import VoiceClient
+
+    if prepared_runtime_python():
+        return "Installed"
+    if VoiceClient().setup_status().get("state") == "installing":
+        return "Installing now"
+    return "Not installed yet"
+
+
 def voice_sections(plugin, live=None) -> list[dict]:
     """One field definition for both interfaces and both speech engines."""
     preferences = load_preferences()
@@ -44,32 +52,30 @@ def voice_sections(plugin, live=None) -> list[dict]:
 
     speech = state.get("speech", {})
     transcription = state.get("transcription", {})
-    classifiers = available_classifiers()
     engines = available_stt_engines()
     return [
+        {
+            "id": "setup",
+            "title": "Voice Setup",
+            "open": True,  # what a new user looks for first
+            "fields": [
+                make_field(
+                    "voice_setup",
+                    "label",
+                    "Status",
+                    value=setup_status(),
+                    help=(
+                        "Voice sets itself up the first time you turn it on: the microphone "
+                        "button in a chat, or /voice on. That first start installs voice "
+                        "support and downloads the selected models, which takes a few minutes."
+                    ),
+                ),
+            ],
+        },
         {
             "id": "preferences",
             "title": "Voice Preferences",
             "fields": [
-                make_field(
-                    "classifier",
-                    "dropdown",
-                    "Classifier",
-                    value=preferences["classifier"],
-                    options=list(classifiers),
-                    option_labels=classifiers,
-                    help=(
-                        "Laya runs locally. "
-                        + (
-                            "Fine-Tuned Qwen3 0.6B also runs locally (645 MB of "
-                            'weights) and answers "was that for me?" itself. '
-                            if "qwen" in classifiers
-                            else ""
-                        )
-                        + "Provider uses the active AI profile, sends transcript "
-                        "context to it and can incur charges."
-                    ),
-                ),
                 make_field(
                     "context_lines",
                     "spinbox",
@@ -78,16 +84,7 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     min_value=1,
                     max_value=MAX_CONTEXT_LINES,
                     step=1,
-                    help="Previous microphone transcript lines used to interpret the next utterance (1–50).",
-                ),
-                make_field(
-                    "classifier_status",
-                    "label",
-                    "Classifier Readiness",
-                    value=classifier_text(preferences["classifier"], state),
-                    help=classifier_worker(preferences["classifier"], state).get(
-                        "detail", ""
-                    ),
+                    help="Previous microphone transcript lines sent to the agent with each new utterance (1–50).",
                 ),
             ],
         },
@@ -220,7 +217,10 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     "label",
                     "Voice State",
                     value=state.get("state", "off").replace("_", " ").title(),
-                    help="Use /voice on, /voice off, /voice status or /voice retry in this chat.",
+                    help=(
+                        "Turn voice on with the microphone button in a chat, or /voice on; "
+                        "/voice off, /voice status and /voice retry work in the terminal."
+                    ),
                 ),
                 make_field(
                     "preferences_path",
@@ -251,7 +251,7 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     "Speaker Gate",
                     value=preferences["speaker_gate"],
                     help=(
-                        "Only your voice reaches the classifier. Other voices stay in "
+                        "Only your voice reaches the agent. Other voices stay in "
                         "the transcript as context. Needs a voiceprint: /voice enroll."
                     ),
                 ),
@@ -281,20 +281,6 @@ def voice_sections(plugin, live=None) -> list[dict]:
             ],
         },
     ]
-
-
-def classifier_worker(selected: str, state: dict) -> dict:
-    """The service's worker status when it runs the selected classifier, else {}."""
-    worker = state.get("classifier") or {}
-    # An older service has no name: it runs Laya only.
-    return worker if worker.get("name", "laya") == selected else {}
-
-
-def classifier_text(selected: str, state: dict) -> str:
-    """The selected classifier and its worker's state, e.g. "Laya · ready"."""
-    if selected not in LOCAL_CLASSIFIERS:
-        return f"{CLASSIFIERS[selected]} · runs in the chat"
-    return f"{CLASSIFIERS[selected]} · {classifier_worker(selected, state).get('state', 'off')}"
 
 
 def voiceprint_text(speaker: dict) -> str:
@@ -345,27 +331,21 @@ class VoicePanel:
         current = await self.describe(ctx, {})
         fields = {f["path"]: f for s in current["sections"] for f in s["fields"]}
         errors = validate_config_changes(fields, changes)
+        # JSON numeric controls may send 20.0. The persisted contract uses integers.
+        changes = dict(changes)
+        for key in ("context_lines", "vibevoice_steps"):
+            if isinstance(changes.get(key), float) and changes[key].is_integer():
+                changes[key] = int(changes[key])
         if not errors:
             errors.update(
                 speech_errors({**load_preferences(), **changes}, check_files=True)
             )
         if errors:
             return error_result("Some voice settings were not saved", errors)
-        # JSON numeric controls may send 20.0. The persisted contract uses integers.
-        changes = dict(changes)
-        for key in ("context_lines", "vibevoice_steps"):
-            if key in changes:
-                changes[key] = int(changes[key])
         try:
             await voice_plugin(ctx).configure_voice(changes)
         except (OSError, ValueError) as exc:
             return error_result(f"Could not save voice settings: {exc}")
-        except RuntimeError as exc:
-            # Settings reached disk even if the active classifier cannot warm up.
-            return ok_result(
-                f"Saved for this device. Classifier setup needs attention: {exc}",
-                panel=await self.describe(ctx, {}),
-            )
         return ok_result(
             "Voice settings saved for this device", panel=await self.describe(ctx, {})
         )

@@ -506,12 +506,18 @@ class RelayClient:
         stops naming loses that vouch; one left with none is dropped. A
         revocation is applied at once and remembered: no vouch brings that
         device back until a human here accepts it again with a join code.
-        Accepted strangers never enter or leave this way.
+        Accepted strangers never enter or leave this way. Nor does this
+        device's primary (the inviter whose join code it used): one member's
+        word is not enough to cut a device off from its own primary, so only
+        a human here (`/connect revoke`) revokes it.
         """
         self._adopt_bridge_fields()
         if voucher not in self.members():
             raise RelayError("peer is not part of this network")
         for key in revoked:
+            if key == self.state.inviter:
+                _LOGGER.warning("Refused a member's revocation of this device's primary")
+                continue
             if key not in (self.public_key, voucher) and key not in self.state.links:
                 self.revoke(key, announce=True)
         named = set()

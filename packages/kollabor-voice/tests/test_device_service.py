@@ -1,8 +1,10 @@
 """Device boundary checks; doubles here do not prove real speech or playback."""
 
 import asyncio
+import contextlib
 import json
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,8 +18,8 @@ import pytest_asyncio
 from kollabor_voice import service as service_module
 from kollabor_voice.audio import AudioSegment, SpeechSegmenter
 from kollabor_voice.client import VoiceClient
-from kollabor_voice.control import VoiceError, manifest
-from kollabor_voice.observer import AdmissionStore, parse_decision
+from kollabor_voice.control import VoiceError, install_identity, manifest
+from kollabor_voice.observer import AdmissionStore
 from kollabor_voice.output import SpeechQueue, sentences
 from kollabor_voice.service import VoiceService
 from kollabor_voice.store import TranscriptLog
@@ -125,6 +127,41 @@ def test_client_has_no_heavy_startup_imports():
         "assert not set(['numpy','faster_whisper','sounddevice','kokoro_onnx']) & set(sys.modules)"
     )
     subprocess.run([sys.executable, "-S", "-c", script], check=True)
+
+
+@pytest.mark.asyncio
+async def test_status_says_which_install_the_service_runs(service, root):
+    status = await VoiceClient(root).call("status")
+    package = Path(service_module.__file__).resolve().parent
+    assert status["install"] == service.install == install_identity()
+    assert status["install"]["path"] == str(package)
+    assert len(status["install"]["code"]) == 16
+
+
+def test_install_code_follows_the_code_not_the_path(tmp_path):
+    """The same code anywhere is one install; an edited file is another."""
+    package = Path(service_module.__file__).resolve().parent
+    copy = tmp_path / "kollabor_voice"
+    copy.mkdir()
+    for path in [*package.glob("*.py"), package / "manifest.json"]:
+        shutil.copy(path, copy / path.name)
+
+    def identity():
+        script = (
+            f"import sys,json;sys.path.insert(0,{str(tmp_path)!r});"
+            "from kollabor_voice.control import install_identity;"
+            "print(json.dumps(install_identity()))"
+        )
+        run = subprocess.run(
+            [sys.executable, "-S", "-c", script], check=True, capture_output=True, text=True
+        )
+        return json.loads(run.stdout)
+
+    copied = identity()
+    assert copied == {"path": str(copy.resolve()), "code": install_identity()["code"]}
+    with (copy / "service.py").open("a") as handle:
+        handle.write("\n# a newer Kollab\n")
+    assert identity()["code"] != copied["code"]
 
 
 def test_manifest_contains_complete_hashes():
@@ -346,21 +383,6 @@ def test_admission_crash_and_duplicate_never_blindly_replay(root):
     with pytest.raises(VoiceError):
         store.reserve("id", "changed")
     store.close()
-
-
-def test_decision_cannot_invent_events_or_execute_invalid_output():
-    records = [{"event_id": "a", "text": "turn the page"}]
-    assert parse_decision('{"decision":"ignore","event_ids":["a"]}', records) == []
-    assert (
-        parse_decision('{"decision":"respond","event_ids":["a"]}', records) == records
-    )
-    for raw in (
-        "not json",
-        '{"decision":"respond","event_ids":["missing"]}',
-        '{"decision":"respond","event_ids":[]}',
-    ):
-        with pytest.raises(VoiceError):
-            parse_decision(raw, records)
 
 
 @pytest.mark.asyncio
@@ -635,8 +657,8 @@ async def test_explicit_and_final_speech_deduplicate_only_matching_sentences(roo
     assert speaker.spoken == ["First sentence.", "The final result."]
 
 
-def test_grouping_preserves_echo_for_classifier_without_merging_it_into_request():
-    from kollabor_voice.observer import connected_speech, utterance_groups
+def test_grouping_keeps_playback_echo_apart_from_the_request():
+    from kollabor_voice.observer import utterance_groups
 
     request = {
         "event_id": "request",
@@ -654,8 +676,6 @@ def test_grouping_preserves_echo_for_classifier_without_merging_it_into_request(
         "playback_overlap": [{"reply_id": "reply", "text": "I'll check the files."}],
     }
     assert utterance_groups([request, echo]) == [[request], [echo]]
-    assert connected_speech([request, echo], [request]) == [request]
-    assert connected_speech([request, echo], [echo]) == [echo]
 
 
 @pytest.mark.asyncio
@@ -675,13 +695,6 @@ async def test_silent_period_never_reaches_synthesizer_or_speech_receipts(root):
 
 @pytest.mark.asyncio
 async def test_delegated_output_cannot_open_mic_read_or_extend_lease(service, root):
-    from unittest.mock import AsyncMock
-
-    from kollabor_voice.speech_review import SpeechDecision
-
-    service.classifier.review_speech = AsyncMock(
-        return_value=SpeechDecision("speak", provider="laya").to_wire()
-    )
     client = VoiceClient(root)
     owner = await claim(client)
     capability = await client.call("delegate", **auth(owner), producer_id="worker")
@@ -950,6 +963,52 @@ async def test_local_classifier_jobs_do_not_block_capture_or_allow_output_delega
     assert service.classifier_jobs == {}
 
 
+@pytest.mark.asyncio
+async def test_voice_never_starts_or_calls_a_classifier_worker(service, root):
+    """Claiming, listening, speaking and releasing leave every worker untouched (#301).
+
+    The classifier ops stay for other features (tested above); voice never asks.
+    """
+    from unittest.mock import AsyncMock, Mock, patch
+
+    workers = list(service.classifiers.values())
+    assert {w.name for w in workers} == {"laya", "qwen"}
+    calls = Mock()
+    with contextlib.ExitStack() as stack:
+        for worker in workers:
+            for name in ("prepare", "decide", "answer", "review_speech", "close"):
+                if hasattr(worker, name):
+                    stack.enter_context(
+                        patch.object(
+                            worker,
+                            name,
+                            getattr(calls, f"{worker.name}_{name}"),
+                        )
+                    )
+        stack.enter_context(
+            patch.object(service, "select_classifier", AsyncMock(side_effect=AssertionError))
+        )
+        client = VoiceClient(root)
+        owner = await claim(client)
+        capability = await client.call("delegate", **auth(owner), producer_id="agent")
+        status = await client.call("heartbeat", **auth(owner))
+        assert "classifier" not in status and "classifier" not in await client.call("status")
+        spoken = await client.voice_out(
+            "Done.", "reply", capability["epoch"], "agent", capability["token"]
+        )
+        assert spoken["ids"]
+        # Code cannot be said: the spoken-format rules ask for a rewrite, no model reviews it.
+        code = await client.voice_out(
+            "See `main.py` for details.", "code", capability["epoch"], "agent", capability["token"]
+        )
+        assert code["status"] == "rewrite" and code["ids"] == []
+        await client.call("release", **auth(owner))
+    assert calls.method_calls == []
+    for worker in workers:
+        assert worker.process is None and worker.setup_task is None
+        assert worker.status()["state"] == "off"
+
+
 def stuck_server(root, recorder_factory):
     return VoiceService(
         root,
@@ -1131,3 +1190,52 @@ async def test_client_timeout_carries_a_real_reason(root):
         release.set()
         holder.cancel()
         await server.close()
+
+
+def _exited_pid():
+    child = subprocess.Popen(["true"])
+    child.wait()
+    return child.pid
+
+
+def test_setup_status_keeps_the_reason_a_failed_setup_wrote(root):
+    (root / "setup.json").write_text(
+        json.dumps(
+            {
+                "state": "error",
+                "detail": "Voice setup failed: uv is not installed.",
+                "pid": _exited_pid(),
+                "updated_at": time.time(),
+            }
+        )
+    )
+    assert VoiceClient(root).setup_status()["detail"] == (
+        "Voice setup failed: uv is not installed."
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_never_shows_an_earlier_setup_failure(root, monkeypatch):
+    (root / "setup.json").write_text(
+        json.dumps(
+            {
+                "state": "error",
+                "detail": "Voice setup failed: old reason",
+                "pid": _exited_pid(),
+                "updated_at": time.time() - 60,
+            }
+        )
+    )
+    answers = iter([OSError("down"), OSError("down"), {"state": "off"}])
+
+    async def call(self, op, **params):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(VoiceClient, "call", call)
+    monkeypatch.setattr(VoiceClient, "launch", lambda self: None)
+    seen = []
+    assert await VoiceClient(root).ensure(seen.append) == {"state": "off"}
+    assert [s["detail"] for s in seen] == ["Starting the voice service"]

@@ -66,6 +66,9 @@ def web_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     from kollabor_ai.response_channels import turn_display_texts
 
+    # A hidden turn's instruction (the voice greeting) is never shown as a message.
+    if any(_metadata(m).get("hidden") for m in history):
+        history = [m for m in history if not _metadata(m).get("hidden")]
     shaped = _xml_tool_turns(history)
     shown = turn_display_texts(shaped)
     if all(text is None for text in shown):

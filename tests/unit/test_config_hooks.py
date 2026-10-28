@@ -352,6 +352,36 @@ class TestBuildHookCallback:
         assert event.cancelled is True
 
     @pytest.mark.asyncio
+    async def test_stop_hook_active_reaches_stdin_payload(self, loader, tmp_path):
+        """`stop_hook_active` in event data rides the hook's stdin payload (#357)."""
+        sink = tmp_path / "payload.json"
+        callback = loader._build_hook_callback(
+            command=f"bash -c 'cat > {sink}'",
+            event_type=EventType.LLM_RESPONSE_POST,
+            event_name="Stop",
+            matcher="",
+            timeout=5,
+            is_async=False,
+            failure_filter=False,
+        )
+
+        event = Event(
+            type=EventType.LLM_RESPONSE_POST,
+            data={
+                "clean_response": "done",
+                "turn_completed": True,
+                "stop_hook_active": True,
+            },
+            source="test",
+        )
+
+        await callback(event.data, event)
+        payload = json.loads(sink.read_text())
+        assert payload["hook_event_name"] == "Stop"
+        assert payload["stop_hook_active"] is True
+        assert payload["turn_completed"] is True
+
+    @pytest.mark.asyncio
     async def test_decision_deny_cancels(self, loader):
         callback = loader._build_hook_callback(
             command='echo \'{"decision": "deny", "reason": "denied"}\'',

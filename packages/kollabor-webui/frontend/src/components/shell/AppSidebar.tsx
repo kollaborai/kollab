@@ -12,12 +12,14 @@ import { liveAgentOf } from "@/components/shell/live-agent";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { AgentSidebarList, AgentSidebarRow, type AgentRowDrag } from "@/components/shell/AgentSidebarRow";
+import { DeviceSidebarList } from "@/components/shell/DeviceSidebarList";
+import { relayDetachedTouches } from "@/components/shell/touch-relay";
 import { sidebarAgentKey } from "@/components/shell/hidden-agents";
 import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import type { SidebarOrder } from "@/hooks/use-sidebar-order";
-import { buildLocalOrderRows, groupByFolder, reorderWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
+import { buildLocalOrderRows, groupByFolder, orderedDevices, reorderDevicesWithinNetwork, reorderWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
-import { LearnMoreLink } from "@/components/learn/LearnMoreLink";
+import { HoverHelp } from "@/components/ui/hover-help";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -116,7 +118,7 @@ function FoldGroup({
 }
 
 const FOOTER_BUTTON =
-  "size-8 p-2 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground";
+  "size-8 p-2 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:size-7 md:p-1.5";
 
 const ROW_CLASS = "h-auto gap-2.5 overflow-visible rounded-lg px-2.5 py-2.5 transition-colors";
 const AVATAR_SIZE = 40;
@@ -245,6 +247,8 @@ export function AppSidebar({
   useEffect(() => {
     if (learnActive || whatsNewActive) setOptionsOpen(false);
   }, [learnActive, whatsNewActive]);
+  // A lifted row's clone replaces the element a touch started on; keep that touch reaching the drag.
+  useEffect(() => relayDetachedTouches(window), []);
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one
@@ -255,7 +259,7 @@ export function AppSidebar({
   );
   const visibleNetworks = networkTree.map((net) => ({
     ...net,
-    devices: net.devices.map((dev) => ({
+    devices: orderedDevices(net.id, net.devices.map((dev) => ({
       ...dev,
       workspaces: dev.workspaces.map((ws) => {
         const agents = ws.agents.filter((agent) => !hiddenKeys.has(sidebarAgentKey({
@@ -279,7 +283,7 @@ export function AppSidebar({
           orderRows,
         };
       }).filter((ws) => ws.agents.length),
-    })).filter((dev) => dev.workspaces.length),
+    })).filter((dev) => dev.workspaces.length), sidebarOrder.order),
   }));
   // Groups the viewer folded away, remembered in this browser only.
   const [folded, setFolded] = useState<Record<string, boolean>>(() => {
@@ -605,7 +609,7 @@ export function AppSidebar({
                 </div>
               ) : null}
               <div className="bg-foreground/[0.04] flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
-                <div className="flex min-w-0 flex-col items-start">
+                <HoverHelp side="bottom" align="start" text="Opens your saved profiles. A profile picks the provider, model and endpoint a new session talks to.">
                   <Button
                     type="button"
                     variant="ghost"
@@ -617,16 +621,7 @@ export function AppSidebar({
                   >
                     Manage Profiles
                   </Button>
-                  <LearnMoreLink
-                    topicId="profiles"
-                    label="Learn about profiles"
-                    className="min-h-7 px-2 text-xs"
-                    onNavigate={() => {
-                      setOptionsOpen(false);
-                      setOpenMobile(false);
-                    }}
-                  />
-                </div>
+                </HoverHelp>
                 <Button type="button" size="sm" disabled={busy} onClick={create}>
                   <Plus className="size-4" />
                   Start Session
@@ -696,15 +691,17 @@ export function AppSidebar({
           >
             <SidebarGroupContent>
               {/* Full-width rows under small headers: nested sub-menus indented both sides and left the names a few letters wide. */}
-              {net.devices.map((dev) => (
-                <Fragment key={dev.device}>
-                  <div className="text-muted-foreground flex h-7 items-center gap-2 px-2.5 text-xs" title={dev.device}>
-                    <span className="min-w-0 truncate">{dev.device}</span>
-                    <span className="ml-auto shrink-0 text-xs tabular-nums">
-                      {dev.workspaces.reduce((sum, ws) => sum + ws.agents.length, 0)}
-                    </span>
-                  </div>
-                  {dev.workspaces.map((ws) => (
+              <DeviceSidebarList
+                networkId={net.id}
+                devices={net.devices}
+                count={(dev) => dev.workspaces.reduce((sum, ws) => sum + ws.agents.length, 0)}
+                beginDrag={sidebarOrder.beginDrag}
+                onReorder={(key, to, devices) => {
+                  const next = reorderDevicesWithinNetwork(net.id, devices, key, to, sidebarOrder.order);
+                  if (next) void sidebarOrder.save(next);
+                }}
+              >
+                {(dev) => dev.workspaces.map((ws) => (
                     <Fragment key={ws.label || "-"}>
                       {ws.label ? (
                         <p className="text-muted-foreground truncate px-2.5 text-xs">{ws.label}</p>
@@ -788,9 +785,8 @@ export function AppSidebar({
                       </AgentSidebarList>
                       ))}
                     </Fragment>
-                  ))}
-                </Fragment>
-              ))}
+                ))}
+              </DeviceSidebarList>
             </SidebarGroupContent>
           </FoldGroup>
         ))}
@@ -854,7 +850,7 @@ export function AppSidebar({
         {/* Use one row when it fits, otherwise center four actions over three. */}
         <div
           data-sidebar="footer-actions"
-          className="grid grid-cols-8 items-center justify-items-center gap-y-1 [&>button]:col-span-2 [&>button:nth-of-type(5)]:col-start-2 [&>button:nth-of-type(6)]:col-start-4 [&>button:nth-of-type(7)]:col-start-6 @min-[17rem]:flex @min-[17rem]:justify-between"
+          className="grid grid-cols-8 items-center justify-items-center gap-y-1 [&>button]:col-span-2 [&>button:nth-of-type(5)]:col-start-2 [&>button:nth-of-type(6)]:col-start-4 [&>button:nth-of-type(7)]:col-start-6 @min-[17rem]:flex @min-[17rem]:justify-between md:@min-[14rem]:flex md:@min-[14rem]:justify-between"
         >
           <Popover>
             <PopoverTrigger asChild>

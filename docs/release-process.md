@@ -2,7 +2,7 @@
 title: "Release Process"
 doc_type: release-process
 created: 2026-05-04
-modified: 2026-10-19
+modified: 2026-10-26
 status: active
 ---
 # Release Process
@@ -36,13 +36,12 @@ Use a `vX.Y.Z` Git tag for public releases.
 
 ## Release From Main, in Place
 
-Releases run from the shared `main` checkout; feature work happens in git
-worktrees per `SOFTWARE_DEVELOPMENT_LIFECYCLE.md` (`../kollab-wt/issue-<N>-<slug>`,
-branched off `origin/main`). In the shared checkout, never stash, reset, clean,
-restore, or switch branches, and never build a release from uncommitted files
-or a scratch clone: the checkout stays behind, dirty with work that already
-shipped. Commit the release on local `main` instead; the merge then
-fast-forwards it, so `main` ends clean and level by construction.
+Releases run from the shared `main` checkout, where all work happens
+(`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`). In it, never create a worktree, stash,
+reset, clean, restore, or switch branches, and never build a release from
+uncommitted files or a scratch clone: the checkout stays behind, dirty with
+work that already shipped. Commit the release on local `main` instead; the
+merge then fast-forwards it, so `main` ends clean and level by construction.
 
 1. Commit the release's work on `main` by explicit paths
    (`git commit -- <paths>`), never `git add -A` or `git add .`. Other agents'

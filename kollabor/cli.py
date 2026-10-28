@@ -1269,6 +1269,25 @@ async def async_main() -> None:
                 # print("Warning: Some resources may not have been cleaned up properly")
 
 
+def _hub_config_flag(key: str) -> bool:
+    """plugins.hub.<key> from the global then the local config (local wins), for
+    CLI paths that skip plugin boot."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from kollabor_config.config_utils import get_existing_global_config_path
+
+    value = False
+    for path in (get_existing_global_config_path(), _Path.cwd() / ".kollab" / "config.json"):
+        try:
+            hub = _json.loads(path.read_text()).get("plugins", {}).get("hub", {})
+        except Exception:
+            continue
+        if key in hub:
+            value = bool(hub[key])
+    return value
+
+
 def _apply_hub_project_scope_from_config() -> None:
     """Read plugins.hub.project_scoped from config and set the env var.
 
@@ -1406,6 +1425,25 @@ def _print_hub_help() -> None:
     print("interactive equivalents (run these inside a kollab session):")
     print("  /hub status        /hub msg <name> <text>    /hub broadcast <text>")
     print("  /hub bridge setup  /hub notify channel <...>  /hub feed")
+
+
+def _print_hub_health(health: Optional[dict]) -> None:
+    """Print the handoff health sections `kollab --hub status` asked for.
+
+    Issue #283: the same lines `/hub status` renders on the coordinator
+    (supervisor section with "handoff awaiting ack", recent dispatch
+    failures), printed verbatim. Nothing extra when the agent has none.
+    """
+    if not health:
+        return
+    lines = [str(line) for line in (health.get("supervisor") or [])]
+    lines += [str(line) for line in (health.get("dispatch") or [])]
+    lines = [line for line in lines if line]
+    if not lines:
+        return
+    print()
+    for line in lines:
+        print(line)
 
 
 async def _handle_cli_hub(hub_args: list) -> None:
@@ -1701,6 +1739,16 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 online = "online" if row.get("online") else "offline"
                 print(f"  {handle} - {detail} ({online})")
 
+        # Handoff health (issue #283): the same sections `/hub status`
+        # shows on that agent -- supervisor cards, awaiting-ack handoffs,
+        # recent dispatch failures.
+        health = (
+            await AgentMessenger.request_health_status(asker["socket_path"])
+            if asker
+            else None
+        )
+        _print_hub_health(health)
+
     elif subcmd in ("stop", "kill"):
         if not rest:
             print("usage: kollab --hub stop <identity|all>")
@@ -1741,29 +1789,50 @@ async def _handle_cli_hub(hub_args: list) -> None:
         raw = "--raw" in rest
         capture_args = [arg for arg in rest if arg != "--raw"]
         if not capture_args:
-            print("usage: kollab --hub capture <identity> [lines] [--raw]")
+            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
             sys.exit(1)
         target = capture_args[0]
         if len(capture_args) > 2:
-            print("usage: kollab --hub capture <identity> [lines] [--raw]")
+            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
             sys.exit(2)
         try:
             num_lines = int(capture_args[1]) if len(capture_args) > 1 else 50
         except ValueError:
-            print("usage: kollab --hub capture <identity> [lines] [--raw]")
+            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
             sys.exit(2)
-        agent = _find_agent(target)
-        if not agent:
-            agents = _get_live_agents()
-            available = [a.get("identity", "?") for a in agents]
-            print(f"agent '{target}' not found")
-            if available:
-                print(f"online: {', '.join(sorted(available))}")
-            sys.exit(1)
-        socket_path = agent.get("socket_path", "")
-        if not socket_path:
-            print(f"agent '{target}' has no socket")
-            sys.exit(1)
+        from plugins.hub.device_names import parse_handle
+
+        if parse_handle(target) is not None:
+            # Another device of this network: a local daemon opens it through
+            # the network attach, which that device's trust decides (a contact
+            # never may). plugins.hub.disallow_cross_device_capture turns it off.
+            if _hub_config_flag("disallow_cross_device_capture"):
+                print("cross-device capture is off here (plugins.hub.disallow_cross_device_capture)")
+                sys.exit(1)
+            asker = _pick_relay_agent()
+            if not asker:
+                print("no local agent online to reach the network")
+                sys.exit(1)
+            reply = await AgentMessenger.request_network_attach(
+                asker["socket_path"], target, quiet=True
+            )
+            if reply.get("type") != "network_attach" or not reply.get("socket_path"):
+                print(f"capture of {target} refused: {reply.get('msg') or 'no answer from the network'}")
+                sys.exit(1)
+            socket_path = reply["socket_path"]
+        else:
+            agent = _find_agent(target)
+            if not agent:
+                agents = _get_live_agents()
+                available = [a.get("identity", "?") for a in agents]
+                print(f"agent '{target}' not found")
+                if available:
+                    print(f"online: {', '.join(sorted(available))}")
+                sys.exit(1)
+            socket_path = agent.get("socket_path", "")
+            if not socket_path:
+                print(f"agent '{target}' has no socket")
+                sys.exit(1)
         if raw:
             # Keep the original terminal request/response path byte-for-byte.
             lines, capture_error = await AgentMessenger.request_output_diagnostic(
@@ -2228,6 +2297,37 @@ def _pick_engine_port(
     raise RuntimeError(f"no free engine port in {port}-{port + tries - 1}")
 
 
+# launchd's PATH: what Kollab.app gets when it is opened from the Dock or Finder.
+GUI_PATH = {"/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin"}
+LOGIN_PATH_MARK = "KOLLAB_LOGIN_PATH"
+
+
+def _adopt_login_path() -> None:
+    """Swap a bare GUI PATH for the login shell's, the one a terminal launch has.
+
+    Kollab.app opened from the Dock starts `--web-ui` with launchd's PATH: voice
+    found neither livekit-server nor uv, and agents' shells missed the user's tools.
+    """
+    import subprocess
+
+    current = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    if not set(current) <= GUI_PATH:
+        return
+    shell = os.environ.get("SHELL") or ("/bin/zsh" if sys.platform == "darwin" else "/bin/sh")
+    try:
+        out = subprocess.run(
+            [shell, "-lc", f'printf "{LOGIN_PATH_MARK}%s{LOGIN_PATH_MARK}" "$PATH"'],
+            capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return
+    # A profile may print its own lines around the marked PATH.
+    _, _, rest = out.partition(LOGIN_PATH_MARK)
+    login, found, _ = rest.partition(LOGIN_PATH_MARK)
+    if found and login:
+        os.environ["PATH"] = os.pathsep.join(dict.fromkeys(login.split(os.pathsep) + current))
+
+
 async def _handle_cli_web_ui(restart: bool = False) -> None:
     """Handle --web-ui: spawn the engine + browser UI, block until Ctrl+C.
 
@@ -2307,6 +2407,7 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     print("\n  starting kollab web ui...")
     print(f"  engine: {engine_url}")
     print(f"  ui:     http://127.0.0.1:{webui_port}\n")
+    _adopt_login_path()  # before the engine starts: every agent and voice inherits it
 
     # Kollab.app's runtime runs isolated (-I -B, see scripts/desktop_release.py);
     # its children run the same way, or a pip --user kollab in ~/.local or a
@@ -2588,9 +2689,17 @@ def cli_main() -> None:
     if "--detached" in sys.argv or "-d" in sys.argv:
         import os
 
-        from kollabor.daemon import SERVICE_ENV, SERVICE_PID_ENV
+        from kollabor.daemon import (
+            DETACHED_CHILD_ENV,
+            SERVICE_ENV,
+            SERVICE_PID_ENV,
+            exec_detached_child,
+        )
 
-        if os.environ.pop(SERVICE_ENV, "") == "1":
+        if os.environ.pop(DETACHED_CHILD_ENV, "") == "1":
+            # Already forked, detached and exec'd by the code below.
+            detached_runtime = True
+        elif os.environ.pop(SERVICE_ENV, "") == "1":
             detached_runtime = True
             # `kollab service`: systemd or launchd owns this process, so it
             # stays in the foreground (no fork, no setsid) and keeps stderr
@@ -2616,6 +2725,9 @@ def cli_main() -> None:
             os.dup2(devnull, 1)  # stdout
             os.dup2(devnull, 2)  # stderr
             os.close(devnull)
+            # Never keep running Python in a forked image on macOS (ObjC
+            # fork-safety abort); on exec failure carry on in-process.
+            exec_detached_child(sys.argv)
 
     # Daemon mode (default): auto-fork daemon + connect as attach client.
     # The daemon runs headless (like --detached). The parent becomes

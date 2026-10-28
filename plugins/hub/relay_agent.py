@@ -161,7 +161,77 @@ class ActiveRelayTask:
     progress_count: int = 0
 
 
+class _MembershipEnrollmentBridge:
+    """Enrollment-facing view of one secondary membership.
+
+    Secondary RelayCommands must poll and decide against their own issuer
+    state, not the primary bridge's issuer.  The rest of the bridge remains
+    shared for identity and human-turn validation.
+    """
+
+    def __init__(self, parent, membership, commands):
+        self._parent = parent
+        self.membership = membership
+        self.commands = commands
+        self.owner = WorkspaceRelayOwner(parent.workspace, membership.state_dir)
+        self.plugin = parent.plugin
+        self.identity = parent.identity
+        self.config_sync = None
+        self._closed = False
+        self._state_store = None
+        self._enrollment_issuer = None
+
+    def __getattr__(self, name):
+        return getattr(self._parent, name)
+
+    def _state(self):
+        if self._state_store is None:
+            self._state_store = RelayStateStore(self._parent.workspace, self.owner.state_dir)
+        return self._state_store
+
+    def _require_human_network_context(self, message):
+        return self._parent._require_human_network_context(message)
+
+    def device_name(self):
+        return self._state().state.device_name or default_device_name(self._parent.workspace)
+
+    def network_name(self):
+        return self._state().state.network_name
+
+    def trust_level(self):
+        return self._state().state.trust
+
+    def bind_network_name(self, name):
+        return self._parent.bind_network_name.__func__(self, name)
+
+    def bind_peer_device(self, key, name):
+        return self._parent.bind_peer_device.__func__(self, key, name)
+
+    def _known_device_names(self, *, except_key=""):
+        state = self._state().state
+        names = {self.device_name(), *state.peer_devices.values()}
+        return {name for name in names if name}
+
+    def pending_enrollment_requests(self, *, source_agent):
+        self._require_human_network_context(
+            "remote model turns cannot review enrollment requests"
+        )
+        if source_agent != self.identity.agent_id:
+            raise RelayError("only the active local issuer agent can review requests")
+        return self._enrollment_issuer.pending_requests()
+
+    async def decide_enrollment_request(self, enrollment_id, *, decision, source_agent):
+        self._require_human_network_context(
+            "remote model turns cannot decide enrollment requests"
+        )
+        if source_agent != self.identity.agent_id:
+            raise RelayError("only the active local issuer agent can decide requests")
+        return await self._enrollment_issuer.decide(enrollment_id, decision=decision)
+
+
+
 class RelayAgentBridge:
+
     def __init__(
         self, plugin, workspace: Path, *, state_dir: Path | None = None, directory=None
     ):
@@ -640,10 +710,14 @@ class RelayAgentBridge:
             raise RelayError("ambiguous agent@device")
         return matches[0]["address"]
 
-    async def attach(self, handle: str) -> str:
-        """A one-shot local socket to agent@device's own socket (network_attach.py)."""
+    async def attach(self, handle: str, *, quiet: bool = False) -> str:
+        """A one-shot local socket to agent@device's own socket (network_attach.py).
+
+        ``quiet`` is a capture: the other device posts no open/close line.
+        """
         # The open waits on the other computer: one secure request, up to 30 s.
-        reply = await self._owner_call("relay.attach", {"handle": handle}, timeout=55)
+        params = {"handle": handle, "quiet": True} if quiet else {"handle": handle}
+        reply = await self._owner_call("relay.attach", params, timeout=55)
         if reply.get("refused"):
             raise AttachRefused(reply["refused"])
         return reply["socket_path"]
@@ -664,7 +738,9 @@ class RelayAgentBridge:
                 "this network: message its agents, opening them needs a join code"
             }
         try:
-            path = await self.network_attach.open(address.key, address.agent_id, parsed[0])
+            path = await self.network_attach.open(
+                address.key, address.agent_id, parsed[0], quiet=params.get("quiet") is True
+            )
         except AttachRefused as refusal:
             # An answer, not a failure: the other computer's own words (who may
             # open its agents, the command that allows it). A window that does not
@@ -751,6 +827,13 @@ class RelayAgentBridge:
                     state_dir=membership.state_dir,
                     agent_bridge=None,
                 )
+                enrollment_bridge = _MembershipEnrollmentBridge(
+                    self, membership, commands
+                )
+                commands.agent_bridge = enrollment_bridge
+                from .enrollment_client import EnrollmentIssuer
+
+                enrollment_bridge._enrollment_issuer = EnrollmentIssuer(enrollment_bridge)
                 transport = SecureConversationTransport(
                     commands.client, commands.client._store.key.encode()
                 )
@@ -762,6 +845,7 @@ class RelayAgentBridge:
                     inbound=lambda peer, method, payload, _slug=slug: (
                         self._receive_membership(_slug, peer, method, payload)
                     ),
+                    enrollment_issuer=enrollment_bridge._enrollment_issuer,
                 )
             except RelayError:
                 # A secondary with unreadable state must not take the
@@ -771,7 +855,9 @@ class RelayAgentBridge:
                 )
                 continue
             self._membership_contexts[membership.slug] = context
-            context.start()
+            asyncio.create_task(
+                context.start(), name=f"kollab-membership-start-{membership.slug}"
+            )
 
     def _stop_secondary_memberships(self) -> None:
         contexts, self._membership_contexts = self._membership_contexts, {}
@@ -820,6 +906,11 @@ class RelayAgentBridge:
                 state_dir=membership.state_dir,
                 agent_bridge=None,
             )
+            enrollment_bridge = _MembershipEnrollmentBridge(self, membership, runtime)
+            runtime.agent_bridge = enrollment_bridge
+            from .enrollment_client import EnrollmentIssuer
+
+            enrollment_bridge._enrollment_issuer = EnrollmentIssuer(enrollment_bridge)
             self._membership_runtimes[membership.slug] = runtime
         return runtime
 

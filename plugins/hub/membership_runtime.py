@@ -179,11 +179,20 @@ class MembershipContext:
     secondaries are a later opt-in).
     """
 
-    def __init__(self, membership: Membership, commands, transport, *, inbound):
+    def __init__(
+        self,
+        membership: Membership,
+        commands,
+        transport,
+        *,
+        inbound,
+        enrollment_issuer=None,
+    ):
         self.membership = membership
         self.commands = commands
         self.transport = transport
         self.inbound = inbound  # bridge-bound async (peer, method, payload)
+        self.enrollment_issuer = enrollment_issuer
         self.resume_task: object | None = None
 
     async def start(self):
@@ -191,6 +200,8 @@ class MembershipContext:
         self.resume_task = asyncio.create_task(
             self.commands.resume(), name=f"kollab-relay-resume-{self.membership.slug}"
         )
+        if self.enrollment_issuer is not None:
+            self.enrollment_issuer.start_recovery()
 
     async def close(self):
         task, self.resume_task = self.resume_task, None
@@ -198,4 +209,7 @@ class MembershipContext:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         self.commands.client.set_request_handler(None)
+        if self.enrollment_issuer is not None:
+            await self.enrollment_issuer.close()
+            self.enrollment_issuer = None
         await self.commands.close()

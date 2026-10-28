@@ -4,7 +4,7 @@ import type { EngineApi, PhoneLinkOffer, PhoneLinkState } from "@/api";
 import { errorText } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { learnHref } from "@/learn/catalog";
+import { HoverHelp } from "@/components/ui/hover-help";
 import { copyText } from "@/phonelink/copy-link";
 import { responsiveQrSvg } from "@/utils/qr-svg";
 
@@ -379,15 +379,14 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
             ))}
           </section>
         ) : null}
-        <div className="text-muted-foreground flex items-center gap-2 text-xs">
+        <HoverHelp
+          className="text-muted-foreground text-xs"
+          side="bottom"
+          align="start"
+          text="Your phone reaches this computer through your Kollab network. No VPN app or server setup is needed."
+        >
           <span>Uses your Kollab connection.</span>
-          <a
-            href={learnHref("phone-access")}
-            className="ml-auto shrink-0 underline underline-offset-2"
-          >
-            How It Works
-          </a>
-        </div>
+        </HoverHelp>
       </section>
     </div>
   );

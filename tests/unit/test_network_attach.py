@@ -115,6 +115,21 @@ def test_an_opened_agent_talks_both_ways_and_closes_on_both_ends():
     asyncio.run(run())
 
 
+def test_a_capture_opens_and_closes_without_a_line_on_the_device():
+    async def run():
+        pair = Pair()
+        await pair.start_agent()
+        path = await pair.mac.open(SERVER, AGENT_ID, "lapis", quiet=True)
+        reader, writer = await asyncio.open_unix_connection(path)
+        assert await reader.readline() == b"hello\n"
+        writer.close()
+        await _settle(lambda: not pair.server._channels)
+        assert pair.notices == []
+        await pair.stop()
+
+    asyncio.run(run())
+
+
 def test_the_device_says_why_it_will_not_open_an_agent():
     async def run():
         pair = Pair()

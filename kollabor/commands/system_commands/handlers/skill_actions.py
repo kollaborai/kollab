@@ -7,6 +7,7 @@ import logging
 
 from kollabor_events.models import Event
 
+from .agent_actions import generation_refusal
 from .skills import SkillCommandHandler
 
 logger = logging.getLogger(__name__)
@@ -185,9 +186,17 @@ async def handle_skill_modal_actions(
                     description=description,
                 )
                 # Send to LLM - it will use @@@FILE blocks to generate the file
-                await handler.llm_service.process_user_input(generation_prompt)
-                # Close modal - LLM handles the rest with existing tool infrastructure
-                data["close_modal"] = True
+                result = await handler.llm_service.process_user_input(
+                    generation_prompt, native_only=True
+                )
+                if isinstance(result, dict) and result.get("status") == "rejected":
+                    # Keep the form open so the description is not lost.
+                    data["display_messages"] = [
+                        ("error", generation_refusal(result), {}),
+                    ]
+                else:
+                    # Close modal - LLM handles the rest with existing tool infrastructure
+                    data["close_modal"] = True
             else:
                 data["display_messages"] = [
                     ("error", "[err] LLM service not available", {}),

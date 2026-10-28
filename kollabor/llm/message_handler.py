@@ -11,6 +11,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
+from kollabor.user_input_source import YES_SOURCES
 from kollabor_agent.queue_processor import (
     MAX_CONTINUATION_TURNS,
     RepeatedToolErrorBreaker,
@@ -175,18 +176,25 @@ class MessageHandler:
         if not claims_voice_origin:
             origin_context = None
         origin_kwargs = {"origin_context": origin_context} if origin_context else {}
+        # Only a person answering live (YES_SOURCES) answers what the agent asked
+        # them. A hub peer's message (the "agent" source) is a turn like the user's,
+        # but its words never do.
+        if getattr(event, "source", None) in YES_SOURCES:
+            origin_kwargs["may_answer"] = True
 
         if data.get("source") == "voice" and data.get("voice"):
             plugin = self._coordinator.event_bus.get_service("voice_plugin")
             if plugin is None:
                 return {"status": "rejected", "reason": "Voice admission is unavailable"}
+            # The turn's grant comes only from the admission (VoicePlugin.admit),
+            # never from the event: the voice tool policy governs it either way.
             return await plugin.admit(
                 data,
-                lambda: self._coordinator.process_user_input(
+                lambda tool_context=None: self._coordinator.process_user_input(
                     message,
                     pre_displayed=pre_displayed,
                     voice=data["voice"],
-                    **origin_kwargs,
+                    **{**origin_kwargs, "origin_context": tool_context},
                 ),
             )
 
@@ -463,6 +471,16 @@ class MessageHandler:
                 # the LLM responded to the nudge text instead of continuing
                 # work, produced no tool calls, and the session went silent.
                 qp.turn_completed = False
+                # A hub wake starts a new operator-driven turn, not the
+                # block-requested continuation (that runs through the queue
+                # drain's continue_conversation, which keeps the flag). Reset
+                # the Stop-hook budget: a turn that died mid-block (ESC/cancel)
+                # must not leak stop_hook_active: true into this wake's Stop
+                # payload — a parity hook reads it as its own continuation and
+                # under-blocks once — and the block budget must not carry over
+                # (#357).
+                qp._stop_hook_active = False
+                qp._stop_hook_continuations = 0
                 # Wall-clock checkpoints only — never kill a working chain.
                 # Force-completing on a timer orphaned the last turn's tool
                 # results (they were in history but the LLM never got called

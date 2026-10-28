@@ -119,6 +119,38 @@ export function frameInterval(size: number, lively: boolean, strained: boolean):
  * still reads as a beat at the laptop instead of yanking it in and out.
  */
 export const TOOL_HOLD = 0.9;
+/** Seconds a thinking blip between two tool calls waits before it shows. */
+export const TOOL_GAP = 0.35;
+
+/**
+ * When the next activity may take the stage from the one shown: 0 = now. A
+ * tool's look holds TOOL_HOLD, and a breath of thinking waits TOOL_GAP to see
+ * whether the next call follows; errors and offline cut in at once.
+ */
+export function holdUntil(shownIsTool: boolean, nextUrgent: boolean, nextIsThinking: boolean, shownSince: number, now: number): number {
+  return shownIsTool && !nextUrgent ? Math.max(shownSince + TOOL_HOLD, nextIsThinking ? now + TOOL_GAP : 0) : 0;
+}
+
+/** What an avatar shows, and what waits out a tool's hold to replace it. */
+export type Stage<A extends string> = { activity: A; since: number; queued: A | null; queuedAt: number };
+
+/**
+ * One wanted activity arrives. Back to the one shown: the blip in between
+ * never happened. Otherwise it takes over now (`switched`) or waits out the hold.
+ */
+export function stageActivity<A extends string>(
+  stage: Stage<A>,
+  next: A,
+  now: number,
+  shownIsTool: boolean,
+  nextUrgent: boolean,
+): { stage: Stage<A>; switched: boolean } {
+  if (next === stage.activity) return { stage: { ...stage, queued: null }, switched: false };
+  if (next === stage.queued) return { stage, switched: false };
+  const until = holdUntil(shownIsTool, nextUrgent, next === ("thinking" as string), stage.since, now);
+  if (now < until) return { stage: { ...stage, queued: next, queuedAt: until }, switched: false };
+  return { stage: { ...stage, queued: null, queuedAt: until }, switched: true };
+}
 
 /** Seconds in one round of the typing routine (each gem runs a little faster or slower). */
 export const FRENZY = 3.4;

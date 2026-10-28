@@ -8,6 +8,7 @@ an adapter behind this boundary.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import platform
 import sys
 import time
@@ -43,6 +44,9 @@ from .voice_types import (
 
 _T = TypeVar("_T")
 JOIN_TICKET_TTL_MS = 300_000
+# A page handed a session this recently is still joining: a room seen empty
+# then gets a full grace again instead of ending under it.
+HANDOUT_GRACE_S = 30.0
 
 
 class RuntimeHost(Protocol):
@@ -141,6 +145,7 @@ class _SessionRecord:
     handle: object | None = None
     start_task: asyncio.Task[None] | None = None
     stop_reason: StopReason | None = None
+    handed_out_at: float = 0.0  # monotonic: create returned it or a join ticket was issued
 
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
@@ -172,6 +177,9 @@ class EngineRuntimeHost:
         self._sessions: dict[VoiceSessionId, _SessionRecord] = {}
         self._active_by_key: dict[tuple[str, str, str, str | None, str], VoiceSessionId] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # A running worker's exit and its room's user; not background tasks, since
+        # they last as long as it does.
+        self._worker_watches: set[asyncio.Task[None]] = set()
         self._shutting_down = False
 
     async def prepare(self) -> RuntimeStatus:
@@ -214,6 +222,7 @@ class EngineRuntimeHost:
                     if existing.state in active_states:
                         # A slower resolver response must never regress an
                         # already-published service lease.
+                        existing.handed_out_at = time.monotonic()
                         return _to_view(existing)
                     raise RuntimeHostError(
                         "target_mismatch",
@@ -226,6 +235,7 @@ class EngineRuntimeHost:
                         self._active_by_key.pop(key, None)
                     return self._create_session_locked(owner_id, control_session_id, target, key)
                 if existing.binding.service_lease_epoch == target.service_lease_epoch:
+                    existing.handed_out_at = time.monotonic()
                     return _to_view(existing)
                 operation_lock = existing.operation_lock
 
@@ -304,6 +314,7 @@ class EngineRuntimeHost:
                         "LiveKit join ticket signing is not configured.",
                     )
                 binding = current.binding.model_copy(update={"generation": current.generation})
+                current.handed_out_at = time.monotonic()
                 room_name = f"kollab-{voice_session_id}-g{current.generation}"
                 expires_at_utc_ms = self._utc_now_ms() + JOIN_TICKET_TTL_MS
 
@@ -421,6 +432,15 @@ class EngineRuntimeHost:
                 raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
             return _to_view(record)
 
+    async def get_binding(self, owner_id: OwnerId, voice_session_id: VoiceSessionId) -> VoiceSessionBinding:
+        """The stored binding for an owned session (what admit_turn compares against)."""
+        async with self._lock:
+            record = self._sessions.get(voice_session_id)
+            if record is None or record.binding.owner_id != owner_id:
+                # Never reveal another owner's session.
+                raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+            return record.binding
+
     async def shutdown(self) -> None:
         """Fence all session generations, stop ready handles, and drain starts/stops."""
         async with self._lock:
@@ -438,6 +458,8 @@ class EngineRuntimeHost:
                     self._fence_record_locked(current, reason="shutdown")
 
         await self.wait_for_background_tasks()
+        for task in tuple(self._worker_watches):
+            task.cancel()  # only a worker whose stop failed is still running
         async with self._lock:
             failed_stops = tuple(
                 record
@@ -630,17 +652,38 @@ class EngineRuntimeHost:
                 )
             return await operation()
 
+    def _starting(self, binding: VoiceSessionBinding) -> _SessionRecord | None:
+        record = self._sessions.get(binding.voice_session_id)
+        if record is not None and record.generation == binding.generation and record.state == "starting":
+            return record
+        return None
+
+    def _setup_detail(self, binding: VoiceSessionBinding, detail: str) -> None:
+        record = self._starting(binding)
+        if record is not None:
+            record.detail = detail
+
     async def _start_session(self, binding: VoiceSessionBinding) -> None:
         try:
+            ensure_runtime = getattr(self._runtime, "ensure_runtime", None)
+            if ensure_runtime is not None:
+                # The first start installs voice support (minutes): show each step.
+                await ensure_runtime(lambda detail: self._setup_detail(binding, detail))
+                if self._starting(binding) is None:
+                    raise RuntimeHostError("stopped", 409, "Voice stopped during setup.")
             handle = await self._runtime.start_session(binding)
-        except Exception:
+        except Exception as exc:
             async with self._lock:
                 record = self._sessions.get(binding.voice_session_id)
                 if record is None:
                     return
                 if record.generation == binding.generation and record.state == "starting":
                     record.state = "error"
-                    record.detail = "The voice runtime could not be started."
+                    record.detail = (
+                        exc.detail
+                        if isinstance(exc, RuntimeHostError)
+                        else "The voice runtime could not be started."
+                    )
                     record.retryable = True
                     if self._active_by_key.get(record.idempotency_key) == binding.voice_session_id:
                         self._active_by_key.pop(record.idempotency_key, None)
@@ -657,6 +700,12 @@ class EngineRuntimeHost:
                 record.state = "ready"
                 record.detail = None
                 record.retryable = False
+                wait_exited = getattr(self._runtime, "wait_exited", None)
+                if wait_exited is not None:
+                    self._watch_worker(self._end_on_exit(binding, handle, wait_exited))
+                wait_abandoned = getattr(self._runtime, "wait_abandoned", None)
+                if wait_abandoned is not None:
+                    self._watch_worker(self._end_when_abandoned(binding, handle, wait_abandoned))
                 return
             expected_generation = record.generation if record is not None else binding.generation + 1
             reason = record.stop_reason if record is not None else "shutdown"
@@ -669,6 +718,68 @@ class EngineRuntimeHost:
             expected_generation=expected_generation,
             reason=reason or "session_switch",
         )
+
+    async def _end_on_exit(
+        self,
+        binding: VoiceSessionBinding,
+        handle: object,
+        wait_exited: Callable[[object], Awaitable[None]],
+    ) -> None:
+        """A worker that exits while its session still holds it ends that session.
+
+        Without this the session stays ready with no worker in the room: the
+        browser keeps its mic on and hears nothing, and create keeps handing
+        the same dead session back.
+        """
+        await wait_exited(handle)
+        record = self._sessions.get(binding.voice_session_id)
+        if record is None:
+            return
+        async with record.operation_lock:
+            async with self._lock:
+                if record.handle is not handle:
+                    return  # a stop or switch took it first: that exit was ours
+                revoke_voice_admissions_for_generation(binding.voice_session_id, record.generation)
+                record.state = "error"
+                record.detail = "The voice worker stopped."
+                record.retryable = True
+                record.handle = None
+                if self._active_by_key.get(record.idempotency_key) == binding.voice_session_id:
+                    self._active_by_key.pop(record.idempotency_key, None)
+        with contextlib.suppress(Exception):
+            await self._runtime.stop_session(binding, handle, "error")  # the backend lets go of it
+
+    async def _end_when_abandoned(
+        self,
+        binding: VoiceSessionBinding,
+        handle: object,
+        wait_abandoned: Callable[[VoiceSessionBinding, object], Awaitable[bool]],
+    ) -> None:
+        """A room its user left, and did not come back to in time, ends as a stop does.
+
+        A closed or reloaded page sends no stop, and its worker would keep running
+        and keep the voice service's lease. Until then create hands this session
+        back, so a reload that starts voice again rejoins the room.
+        """
+        while True:
+            if not await wait_abandoned(binding, handle):
+                return  # the worker exited first: _end_on_exit has it
+            record = self._sessions.get(binding.voice_session_id)
+            if record is None:
+                return
+            if time.monotonic() - record.handed_out_at >= HANDOUT_GRACE_S:
+                break
+            # A page was just given this session (a reload near the end of the
+            # grace): it is still joining, so wait a full grace again.
+        async with record.operation_lock:
+            async with self._lock:
+                if record.handle is handle:  # else a stop, switch or exit took it first
+                    self._fence_record_locked(record, reason="disconnect")
+
+    def _watch_worker(self, coroutine: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(coroutine)
+        self._worker_watches.add(task)
+        task.add_done_callback(self._worker_watches.discard)
 
     async def _stop_handle(
         self,

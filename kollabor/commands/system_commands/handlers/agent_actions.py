@@ -9,6 +9,17 @@ from kollabor_events.models import Event
 
 from .agent import AgentCommandHandler
 
+
+def generation_refusal(result: dict) -> str:
+    """The error line for a generation the LLM service refused."""
+    if result.get("reason") == "native_provider_required":
+        return (
+            "[err] Generation needs a native provider: ACP agents cannot write "
+            "these files. Switch with /llm, then try again"
+        )
+    return f"[err] Generation not started: {result.get('message') or result.get('reason')}"
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -124,9 +135,17 @@ async def handle_agent_modal_actions(
                 source=source,
             )
             # Send to LLM - it will use @@@FILE blocks to generate files
-            await handler.llm_service.process_user_input(generation_prompt)
-            # Close modal - LLM handles the rest with existing tool infrastructure
-            data["close_modal"] = True
+            result = await handler.llm_service.process_user_input(
+                generation_prompt, native_only=True
+            )
+            if isinstance(result, dict) and result.get("status") == "rejected":
+                # Keep the form open so the description is not lost.
+                data["display_messages"] = [
+                    ("error", generation_refusal(result), {}),
+                ]
+            else:
+                # Close modal - LLM handles the rest with existing tool infrastructure
+                data["close_modal"] = True
         else:
             data["display_messages"] = [
                 ("error", "[err] LLM service not available", {}),

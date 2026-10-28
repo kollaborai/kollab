@@ -1,6 +1,17 @@
 """Test configuration and fixtures."""
 
+import tempfile
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def no_real_voice_service(monkeypatch):
+    """Voice talks to a scratch root's service: a voice start asks the service for
+    its status and replaces an idle one running other code, the developer's too."""
+    with tempfile.TemporaryDirectory(prefix="kv-", dir="/tmp") as root:  # short: it holds a socket
+        monkeypatch.setenv("KOLLAB_VOICE_ROOT", root)
+        yield root
 
 
 @pytest.fixture(autouse=True)

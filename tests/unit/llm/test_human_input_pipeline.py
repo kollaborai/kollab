@@ -598,3 +598,108 @@ async def test_authenticated_agent_rejects_acp_registry_lookup_failure():
         request_id="req-fail", thread_id="thread-fail",
     )
     assert result == {"status": "rejected", "reason": "acp_unavailable"}
+
+
+async def _native_route_service(profile_provider: str, *, acp_active: bool):
+    """Minimal service with real ACP admission and a spy native queue."""
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(
+            get_provider=lambda: profile_provider
+        )
+    )
+    service._pending_agent_hud = []
+    service.current_parent_uuid = "parent-1"
+    service._queue_processor = SimpleNamespace(
+        enqueue=AsyncMock(),
+        process_message_batch=AsyncMock(return_value="parent-2"),
+        continue_conversation=AsyncMock(return_value="parent-3"),
+        turn_completed=False,
+    )
+    service._enqueue_with_overflow_strategy = AsyncMock()
+    service._message_handler = SimpleNamespace(
+        handle_user_input=AsyncMock(return_value={"status": "native"})
+    )
+    service.message_display_service = SimpleNamespace(
+        display_user_message=MagicMock(),
+        display_error_message=MagicMock(),
+    )
+    service.conversation_logger = SimpleNamespace(
+        log_user_message=AsyncMock(return_value="parent-2")
+    )
+    service.api_service = SimpleNamespace(model="native-model")
+    service.supports_image_input = MagicMock(return_value=True)
+    service.is_processing = True
+    service.cancel_processing = False
+    service.cancellation_message_shown = False
+    service.create_background_task = MagicMock()
+
+    class ACP:
+        active = acp_active
+        startup_error = None
+
+        def __init__(self):
+            self.admissions = []
+            self.voice_rules_epochs = set()
+
+        async def steer(self, *args, **kwargs):
+            return False
+
+        def admit(self, message, *, request_id, source, thread_id=None, origin=None):
+            self.admissions.append((message, source))
+            return SimpleNamespace(request_id=request_id, turn_id="turn-1")
+
+    acp = ACP()
+    if acp_active:
+        bus.register_service("acp_orchestrator", acp)
+    await bus.register_hook(
+        Hook(
+            name="process_user_input",
+            plugin_name="llm_core",
+            event_type=EventType.USER_INPUT,
+            priority=HookPriority.LLM.value,
+            callback=service._handle_user_input,
+        )
+    )
+    return service, acp
+
+
+@pytest.mark.asyncio
+async def test_process_user_input_routes_active_acp_through_canonical_admission():
+    service, acp = await _native_route_service("AcP", acp_active=True)
+
+    result = await service.process_user_input("normal human prompt")
+
+    assert result["status"] == "queued"
+    assert acp.admissions == [("normal human prompt", UserInputSource.TUI.value)]
+    service._enqueue_with_overflow_strategy.assert_not_awaited()
+    service.conversation_logger.log_user_message.assert_not_awaited()
+    service._message_handler.handle_user_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_user_input_rejects_unavailable_acp_without_native_enqueue():
+    service, _ = await _native_route_service(" ACP ", acp_active=False)
+
+    result = await service.process_user_input("normal human prompt")
+
+    assert result["status"] == "rejected"
+    assert result["reason"] == "acp_unavailable"
+    service._enqueue_with_overflow_strategy.assert_not_awaited()
+    service.conversation_logger.log_user_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_native_only_generation_is_rejected_for_active_acp():
+    service, acp = await _native_route_service("acp", acp_active=True)
+
+    result = await service.process_user_input("generate agent files", native_only=True)
+
+    assert result == {
+        "status": "rejected",
+        "reason": "native_provider_required",
+    }
+    assert acp.admissions == []
+    service._enqueue_with_overflow_strategy.assert_not_awaited()

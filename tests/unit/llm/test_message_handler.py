@@ -104,14 +104,14 @@ class TestMessageHandler(unittest.TestCase):
     def test_handle_user_input(self):
         """Test user input handler."""
         data = {"message": "hello"}
-        event = MagicMock()
+        event = MagicMock(source="user")  # typed in the TUI
 
         result = self.loop.run_until_complete(
             self.handler.handle_user_input(data, event)
         )
 
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=False
+            "hello", pre_displayed=False, may_answer=True
         )
         self.assertEqual(result, {"status": "processed"})
 
@@ -123,7 +123,7 @@ class TestMessageHandler(unittest.TestCase):
         self.loop.run_until_complete(
             self.handler.handle_user_input(
                 {"message": "show status", "origin_context": origin_context},
-                event=None,
+                event=MagicMock(source="state_rpc"),  # how a room turn arrives
             )
         )
 
@@ -131,6 +131,7 @@ class TestMessageHandler(unittest.TestCase):
             "show status",
             pre_displayed=False,
             origin_context=origin_context,
+            may_answer=True,
         )
 
 
@@ -153,14 +154,14 @@ class TestMessageHandler(unittest.TestCase):
         self.loop.create_task(release_startup())
 
         result = self.loop.run_until_complete(
-            self.handler.handle_user_input({"message": "hello"}, MagicMock())
+            self.handler.handle_user_input({"message": "hello"}, MagicMock(source="user"))
         )
 
         self.coordinator.message_display_service.display_user_message.assert_called_once_with(
             "hello"
         )
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=True
+            "hello", pre_displayed=True, may_answer=True
         )
         self.assertEqual(result, {"status": "processed"})
 
@@ -348,6 +349,52 @@ class TestMessageHandler(unittest.TestCase):
                 self.coordinator.create_background_task.called,
                 "_hub_continue() must restart _process_queue() when "
                 "processing_queue has messages after releasing is_processing",
+            )
+
+        self.loop.run_until_complete(run())
+
+    def test_hub_continue_resets_stale_stop_hook_state(self):
+        """A hub wake after ESC mid-block starts a fresh Stop-hook budget (#357).
+
+        Regression: a turn that died while a Stop-hook block was active left
+        _stop_hook_active True and the continuation budget spent; the hub
+        wake's continuation then fired Stop with a stale stop_hook_active:
+        true (a Claude-Code-parity hook under-blocks once) and a carry-over
+        3-block cap.
+        """
+
+        async def run():
+            self.coordinator.conversation_history.append(
+                type("obj", (object,), {"role": "user", "content": "hello"})()
+            )
+
+            qp = self.coordinator._queue_processor
+            # ESC latch from a drain that already stopped, with stale
+            # stop-hook state from a block the dying turn never resolved.
+            qp.cancel_processing = True
+            qp.is_processing = False
+            qp.turn_completed = True
+            qp._stop_hook_active = True
+            qp._stop_hook_continuations = 2
+            qp.processing_queue = asyncio.Queue()
+
+            async def complete_turn():
+                qp.turn_completed = True
+
+            self.coordinator._continue_conversation = complete_turn
+
+            await self.handler.handle_llm_continue({"source": "hub-test"}, MagicMock())
+            hub_factory = self.coordinator.create_background_task.call_args[0][0]
+            await hub_factory()
+
+            self.assertFalse(
+                qp._stop_hook_active,
+                "wake-after-cancel must clear stale stop_hook_active",
+            )
+            self.assertEqual(
+                qp._stop_hook_continuations,
+                0,
+                "wake-after-cancel must reset the Stop-hook block budget",
             )
 
         self.loop.run_until_complete(run())
@@ -705,3 +752,40 @@ class TestMessageHandler(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_add_message_trigger_llm_rejects_acp_before_mutating_or_enqueuing(self):
+        self.coordinator._uses_acp_input = MagicMock(return_value=True)
+        data = {
+            "messages": [{"role": "user", "content": "do not queue natively"}],
+            "options": {"trigger_llm": True},
+        }
+
+        result = self.loop.run_until_complete(
+            self.handler.handle_add_message(data, MagicMock())
+        )
+
+        self.assertEqual(
+            result,
+            {"success": False, "error": "acp_requires_submit_human_input"},
+        )
+        self.coordinator._add_conversation_message.assert_not_called()
+        self.coordinator.conversation_logger.log_user_message.assert_not_awaited()
+        self.coordinator._enqueue_with_overflow_strategy.assert_not_awaited()
+        self.coordinator.create_background_task.assert_not_called()
+        self.coordinator.message_display_service.show_loading.assert_not_called()
+
+    def test_llm_continue_rejects_acp_without_launching_native_continuation(self):
+        self.coordinator._uses_acp_input = MagicMock(return_value=True)
+
+        result = self.loop.run_until_complete(
+            self.handler.handle_llm_continue({"source": "agent-orchestrator"}, MagicMock())
+        )
+
+        self.assertEqual(
+            result,
+            {"status": "rejected", "reason": "acp_requires_submit_human_input"},
+        )
+        self.coordinator.create_background_task.assert_not_called()
+        self.coordinator._continue_conversation.assert_not_awaited()
+        self.coordinator.message_display_service.display_error_message.assert_called_once()

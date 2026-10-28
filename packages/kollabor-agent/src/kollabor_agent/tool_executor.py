@@ -18,6 +18,7 @@ from .file_operations_executor import FileOperationsExecutor
 from .mcp_integration import MCPIntegration
 from .shell_executor import ShellExecutor
 from .tool_output_budget import ToolOutputArtifactStore
+from .voice_admission import is_voice_origin
 from .voice_tool_policy import (
     MAX_VOICE_COMMAND_SECONDS,
     MAX_VOICE_OUTPUT_BYTES,
@@ -25,6 +26,7 @@ from .voice_tool_policy import (
     VoiceToolDecision,
     VoiceToolExecutionGuard,
 )
+from .yes_approval import NEEDS_YES, NOT_IN_HIDDEN_TURN, YesApprovals, call_approval
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +130,10 @@ class ToolExecutor:
             interactive_shell = config.get("terminal.interactive_shell", False)
         self.shell_executor = ShellExecutor(interactive=interactive_shell)
         self._voice_tool_guard = VoiceToolExecutionGuard()
+        self.yes_approvals = YesApprovals()
+        # Trust All, kept in step by PermissionManager: a voice turn then runs its
+        # tools as a typed one does, with no voice list and no spoken yes.
+        self.trust_all = False
 
         # True while a tool is genuinely executing. The TurnWatchdog reads this
         # (like an in-flight API call) so a long-running foreground tool — e.g.
@@ -456,6 +462,13 @@ class ToolExecutor:
         self._executed_count = 0
         return count
 
+    def _ask_for_yes(self, tool_data: Dict[str, Any], context: Dict[str, Any] | None) -> str:
+        """Keep a call for the user's yes; what the model reads in place of its result."""
+        self.yes_approvals.ask(tool_data, context)  # never a hidden turn's call
+        if isinstance(context, dict) and context.get("voice_hidden") is True:
+            return NOT_IN_HIDDEN_TURN
+        return NEEDS_YES
+
     async def execute_tool(
         self,
         tool_data: Dict[str, Any],
@@ -472,21 +485,36 @@ class ToolExecutor:
 
         tool_id = tool_data.get("id", "unknown")
         tool_name = self._get_display_name(tool_data)
+        approval = "yes" if self.yes_approvals.take(tool_data) else None
         voice_decision: VoiceToolDecision | None = None
-        if execution_context is not None and execution_context.get("source") == "livekit_voice":
+        if is_voice_origin(execution_context) and not self.trust_all:
             voice_decision = self._voice_tool_guard.evaluate(
                 tool_data,
                 execution_context,
                 repository_root=self.workspace or Path.cwd(),
             )
+            if approval is None:
+                approval = "ask"  # a voice turn asks for a yes, never waits on a prompt
+            elif voice_decision.reason_code == "confirmation_required":
+                # Their yes OK'd it: the guard plans it again, argv with no shell.
+                voice_decision = self._voice_tool_guard.evaluate(
+                    tool_data,
+                    execution_context,
+                    repository_root=self.workspace or Path.cwd(),
+                    approved=True,
+                )
             if not voice_decision.allowed:
                 reason_code = voice_decision.reason_code or "command_blocked"
                 message = voice_decision.message or "Voice tool policy denied this action."
+                error = f"{reason_code}: {message}"
+                if reason_code == "confirmation_required":
+                    error = self._ask_for_yes(tool_data, execution_context)
+                logger.info(f"Voice tool {tool_id} not run: {reason_code}")
                 result = ToolExecutionResult(
                     tool_id=tool_id,
                     tool_type=tool_data.get("type", "unknown"),
                     success=False,
-                    error=f"{reason_code}: {message}",
+                    error=error,
                     metadata={
                         "reason_code": reason_code,
                         "voice_tool_policy": execution_context.get("voice_tool_policy"),
@@ -545,7 +573,11 @@ class ToolExecutor:
             if execution_context is not None:
                 inner_kwargs["execution_context"] = execution_context
                 inner_kwargs["voice_decision"] = voice_decision
-            result = await self._execute_tool_inner(tool_data, **inner_kwargs)
+            approval_token = call_approval.set(approval)
+            try:
+                result = await self._execute_tool_inner(tool_data, **inner_kwargs)
+            finally:
+                call_approval.reset(approval_token)
             self._executed_count += 1
 
             if self._tool_output_store is not None:
@@ -606,7 +638,7 @@ class ToolExecutor:
             tool_type = "terminal"
 
         voice_terminal_plan: VoiceTerminalPlan | None = None
-        if execution_context is not None and execution_context.get("source") == "livekit_voice":
+        if is_voice_origin(execution_context) and not self.trust_all:
             decision = voice_decision or self._voice_tool_guard.evaluate(
                 tool_data,
                 execution_context,
@@ -672,6 +704,10 @@ class ToolExecutor:
                 final_data = pre_call_results.get("main", {}).get("final_data", {})
                 permission_decision = final_data.get("permission_decision", {})
                 reason = permission_decision.get("reason", "Permission denied")
+                if permission_decision.get("needs_yes") is True:
+                    # A prompt it did not wait on: the manager's own decision, never
+                    # a tool's text, keeps the call for the user's yes.
+                    reason = self._ask_for_yes(tool_data, execution_context)
 
                 logger.warning(f"Tool {tool_id} execution denied: {reason}")
                 return ToolExecutionResult(
