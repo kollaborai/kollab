@@ -144,6 +144,26 @@ _prepend_dev_workspace_paths()
 
 def cli_main():
     """Run the interactive app, its headless account-free relay, or `kollab service`."""
+    # The model-free relay is an exempt command in halt_runtime.boot_decision.
+    # Dispatch it before importing the full app's kill-switch runtime: the
+    # standalone relay artifact intentionally contains no workspace packages.
+    if sys.argv[1:2] == ["relay"]:
+        if sys.argv[2:3] == ["run"]:
+            from plugins.hub.relay_runtime import main
+
+            return main(sys.argv[3:])
+        if sys.argv[2:3] != ["serve"]:
+            print("usage: kollab relay serve --domain <domain> [options] | run --config <file>")
+            if sys.argv[2:] and sys.argv[2] not in {"-h", "--help"}:
+                raise SystemExit(2)
+            return
+        # `serve --origin ...` is the bare worker `run` supervises; every other `serve` is the directory.
+        if any(arg == "--origin" or arg.startswith("--origin=") for arg in sys.argv[3:]):
+            from plugins.hub.relay_service import main
+        else:
+            from plugins.hub.relay_selfhost import main
+
+        return main(sys.argv[3:])
     # Kill switch (spec section 1, "Waiters"): keep argv and the full
     # environment before anything pops KOLLAB_SERVICE or the detached flag,
     # then hold, refuse or wait when this folder is halted.
@@ -167,23 +187,6 @@ def cli_main():
         protocol = isolated_stdout()
         from kollabor.mcp_hub import main as mcp_hub_main
         return mcp_hub_main(protocol=protocol)
-    if sys.argv[1:2] == ["relay"]:
-        if sys.argv[2:3] == ["run"]:
-            from plugins.hub.relay_runtime import main
-
-            return main(sys.argv[3:])
-        if sys.argv[2:3] != ["serve"]:
-            print("usage: kollab relay serve --domain <domain> [options] | run --config <file>")
-            if sys.argv[2:] and sys.argv[2] not in {"-h", "--help"}:
-                raise SystemExit(2)
-            return
-        # `serve --origin ...` is the bare worker `run` supervises; every other `serve` is the directory.
-        if any(arg == "--origin" or arg.startswith("--origin=") for arg in sys.argv[3:]):
-            from plugins.hub.relay_service import main
-        else:
-            from plugins.hub.relay_selfhost import main
-
-        return main(sys.argv[3:])
     if sys.argv[1:2] == ["service"]:
         from kollabor.service import ACTIONS
         from kollabor.service import main as service_main

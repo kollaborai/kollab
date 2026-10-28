@@ -151,11 +151,12 @@ def agent_proc():
     agent.wait()
 
 
-def _select(agent, rows, procs=(), tree=None):
+def _select(agent, rows, procs=(), tree=None, info=None):
     me = nh.Proc(agent.pid, os.getpid(), ["/opt/this-install/bin/kollab"], {}, "/work")
     return {p.pid for p in nh.select_sweep(
         [me, *procs], install=INSTALL, scopes=["machine"], agent_pids=[agent.pid],
-        protect=nh.ancestors(os.getpid()), tree=tree or hr.process_tree(), tool_shells=rows, info=hr.process_info(),
+        protect=nh.ancestors(os.getpid()), tree=tree or hr.process_tree(), tool_shells=rows,
+        info=info if info is not None else hr.process_info(),
     )}
 
 
@@ -208,10 +209,14 @@ def test_a_process_named_tmux_by_argv0_is_still_swept(agent_proc):
     try:
         _wait(lambda: bool(left.update(group()) or left))
         (fake,) = left
-        assert hr.process_info()[fake][1].endswith("tmux")  # ps names it tmux
+        # Linux ps reports the executable's comm (sleep), while macOS may report argv[0].
+        # Force the misleading name to exercise the same adversarial case on both.
+        info = hr.process_info()
+        start, _, tty = info[fake]
+        info[fake] = (start, "tmux", tty)
         assert nh.exe_path(fake).endswith("/sleep")
         tagged = nh.Proc(fake, 1, ["tmux"], {"KOLLAB_AGENT_PID": str(agent_proc.pid)}, "/")  # F13: tag needed
-        assert fake in _select(agent_proc, [(shell.pid, t0, agent_proc.pid)], [tagged])
+        assert fake in _select(agent_proc, [(shell.pid, t0, agent_proc.pid)], [tagged], info=info)
     finally:
         for pid in left:
             os.kill(pid, signal.SIGKILL)

@@ -486,7 +486,7 @@ keys, the managed-config record or MCP settings.
 ### Waiters (R4, N3, N7, R18, R3-F11)
 
 - A launch whose folder is in an active halt's scope becomes a waiter, except:
-  `--hub *` subcommands, `kollab service *`, `--version`, `--help`,
+  `--hub *` subcommands, `kollab service *`, `kollab relay *`, `kollab mcp *`, `--version`, `--help`,
   `--attach`, and `--web-ui` (R4-N3: it runs no model, Kollab.app starts it,
   `cli.py:2308`, and a person confirms resumes through it), which run
   normally; and `-p` pipe runs and ACP stdio, which

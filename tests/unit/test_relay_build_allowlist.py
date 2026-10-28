@@ -42,6 +42,12 @@ def child_env(tree):
 
 def test_packaged_relay_imports_and_help_from_allowlist_alone(artifact_tree):
     assert (artifact_tree / "plugins/hub/phone_static/index.html").read_text() == "<main>PhoneLink</main>"
+    # A directory relay is model-free and exempt even when this home's halt is active.
+    private = artifact_tree.parent / "home" / ".kollab" / "private"
+    private.mkdir(parents=True)
+    halt_file = private / "halt.json"
+    halt_file.write_text('{"scopes":{"net":"machine"},"networks":{}}')
+    halt_file.chmod(0o600)
     modules = [
         name[:-3].replace("/", ".").removesuffix(".__init__")
         for name in build_service.FILES if name.endswith(".py")
