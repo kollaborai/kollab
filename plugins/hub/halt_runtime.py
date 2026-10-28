@@ -606,7 +606,9 @@ def run_interactive(folder: str, *, root: Path | None = None, read_key: Callable
     Drives the same ``HaltScreen`` the TUI's Connect screen opens with `h`
     (plugins/altview/connect_halt_altview.py), printed, since no app runs here.
     """
-    from plugins.altview.connect_halt_altview import HaltScreen, halt_view_lines
+    from kollabor_tui.key_parser import KeyParser
+    from kollabor_tui.terminal_state import get_global_terminal_state
+    from plugins.altview.connect_halt_altview import HaltScreen
 
     from .halt_context import HaltContext
 
@@ -614,10 +616,12 @@ def run_interactive(folder: str, *, root: Path | None = None, read_key: Callable
     read_key = read_key or _read_key
     start_listener(root)
     screen = HaltScreen(HaltContext(folder, root))
-    names = {"\x1b": "Escape", "": "Escape", "\r": "Enter", "\n": "Enter", "\x7f": "Backspace"}
+    parser = KeyParser()
 
-    async def step(name: str, char: str) -> bool:
+    async def step(name: str, char: str, frame_is_current: Callable[[], bool] = lambda: True) -> bool:
         await wait_for_listener(root, timeout=5.0)
+        if (name == "Enter" or (screen.reason is None and char)) and not frame_is_current():
+            return False
         try:
             done = await screen.key(name, char) if name or char else False
             await screen.load()
@@ -627,28 +631,121 @@ def run_interactive(folder: str, *, root: Path | None = None, read_key: Callable
         return done
 
     asyncio.run(step("", ""))
+    with _waiter_input_mode(read_key is _read_key):
+        return _waiter_loop(screen, read_key, step, parser, get_global_terminal_state)
+
+
+def _waiter_loop(screen: Any, read_key: Callable[[], str], step: Any, parser: Any, terminal_state: Any) -> int:
+    from kollabor_tui.key_parser import KeyParser
+    from plugins.altview.connect_halt_altview import halt_frame_state, halt_input_allowed
+
     while True:
-        for line in halt_view_lines(screen, 100):
-            print(line)
+        terminal = terminal_state()
+        terminal.update_size()
+        width, height = terminal.get_size()
+        lines, safe = _waiter_lines(screen, width, height)
+        if sys.stdout.isatty():
+            sys.stdout.write("\x1b[H\x1b[2J" + "\r\n".join(lines))
+        else:
+            print("\n".join(lines))
+        sys.stdout.flush()
+        frame = halt_frame_state(screen)
         key = read_key()
-        name = names.get(key, "")
+        if not key:
+            return 0
+        if key == "\n":
+            key = "\r"
+        event = None
+        for char in key:
+            event = parser.parse_char(char) or event
+        if event is None:
+            event = parser.check_for_standalone_escape()
+        if event is None:
+            parser = KeyParser()  # discard an incomplete sequence
+            continue
+        name, char = event.name, event.char or ""
+        if name == "Ctrl+C":
+            return 130
         if name == "Escape" and screen.reason is None:
             return 0
-        asyncio.run(step(name, "" if name else key))
+        terminal.update_size()
+        current_size = terminal.get_size()
+        if (not safe or current_size != (width, height)) and (name == "Enter" or (screen.reason is None and char)):
+            continue
+        if (name == "Enter" or (screen.reason is None and char)) and not halt_input_allowed(
+            screen, max(1, width - 1), max(1, height), 1, name, char
+        ):
+            continue
+        def frame_is_current() -> bool:
+            terminal.update_size()
+            return safe and terminal.get_size() == (width, height) and halt_frame_state(screen) == frame
+
+        asyncio.run(step(name, char, frame_is_current))
 
 
-def _read_key() -> str:
+def _waiter_lines(screen: Any, width: int, height: int) -> tuple[list[str], bool]:
+    """Render a bounded viewport with the complete action target kept in view."""
+    from plugins.altview.connect_halt_altview import _wrap, halt_viewport
+
+    # Leave the last column unused so the terminal never auto-wraps a line.
+    width = max(1, width - 1)
+    height = max(1, height)
+    if width < 8:
+        return ["Resize"][:height], False
+    body, safe = halt_viewport(screen, width, height, 1)
+    if not safe:
+        return _wrap("Resize terminal to use controls", width)[:height], False
+    header = _wrap("Halt and Resume", width)
+    if len(header) > 1:
+        header = [" Halt"]
+    return [*header, *body], True
+
+
+@contextlib.contextmanager
+def _waiter_input_mode(enabled: bool) -> Iterator[None]:
     import termios
     import tty
 
-    if not os.isatty(0):
-        return ""
+    if not enabled or not os.isatty(0):
+        yield
+        return
     old = termios.tcgetattr(0)
     try:
-        tty.setraw(0)
-        return os.read(0, 1).decode(errors="replace")
+        tty.setraw(0, termios.TCSANOW)
+        yield
     finally:
         termios.tcsetattr(0, termios.TCSADRAIN, old)
+
+
+def _read_key() -> str:
+    import codecs
+    import select
+
+    if not os.isatty(0):
+        return ""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    first = os.read(0, 1)
+    if not first:
+        return ""
+    try:
+        result = decoder.decode(first)
+    except UnicodeDecodeError:
+        return "\ufffd"
+    # Gather the rest of a UTF-8 character or terminal escape sequence.
+    while (not result or result.startswith("\x1b")) and select.select([0], [], [], 0.3)[0]:
+        part = os.read(0, 1)
+        if not part:
+            break
+        try:
+            result += decoder.decode(part)
+        except UnicodeDecodeError:
+            return "\ufffd"
+        if result.startswith("\x1b") and len(result) > 1:
+            from kollabor_tui.key_parser import KeyParser
+
+            if result[1:] in KeyParser.ESCAPE_SEQUENCES:
+                break
+    return result or "\ufffd"
 
 
 # ----------------------------------------------------------------- sweep
