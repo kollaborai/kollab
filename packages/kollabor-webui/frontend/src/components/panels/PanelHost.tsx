@@ -670,7 +670,7 @@ export function PanelHost({
                   changes: formChanges(panel, top.draft),
                   ...(target ? { target } : {}),
                   ...(panel.context ? { context: panel.context } : {}),
-                },
+                }),
                 { reset: true },
               )
             }
