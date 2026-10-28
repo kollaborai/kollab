@@ -10,7 +10,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     from .commands.registry import SlashCommandRegistry
@@ -1485,16 +1485,28 @@ def _cleanup_presence_for_pid(presence_dir: Path, pid: int) -> None:
 
 
 async def stop_agent_record(
-    agent: dict, reason: str, *, presence_dir: Optional[Path] = None, kill=None
+    agent: dict, reason: str, *, presence_dir: Optional[Path] = None, kill=None,
+    identity: Optional[Callable[[int], Optional[tuple]]] = None,
 ) -> tuple[bool, str]:
     """The stop ladder: graceful shutdown over the socket, SIGTERM, then SIGKILL.
 
     ``kill(pid, sig)`` defaults to ``os.kill``; the halt sweep passes one that
     signals the whole process group (``halt_runtime.group_kill``).
+
+    F15b: every signal is bound to the process that was selected -- its start time,
+    exe and argv hash, read once here and re-verified immediately before SIGTERM
+    and again before SIGKILL. A pid reused during the waits is never signalled
+    ("identity changed"), and a live pid whose identity cannot be read is not
+    signalled either.
     """
+    from plugins.hub.halt_runtime import same_identity
     from plugins.hub.messenger import AgentMessenger
     from plugins.hub.presence import get_presence_dir
 
+    if identity is None:
+        from plugins.hub.halt_runtime import process_identity
+
+        identity = process_identity
     kill = kill or os.kill
     presence_dir = presence_dir or get_presence_dir()
     desig = agent.get("identity", "?")
@@ -1504,12 +1516,29 @@ async def stop_agent_record(
     def cleanup() -> None:
         _cleanup_presence_for_pid(presence_dir, pid)
 
+    ident = identity(pid) if pid else None  # captured once, at selection time
+
+    def signal_guard() -> str:
+        """F15b: "" when the selected process may still be signalled, else the refusal line."""
+        if pid and ident is None:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return ""  # already gone: the signal path reports it stopped
+            return f"not killed: {desig} (pid {pid} identity could not be read)"
+        if ident is not None and not same_identity(identity(pid), ident):
+            return f"not killed: {desig} (pid {pid} identity changed)"
+        return ""
+
     async def hard_kill() -> tuple[bool, str]:
         # Uncatchable, so a wedged event loop that swallowed the graceful
         # shutdown *and* SIGTERM still dies here (`stop all` reaps a hung
         # coordinator instead of giving up).
         if not pid:
             return False, f"failed to stop {desig} (no pid)"
+        refuse = signal_guard()
+        if refuse:
+            return False, refuse
         try:
             kill(pid, 9)  # SIGKILL
         except (OSError, ProcessLookupError):
@@ -1532,6 +1561,9 @@ async def stop_agent_record(
         if await _wait_for_pid_exit(pid, timeout=STOP_GRACE_SECONDS):
             cleanup()
             return True, f"stopped {desig}"
+        refuse = signal_guard()
+        if refuse:
+            return False, refuse
         try:
             kill(pid, 15)  # SIGTERM
         except (OSError, ProcessLookupError):
@@ -1543,6 +1575,9 @@ async def stop_agent_record(
         return await hard_kill()
 
     if pid:
+        refuse = signal_guard()
+        if refuse:
+            return False, refuse
         try:
             kill(pid, 15)  # SIGTERM
         except (OSError, ProcessLookupError):

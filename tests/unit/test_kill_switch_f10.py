@@ -95,7 +95,7 @@ def test_new_1_nc_with_an_empty_env_under_an_agent_cannot_lift_a_halt(monkeypatc
     listener = hr.HaltListener(Path(d), grace=0)
     handled: list = []
 
-    async def handle(req):
+    async def handle(req, peer=None):
         handled.append(req)
         return {"ok": False, "error": "handled"}
 

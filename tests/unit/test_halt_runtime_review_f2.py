@@ -191,6 +191,7 @@ def test_take_halt_records_the_hand_off_folder(tmp_path, monkeypatch):
     _book(tmp_path)
     listener = hr.HaltListener(tmp_path, open_link=open_link, grace=0, stop=_stop_ok,
                                processes=lambda: [], agents=lambda: [])
+    listener._networks_of = lambda folder: [NET]  # F15b: the hand-off folder belongs to this network
     asyncio.run(listener.handle({"op": "halt", "network": NET, "scope": "machine", "folder": FOLDER}))
     assert hr.read_halt(tmp_path)["folders"][NET] == [FOLDER]
 

@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import contextvars
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -951,8 +952,23 @@ def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
     return kill
 
 
-def kollab_start(pid: int, install=None) -> float | None:
-    """F13: ``pid``'s start time while it is a kollab of this install, else None (gone, reused, unreadable)."""
+def process_identity(pid: int) -> tuple[float, str, str] | None:
+    """F15b: (start time, exe, argv hash) of a live same-user ``pid``; None when it cannot be read."""
+    from .network_halt import read_process
+
+    try:
+        proc = read_process(pid, with_cwd=False)
+        row = process_info().get(pid)
+        if proc is None or row is None:
+            return None
+        argv_hash = hashlib.sha256(json.dumps(proc.argv).encode()).hexdigest()[:16]
+        return (row[0], proc.exe or row[1], argv_hash)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def kollab_identity(pid: int, install=None) -> tuple[float, str, str] | None:
+    """F15b: ``process_identity`` while ``pid`` is still a kollab of this install (a reused pid is None)."""
     from .network_halt import Install, _cli_args, read_process
 
     try:
@@ -960,26 +976,40 @@ def kollab_start(pid: int, install=None) -> float | None:
         if proc is None or _cli_args(proc, install or Install.current()) is None:
             return None
         row = process_info().get(pid)
-        return row[0] if row else None
+        if row is None:
+            return None
+        argv_hash = hashlib.sha256(json.dumps(proc.argv).encode()).hexdigest()[:16]
+        return (row[0], proc.exe or row[1], argv_hash)
     except Exception:  # noqa: BLE001
         return None
 
 
+def same_identity(now: tuple | None, before: tuple | None) -> bool:
+    """F15b: one process still: start within ``REUSE_SLACK`` (ps reads drift a second), same exe, same argv."""
+    from .network_halt import REUSE_SLACK
+
+    if not isinstance(now, tuple) or not isinstance(before, tuple) or len(now) != 3 or len(before) != 3:
+        return False
+    return abs(now[0] - before[0]) <= REUSE_SLACK and now[1] == before[1] and now[2] == before[2]
+
+
 async def fallback_stop(
     scopes: list, agents: list, procs: list, protect: Iterable[int], *, install=None, grace: float = 3.0,
-    identify: Callable[[int], float | None] | None = None,
+    identify: Callable[[int], tuple[float, str, str] | None] | None = None,
 ) -> list[tuple[dict, bool, str]]:
     """F12/NEW-4: the sweep threw, so stop the in-scope agents by pid: SIGTERM, then SIGKILL after ``grace``.
 
     F13/NEW-4b: only pids the sweep itself would take: a kollab of this install among the processes
     already read, in scope by its own folder (or the presence record's, for the same pid). A presence pid
-    that is not such a process is left alone (stale presence, a reused pid, a forged row). Each target's
-    start time is read before SIGTERM and again before SIGKILL; a pid that is no longer the same kollab
-    is not killed. Nothing the agents started is chased here (that is what failed). Never raises.
+    that is not such a process is left alone (stale presence, a reused pid, a forged row). F15b: every
+    signal is bound to the identity (start time, exe, argv hash) read at selection and re-verified
+    immediately before SIGTERM and again before SIGKILL, so a pid that became another process in
+    between is never signalled. Nothing the agents started is chased here (that is what failed).
+    Never raises.
     """
     from .network_halt import Install, _cli_args, _never_swept, in_scope, pid_ok
 
-    identify = identify or (lambda pid: kollab_start(pid, install))
+    identify = identify or (lambda pid: kollab_identity(pid, install))
     out: list[tuple[dict, bool, str]] = []
     try:
         install = install or Install.current()
@@ -1006,7 +1036,10 @@ async def fallback_stop(
             except Exception:  # noqa: BLE001
                 continue
         starts = {pid: identify(pid) for pid in targets}
-        for pid in targets:
+        for pid in list(targets):
+            if not same_identity(identify(pid), starts[pid]):  # F15b: reuse between selection and the signal
+                out.append((targets.pop(pid), False, f"pid {pid} not killed: identity changed"))
+                continue
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
@@ -1018,7 +1051,7 @@ async def fallback_stop(
             name = rec.get("identity", pid)
             if not _running(pid):
                 out.append((rec, True, f"stopped {name} (by pid)"))
-            elif starts[pid] is not None and _same_start(identify(pid), starts[pid]):
+            elif starts[pid] is not None and same_identity(identify(pid), starts[pid]):
                 try:
                     os.kill(pid, signal.SIGKILL)
                     out.append((rec, True, f"stopped {name} (by pid, SIGKILL)"))
@@ -1031,13 +1064,6 @@ async def fallback_stop(
         logger.exception("halt listener: fallback stop failed")
         out.append(({"identity": "fallback"}, False, f"fallback stop failed: {type(error).__name__}"))
     return out
-
-
-def _same_start(now: float | None, before: float) -> bool:
-    """F14: ``ps`` start times of one process drift by a second between reads; allow ``REUSE_SLACK``."""
-    from .network_halt import REUSE_SLACK
-
-    return now is not None and abs(now - before) <= REUSE_SLACK
 
 
 def _alive(pid: int) -> bool:
@@ -1092,6 +1118,7 @@ class HaltListener:
         self.links: dict[str, Any] = {}  # network id -> HaltLink
         self.folders: dict[str, set[str]] = {}  # network id -> folders seen here
         self.held: dict[str, Any] = {}  # F12: network id -> scope this listener holds, kept in memory too
+        self.state_lock = asyncio.Lock()  # F15b: one halt/resume state change at a time (held + halt.json)
         self._lock_fd: int | None = None
         self._server: asyncio.AbstractServer | None = None
         self._done = asyncio.Event()
@@ -1184,7 +1211,7 @@ class HaltListener:
         except (OSError, ValueError, AttributeError, TypeError) as error:
             logger.warning("halt listener: halt.json unreadable (%s); nothing is lifted", type(error).__name__)
             return  # the halt holds; the file may come back
-        data = self._restore_scopes(data)
+        data = await self._restore_scopes(data)
         for net in list((data.get("scopes") or {})):
             book = (data.get("networks") or {}).get(net)
             if book is None and net in self.held:
@@ -1194,7 +1221,7 @@ class HaltListener:
         if not (read_halt_held(self.root).get("scopes") or {}) and time.monotonic() >= self._hold_until:
             self._done.set()
 
-    def _restore_scopes(self, data: dict[str, Any]) -> dict[str, Any]:
+    async def _restore_scopes(self, data: dict[str, Any]) -> dict[str, Any]:
         """F12: a halt this listener holds stays in halt.json even when the file was deleted or rewritten.
 
         D7 found ``rm halt.json`` released a halted machine: the link's exchange wrote the halt back
@@ -1218,7 +1245,8 @@ class HaltListener:
             for net in lost:
                 folders[net] = sorted(set(folders.get(net) or []) | self.folders.get(net, set()))
 
-        update_halt(restore, self.root)
+        async with self.state_lock:  # F15b: cannot interleave with a hand-off or a lift
+            update_halt(restore, self.root)
         try:
             return read_halt(self.root)
         except (OSError, ValueError, AttributeError, TypeError):
@@ -1249,7 +1277,7 @@ class HaltListener:
 
                 reply = {"ok": False, "error": GUARD_REFUSAL}
             else:
-                reply = await self.handle(request)
+                reply = await self.handle(request, peer=peer_pid(writer.get_extra_info("socket")))
         except Exception as error:  # never let one caller take the listener down
             reply = {"ok": False, "error": str(error) or type(error).__name__}
         writer.write(json.dumps(reply).encode() + b"\n")
@@ -1257,13 +1285,13 @@ class HaltListener:
             await writer.drain()
             writer.close()
 
-    async def handle(self, request: dict) -> dict:
+    async def handle(self, request: dict, peer: int | None = None) -> dict:
         """``halt.sock``: the hand-off and the two halt panels, nothing else."""
         op = request.get("op")
         if op == "ping":
             return {"ok": True}
         if op == "halt":
-            return await self.take_halt(request)
+            return await self.take_halt(request, peer)
         if op in ("describe", "act", "members", "status"):
             link = self._link_for(request.get("folder"), request.get("network"))
             if link is None:
@@ -1294,18 +1322,20 @@ class HaltListener:
 
     # halt --------------------------------------------------------------
 
-    async def take_halt(self, order: dict) -> dict:
-        """Step 2 to 4: record scope, sweep, open links."""
-        net, scope, folder = order.get("network"), order.get("scope"), order.get("folder")
-        if not isinstance(net, str) or not (scope == "machine" or isinstance(scope, list)):
+    async def take_halt(self, order: dict, peer: int | None = None) -> dict:
+        """Step 2 to 4: record scope, sweep, open links.
+
+        F15b: the scope comes from this listener's own state -- the membership-bound roster
+        (``halt_scope``, read through the folder's control), what it already holds and the folders
+        it has seen for the network -- never from the request, and a hand-off can only widen the
+        hold. The protected pids are the listener, its waiters and the peer's parents, read from
+        the socket; a claim in the request body protects nothing. The sender is not screened by
+        ancestry (the relay agent legitimately hands off): what it may set is bounded by the
+        recorded, signature-verified halt in this network's book and the derivations above.
+        """
+        net = order.get("network")
+        if not isinstance(net, str):
             return {"ok": False, "error": "invalid hand-off"}
-        if isinstance(scope, list) and not all(isinstance(f, str) for f in scope):
-            scope = "machine"  # F14: a malformed folder list holds the machine, never raises
-        # a sweep needs a halt recorded in this network's book (halt_act or a merged peer order)
-        book = ((read_halt_held(self.root).get("networks") or {}).get(net))
-        active = _book_active_hashes(net, book)
-        if not active or (order.get("hash") and order["hash"] not in active):
-            return {"ok": False, "error": "no recorded halt for that network"}
         # F13/NEW-4c: from here on every step is guarded on its own: the halt is always recorded (on disk,
         # or in memory for the next tick to write), everything that can be stopped is, and the reply
         # carries every error. Nothing below raises.
@@ -1321,29 +1351,31 @@ class HaltListener:
                 errors.append(f"{what}: {type(error).__name__}: {error}"[:200])
                 return default
 
-        if isinstance(folder, str):
-            self.folders.setdefault(net, set()).add(folder)
-        agents = guarded("presence", lambda: list(self._agents() if self._agents else _live_agents()), [])
-        for a in agents:
-            if isinstance(a, dict) and a.get("project"):
-                guarded("presence", lambda a=a: self._remember_folder(a["project"]), None)
-        if isinstance(scope, list):  # every folder of this network on this machine, not only the first
-            scope = sorted({*scope, *(f for f in self.folders.get(net, ()))})
+        # a sweep needs a halt recorded in this network's book (halt_act or a merged peer order)
+        async with self.state_lock:  # F15b: one hand-off at a time; a concurrent resume cannot interleave
+            data = read_halt_held(self.root)
+            book = (data.get("networks") or {}).get(net)
+            active = _book_active_hashes(net, book)
+            if not active or (order.get("hash") and order["hash"] not in active):
+                return {"ok": False, "error": "no recorded halt for that network"}
+            folder = order.get("folder")
+            if isinstance(folder, str):  # membership-checked: a folder joins only a network it belongs to
+                guarded("presence", lambda: self._remember_folder(folder), None)
+            agents = guarded("presence", lambda: list(self._agents() if self._agents else _live_agents()), [])
+            for a in agents:
+                if isinstance(a, dict) and a.get("project"):
+                    guarded("presence", lambda a=a: self._remember_folder(a["project"]), None)
+            scope = self._trusted_scope(net, data)
+            self.held[net] = scope
 
-        if isinstance(scope, list) and not scope:
-            scope = "machine"  # F7: an empty folder list is malformed, so it holds the machine
+            def record(data: dict) -> None:
+                data.setdefault("scopes", {})[net] = scope
+                seen = set(data.setdefault("folders", {}).get(net, []))
+                data["folders"][net] = sorted(seen | self.folders.get(net, set()))
 
-        self.held[net] = scope
-
-        def record(data: dict) -> None:
-            data.setdefault("scopes", {})[net] = scope
-            seen = set(data.setdefault("folders", {}).get(net, []))
-            data["folders"][net] = sorted(seen | self.folders.get(net, set()))
-
-        guarded("record", lambda: update_halt(record, self.root), None)
+            guarded("record", lambda: update_halt(record, self.root), None)
         waiters = guarded("waiters", lambda: set(waiter_pids(self.root)), set())
-        protect = guarded("protect", lambda: {os.getpid(), *waiters, *(
-            int(p) for p in order.get("protect") or [] if str(p).isdigit())}, {os.getpid(), *waiters})
+        protect = guarded("protect", lambda: self._protect_set(peer, waiters), {os.getpid(), *waiters})
         stop = self._stop or guarded("stop", lambda: _default_stop(protect, self.root), None)
         scopes = guarded("scopes", lambda: active_scopes(read_halt_held(self.root)), []) or [scope]
         if scope not in scopes:
@@ -1379,7 +1411,8 @@ class HaltListener:
             known = {(s.get("identity"), s.get("folder")) for s in data.get("stopped", [])}
             data.setdefault("stopped", []).extend(s for s in stopped if (s["identity"], s["folder"]) not in known)
 
-        guarded("record stopped", lambda: update_halt(note, self.root), None)
+        async with self.state_lock:  # F15b: every halt.json write of the listener goes under the lock
+            guarded("record stopped", lambda: update_halt(note, self.root), None)
         try:
             await self.open_links(net)
         except Exception as error:  # noqa: BLE001
@@ -1395,6 +1428,59 @@ class HaltListener:
     def _remember_folder(self, folder: str) -> None:
         for net in self._networks_of(folder):
             self.folders.setdefault(net, set()).add(folder)
+
+    def _trusted_scope(self, net: str, data: dict) -> "str | list[str]":
+        """F15b: what to hold for ``net``: this listener's own derivation unioned with what it already
+        holds and the folders it has seen for that network. Never a request claim, never narrower
+        than what is already held."""
+        candidates: list[Any] = []
+        held = (data.get("scopes") or {}).get(net)
+        if held == "machine" or (isinstance(held, list) and held):
+            candidates.append(held)
+        try:
+            derived = self._roster_scope(net, data)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("halt listener: scope derivation failed (%s)", type(error).__name__)
+            derived = None
+        if derived == "machine" or (isinstance(derived, list) and derived):
+            candidates.append(derived)
+        if any(c == "machine" for c in candidates):
+            return "machine"  # union with a machine-wide hold is the machine
+        folders = {f for c in candidates if isinstance(c, list) for f in c if isinstance(f, str)}
+        folders |= {f for f in self.folders.get(net, ()) if isinstance(f, str)}
+        folders |= {f for f in ((data.get("folders") or {}).get(net) or []) if isinstance(f, str)}
+        return sorted(folders) if folders else "machine"  # F7: nothing else derivable holds the machine
+
+    def _roster_scope(self, net: str, data: dict) -> "str | list[str] | None":
+        """The scope the issuing CLI computed (``halt_scope``), read here from the folder's own network
+        state: the machine when this machine counts on that network, else its folders of the network."""
+        from .network_halt import halt_scope
+
+        hints = sorted(self.folders.get(net, ()))
+        hints += [f for f in ((data.get("folders") or {}).get(net) or []) if f not in hints]
+        for folder in hints:
+            if not isinstance(folder, str):
+                continue
+            control = _folder_control(folder)
+            if control is None or control.network_id() != net:
+                continue
+            return halt_scope(control.view(), control.machine_hex, [folder])
+        return None
+
+    def _protect_set(self, peer: int | None, waiters: Iterable[int]) -> set[int]:
+        """F15b: the listener, its waiters and the caller's chain, read from the socket peer pid.
+        The peer itself is spared only when the F10 guard clears it (a person's CLI): an agent,
+        a tool shell or an unknown caller is not shielded from the sweep by its own request.
+        A claim in the request body protects nothing."""
+        from .network_halt import ancestors
+
+        protect = {os.getpid(), *waiters}
+        if isinstance(peer, int) and peer > 0:
+            chain = ancestors(peer)
+            if caller_refusal(peer):
+                chain.discard(peer)  # its parents (the person's shell, tmux) still survive group kills
+            protect |= chain
+        return protect
 
     def _networks_of(self, folder: str) -> list[str]:
         try:
@@ -1437,12 +1523,13 @@ class HaltListener:
                     return
             await link.close()  # releases the relay-owner lock
         if mark:
-            self.held.pop(net, None)
+            async with self.state_lock:  # F15b: cannot interleave with a hand-off taking the halt again
+                self.held.pop(net, None)
 
-            def lift(data: dict) -> None:
-                (data.get("scopes") or {}).pop(net, None)
+                def lift(data: dict) -> None:
+                    (data.get("scopes") or {}).pop(net, None)
 
-            update_halt(lift, self.root)
+                update_halt(lift, self.root)
 
 
 def _peer_is_tool_shell(writer: Any) -> bool:

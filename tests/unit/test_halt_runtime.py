@@ -149,7 +149,7 @@ class FakeLink:
         return {"active": [{"machine": "m" * 64, "reason": "r"}]}
 
 
-def test_hand_off_records_scope_sweeps_and_opens_the_link(tmp_path):
+def test_hand_off_records_scope_sweeps_and_opens_the_link(tmp_path, monkeypatch):
     stopped, log = [], []
     me = os.getpid()
     cli = 4242
@@ -174,6 +174,9 @@ def test_hand_off_records_scope_sweeps_and_opens_the_link(tmp_path):
         tmp_path, stop=stop, processes=lambda: procs,
         agents=lambda: [{"identity": "lapis", "pid": 101, "project": FOLDER}], open_link=open_link,
     )
+    monkeypatch.setattr(nh, "ancestors", lambda pid: {pid, me})  # F15b: the peer's chain, read by the listener
+    monkeypatch.setattr(hr, "caller_refusal", lambda pid: "")  # F15b: the peer is a person's CLI, not an agent
+    listener._networks_of = lambda folder: ["net1"]  # F15b: the folder belongs to this network
     orig = hr.sweep
 
     async def sweep(*a, **k):
@@ -183,7 +186,8 @@ def test_hand_off_records_scope_sweeps_and_opens_the_link(tmp_path):
     hr_state, hr._state_dir_for = hr._state_dir_for, lambda folder, net: Path(folder)
     try:
         reply = asyncio.run(listener.handle(
-            {"op": "halt", "network": "net1", "scope": [FOLDER], "folder": FOLDER, "protect": [me, cli]}
+            {"op": "halt", "network": "net1", "scope": [FOLDER], "folder": FOLDER, "protect": [me, cli]},
+            peer=cli,
         ))
     finally:
         hr.sweep, hr._state_dir_for = hr_sweep, hr_state

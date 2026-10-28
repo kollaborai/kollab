@@ -125,6 +125,7 @@ def test_new_4_a_failing_sweep_still_stops_the_agents(tmp_path, monkeypatch):
 
     monkeypatch.setattr(hr, "sweep", boom)
     monkeypatch.setattr(hr, "_state_dir_for", lambda folder, net: None)
+    monkeypatch.setattr(hr, "kollab_identity", lambda pid, install=None: (1000.0, "/x", "h"))  # F15b seam
     me = nh.Proc(agent.pid, os.getpid(), [f"{sys.prefix}/bin/python", "-m", "kollabor_cli_main"], {}, "/work")
     listener = hr.HaltListener(tmp_path, processes=lambda: [me], open_link=open_link,
                                agents=lambda: [{"identity": "lapis", "pid": agent.pid, "project": "/work",

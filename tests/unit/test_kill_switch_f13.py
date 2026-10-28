@@ -63,7 +63,7 @@ def test_fallback_kills_only_a_pid_that_is_still_the_same_kollab():
         code = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
         stubborn = subprocess.Popen([sys.executable, "-c", code])
         time.sleep(0.5)
-        starts = iter([1000.0, 1000.0 if same else 2000.0])
+        starts = iter([(1000.0, "/x", "h")] * 3 if same else [(1000.0, "/x", "h"), (2000.0, "/x", "h")])
         me = nh.Proc(stubborn.pid, os.getpid(), KOLLAB_ARGV, {}, "/w")
         try:
             got = asyncio.run(hr.fallback_stop(["machine"], [], [me], set(), grace=0.3,

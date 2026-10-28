@@ -97,7 +97,7 @@ def test_fallback_allows_a_one_second_start_drift():
     code = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
     stubborn = subprocess.Popen([sys.executable, "-c", code])
     time.sleep(0.5)
-    starts = iter([1000.0, 1001.0])
+    starts = iter([(1000.0, "/x", "h"), (1001.0, "/x", "h"), (1001.0, "/x", "h")])
     me = nh.Proc(stubborn.pid, os.getpid(), KOLLAB_ARGV, {}, "/w")
     try:
         got = asyncio.run(hr.fallback_stop(["machine"], [], [me], set(), grace=0.3, identify=lambda pid: next(starts)))
@@ -144,6 +144,7 @@ def test_a_failing_default_stop_still_lets_the_fallback_see_the_process_table(tm
     monkeypatch.setattr(hr, "_default_stop", lambda protect, root: (_ for _ in ()).throw(ImportError("no cli")))
     # a kollab with no presence row: only the process table names it (pid above every OS's ceiling: no signal lands)
     monkeypatch.setattr(hr, "_read_candidates", lambda: [nh.Proc(P1, 1, KOLLAB_ARGV, {}, "/w")])
+    monkeypatch.setattr(hr, "kollab_identity", lambda pid, install=None: (1000.0, "/x", "h"))  # F15b seam
     listener = hr.HaltListener(tmp_path, agents=lambda: [], open_link=_no_link)
     reply = asyncio.run(listener.handle({"op": "halt", "network": "net1", "scope": "machine", "folder": "/w"}))
     assert reply["ok"] and any(str(P1) in m for m in reply["stopped"]), reply
