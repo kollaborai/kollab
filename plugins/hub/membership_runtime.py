@@ -60,17 +60,30 @@ class Memberships:
     # -- discovery ----------------------------------------------------------
 
     def _membership_dirs(self) -> dict[str, Path]:
-        from .device_record import NETWORKS_DIR_NAME, workspace_dir
+        import hashlib
+
+        from .config_sync import kollab_root
+        from .device_record import LEGACY_NETWORK_DIR_NAME, NETWORKS_DIR_NAME, workspace_dir
 
         networks = workspace_dir(self.workspace, self.root) / NETWORKS_DIR_NAME
         found: dict[str, Path] = {}
-        if not networks.is_dir():
+        if networks.is_dir():
+            for entry in sorted(networks.iterdir()):
+                if not entry.is_dir() or entry.name == "unjoined":
+                    continue
+                if (entry / "state.json").exists():
+                    found[entry.name] = entry
+        if found:
             return found
-        for entry in sorted(networks.iterdir()):
-            if not entry.is_dir() or entry.name == "unjoined":
-                continue
-            if (entry / "state.json").exists():
-                found[entry.name] = entry
+        # v1 layout (#364): the state migration refuses to move a folder's state while its
+        # daemon runs, so a live machine can hold its only membership under
+        # legacy/network/<digest>. Reads must see it exactly then — a halt is issued while
+        # the daemon is alive — or the halt paths cannot resolve folder -> network.
+        legacy = kollab_root(self.root) / LEGACY_NETWORK_DIR_NAME / hashlib.sha256(
+            str(self.workspace).encode()
+        ).hexdigest()
+        if legacy.is_dir() and (legacy / "state.json").exists():
+            found[legacy.name[:12]] = legacy
         return found
 
     def list(self) -> list[Membership]:

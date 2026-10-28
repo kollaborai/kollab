@@ -1487,7 +1487,10 @@ class HaltListener:
             from .membership_runtime import Memberships
 
             return [_network_of(folder, m.state_dir) for m in Memberships(Path(folder)).list()]
-        except Exception:
+        except Exception as error:  # noqa: BLE001
+            # #364: this silent [] left folders[net] empty on every machine and jammed all
+            # resume forms; a folder that resolves to nothing is worth a log line.
+            logger.warning("halt listener: folder %s resolved to no network (%s)", folder, type(error).__name__)
             return []
 
     async def open_links(self, net: str) -> None:
