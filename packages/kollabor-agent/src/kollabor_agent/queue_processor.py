@@ -1094,8 +1094,13 @@ class QueueProcessor:
         Returns:
             Updated parent UUID
         """
-        # A new user message starts a fresh turn chain: stop-hook budget resets.
+        # A new user message starts a fresh turn chain: stop-hook budget and
+        # continuation flag reset. A turn that died mid-block (cancel, error,
+        # new input breaking LOOP 2) must not leak stop_hook_active: true
+        # into the next turn's Stop payload, where a well-behaved hook would
+        # read it as its own continuation and skip blocking.
         self._stop_hook_continuations = 0
+        self._stop_hook_active = False
         voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
         self.active_voice = voice_inputs[-1].voice if voice_inputs else None
         merged_origin_context = merge_voice_origin_contexts(messages)

@@ -188,8 +188,10 @@ class TestStopHookBlock(unittest.TestCase):
         emitted = self.event_bus.emit_with_hooks.call_args[0][1]
         self.assertIs(emitted["stop_hook_active"], True)
 
-    def test_new_user_batch_resets_budget(self):
-        """process_message_batch starts a fresh stop-hook budget per user turn."""
+    def test_new_user_batch_resets_budget_and_flag(self):
+        """process_message_batch starts a fresh stop-hook budget per user turn
+        and clears stop_hook_active, so a turn that died mid-block cannot
+        leak the flag into the next turn's Stop payload."""
         self.processor._stop_hook_continuations = 2
         self.processor._stop_hook_active = True
         self.processor._execute_llm_turn = AsyncMock(return_value="uuid-1")
@@ -202,6 +204,7 @@ class TestStopHookBlock(unittest.TestCase):
         )
 
         self.assertEqual(self.processor._stop_hook_continuations, 0)
+        self.assertFalse(self.processor._stop_hook_active)
 
     def test_blocked_reason_without_parent_uuid_skips_transcript_log(self):
         """No parent_uuid (legacy callers) still continues the turn."""
