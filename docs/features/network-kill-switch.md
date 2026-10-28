@@ -1,14 +1,16 @@
 # Network Kill Switch
 
 **Status: draft and unsafe for unattended operation.** Review of the current
-implementation found that competing revocations can leave members with
-different trust state (every machine computes the same answer from the same
-signed records, but coordinated signers can still revoke together), secondary
-networks are not fully routed, and a detached process using `env -i` can lift
-its local halt. Halt hand-off scope, protected pids and per-signal process
-identity were reworked in F15b (listener-derived) and proven live in isolated
-multi-device Docker runs through D13, including the F17 sweep and the F18
-revocation transit (receipts in docs/handoff/kill-switch-phase1.md). The
+implementation found three concerns. Two are since reworked and proven: the
+revocation trust state is computed as a pure function of the valid signed
+record set (F15a, b70aef20 — every machine derives the same answer, no
+arrival order or wall clock), and revocation transit to second networks is
+in (F18, 8f71bc9e, #365) with halted-network admission gated (F19, 99c53cc1,
+#361 finding 2); both are covered by the isolated multi-device Docker runs
+through D13, together with the F15b hand-off scope/protected-pid/per-signal
+identity rework and the F17 sweep (receipts in
+docs/handoff/kill-switch-phase1.md). Still open: a detached process using
+`env -i` can lift its local halt — no fix recorded for that limitation. The
 behavior below describes the design as proven there.
 
 The intended switch stops agents on your devices with one command. Agents and
