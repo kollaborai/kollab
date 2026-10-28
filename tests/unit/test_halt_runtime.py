@@ -199,6 +199,81 @@ def test_hand_off_records_scope_sweeps_and_opens_the_link(tmp_path, monkeypatch)
     assert log == [("open", FOLDER)] and "net1" in listener.links
 
 
+def test_protect_set_never_shields_a_peer_that_is_a_live_agent(tmp_path, monkeypatch):
+    """F17/#363: a halt.sock peer that IS itself a live agent — the daemon handing off a
+    listener-learned halt — is not spared by the sweep, even though the F10 guard clears it
+    (its ancestors are clean and its env carries no tool-shell tag; that is the live D12 state).
+    Until F17 no test made the caller itself a live agent, which is how #363 shipped green."""
+    me = os.getpid()
+    daemon = 101  # the machine's agent: in presence, parented by init, no tool-shell env
+    parent = 4242
+    listener = hr.HaltListener(
+        tmp_path, agents=lambda: [{"identity": "koordinator", "pid": daemon, "project": FOLDER}]
+    )
+    monkeypatch.setattr(nh, "ancestors", lambda pid: {pid, parent, me})
+    monkeypatch.setattr(hr, "caller_refusal", lambda pid: "")  # the guard clears it — not enough
+    protect = listener._protect_set(daemon, waiters=set())
+    assert daemon not in protect  # the agent peer is swept
+    assert parent in protect and me in protect  # its chain (a person's shell, tmux) survives
+
+
+def test_protect_set_unreadable_presence_fails_closed(tmp_path, monkeypatch):
+    """F17/#363: when presence cannot be read, the peer is spared nothing (caller_refusal's
+    own posture — it refuses on unreadable presence too)."""
+    me = os.getpid()
+    listener = hr.HaltListener(tmp_path)
+
+    def boom():
+        raise OSError("presence gone")
+
+    monkeypatch.setattr(hr, "_live_agents", boom)
+    monkeypatch.setattr(nh, "ancestors", lambda pid: {pid, me})
+    monkeypatch.setattr(hr, "caller_refusal", lambda pid: "")
+    assert 4242 not in listener._protect_set(4242, waiters=set())
+
+
+def test_hand_off_from_the_daemon_sweeps_the_daemon(tmp_path, monkeypatch):
+    """F17/#363, the live D12 path replayed: the automatic hand-off's caller is the machine's
+    own --detached daemon (a presence agent). The sweep must stop it — before F17 it returned
+    {"ok": true} with stopped: [] and the daemon lived on under a machine-wide halt."""
+    stopped = []
+    me = os.getpid()
+    daemon = 101
+    procs = [nh.Proc(daemon, 1, ["/x/python", "-m", "kollabor_cli_main", "--detached"], {}, FOLDER)]
+    install = nh.Install(prefix="/x")
+    h = "ab" * 32
+    nh.HaltFile(tmp_path).write({"scopes": {}, "stopped": [], "networks": {"net1": {"halts": {
+        h: {"hash": h, "kind": "halt", "machine": "m" * 64, "issued_at": 1}}}}})
+
+    async def stop(agent):
+        stopped.append(agent.get("pid"))
+        return True, f"stopped {agent.get('identity')}"
+
+    listener = hr.HaltListener(
+        tmp_path, stop=stop, processes=lambda: procs, open_link=lambda folder, state_dir: None,
+        agents=lambda: [{"identity": "koordinator", "pid": daemon, "project": FOLDER}],
+    )
+    monkeypatch.setattr(nh, "ancestors", lambda pid: {pid, 1, me})
+    monkeypatch.setattr(hr, "caller_refusal", lambda pid: "")  # guard clears: ancestors clean, no env tag
+    listener._networks_of = lambda folder: ["net1"]
+    orig = hr.sweep
+
+    async def sweep(*a, **k):
+        return await orig(*a, **{**k, "install": install})
+
+    hr_sweep, hr.sweep = hr.sweep, sweep
+    hr_state, hr._state_dir_for = hr._state_dir_for, lambda folder, net: Path(folder)
+    try:
+        reply = asyncio.run(listener.handle(
+            {"op": "halt", "network": "net1", "scope": "machine", "folder": FOLDER, "hash": h},
+            peer=daemon,
+        ))
+    finally:
+        hr.sweep, hr._state_dir_for = hr_sweep, hr_state
+    assert reply["ok"] and reply["count"] == 1, reply
+    assert stopped == [daemon]  # the daemon that handed the halt off is swept, not spared
+
+
 def test_hand_back_releases_the_link_before_marking_lifted(tmp_path):
     log = []
     nh.HaltFile(tmp_path).write({"scopes": {"net1": [FOLDER]}, "networks": {}})

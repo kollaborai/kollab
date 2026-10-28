@@ -1477,7 +1477,14 @@ class HaltListener:
         protect = {os.getpid(), *waiters}
         if isinstance(peer, int) and peer > 0:
             chain = ancestors(peer)
-            if caller_refusal(peer):
+            # F17/#363: caller_refusal judges ancestors and env only, so a peer that IS itself a
+            # live agent — a daemon handing off a listener-learned halt — used to slip through and
+            # shield the machine's own agent from the sweep. A presence pid is an agent: never spared.
+            try:
+                agent_pids = {int(a.get("pid") or 0) for a in (self._agents() if self._agents else _live_agents())}
+            except Exception:  # presence unreadable: fail closed like caller_refusal, spare nothing
+                agent_pids = {peer}
+            if caller_refusal(peer) or peer in agent_pids:
                 chain.discard(peer)  # its parents (the person's shell, tmux) still survive group kills
             protect |= chain
         return protect

@@ -1502,10 +1502,12 @@ Run ids: halt `4a90f2c5` (row a/b), `568eae6f` (forms 2-4 + crossing `caae893a` 
 
 ### Fix designs agreed before coding (Garnet guardrail 2026-10-28: the Ed25519 handshake stays on EVERY path)
 
-- **#363 (F17)**: `caller_refusal` must also refuse a caller that IS itself a live agent (a presence
-  pid), not only one descending from an agent — restoring its documented contract ("an agent, a tool
-  shell or an unknown caller is not shielded from the sweep by its own request"); the daemon handing
-  off a listener-learned halt then stops being spared by `_protect_set`. `RelayAgentBridge._halt_changed`'s
+- **#363 (F17)**: `_protect_set` must also refuse a peer that IS itself a live agent (a presence pid),
+  not only one the F10 guard refuses — restoring `_protect_set`'s own documented contract ("an agent,
+  a tool shell or an unknown caller is not shielded from the sweep by its own request"); the daemon
+  handing off a listener-learned halt then stops being spared. (First draft widened `caller_refusal`
+  itself; dropped because a person's TUI is a presence-listed agent and widening the guard would have
+  refused their `/connect` acts — the fix belongs to the sweep shield alone.) `RelayAgentBridge._halt_changed`'s
   `go()` additionally logs the hand_off reply's `errors` (today the reply is discarded whole, so a
   failing sweep is invisible in the daemon's log — the D11 "swept nothing, no reason anywhere" hole).
 - **#365 (F18), chosen shape — the halt link answers the `network_halt` exchange**: under a halt the

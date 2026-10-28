@@ -2871,7 +2871,11 @@ class RelayAgentBridge:
 
         async def go() -> None:
             try:
-                await hr.hand_off(order)
+                reply = await hr.hand_off(order)
+                # F17/#363: the reply carries every sweep error (F13); discarding it whole left
+                # "swept nothing, no reason anywhere" in the daemon's log (D11's hole).
+                if reply.get("errors"):
+                    logger.warning("network halt: hand-off reported errors: %s", reply["errors"])
             except Exception as error:
                 logger.warning("network halt: hand-off failed (%s)", type(error).__name__)
 
