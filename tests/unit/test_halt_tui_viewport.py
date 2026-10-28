@@ -289,6 +289,8 @@ async def test_selection_and_confirmation_visible(width, height, selection):
     await view.screen.key("Enter")  # only arms the synthetic action
     await view.render_frame(0)
     text = view._renderer.text()
+    assert text.count("Selected Target") == 1
+    assert text.count(f"> Resume proposal {selection}") == 1
     assert f"> Resume proposal {selection}" in text
     assert f"Signers for proposal {selection}" in text
     assert "enter Confirm Resume" in text
@@ -314,10 +316,14 @@ async def test_long_text_scroll_and_reason_cancel(width, height):
     await view.render_frame(0)
     text = view._renderer.text()
     assert "END_" in text and "press again to Halt Network" in text
+    assert text.count("Reason:") == 1
+    assert "enter Confirm Resume" not in text
     assert "esc cancel" in text and "enter halt network" in text
     await view.screen.key("PageUp")
     await view.render_frame(0)
     assert "esc cancel" in view._renderer.text()
+    assert view._renderer.text().count("Reason:") == 1
+    assert "enter Confirm Resume" not in view._renderer.text()
     await view.screen.key("Escape")
     assert view.screen.reason is None and not view.screen.armed
 
@@ -447,6 +453,21 @@ async def test_real_panel_duplicate_targets_visible_on_both_terminal_surfaces(wi
         assert view.screen.armed == f"{row['id']}:{picked[1]['id']}"
         view.screen.armed, view.screen.message = "", ""
         view._renderer.height = height
+        view.screen.reason = "synthetic reason"
+        for armed in (False, True):
+            if armed:
+                await view.screen.key("Enter")
+            for scroll in (0, 1000):
+                view.screen.scroll, view.screen.follow = scroll, False
+                await view.render_frame(0)
+                waiter_lines, safe = _waiter_lines(view.screen, width, height)
+                for text in (view._renderer.text(), "\n".join(waiter_lines)):
+                    assert safe and text.count("Reason:") == 1
+                    assert "enter halt network" in text
+                    assert not any(f"enter {action['label']}" in text for action in panel["row_actions"])
+                    if armed:
+                        assert "press again to Halt Network" in text
+        view.screen.reason, view.screen.armed, view.screen.message = None, "", ""
 
 
 class MultiHaltContext:
@@ -512,6 +533,9 @@ async def test_multi_halt_fullscreen_exact_confirmation_boundary():
     assert not view.screen.armed and not context.calls
 
     view._renderer.height = 28
+    await view.render_frame(0)
+    assert "Resize to use row actions" in view._renderer.text()
+    view._renderer.height = 29
     await view.render_frame(0)
     text = "".join(line.strip() for line in view._renderer.lines.values())
     assert "proposal:" + "c" * 64 in text

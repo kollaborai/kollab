@@ -181,19 +181,19 @@ def _halt_parts(
         if row.get("group") != group:
             group = row.get("group")
             lines += ["", *_wrap(str(group), width)]
-        mark = ">" if index == screen.selected else " "
+        mark = ">" if index == screen.selected and not viewport else " "
         start = len(lines)
         lines += _wrap(f"{mark} {row['label']}", width)
         if row.get("detail"):
             lines += _wrap(str(row["detail"]), width, "     ")
         acts = [labels[a] for a in row.get("actions") or [] if a in labels]
-        if acts and index == screen.selected:
+        if acts and index == screen.selected and screen.reason is None and not viewport:
             lines += _wrap(f"enter {acts[0]}", width, "     ")
         if index == screen.selected:
             selected = (start, len(lines))
     if panel.get("notice"):
         lines += ["", *_wrap(panel["notice"], width)]
-    if screen.reason is not None:
+    if screen.reason is not None and not viewport:
         start = len(lines)
         lines += ["", *_wrap(f"Reason: {screen.reason}_", width, preserve_spaces=True)]
         selected = (start, len(lines))
@@ -246,11 +246,15 @@ def _halt_viewport_access(
     confirmation_footer = footer
     if screen.reason is not None:
         target = _wrap(f"Reason: {screen.reason}_", width, preserve_spaces=True)
+        message_lines = _wrap(screen.message, width) if screen.message else []
+        confirmation_footer = (
+            _wrap("press again to Halt Network", width) + footer[len(message_lines):]
+        )
     else:
         rows = screen.panel.get("rows") or []
         if rows:
             row = rows[screen.selected]
-            target = _wrap(f"> {row['label']}", width)
+            target = _wrap("Selected Target", width) + _wrap(f"> {row['label']}", width)
             if row.get("detail"):
                 target += _wrap(str(row["detail"]), width, "     ")
             picked = screen._row_action()

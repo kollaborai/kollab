@@ -437,7 +437,7 @@ def test_multi_halt_waiter_exact_confirmation_boundary(monkeypatch, capsys):
         nonlocal reads
         reads += 1
         if reads == 6:
-            terminal.size = (40, 25)
+            terminal.size = (40, 26)
         return next(keys)
 
     monkeypatch.setattr("plugins.hub.halt_context.HaltContext", lambda *args: context)
