@@ -1,0 +1,138 @@
+name: CI after auto-merge
+
+# GitHub suppresses push-to-main workflow runs for merges performed with
+# GITHUB_TOKEN. Watch successful PR CI and the human events that can unblock
+# auto-merge, then explicitly dispatch CI after the merge is visible on main.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  pull_request:
+    types: [ready_for_review]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  dispatch-main-ci:
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'ready_for_review') ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Wait for eligible auto-merge, then dispatch main CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || github.event.pull_request.number }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          pr_number="$EVENT_PR_NUMBER"
+          if [[ ! "$pr_number" =~ ^[0-9]+$ && "$EVENT_NAME" == "workflow_run" ]]; then
+            pr_number="$(gh api "repos/$REPOSITORY/actions/runs/$WORKFLOW_RUN_ID" \
+              --jq '[.pull_requests[]? | select(.base.ref == "main") | .number] | .[0] // empty')"
+            if [[ -z "$pr_number" ]]; then
+              pr_number="$(gh api "repos/$REPOSITORY/commits/$SOURCE_SHA/pulls" \
+                --jq '[.[]? | select(.base.ref == "main") | .number] | .[0] // empty')"
+            fi
+          fi
+          if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
+            echo "::warning::No main pull request is associated with this event; skipping."
+            exit 0
+          fi
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Expected a 40-character source commit SHA; got '$SOURCE_SHA'."
+            exit 1
+          fi
+
+          # Human-triggered ready/review events can arrive before PR CI
+          # completes, while an older successful run could be stale. Require
+          # the newest run for this exact head SHA to have succeeded.
+          ci_conclusion="$(gh api \
+            "repos/$REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SOURCE_SHA&event=pull_request&per_page=100" \
+            --jq '.workflow_runs[0].conclusion // "pending"')"
+          if [[ "$ci_conclusion" != "success" ]]; then
+            echo "Latest CI result for $SOURCE_SHA is '$ci_conclusion'; completion will retry."
+            exit 0
+          fi
+
+          # The ready_for_review event and Auto-merge workflow start together;
+          # allow the latter a short window to arm the PR before giving up.
+          for attempt in $(seq 1 45); do
+            pull_request="$(gh api "repos/$REPOSITORY/pulls/$pr_number")"
+            base_ref="$(jq -r '.base.ref' <<< "$pull_request")"
+            if [[ "$base_ref" != "main" ]]; then
+              echo "PR #$pr_number targets '$base_ref', not main; skipping."
+              exit 0
+            fi
+
+            head_sha="$(jq -r '.head.sha' <<< "$pull_request")"
+            if [[ "$head_sha" != "$SOURCE_SHA" ]]; then
+              echo "PR #$pr_number moved to $head_sha; this event is stale."
+              exit 0
+            fi
+
+            merged_at="$(jq -r '.merged_at // empty' <<< "$pull_request")"
+            if [[ -n "$merged_at" ]]; then
+              merge_sha="$(jq -r '.merge_commit_sha // empty' <<< "$pull_request")"
+              if [[ -z "$merge_sha" ]]; then
+                echo "::error::PR #$pr_number is merged but has no merge commit SHA."
+                exit 1
+              fi
+              merged_by="$(jq -r '.merged_by.login // empty' <<< "$pull_request")"
+              if [[ "$merged_by" != "github-actions[bot]" ]]; then
+                echo "PR #$pr_number was merged by '$merged_by'; normal push CI covers it."
+                exit 0
+              fi
+              gh workflow run ci.yml --repo "$REPOSITORY" --ref main
+              echo "Dispatched CI on main after PR #$pr_number merged as $merge_sha."
+              exit 0
+            fi
+
+            state="$(jq -r '.state' <<< "$pull_request")"
+            if [[ "$state" != "open" ]]; then
+              echo "PR #$pr_number closed without a merge; no main CI dispatch needed."
+              exit 0
+            fi
+
+            auto_merge_enabled="$(jq -r '.auto_merge != null' <<< "$pull_request")"
+            if [[ "$auto_merge_enabled" != "true" ]]; then
+              if [[ "$EVENT_NAME" == "pull_request" && "$EVENT_ACTION" == "ready_for_review" ]]; then
+                if (( attempt <= 6 )); then
+                  sleep 20
+                  continue
+                fi
+                echo "Auto-merge was not armed within 2 minutes for PR #$pr_number."
+                exit 0
+              fi
+              echo "Auto-merge is not enabled for PR #$pr_number; skipping."
+              exit 0
+            fi
+
+            review_decision="$(gh pr view "$pr_number" --repo "$REPOSITORY" \
+              --json reviewDecision --jq '.reviewDecision // "NONE"')"
+            if [[ "$review_decision" == "REVIEW_REQUIRED" || "$review_decision" == "CHANGES_REQUESTED" ]]; then
+              echo "PR #$pr_number still needs review ($review_decision); approval will retry."
+              exit 0
+            fi
+
+            sleep 20
+          done
+
+          echo "::error::PR #$pr_number did not auto-merge within 15 minutes; no main CI was dispatched."
+          exit 1
