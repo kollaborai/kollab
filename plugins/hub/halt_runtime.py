@@ -1493,7 +1493,8 @@ class HaltListener:
         try:
             from .membership_runtime import Memberships
 
-            return [_network_of(folder, m.state_dir) for m in Memberships(Path(folder)).list()]
+            dirs = [m.state_dir for m in Memberships(Path(folder)).list()] + _unjoined_state_dir(Path(folder))
+            return [_network_of(folder, d) for d in dirs]
         except Exception as error:  # noqa: BLE001
             # #364: this silent [] left folders[net] empty on every machine and jammed all
             # resume forms; a folder that resolves to nothing is worth a log line.
@@ -1609,13 +1610,27 @@ def _network_of(folder: str, state_dir: Path) -> str:
     return RelayCommands(Path(folder), state_dir=state_dir).client.network_id()
 
 
+def _unjoined_state_dir(workspace: Path, root: Path | None = None) -> list[Path]:
+    """F18/#365: a workspace's live network state can sit under ``networks/unjoined`` — the
+    founder's join-in-place shape (state.json + private/network_control.json live there; seen
+    live on ks13). The registry skips that slug so the runtime never adopts a pre-join
+    placeholder, which left the halt paths with no membership: folders[net] empty, the halt
+    listener's relay link never opened, and neither the halt nor its revocation records could
+    leave the machine. Read it here — every caller filters by a network id it already holds."""
+    from .device_record import NETWORKS_DIR_NAME, workspace_dir
+
+    unjoined = workspace_dir(workspace, root) / NETWORKS_DIR_NAME / "unjoined"
+    return [unjoined] if (unjoined / "state.json").exists() else []
+
+
 def _state_dir_for(folder: str, net: str) -> Path | None:
     from .membership_runtime import Memberships
 
-    for m in Memberships(Path(folder)).list():
+    dirs = [m.state_dir for m in Memberships(Path(folder)).list()] + _unjoined_state_dir(Path(folder))
+    for state_dir in dirs:
         try:
-            if _network_of(folder, m.state_dir) == net:
-                return m.state_dir
+            if _network_of(folder, state_dir) == net:
+                return state_dir
         except Exception:
             continue
     # a machine that never registered a membership keeps the folder's default state dir
