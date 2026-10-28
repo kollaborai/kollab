@@ -258,16 +258,12 @@ def test_crossing_revocations_with_wild_stamps_converge_in_every_order_and_batch
             nh.revocation(a.folders[0], a.key, net.id, c.fk(), 0),
             nh.revocation(b.folders[0], b.key, net.id, c.fk(), 1)]
     final = nh.revocations_to_apply(recs, view, recount=recount)
-    assert len(_who(view, final)) == 1
-    t = 50_000.0
+    assert len(_who(view, final)) == 2  # F15a: a crossing with two signers a side revokes both
     for order in itertools.permutations(recs):
         for cut in range(len(order) + 1):
-            applied, seen = set(), {}
-            applied |= nh.revocations_to_apply(list(order[:cut]), view, recount=recount, seen=seen, now=t)
-            applied |= nh.revocations_to_apply(list(order), view, recount=recount, seen=seen, now=t + 100)
-            # the first batch has settled, the second not: a key after an unsettled one must still wait
-            applied |= nh.revocations_to_apply(list(order), view, recount=recount, seen=seen, now=t + 130)
-            applied |= nh.revocations_to_apply(list(order), view, recount=recount, seen=seen, now=t + 400)
+            applied = set()
+            applied |= nh.revocations_to_apply(list(order[:cut]), view, recount=recount)
+            applied |= nh.revocations_to_apply(list(order), view, recount=recount)
             assert applied == final and len(recount(_who(view, applied)).counting) >= 2
 
 
@@ -277,32 +273,25 @@ def test_a_far_future_stamp_does_not_hold_back_an_honest_revocation():
     view = recount(set())
     recs = [nh.revocation(m.folders[0], m.key, net.id, a.fk(), 9_999_999_999) for m in (c, d)]
     recs += [nh.revocation(m.folders[0], m.key, net.id, d.fk(), 9000) for m in (b, c)]
-    seen = {}
-    nh.revocations_to_apply(recs, view, recount=recount, seen=seen, now=10_000)
-    assert set(seen.values()) == {10_000}  # this machine's clock, never the signers'
-    out = nh.revocations_to_apply(recs, view, recount=recount, seen=seen, now=10_000 + nh.REVOKE_SETTLE)
-    assert out == nh.revocations_to_apply(recs, view, recount=recount) and out
+    out = nh.revocations_to_apply(recs, view, recount=recount)
+    assert _who(view, out) == {a.mk, d.mk}  # F15a: the far-future stamp delays nothing
 
 
-def test_a_record_that_arrives_after_a_revocation_applied_can_still_diverge():
-    """Documented limit: machine X heard only C's records, waited out the window and applied; A's records reach
-    it later. Y heard everything at once. Their final sets differ: the window bounds delay, not partitions."""
+def test_a_record_that_arrives_after_a_revocation_applied_converges():
+    """F15a: the F14 divergence is gone. Machine X heard only one side of a crossing and applied it;
+    when the other side arrives, any delay later, X lands on the full-set answer like Y."""
     net, a, b, c, d = _four()
     recount = _recount(net)
     view = recount(set())
     to_a = [nh.revocation(m.folders[0], m.key, net.id, a.fk()) for m in (b, c)]
     to_c = [nh.revocation(m.folders[0], m.key, net.id, c.fk()) for m in (a, b)]
     y = nh.revocations_to_apply(to_a + to_c, view, recount=recount)
-    first = min([(a.fk(), to_a), (c.fk(), to_c)])[1]  # the key that sorts first wins at Y
-    second = to_c if first is to_a else to_a
-    seen = {}
-    x = nh.revocations_to_apply(second, view, recount=recount, seen=seen, now=0)
-    x |= nh.revocations_to_apply(second, view, recount=recount, seen=seen, now=nh.REVOKE_SETTLE)
-    x |= nh.revocations_to_apply(second + first, view, recount=recount, seen=seen, now=10**6)
-    assert _who(view, y) != _who(view, x)
+    x = nh.revocations_to_apply(to_c, view, recount=recount)
+    x |= nh.revocations_to_apply(to_a + to_c, view, recount=recount)
+    assert _who(view, x) == _who(view, y) == {a.mk, c.mk}
 
 
-def test_control_keeps_first_seen_on_its_own_clock(tmp_path, monkeypatch):
+def test_control_applies_the_second_signature_with_no_clock_of_its_own(tmp_path):
     from plugins.hub.network_control import NetworkControl
     from tests.unit.test_network_control import join, machine, meet
 
@@ -320,13 +309,8 @@ def test_control_keeps_first_seen_on_its_own_clock(tmp_path, monkeypatch):
     b.sign_revocation(dk)
     c.sign_revocation(dk)
     meet(f, b, c, d)
-    clock = [5_000_000.0]
-    monkeypatch.setattr(nh.time, "time", lambda: clock[0])
-    assert f.revocations_to_apply() == set()
-    kept = NetworkControl(f.client, machine=f.machine).data["revoke_seen"]  # persisted, one per signature (F14)
-    assert len(kept) == 2 and all(k.startswith(dk + "|") and v == 5_000_000.0 for k, v in kept.items())
-    clock[0] += nh.REVOKE_SETTLE
-    assert dk in f.revocations_to_apply()
+    assert dk in f.revocations_to_apply()  # F15a: at once, and no first-seen clock is kept anywhere
+    assert "revoke_seen" not in NetworkControl(f.client, machine=f.machine).data
 
 
 # ------------------------------------------------------------------ halt.json and halt.lock

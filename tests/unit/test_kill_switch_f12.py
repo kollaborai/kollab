@@ -267,18 +267,17 @@ def test_new_2_crossing_revocations_converge_in_every_order_and_batch():
     recount = _recount(net)
     view = recount(set())
 
-    def apply(have, now, seen):
-        return nh.revocations_to_apply(have, view, recount=recount, now=now, seen=seen)
+    def apply(have):
+        return nh.revocations_to_apply(have, view, recount=recount)
 
-    final = apply(recs, t0 + 10_000, None)
-    assert len({view.machine_of(k) for k in final}) == 1
+    final = apply(recs)
+    assert {view.machine_of(k) for k in final} == {a.mk, c.mk}  # F15a: a crossing with two signers a side revokes both
     outcomes = set()
     for order in itertools.permutations(recs):
         for cut in range(len(order) + 1):
-            applied, seen = set(), {}  # F13: this machine's own first-seen clock
-            applied |= apply(list(order[:cut]), t0 + 5, seen)  # batch one, inside the settle window
-            applied |= apply(list(order), t0 + 6, seen)  # batch two arrives
-            applied |= apply(list(order), t0 + nh.REVOKE_SETTLE + 10, seen)
+            applied = set()
+            applied |= apply(list(order[:cut]))  # batch one
+            applied |= apply(list(order))  # batch two arrives, any delay later (F15a: no clock, no window)
             outcomes.add(frozenset(applied))
             gone = {view.machine_of(k) or k for k in applied}
             assert len(recount(gone).counting) >= 2
@@ -299,7 +298,6 @@ def test_new_2_the_answer_ignores_what_this_machine_already_applied():
 def test_new_2_control_judges_from_the_roster_before_any_revocation(tmp_path, monkeypatch):
     from tests.unit.test_network_control import join, machine, meet
 
-    monkeypatch.setattr(nh, "REVOKE_SETTLE", 0)
     f = machine(tmp_path, "f")
     b, c, d = machine(tmp_path, "b"), machine(tmp_path, "c"), machine(tmp_path, "d")
     for m in (b, c, d):
@@ -317,11 +315,9 @@ def test_new_2_control_judges_from_the_roster_before_any_revocation(tmp_path, mo
     d.sign_revocation(ck)
     b.sign_revocation(ck)
     meet(f, b, c, d)
-    answer = f.revocations_to_apply()
-    assert len(answer) == 1
-    (first,) = answer
-    other = ck if first == dk else dk
-    f.client.revoke(other, announce=True)  # this machine heard the other order first and applied it
+    answer = f.revocations_to_apply()  # F15a: at once, both sides of the crossing
+    assert answer == {ck, dk}
+    f.client.revoke(ck, announce=True)  # this machine heard one side first and applied it
     assert f.revocations_to_apply() == answer
 
 
@@ -349,18 +345,14 @@ def test_new_2_a_revocation_that_would_uncount_others_below_two_is_skipped():
     assert nh.revocations_to_apply(recs, recount(set()), recount=recount) == set()
 
 
-def test_new_2_a_revocation_waits_for_the_settle_window():
+def test_new_2_a_revocation_applies_the_moment_the_second_signature_arrives():
+    """F15a: no settle window and no first-seen clock — the second counting signature is enough."""
     net, a, b, c, d = _four()
     recs = [nh.revocation(b.folders[0], b.key, net.id, d.fk(), 5000),
             nh.revocation(c.folders[0], c.key, net.id, d.fk(), 5001)]
     recount = _recount(net)
-    seen: dict = {}  # F13: counted from when this machine first held both signatures, not from issued_at
-    assert nh.revocations_to_apply(recs, recount(set()), recount=recount, now=7000, seen=seen) == set()
-    assert sorted(seen.values()) == [7000, 7000] and all(k.startswith(d.fk() + "|") for k in seen)
-    assert nh.revocations_to_apply(recs, recount(set()), recount=recount, now=7000 + nh.REVOKE_SETTLE - 1,
-                                   seen=seen) == set()
-    assert d.fk() in nh.revocations_to_apply(recs, recount(set()), recount=recount, now=7000 + nh.REVOKE_SETTLE,
-                                             seen=seen)
+    assert nh.revocations_to_apply(recs[:1], recount(set()), recount=recount) == set()
+    assert d.fk() in nh.revocations_to_apply(recs, recount(set()), recount=recount)
 
 
 # ------------------------------------------------------------------ NEW-3: no ps

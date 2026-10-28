@@ -188,7 +188,7 @@ class MembershipSync:
 
     async def tick(self) -> None:
         client = self._client
-        try:  # F12: a revocation applies once settled (REVOKE_SETTLE), not only when a list arrives
+        try:  # F15a: a revocation applies once two counting machines signed it, not only when a list arrives
             client.control.apply_revocations()
         except Exception as error:
             logger.warning("network members: revocations not applied (%s)", type(error).__name__)

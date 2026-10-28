@@ -25,7 +25,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -778,8 +777,7 @@ def revocation_ok(record: Any, network: str) -> bool:
     )
 
 
-REVOKE_SETTLE = 120  # seconds after THIS machine first held two signatures for a key before it applies it
-REVOKE_PAIR = 120  # F14: a lone signature older than this (on THIS machine's clock) never pairs again
+REVOKE_SIGNERS = 2  # counting machines (other than the target) a revocation needs; also the counting floor
 
 
 def revocations_to_apply(
@@ -789,32 +787,27 @@ def revocations_to_apply(
     protected: Iterable[str] = (),
     orders: Iterable[dict] = (),
     recount: Callable[[set[str]], Counting] | None = None,
-    seen: dict[str, float] | None = None,
-    now: float | None = None,
 ) -> set[str]:
     """Keys whose revocation this machine applies on other machines' word.
 
-    F12/NEW-2: ``view`` is the roster before any revocation, never what this machine already applied.
-    F13/NEW-2a: no signer's clock decides anything. ``issued_at`` is ignored; keys are taken in the
-    order of the revoked key itself (a key id no signer can choose for someone else), so the answer is a
-    pure function of the set of signed records. Each key needs two counting machines other than its
-    target, counted after the keys before it are gone (``recount(removed)``), and is skipped when it
-    would leave fewer than two counting machines.
-
-    F14: ``seen`` (optional, kept by the caller) maps ``"<key>|<machine>"`` to when THIS machine first
-    held that signature, by its own clock. A key completes when a signature arrives within
-    ``REVOKE_PAIR`` of an earlier one; a lone signature older than that is stale and never pairs
-    again, so an old one-signature record cannot be revived later to flip an outcome. Keys are taken by
-    completion time; keys completing within ``REVOKE_SETTLE`` of each other form one batch ordered by
-    key, so crossing revocations that reach a machine within the window in any order give one answer.
-    A batch applies once its last completion is ``REVOKE_SETTLE`` old and holds back every later batch.
-    Without ``seen`` nothing waits and every key is one batch ordered by key.
-    ``protected`` (this device's primary and the folder key that admitted it) only stops this machine
-    applying a key; the order is unchanged. A key naming a machine key revokes every folder key bound
-    to it. ``orders`` are halts this machine took: each ``revoke`` entry counts as a revocation record
+    F15a: the outcome is a pure function of the SET of valid signed records — no arrival order, no
+    wall clock, no local first-seen state, no expiry. Each key is judged alone from the roster
+    before any revocation: it applies when two distinct counting machines other than its target
+    signed it and revoking its target ALONE still leaves two counting machines (``recount``, chain
+    effects included). Judging every key alone makes the rule monotone — adding records can only
+    add keys — so machines that heard subsets, in any order, with restarts, converge on the full
+    set's answer as the missing records arrive, and what each machine applied is exactly that
+    answer. ``issued_at`` is ignored, so backdated, far-future and negative stamps change nothing.
+    A lone signature, however old, completes nothing by itself; re-signing adds no second signer
+    and nothing needs re-arming. A crossing where each side has two signers revokes BOTH sides
+    everywhere — the only resolution with no clock and no order to fight over; the floor keeps
+    two machines counting.
+    ``view`` is the roster before any revocation, never what this machine already applied.
+    ``protected`` (this device's primary and the folder key that admitted it) only stops this
+    machine applying a key. A key naming a machine key revokes every folder key bound to it.
+    ``orders`` are halts this machine took: each ``revoke`` entry counts as a revocation record
     from the order's issuer.
     """
-    now = time.time() if now is None else now
     signed: dict[str, set[str]] = {}  # key -> signing machines
     for r in records:
         if not revocation_ok(r, view.network) or view.machine_of(r["by"]) != r["machine"]:
@@ -832,39 +825,13 @@ def revocations_to_apply(
     def counting(removed: set[str]) -> set[str]:
         return set(recount(removed).counting) if recount else view.counting - removed
 
-    done: dict[str, float] = {}  # key -> when it completed here
-    for key, machines in signed.items():
-        if seen is None:
-            if len(machines) >= 2:
-                done[key] = 0.0
-            continue
-        times = sorted(seen.setdefault(f"{key}|{m}", now) for m in machines)
-        pairs = [b for a, b in zip(times, times[1:]) if b - a <= REVOKE_PAIR]
-        if pairs:
-            done[key] = pairs[0]
-    batches: list[list[str]] = []
-    for key in sorted(done, key=lambda k: (done[k], k)):
-        if batches and done[key] - done[batches[-1][-1]] <= REVOKE_SETTLE:
-            batches[-1].append(key)
-        else:
-            batches.append([key])
-    ready: list[str] = []
-    for batch in batches:
-        if seen is not None and done[batch[-1]] + REVOKE_SETTLE > now:
-            break  # not settled here: neither this batch nor any later one applies yet
-        ready += sorted(batch)
+    clean = counting(set())
     out: set[str] = set()
-    removed: set[str] = set()
-    for key in ready:
+    for key, machines in signed.items():
         target = view.machine_of(key) or key
-        if target in removed:
-            out.add(key)
+        good = {m for m in machines if m in clean and m != target}
+        if len(good) < REVOKE_SIGNERS or len(counting({target})) < REVOKE_SIGNERS:
             continue
-        now_counting = counting(removed)
-        good = {m for m in signed[key] if m in now_counting and m != target}
-        if len(good) < 2 or len(counting(removed | {target})) < 2:
-            continue
-        removed.add(target)
         out.add(key)
         out.update(f for f, m in view.folder_machine.items() if m == target)
     guarded = set(protected)

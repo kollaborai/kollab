@@ -15,7 +15,6 @@ import contextlib
 import dataclasses
 import hashlib
 import logging
-import math
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -577,33 +576,21 @@ class NetworkControl:
 
     def revocations_to_apply(self) -> set[str]:
         # F12/NEW-2: judged from the roster before any revocation (revoked folders still listed, none
-        # applied), so what this machine already applied, and in which order it heard, changes nothing
+        # applied), so what this machine already applied, and in which order it heard, changes nothing.
+        # F15a: no local clock state — the answer is a pure function of the signed records.
         roster = self.roster()
         roster.member_folders = (roster.member_folders or set()) | set(self.client.state.revoked)
 
         def recount(removed: set[str]) -> nh.Counting:
             return nh.count_machines(dataclasses.replace(roster, revoked_machines=set(removed)))
 
-        # F13/F14: the settle window runs on this machine's clock from when it first held each
-        # signature ("<key>|<machine>"), never on a signer's issued_at
-        seen = self._fresh().setdefault("revoke_seen", {})
-        if not isinstance(seen, dict) or not all(type(v) in (int, float) and math.isfinite(v) for v in seen.values()):
-            seen = self._fresh()["revoke_seen"] = {}
-        before = dict(seen)
-        out = nh.revocations_to_apply(
+        return nh.revocations_to_apply(
             self._fresh().get("revocations", []),
             recount(set()),
             protected=self._protected(),
             orders=self.halt_book().halts.values(),
             recount=recount,
-            seen=seen,
         )
-        if seen != before:
-            try:
-                self.save()
-            except (nh.HaltError, OSError):
-                logger.warning("network control: could not store when revocations were first seen")
-        return out
 
     def apply_revocations(self) -> None:
         """Revoke every key two counting machines name (member lists and the halt exchange both end here)."""
@@ -984,7 +971,7 @@ class HaltSync:
 
     async def tick(self) -> None:
         control = self._client.control
-        try:  # F12: a revocation applies once settled (REVOKE_SETTLE), also while the network is halted
+        try:  # F15a: a revocation applies once two counting machines signed it, also while halted
             control.apply_revocations()
         except Exception as error:
             logger.warning("halt sync: revocations not applied (%s)", type(error).__name__)

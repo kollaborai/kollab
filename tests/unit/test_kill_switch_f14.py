@@ -1,6 +1,7 @@
 """Kill switch round 11 (F14): the dead-leader orphan sweep is back on macOS, fallback start-time slack and own-folder
-scope, a malformed scope list holds the machine, revocations ordered by this machine's first-seen clock with stale
-lone signatures dropped, a directory named halt.json is recoverable.
+scope, a malformed scope list holds the machine, revocations judged as a pure function of the signed
+record set (F15a: both sides of a crossing apply, a lone signature never completes), a directory named
+halt.json is recoverable.
 
 The real-process tests run commands through the real ShellExecutor and signal only what they started.
 """
@@ -155,54 +156,45 @@ def _rec(m, net, key, t=0):
     return nh.revocation(m.folders[0], m.key, net.id, key, t)
 
 
-def test_a_stale_lone_signature_cannot_be_revived_to_beat_an_honest_revocation():
-    """b once signed "revoke c" alone; much later hostile d co-signs it while b+c revoke d. d is revoked, c stays
-    (F13 ordered by key and lost this in 16 of 24 networks)."""
+def test_a_stale_lone_signature_cannot_save_its_owner():
+    """b once signed "revoke c" alone; much later hostile d co-signs it while b+c revoke d. F15a: both complete,
+    everywhere the same — d does not escape (F13 lost d in 16 of 24 key orders; F14 needed a local clock)."""
     for _ in range(12):
         net, a, b, c, d = _four()
         recount = _recount(net)
         view = recount(set())
-        seen: dict = {}
         stale = [_rec(b, net, c.fk())]
         honest = [_rec(b, net, d.fk()), _rec(c, net, d.fk())]
         revive = [_rec(d, net, c.fk())]
-        nh.revocations_to_apply(stale, view, recount=recount, seen=seen, now=500)
-        nh.revocations_to_apply(stale + honest, view, recount=recount, seen=seen, now=9000)
-        nh.revocations_to_apply(stale + honest + revive, view, recount=recount, seen=seen, now=9050)
-        out = nh.revocations_to_apply(stale + honest + revive, view, recount=recount, seen=seen, now=20_000)
+        out = nh.revocations_to_apply(stale + honest + revive, view, recount=recount)
         gone = {view.machine_of(k) or k for k in out}
-        assert d.mk in gone and c.mk not in gone
+        assert gone == {c.mk, d.mk}
 
 
-def test_the_completion_that_came_first_here_is_evaluated_first():
-    """Two revocations completing well apart (beyond the window) apply in the order this machine completed them."""
+def test_completions_are_not_ordered_by_this_machine_clock():
+    """Two revocations, whichever completes here first: one answer. The F14 first-completed-here rule is
+    what let two machines keep opposite revocations off the same records."""
     net, a, b, c, d = _four()
     recount = _recount(net)
     view = recount(set())
     to_c = [_rec(a, net, c.fk()), _rec(b, net, c.fk())]
-    to_a = [_rec(b, net, a.fk()), _rec(c, net, a.fk())]  # needs c, which goes first
-    for first, second, winner in ((to_c, to_a, c.mk), (to_a, to_c, a.mk)):
-        seen: dict = {}
-        nh.revocations_to_apply(first, view, recount=recount, seen=seen, now=0)
-        out = nh.revocations_to_apply(first + second, view, recount=recount, seen=seen, now=1000)
-        assert {view.machine_of(k) or k for k in out} == {winner}
+    to_a = [_rec(b, net, a.fk()), _rec(c, net, a.fk())]
+    for first, second in ((to_c, to_a), (to_a, to_c)):
+        applied = set()
+        applied |= nh.revocations_to_apply(first, view, recount=recount)
+        applied |= nh.revocations_to_apply(first + second, view, recount=recount)
+        assert {view.machine_of(k) or k for k in applied} == {a.mk, c.mk}
 
 
-def test_a_lone_signature_within_the_window_still_pairs():
+def test_a_lone_signature_pairs_at_any_delay():
+    """F15a: no pair window — a co-signature hours later still completes the revocation."""
     net, a, b, c, d = _four()
     recount = _recount(net)
     view = recount(set())
-    seen: dict = {}
     one = [_rec(b, net, d.fk())]
-    nh.revocations_to_apply(one, view, recount=recount, seen=seen, now=0)
     both = one + [_rec(c, net, d.fk())]
-    nh.revocations_to_apply(both, view, recount=recount, seen=seen, now=nh.REVOKE_PAIR)
-    assert d.fk() in nh.revocations_to_apply(both, view, recount=recount, seen=seen, now=3 * nh.REVOKE_SETTLE)
-    # the same co-signature one second past the window: b's is stale, nothing applies
-    seen = {}
-    nh.revocations_to_apply(one, view, recount=recount, seen=seen, now=0)
-    nh.revocations_to_apply(both, view, recount=recount, seen=seen, now=nh.REVOKE_PAIR + 1)
-    assert nh.revocations_to_apply(both, view, recount=recount, seen=seen, now=10**6) == set()
+    assert nh.revocations_to_apply(one, view, recount=recount) == set()
+    assert d.fk() in nh.revocations_to_apply(both, view, recount=recount)
 
 
 # ------------------------------------------------------------------ 5. a directory named halt.json

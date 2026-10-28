@@ -108,24 +108,27 @@ halting command and its parents, and their process groups and sessions are
 never taken from a presence row. A forged presence row (written by a program
 running as you) can still name a group or session whose leader exited and
 take what it holds; such a program can already stop those processes itself.
+A real row is pruned on every presence publish: a shell whose group is gone,
+or whose pid a new process reused (the start no longer matches), drops out,
+so an idle agent never carries dead pids into the night or a reused pid's
+group into a halt.
 
-Revocations are judged from the signed records alone; no signer's clock
-(`issued_at`) changes who is revoked. Each machine notes when it first held
-each signature, by its own clock. A revocation completes when a second
-signature arrives within two minutes of an earlier one; a lone signature
-older than that never pairs, so an old one-signature record cannot be
-co-signed later to flip an outcome. Revocations apply in the order they
-completed on this machine; ones that completed within two minutes of each
-other are one batch, taken in order of the revoked key, and a batch applies
-two minutes after its last completion, holding back every later one. So
-crossing revocations that reach a machine within two minutes of each other
-give one answer everywhere. What can still diverge: records that reach two
-machines more than two minutes apart (a partition, a machine that was off,
-a machine joining later and reading the whole history at once) can be
-batched and ordered differently, and what a machine applied stays applied.
-Inside one batch a member can choose a key that sorts late. Two counting
-machines acting together can delay other revocations by signing new ones,
-two minutes at a time, up to their record limit.
+Revocations are judged as a pure function of the set of signed records:
+no signer's clock (`issued_at` is ignored), no arrival order, no wall-clock
+window and no per-machine state. A revocation completes when two distinct
+counting machines other than its target signed it, and each key is judged
+alone from the roster before any revocation, so adding records can only add
+revoked keys. That makes every machine — whatever subset it heard, in
+whatever order, across restarts — converge on the full set's answer when the
+missing records arrive; a second signature at any delay completes, and a
+lone signature, however old, completes nothing by itself. A crossing where
+each side has two signers revokes both sides everywhere: that is the price
+of having no clock and no order to fight over, and the two-machine floor
+still holds under each key alone. What can still happen (everywhere the
+same, so not a divergence): revocations that each pass the floor alone can
+together leave fewer than two counting machines; two counting machines can
+revoke any non-protected member on a coordinated pair of signatures,
+including one made long before; and there is no way to withdraw a signature.
 
 Lifting a halt from an agent's terminal tool is refused. That refusal guards
 against an agent's own shell by accident; it is not a wall against another
