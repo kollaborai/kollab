@@ -149,7 +149,7 @@ def test_a_failing_default_stop_still_lets_the_fallback_see_the_process_table(tm
     assert reply["ok"] and any(str(P1) in m for m in reply["stopped"]), reply
 
 
-# ------------------------------------------------------------------ 4. revocations by first-seen
+# ------------------------------------------------------------------ 4. revocations as a pure function of the record set
 
 
 def _rec(m, net, key, t=0):
