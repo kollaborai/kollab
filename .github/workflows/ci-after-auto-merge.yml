@@ -1,11 +1,13 @@
 name: CI after auto-merge
 
 # GitHub suppresses push-to-main workflow runs for merges performed with
-# GITHUB_TOKEN. Watch successful PR CI and the human events that can unblock
-# auto-merge, then explicitly dispatch CI after the merge is visible on main.
+# GITHUB_TOKEN. Watch successful CI/auto-merge runs and the human events that
+# can unblock auto-merge, then explicitly dispatch CI after the merge is visible.
+# No workflow_run branches filter: it matches the PR head, not the target branch;
+# the job verifies that the PR base is main before dispatching.
 on:
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["CI", "Auto-merge"]
     types: [completed]
   pull_request:
     types: [ready_for_review]
@@ -22,7 +24,9 @@ jobs:
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.event == 'pull_request' &&
-       github.event.workflow_run.conclusion == 'success') ||
+       github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.name == 'CI' ||
+        github.event.workflow_run.name == 'Auto-merge')) ||
       (github.event_name == 'pull_request' &&
        github.event.action == 'ready_for_review') ||
       (github.event_name == 'pull_request_review' &&
