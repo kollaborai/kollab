@@ -1407,3 +1407,71 @@ Round 13 = the round-11 review's findings 3 and 4 (blocking: untrusted halt scop
 - Mutations killed on the working sources (bytes restored and `cmp`-checked, `__pycache__` cleared; 12 of 12, each by its named test): caller scope honored, machine claim over a held folder list, held scope dropped from the union, cli identity guards off, peer chain unprotected, hand-off folder remembered without membership, state lock bypassed, request protect honored, start-time slack off, unreadable identity signalled, fallback pre-TERM check off, fallback SIGKILL start-only compare.
 - Tests: 852 passed over every `halt|kill_switch|relay_agent|network_|shell_executor|process_manager|presence` unit file on the F15b commit; after the rebase onto F15a (b70aef20) the same family re-ran green (852 in the pre-rebase run, the combined tree verified on the f10/f12/f13/f14/f15a/f15b/halt_runtime files — 102 on the direct set; the full family on the combined tree is the push's CI job). ruff clean on every changed file.
 - Unproven: no Docker run of F15b, no live `halt.sock` round-trip of a real hand-off (the listener path is driven through `handle` with a fake book and injected process lists, matching the reviewer's repro; the real CLI → `hand_off` → listener path was not run live), macOS only (the Linux `/proc` identity read is the same `read_process` F13 used), and the serialization is mechanism-checked, not race-proven. The TUI findings (item 4) were not done: budget. Note 4f12123b/6d2eaa24 already keep the selected action visible and label the pinned target; the remaining P2s (armed toolbar showing only `Confirm`, 40-column wrapping) are still open.
+
+## D11 proof on ff1bcfb (F15a + F15b together)
+
+**Verdict: NOT production-ready.** Moonstone's recommendation was right to demand this proof: F15a's
+rule and F15b's issuer-side protections held live, but the receiving-machine paths regressed or jam
+(#363, #364, #365). The kill switch today half-locks (no sweep on reconnect) and cannot be lifted from
+a terminal (all resume forms refused).
+
+Image `ks11-img:dev` (9abfc5137e425c514a82c4eaf02e17de8880c6ded5fcac132d245fa458ecd805) built from
+`git archive ff1bcfbc` (the committed candidate tree; no docker cp, no dirty files). Harness
+`tests/docker/kill_switch/` unchanged; scratch scripts in the session scratchpad (`.../scratchpad/h11/`:
+enroll.sh, view.py, plant.py, d11-rows.md), not committed. One network `ks-net` (reused, pre-existing),
+four machines as counting members (m1 founder, m2 bootstrap via make_bootstrap, m3/m4 enrolled and
+confirmed by m2) + ks11-relay (TLS front). All four `counts=true` on every machine before the halt.
+Everything destructive ran in `ks11-*` containers (`docker run --rm`); halts/resumes/acts typed from
+real ptys (tmux `login` = `bash -l`) or through `tests/docker/kill_switch/halt_ctx.py`.
+
+Three findings, filed: kollaborai/kollab#363 (a halt learned by the listener instead of a direct
+hand-off records scope but sweeps nothing — agents stay alive under a machine-wide halt on 3 of 4
+machines), kollaborai/kollab#364 (`folders[net]` stays empty in halt.json on every machine, the listener
+opens no link, and all three resume forms plus the panel and the halted interactive screen refuse with
+"no halted network holds that folder" — the switch jams ON), and kollaborai/kollab#365 (revocation
+records do not transit through a third machine; a machine missing the edge to one signer stays
+one-signer pending forever). Rows 1-2 and 5 are the properties that DID hold live; rows 3, 4 and 6 are
+the #363/#364/#365 evidence.
+
+| # | What | Command | Observed output | Result |
+|---|---|---|---|---|
+| 1 | Network halt from a real tty (F15b scope, CLI -> hand_off -> listener over halt.sock, live) | m1 tmux `bash -l` in /root/work: `kollab --hub halt --reason d11-proof` | `Halt 40900fd3 recorded. m2-work: offline, halts on reconnect / m3-work: offline, halts on reconnect / m4-work: offline, halts on reconnect / m1-work: halted, 1 agents stopped`. All four halt.json gained the book + `scopes[net]="machine"` within ~5 min (m2-m4 via reconnect sync) | PASS on the issuer; m2-m4 recorded the hold but swept nothing (#363) |
+| 2 | F15b protect list, live on the issuer | (during row 1) | The halt CLI completed and returned to the prompt (not killed by its own sweep); its chain survived (`bash -l` 11197 under tmux server 59); the halt listener 12817 alive; m1's agents stopped: TUI agent (`pid 60`) + `koordinator` in `stopped` | PASS |
+| 3 | Sweep + resume on receiving machines | halt_ctx members/snap + `kollab --hub resume [--local]` on m2-m4 | m2/m3/m4: `stopped: []`, `--detached` daemons alive `state: idle` 15+ min under the halt; every resume form refused (see #363/#364) | FAIL — filed #363, #364 |
+| 4 | F15a crossing, both directions, signers overlapping the targets | halt_ctx `act confirm_revoke` x4: m2+m4 revoke m3, m3+m4 revoke m2 | All four acts `{"ok": true}`. t+15 s: m2 `{m3 revoked}` / m3 `{m2 revoked}` / m4 `{m2, m3 revoked}` — each machine holds exactly the subset it heard, none exceeding the full answer (monotone, as the rule promises). m3 and m4 hold their subsets' full answers (m3 exchanged both sigs over warm edges). m2 NEVER completes: `pending_revocations: [m2]`, `revocation_signers: {m2: [m4]}` for 12+ min — it holds m4's signature (direct announce at sign time) but never m3's, though m4 (m2's only online peer) has it; the m2<->m3 relay edge was one-way (m3 saw m2, m2 never saw m3), and m3 cannot re-announce (revoked -> stopped counting). m4's applied `{m2, m3}` leaves counting = {m1} (<2: the union of two floor-passing revocations, the documented F15a Limits case). m1 (daemon swept by its own halt, listener linkless) stays stale | HALF — monotonicity + per-subset answers held live; full-set convergence FAILED on the partial-edge topology (#365) |
+| 5 | Non-kollab decoy under the halt (F15b selection guard) | `setsid sleep 9991` on m2 + a planted presence row (true start, so the F15a prune keeps it) | The daemon's presence cleaner reaped the row within ~5 min (`Cleaning stale agent: fake (pid alive but socket dead)`, 12:40 + 12:44); `sleep 9991` survived every halt; nothing signalled a non-kollab pid | PASS (decoy untouched; the mid-flight pid-swap identity check remains unit-proven, as in F15a's notes) |
+| 6 | halt.sock round-trip of a real hand-off | row 1's CLI hand_off (m1) + m2-m4's halt book/scope sync | take_halt wrote scope machine on m1 via the CLI hand-off (the F15b unproven path, now run live); m2-m4 received book+scope through the member sync without any hand-off (the #363 mechanism) | HALF: CLI->listener proven on m1; relay->listener hand-off on reconnect proven NOT to fire (see #363) |
+
+### Findings
+
+1. #363: the offline/reconnect halt path does not stop agents. m1 saw m2-m4 "offline"; their halt
+   arrived through the member sync into halt.json (scope machine) but `take_halt` — the only sweeper —
+   never ran there, and `RelayAgentBridge._halt_changed`'s "listener already holds it" early return
+   guarantees it stays that way. D10 (F14) swept the same path. Regression between F14 and F15.
+2. #364: `folders[net]` empty on all four machines -> no HaltLink -> every resume form refused, on the
+   issuer too. `_networks_of`/`Memberships` resolve correctly when probed live, so the remember failed
+   silently at hand-off time (all `guarded`), and the member sync spreads the empty list.
+3. #365: the exchange carries a peer's own announcements but not third-party records: m2's only online
+   peer (m4) held m3's signature for 12+ minutes without delivering it, and the signer that could
+   re-send it (m3) had already stopped counting. The pure-set rule's convergence depends on records
+   arriving; on a partial-edge topology they do not.
+4. What F15a got right live: every machine's applied set was a subset of the full answer in every poll
+   (nothing exceeded the full set), and each machine's answer matched the pure function over the
+   records it actually held (m2: one signer -> pending, not applied).
+5. Harness notes: `ps -o etime=` beats /proc/stat math for row starts (my /proc math drifted 14 h);
+   the daemon's presence cleaner reaps forged rows with dead sockets in ~5 min, so presence-row
+   identity probes must ride a live socket to survive to a halt.
+
+### Unproven / left
+
+- Network resume (propose/confirm) never ran live: blocked by #364 (no machine would accept any
+  resume form). Re-prove after both fixes land (the D8 2i / D10 gap stays open).
+- The mid-flight pid-swap identity check and `_pid_starts`' reused-pid drop stay unit-proven
+  (injected tables), as in F15a/F15b notes.
+- m1's stale view after its own sweep (linkless listener) is #364 damage, not separately probed.
+
+### Docker objects left
+
+Images: `ks11-img:dev` (9abfc5137e42). Network: `ks-net` (pre-existing, reused). Containers
+`ks11-relay`, `ks11-m1`..`ks11-m4` were `--rm`; stopped and gone at teardown. No volumes. The Bash hook
+refuses image removal, so Marco removes `ks11-img:dev` when done with it.
