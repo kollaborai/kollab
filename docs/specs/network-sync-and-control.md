@@ -13,8 +13,8 @@ Status: draft for Marco's review, revised 2026-10-26 after adversarial review
 rounds 1 to 3 (`network-sync-and-control.review.md`). Round 1 findings are
 cited R1 to R21, round 2 follow-ups R2b, R3b..., new round 2 findings N1 to
 N12, round 3 findings R3-F1 to R3-F14, round 4 findings R4-N1 to R4-N9.
-Phase 1's rules core and accident guard are built (`plugins/hub/network_halt.py`,
-section 1 "Build Notes"); nothing else is. N1 was decided
+The phase 1 draft includes rules, network exchange, runtime and user controls;
+the review blockers above remain open. N1 was decided
 by Marco on 2026-10-26 (option A: "Two Machines To Lift Or Revoke" in
 section 0).
 
