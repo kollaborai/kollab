@@ -593,9 +593,22 @@ class NetworkControl:
         )
 
     def apply_revocations(self) -> None:
-        """Revoke every key two counting machines name (member lists and the halt exchange both end here)."""
+        """Revoke every key two counting machines name (member lists and the halt exchange both end here).
+
+        F15b: only what keeps this machine's own applied set above two counting machines; a machine
+        that heard a subset may already hold a key the full-set answer displaced, and applied stays
+        applied.
+        """
         client = self.client
-        for key in sorted(self.revocations_to_apply()):
+        roster = self.roster()
+        roster.member_folders = (roster.member_folders or set()) | set(client.state.revoked)
+
+        def recount(removed: set[str]) -> nh.Counting:
+            return nh.count_machines(dataclasses.replace(roster, revoked_machines=set(removed)))
+
+        for key in sorted(
+            nh.floor_safe_applies(recount(set()), client.state.revoked, self.revocations_to_apply(), recount=recount)
+        ):
             if key != client.public_key and key not in client.state.links and key not in client.state.revoked:
                 client.revoke(key, announce=True)
 

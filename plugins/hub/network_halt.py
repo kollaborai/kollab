@@ -790,18 +790,22 @@ def revocations_to_apply(
 ) -> set[str]:
     """Keys whose revocation this machine applies on other machines' word.
 
-    F15a: the outcome is a pure function of the SET of valid signed records — no arrival order, no
-    wall clock, no local first-seen state, no expiry. Each key is judged alone from the roster
-    before any revocation: it applies when two distinct counting machines other than its target
-    signed it and revoking its target ALONE still leaves two counting machines (``recount``, chain
-    effects included). Judging every key alone makes the rule monotone — adding records can only
-    add keys — so machines that heard subsets, in any order, with restarts, converge on the full
-    set's answer as the missing records arrive, and what each machine applied is exactly that
-    answer. ``issued_at`` is ignored, so backdated, far-future and negative stamps change nothing.
-    A lone signature, however old, completes nothing by itself; re-signing adds no second signer
-    and nothing needs re-arming. A crossing where each side has two signers revokes BOTH sides
-    everywhere — the only resolution with no clock and no order to fight over; the floor keeps
-    two machines counting.
+    F15a/F15b: the outcome is a pure function of the SET of valid signed records — no arrival
+    order, no wall clock, no local first-seen state, no expiry. A key is valid when two distinct
+    counting machines (from the roster before any revocation) other than its target signed it;
+    ``issued_at`` is ignored, so backdated, far-future and negative stamps change nothing; a lone
+    signature, however old, completes nothing by itself, and re-signing adds no second signer.
+
+    F15b: valid keys are taken in sorted key order (a key id no signer can choose for someone
+    else) and each must keep two counting machines over the keys accepted SO FAR (``recount`` over
+    the accumulated targets, chain effects included), so the final answer always leaves two
+    counting machines. On four or more machines a crossing with two signers a side revokes both
+    sides (the floor holds); on three machines exactly one side — the lower key id — applies,
+    deterministically everywhere. Judging keys one by one cannot keep the floor over the union of
+    what different machines applied at different times (that needs an order no clock-free rule
+    has), so the control's ``apply_revocations`` adds the same guard over what this machine
+    already applied; the exact difference between a machine that heard a subset and one that
+    heard everything is in ``docs/features/network-kill-switch.md`` Limits.
     ``view`` is the roster before any revocation, never what this machine already applied.
     ``protected`` (this device's primary and the folder key that admitted it) only stops this
     machine applying a key. A key naming a machine key revokes every folder key bound to it.
@@ -827,16 +831,47 @@ def revocations_to_apply(
 
     clean = counting(set())
     out: set[str] = set()
-    for key, machines in signed.items():
+    removed: set[str] = set()  # machine targets accepted so far: the floor is checked over all of them
+    for key in sorted(signed):
         target = view.machine_of(key) or key
-        good = {m for m in machines if m in clean and m != target}
-        if len(good) < REVOKE_SIGNERS or len(counting({target})) < REVOKE_SIGNERS:
+        good = {m for m in signed[key] if m in clean and m != target}
+        if len(good) < REVOKE_SIGNERS or len(counting(removed | {target})) < REVOKE_SIGNERS:
             continue
+        removed.add(target)
         out.add(key)
         out.update(f for f, m in view.folder_machine.items() if m == target)
     guarded = set(protected)
     guarded |= {m for f, m in view.folder_machine.items() if f in guarded}
     return {k for k in out if k not in guarded and (view.machine_of(k) or k) not in guarded}
+
+
+def floor_safe_applies(
+    view: Counting,
+    applied_keys: Iterable[str],
+    candidates: Iterable[str],
+    *,
+    recount: Callable[[set[str]], Counting] | None = None,
+) -> set[str]:
+    """F15b: which candidate keys this machine may apply ON TOP of what it already revoked without
+    its own network dropping below two counting machines.
+
+    The pure answer above is floor-checked over the records alone; a machine that heard a subset
+    may have applied a key the full-set answer displaced, and applied stays applied. This guard
+    re-checks the floor over the machine's own applied history, so every machine individually ends
+    haltable even in that (documented) case.
+    """
+    def counting(removed: set[str]) -> set[str]:
+        return set(recount(removed).counting) if recount else view.counting - removed
+
+    removed = {view.machine_of(k) or k for k in applied_keys}
+    out: set[str] = set()
+    for key in sorted(candidates):
+        target = view.machine_of(key) or key
+        if len(counting(removed | {target})) < REVOKE_SIGNERS:
+            continue
+        removed.add(target)
+        out.add(key)
+    return out
 
 
 def revoke_leaves_quorum(view: Counting, target: str) -> bool:

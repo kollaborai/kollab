@@ -250,12 +250,10 @@ def test_shell_executor_records_each_tool_shell(monkeypatch):
 # ------------------------------------------------------------------ NEW-2
 
 
-def test_new_2_a_crossing_on_three_machines_is_one_answer_everywhere():
-    """F15a: keys are judged one by one, so a mutual crossing on a three-machine network revokes both
-    sides and dissolves it to one counting machine — deterministic on every machine. The F11-F14
-    answer (one winner, by key order or by local completion order) is exactly what let two machines
-    that heard different orders keep opposite revocations; the aggregate floor cannot survive that
-    fix (test_kill_switch_f15a proves the four-machine floor still holds per key)."""
+def test_new_2_a_crossing_on_three_machines_keeps_the_floor():
+    """F15b: on three machines a mutual crossing cannot revoke both sides (that leaves one counting
+    machine — the network can never halt again). Exactly one side applies, the lower key id, with no
+    clock and no arrival order: the same answer on every machine that heard the records."""
     from tests.unit.test_network_halt import Net, rev
 
     net = Net()
@@ -268,7 +266,8 @@ def test_new_2_a_crossing_on_three_machines_is_one_answer_everywhere():
     records = [rev(b, net, a.fk()), rev(c, net, a.fk()), rev(a, net, c.fk()), rev(b, net, c.fk())]
     out = nh.revocations_to_apply(records, view)
     gone = {view.machine_of(k) for k in out}
-    assert gone == {a.mk, c.mk}
+    winner = min(a.fk(), c.fk())
+    assert gone == {view.machine_of(winner)} and len(view.counting - gone) == 2
     assert out == nh.revocations_to_apply(list(reversed(records)), view)  # same answer on every machine
 
 

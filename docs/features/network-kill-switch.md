@@ -126,22 +126,23 @@ group into a halt.
 
 Revocations are judged as a pure function of the set of signed records:
 no signer's clock (`issued_at` is ignored), no arrival order, no wall-clock
-window and no per-machine state. A revocation completes when two distinct
-counting machines other than its target signed it, and each key is judged
-alone from the roster before any revocation, so adding records can only add
-revoked keys. That makes every machine — whatever subset it heard, in
-whatever order, across restarts — converge on the full set's answer when the
-missing records arrive; a second signature at any delay completes, and a
-lone signature, however old, completes nothing by itself. A crossing where
-each side has two signers revokes both sides everywhere: that is the price
-of having no clock and no order to fight over, and the two-machine floor
-still holds under each key alone. What can still happen (everywhere the
-same, so not a divergence): revocations that each pass the floor alone can
-together leave fewer than two counting machines — on a three-machine network
-a mutual crossing dissolves it to one counting machine; two counting
-machines can revoke any non-protected member on a coordinated pair of
-signatures, including one made long before; and there is no way to withdraw
-a signature.
+window and no per-machine state. A revocation is valid when two distinct
+counting machines other than its target signed it; a second signature at
+any delay completes, and a lone signature, however old, completes nothing
+by itself. Valid keys are taken in sorted key order and each must keep two
+counting machines over the keys taken so far (chain effects included), so
+the answer itself never leaves fewer than two counting machines. On four or
+more machines a crossing with two signers a side revokes both sides — no
+clock, no order to fight over; on three machines exactly one side, the
+lower key id, applies. Machines that heard everything agree everywhere;
+what can still differ is a machine that heard a SUBSET first: it may have
+applied a key the full-set answer displaced (applied stays applied), and it
+then skips the displaced-to key instead of dropping its own network below
+two counting machines — so two such machines can hold different single
+revocations of a crossing, each with a haltable network, until people
+resolve it. Two counting machines can always revoke any non-protected
+member on a coordinated pair of signatures, including one made long before,
+and there is no way to withdraw a signature.
 
 Lifting a halt from an agent's terminal tool is refused. That refusal guards
 against an agent's own shell by accident; it is not a wall against another

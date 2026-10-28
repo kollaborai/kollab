@@ -239,3 +239,67 @@ def test_recording_a_new_shell_drops_reused_pids(monkeypatch):
     monkeypatch.setattr(se, "_pid_starts", lambda pids: {444: 900.0})
     se.record_tool_shell(555, 500.0)
     assert se.TOOL_SHELLS == [[555, 500.0, se.os.getpid()]]
+
+
+# ------------------------------------------------------------------ 3. the aggregate floor (F15b)
+
+
+def _three():
+    """Three counting machines: founder a, bootstrap b, member c (the smallest network that can halt)."""
+    from tests.unit.test_kill_switch_f12 import _recount
+    from tests.unit.test_network_halt import Net
+
+    net = Net()
+    net.prod = net.admit(net.founder, "prod", bootstrap=True)
+    a, b = net.founder, net.prod
+    c = net.admit(a, "c")
+    net.confirm(b, c)
+    return net, a, b, c, _recount(net)
+
+
+def test_a_three_machine_crossing_keeps_two_counting_machines():
+    """F15b (Amethyst's blocker): a+b revoke c, b+c revoke a — each alone passes the per-key floor,
+    together they leave only b counting. The final answer must keep two counting machines."""
+    net, a, b, c, recount = _three()
+    view = recount(set())
+    assert len(view.counting) == 3
+    recs = [_rec(a, net, c.fk()), _rec(b, net, c.fk()), _rec(b, net, a.fk()), _rec(c, net, a.fk())]
+    out = nh.revocations_to_apply(recs, view, recount=recount)
+    gone = _who(view, out)
+    assert len(recount(gone).counting) >= 2  # the floor holds over the FINAL applied set
+    assert gone == {view.machine_of(min(c.fk(), a.fk()))}  # one winner: the lower key id, no clock
+
+
+def test_four_machine_chains_keep_the_floor():
+    """Three completed revocations on four machines can never all apply: exactly the two lowest keys do."""
+    net, a, b, c, d = _four()
+    recount = _recount(net)
+    view = recount(set())
+    recs = [
+        _rec(a, net, c.fk()), _rec(b, net, c.fk()),  # a+b revoke c
+        _rec(b, net, a.fk()), _rec(d, net, a.fk()),  # b+d revoke a
+        _rec(b, net, d.fk()), _rec(c, net, d.fk()),  # b+c revoke d
+    ]
+    out = nh.revocations_to_apply(recs, view, recount=recount)
+    gone = _who(view, out)
+    assert len(gone) == 2 and len(recount(gone).counting) >= 2  # the third would leave only b
+    lowest = sorted([(c.fk(), c.mk), (a.fk(), a.mk), (d.fk(), d.mk)])[:2]
+    assert gone == {m for _, m in lowest}  # the two lowest key ids, no clock, no arrival order
+
+
+def test_the_apply_guard_skips_what_this_machines_history_would_kill():
+    """The F15b guard: a machine heard one side of a three-machine crossing and applied it; the
+    full-set answer is the other side (the lower key). Applying that too would leave one counting
+    machine, so the apply step skips it and the machine stays haltable."""
+    net, a, b, c, recount = _three()
+    view = recount(set())
+    winner, loser = min(c.fk(), a.fk()), max(c.fk(), a.fk())
+    recs = [_rec(b, net, a.fk()), _rec(c, net, a.fk()), _rec(a, net, c.fk()), _rec(b, net, c.fk())]
+    candidates = nh.revocations_to_apply(recs, view, recount=recount)
+    assert candidates == {winner}  # the full-set answer: the lower key only
+    clean = nh.floor_safe_applies(view, set(), candidates, recount=recount)
+    assert clean == candidates  # with nothing applied yet, it goes
+    applied = nh.floor_safe_applies(view, {loser}, candidates, recount=recount)
+    assert applied == set()  # this machine already revoked the loser: the winner stays out
+    both = nh.floor_safe_applies(view, set(), {winner, loser}, recount=recount)
+    assert both == {winner}  # offered both, it takes the floor-safe one and stops
