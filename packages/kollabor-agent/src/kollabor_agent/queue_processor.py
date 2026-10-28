@@ -171,6 +171,12 @@ MAX_CONTINUATION_TURNS = 500
 # Identical failing tool batches in a row before a chain is stopped.
 MAX_CONSECUTIVE_ERRORS = 3
 
+# Stop-hook blocks honored per user turn (#357). Each honored block costs one
+# extra model round; a hook that blocks unconditionally would otherwise loop to
+# MAX_CONTINUATION_TURNS. Hooks that respect the `stop_hook_active` stdin flag
+# never hit this.
+MAX_STOP_HOOK_CONTINUATIONS = 3
+
 # Tokens of system prompt + tool schemas that never shrink, taken off the window
 # before tool output is budgeted (`kollabor.llm.context_overhead_tokens`).
 # Measured 2026-10-02 from the first-turn prompt_tokens of 169 real sessions
@@ -502,6 +508,11 @@ class QueueProcessor:
         self.dropped_messages = 0
         self.is_processing = False
         self.turn_completed = False
+        # Stop-hook block state (#357): `stop_hook_active` marks a Stop event
+        # fired on a continuation the hook itself requested (Claude Code
+        # parity, hooks read it on stdin), the counter caps blocks per turn.
+        self._stop_hook_active = False
+        self._stop_hook_continuations = 0
         self.active_origin_context: dict[str, Any] | None = None
         self._voice_turn_token: Any = None  # current_turn stamp (_stamp_voice_turn)
         self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
@@ -1083,6 +1094,13 @@ class QueueProcessor:
         Returns:
             Updated parent UUID
         """
+        # A new user message starts a fresh turn chain: stop-hook budget and
+        # continuation flag reset. A turn that died mid-block (cancel, error,
+        # new input breaking LOOP 2) must not leak stop_hook_active: true
+        # into the next turn's Stop payload, where a well-behaved hook would
+        # read it as its own continuation and skip blocking.
+        self._stop_hook_continuations = 0
+        self._stop_hook_active = False
         voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
         self.active_voice = voice_inputs[-1].voice if voice_inputs else None
         merged_origin_context = merge_voice_origin_contexts(messages)
@@ -1716,6 +1734,7 @@ class QueueProcessor:
                     thinking_duration,
                     all_tools=all_tools,
                     has_native_tools=has_native_tools,
+                    parent_uuid=parent_uuid,
                 )
             )
             if turn_complete:
@@ -2537,10 +2556,18 @@ class QueueProcessor:
         log_prefix: str = "",
         all_tools: Optional[list] = None,
         has_native_tools: bool = False,
+        parent_uuid: Optional[str] = None,
     ) -> tuple:
         """Emit LLM_RESPONSE and read back what its hooks changed.
 
         Returns (clean_response, suppress_display, turn_complete).
+
+        A Stop hook (LLM_RESPONSE_POST alias) that blocks a turn-final reply
+        gets its reason to the agent natively (#357): the reason is attached
+        as a one-shot context block on the next request and the turn is kept
+        open, so LOOP 2 runs one continuation round that addresses it. The
+        continuation round's Stop payload carries `stop_hook_active: true`
+        (Claude Code parity) and MAX_STOP_HOOK_CONTINUATIONS caps the loop.
         """
         suppress_display = False
         turn_complete = False
@@ -2560,10 +2587,15 @@ class QueueProcessor:
                 "all_tools": all_tools or [],
                 "has_native_tools": has_native_tools,
                 "turn_completed": self.turn_completed,
+                # Claude Code parity: true when this Stop evaluation runs on a
+                # continuation a Stop hook itself requested. Config hooks see
+                # it flattened onto their stdin payload.
+                "stop_hook_active": self._stop_hook_active,
             },
             "llm_service",
         )
 
+        stop_block_reason: Optional[str] = None
         if response_context:
             for phase in ["pre", "main", "post"]:
                 phase_data = response_context.get(phase, {})
@@ -2581,5 +2613,71 @@ class QueueProcessor:
                             f"len={len(clean_response)} "
                             f"preview={clean_response[:80]!r}"
                         )
+                if final_data.get("_hook_blocked"):
+                    stop_block_reason = (
+                        str(final_data.get("_hook_reason") or "").strip()
+                        or "Blocked by Stop hook"
+                    )
+
+        # A block only redirects a reply that was about to end the turn; a
+        # tool-bearing response continues anyway and its Stop evaluation is
+        # informational (hooks gate themselves the same way the hub adapter
+        # does, on all_tools/has_native_tools).
+        turn_final = self.turn_completed and not (all_tools or has_native_tools)
+        if turn_final and not stop_block_reason:
+            self._stop_hook_active = False
+            self._stop_hook_continuations = 0
+        elif turn_final and stop_block_reason:
+            if self._stop_hook_continuations >= MAX_STOP_HOOK_CONTINUATIONS:
+                logger.warning(
+                    f"Stop hook block ignored: hit MAX_STOP_HOOK_CONTINUATIONS "
+                    f"({MAX_STOP_HOOK_CONTINUATIONS}) for this turn"
+                )
+                self.message_display_service.display_error_message(
+                    f"Stop hook still blocking after "
+                    f"{MAX_STOP_HOOK_CONTINUATIONS} continuations; ending turn. "
+                    f"Last reason: {stop_block_reason[:200]}"
+                )
+                self._stop_hook_active = False
+                self._stop_hook_continuations = 0
+            else:
+                self._stop_hook_continuations += 1
+                self._stop_hook_active = True
+                # Model channel: one-shot block on the next request (rides the
+                # newest user/tool message, never rewrites seen history).
+                self._attach_context(
+                    [
+                        (
+                            "",
+                            "Your reply was blocked by a Stop hook and the turn "
+                            "continues.\n"
+                            f"Reason: {stop_block_reason}\n"
+                            "Address the reason, then finish the turn.",
+                        )
+                    ]
+                )
+                if self.conversation_logger and parent_uuid:
+                    try:
+                        await self.conversation_logger.log_system_message(
+                            f"Stop hook blocked the turn: {stop_block_reason}",
+                            parent_uuid=parent_uuid,
+                            subtype="stop_hook_block",
+                        )
+                    except Exception as exc:
+                        logger.warning(f"Failed to log stop hook block: {exc}")
+                if not getattr(self.renderer, "pipe_mode", False):
+                    self.message_display_service.display_system_message(
+                        f"Stop hook blocked this reply, continuing: "
+                        f"{stop_block_reason[:300]}"
+                    )
+                logger.info(
+                    f"[STOP-HOOK] blocked turn-final reply (continuation "
+                    f"{self._stop_hook_continuations}/{MAX_STOP_HOOK_CONTINUATIONS}): "
+                    f"{stop_block_reason[:300]}"
+                )
+                # Keep the turn open: LOOP 2 runs one more round that sees
+                # the reason. `turn_complete` from a plugin hook still ends
+                # the turn at the call site, as before.
+                self.turn_completed = False
 
         return clean_response, suppress_display, turn_complete

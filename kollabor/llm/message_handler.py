@@ -471,6 +471,16 @@ class MessageHandler:
                 # the LLM responded to the nudge text instead of continuing
                 # work, produced no tool calls, and the session went silent.
                 qp.turn_completed = False
+                # A hub wake starts a new operator-driven turn, not the
+                # block-requested continuation (that runs through the queue
+                # drain's continue_conversation, which keeps the flag). Reset
+                # the Stop-hook budget: a turn that died mid-block (ESC/cancel)
+                # must not leak stop_hook_active: true into this wake's Stop
+                # payload — a parity hook reads it as its own continuation and
+                # under-blocks once — and the block budget must not carry over
+                # (#357).
+                qp._stop_hook_active = False
+                qp._stop_hook_continuations = 0
                 # Wall-clock checkpoints only — never kill a working chain.
                 # Force-completing on a timer orphaned the last turn's tool
                 # results (they were in history but the LLM never got called
