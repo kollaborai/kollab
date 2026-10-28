@@ -518,6 +518,15 @@ def test_await_acks_waits_longer_for_an_online_member(monkeypatch):
 def test_cli_resume_lines(monkeypatch, capsys):
     monkeypatch.setattr(os, "isatty", lambda fd: True)
     monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
+def test_cli_resume_lines(monkeypatch, capsys):
+    monkeypatch.setattr(os, "isatty", lambda fd: True)
+    monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
+    # F10 guard isolation: this test runs pytest itself, which inside an agent
+    # tool shell carries that shell's env tags in its ancestor chain. The
+    # sibling cli tests stub this refusal; this one missed it and failed only
+    # where pytest runs under an agent (CI, a person's shell: green).
+    monkeypatch.setattr(hr, "tool_shell_refusal", lambda: "")
+
 
     class Control:
         def halt_snapshot(self):
