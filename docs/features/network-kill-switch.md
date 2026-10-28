@@ -6,9 +6,10 @@ different trust state (every machine computes the same answer from the same
 signed records, but coordinated signers can still revoke together), secondary
 networks are not fully routed, and a detached process using `env -i` can lift
 its local halt. Halt hand-off scope, protected pids and per-signal process
-identity were reworked in F15b (listener-derived, unit-tested) but still need
-isolated multi-device proof. The behavior below describes the intended design,
-not a guarantee established by the current implementation.
+identity were reworked in F15b (listener-derived) and proven live in isolated
+multi-device Docker runs through D13, including the F17 sweep and the F18
+revocation transit (receipts in docs/handoff/kill-switch-phase1.md). The
+behavior below describes the design as proven there.
 
 The intended switch stops agents on your devices with one command. Agents and
 skills stay on disk; only running processes stop. Contacts you accepted from a

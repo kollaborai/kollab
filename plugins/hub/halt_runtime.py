@@ -1817,7 +1817,7 @@ def member_lines(
 
 async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None, root: Path | None = None) -> int:
     """``kollab --hub halt|resume``. Returns the exit code; prints the spec's lines."""
-    from .network_halt import ancestors, network_control_refusal
+    from .network_halt import network_control_refusal
 
     refusal = network_control_refusal() or tool_shell_refusal()  # F10: env, tty, then the ppid chain
     if refusal:
@@ -1855,7 +1855,7 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
         try:
             reply = await hand_off(
                 {"network": control.network_id(), "scope": scope, "folder": folder,
-                 "hash": act.get("hash"), "protect": sorted(ancestors(os.getpid()))},
+                 "hash": act.get("hash")},
                 root,
             )
         except (OSError, asyncio.TimeoutError) as error:
