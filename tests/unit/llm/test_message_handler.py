@@ -353,6 +353,52 @@ class TestMessageHandler(unittest.TestCase):
 
         self.loop.run_until_complete(run())
 
+    def test_hub_continue_resets_stale_stop_hook_state(self):
+        """A hub wake after ESC mid-block starts a fresh Stop-hook budget (#357).
+
+        Regression: a turn that died while a Stop-hook block was active left
+        _stop_hook_active True and the continuation budget spent; the hub
+        wake's continuation then fired Stop with a stale stop_hook_active:
+        true (a Claude-Code-parity hook under-blocks once) and a carry-over
+        3-block cap.
+        """
+
+        async def run():
+            self.coordinator.conversation_history.append(
+                type("obj", (object,), {"role": "user", "content": "hello"})()
+            )
+
+            qp = self.coordinator._queue_processor
+            # ESC latch from a drain that already stopped, with stale
+            # stop-hook state from a block the dying turn never resolved.
+            qp.cancel_processing = True
+            qp.is_processing = False
+            qp.turn_completed = True
+            qp._stop_hook_active = True
+            qp._stop_hook_continuations = 2
+            qp.processing_queue = asyncio.Queue()
+
+            async def complete_turn():
+                qp.turn_completed = True
+
+            self.coordinator._continue_conversation = complete_turn
+
+            await self.handler.handle_llm_continue({"source": "hub-test"}, MagicMock())
+            hub_factory = self.coordinator.create_background_task.call_args[0][0]
+            await hub_factory()
+
+            self.assertFalse(
+                qp._stop_hook_active,
+                "wake-after-cancel must clear stale stop_hook_active",
+            )
+            self.assertEqual(
+                qp._stop_hook_continuations,
+                0,
+                "wake-after-cancel must reset the Stop-hook block budget",
+            )
+
+        self.loop.run_until_complete(run())
+
     def test_hub_continue_no_drain_when_queue_empty(self):
         """_hub_continue() must NOT spawn a spurious _process_queue() task
         when processing_queue is already empty after the turn completes."""

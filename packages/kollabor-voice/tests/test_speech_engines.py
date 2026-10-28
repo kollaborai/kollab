@@ -162,3 +162,13 @@ async def test_cancelled_vibevoice_generation_never_reaches_playback(root, monke
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         engine.close()
+
+
+def test_the_engine_only_ever_receives_speakable_text(root):
+    synth = Mock(return_value=(np.ones(10), 24000))
+    engine = SpeechEngine(root, synth)
+    say(engine, r"Done \- the parser → strips tags.")
+    synth.assert_called_once_with("Done, the parser to strips tags.")
+    synth.reset_mock()
+    assert list(engine.stream(r"\. *")) == []  # nothing left to say: no call
+    synth.assert_not_called()

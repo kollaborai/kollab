@@ -59,6 +59,7 @@ def joined(inviter, joiner):
     inviter.client.approve(joiner.key)
     inviter.client.add_config_recipient(joiner.key)
     inviter.bridge.bind_peer_device(joiner.key, joiner.name)
+    joiner.client.state.inviter = inviter.key  # the join names the joiner's primary
     joiner.client.approve(inviter.key)
     joiner.bridge.bind_peer_device(inviter.key, inviter.name)
 
@@ -197,6 +198,50 @@ async def test_a_revoked_device_stays_out_until_a_member_accepts_it_again(chain)
     a.client.add_config_recipient(c.key)
     a.client.accept_membership(b.key, [(c.key, "srv-c")], [])
     assert c.key in approved(a) and c.key not in a.client.state.revoked
+
+
+@pytest.mark.asyncio
+async def test_one_members_revocation_never_cuts_a_device_off_from_its_primary(chain):
+    """A compromised member must not evict a device's primary on its word alone."""
+    a, b, c, nodes, _wire = chain
+    await sync(nodes)
+    assert c.client.state.inviter == b.key
+
+    c.client.accept_membership(a.key, [(b.key, "srv-b")], [b.key])  # A says: B is out
+
+    assert b.key in approved(c) and b.key not in c.client.state.revoked
+    # A human at C can still revoke its primary.
+    c.client.revoke(b.key, announce=True)
+    assert b.key not in approved(c) and b.key in c.client.state.revoked
+
+
+@pytest.mark.asyncio
+async def test_the_primarys_own_revocation_still_applies(chain):
+    a, b, c, nodes, _wire = chain
+    await sync(nodes)
+
+    b.client.revoke(a.key, announce=True)  # C's primary drops A
+    await sync(nodes)
+
+    assert a.key not in approved(c) and a.key in c.client.state.revoked
+    assert b.key in approved(c)
+
+
+@pytest.mark.asyncio
+async def test_a_peers_revocation_of_an_ordinary_member_still_applies(tmp_path):
+    wire, nodes = await make_net(tmp_path, "mac", "srv-b", "srv-c", "srv-d")
+    a, b, c, d = nodes
+    joined(a, b)
+    joined(a, c)
+    joined(a, d)
+    await sync(nodes, rounds=5)
+
+    # B is neither D's primary nor the voucher: one member's word drops it at D.
+    d.client.accept_membership(c.key, [], [b.key])
+
+    assert b.key not in approved(d) and b.key in d.client.state.revoked
+    assert approved(d) == {a.key, c.key}
+    await close_net(wire, nodes)
 
 
 @pytest.mark.asyncio

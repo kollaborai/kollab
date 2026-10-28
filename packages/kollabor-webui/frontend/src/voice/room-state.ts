@@ -147,3 +147,6 @@ export function reduceVoiceEvent(s: VoiceRoomState, e: VoiceEventEnvelope): Voic
       return { ...s, cursor };
   }
 }
+
+/** The engine's "no speech model yet" state (speech_adapter.map_readiness): a setup step, not a failure. */
+export const needsSpeechModel = (error: string | null) => !!error?.includes("needs a speech model on this computer");
