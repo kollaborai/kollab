@@ -1475,3 +1475,99 @@ the #363/#364/#365 evidence.
 Images: `ks11-img:dev` (9abfc5137e42). Network: `ks-net` (pre-existing, reused). Containers
 `ks11-relay`, `ks11-m1`..`ks11-m4` were `--rm`; stopped and gone at teardown. No volumes. The Bash hook
 refuses image removal, so Marco removes `ks11-img:dev` when done with it.
+
+## D12 proof on 8887c335 (F16 resume forms + the #363/#365 live rows)
+
+**Verdict: #364 is FIXED live (every resume form lifts); #363 and #365 reproduce with root causes now
+pinned at the code level.** Image `ks12-img:dev` (723e6c2017e313ebdf2e4cc5a842fbcc7ec5b279d1eadd2951bf37cb2fbc3fc6)
+built from `git archive 8887c335` (committed tree, no docker cp). Network `ks12-net` (10.231.78.0/24, fresh —
+the ks11 rig stayed isolated on `ks-net` until its teardown), relay `ks12-relay` + m1..m4 (`ks12-*`, `--rm`),
+all four counting before the first halt (m2 bootstrap via m1's `make_bootstrap`, m3/m4 enrolled on m1's offers
++ `confirm_machine` by m2 + `count` on each). Halts typed from a real tty (tmux `hs` session, `bash -l` in
+/root/work); panel acts through `tests/docker/kill_switch/halt_ctx.py` over the listener link.
+
+Run ids: halt `4a90f2c5` (row a/b), `568eae6f` (forms 2-4 + crossing `caae893a` under it), crossing acts at
+14:18Z local, freeze verified t+7min.
+
+| # | What | Command | Observed output | Result |
+|---|---|---|---|---|
+| 1 | #364 live: halt records the folder and opens the link (F16) | m1 tty `kollab --hub halt --reason d12-matrix` (m4 docker-disconnected first) | `Halt 4a90f2c5 recorded. m2-work: halted / m3-work: halted / m4-work: offline, halts on reconnect / m1-work: halted, 1 agents stopped`. halt.json on m1: `scopes[net]="machine"`, **`folders[net]=["/root/work"]`**, stopped=[TUI pid 59, koordinator]. m2/m3/m4 (on delivery): scope machine + folders populated (m3's own `folders` stayed `[]`; scope "machine" covers it) | PASS — the D11 jam (`folders[net]=[]`, every form refused) is gone |
+| 2 | Resume form: plain propose + confirm | m1 tty `kollab --hub resume` then m2 `halt_ctx act confirm_resume '{"hash":"68253d82"}'` | m1: `Resume proposed. A person on another machine confirms it...`; m2: `{"ok": true, "lifted": ["4a90f2c5..."]}`; scopes cleared on all four machines within seconds | PASS |
+| 3 | Resume form: `--local` | m1 tty `kollab --hub resume --local` (halt 568eae6f, m2/m3 still holding) | `Lifted on this machine only. It halts again when it next reaches a member that holds the halt.` — m1's book lifted, then re-took the halt on the flush (the R3-F9 designed re-halt; operator line states it) | PASS (accepted, no refusal; the lift-and-re-halt is the designed semantics with members still holding) |
+| 4 | Resume form: web panel act (`resume_local` through the listener link) | m1 `halt_ctx act resume_local '{}'` (halt re-issued first) | `{"lifted": ["568eae6f..."], "line": "Lifted on this machine only..."}` — the listener's link served the act with the daemon dead | PASS |
+| 5 | Resume form: halted interactive screen | fresh TUI `kollab` in m1:/root/work under the halt → screen `p`, `p` (press-again confirm) → m2 confirms | Screen shows `Halt and Resume / Halted by m1-work ... d12-form2` with `n halt network  p propose resume`; double-p proposes (`proposal:9f45ac88...`), m2 `confirm_resume 9f45ac88` → `lifted: [568eae6f...]`, scopes cleared on all four | PASS |
+| 6 | #363 observation: machine offline at halt time, reconnect via listener | `docker network disconnect ks12-net ks12-m4` before the halt; `docker network connect` after; then a manual `hand_off` from a root shell | On reconnect: halt.json gained scope machine + folders within seconds, a `--halt-listener` spawned (pid 2548), but the `--detached` daemon (pid 25) stayed ALIVE, `stopped: []` — for ~90 s. Manual `hand_off` from a shell then returned `{"ok": true, "stopped": ["stopped koordinator"], "count": 1}` and the daemon died. Same machine, same halt, same order — only the CALLER differs | FAIL — #363 reproduced + root cause: the automatic hand-off's caller is the daemon itself; `caller_refusal` only refuses callers whose ANCESTORS are agents or that carry `KOLLAB_TOOL_SHELL`/`KOLLAB_AGENT_PID` (the daemon's env has neither, `/proc/25/environ` read), so `_protect_set` adds the daemon + its chain to the protect set and the sweep spares the machine's own agent |
+| 7 | F15a crossing, both directions (m2+m4 revoke m3; m3+m4 revoke m2) | `halt_ctx act confirm_revoke` x4 under halt caae893a | t+20 s: m2 applied m3-revoked, pending [m2] signers {m4}; m3 applied m2-revoked, pending [m2] signers {m3-own}; m4 pending [m2, m3] signers {m4-own}. t+7 min: **unchanged** — records never left their sign-time subsets. Monotonicity held everywhere (no machine exceeded its subset's answer) | HALF — the pure-set rule is fine; the transport is dead (see #365 finding) |
+| 8 | Partition convergence (m2<->m3 without m1) | online maps read via `halt_ctx snap .members_online` during row 7 | m2 online: {m1, m4}, m3 online: {m1, m4} (m2 and m3 do NOT see each other), m4 online: {m1} only; m1's daemon swept + listener linkless (never answers). m2/m3's `network_halt` requests toward m4 die `no authenticated application response received before deadline` (both logs); m4's toward m1 die `peer application request failed` | FAIL — the m2<->m3 edge does not exist under the halt, so there is nothing to converge on; every exchange path is severed |
+
+### Fix designs agreed before coding (Garnet guardrail 2026-10-28: the Ed25519 handshake stays on EVERY path)
+
+- **#363 (F17)**: `caller_refusal` must also refuse a caller that IS itself a live agent (a presence
+  pid), not only one descending from an agent — restoring its documented contract ("an agent, a tool
+  shell or an unknown caller is not shielded from the sweep by its own request"); the daemon handing
+  off a listener-learned halt then stops being spared by `_protect_set`. `RelayAgentBridge._halt_changed`'s
+  `go()` additionally logs the hand_off reply's `errors` (today the reply is discarded whole, so a
+  failing sweep is invisible in the daemon's log — the D11 "swept nothing, no reason anywhere" hole).
+- **#365 (F18), chosen shape — the halt link answers the `network_halt` exchange**: under a halt the
+  listener already owns the folder's authenticated relay session (the link) and already serves panel
+  acts on it; it will also answer the `network_halt` HALT_METHOD request — merge the peer's payload
+  through the SAME `halt_merge`/`learn` validation (signed records only, strangers dropped) and reply
+  with the local book + revocation records. Records then transit toward halted machines over the link,
+  and a wedged daemon still converges on disk (the listener writes the shared control store).
+  Rejected shapes: a separate halt channel (new surface + new auth edges), and any unauthenticated or
+  plaintext convenience route (forbidden — the authenticated path being dead is never a reason to open
+  an unauthenticated one; the link reuses the exact Ed25519 handshake every exchange already uses, no
+  new route is created). Trade: the listener becomes a full exchange participant — a bigger job for a
+  privileged, model-less process, accepted because every record it merges passes the same
+  signature checks the daemon path enforces, and because the alternative (records that cannot transit)
+  is the convergence failure this fixes.
+- **Proof gap (its own line, per Garnet)**: the unit suite never exercises the halt.sock CALLER
+  IDENTITY path — `_protect_set`/`caller_refusal` tests inject chains and env tags, but no test makes
+  the caller itself a live agent, which is precisely the live configuration of every automatic
+  hand-off (the daemon is the caller). That gap is how #363 shipped green through F14→F15; the F17
+  tests close it (caller-is-a-live-agent cases on both the guard and `_protect_set`), and any future
+  caller-identity change re-proves live for the same reason.
+
+### Findings
+
+1. #363 root cause (live, this run): a halt that arrives through the member sync is handed off by the
+   daemon (`RelayAgentBridge._halt_changed` → `hand_off`), so the halt.sock peer pid IS the daemon.
+   `caller_refusal` checks only `(chain - {pid}) & agent_pids` (ancestors) and tool-shell env vars; the
+   daemon passes both (its parents are init, its env carries neither var), so it is judged a person's
+   CLI and `_protect_set` shields it — the machine's only agent survives its own machine-wide halt.
+   A manual hand_off from any other shell sweeps correctly, which is why D11's m1 (CLI caller) swept
+   but m2-m4 (daemon callers) did not. Fix direction: the guard must also refuse a caller that IS
+   itself a live agent (presence pid), restoring the documented "an agent ... is not shielded from the
+   sweep by its own request" contract.
+2. #365 root cause (live, this run): under a halt the receiver's halt LISTENER takes the folder's
+   relay-owner session (the link, `open_links`) and serves only halt.sock ops. Daemon-to-daemon
+   `network_halt` exchanges toward that machine die at the application layer ("no authenticated
+   application response"), the halted machines' online maps collapse (m2/m3 lost each other; m4 saw
+   only m1), and revocation records freeze at their sign-time subsets — the halt exchange that D6
+   built to carry them has no live transport on a halted receiver. Fix direction: the records must
+   ride something that survives the listener's lock — the halt link's own exchange (the listener
+   answers `network_halt` on its session), or the listener must relay the exchange to the daemon.
+3. F15a itself held again: every machine's pending/applied sets matched the pure function over the
+   records it held, in every poll; nothing exceeded the full answer.
+4. Harness notes: headless daemons' `state.hub_enrollment_offer` never surfaces the enrollment
+   request on the offerer's snapshot (offers must come from a machine with an attached session, m1
+   here — same as D11's enroll.sh); a machine only counts after a counting machine's
+   `confirm_machine` (m2 here) — enrollment alone is not counting; `kollab` is not on PATH in
+   containers, use `/opt/kollab/bin/kollab`; the halted screen's `p` needs a second `p` (press-again
+   confirmation) — that is citrine's confirm-label fix working.
+
+### Unproven / left
+
+- #363/#365 fixes: not in this image (this proof ran the unfixed tree deliberately; the fixes land as
+  F17/F18 with their own fresh-image rows).
+- The `--local` resume of a machine whose network still holds the halt re-halts it on contact (R3-F9);
+  a `--local` lift that STAYS lifted was not separately staged (needs a last-holder machine).
+- m1's stale view after its own sweep (linkless listener) — same as D11, #364-adjacent, now moot on
+  the fixed path.
+
+### Docker objects left
+
+Images: `ks12-img:dev` (723e6c2017e3). Networks: `ks12-net` (10.231.78.0/24) and `ks-net` (ks11 rig,
+torn down after this run per plan). Containers `ks12-relay`, `ks12-m1`..`ks12-m4` are `--rm`, stopped at
+teardown. Certs scratch `.../scratchpad/h12/certs`. No volumes. The Bash hook refuses image removal, so
+Marco removes `ks11-img:dev` / `ks12-img:dev` when done with them.
