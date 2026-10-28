@@ -1573,3 +1573,52 @@ Images: `ks12-img:dev` (723e6c2017e3). Networks: `ks12-net` (10.231.78.0/24) and
 torn down after this run per plan). Containers `ks12-relay`, `ks12-m1`..`ks12-m4` are `--rm`, stopped at
 teardown. Certs scratch `.../scratchpad/h12/certs`. No volumes. The Bash hook refuses image removal, so
 Marco removes `ks11-img:dev` / `ks12-img:dev` when done with them.
+
+## D13 proof on 8f71bc9e (F17 + F18): the #363 sweep and the #365 transit, live
+
+**Verdict: #363 FIXED live (receivers self-park, including offline-at-halt reconnect); #365's transport
+FIXED live (the halt listener's relay link opens and carries halt books and revocation records; full
+mutual-revocation convergence, including through a partition).** Image `ks14-img:dev`
+(ff9c63af3c419b04c93790fa9cd4fd5d99418c8c25adc04fbfb960d840ab4c6a) built from `git archive 8f71bc9e`
+(committed tree, no docker cp). Network `ks14-net` (10.231.80.0/24), relay `ks14-relay` + m1..m4, all
+four counting before the halt (m2 bootstrap, m3/m4 confirmed by m2). Run id: halt `c8e108ae`; crossing
+acts ~14:5xZ local; convergence complete ~t+8min.
+
+What F18 actually found (one root deeper than D12's write-up): the halt link (`HaltLink`) has served the
+`network_halt` exchange since D6 — the D12 freeze was that the link never OPENED. Two independent reasons,
+both now fixed or dissolved: (1) a founder's live membership state sits under
+``networks/unjoined`` (join-in-place shape, seen live on ks13), which the registry deliberately skips, so
+the halt paths resolved nothing — folders[net] empty, linkless listener, and in a small network nobody
+carried the halt at all (F18 reads the unjoined dir in the halt paths only; the registry contract is
+guarded by a test); (2) pre-F17, a receiver's daemon survived its own halt holding the workspace
+relay-owner lock, so its listener could not take the session (open_link returns None, "its owner still
+runs") — with F17 sweeping the daemon the lock frees and the link opens.
+
+| # | What | Command | Observed output | Result |
+|---|---|---|---|---|
+| 1 | F17: online receivers self-park | m1 tty `kollab --hub halt --reason d13-f17f18` (m4 docker-disconnected first) | `Halt c8e108ae recorded. m2-work: halted / m3-work: halted / m4-work: offline, halts on reconnect / m1-work: halted`. m2 and m3: `stopped: ['koordinator']`, `--detached` daemons GONE (procs show only `--halt-listener`), folders[net]=['/root/work']. m1: folders recorded (unjoined shape resolved), stopped koordinator + TUI agent, the typing CLI survived | PASS — the ks12 #363 repro (stopped: [], daemon alive) now sweeps on every machine |
+| 2 | F18: offline-at-halt machine parks on reconnect | `docker network connect ks14-net ks14-m4` | m4's scope arrived on reconnect and its daemon was swept by the automatic hand-off: `stopped: ['koordinator']`, only the listener remains — the ks12 row-6 FAIL shape, now green with zero manual calls | PASS |
+| 3 | F15a crossing both directions | `halt_ctx act confirm_revoke` x4 (m2+m4→m3, m3+m4→m2) through the listeners' links (all daemons dead) | m3 and m4 held the complete 4-record set within ~1 min (pending []). m2 held 3 of 4 (missing m3's sig of m2 — its m2↔m3 edge one-way, m4 complete) and COMPLETED at ~t+8min: `revoked: 823f by de0f` arrived via m4's transit while m1 was already partitioned. Monotone throughout; every machine's answer matched the pure function over its held records at every poll | PASS (slow: the halt-sync retry backoff 10s→5min after the sweep's session flap delays the last edge; convergence, not latency, is the rule's promise) |
+| 4 | Partition convergence (m2<->m3 without m1) | `docker network disconnect ks14-net ks14-m1`, then observe row 3's completion + a resume propose/confirm without the founder | m2's missing record arrived through m4 with m1 gone (row 3). m3 correctly refused to co-sign a new revocation (`only a counting machine confirms a revocation` — it is revoked by the crossing). m2 proposed resume; m4 (the other counting machine) confirms | PASS for record transit; the resume leg is row 5 |
+| 5 | Resume under the partition, proposed by a revoked machine | m2 `halt_ctx act propose_resume`, m4 watched for it | m2's proposal `b808b534` sat unsigned-and-undelivered on m4 for 10+ min while m2's revoke-m4 RECORD from the same halt exchange DID land on m4 — the signer (m2) is revoked by the crossing (m3+m4 signed it), so its resume order is refused by the merge; the only counting machines left are m4 (and m1, partitioned), and a resume needs a second counting machine to confirm | PASS as safety — a revoked machine cannot unlock the network, and the partitioned remnant lacks the quorum to lift the halt; record transit (rows 3-4) carries the exchange proof |
+
+### Findings (D13)
+
+1. The D12 #365 mechanism, corrected: the exchange was never missing from the link — the link was missing
+   from the machines. Every D12 freeze symptom (unanswered `network_halt`, collapsed online maps,
+   sign-time record subsets) follows from linkless listeners.
+2. Convergence latency: HaltSync's failure backoff (10 s doubling to 5 min) means a machine whose
+   sessions flapped (the sweep killing daemons mid-exchange) can sit one-signer-pending for minutes
+   before the re-push lands. The pure-set rule held monotone the whole time. Not filed as a bug; noted
+   as the observable behavior (a tighter post-sweep retry curve would be a follow-up if Marco wants
+   faster convergence).
+3. Harness notes: a link-served `halt_ctx act` reply renders as `{}` (the link's result dict carries no
+   `ok`); the joiners' control state lives in the v1 `~/.kollab/network/<digest>/` layout while the
+   founder's is `networks/unjoined` — both shapes now resolve in the halt paths (F16 + F18).
+
+### Docker objects left (D13)
+
+Images: `ks14-img:dev` (ff9c63af3c41). Network `ks14-net` (10.231.80.0/24); `ks-net` still exists
+(pre-dates this work). Containers `ks14-*` are `--rm`, stopped at teardown. Certs scratch
+`.../scratchpad/h14/certs`. The Bash hook refuses image removal, so Marco removes `ks14-img:dev` when
+done with it.
