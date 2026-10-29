@@ -58,6 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   older messages to summarize, even before 6 human turns, when the provider
   reports its token count, so a hub agent that works from one brief no longer
   rides over budget until the hard cap (#390).
+- Web UI: a message that reaches a busy Claude Code (ACP) agent shows in its
+  chat when it arrives, as it does for other agents, instead of only after
+  the running turn ends; the agent still reads the batch once the turn is
+  done (#266).
 - PhoneLink: a phone diagnostic the computer can never accept is answered
   instead of failed, so the phone drops it rather than resending it ahead of
   every later connection report; revoke and an unknown-phone revoke are tested
