@@ -179,11 +179,15 @@ class NetworkAttach:
         target: Target,
         peer_name: Callable[[str], str],
         notice: Callable[[str], None],
+        halt_active: Callable[[], bool] | None = None,
     ):
         self._request_fn = request
         self._target = target
         self._peer_name = peer_name
         self._notice = notice
+        # F19 requester side: True while this device's own halt book is active.
+        # None in tests that build a bare NetworkAttach.
+        self._halt_active = halt_active
         self._channels: dict[tuple[str, str], _Channel] = {}
         self._pacer = _Pacer()
         self._socket_dir: Path | None = None
@@ -200,6 +204,14 @@ class NetworkAttach:
             raise RelayError("network attach is closed")
         if len(self._channels) >= MAX_CHANNELS:
             raise RelayError("too many open agents on other computers; close one first")
+        # F19 requester side: a halted network admits no new attach channels
+        # from this device either — the target's gate alone misses a halt the
+        # requester learned first (or a partition that hides it).
+        if self._halt_active is not None and self._halt_active():
+            raise AttachRefused(
+                "this device's network is halted: no attach channels while the "
+                "halt holds (lift it with /connect resume)"
+            )
         channel = _Channel(id=secrets.token_hex(16), peer=peer, name=name, requester=True)
         request = {"channel": channel.id, "agent_id": agent_id, "name": name}
         if quiet:
@@ -343,6 +355,16 @@ class NetworkAttach:
     async def _allowed(self, channel: _Channel) -> bool:
         """The device side asks its rules again (trust, grants, membership change)."""
         if channel.requester:
+            # F19 requester side: a local halt withdraws this device's
+            # outbound channels too, at the same recheck cadence the device
+            # side uses for its own.
+            if self._halt_active is not None and self._halt_active():
+                logger.info(
+                    "network attach %s to %s withdrawn: this device's network is halted",
+                    channel.name,
+                    channel.peer[:12],
+                )
+                return False
             return True
         now = time.monotonic()
         if now - channel.checked < RECHECK_SECONDS:
@@ -473,7 +495,9 @@ class NetworkAttach:
             if not await self._allowed(channel):
                 await self._close(channel, tell_peer=True, why=self._withdrawn(channel))
 
-        await asyncio.gather(*(one(c) for c in list(self._channels.values()) if not c.requester))
+        # F19 requester side: this device's own halt withdraws its outbound
+        # channels here too, same cadence as the device side's rule rechecks.
+        await asyncio.gather(*(one(c) for c in list(self._channels.values())))
 
     async def _close(self, channel: _Channel, *, tell_peer: bool, why: str | None = None) -> None:
         if channel.closed:

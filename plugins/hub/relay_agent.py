@@ -966,6 +966,7 @@ class RelayAgentBridge:
                 target=self.attach_target,
                 peer_name=self._peer_name,
                 notice=self._config_notice,
+                halt_active=lambda: self.commands.client.control.halt_book().active(),
             )
             try:
                 from .peer_transport import PeerMeshRuntime
