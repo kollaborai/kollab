@@ -58,23 +58,18 @@ MAX_PICTURE = 200_000
 MAX_EMOJI = 16
 _KEY = re.compile(r"^[a-z][a-z0-9_-]{0,31}(@[^\x00-\x1f\x7f]{1,1024})?$")
 
-# What a gem can be born with: gem-face.ts's EYE_STYLES and HAT_STYLES without
-# the Halloween and Christmas groups, its HAIR_STYLES in a HAIR_COLORS shade,
+# Birth faces match gem-appearance.tsx's visually checked EVERYDAY_FACES.
+# Hats exclude seasonal groups; hair uses HAIR_STYLES in a HAIR_COLORS shade,
 # and FUR_STYLES in the gem's own color or a natural shade (a test keeps the
 # two in step). Every birth is a fixed draw from the gem's name (_drawn, the
 # same scoring draw the web UI's fallback makes), never a fresh random one.
 BIRTH_FACES = (
     "pill",
-    "dot",
-    "disney",
+    "gleam",
+    "bean",
+    "smile",
+    "drowsy",
     "kawaii",
-    "diamond",
-    "heart",
-    "triclops",
-    "shades",
-    "visor",
-    "googly",
-    "pixel",
 )
 BIRTH_HATS = (
     "none",
@@ -87,8 +82,18 @@ BIRTH_HATS = (
     "headphones",
     "hardhat",
     "beret",
+    "sailor",
+    "chef",
+    "cowboy",
+    "bucket",
+    "boater",
+    "graduate",
+    "aviator",
+    "flower",
+    "halo",
+    "propeller",
 )
-BIRTH_HAIRS = ("short", "long", "spiky", "mohawk")
+BIRTH_HAIRS = ("short", "long", "spiky", "mohawk", "buzz", "crop", "fringe", "bob", "page", "mane", "plume", "crest", "quiff", "halo")
 BIRTH_HAIR_COLORS = (
     (30, 26, 24),
     (95, 60, 35),
@@ -97,7 +102,7 @@ BIRTH_HAIR_COLORS = (
     (170, 170, 175),
     (235, 232, 225),
 )
-BIRTH_FURS = ("short", "shaggy")
+BIRTH_FURS = ("short", "shaggy", "velvet", "plush", "long", "flowing")
 BIRTH_FUR_COLORS = ("gem",) + BIRTH_HAIR_COLORS
 # The share of new gems born with fur, and with hair; the rest are born bare.
 # gem-look.ts (BORN_FUR_SHARE, BORN_HAIR_SHARE) draws the same shares.

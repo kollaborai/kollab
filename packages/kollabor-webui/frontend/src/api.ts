@@ -854,7 +854,7 @@ export class EngineApi {
 
   private headers(extra: HeadersInit = {}): Headers {
     const headers = new Headers(extra);
-    headers.set("Content-Type", "application/json");
+    if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
     return headers;
   }
@@ -1426,6 +1426,16 @@ export class EngineApi {
 
   getGemAppearance() {
     return this.json<GemAppearance>("/agents/appearance");
+  }
+
+  async getGemHeadshot(key: string) {
+    return (await this.request(`/agents/headshot?key=${encodeURIComponent(key)}`)).blob();
+  }
+
+  async saveGemHeadshot(key: string, png: Blob) {
+    await this.request(`/agents/headshot?key=${encodeURIComponent(key)}`, {
+      method: "PUT", headers: { "Content-Type": "image/png" }, body: png,
+    });
   }
 
   saveGemAppearance(appearance: GemAppearance) {
