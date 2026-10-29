@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `KOLLAB_WEBUI_NO_BROWSER=1` starts the web UI without opening a browser tab.
+  The desktop app sets it in place of `BROWSER=true`, which does nothing on
+  Windows (#268).
 - Voice: words said while the agent is working get a spoken answer within
   2.5 s from the Quick Model, read from what the agent's tools are doing (a
   tool's name and how long it has run, never its command or paths), and the

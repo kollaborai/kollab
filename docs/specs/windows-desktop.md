@@ -22,7 +22,7 @@ that commit; the function names are the stable handle.
 | Do the dependencies resolve? | Yes. All 72 runtime packages in `uv.lock` ship a `win_amd64` or `none-any` wheel; none is sdist-only. `colorama`, `pywin32-ctypes` and `pywin32` arrive by `sys_platform == 'win32'` markers. |
 | Does the smoke import? | Expected to. No Unix-only module is reachable by module-level imports from `kollabor_cli_main`, `kollabor.application`, `kollabor_engine`, `kollabor_webui`, `kollabor_voice` or `plugins`, the imports `build_binary.smoke` checks. The hub plugin is not among them (below). |
 | `--web-ui` start-up | `kollabor/cli.py` (`--web-ui` handler, about lines 2312-2330) starts the engine as `sys.executable -m kollabor_engine serve` and the UI as `sys.executable -c "from kollabor_webui import main; main()"`. In a scie `sys.executable` is the pex venv's interpreter, so the re-exec contract holds. `kollabor/binary.py:running_binary()` (`SCIE` plus `PEX-INFO` in `sys.prefix`) is platform neutral; `app_launcher()` is only the macOS unpacked-runtime marker. No change needed. |
-| Desktop browser tab | `kollabor_webui.main()` (`packages/kollabor-webui/src/kollabor_webui/__init__.py`, `open_browser_delayed`) always calls `webbrowser.open`. The desktop sets `BROWSER=true` to silence it; Windows has no `true`, so Python falls through to the default browser. Port item 7. |
+| Desktop browser tab | `kollabor_webui.main()` (`packages/kollabor-webui/src/kollabor_webui/__init__.py`, `open_browser_delayed`) always calls `webbrowser.open`. The desktop set `BROWSER=true` to silence it; Windows has no `true`, so Python fell through to the default browser. Done: the desktop sets `KOLLAB_WEBUI_NO_BROWSER=1` (port item 7). |
 
 ### Agent runtime: blocked, needs a real port
 
@@ -39,7 +39,7 @@ Windows.
 | 4 | `os.getuid()` | 40 calls in 15 files, among them `plugins/hub/messenger.py` (3), `local_directory.py` (3), `relay_runtime.py` (6), `relay_owner.py` (4), `relay_conversations.py` (4), `secure_session.py`, `device_record.py`, `enrollment_recovery.py`, `enrollment_delegations.py`, `presence.py`, `kollabor_config/provisioned_state.py`, `kollabor_ai/conversation_logger.py`. | Missing on Windows: `AttributeError` at call time, mostly in the socket owner checks of blocker 2. |
 | 5 | Signals and process groups | `os.killpg` / `os.getpgid` / `signal.SIGKILL` in `kollabor_agent/process_manager.py:SubprocessStrategy.kill` (365-376), `shell_executor.py:_kill_unix_process_group` (375-383), `plugins/terminal_plugin.py:_kill_process` (583-594), `plugins/hub/plugin.py:_hard_kill_agent` (12804), `DaemonHandle.close` (`daemon_pool.py:446`), `plugins/hub/presence.py:pid_alive` (110, `os.WNOHANG`). `loop.add_signal_handler` in `kollabor_voice/service.py:serve` (942), `plugins/hub/relay_runtime.py` (810, 908), `relay_selfhost.py` (470). | No process groups or `SIGKILL` on Windows, and `ProactorEventLoop` has no `add_signal_handler`. |
 | 6 | POSIX shell for agent tools | `kollabor_agent/shell_executor.py` (284, `SHELL` or `/bin/sh`), `shell_utils.py:55` (`/bin/bash`), `kollabor_ai/prompt_renderer.py` (944, `["/bin/sh", "-c"]`), `kollabor/llm/acp_bridge.py` (121, 220), `plugins/terminal_plugin.py` (280-290, 773; tmux). | A product decision first: Git Bash, PowerShell or WSL for agent tools. tmux has no Windows build. |
-| 7 | Desktop browser tab | See the table above. | `webbrowser.open` ignores a no-op `BROWSER` on Windows. |
+| 7 | Desktop browser tab | See the table above. | Done: `KOLLAB_WEBUI_NO_BROWSER=1` skips the tab on every platform. |
 
 Not blockers for the desktop: the TUI's `termios`/`tty` imports are guarded in
 `terminal_state.py`, `inline_editor_service.py`, `fullscreen/renderer.py` and
@@ -112,7 +112,7 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 4. **`os.getuid()`.** One `current_user_id()` helper (Windows: the user SID) for the 40 calls.
 5. **Signals and trees.** Job Objects for agent and shell trees in place of `killpg`; `SIGKILL` becomes `TerminateProcess`; replace `add_signal_handler` with `signal.signal` or console control handlers.
 6. **Agent shell.** Decide the Windows shell for agent tools (Git Bash, PowerShell, WSL) and wire `shell_executor`, `shell_utils`, `prompt_renderer` and `acp_bridge`; tmux features stay Unix-only.
-7. **No browser tab.** A `KOLLAB_WEBUI_NO_BROWSER` switch (or honouring `BROWSER` portably) in `kollabor_webui.main()`.
+7. **No browser tab.** Done: `kollabor_webui.main()` opens no tab when `KOLLAB_WEBUI_NO_BROWSER` is set, and the desktop sets it.
 8. **Desktop.** Graceful stop (an engine shutdown request, or Job Object `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` plus a console-free Ctrl+Break) instead of `taskkill /F`; confirm that WebView2 raises `on_navigation` for the `kollab-desktop://` report and update links; a Windows updater (`updater.rs` is macOS only: the prompt offers the release page elsewhere); GUI automation for clean Quit in `check_desktop_package_windows.py`, which today ends the app with `taskkill`.
 9. When 1 to 5 land, `--agent-smoke` passes unchanged; then promote, as above.
 

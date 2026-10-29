@@ -124,7 +124,10 @@ def main() -> None:
         time.sleep(1.5)
         webbrowser.open(f"http://127.0.0.1:{port}")
 
-    threading.Thread(target=open_browser_delayed, daemon=True).start()
+    # The desktop app is the browser. A no-op BROWSER does not work on
+    # Windows (no `true`), so it sets this instead (#268).
+    if not os.getenv("KOLLAB_WEBUI_NO_BROWSER"):
+        threading.Thread(target=open_browser_delayed, daemon=True).start()
 
     app = create_app(engine_url, bind_hosts=active_hosts)
     uvicorn.Server(build_uvicorn_config(app)).run(sockets=sockets)
