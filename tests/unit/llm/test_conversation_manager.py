@@ -335,3 +335,47 @@ class TestConversationSessionStatsPersistence(unittest.TestCase):
 
             self.assertTrue(reader.load_session("streamed"))
             self.assertEqual(restored_stats, self.SESSION_STATS)
+
+    def test_streaming_session_keeps_its_snapshot_conversation_uid(self):
+        """A resumed streaming session keeps the uid its goal is bound to (#400)."""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            writer = self._manager(root)
+            writer.current_session_id = "streamed"
+            uid = writer.conversation_uid
+            writer.add_message("user", "streamed message")
+            writer.save_conversation()
+            streaming_record = {
+                "type": "user",
+                "uuid": "streamed-user",
+                "timestamp": "2026-08-14T22:00:00Z",
+                "message": {"role": "user", "content": "streamed message"},
+            }
+            (root / "streamed.jsonl").write_text(json.dumps(streaming_record) + "\n")
+
+            reader = self._manager(root)
+            self.assertTrue(reader.load_session("streamed"))
+            self.assertEqual(reader.conversation_uid, uid)
+
+    def test_streaming_session_without_snapshot_mints_a_conversation_uid(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            streaming_record = {
+                "type": "user",
+                "uuid": "bare-user",
+                "timestamp": "2026-08-14T22:00:00Z",
+                "message": {"role": "user", "content": "bare message"},
+            }
+            (root / "bare.jsonl").write_text(json.dumps(streaming_record) + "\n")
+
+            reader = self._manager(root)
+            self.assertTrue(reader.load_session("bare"))
+            self.assertEqual(len(reader.conversation_uid), 32)

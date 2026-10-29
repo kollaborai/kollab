@@ -279,7 +279,9 @@ class P0CrashRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.provider_requests), 1)
         self.assertEqual(len(report["ambiguous"]), 1)
         self.assertEqual(rec.status, "paused")
-        self.assertIn("reconcile", (rec.blocked_reason or ""))
+        self.assertIn("cut off", (rec.blocked_reason or ""))
+        # /goal prints last_reason, so the user sees why it paused
+        self.assertEqual(rec.last_reason, rec.blocked_reason)
         events = {e.kind for e in self.store.events(rec.goal_id)}
         self.assertIn("reconcile_paused", events)
 
