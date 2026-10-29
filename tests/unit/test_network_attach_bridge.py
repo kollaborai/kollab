@@ -96,17 +96,20 @@ async def test_a_member_device_opens_an_agent_under_trust_open_with_no_command(d
 # ------------------------------------------------------- F19: no attach under a halt
 
 
-def _haltable(taker, other) -> None:
-    """Give each control its own machine key (the fixture shares the real device
-    key), enroll ``taker`` as the founder's bootstrap member, and take the halt."""
+def _enroll(taker, other, *, isolate: bool = False) -> None:
+    """Give each control its own machine key AND its own halt file (with
+    root=None both read the real ~/.kollab halt.json and would see each
+    other's halts), then bind the founder and enroll ``taker`` as a
+    counting bootstrap member — WITHOUT taking a halt."""
     from nacl.signing import SigningKey
-
-    from plugins.hub import network_halt as nh
 
     rc = taker.commands.client.control
     lc = other.commands.client.control
     rc._machine = SigningKey.generate()
     lc._machine = SigningKey.generate()
+    if isolate:
+        rc._root = _next_halt_root()
+        lc._root = _next_halt_root()
     lc.found()
     lc._fresh().setdefault("members", {})[rc.client.public_key] = rc.own_row()
     rc._fresh().setdefault("members", {})[lc.client.public_key] = lc.own_row()
@@ -124,7 +127,23 @@ def _haltable(taker, other) -> None:
     }
     lc.learn("peer", rc.halt_payload())
     assert {m for m in lc.view().counting} == {rc.machine_hex, lc.machine_hex}
-    rc.halt_act("halt", {"reason": "test halt", "confirmed": True})
+
+
+_HAL_ROOT_SEQ = iter(range(1000))
+
+
+def _next_halt_root() -> Path:
+    """A fresh per-device halt-file root (halt.json lives under <root>/private)."""
+    root = Path(tempfile.mkdtemp(prefix=f"haltnet-{next(_HAL_ROOT_SEQ)}-"))
+    (root / "private").mkdir()
+    return root
+
+
+def _haltable(taker, other, *, isolate: bool = False) -> None:
+    """Enroll both machines, then the TAKER halts. With ``isolate`` each device
+    gets its own halt file, so the other stays unhalted and unaware."""
+    _enroll(taker, other, isolate=isolate)
+    taker.commands.client.control.halt_act("halt", {"reason": "test halt", "confirmed": True})
 
 
 @pytest.mark.asyncio
@@ -142,7 +161,7 @@ async def test_a_halted_network_refuses_new_attach_channels(devices):
     peer_control = left.commands.client.control
     peer_control.learn("peer", control.halt_payload())
     peer_control.halt_act("confirm_resume", {"hash": proposal, "confirmed": True})
-    control.learn("peer", peer_control.halt_payload())
+    control.halt_merge(peer_control.halt_payload())  # the ack lifts the halt
     assert not control.halt_book().active()
     assert await _open(left, right)
 
@@ -335,22 +354,15 @@ def test_a_relay_state_from_the_attach_allow_list_loads_without_it(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_halt_on_the_requester_refuses_new_outbound_channels(devices):
-    """P1: the requester's own halt gates open() too, not just the target's."""
+    """P1 partition case: only the requester halts; the unaware target would admit."""
     left, right, _ = devices
-    control = left.commands.client.control
-    _haltable(right, left)  # give the shared network a second counting machine
-    control.halt_act("halt", {"reason": "requester halt", "confirmed": True})
-    with pytest.raises(AttachRefused, match="is halted"):
+    _haltable(left, right, isolate=True)
+    assert left.commands.client.control.halt_book().active()
+    assert not right.commands.client.control.halt_book().active()
+    with pytest.raises(AttachRefused, match="this device's network is halted"):
         await _open(left, right)
-    # resume restores outbound attach
-    control.halt_act("propose_resume", {"confirmed": True})
-    proposal = next(iter(control.halt_book().proposals))
-    peer_control = right.commands.client.control
-    peer_control.learn("peer", control.halt_payload())
-    peer_control.halt_act("confirm_resume", {"hash": proposal, "confirmed": True})
-    control.learn("peer", peer_control.halt_payload())
-    assert not control.halt_book().active()
-    assert await _open(left, right)
+    assert not left.network_attach._channels
+    assert not right.network_attach._channels
 
 
 @pytest.mark.asyncio
@@ -361,9 +373,9 @@ async def test_an_outbound_channel_from_before_the_halt_is_withdrawn_by_the_rech
     reader, _ = await asyncio.open_unix_connection(opened)
     assert await reader.readline() == b"agent here\n"
 
-    _haltable(right, left)
-    control = left.commands.client.control
-    control.halt_act("halt", {"reason": "requester halt", "confirmed": True})
+    # only the requester halts; the target stays unhalted and unaware
+    _haltable(left, right, isolate=True)
+    assert not right.commands.client.control.halt_book().active()
     await left.network_attach.recheck()
     assert not left.network_attach._channels
     assert await asyncio.wait_for(reader.read(), 5) == b""
