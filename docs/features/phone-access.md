@@ -36,7 +36,7 @@ capability endpoint before offering a QR code.
   generates its own identity and keeps it on that phone, as non-extractable
   WebCrypto keys in IndexedDB: script on the page can use them, but cannot
   copy them out. A browser without WebCrypto Ed25519 and X25519 keeps a raw
-  seed in local storage instead. A link saved with its seed by an older
+  seed in browser storage instead, as before. A link saved with its seed by an older
   loader moves into sealed keys at its next launch, with no new pairing.
 - Scanning requests access. Only an explicit local approval pins that phone's
   key. An invitation admits at most one phone and expires after five minutes.
@@ -167,10 +167,12 @@ served by the computer ([390](../screenshots/phone-access/phonelink-app-390.png)
   A hash of the loader pinned in the QR would not close this: the directory
   serves the page that checks it, too. What would close it is the planned
   mobile app (#369, not built yet), with the loader inside the app.
-- The phone's private keys cannot be read out of the browser's storage. A
-  script running on the page (an XSS on the directory's origin, for example)
-  can still use them while it runs, and a relay connection it opens then
-  lasts until that connection drops. Revoke the phone if you suspect that.
+- On a browser with WebCrypto Ed25519 and X25519, the phone's private keys
+  cannot be read out of the browser's storage; elsewhere the seed is stored
+  as before. A script running on the page (an XSS on the directory's origin,
+  for example) can still use the keys while it runs, and a relay connection
+  it opens then lasts until that connection drops. Revoke the phone if you
+  suspect that.
 - The relay still sees only encrypted packets; it cannot sign for the computer.
 - The signature proves the computer built the file list, not that it is
   harmless; approve only phones you trust with the app's controls.
