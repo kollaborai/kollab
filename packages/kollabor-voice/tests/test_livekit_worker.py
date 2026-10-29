@@ -493,6 +493,54 @@ def test_sentences_stream_into_tts_before_the_reply_finishes():
     assert {"hearing", "thinking", "speaking"} <= set(states)
 
 
+def test_a_speech_failure_reports_an_error_and_the_session_keeps_going():
+    # TTS failure changes state only (#295): the turn is not cut and the next one runs
+    async def scenario():
+        async with Rig(
+            ["is the build green", "still there"], [[S1, "done"], ["Okay.", "done"]]
+        ) as rig:
+
+            async def broken(binding, text, cancel):
+                rig.adapter.spoken.append(text)
+                raise AdapterError("tts_failed", "speech engine stopped", True)
+                yield  # never reached: makes this an async generator like the real one
+
+            def settled():  # back to listening after the failed reply
+                posts = rig.poster.posts
+                at = next(
+                    (i for i, (p, b) in enumerate(posts)
+                     if p == "events" and b["event"] == "voice.error"),
+                    None,
+                )  # fmt: skip
+                return at is not None and any(
+                    p == "events"
+                    and b["event"] == "voice.state"
+                    and b["payload"]["state"] == "listening"
+                    for p, b in posts[at + 1 :]
+                )
+
+            rig.adapter.synthesize = broken
+            await rig.say("is the build green")
+            await until(settled)
+            await rig.say("still there")
+            await until(lambda: "Okay." in rig.adapter.spoken)
+        return rig
+
+    rig = run(scenario())
+    errors = events(rig.poster, "voice.error")
+    assert errors[0]["payload"] == {
+        "code": "tts_failed",
+        "message": "speech engine stopped",
+        "retryable": True,
+    }
+    assert [r["display_text"] for r in rig.engine.requests] == [
+        "is the build green",
+        "still there",
+    ]
+    assert rig.adapter.spoken == [S1, "Okay."]  # each reply went to speech once
+    assert interrupted_posts(rig.poster) == []
+
+
 def test_words_over_the_reply_cancel_it_and_become_the_next_turn():
     async def scenario():
         async with Rig(scripts=[[S1, "wait", S2, "done"], ["Okay.", "done"]]) as rig:
