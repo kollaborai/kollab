@@ -56,8 +56,18 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
 
         snapshot = await LocalStateService(llm, None).get_conversation()
         inputs = [message for message in snapshot.messages if message.role == "user"]
-        assert len(inputs) == 1
-        context = inputs[0].content
+        # One row per observation, written as each arrived, so a watching page
+        # shows it live (#266).
+        assert len(inputs) == 22
+        assert all(row.content.count("[hub channel:") == 1 for row in inputs)
+        assert "PEER_NOTE_0\n" in inputs[0].content
+        assert "PEER_NOTE_21" in inputs[21].content
+        # The model still gets one bounded batch once the turn ends.
+        context = next(
+            update["text"]
+            for update in orchestrator.runner._updates
+            if str(update["request_id"]).startswith("observations-")
+        )
         assert context.startswith("<agent_hud>\n") and context.endswith("\n</agent_hud>")
         assert "2 older observations omitted." in context
         assert "PEER_NOTE_0\n" not in context and "PEER_NOTE_1\n" not in context
@@ -78,7 +88,81 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
         restored = ConversationManager(configuration)
         assert restored.load_session(conversation_logger.session_id)
         restored_inputs = [message["content"] for message in restored.messages if message["role"] == "user"]
-        assert restored_inputs == [context, human]
+        assert restored_inputs == [row.content for row in inputs] + [human]
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_busy_observation_is_written_on_arrival_and_sent_once(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    semantic = []
+
+    def spy_publish(bus, name, *args, **fields):
+        semantic.append((name, fields))
+
+    monkeypatch.setattr(mod, "publish_semantic", spy_publish)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        sent = []
+        real_admit = orchestrator.runner.admit
+
+        def record_admit(text, **kwargs):
+            sent.append((text, kwargs))
+            return real_admit(text, **kwargs)
+
+        monkeypatch.setattr(orchestrator.runner, "admit", record_admit)
+        orchestrator.runner.is_processing = True
+        orchestrator.observe_notification(
+            HubMessage(
+                action="message",
+                from_agent="peer-id-1",
+                from_identity="peer-1",
+                to="*",
+                content="BUSY_NOTE\n\nDetails",
+                thread_id=None,
+                reply_to="",
+            )
+        )
+        arrival_rows = list(orchestrator._observation_rows)
+        rows = [m for m in llm.conversation_history if m.role == "user"]
+        assert len(arrival_rows) == 1
+        assert len(rows) == 1
+        assert rows[0].metadata["source"] == "observation"
+        hub_events = [fields for name, fields in semantic if name == "hub_message"]
+        assert len(hub_events) == 1
+        assert hub_events[0]["input_source"] == "observation"
+        assert sent == []
+
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        assert len(sent) == 1
+        text, kwargs = sent[0]
+        assert "BUSY_NOTE" in text
+        assert kwargs["request_id"] == arrival_rows[0]
+        rows = [m for m in llm.conversation_history if m.role == "user"]
+        assert len(rows) == 1
     finally:
         await orchestrator.close()
 

@@ -86,6 +86,7 @@ class ACPOrchestrator:
         self._options_path = Path(get_project_data_dir()) / "acp" / "options.json"
         self._binding_conversation_id: str | None = None
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
+        self._observation_rows: list[str] = []
         self._observation_count = 0
 
     @property
@@ -168,6 +169,7 @@ class ACPOrchestrator:
         self._terminal_session_id = None
         self._observations.clear()
         self._observation_count = 0
+        self._observation_rows.clear()
         self._selected_profile = profile
         self.hub_plugin = self.event_bus.get_service("hub_plugin") or self.hub_plugin
         if not getattr(self.hub_plugin, "enabled", True):
@@ -256,6 +258,7 @@ class ACPOrchestrator:
     def admit(
         self, text: str, *, request_id: str, source: str, thread_id: str | None = None,
         origin: dict[str, Any] | None = None,
+        record: bool = True,
     ) -> ACPAdmission:
         if self._runner is None or self._closed:
             raise ACPError(self.startup_error or "ACP runner is not active")
@@ -267,24 +270,46 @@ class ACPOrchestrator:
         task = asyncio.create_task(self._complete(admission), name=f"acp-turn-{request_id}")
         self._completion_tasks.add(task)
         task.add_done_callback(self._completion_tasks.discard)
-        try:
-            self._record_user(request_id, text, source, thread_id, track_completion=True)
-        except Exception as exc:
-            # Admission is already owned. Remove it before the worker can run,
-            # and let that owner's terminal event report the persistence error.
-            if not admission.future.done():
-                admission.future.set_exception(exc)
-            self._runner.cancel_queued(request_id)
+        if record:
+            try:
+                self._record_user(
+                    request_id, text, source, thread_id, track_completion=True
+                )
+            except Exception as exc:
+                # Admission is already owned. Remove it before the worker can run,
+                # and let that owner's terminal event report the persistence error.
+                if not admission.future.done():
+                    admission.future.set_exception(exc)
+                self._runner.cancel_queued(request_id)
         return admission
 
     def observe_notification(self, message: Any) -> None:
         thread = f" [thread:{message.thread_id}]" if message.thread_id else ""
         reply = f" [reply-to:{message.reply_to}]" if message.reply_to else ""
-        self._observations.append(AgentHudEntry(
+        entry = AgentHudEntry(
             section="hub", label=f"{message.from_identity}->{message.to}",
             content=f"[hub channel: {message.from_identity} -> {message.to}{thread}{reply}]\n{message.content}",
-        ))
+        )
+        self._observations.append(entry)
         self._observation_count += 1
+        # Written as it arrives, like a native agent's hub message, so a watching
+        # page reloads it now rather than when the running turn ends. The flush
+        # hands the batch to the model without writing it again.
+        row_id = f"observations-{uuid.uuid4().hex}"
+        try:
+            self._record_user(
+                row_id,
+                format_agent_hud([entry]),
+                "observation",
+                None,
+                track_completion=True,
+            )
+        except Exception as error:
+            logger.warning(
+                "ACP observation history write failed (%s)", type(error).__name__
+            )
+        else:
+            self._observation_rows.append(row_id)
         if not self.is_processing:
             self._flush_observations()
 
@@ -296,10 +321,20 @@ class ACPOrchestrator:
         if discarded:
             entries.insert(0, AgentHudEntry("status", "observations", f"{discarded} older observations omitted."))
         text = format_agent_hud(entries)
+        rows, self._observation_rows = self._observation_rows, []
+        # The turn takes the newest arrival row's id, so its reply threads under
+        # that row; the older rows' bookkeeping goes now.
+        request_id = rows[-1] if rows else f"observations-{uuid.uuid4().hex}"
         try:
-            self.admit(text, request_id=f"observations-{uuid.uuid4().hex}", source="observation")
+            self.admit(
+                text, request_id=request_id, source="observation", record=not rows
+            )
         except Exception:
+            self._observation_rows = rows + self._observation_rows
             return
+        for stale in rows[:-1]:
+            self._parents.pop(stale, None)
+            self._user_history_tasks.pop(stale, None)
         self._observations.clear()
         self._observation_count = 0
 

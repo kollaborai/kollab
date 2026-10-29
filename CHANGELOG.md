@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Web UI: a message that reaches a busy Claude Code (ACP) agent shows in its
+  chat when it arrives, as it does for other agents, instead of only after
+  the running turn ends; the agent still reads the batch once the turn is
+  done (#266).
 - Save paths under the Settings save buttons no longer break mid-word: the
   home folder reads as `~` and a long path shows its last folders, with the
   full path on hover (#371).
