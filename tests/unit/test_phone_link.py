@@ -322,10 +322,27 @@ async def test_persisted_approval_is_private_and_corruption_preserves_data(setup
     data = path.read_text()
     assert phone._store.key.encode().hex() not in data and host.state.room not in data
     await manager.close()
+    legacy_data = json.loads(data)
+    del legacy_data["phones"][offer["id"]]["network"]
+    path.write_text(json.dumps(legacy_data))
     restored = PhoneLink(manager.app, manager.directory)
+
+    async def no_background_connect(_origin):
+        return False
+
+    restored.directory_ready = no_background_connect
     await restored.start()
     try:
         assert restored.records[offer["id"]]["key"] == phone.public_key
+        assert restored.records[offer["id"]]["network"] == "relay.example"
+        history = await restored.event_history()
+        restored_event = next(
+            event
+            for event in history["events"]
+            if event["event"] == "restored_at_startup"
+        )
+        assert restored_event["device_name"] == "My iPhone"
+        assert restored_event["network"] == "relay.example"
     finally:
         await restored.close()
     path.write_text("corrupt private state")
@@ -535,6 +552,7 @@ async def test_lifecycle_history_redacts_pairing_material_and_hashes_actor(setup
     }
 
     await manager.status(actor=actor)
+    await manager.revoke(offer["id"], actor=actor)
     history = await manager.event_history()
     serialized = json.dumps(history)
 
@@ -548,6 +566,21 @@ async def test_lifecycle_history_redacts_pairing_material_and_hashes_actor(setup
     ):
         assert secret not in serialized
     assert any(event["event"] == "pairing_code_shown" for event in history["events"])
+    assert all(
+        {"phone_ref", "device_name", "network"}.issubset(event)
+        for event in history["events"]
+    )
+    expected_phone_ref = hashlib.sha256(offer["id"].encode()).hexdigest()[:12]
+    invite_event = next(
+        event for event in history["events"] if event["event"] == "invite_created"
+    )
+    cancellation_event = next(
+        event for event in history["events"] if event["event"] == "invitation_cancelled"
+    )
+    for event in (invite_event, cancellation_event):
+        assert event["phone_ref"] == expected_phone_ref
+        assert event["device_name"] == "My iPhone"
+        assert event["network"] == "mine via relay.example"
     assert all(
         "pairing_code" not in event and "code" not in event
         for event in history["events"]

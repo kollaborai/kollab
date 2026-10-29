@@ -38,7 +38,11 @@ from plugins.hub.relay_state import ID, KEY, RelayError, canonical_origin, stric
 
 from .auth import get_token, read_token_from_disk
 from .hub_bridge import network_daemons
-from .phonelink_events import PhoneLinkEventLog, normalize_phone_diagnostic
+from .phonelink_events import (
+    PhoneLinkEventLog,
+    normalize_phone_diagnostic,
+    safe_event_label,
+)
 
 PHONE_PROTOCOL = "kollab-phonelink/1"
 MAX_PHONES = 8
@@ -237,6 +241,10 @@ class PhoneLink:
         actor: dict | None = None,
         **fields,
     ) -> dict:
+        row = self.records.get(identifier) if identifier is not None else None
+        if row is not None:
+            fields.setdefault("device_name", row.get("name"))
+            fields.setdefault("network", row.get("network"))
         return self.event_log.emit(
             event, identifier=identifier, peer=peer, actor=actor, **fields
         )
@@ -372,7 +380,12 @@ class PhoneLink:
                 for identifier, row in records.items():
                     if not ID.fullmatch(identifier) or not isinstance(row, dict):
                         raise ValueError()
-                    canonical_origin(row["origin"])
+                    origin = canonical_origin(row["origin"])
+                    row["origin"] = origin
+                    row["network"] = safe_event_label(
+                        row.get("network") or urlsplit(origin).hostname or "unknown",
+                        max_length=128,
+                    )
                     if (
                         not isinstance(row["name"], str)
                         or not 1 <= len(row["name"]) <= 48
@@ -429,7 +442,12 @@ class PhoneLink:
             client.approve(row["key"])
         client.set_request_handler(lambda peer, method, payload: self._receive(identifier, peer, method, payload))
         client.add_peer_session_listener(
-            lambda event: self._invalidate(identifier, cause=event.kind)
+            lambda event: self._invalidate(
+                identifier,
+                cause=event.kind,
+                device_name=row["name"],
+                network=row["network"],
+            )
         )
 
         def relay_lifecycle(event) -> None:
@@ -453,7 +471,13 @@ class PhoneLink:
                 value = getattr(event, field_name, None)
                 if value is not None:
                     fields[field_name] = value
-            self._event(event_name, identifier=identifier, **fields)
+            self._event(
+                event_name,
+                identifier=identifier,
+                device_name=row["name"],
+                network=row["network"],
+                **fields,
+            )
 
         client.add_connection_listener(relay_lifecycle)
         self.clients[identifier] = client
@@ -473,6 +497,8 @@ class PhoneLink:
         *,
         cause: str = "session_invalidated",
         peer: str | None = None,
+        device_name: str | None = None,
+        network: str | None = None,
     ) -> None:
         session = self.sessions.pop(identifier, None)
         if session is not None:
@@ -482,6 +508,8 @@ class PhoneLink:
                 identifier=identifier,
                 peer=peer or row.get("key"),
                 cause=cause,
+                device_name=device_name or row.get("name"),
+                network=network or row.get("network"),
                 idle_seconds=time.monotonic() - session.used,
                 last_request_at=(
                     int(session.last_request_at)
@@ -624,21 +652,36 @@ class PhoneLink:
     async def offer(self, name: str, actor: dict | None = None) -> dict:
         await self.start()
         if not isinstance(name, str) or len(name.strip()) > 48 or (name.strip() and not name.strip().isprintable()):
-            self._event("denied", actor=actor, cause="invalid_name")
+            self._event(
+                "denied", actor=actor, cause="invalid_name", device_name=name
+            )
             raise PhoneLinkError("Use a phone name of at most 48 printable characters.")
         status = await self.status(refresh=True, actor=actor)
         if status["state"] != "ready":
-            self._event("denied", actor=actor, cause="service_unavailable")
+            self._event(
+                "denied",
+                actor=actor,
+                cause="service_unavailable",
+                device_name=name,
+                network=status.get("network"),
+            )
             raise PhoneLinkError(status["message"])
         network = await self.network()
         async with self._lock:
             if len(self.records) >= MAX_PHONES:
-                self._event("denied", actor=actor, cause="phone_limit")
+                self._event(
+                    "denied",
+                    actor=actor,
+                    cause="phone_limit",
+                    device_name=name.strip() or "My Phone",
+                    network=network.get("network") if network else None,
+                )
                 raise PhoneLinkError("Up to eight phones can be saved. Remove a phone before adding another.")
             identifier = secrets.token_hex(16)
             self.records[identifier] = {
                 "name": name.strip() or "My Phone",
                 "origin": network["origin"],
+                "network": safe_event_label(network.get("network"), max_length=128),
                 "key": "",
                 "host": "",
                 "seen": 0,
@@ -760,11 +803,15 @@ class PhoneLink:
                 actor=actor,
                 cause="user_action",
                 record_state="linked" if row["key"] else "pending",
+                device_name=row["name"],
+                network=row["network"],
             )
             self._invalidate(
                 identifier,
                 cause=event_name,
                 peer=row["key"] or None,
+                device_name=row["name"],
+                network=row["network"],
             )
             self._pending_announced = {
                 item for item in self._pending_announced if item[0] != identifier

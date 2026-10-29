@@ -37,6 +37,8 @@ def test_event_log_redacts_identifiers_actor_secrets_and_unknown_fields(caplog):
             invite_url=invite_url,
             host_key=host_key,
             pairing_code=pairing_code,
+            device_name=invite_url,
+            network=host_key,
         )
 
     output = json.dumps(log.snapshot()) + caplog.text
@@ -52,6 +54,8 @@ def test_event_log_redacts_identifiers_actor_secrets_and_unknown_fields(caplog):
     assert record["phone_ref"] == hashlib.sha256(phone_id.encode()).hexdigest()[:12]
     assert record["device_ref"] == hashlib.sha256(host_key.encode()).hexdigest()[:12]
     assert record["cause"] == "unknown"
+    assert record["device_name"] == "redacted"
+    assert record["network"] == "redacted"
     assert record["actor"]["user_agent"] == "Chrome/124"
     assert (
         record["actor"]["web_session_ref"]
@@ -65,6 +69,28 @@ def test_event_log_redacts_identifiers_actor_secrets_and_unknown_fields(caplog):
     )
 
 
+def test_event_log_preserves_safe_device_and_network_labels():
+    record = PhoneLinkEventLog().emit(
+        "approved",
+        identifier="phone-id",
+        device_name="My iPhone",
+        network="mine via relay.example",
+    )
+
+    assert record["device_name"] == "My iPhone"
+    assert record["network"] == "mine via relay.example"
+
+    for secret in (
+        "123456",
+        "My iPhone 123456",
+        "iPhone123456",
+        "My device token abcd",
+        f"phone {'a' * 64}",
+    ):
+        redacted = PhoneLinkEventLog().emit("approved", device_name=secret)
+        assert redacted["device_name"] == "redacted"
+
+
 def test_event_log_history_is_bounded_and_close_codes_are_validated():
     log = PhoneLinkEventLog(max_events=2)
     log.emit("relay_socket_closed", close_code=1000)
@@ -76,6 +102,12 @@ def test_event_log_history_is_bounded_and_close_codes_are_validated():
     assert [event["id"] for event in history] == [2, 3]
     assert "close_code" not in history[-1]
     assert history[-1]["event"] == "relay_socket_closed"
+    assert all(
+        {"phone_ref", "device_name", "network"}.issubset(event) for event in history
+    )
+    assert history[-1]["phone_ref"] == "unknown"
+    assert history[-1]["device_name"] == "unknown"
+    assert history[-1]["network"] == "unknown"
 
     sanitized = PhoneLinkEventLog().emit(
         "relay_socket_closed",

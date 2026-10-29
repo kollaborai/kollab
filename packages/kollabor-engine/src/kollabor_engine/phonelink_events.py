@@ -67,6 +67,16 @@ _ROUTES = frozenset(
     }
 )
 _SAFE_TOKEN = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+_TOKEN_LIKE_LABEL = re.compile(
+    r"(?:(?<![0-9])[0-9]{6}(?![0-9])|"
+    r"(?<![A-Fa-f0-9])[A-Fa-f0-9]{24,}(?![A-Fa-f0-9])|"
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-]))"
+)
+_SENSITIVE_LABEL_MARKER = re.compile(
+    r"\b(?:api[ _-]?key|(?:host|private|public)[ _-]?key|token|secret|password|"
+    r"pairing[ _-]?code|invite|invitation|session|authorization|bearer)\b",
+    re.IGNORECASE,
+)
 _USER_AGENTS = (
     ("Edge", re.compile(r"\bEdg(?:A|iOS)?/(\d+)", re.IGNORECASE)),
     ("Chrome", re.compile(r"\b(?:Chrome|CriOS)/(\d+)", re.IGNORECASE)),
@@ -81,6 +91,8 @@ _EVENT_FIELD_NAMES = frozenset(
     {
         "actor",
         "cause",
+        "device_name",
+        "network",
         "error_kind",
         "record_state",
         "phone_event",
@@ -157,6 +169,24 @@ def _remote_addr(value: Any) -> str | None:
         return ipaddress.ip_address(value.split("%", 1)[0]).compressed
     except ValueError:
         return None
+
+
+def safe_event_label(value: Any, *, max_length: int) -> str:
+    """Keep useful labels while rejecting URL, credential, and code-shaped text."""
+    if not isinstance(value, str):
+        return "unknown"
+    label = value.strip()
+    if not label:
+        return "unknown"
+    if (
+        len(label) > max_length
+        or _TOKEN_LIKE_LABEL.search(label)
+        or _SENSITIVE_LABEL_MARKER.search(label)
+    ):
+        return "redacted"
+    if any(not (character.isalnum() or character in " ._-'()") for character in label):
+        return "redacted"
+    return label
 
 
 def actor_from_request(request: Any, route: str) -> dict[str, Any]:
@@ -258,6 +288,8 @@ def _actor_fields(actor: Any) -> dict[str, Any] | None:
 
 
 def _event_value(name: str, value: Any) -> Any:
+    if name in {"device_name", "network"}:
+        return safe_event_label(value, max_length=48 if name == "device_name" else 128)
     if name == "cause" or name == "phone_event":
         return (
             value
@@ -321,16 +353,17 @@ class PhoneLinkEventLog:
     ) -> dict[str, Any]:
         if event not in LIFECYCLE_EVENTS:
             raise ValueError(f"unsupported PhoneLink lifecycle event: {event!r}")
+        phone_ref = opaque_ref(identifier)
+        device_ref = opaque_ref(peer)
         record: dict[str, Any] = {
             "id": self._next_id,
             "at": int(time.time()),
             "event": event,
+            "phone_ref": phone_ref or "unknown",
+            "device_name": _event_value("device_name", fields.pop("device_name", None)),
+            "network": _event_value("network", fields.pop("network", None)),
         }
         self._next_id += 1
-        phone_ref = opaque_ref(identifier)
-        device_ref = opaque_ref(peer)
-        if phone_ref:
-            record["phone_ref"] = phone_ref
         if device_ref:
             record["device_ref"] = device_ref
         for name, value in fields.items():
