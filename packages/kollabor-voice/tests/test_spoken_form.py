@@ -9,8 +9,8 @@ from kollabor_voice.spoken_form import spoken_form
     [
         # Markdown escapes the model writes inside <spoken_text> were read as "backslash".
         (r"I fixed it \- the parser now strips tags\.", "I fixed it, the parser now strips tags."),
-        (r"Step 1\. Open it\.", "Step 1. Open it."),
-        (r"Step 2 \(optional\): save it .", "Step 2 (optional): save it."),
+        (r"Step 1\. Open it\.", "Step one. Open it."),
+        (r"Step 2 \(optional\): save it .", "Step two (optional): save it."),
         (r"Sure \*thing\*.", "Sure thing."),
         # Arrows were read as symbols, or cut to "-" / "=".
         ("Version 0.18.4 → 0.18.5 shipped.", "Version 0.18.4 to 0.18.5 shipped."),
@@ -24,11 +24,27 @@ from kollabor_voice.spoken_form import spoken_form
         ("- one\n- two", "one two"),
         ("Use `kollab --hub status` now.", "Use kollab hub status now."),
         ("See [the docs](https://x.y/z) or https://a.b", "See the docs or link"),
-        ("and/or 3/4 pass & x = 5", "and or 3/4 pass and x equals 5"),
-        ("Fixed #345 ~ok~", "Fixed 345 ok"),
+        ("and/or 3/4 pass & x = 5", "and or 3/4 pass and x equals five"),
+        ("Fixed #345 ~ok~", "Fixed three hundred forty-five ok"),
         ("Wait... really?", "Wait... really?"),
         ("e.g. this, i.e. that.", "e.g. this, i.e. that."),
         ("```py\nprint(1)\n``` Done.", "Done."),
+        # A standalone whole number is said as words; versions, decimals, times,
+        # fractions, money, grouped digits and tokens like x86 keep their digits.
+        ("I changed 3 files.", "I changed three files."),
+        ("374 tests passed", "three hundred seventy-four tests passed"),
+        ("1, 2 and 3", "one, two and three"),
+        ("1000000 rows", "one million rows"),
+        ("2026", "two thousand twenty-six"),
+        ("0 errors", "zero errors"),
+        ("version 0.18.5", "version 0.18.5"),
+        ("at 10:30", "at 10:30"),
+        ("3/4 done", "3/4 done"),
+        ("2.5 GB", "2.5 GB"),
+        ("12,000 rows", "12,000 rows"),
+        ("$5 or 50%", "$5 or 50%"),
+        ("1st try on x86 with v2", "1st try on x86 with v2"),
+        ("007", "007"),
     ],
 )
 def test_reply_becomes_speakable(reply, spoken):
