@@ -158,13 +158,19 @@ def test_pex_gets_bare_wheel_names_from_the_wheels_folder(tmp_path: Path, monkey
 
     def run(command: list[str], **kwargs: Any) -> None:
         calls.append((command, kwargs))
-        binary = out / build_binary.binary_filename()
-        binary.write_bytes(b"")
-        binary.with_name(binary.name + ".sha256").write_text("")
+        output = Path(command[command.index("--output-file") + 1])
+        scie = output.with_name(build_binary.binary_filename())
+        scie.write_bytes(b"scie")
+        scie.with_name(scie.name + ".sha256").write_text("sum")
 
     monkeypatch.setattr(build_binary, "run", run)
     monkeypatch.setattr(build_binary, "floor_platform", lambda path: path)
-    build_binary.build(wheels, out, tmp_path)
+    binary = build_binary.build(wheels, out, tmp_path)
     command, kwargs = calls[0]
     assert kwargs["cwd"] == folder
     assert [arg for arg in command if arg.endswith(".whl")] == [wheel.name for wheel in wheels]
+    # pex prints its output's path relative to its working folder; Windows refuses that across drives.
+    assert Path(command[command.index("--output-file") + 1]).parent == folder
+    assert binary == out / build_binary.binary_filename()
+    assert binary.read_bytes() == b"scie"
+    assert binary.with_name(binary.name + ".sha256").read_text() == "sum"
