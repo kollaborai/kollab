@@ -99,6 +99,10 @@ def test_parse_aside_reads_the_first_line_only():
         "I'll tell it to run the linter.",
     )
     assert parse_aside("answer - Almost done.") == ("ANSWER", "Almost done.")
+    assert parse_aside("FORWARD — I've passed it on.") == (
+        "FORWARD",
+        "I've passed it on.",
+    )
     for bad in (
         None,
         "",

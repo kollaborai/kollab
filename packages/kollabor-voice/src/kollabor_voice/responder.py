@@ -25,7 +25,8 @@ ASIDE_PROMPT = (
     "agent to do, change or stop something, or ask what the activity cannot answer.\n"
     "Never invent files, results or progress the activity does not show."
 )
-_VERDICT = re.compile(r"(ANSWER|FORWARD)\b[\s:*-]*(.*)", re.IGNORECASE)
+# A live GLM reply wrote "FORWARD — I've passed it on": dashes go with the colon.
+_VERDICT = re.compile(r"(ANSWER|FORWARD)\b[\s:*\-–—]*(.*)", re.IGNORECASE)
 
 
 def responder_model(config: Any) -> Optional[str]:
