@@ -678,12 +678,7 @@ class EngineRuntimeHost:
                 if record is None:
                     return
                 if record.generation == binding.generation and record.state == "starting":
-                    # a model that ran out of memory keeps its own state (Low On Resources)
-                    shortage = (
-                        isinstance(exc, RuntimeHostError)
-                        and exc.code == "resource_shortage"
-                    )
-                    record.state = "resource_shortage" if shortage else "error"
+                    record.state = "error"
                     record.detail = (
                         exc.detail
                         if isinstance(exc, RuntimeHostError)

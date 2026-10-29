@@ -96,6 +96,7 @@ test("a model out of memory shows Low On Resources with the reason", () => {
   assert.equal(s.state, "resource_shortage");
   assert.equal(s.detail, "MemoryError: VibeVoice");
   assert.equal(s.retryable, true);
+  assert.equal(s.error, "MemoryError: VibeVoice");
 });
 
 test("talking over the assistant shows interrupting; remote LLM shows the notice", () => {
@@ -207,6 +208,19 @@ test("a runtime that fails before ready never joins or asks for the mic", async 
   const h = harness({ startsAs: "starting", events: [{ state: "error" }] });
   await h.controller.start("s1", null);
   assert.equal(h.controller.getState().state, "error");
+  assert.ok(!h.calls.includes("join") && !h.calls.includes("mic:true"));
+  assert.ok(h.calls.includes("stop:error"));
+});
+
+test("a model out of memory before ready keeps Low On Resources and its reason", async () => {
+  const h = harness({
+    startsAs: "starting",
+    events: [{ state: "resource_shortage", detail: "MemoryError: VibeVoice", retryable: true }],
+  });
+  await h.controller.start("s1", null);
+  const s = h.controller.getState();
+  assert.equal(s.state, "resource_shortage");
+  assert.equal(s.error, "MemoryError: VibeVoice");
   assert.ok(!h.calls.includes("join") && !h.calls.includes("mic:true"));
   assert.ok(h.calls.includes("stop:error"));
 });

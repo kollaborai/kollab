@@ -416,19 +416,3 @@ async def test_a_worker_that_cannot_start_gives_its_reason():
         await LiveKitRuntime._read_ready(worker)
     await worker.wait()
     assert err.value.detail == "Choose Parakeet v3 in Settings > Voice."
-
-async def test_a_worker_out_of_memory_reports_a_resource_shortage():
-    worker = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-c",
-        "print('WORKER_SHORTAGE MemoryError: VibeVoice', flush=True)",
-        stdout=asyncio.subprocess.PIPE,
-    )
-    with pytest.raises(RuntimeHostError) as err:
-        await LiveKitRuntime._read_ready(worker)
-    await worker.wait()
-    assert (err.value.code, err.value.detail, err.value.retryable) == (
-        "resource_shortage",
-        "MemoryError: VibeVoice",
-        True,
-    )

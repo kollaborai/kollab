@@ -837,10 +837,9 @@ def main() -> None:
     try:
         asyncio.run(amain())
     except AdapterError as exc:
-        # Already reported to the Engine (voice.error, or the resource_shortage state);
-        # this line is the reason a start that never joined gives (voice_livekit._read_ready).
-        kind = "WORKER_SHORTAGE" if exc.code == "resource_shortage" else "WORKER_ERROR"
-        print(f"{kind} {exc}", flush=True)
+        # Already reported to the Engine as voice.error; this line is the reason a
+        # start that never joined gives (voice_livekit._read_ready).
+        print(f"WORKER_ERROR {exc}", flush=True)
         raise SystemExit(2)
 
 

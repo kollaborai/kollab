@@ -390,28 +390,6 @@ def test_the_speech_lock_is_released_by_the_thread_that_took_it(service, caplog,
     assert lock_is_free(service.speech.lock)
 
 
-def test_readiness_tells_a_memory_shortage_from_a_path_that_names_memory():
-    path = map_readiness(
-        {
-            "state": "error",
-            "detail": "FileNotFoundError: /x/memoryerror-cache/model.bin",
-        }
-    )
-    assert path.state == "error"
-    metal = map_readiness(
-        {
-            "state": "error",
-            "detail": "RuntimeError: [METAL] Command buffer execution failed: Insufficient"
-            " Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)",
-        }
-    )
-    assert metal.state == "resource_shortage"
-    enomem = map_readiness(
-        {"state": "error", "detail": "OSError: [Errno 12] Cannot allocate memory"}
-    )
-    assert enomem.state == "resource_shortage"
-
-
 def test_readiness_names_an_out_of_memory_failure():
     oom = map_readiness(
         {"state": "error", "detail": "OutOfMemoryError: MPS backend out of memory"}

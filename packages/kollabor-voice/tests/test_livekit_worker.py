@@ -1000,23 +1000,6 @@ def test_a_room_never_starts_while_parakeet_is_not_ready(capsys):
     )
 
 
-def test_a_start_that_failed_names_a_memory_shortage_on_its_last_line(
-    monkeypatch, capsys
-):
-    for code, line in (
-        ("resource_shortage", "WORKER_SHORTAGE MemoryError: VibeVoice\n"),
-        ("models_not_ready", "WORKER_ERROR MemoryError: VibeVoice\n"),
-    ):
-
-        async def failed(code=code):
-            raise AdapterError(code, "MemoryError: VibeVoice", True)
-
-        monkeypatch.setattr(lw, "amain", failed)
-        with pytest.raises(SystemExit):
-            lw.main()
-        assert capsys.readouterr().out == line
-
-
 def test_a_model_out_of_memory_shows_as_a_resource_shortage():
     rig = Rig()
     rig.adapter.states = iter(

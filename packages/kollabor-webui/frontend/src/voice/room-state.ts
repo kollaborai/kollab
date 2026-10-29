@@ -114,7 +114,8 @@ export function reduceVoiceEvent(s: VoiceRoomState, e: VoiceEventEnvelope): Voic
         retryable: p.retryable === true,
         download,
         bargedIn: p.barge_in === true ? true : next === "speaking" ? false : s.bargedIn,
-        error: next === "error" ? (str(p.detail) ?? "Voice failed.") : s.error,
+        // A model out of memory ends the session too: its reason shows like an error's.
+        error: next === "error" || next === "resource_shortage" ? (str(p.detail) ?? "Voice failed.") : s.error,
       };
     }
     case "voice.transcript":
