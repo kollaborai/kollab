@@ -462,6 +462,20 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.store.get(goal_id).status, "active")
         self.assertTrue(self.service._goal_turn_in_flight(goal_id))
 
+    def test_watchdog_finds_a_live_dispatcher_behind_many_events(self):
+        # a long turn writes many events after its turn_started
+        goal_id = self._create()
+        self._dispatch_from(goal_id, f"testhost:{os.getppid()}")
+        for _ in range(250):
+            version = self.store.get(goal_id).record_version
+            self.store.transition(goal_id, version, "progress")
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        driver.schedule = lambda _goal_id: None
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(self.store.get(goal_id).status, "active")
+        self.assertTrue(self.service._goal_turn_in_flight(goal_id))
+
     def test_a_turn_that_raises_settles_its_attempt(self):
         goal_id = self._create()
         driver, _coord = self._make_driver(turn_script=[[FakeResult("read", "x")]])

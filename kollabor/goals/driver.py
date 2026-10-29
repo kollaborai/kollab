@@ -170,7 +170,9 @@ class GoalTurnDriver:
                 for attempt in self.service.store.unfinished_attempts(goal_id)
                 if attempt.state in ("dispatched", "acked")
             }
-            events = self.service.store.events(goal_id, limit=200)
+            # turn_started rows only: one per attempt and one attempt in flight,
+            # so a busy turn's other events can never push its row out
+            events = self.service.store.events(goal_id, limit=200, kind="turn_started")
         except GoalStoreError:
             return True  # cannot tell: leave it alone
         for event in events:

@@ -1069,11 +1069,14 @@ class GoalStore:
     # events
     # ------------------------------------------------------------------
 
-    def events(self, goal_id: str, limit: int = 50) -> List[GoalEvent]:
+    def events(
+        self, goal_id: str, limit: int = 50, kind: Optional[str] = None
+    ) -> List[GoalEvent]:
+        """Newest first; kind=None returns every kind."""
         cur = self._conn.execute(
-            "SELECT * FROM goal_events WHERE goal_id = ? "
+            "SELECT * FROM goal_events WHERE goal_id = ? AND (? IS NULL OR kind = ?) "
             "ORDER BY sequence DESC LIMIT ?",
-            (goal_id, limit),
+            (goal_id, kind, kind, limit),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
 
