@@ -308,7 +308,7 @@ export function FieldRenderer({
           <SelectContent>
             {options.map((option) => (
               <SelectItem key={option} value={toItem(option)}>
-                {option === "" ? "(default)" : optionLabel(field, option)}
+                {optionLabel(field, option) || "(default)"}
               </SelectItem>
             ))}
           </SelectContent>

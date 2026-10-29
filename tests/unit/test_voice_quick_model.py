@@ -76,10 +76,11 @@ class FakeApiService:
         return True
 
 
-def make_world(responder="", loadouts=None):
+def make_world(responder="", loadouts=None, extra=None):
     profiles = {
         "main": Profile("main", "anthropic", "big-chat"),
         "orr": Profile("orr", "openrouter", "old-or-model"),
+        **(extra or {}),
     }
     api = FakeApiService(profiles["main"], profiles)
     api._config = Cfg(
@@ -188,13 +189,13 @@ class FakeConfigService:
         return True
 
 
-def make_panel_ctx(tmp_path, monkeypatch, responder="", loadouts=None):
+def make_panel_ctx(tmp_path, monkeypatch, responder="", loadouts=None, extra=None):
     from types import SimpleNamespace
 
     from plugins.voice_plugin import VoicePlugin
 
     monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
-    _, pm = make_world(responder=responder, loadouts=loadouts)
+    _, pm = make_world(responder=responder, loadouts=loadouts, extra=extra)
     config_service = FakeConfigService(
         {
             RESPONDER_KEY: responder,
@@ -290,3 +291,33 @@ async def test_panel_rejects_unknown_quick_model_and_survives_missing_llm(
     described = await VoicePanel().describe(ctx2, {})
     fields = {f["path"]: f for s in described["sections"] for f in s["fields"]}
     assert fields["quick_model"]["options"] == [""]  # Same as Chat only
+
+
+AGENT_CLI = {"agent": Profile("agent", "acp", "agent-cli")}
+AGENT_LOADOUT = {"agent-q": {"provider_profile": "agent", "model": "agent-cli"}}
+
+
+@pytest.mark.asyncio
+async def test_agent_cli_quick_model_keeps_the_chat_model():
+    api, pm = make_world(responder="agent-q", loadouts=AGENT_LOADOUT, extra=AGENT_CLI)
+    async with voice_provider(api, pm, {}):
+        assert api._profile.name == "main"
+        assert api._provider.model == "big-chat"
+    assert api.reinits == []
+
+
+@pytest.mark.asyncio
+async def test_panel_never_offers_an_agent_cli_as_quick_model(tmp_path, monkeypatch):
+    from kollabor.panels.voice import VoicePanel
+
+    loadouts = {
+        **AGENT_LOADOUT,
+        "fast-or": {"provider_profile": "orr", "model": "x-1b"},
+    }
+    ctx, _, _ = make_panel_ctx(
+        tmp_path, monkeypatch, loadouts=loadouts, extra=AGENT_CLI
+    )
+    described = await VoicePanel().describe(ctx, {})
+    fields = {f["path"]: f for s in described["sections"] for f in s["fields"]}
+    assert "agent-q" not in fields["quick_model"]["options"]
+    assert "fast-or" in fields["quick_model"]["options"]

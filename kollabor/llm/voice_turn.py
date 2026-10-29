@@ -68,12 +68,15 @@ async def voice_provider(
             if profile_manager is not None
             else None
         )
-        if profile is None:
+        if profile is None or profile.get_provider() == "acp":
+            # A missing profile has no connection and an agent CLI (ACP) cannot
+            # answer one model call: the voice turn stays on the chat's model.
             logger.warning(
-                "quick model %r has no provider profile %r; using the active profile",
+                "quick model %r cannot run on provider profile %r; using the chat's model",
                 quick.name,
                 quick.provider_profile,
             )
+            quick = None
         elif getattr(profile, "name", None) != getattr(active, "name", None):
             if not await api_service.reinitialize_provider(profile):
                 await api_service.reinitialize_provider(active)

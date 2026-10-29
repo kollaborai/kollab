@@ -87,6 +87,9 @@ def _quick_model_choices(ctx, plugin):
         from kollabor_ai.loadout_manager import LoadoutManager
 
         for loadout in LoadoutManager(profile_manager, config_service).list_loadouts():
+            profile = profile_manager.get_profile(loadout.provider_profile)
+            if profile is not None and profile.get_provider() == "acp":
+                continue  # an agent CLI cannot answer one voice turn
             labels.setdefault(
                 loadout.name, f"{loadout.name} · {loadout.provider_profile}"
             )
