@@ -38,6 +38,10 @@ RPC — the daemon owns the conversation identity, store, and driver, and
   dispatch: stop intents, typed outcome (`ok|cancelled|error` only `ok`
   continues), empty input queue, no pending work, provider health, budget
   admission, and default bounds.
+- **Watchdog**: every daemon checks its conversation's goal once a minute. An
+  active goal that no loop is driving (the provider was down when it yielded,
+  or you `/resume`d into its conversation) is scheduled again; the checklist
+  above still decides whether a turn may dispatch, so user input still wins.
 - **Bounds** (independent of any token budget): 40 goal turns / 2h active
   time by default; per-request token accounting; budgets are dispatch gates
   with documented in-flight overshoot; resumed budgets are total ceilings.

@@ -117,6 +117,51 @@ class GoalTurnDriver:
             self._yielded_goals.discard(goal_id)
             self.schedule(goal_id)
 
+    def _conversation_uid(self) -> Optional[str]:
+        """This daemon's conversation uid, read the way /goal reads it."""
+        bus = getattr(self.coord, "event_bus", None)
+        try:
+            state = bus.get_service("state_service") if bus is not None else None
+            uid = state.get_conversation_uid() if state is not None else None
+        except Exception:
+            return None
+        return uid or None
+
+    def check_stalled(self) -> Optional[str]:
+        """Schedule this conversation's active goal when no loop drives it (#389).
+
+        A loop that yields waits for a settled turn to wake it. When that turn
+        never comes (the provider was down, a /resume into the conversation),
+        the goal stays active with nothing driving it. schedule() is idempotent
+        and maybe_continue still lets user input win. Returns the goal id it
+        scheduled, or None.
+        """
+        uid = self._conversation_uid()
+        if not uid:
+            return None
+        try:
+            record = self.service.active(uid)
+        except GoalStoreError:
+            return None
+        if (
+            record is None
+            or record.status != "active"
+            or record.goal_id in self._running_goals
+        ):
+            return None
+        self.schedule(record.goal_id)
+        return record.goal_id
+
+    async def watch(self, interval: float = 60.0) -> None:
+        """Run check_stalled every ``interval`` seconds for the daemon's life."""
+        # ponytail: fixed 60 s poll; make it a setting if a goal needs faster pickup
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self.check_stalled()
+            except Exception as exc:
+                logger.warning("goal watchdog check failed: %s", exc)
+
     # ------------------------------------------------------------------
     # the loop
     # ------------------------------------------------------------------

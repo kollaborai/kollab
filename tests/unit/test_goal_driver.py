@@ -363,6 +363,91 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(final.status, "paused")
         self.assertIn("artifact_missing", final.blocked_reason or "")
 
+    def _bus(self, coord, uid="conv-1"):
+        state = SimpleNamespace(get_conversation_uid=lambda: uid)
+        coord.event_bus = SimpleNamespace(
+            get_service=lambda name: state if name == "state_service" else None
+        )
+
+    def test_watchdog_schedules_a_stalled_active_goal(self):
+        goal_id = self._create()
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertEqual(driver.check_stalled(), goal_id)
+        self.assertEqual(started, [goal_id])
+
+    def test_watchdog_skips_a_goal_its_loop_is_driving(self):
+        goal_id = self._create()
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        driver._running_goals.add(goal_id)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_watchdog_skips_a_paused_goal(self):
+        goal_id = self._create()
+        self.service.pause(goal_id)
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_watchdog_leaves_other_conversations_alone(self):
+        self._create()
+        driver, coord = self._make_driver()
+        self._bus(coord, uid="conv-2")
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_watchdog_without_a_state_service_does_nothing(self):
+        self._create()
+        driver, _coord = self._make_driver()
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_watchdog_pickup_runs_a_goal_turn(self):
+        goal_id = self._create()
+        driver, coord = self._make_driver(turn_script=[[FakeResult("read", "x")]])
+        self._bus(coord)
+
+        async def tick() -> None:
+            self.assertEqual(driver.check_stalled(), goal_id)
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if self.store.get(goal_id).turn_count >= 1:
+                    return
+
+        asyncio.run(tick())
+        self.assertGreaterEqual(self.store.get(goal_id).turn_count, 1)
+
+    def test_watch_keeps_running_after_a_failed_check(self):
+        driver, _coord = self._make_driver()
+        calls: list[int] = []
+
+        def boom() -> None:
+            calls.append(1)
+            raise RuntimeError("db locked")
+
+        driver.check_stalled = boom
+
+        async def run_briefly() -> None:
+            task = asyncio.get_running_loop().create_task(driver.watch(interval=0.01))
+            await asyncio.sleep(0.08)
+            task.cancel()
+
+        asyncio.run(run_briefly())
+        self.assertGreaterEqual(len(calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
