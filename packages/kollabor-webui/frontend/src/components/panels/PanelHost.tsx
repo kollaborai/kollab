@@ -749,7 +749,7 @@ export function PanelHost({
       >
         <TabsList
           aria-label="Settings sections"
-          className="mx-4 w-auto shrink-0 justify-start overflow-x-auto sm:mx-6"
+          className="mx-4 w-auto shrink-0 justify-start overflow-x-auto [scrollbar-width:none] sm:mx-6 [&::-webkit-scrollbar]:hidden"
         >
           {SETTINGS_TABS.map((item) => (
             <TabsTrigger
@@ -766,7 +766,7 @@ export function PanelHost({
             role="tabpanel"
             aria-label="Session"
             className={cn(
-              "min-h-0 flex-1 flex-col",
+              "mx-auto min-h-0 w-full max-w-3xl flex-1 flex-col",
               tab === "session" ? "flex" : "hidden",
             )}
           >
@@ -789,7 +789,7 @@ export function PanelHost({
             <PromptsPage api={promptsApi} />
           </div>
           {tab === "phonelink" && open ? (
-            <div role="tabpanel" aria-label="PhoneLink" className="flex min-h-0 flex-1 flex-col">
+            <div role="tabpanel" aria-label="PhoneLink" className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
               <PhoneLinkPanel api={api} onOpenNetwork={() => changeTab("network")} />
             </div>
           ) : null}
@@ -797,7 +797,7 @@ export function PanelHost({
             <div
               role="tabpanel"
               aria-label={activeTab.label}
-              className="flex min-h-0 flex-1 flex-col"
+              className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col"
             >
               {panelBody()}
             </div>
@@ -817,7 +817,7 @@ export function PanelHost({
           {body}
         </SheetContent>
       ) : (
-        <DialogContent className="flex h-[min(46rem,90dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+        <DialogContent className="flex h-[min(52rem,92dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(72rem,94vw)]">
           {body}
         </DialogContent>
       )}
