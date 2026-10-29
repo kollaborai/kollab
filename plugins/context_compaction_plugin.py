@@ -250,9 +250,9 @@ class ContextCompactionPlugin(BasePlugin):
                     "max_value": 30,
                     "step": 1,
                     "help": (
-                        "Recent messages kept verbatim after compaction. A round keeps "
-                        "fewer, never below 2, when they would fill more than a quarter "
-                        "of the compaction threshold."
+                        "Recent messages kept verbatim after compaction (more on "
+                        "1M-token windows). A round keeps fewer, down to 2, when they "
+                        "would fill more than a quarter of the compaction threshold."
                     ),
                 },
                 {
@@ -847,8 +847,8 @@ class ContextCompactionPlugin(BasePlugin):
         session_stats = getattr(self._llm_service, "session_stats", None)
         if session_stats:
             input_tokens = session_stats.get("input_tokens", 0)
-            if isinstance(input_tokens, int) and input_tokens > 0:
-                return input_tokens
+            if isinstance(input_tokens, (int, float)) and input_tokens > 0:
+                return int(input_tokens)
 
         # Fallback: api_service.last_token_usage
         api_service = getattr(self._llm_service, "api_service", None)
@@ -856,7 +856,8 @@ class ContextCompactionPlugin(BasePlugin):
             usage = api_service.get_last_token_usage()
             if usage:
                 prompt_tokens = usage.get("prompt_tokens", 0)
-                return prompt_tokens if isinstance(prompt_tokens, int) else 0
+                if isinstance(prompt_tokens, (int, float)):
+                    return int(prompt_tokens)
 
         return 0
 
@@ -1635,10 +1636,9 @@ class ContextCompactionPlugin(BasePlugin):
         """Messages always kept intact. Scales with the window (~1 per 100K)
         so 1M-token models don't lose the thread keeping only 8.
 
-        Given the history, fewer are kept (never below 2) when the recent
-        messages would fill more than a quarter of the token threshold, so a
-        few large messages cannot keep the prompt over budget after a round
-        (#390).
+        Given the history, fewer are kept (down to 2, or the setting if lower)
+        when the messages the cut really keeps would fill more than a quarter
+        of the token threshold (#390).
         """
         keep = self.config.get("plugins.context_compaction.keep_recent", 8)
         window = self._resolve_context_window()
@@ -1660,6 +1660,13 @@ class ContextCompactionPlugin(BasePlugin):
                 break
             kept += 1
             used += cost
+        # the cut never parts a tool call from its results (_find_split_point
+        # walks back over them), so size what that cut really keeps
+        while kept > floor:
+            tail = history[self._find_split_point(history, kept) :]
+            if self._estimate_history_tokens(tail) * scale <= budget:
+                break
+            kept -= 1
         return kept
 
     def _build_curation_request(self, reason: str) -> str:

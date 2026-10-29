@@ -450,6 +450,24 @@ class TestKeepRecentByTokens(unittest.TestCase):
         _wire_history(plugin, history, prompt_tokens=100_000)
         self.assertEqual(plugin._keep_recent_count(), 8)
 
+    def test_tail_is_sized_where_the_cut_really_lands(self) -> None:
+        # the cut never parts a tool call from its results, so a count whose
+        # cut lands inside them would keep every one of them
+        plugin = _make_plugin(token_threshold_k=100, keep_recent=8)
+        history = [_msg("user", "brief")]
+        history += [_msg(r, "x" * 300) for r in ("assistant", "user") * 2]
+        history += [
+            _msg("assistant", "calls", tool_calls=[{"id": "c1"}, {"id": "c2"}]),
+            _msg("tool", "x" * 60_000, tool_call_id="c1"),
+            _msg("tool", "x" * 60_000, tool_call_id="c2"),
+            _msg("assistant", "done"),
+            _msg("user", "thanks"),
+        ]
+        _wire_history(plugin, history, prompt_tokens=500_000)
+        kept = plugin._keep_recent_count(history)
+        tail = history[plugin._find_split_point(history, kept) :]
+        self.assertEqual([m.content for m in tail], ["done", "thanks"])
+
     def test_gate_uses_the_token_sized_tail(self) -> None:
         plugin = _make_plugin(token_threshold_k=100, min_human_turns=6, keep_recent=8)
         history = self._history([30_000] * 8)
