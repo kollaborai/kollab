@@ -505,11 +505,25 @@ def test_a_speech_failure_reports_an_error_and_the_session_keeps_going():
                 raise AdapterError("tts_failed", "speech engine stopped", True)
                 yield  # never reached: makes this an async generator like the real one
 
+            def settled():  # back to listening after the failed reply
+                posts = rig.poster.posts
+                at = next(
+                    (i for i, (p, b) in enumerate(posts)
+                     if p == "events" and b["event"] == "voice.error"),
+                    None,
+                )  # fmt: skip
+                return at is not None and any(
+                    p == "events"
+                    and b["event"] == "voice.state"
+                    and b["payload"]["state"] == "listening"
+                    for p, b in posts[at + 1 :]
+                )
+
             rig.adapter.synthesize = broken
             await rig.say("is the build green")
-            await until(lambda: events(rig.poster, "voice.error"))
+            await until(settled)
             await rig.say("still there")
-            await until(lambda: len(rig.engine.requests) == 2)
+            await until(lambda: "Okay." in rig.adapter.spoken)
         return rig
 
     rig = run(scenario())
@@ -523,7 +537,8 @@ def test_a_speech_failure_reports_an_error_and_the_session_keeps_going():
         "is the build green",
         "still there",
     ]
-    assert not any("interrupted" in path for path, _ in rig.poster.posts)
+    assert rig.adapter.spoken == [S1, "Okay."]  # each reply went to speech once
+    assert interrupted_posts(rig.poster) == []
 
 
 def test_words_over_the_reply_cancel_it_and_become_the_next_turn():
