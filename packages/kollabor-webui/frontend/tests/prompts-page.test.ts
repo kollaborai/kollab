@@ -306,7 +306,7 @@ describe("PromptsView editor (rendered)", () => {
       editorOpen: true,
     });
     expect(html).toContain('data-testid="section-content"');
-    expect(html).toContain("Save for coder");
+    expect(html).toContain("Save for Coder");
     expect(html).toContain('data-testid="reset-section"');
     expect(html).toContain("Reset to Library");
     expect(html).toContain('data-testid="edit-in-library"');
