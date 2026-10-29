@@ -42,8 +42,10 @@ def build_a2a_service_locator(origin: str, signing_key: SigningKey | bytes | str
     state_path = Path(state_path)
     state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(str(state_path) + ".transaction.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    locked = False
     try:
         lock(fd)
+        locked = True
         now, revision = int(time.time()), 0
         public_key = key.verify_key.encode().hex()
         card_url = target.origin + "/.well-known/agent-card.json"
@@ -84,5 +86,6 @@ def build_a2a_service_locator(origin: str, signing_key: SigningKey | bytes | str
         _locked_atomic_write(state_path, payload, compact=True)
         return payload
     finally:
-        unlock(fd)
+        if locked:
+            unlock(fd)
         os.close(fd)

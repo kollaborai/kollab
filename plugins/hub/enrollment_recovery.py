@@ -107,12 +107,15 @@ class EnrollmentRecoveryJournal:
         with self._thread_lock:
             flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(self._lock_path, flags, 0o600)
+            locked = False
             try:
                 self._check_file(os.fstat(fd), "journal lock")
                 lock(fd)
+                locked = True
                 yield
             finally:
-                unlock(fd)
+                if locked:
+                    unlock(fd)
                 os.close(fd)
 
     def _read_unlocked(self) -> dict[str, Any]:

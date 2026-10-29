@@ -122,10 +122,12 @@ def _save_mcp_config(config: Dict[str, Any]) -> None:
 
     # Acquire file lock
     lock_fd = None
+    locked = False
     try:
         # Create/open lock file
         lock_fd = open(GLOBAL_MCP_DIR / "mcp_settings.lock", "w")
         lock(lock_fd.fileno())
+        locked = True
 
         # Write to temp file first (atomic pattern)
         with tempfile.NamedTemporaryFile(
@@ -144,7 +146,8 @@ def _save_mcp_config(config: Dict[str, Any]) -> None:
     finally:
         # Release lock
         if lock_fd is not None:
-            unlock(lock_fd.fileno())
+            if locked:
+                unlock(lock_fd.fileno())
             lock_fd.close()
 
 

@@ -267,11 +267,14 @@ class TaskLedger:
         """Hold an advisory lock beside a shared JSON file."""
         lock_path = path.with_suffix(".lock")
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        locked = False
         try:
             lock(fd)
+            locked = True
             yield
         finally:
-            unlock(fd)
+            if locked:
+                unlock(fd)
             os.close(fd)
 
     @staticmethod
