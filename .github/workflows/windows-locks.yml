@@ -19,6 +19,4 @@ jobs:
       - name: Install pytest
         run: python -m pip install pytest
       - name: Run lock tests
-        env:
-          PYTHONPATH: packages/kollabor-config/src
         run: python -m pytest -q -p no:cacheprovider --noconftest tests/unit/test_file_lock.py

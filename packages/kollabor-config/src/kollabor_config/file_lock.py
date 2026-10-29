@@ -14,6 +14,16 @@ else:
 # Windows locks are mandatory, so lock a byte past the data: byte 0 would block readers.
 _LOCK_OFFSET = 0x7FFFFFFF
 
+# The open() modes locked_file takes. "w" empties the file only once the lock is held.
+_FLAGS = {
+    "r": os.O_RDONLY,
+    "r+": os.O_RDWR,
+    "w": os.O_WRONLY | os.O_CREAT,
+    "w+": os.O_RDWR | os.O_CREAT,
+    "a": os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+    "a+": os.O_RDWR | os.O_CREAT | os.O_APPEND,
+}
+
 
 def _lock_byte(fd: int, mode: int) -> None:
     pos = os.lseek(fd, 0, os.SEEK_CUR)
@@ -54,13 +64,44 @@ def unlock(fd: int) -> None:
 
 
 @contextlib.contextmanager
-def locked_file(path: str | os.PathLike[str], mode: str = "a+") -> Iterator[IO[str]]:
-    f = open(path, mode)
+def locked_file(
+    path: str | os.PathLike[str], mode: str = "a+", *, private: bool = False
+) -> Iterator[IO]:
+    """Open ``path`` and hold an exclusive lock on it while the block runs.
+
+    ``mode`` is an open() mode: r, r+, w, w+, a or a+, with an optional b. Text
+    is UTF-8. A "w" mode empties the file only after the lock is held, and
+    writes are flushed before it is released. ``private`` creates the file
+    owner-only (0o600) and refuses to follow a symlink.
+    """
+    flags = _FLAGS.get(mode.replace("b", ""))
+    if flags is None:
+        raise ValueError(
+            f"locked_file mode must be r, r+, w, w+, a or a+, not {mode!r}"
+        )
+    flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    if private:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600 if private else 0o666)
     try:
-        lock(f.fileno())
+        lock(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        if mode.startswith("w"):
+            os.ftruncate(fd, 0)
+        # The fd is already open, so "w" here neither truncates nor creates.
+        f = os.fdopen(fd, mode, encoding=None if "b" in mode else "utf-8")
+    except BaseException:
+        unlock(fd)
+        os.close(fd)
+        raise
+    with f:
         try:
             yield f
         finally:
-            unlock(f.fileno())
-    finally:
-        f.close()
+            try:
+                f.flush()
+            finally:
+                unlock(fd)
