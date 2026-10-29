@@ -45,7 +45,9 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PEX = "pex==2.103.4"
+# 2.98.2 is the last pex on scie-jump 1.12.0: 1.13.0 cannot read back a Windows
+# scie's configure env file ("expected a borrowed string", #268).
+PEX = "pex==2.98.2"
 # The CPython the binary carries: a Python Standalone Builds release and version.
 # It, not the kollab file, is what reads the Keychain, and macOS knows it by its
 # code hash (it is ad hoc signed): changing either makes every Mac ask once again.
