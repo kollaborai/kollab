@@ -249,7 +249,11 @@ class ContextCompactionPlugin(BasePlugin):
                     "min_value": 1,
                     "max_value": 30,
                     "step": 1,
-                    "help": "Minimum recent messages to preserve after compaction",
+                    "help": (
+                        "Recent messages kept verbatim after compaction. A round keeps "
+                        "fewer, never below 2, when they would fill more than a quarter "
+                        "of the compaction threshold."
+                    ),
                 },
                 {
                     "type": "slider",
@@ -843,7 +847,7 @@ class ContextCompactionPlugin(BasePlugin):
         session_stats = getattr(self._llm_service, "session_stats", None)
         if session_stats:
             input_tokens = session_stats.get("input_tokens", 0)
-            if input_tokens > 0:
+            if isinstance(input_tokens, int) and input_tokens > 0:
                 return input_tokens
 
         # Fallback: api_service.last_token_usage
@@ -851,7 +855,8 @@ class ContextCompactionPlugin(BasePlugin):
         if api_service:
             usage = api_service.get_last_token_usage()
             if usage:
-                return usage.get("prompt_tokens", 0)
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                return prompt_tokens if isinstance(prompt_tokens, int) else 0
 
         return 0
 
@@ -1283,7 +1288,8 @@ class ContextCompactionPlugin(BasePlugin):
         # be summarized, even before min_human_turns: a hub agent whose work
         # comes in one brief has few. The estimate runs ~2.3x high, so it waits.
         if human_turns < min_turns and (
-            estimated or self._find_split_point(history, self._keep_recent_count()) < 2
+            estimated
+            or self._find_split_point(history, self._keep_recent_count(history)) < 2
         ):
             return False
 
@@ -1545,7 +1551,7 @@ class ContextCompactionPlugin(BasePlugin):
             return data
 
         history = self._get_conversation_history() or []
-        if self._find_split_point(history, self._keep_recent_count()) <= 1:
+        if self._find_split_point(history, self._keep_recent_count(history)) <= 1:
             self._set_compaction_status(
                 "failed",
                 "The provider rejected this request for context size, but there are "
@@ -1605,7 +1611,7 @@ class ContextCompactionPlugin(BasePlugin):
         if self._compaction_in_progress:
             return "compaction already running"
         history = self._get_conversation_history() or []
-        keep = self._keep_recent_count()
+        keep = self._keep_recent_count(history)
         if self._find_split_point(history, keep) <= 1:
             return (
                 f"nothing to compact yet: {len(history)} messages, "
@@ -1623,12 +1629,38 @@ class ContextCompactionPlugin(BasePlugin):
             "(or when its turn ends)"
         )
 
-    def _keep_recent_count(self) -> int:
+    def _keep_recent_count(
+        self, history: Optional[List[ConversationMessage]] = None
+    ) -> int:
         """Messages always kept intact. Scales with the window (~1 per 100K)
-        so 1M-token models don't lose the thread keeping only 8."""
+        so 1M-token models don't lose the thread keeping only 8.
+
+        Given the history, fewer are kept (never below 2) when the recent
+        messages would fill more than a quarter of the token threshold, so a
+        few large messages cannot keep the prompt over budget after a round
+        (#390).
+        """
         keep = self.config.get("plugins.context_compaction.keep_recent", 8)
         window = self._resolve_context_window()
-        return max(keep, window // 100_000) if window else keep
+        keep = max(keep, window // 100_000) if window else keep
+        if not history or keep <= 0:
+            return keep
+        # ponytail: fixed quarter of the threshold; a setting if users tune it
+        budget = self._get_token_threshold() // 4
+        reported = self._get_prompt_tokens()
+        estimated = self._estimate_history_tokens(history)
+        # chars/3 runs high (~2.3x); the provider's count scales it down.
+        scale = min(1.0, reported / estimated) if reported > 0 and estimated else 1.0
+        floor = min(2, keep)
+        kept = 0
+        used = 0.0
+        for msg in reversed(history[-keep:]):
+            cost = self._estimate_history_tokens([msg]) * scale
+            if kept >= floor and used + cost > budget:
+                break
+            kept += 1
+            used += cost
+        return kept
 
     def _build_curation_request(self, reason: str) -> str:
         """The prompt that asks the model what to keep before compacting."""
@@ -2892,7 +2924,7 @@ class ContextCompactionPlugin(BasePlugin):
             snapshot_len = len(history_snapshot)
             snapshot_session_id = self._get_current_session_id()
 
-            keep_recent = self._keep_recent_count()
+            keep_recent = self._keep_recent_count(history_snapshot)
             max_summary_tokens = self.config.get(
                 "plugins.context_compaction.max_summary_tokens", 2000
             )

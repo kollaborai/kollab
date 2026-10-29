@@ -410,5 +410,52 @@ class TestKeepRecentScaling(unittest.TestCase):
         self.assertEqual(keep, 8)
 
 
+class TestKeepRecentByTokens(unittest.TestCase):
+    """The kept tail shrinks to a quarter of the threshold in tokens (#390)."""
+
+    def _history(self, sizes: List[int]) -> List[ConversationMessage]:
+        history = [_msg("user", "brief")]
+        for i, size in enumerate(sizes):
+            role = "assistant" if i % 2 == 0 else "user"
+            history.append(_msg(role, "x" * size, hub_message=role == "user"))
+        return history
+
+    def test_large_recent_messages_shrink_the_tail(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, keep_recent=8)
+        history = self._history([30_000] * 10)
+        _wire_history(plugin, history, prompt_tokens=100_000)
+        self.assertEqual(plugin._keep_recent_count(history), 2)
+
+    def test_reported_count_scales_the_estimate(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, keep_recent=8)
+        history = self._history([30_000] * 10)
+        _wire_history(plugin, history, prompt_tokens=50_000)
+        self.assertEqual(plugin._keep_recent_count(history), 5)
+
+    def test_small_messages_keep_the_full_count(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, keep_recent=8)
+        history = self._history([300] * 20)
+        _wire_history(plugin, history, prompt_tokens=50_000)
+        self.assertEqual(plugin._keep_recent_count(history), 8)
+
+    def test_one_huge_message_still_keeps_two(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, keep_recent=8)
+        history = self._history([300] * 5 + [300_000])
+        _wire_history(plugin, history, prompt_tokens=150_000)
+        self.assertEqual(plugin._keep_recent_count(history), 2)
+
+    def test_without_history_the_count_is_unchanged(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, keep_recent=8)
+        history = self._history([30_000] * 10)
+        _wire_history(plugin, history, prompt_tokens=100_000)
+        self.assertEqual(plugin._keep_recent_count(), 8)
+
+    def test_gate_uses_the_token_sized_tail(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, min_human_turns=6, keep_recent=8)
+        history = self._history([30_000] * 8)
+        _wire_history(plugin, history, prompt_tokens=150_000)
+        self.assertTrue(plugin._should_compact(history))
+
+
 if __name__ == "__main__":
     unittest.main()
