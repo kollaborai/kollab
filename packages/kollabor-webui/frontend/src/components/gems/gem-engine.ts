@@ -534,6 +534,7 @@ class GemEngine {
   private paint: CanvasRenderingContext2D | null = null;
   private avatars = new Set<Avatar>();
   private byCanvas = new WeakMap<HTMLCanvasElement, Avatar>();
+  private headshotCallbacks = new WeakMap<HTMLCanvasElement, () => void>();
   private observer: IntersectionObserver | null = null;
   private pointer = { x: 0, y: 0, at: -Infinity };
   /** Pointer speed in px/s, smoothed; it stirs jelly gems. */
@@ -663,7 +664,7 @@ class GemEngine {
     return true;
   }
 
-  mount(canvas: HTMLCanvasElement, props: GemProps): boolean {
+  mount(canvas: HTMLCanvasElement, props: GemProps, onPaint?: () => void): boolean {
     if (!this.ensureRenderer()) return false;
     const ctx = canvas.getContext("2d");
     if (!ctx) return false;
@@ -756,6 +757,7 @@ class GemEngine {
     this.resize(avatar);
     this.avatars.add(avatar);
     this.byCanvas.set(canvas, avatar);
+    if (onPaint) this.headshotCallbacks.set(canvas, onPaint);
     this.observer?.observe(canvas);
     return true;
   }
@@ -786,6 +788,7 @@ class GemEngine {
     this.observer?.unobserve(canvas);
     this.avatars.delete(avatar);
     this.byCanvas.delete(canvas);
+    this.headshotCallbacks.delete(canvas);
     if (!this.avatars.size) {
       cancelAnimationFrame(this.raf);
       this.raf = 0;
@@ -1375,7 +1378,10 @@ class GemEngine {
     copy.clearRect(0, 0, this.atlas, rows);
     copy.drawImage(renderer.domElement, 0, 0, this.atlas, rows, 0, 0, this.atlas, rows);
     const started = performance.now();
-    for (const p of batch) this.paint2d(p, copy.canvas);
+    for (const p of batch) {
+      this.paint2d(p, copy.canvas);
+      this.headshotCallbacks.get(p.avatar.canvas)?.();
+    }
     this.paintCost += ((performance.now() - started) / batch.length - this.paintCost) * 0.1;
     batch.length = 0;
   }

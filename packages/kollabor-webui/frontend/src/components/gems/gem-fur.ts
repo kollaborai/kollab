@@ -23,8 +23,6 @@ import type { FurStyle, HairStyle } from "./gem-face";
  */
 
 const BLADES = 16000;
-/** Segments along a blade: enough to bend smoothly as it sways. */
-const LEVELS = 4;
 
 const FUR_VERT = /* glsl */ `
 ${SURFACE_GLSL}
@@ -36,6 +34,8 @@ uniform float uSway;
 uniform float uClump;
 uniform float uFall;
 uniform float uBangs;
+uniform float uCurl;
+uniform float uCurlCycles;
 // A hat pulled down over the coat: its band's height and half width.
 uniform float uHat;
 uniform float uHatY;
@@ -97,12 +97,25 @@ void main() {
   // Clumps: strands rooted in one cell of the surface meet at a point, so a spiky style reads as spikes.
   vec3 toward = (normalize((floor(d * 7.0) + 0.5) / 7.0) - d) * length(p);
   vec3 spine = p + n * 0.003 + (dir * t + swing * t * t) * len + toward * uClump * t;
+  // Curls are coils: each strand winds around its own line, and the strands rooted in one
+  // cell wind in step, so a curly style reads as ringlets instead of frizz.
+  // A curly coat gathers into thin locks of its own (a finer grid than the clumps) that
+  // coil as one, so it reads as ringlets.
+  vec3 lockCell = floor(d * 14.0);
+  vec3 lockToward = (normalize((lockCell + 0.5) / 14.0) - d) * length(p);
+  spine += lockToward * min(uCurl, 1.0) * 0.85 * smoothstep(0.0, 0.35, t);
+  float curlPhase = hash3(lockCell) * 6.2832;
+  float angle = 6.2832 * uCurlCycles * t + curlPhase;
+  vec3 around = normalize(cross(dir, across));
+  float coilRadius = uCurl * len * 0.3 * smoothstep(0.0, 0.2, t);
+  spine += (across * cos(angle) + around * sin(angle)) * coilRadius;
   // Long hair falls, resting on the head instead of passing through it.
   spine.y -= uFall * t * t * len;
   float rest = length(p) + 0.004;
   spine *= max(1.0, rest / max(length(spine), 1e-4));
   vec4 mv = modelViewMatrix * vec4(spine, 1.0);
   vec3 grow = (dir + swing * 2.0 * t) * len + toward * uClump - vec3(0.0, 2.0 * uFall * t * len, 0.0);
+  grow += (around * cos(angle) - across * sin(angle)) * coilRadius * 6.2832 * uCurlCycles;
   vec3 tv = normalize(mat3(modelViewMatrix) * grow);
   // A ribbon turned to face the camera, tapering to its tip.
   vec3 side = cross(tv, vec3(0.0, 0.0, 1.0));
@@ -166,6 +179,9 @@ export type CoatStyle = {
   hairline: number;
   back: number;
   strip: number;
+  /** Curl amplitude and turns along the strand; absent for straight coats. */
+  curl?: number;
+  curlCycles?: number;
 };
 
 /**
@@ -177,10 +193,24 @@ export const HAIR_COATS: Record<HairStyle, CoatStyle> = {
   long: { mode: 1, length: 0.55, lie: 1.6, sway: 0.2, clump: 0.15, fall: 1, bangs: 0.3, gloss: 0.3, dark: 0.65, tip: 0.05, hairline: 0.42, back: 0.7, strip: 0 },
   spiky: { mode: 1, length: 0.3, lie: 0.4, sway: 0.07, clump: 0.9, fall: 0, bangs: 1, gloss: 0.25, dark: 0.65, tip: 0.1, hairline: 0.71, back: 0, strip: 0.6 },
   mohawk: { mode: 1, length: 0.6, lie: 0.1, sway: 0.05, clump: 0.8, fall: 0, bangs: 1, gloss: 0.25, dark: 0.6, tip: 0.08, hairline: 0.3, back: 0.7, strip: 0.32 },
+  buzz: { mode: 1, length: 0.06, lie: 0.2, sway: 0.02, clump: 0, fall: 0, bangs: 1, gloss: 0.2, dark: 0.65, tip: 0.05, hairline: 0.4, back: 0.25, strip: 0 },
+  crop: { mode: 1, length: 0.22, lie: 0.4, sway: 0.05, clump: 0.15, fall: 0, bangs: 1, gloss: 0.2, dark: 0.65, tip: 0.05, hairline: 0.55, back: 0.15, strip: 0, curl: 0.75, curlCycles: 2.5 },
+  fringe: { mode: 1, length: 0.33, lie: 3.5, sway: 0.1, clump: 0.1, fall: 0.2, bangs: 1, gloss: 0.3, dark: 0.65, tip: 0.05, hairline: 0.25, back: 0.1, strip: 0 },
+  bob: { mode: 1, length: 0.38, lie: 2.8, sway: 0.12, clump: 0, fall: 0.8, bangs: 0.4, gloss: 0.3, dark: 0.65, tip: 0.05, hairline: 0.4, back: 0.5, strip: 0, curl: 0.7, curlCycles: 2 },
+  page: { mode: 1, length: 0.48, lie: 4.5, sway: 0.12, clump: 0, fall: 1.3, bangs: 0.75, gloss: 0.35, dark: 0.65, tip: 0.05, hairline: 0.3, back: 0.9, strip: 0 },
+  mane: { mode: 1, length: 0.6, lie: 1.2, sway: 0.25, clump: 0.2, fall: 0.8, bangs: 0.22, gloss: 0.3, dark: 0.65, tip: 0.05, hairline: 0.48, back: 1.0, strip: 0, curl: 0.5, curlCycles: 2.5 },
+  plume: { mode: 1, length: 0.5, lie: 0.25, sway: 0.18, clump: 0, fall: 0, bangs: 0.75, gloss: 0.25, dark: 0.6, tip: 0.1, hairline: 0.65, back: 0, strip: 0 },
+  crest: { mode: 1, length: 0.38, lie: 0.1, sway: 0.08, clump: 0.6, fall: 0, bangs: 1, gloss: 0.25, dark: 0.6, tip: 0.08, hairline: 0.62, back: 0.1, strip: 0.22 },
+  quiff: { mode: 1, length: 0.5, lie: 0.65, sway: 0.1, clump: 0.7, fall: 0, bangs: 1, gloss: 0.3, dark: 0.6, tip: 0.08, hairline: 0.45, back: 0, strip: 0.45 },
+  halo: { mode: 1, length: 0.25, lie: 0, sway: 0.14, clump: 0, fall: 0, bangs: 1, gloss: 0.2, dark: 0.6, tip: 0.1, hairline: 0.35, back: 0.45, strip: 0 },
 };
 export const FUR_COATS: Record<FurStyle, CoatStyle> = {
   short: { mode: 2, length: 0.16, lie: 0.3, sway: 0.35, clump: 0, fall: 0, bangs: 1, gloss: 0.15, dark: 0, tip: 0.25, hairline: 0, back: 0, strip: 0 },
   shaggy: { mode: 2, length: 0.3, lie: 1.2, sway: 0.45, clump: 0.35, fall: 0.3, bangs: 1, gloss: 0.1, dark: 0.15, tip: 0.2, hairline: 0, back: 0, strip: 0 },
+  velvet: { mode: 2, length: 0.05, lie: 0.3, sway: 0.1, clump: 0, fall: 0, bangs: 1, gloss: 0.15, dark: 0, tip: 0.2, hairline: 0, back: 0, strip: 0 },
+  plush: { mode: 2, length: 0.23, lie: 0.3, sway: 0.3, clump: 0, fall: 0, bangs: 1, gloss: 0.15, dark: 0, tip: 0.25, hairline: 0, back: 0, strip: 0 },
+  long: { mode: 2, length: 0.48, lie: 1.2, sway: 0.35, clump: 0.25, fall: 0.5, bangs: 1, gloss: 0.1, dark: 0.15, tip: 0.2, hairline: 0, back: 0, strip: 0 },
+  flowing: { mode: 2, length: 0.62, lie: 1.5, sway: 0.45, clump: 0.2, fall: 0.55, bangs: 1, gloss: 0.1, dark: 0.15, tip: 0.2, hairline: 0, back: 0, strip: 0 },
 };
 
 /** How far a coat stands above the crown, in body units: where a perched hat sits on it. */
@@ -193,14 +223,14 @@ export function coatPress(style: CoatStyle | undefined): number {
   return style ? 0.12 * style.length : 0;
 }
 
-const blades = new Map<number, InstancedBufferGeometry>();
+const blades = new Map<string, InstancedBufferGeometry>();
 
 /**
  * One tapered blade, instanced over the body: x across it (-0.5..0.5), y
  * along it (0..1). Roots only where the coat can grow (`lowest`, the lowest
  * root direction's y), so hair spends its blades on the head.
  */
-function bladeGeometry(lowest: number): InstancedBufferGeometry {
+function bladeGeometry(lowest: number, LEVELS: number): InstancedBufferGeometry {
   const corners: number[] = [];
   for (let j = 0; j < LEVELS; j += 1) corners.push(-0.5, j / LEVELS, 0, 0.5, j / LEVELS, 0);
   corners.push(0, 1, 0);
@@ -246,11 +276,16 @@ function bladeGeometry(lowest: number): InstancedBufferGeometry {
   return geometry;
 }
 
+function coatGeometry(kind: "hair" | "fur", curly: boolean): InstancedBufferGeometry {
+  const key = `${kind}:${curly}`;
+  const geometry = blades.get(key) ?? bladeGeometry(kind === "hair" ? -0.3 : -2, curly ? 8 : 4);
+  blades.set(key, geometry);
+  return geometry;
+}
+
 /** A coat's mesh: a child of the body, so it takes the body's pose. Hidden until a gem wears it. */
 export function coatMesh(kind: "hair" | "fur"): Mesh {
-  const lowest = kind === "hair" ? -0.3 : -2;
-  const geometry = blades.get(lowest) ?? bladeGeometry(lowest);
-  blades.set(lowest, geometry);
+  const geometry = coatGeometry(kind, false);
   const material = new ShaderMaterial({
     vertexShader: FUR_VERT,
     fragmentShader: FUR_FRAG,
@@ -268,6 +303,8 @@ export function coatMesh(kind: "hair" | "fur"): Mesh {
       uClump: { value: 0 },
       uFall: { value: 0 },
       uBangs: { value: 1 },
+      uCurl: { value: 0 },
+      uCurlCycles: { value: 0 },
       uHat: { value: 0 },
       uHatY: { value: 0 },
       uHatR: { value: 0 },
@@ -313,6 +350,7 @@ export function dressCoat(
   else b.uUnderFurMix.value = 0;
   coat.visible = !!style;
   if (!style) return;
+  coat.geometry = coatGeometry(hair ? "hair" : "fur", !!style.curl);
   const material = coat.material as ShaderMaterial;
   const u = material.uniforms;
   u.uShapes.value = bodyGeometry().userData.shapes;
@@ -330,6 +368,8 @@ export function dressCoat(
   u.uClump.value = style.clump;
   u.uFall.value = style.fall;
   u.uBangs.value = style.bangs;
+  u.uCurl.value = style.curl ?? 0;
+  u.uCurlCycles.value = style.curlCycles ?? 0;
   u.uHat.value = band ? 1 : 0;
   u.uHatY.value = band?.y ?? 0;
   u.uHatR.value = band?.r ?? 0;
