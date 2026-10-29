@@ -25,7 +25,7 @@ import {
   type ContextCompactionStatus,
 } from "./context-compaction-status";
 import { AppSidebar } from "@/components/shell/AppSidebar";
-import { networkOf, targetsOn } from "@/components/shell/agent-network";
+import { networkOf, prepareRemoteOpen, targetsOn } from "@/components/shell/agent-network";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
@@ -1032,18 +1032,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
    * koordinator of that network's folder to carry it first (GET /sessions `network`). */
   const selectRemote = async (handle: string): Promise<boolean> => {
     openedRef.current = true;
-    const on = networkOf(network, handle);
-    if (on.live) return selectSession(handle);
     setOpening({ id: handle });
     try {
-      const carrier = {
-        profile: selectedProfile || "default",
-        approval_mode: "trust_all",
-        workspace: on.folder || undefined,
-      };
-      await api
-        .createSession({ ...carrier, identity: "koordinator", agent: "koordinator" })
-        .catch(() => api.createSession(carrier));
+      if (await prepareRemoteOpen(api, network, handle, selectedProfile || "default") === "open") {
+        return selectSession(handle);
+      }
       const deadline = Date.now() + 45_000;
       let liveSince = 0;
       while (Date.now() < deadline) {

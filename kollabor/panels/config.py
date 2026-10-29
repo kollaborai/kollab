@@ -25,6 +25,7 @@ from kollabor_config.secrets import is_secret_path
 from .base import (
     FIELD_TYPES,
     PanelError,
+    display_path,
     error_result,
     make_field,
     ok_result,
@@ -327,8 +328,8 @@ class ConfigPanel:
             ],
             "actions": [{"id": "save", "label": "Save", "targets": list(TARGETS)}],
             "save_targets": {
-                "local": str(get_local_config_path()),
-                "global": str(get_global_config_path()),
+                "local": display_path(get_local_config_path()),
+                "global": display_path(get_global_config_path()),
             },
         }
 

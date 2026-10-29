@@ -344,6 +344,75 @@ def test_manifest_rejects_mismatched_discovered_pid_and_purges_dead_daemon(
         _stop_process(daemon)
 
 
+def test_restart_repairs_identical_aliases_without_stopping_daemons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _disable_presence_lookup(monkeypatch)
+    daemon, other = _sleeping_process(), _sleeping_process()
+    socket_path, other_socket = tmp_path / "agent.sock", tmp_path / "other.sock"
+    socket_path.touch()
+    other_socket.touch()
+    first = HandoverStore(7433, config_dir=tmp_path / "config")
+    second = None
+    try:
+        first.acquire()
+        original = _session(tmp_path, daemon, socket_path)
+        first.register_session(original)
+        separate = _session(tmp_path, other, other_socket)
+        separate.session_id = "other-session"
+        first.register_session(separate)
+        saved = first._data["sessions"][0]
+        duplicate = {**saved, "session_id": "alias-session", "created_at": saved["created_at"] + 1}
+        # Reproduce an old manifest with a later alias listed before its owner.
+        first._data["sessions"].insert(0, duplicate)
+        first._write()
+        first.close()
+
+        second = HandoverStore(7433, config_dir=tmp_path / "config")
+        second.acquire()
+        assert second.prune_dead_sessions() == 1
+        assert {row["session_id"] for row in second.reown_rows([])} == {
+            "web-session-1", "other-session"
+        }
+        assert {row["session_id"] for row in json.loads(second.path.read_text())["sessions"]} == {
+            "web-session-1", "other-session"
+        }
+        assert daemon.poll() is None and other.poll() is None
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+        _stop_process(daemon)
+        _stop_process(other)
+
+
+def test_conflicting_alias_is_preserved_but_not_reowned_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _disable_presence_lookup(monkeypatch)
+    daemon = _sleeping_process()
+    socket_path = tmp_path / "agent.sock"
+    socket_path.touch()
+    store = HandoverStore(7433, config_dir=tmp_path / "config")
+    try:
+        store.acquire()
+        session = _session(tmp_path, daemon, socket_path)
+        store.register_session(session)
+        saved = store._data["sessions"][0]
+        store._data["sessions"].append({
+            **saved, "session_id": "alias-session", "conversation_id": "different-conversation",
+            "created_at": saved["created_at"] + 1,
+        })
+        store._write()
+        assert store.prune_dead_sessions() == 0
+        assert [row["session_id"] for row in store.reown_rows([])] == ["web-session-1"]
+        assert len(json.loads(store.path.read_text())["sessions"]) == 2
+        assert daemon.poll() is None
+    finally:
+        store.close()
+        _stop_process(daemon)
+
+
 def test_graceful_lifespan_can_restart_in_same_process(tmp_path: Path) -> None:
     first = HandoverStore(7433, config_dir=tmp_path)
     first.acquire()

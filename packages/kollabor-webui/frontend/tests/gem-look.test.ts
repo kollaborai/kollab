@@ -180,3 +180,57 @@ test("knob settings keep known knobs only, each held to its range, and are never
   assert.deepEqual(resolveGemLook(appearance, "ruby", vocabulary).furKnobs, { length: 0.05 });
   assert.equal(resolveGemLook({ born: appearance.born }, "lapis", vocabulary).hairKnobs, undefined);
 });
+
+const HAIR_SHADES = [
+  [30, 26, 24],
+  [95, 60, 35],
+  [150, 60, 35],
+  [225, 190, 120],
+  [170, 170, 175],
+  [235, 232, 225],
+] as [number, number, number][];
+// The birth pools the engine draws from (gem_appearance.py BIRTH_*), so this
+// suite pins the same draw the engine's roll makes for a gem it never rolled.
+const COATS = {
+  ...VOCABULARY,
+  hairs: new Set(["none", "short", "long", "spiky", "mohawk"]),
+  furs: new Set(["none", "short", "shaggy"]),
+  birthFaces: ["pill", "disney"],
+  birthHats: ["none", "beret"],
+  birthHairs: ["short", "long", "spiky", "mohawk"],
+  birthFurs: ["short", "shaggy"],
+  birthHairColors: HAIR_SHADES,
+  birthFurColors: ["gem", ...HAIR_SHADES] as ("gem" | number[])[],
+};
+
+test("a gem the engine never rolled is born furry 85% of the time, the same on every reload", () => {
+  const keys = Array.from({ length: 1000 }, (_, i) => `gem${i}`);
+  const looks = keys.map((key) => resolveGemLook({}, key, COATS));
+  const furry = looks.filter((look) => look.fur !== undefined && look.fur !== "none");
+  assert.ok(furry.length >= 800 && furry.length <= 900, `born furry: ${furry.length} of 1000`);
+  for (const look of furry) {
+    assert.ok(look.furColor !== undefined, "born fur comes with a color");
+  }
+  for (const look of looks) {
+    if (look.hair !== undefined) assert.ok(COATS.hairs.has(look.hair));
+    if (look.hairColor !== undefined) assert.notEqual(look.hairColor, "gem");
+    if (look.fur !== undefined) assert.ok(COATS.furs.has(look.fur));
+  }
+  // A fixed draw of the key: the same gem, the same coat, on every device.
+  assert.deepEqual(resolveGemLook({}, "gem123", COATS), looks[123]);
+});
+
+test("the user's picks win over the coat a gem was born with, and a roll is never redrawn", () => {
+  const keys = Array.from({ length: 100 }, (_, i) => `gem${i}`);
+  const looks = keys.map((key) => resolveGemLook({}, key, COATS));
+  const index = looks.findIndex((look) => look.fur !== undefined && look.fur !== "none");
+  const key = keys[index];
+  // Picked "None" takes the born fur off.
+  assert.equal(resolveGemLook({ gems: { [key]: { fur: "none" } } }, key, COATS).fur, "none");
+  // A picked hair goes over the born coat; the un-picked fur keeps its draw.
+  const dressed = resolveGemLook({ gems: { [key]: { hair: "mohawk" } } }, key, COATS);
+  assert.equal(dressed.hair, "mohawk");
+  assert.equal(dressed.fur, looks[index].fur);
+  // The engine's record wins over the fallback draw, bare included.
+  assert.equal(resolveGemLook({ born: { [key]: { hair: "none" } } }, key, COATS).fur, undefined);
+});

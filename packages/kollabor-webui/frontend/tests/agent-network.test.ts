@@ -1,7 +1,8 @@
 // Run: node --test tests/agent-network.test.ts (Node 24 strips the types).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupNetworkTree, groupRemoteByDevice, networkOf, targetsOn } from "../src/components/shell/agent-network.ts";
+import { groupNetworkTree, groupRemoteByDevice, networkOf, prepareRemoteOpen, targetsOn } from "../src/components/shell/agent-network.ts";
+import type { AgentNetwork, EngineApi } from "../src/api.ts";
 
 test("remote agents group under the computer they run on, both sorted by name", () => {
   const groups = groupRemoteByDevice([
@@ -151,6 +152,7 @@ test("an agent's own network says whether one here carries it and where to start
         id: "l",
         name: "lab-net",
         live: false,
+        local_agent_running: true,
         folder: "/w/lab",
         devices: [{ device: "lab-box", workspaces: [{ label: "", agents: [opal] }] }],
       },
@@ -158,13 +160,89 @@ test("an agent's own network says whether one here carries it and where to start
   };
 
   // home-net is live although lab-net went quiet: opening lapis goes straight through.
-  assert.deepEqual(networkOf(network, "lapis@prod-box"), { live: true, folder: undefined, agents: [lapis] });
-  // Opening opal first starts an agent in lab-net's own folder.
-  assert.deepEqual(networkOf(network, "opal@lab-box"), { live: false, folder: "/w/lab", agents: [opal] });
+  assert.deepEqual(networkOf(network, "lapis@prod-box"), { live: true, folder: undefined, agents: [lapis], localAgentRunning: undefined });
+  // A quiet network may still have a local agent, so no second one is started.
+  assert.deepEqual(networkOf(network, "opal@lab-box"), { live: false, folder: "/w/lab", agents: [opal], localAgentRunning: true });
   // Without per-network blocks the flat fields answer.
   assert.deepEqual(networkOf({ device: "mac-box", remote: [opal], live: false, folder: "/w" }, "opal@lab-box"), {
     live: false,
     folder: "/w",
     agents: [opal],
+    localAgentRunning: undefined,
   });
+});
+
+function remoteNetwork(local: boolean | null, live = false): AgentNetwork {
+  const remote = { name: "koordinator", device: "prod", handle: "koordinator@prod", state: "idle" };
+  return {
+    device: "mac", remote: [remote], live, folder: "/project",
+    networks: [{ id: "net", name: "net", live, folder: "/project", local_agent_running: local,
+      devices: [{ device: "prod", workspaces: [{ label: "", agents: [remote] }] }] }],
+  };
+}
+
+function carrierApi(snapshots: AgentNetwork[], failure?: Error) {
+  const created: Record<string, unknown>[] = [];
+  let reads = 0;
+  const api = {
+    listSessions: async () => ({ sessions: [], network: snapshots[Math.min(reads++, snapshots.length - 1)] }),
+    createSession: async (body: Record<string, unknown>) => {
+      created.push(body);
+      if (failure && created.length === 1) throw failure;
+      return { session_id: "new" };
+    },
+  } as unknown as Pick<EngineApi, "listSessions" | "createSession">;
+  return { api, created };
+}
+
+test("a local agent that has not answered yet is waited for, and no second one starts", async () => {
+  const network = remoteNetwork(true);
+  const { api, created } = carrierApi([network]);
+  assert.equal(await prepareRemoteOpen(api, network, "koordinator@prod", "default"), "wait");
+  assert.deepEqual(created, []);
+});
+
+test("opening a remote agent starts a carrier only when the workspace has none", async () => {
+  const network = remoteNetwork(false);
+  const { api, created } = carrierApi([network]);
+  assert.equal(await prepareRemoteOpen(api, network, "koordinator@prod", "default"), "wait");
+  assert.deepEqual(created, [{ profile: "default", approval_mode: "trust_all", workspace: "/project",
+    identity: "koordinator", agent: "koordinator" }]);
+});
+
+test("an unknown local process state never starts another agent", async () => {
+  const network = remoteNetwork(null);
+  const { api, created } = carrierApi([network]);
+  assert.equal(await prepareRemoteOpen(api, network, "koordinator@prod", "default"), "open");
+  assert.deepEqual(created, []);
+});
+
+test("a concurrent carrier launch does not fall back to a second agent", async () => {
+  const network = remoteNetwork(false);
+  const conflict = Object.assign(new Error("already in use"), {
+    status: 409, body: { detail: "hub identity 'koordinator' is already in use in /project" },
+  });
+  const { api, created } = carrierApi([network, remoteNetwork(true)], conflict);
+  assert.equal(await prepareRemoteOpen(api, network, "koordinator@prod", "default"), "wait");
+  assert.equal(created.length, 1);
+});
+
+test("a solo koordinator permits another carrier, while other errors do not", async () => {
+  const network = remoteNetwork(false);
+  const conflict = Object.assign(new Error("already in use"), {
+    status: 409, body: { detail: "hub identity 'koordinator' is already in use in /project" },
+  });
+  const first = carrierApi([network, network], conflict);
+  assert.equal(await prepareRemoteOpen(first.api, network, "koordinator@prod", "default"), "wait");
+  assert.equal(first.created.length, 2);
+  assert.equal(first.created[1].identity, undefined);
+  const failed = carrierApi([network], new Error("network error"));
+  await assert.rejects(prepareRemoteOpen(failed.api, network, "koordinator@prod", "default"), /network error/);
+  assert.equal(failed.created.length, 1);
+  const unrelatedConflict = Object.assign(new Error("session already exists"), {
+    status: 409, body: { detail: "session already exists" },
+  });
+  const failedConflict = carrierApi([network], unrelatedConflict);
+  await assert.rejects(prepareRemoteOpen(failedConflict.api, network, "koordinator@prod", "default"), /session already exists/);
+  assert.equal(failedConflict.created.length, 1);
 });
