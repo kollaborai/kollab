@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Goals: `/resume` keeps a conversation's goal. The resumed chat used to get a new conversation id, so `/goal` answered "no active goal" and the goal was never driven or paused again, refs #400
 - Goals: a goal whose last turn was cut off by an agent that stopped mid-turn is paused with the reason, instead of staying active with nothing driving it; `/goal resume` continues it, refs #397
 - Context compaction: a reply that hit the length limit and was continued no longer counts its prompt twice. The doubled count could trip the hard cap and cut a long reply to 8,000 characters, refs #396
 - Voice: a spoken yes can no longer run a recursive or forced `git rm` in any spelling, abbreviations such as `--f` included (`--cached` before any `--` still works), or `kollab --hub halt`, and `gh -R <repo> pr merge`, `kollab --hub=stop` and `--restart=...` are refused like their plain forms, refs #295
