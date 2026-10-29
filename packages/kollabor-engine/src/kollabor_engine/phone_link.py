@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import errno
 import gzip
 import hashlib
 import importlib.metadata
@@ -32,6 +31,7 @@ from nacl.public import Box, PrivateKey, PublicKey
 from nacl.secret import SecretBox
 
 from kollabor_config.config_utils import get_config_directory
+from kollabor_config.file_lock import try_lock
 from plugins.hub.dns.discovery import _PublicResolver, discover
 from plugins.hub.dns.discovery_store import DiscoveryStore
 from plugins.hub.relay_client import RelayClient
@@ -363,25 +363,11 @@ class PhoneLink:
             0o600,
         )
         try:
-            if os.name == "nt":  # pragma: no cover - native Windows lock
-                import msvcrt
-
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            os.close(fd)
-            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            if not try_lock(fd):
                 raise PhoneLinkError(
                     "Another Kollab engine is managing PhoneLink on this computer. "
                     "Manage phones there, or close that engine and try again."
-                ) from None
-            raise
+                )
         except BaseException:
             os.close(fd)
             raise

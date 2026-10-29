@@ -34,16 +34,7 @@ from urllib.parse import urlsplit
 from nacl.exceptions import BadSignatureError
 from nacl.signing import SigningKey, VerifyKey
 
-try:  # pragma: no cover - Windows has a different standard-library lock API
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
-
-try:  # pragma: no cover - only imported on Windows
-    import msvcrt
-except ImportError:  # pragma: no cover
-    msvcrt = None  # type: ignore[assignment]
-
+from kollabor_config.file_lock import lock, unlock
 
 STATE_VERSION = 1
 MAX_PAIRING_TTL_SECONDS = 15 * 60
@@ -1345,24 +1336,17 @@ class PrivateDirectory:
     def _locked_file(self) -> Iterator[None]:
         self._thread_lock.acquire()
         fd: int | None = None
+        locked = False
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            elif msvcrt is not None:  # pragma: no cover
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            lock(fd)
+            locked = True
             yield
         finally:
             if fd is not None:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                elif msvcrt is not None:  # pragma: no cover
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                if locked:
+                    unlock(fd)
                 os.close(fd)
             self._thread_lock.release()
 

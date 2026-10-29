@@ -108,7 +108,13 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 
 1. **Detached start without fork.** A Windows branch in `cli_main` and `kollabor/daemon.py`: start the agent as a `subprocess` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, own readiness through `_wait_for_ready`, and make `stop_daemon` and `DaemonHandle.close` use `TerminateProcess`.
 2. **A local IPC transport.** One abstraction under `kollabor_rpc` and `plugins/hub/messenger.py` for the sites in blocker 2: named pipes (`\\.\pipe\kollabor-hub-<hash>-<name>`, `ProactorEventLoop` pipe server and client) or loopback TCP with a per-agent token. Keep framing (`LOCAL_MAX_LINE_BYTES`, `LARGE_BUFFER_LIMIT`) and the owner-only access the Unix sockets get from the filesystem. Replace the `/tmp/kollabor-hub` constants with a per-user directory.
-3. **One file-lock helper.** Replace the `fcntl` imports with a shared helper in `kollabor_config` (`msvcrt.locking` or a small dependency) that keeps `flock` semantics: exclusive, blocking and non-blocking, released on process death. Review every site that guards the import and skips the lock.
+3. **One file-lock helper.** Mostly done. `kollabor_config.file_lock` (`lock`, `try_lock`, `unlock`, `locked_file`) keeps `flock` semantics on both platforms and its tests run on a Windows runner (`.github/workflows/windows-locks.yml`, #414).
+   - Every lock in the hub plugin's coordinator, Telegram bridge, task ledger, service locator, private directory and enrollment, and in the engine's handover, MCP settings, sidebar order and PhoneLink, now goes through it.
+   - Still on `fcntl`, in two groups:
+     - The relay and kill-switch paths: `plugins/hub/relay_owner.py`, `relay_runtime.py`, `relay_selfhost.py`, `halt_runtime.py`, `dns/storage.py`, `dns/discovery_store.py` and `dns/discovery_publish.py`.
+       - Several of these ship in the headless relay (`scripts/relay/build_service.py` `FILES`), which must not import a workspace package (`tests/unit/test_relay_build_allowlist.py`). They need a lock the relay can ship.
+       - After the swap, rerun the Docker harness in `tests/docker/kill_switch/`.
+     - `kollabor_voice` (`bootstrap.py`, `service.py`, `classifiers.py`, `speech_settings.py`) and `kollabor_ai/oauth/token_storage.py`. Their packages do not depend on `kollabor-config`.
 4. **`os.getuid()`.** One `current_user_id()` helper (Windows: the user SID) for the 40 calls.
 5. **Signals and trees.** Job Objects for agent and shell trees in place of `killpg`; `SIGKILL` becomes `TerminateProcess`; replace `add_signal_handler` with `signal.signal` or console control handlers.
 6. **Agent shell.** Decide the Windows shell for agent tools (Git Bash, PowerShell, WSL) and wire `shell_executor`, `shell_utils`, `prompt_renderer` and `acp_bridge`; tmux features stay Unix-only.

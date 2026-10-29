@@ -26,15 +26,7 @@ from urllib.parse import urlsplit
 from nacl.exceptions import BadSignatureError
 from nacl.signing import SigningKey, VerifyKey
 
-try:  # pragma: no cover - Windows uses msvcrt below
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
-
-try:  # pragma: no cover - only imported on Windows
-    import msvcrt
-except ImportError:  # pragma: no cover
-    msvcrt = None  # type: ignore[assignment]
+from kollabor_config.file_lock import lock, unlock
 
 STATE_VERSION = 4
 DEFAULT_DELEGATION_TTL_SECONDS = 10 * 60
@@ -1099,17 +1091,8 @@ class EnrollmentDelegationStore:
             flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
             fd = os.open(self._lock_path, flags, 0o600)
             _check_private_file(os.fstat(fd), "delegation lock")
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                locked = True
-            elif msvcrt is not None:  # pragma: no cover
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                locked = True
-            else:  # pragma: no cover
-                raise DelegationPersistenceError("no supported file-lock backend")
+            lock(fd)
+            locked = True
             yield
         except EnrollmentDelegationError:
             raise
@@ -1119,11 +1102,8 @@ class EnrollmentDelegationStore:
             try:
                 if fd is not None:
                     try:
-                        if locked and fcntl is not None:
-                            fcntl.flock(fd, fcntl.LOCK_UN)
-                        elif locked and msvcrt is not None:  # pragma: no cover
-                            os.lseek(fd, 0, os.SEEK_SET)
-                            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                        if locked:
+                            unlock(fd)
                     finally:
                         os.close(fd)
             finally:

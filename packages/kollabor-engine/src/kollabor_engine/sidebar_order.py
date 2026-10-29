@@ -19,22 +19,13 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from kollabor_config.config_utils import get_config_directory
+from kollabor_config.file_lock import lock, unlock
 
 ORDER_FILE = "sidebar-order.json"
 MAX_KEYS = 512
 MAX_KEY_LEN = 1024
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _THREAD_LOCK = threading.Lock()
-
-try:  # pragma: no cover - platform-specific imports
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None  # type: ignore[assignment]
-
-try:  # pragma: no cover - platform-specific imports
-    import msvcrt
-except ImportError:  # pragma: no cover - POSIX
-    msvcrt = None  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -131,25 +122,13 @@ def _locked_order(path: Path) -> Iterator[None]:
         fd = os.open(lock_path, flags, 0o600)
         locked = False
         try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                locked = True
-            elif msvcrt is not None:  # pragma: no cover - Windows
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                locked = True
-            else:  # pragma: no cover
-                raise OSError("No supported sidebar order lock backend")
+            lock(fd)
+            locked = True
             yield
         finally:
             try:
-                if locked and fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                elif locked and msvcrt is not None:  # pragma: no cover - Windows
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                if locked:
+                    unlock(fd)
             finally:
                 os.close(fd)
 

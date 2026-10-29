@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import re
-import sys
 import tempfile
 from typing import Any, Dict
 
@@ -20,13 +19,7 @@ from fastapi import APIRouter, HTTPException, status  # type: ignore
 from pydantic import BaseModel
 
 from kollabor_config.config_utils import get_config_directory
-
-IS_WINDOWS = sys.platform == "win32"
-
-if IS_WINDOWS:
-    import msvcrt
-else:
-    import fcntl
+from kollabor_config.file_lock import lock, unlock
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/mcp", tags=["mcp"])
@@ -132,10 +125,7 @@ def _save_mcp_config(config: Dict[str, Any]) -> None:
     try:
         # Create/open lock file
         lock_fd = open(GLOBAL_MCP_DIR / "mcp_settings.lock", "w")
-        if IS_WINDOWS:
-            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
-        else:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        lock(lock_fd.fileno())
 
         # Write to temp file first (atomic pattern)
         with tempfile.NamedTemporaryFile(
@@ -154,13 +144,7 @@ def _save_mcp_config(config: Dict[str, Any]) -> None:
     finally:
         # Release lock
         if lock_fd is not None:
-            if IS_WINDOWS:
-                try:
-                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
-                except OSError:
-                    pass
-            else:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+            unlock(lock_fd.fileno())
             lock_fd.close()
 
 

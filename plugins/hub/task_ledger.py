@@ -19,7 +19,6 @@ under the card's advisory file lock), and the idle supervisor wakes the
 coordinator whenever open work sits while the hub is idle.
 """
 
-import fcntl
 import json
 import logging
 import math
@@ -31,6 +30,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from kollabor_config.file_lock import lock, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -267,10 +268,10 @@ class TaskLedger:
         lock_path = path.with_suffix(".lock")
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            lock(fd)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock(fd)
             os.close(fd)
 
     @staticmethod
