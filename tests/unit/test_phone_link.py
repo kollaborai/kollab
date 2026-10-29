@@ -315,6 +315,24 @@ async def test_expired_and_consumed_invitation_and_revoke(setup_link):
 
 
 @pytest.mark.asyncio
+async def test_expired_invitation_is_pruned_and_logged(setup_link):
+    manager, offer, *_ = setup_link
+    manager.records[offer["id"]]["expires"] = int(time.time()) - 1
+    for _ in range(100):
+        if offer["id"] not in manager.records:
+            break
+        await asyncio.sleep(0.1)
+    assert offer["id"] not in manager.records
+    saved = json.loads((manager.directory / "phones.json").read_bytes())["phones"]
+    assert offer["id"] not in saved
+    history = await manager.event_history()
+    expired = [
+        event for event in history["events"] if event["event"] == "invite_expired"
+    ]
+    assert expired and expired[0]["cause"] == "ttl_expired"
+
+
+@pytest.mark.asyncio
 async def test_persisted_approval_is_private_and_corruption_preserves_data(setup_link, tmp_path):
     manager, offer, host, phone, *_ = setup_link
     await secure_phone(setup_link)
