@@ -1926,7 +1926,8 @@ class ProfileManager:
                 else:
                     set_fields["extra_headers"] = extra_headers
             except json.JSONDecodeError:
-                logger.warning(f"Invalid EXTRA_HEADERS JSON: {headers_str}")
+                # Headers carry tokens: name the variable, never log its value.
+                logger.warning("Invalid %sEXTRA_HEADERS JSON (value not logged)", prefix)
 
         stored = self._profiles.get(name)
         if stored is not None:

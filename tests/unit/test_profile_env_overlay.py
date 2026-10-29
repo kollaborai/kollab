@@ -66,3 +66,26 @@ def test_env_only_profile_still_created(monkeypatch, tmp_path):
     profile = manager.get_active_profile()
     assert profile.provider == "custom"
     assert profile.model == "m3"
+
+
+def test_bad_env_values_keep_stored_fields_and_never_log_headers(
+    monkeypatch, tmp_path, caplog
+):
+    _clear_profile_env(monkeypatch, "KOLLAB_DEMO_")
+    monkeypatch.setenv("KOLLAB_DEMO_MODEL", "m4")
+    monkeypatch.setenv("KOLLAB_DEMO_TEMPERATURE", "abc")
+    monkeypatch.setenv(
+        "KOLLAB_DEMO_EXTRA_HEADERS", '{"Authorization": "Bearer sk-secret"'
+    )
+    manager = _isolated_profile_manager(monkeypatch, tmp_path)
+    manager._profiles["demo"] = LLMProfile(
+        name="demo", provider="openrouter", model="old-model", temperature=0.3
+    )
+
+    with caplog.at_level("WARNING"):
+        assert manager.set_active_profile("demo", persist=False) is True
+
+    profile = manager.get_active_profile()
+    assert profile.model == "m4"
+    assert profile.temperature == 0.3
+    assert "sk-secret" not in caplog.text
