@@ -1,0 +1,464 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		3C66E52761F4F22238C06593 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = D901A9C083DB252F7D627C13 /* assets */; };
+		600A12CD5D70FBC68F8C6208 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D6347BD90784B5EFDD03F3F2 /* Security.framework */; };
+		6CCF071C06D121EA1A8CE1B9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9BD0F4648F5EF7535AF338CB /* Assets.xcassets */; };
+		80993678BCCEABC0A426ADF8 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 673D51DAA276D9B48E65F822 /* QuartzCore.framework */; };
+		8FE715ADC0142474ADECD862 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 654C44962CD39991746F98D6 /* LaunchScreen.storyboard */; };
+		9CF8E183B8372BB92DBF545A /* libapp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = FC76C8BC4C07550CCDAF8EE8 /* libapp.a */; };
+		B317B18ECFCB6709EFBB40AC /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FD835C5A511B7FBA363C96B6 /* Metal.framework */; };
+		B3D63D4AD236C5A15C02DEF3 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F2D19E8EC05BCB8BB3E3849B /* UIKit.framework */; };
+		B4EF72ACB9E568E46F180598 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D332AB71FA7944C5C5B39D0 /* MetalKit.framework */; };
+		CFEEEA05D0B6852AE90280F0 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = DAE05ECBA83C55D519506028 /* main.mm */; };
+		E48283B32D7BBCEB1D02AFE8 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 08FDD9EA42EE7E60F4AE63A7 /* WebKit.framework */; };
+		F63681D2EEEC08BCC8E29B06 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CABA05F40CD990A01AF39922 /* CoreGraphics.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		08FDD9EA42EE7E60F4AE63A7 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
+		28B86B52D8C953A42ED641B2 /* kollab-desktop_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "kollab-desktop_iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		3C73659B4C6D374CDED4EC94 /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
+		3D332AB71FA7944C5C5B39D0 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
+		654C44962CD39991746F98D6 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		673D51DAA276D9B48E65F822 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		9BD0F4648F5EF7535AF338CB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		9EEB29C427D6A1781447028C /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
+		A78115C8A0D5E50463A972D2 /* desktop.rs */ = {isa = PBXFileReference; path = desktop.rs; sourceTree = "<group>"; };
+		CABA05F40CD990A01AF39922 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		CD0E5FCB7CB34F472305589A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		D2ABD9C67A3560D2108C8304 /* updater.rs */ = {isa = PBXFileReference; path = updater.rs; sourceTree = "<group>"; };
+		D6347BD90784B5EFDD03F3F2 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		D901A9C083DB252F7D627C13 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
+		DAE05ECBA83C55D519506028 /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
+		DC0785BEBF1DA2CBD5D3CFBC /* kollab-desktop_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "kollab-desktop_iOS.entitlements"; sourceTree = "<group>"; };
+		EB17B73523276680AB80A04A /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
+		F2D19E8EC05BCB8BB3E3849B /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		FC76C8BC4C07550CCDAF8EE8 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
+		FD835C5A511B7FBA363C96B6 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		EB75033CE93D001C53274FB0 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9CF8E183B8372BB92DBF545A /* libapp.a in Frameworks */,
+				F63681D2EEEC08BCC8E29B06 /* CoreGraphics.framework in Frameworks */,
+				B317B18ECFCB6709EFBB40AC /* Metal.framework in Frameworks */,
+				B4EF72ACB9E568E46F180598 /* MetalKit.framework in Frameworks */,
+				80993678BCCEABC0A426ADF8 /* QuartzCore.framework in Frameworks */,
+				600A12CD5D70FBC68F8C6208 /* Security.framework in Frameworks */,
+				B3D63D4AD236C5A15C02DEF3 /* UIKit.framework in Frameworks */,
+				E48283B32D7BBCEB1D02AFE8 /* WebKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0B518B38B7078363EEC17833 /* Externals */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Externals;
+			sourceTree = "<group>";
+		};
+		116688BEEBF0411A41EED750 /* kollab-desktop */ = {
+			isa = PBXGroup;
+			children = (
+				DAE05ECBA83C55D519506028 /* main.mm */,
+				C5E727933C247EF43F9D1203 /* bindings */,
+			);
+			path = "kollab-desktop";
+			sourceTree = "<group>";
+		};
+		2B2CDAEE382E2EB64DC16B46 = {
+			isa = PBXGroup;
+			children = (
+				D901A9C083DB252F7D627C13 /* assets */,
+				9BD0F4648F5EF7535AF338CB /* Assets.xcassets */,
+				654C44962CD39991746F98D6 /* LaunchScreen.storyboard */,
+				0B518B38B7078363EEC17833 /* Externals */,
+				6EE8AB1F34C7A38AB45CBE56 /* kollab-desktop_iOS */,
+				5568673EB734B36FA50C0D76 /* Sources */,
+				C853D34FC3AC36156A21061A /* src */,
+				73D8E5C4BD73108D06214EA8 /* Frameworks */,
+				57F133D26BFA1C500AFF486D /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		5568673EB734B36FA50C0D76 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				116688BEEBF0411A41EED750 /* kollab-desktop */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		57F133D26BFA1C500AFF486D /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				28B86B52D8C953A42ED641B2 /* kollab-desktop_iOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		6EE8AB1F34C7A38AB45CBE56 /* kollab-desktop_iOS */ = {
+			isa = PBXGroup;
+			children = (
+				CD0E5FCB7CB34F472305589A /* Info.plist */,
+				DC0785BEBF1DA2CBD5D3CFBC /* kollab-desktop_iOS.entitlements */,
+			);
+			path = "kollab-desktop_iOS";
+			sourceTree = "<group>";
+		};
+		73D8E5C4BD73108D06214EA8 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				CABA05F40CD990A01AF39922 /* CoreGraphics.framework */,
+				FC76C8BC4C07550CCDAF8EE8 /* libapp.a */,
+				FD835C5A511B7FBA363C96B6 /* Metal.framework */,
+				3D332AB71FA7944C5C5B39D0 /* MetalKit.framework */,
+				673D51DAA276D9B48E65F822 /* QuartzCore.framework */,
+				D6347BD90784B5EFDD03F3F2 /* Security.framework */,
+				F2D19E8EC05BCB8BB3E3849B /* UIKit.framework */,
+				08FDD9EA42EE7E60F4AE63A7 /* WebKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		C5E727933C247EF43F9D1203 /* bindings */ = {
+			isa = PBXGroup;
+			children = (
+				EB17B73523276680AB80A04A /* bindings.h */,
+			);
+			path = bindings;
+			sourceTree = "<group>";
+		};
+		C853D34FC3AC36156A21061A /* src */ = {
+			isa = PBXGroup;
+			children = (
+				A78115C8A0D5E50463A972D2 /* desktop.rs */,
+				9EEB29C427D6A1781447028C /* lib.rs */,
+				3C73659B4C6D374CDED4EC94 /* main.rs */,
+				D2ABD9C67A3560D2108C8304 /* updater.rs */,
+			);
+			name = src;
+			path = ../../src;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		99E271E92CF871FEA6E6073D /* kollab-desktop_iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BDC4303F7005C2000DDC679B /* Build configuration list for PBXNativeTarget "kollab-desktop_iOS" */;
+			buildPhases = (
+				CB71868F447AA5D90B87C47C /* Build Rust Code */,
+				2B368AB747937E9A79F051BE /* Sources */,
+				E6068F88BE5CAA77CE484A33 /* Resources */,
+				EB75033CE93D001C53274FB0 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "kollab-desktop_iOS";
+			packageProductDependencies = (
+			);
+			productName = "kollab-desktop_iOS";
+			productReference = 28B86B52D8C953A42ED641B2 /* kollab-desktop_iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		3E532A86FB15A290B407B686 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
+			};
+			buildConfigurationList = 0364312EDDA9A8C4F310E007 /* Build configuration list for PBXProject "kollab-desktop" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 2B2CDAEE382E2EB64DC16B46;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 57F133D26BFA1C500AFF486D /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				99E271E92CF871FEA6E6073D /* kollab-desktop_iOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E6068F88BE5CAA77CE484A33 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6CCF071C06D121EA1A8CE1B9 /* Assets.xcassets in Resources */,
+				8FE715ADC0142474ADECD862 /* LaunchScreen.storyboard in Resources */,
+				3C66E52761F4F22238C06593 /* assets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		CB71868F447AA5D90B87C47C /* Build Rust Code */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust Code";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a",
+				"$(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "cargo tauri ios xcode-script -v --platform \"${PLATFORM_DISPLAY_NAME:?}\" --sdk-root \"${SDKROOT:?}\" --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration \"${CONFIGURATION:?}\" ${FORCE_COLOR} ${ARCHS:?}\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2B368AB747937E9A79F051BE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CFEEEA05D0B6852AE90280F0 /* main.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		48A5CE3CA8FD3C622AEBF2D2 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = debug;
+		};
+		7E5B9DE447B9664FEF944646 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "kollab-desktop_iOS/kollab-desktop_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "kollab-desktop_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = ai.kollabor.kollab;
+				PRODUCT_NAME = "Kollab";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+			};
+			name = debug;
+		};
+		85BE4CFA38CB8875E9276357 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "kollab-desktop_iOS/kollab-desktop_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "kollab-desktop_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = ai.kollabor.kollab;
+				PRODUCT_NAME = "Kollab";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+			};
+			name = release;
+		};
+		9513691006B4256F29DE6A47 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0364312EDDA9A8C4F310E007 /* Build configuration list for PBXProject "kollab-desktop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				48A5CE3CA8FD3C622AEBF2D2 /* debug */,
+				9513691006B4256F29DE6A47 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+		BDC4303F7005C2000DDC679B /* Build configuration list for PBXNativeTarget "kollab-desktop_iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7E5B9DE447B9664FEF944646 /* debug */,
+				85BE4CFA38CB8875E9276357 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 3E532A86FB15A290B407B686 /* Project object */;
+}

@@ -1,0 +1,5 @@
+{
+  "build": {
+    "frontendDist": "https://kollabor.ai/relay/v1/phone/"
+  }
+}
