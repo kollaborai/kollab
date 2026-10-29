@@ -106,16 +106,16 @@ void main() {
   spine += lockToward * min(uCurl, 1.0) * 0.85 * smoothstep(0.0, 0.35, t);
   float curlPhase = hash3(lockCell) * 6.2832;
   float angle = 6.2832 * uCurlCycles * t + curlPhase;
-  vec3 around = normalize(cross(dir, across));
+  vec3 coilAxis = normalize(cross(dir, across));
   float coilRadius = uCurl * len * 0.3 * smoothstep(0.0, 0.2, t);
-  spine += (across * cos(angle) + around * sin(angle)) * coilRadius;
+  spine += (across * cos(angle) + coilAxis * sin(angle)) * coilRadius;
   // Long hair falls, resting on the head instead of passing through it.
   spine.y -= uFall * t * t * len;
   float rest = length(p) + 0.004;
   spine *= max(1.0, rest / max(length(spine), 1e-4));
   vec4 mv = modelViewMatrix * vec4(spine, 1.0);
   vec3 grow = (dir + swing * 2.0 * t) * len + toward * uClump - vec3(0.0, 2.0 * uFall * t * len, 0.0);
-  grow += (around * cos(angle) - across * sin(angle)) * coilRadius * 6.2832 * uCurlCycles;
+  grow += (coilAxis * cos(angle) - across * sin(angle)) * coilRadius * 6.2832 * uCurlCycles;
   vec3 tv = normalize(mat3(modelViewMatrix) * grow);
   // A ribbon turned to face the camera, tapering to its tip.
   vec3 side = cross(tv, vec3(0.0, 0.0, 1.0));
@@ -194,12 +194,12 @@ export const HAIR_COATS: Record<HairStyle, CoatStyle> = {
   spiky: { mode: 1, length: 0.3, lie: 0.4, sway: 0.07, clump: 0.9, fall: 0, bangs: 1, gloss: 0.25, dark: 0.65, tip: 0.1, hairline: 0.71, back: 0, strip: 0.6 },
   mohawk: { mode: 1, length: 0.6, lie: 0.1, sway: 0.05, clump: 0.8, fall: 0, bangs: 1, gloss: 0.25, dark: 0.6, tip: 0.08, hairline: 0.3, back: 0.7, strip: 0.32 },
   buzz: { mode: 1, length: 0.06, lie: 0.2, sway: 0.02, clump: 0, fall: 0, bangs: 1, gloss: 0.2, dark: 0.65, tip: 0.05, hairline: 0.4, back: 0.25, strip: 0 },
-  crop: { mode: 1, length: 0.22, lie: 0.4, sway: 0.05, clump: 0.15, fall: 0, bangs: 1, gloss: 0.2, dark: 0.65, tip: 0.05, hairline: 0.55, back: 0.15, strip: 0, curl: 0.75, curlCycles: 2.5 },
+  crop: { mode: 1, length: 0.3, lie: 0.4, sway: 0.05, clump: 0.15, fall: 0, bangs: 1, gloss: 0.2, dark: 0.65, tip: 0.05, hairline: 0.55, back: 0.15, strip: 0, curl: 1, curlCycles: 2.5 },
   fringe: { mode: 1, length: 0.33, lie: 3.5, sway: 0.1, clump: 0.1, fall: 0.2, bangs: 1, gloss: 0.3, dark: 0.65, tip: 0.05, hairline: 0.25, back: 0.1, strip: 0 },
   bob: { mode: 1, length: 0.38, lie: 2.8, sway: 0.12, clump: 0, fall: 0.8, bangs: 0.4, gloss: 0.3, dark: 0.65, tip: 0.05, hairline: 0.4, back: 0.5, strip: 0, curl: 0.7, curlCycles: 2 },
-  page: { mode: 1, length: 0.48, lie: 4.5, sway: 0.12, clump: 0, fall: 1.3, bangs: 0.75, gloss: 0.35, dark: 0.65, tip: 0.05, hairline: 0.3, back: 0.9, strip: 0 },
+  page: { mode: 1, length: 0.36, lie: 4.5, sway: 0.12, clump: 0, fall: 1.3, bangs: 1, gloss: 0.35, dark: 0.65, tip: 0.05, hairline: 0.3, back: 0.9, strip: 0 },
   mane: { mode: 1, length: 0.6, lie: 1.2, sway: 0.25, clump: 0.2, fall: 0.8, bangs: 0.22, gloss: 0.3, dark: 0.65, tip: 0.05, hairline: 0.48, back: 1.0, strip: 0, curl: 0.5, curlCycles: 2.5 },
-  plume: { mode: 1, length: 0.5, lie: 0.25, sway: 0.18, clump: 0, fall: 0, bangs: 0.75, gloss: 0.25, dark: 0.6, tip: 0.1, hairline: 0.65, back: 0, strip: 0 },
+  plume: { mode: 1, length: 0.72, lie: 0.25, sway: 0.3, clump: 0, fall: 0, bangs: 0.75, gloss: 0.25, dark: 0.6, tip: 0.1, hairline: 0.65, back: 0, strip: 0 },
   crest: { mode: 1, length: 0.38, lie: 0.1, sway: 0.08, clump: 0.6, fall: 0, bangs: 1, gloss: 0.25, dark: 0.6, tip: 0.08, hairline: 0.62, back: 0.1, strip: 0.22 },
   quiff: { mode: 1, length: 0.5, lie: 0.65, sway: 0.1, clump: 0.7, fall: 0, bangs: 1, gloss: 0.3, dark: 0.6, tip: 0.08, hairline: 0.45, back: 0, strip: 0.45 },
   halo: { mode: 1, length: 0.25, lie: 0, sway: 0.14, clump: 0, fall: 0, bangs: 1, gloss: 0.2, dark: 0.6, tip: 0.1, hairline: 0.35, back: 0.45, strip: 0 },

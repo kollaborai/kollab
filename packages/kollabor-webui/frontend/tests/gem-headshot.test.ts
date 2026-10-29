@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { captureHeadshot, headshotSignature } from "../src/components/gems/gem-headshot";
+import { captureHeadshot, headshotKey, headshotSignature } from "../src/components/gems/gem-headshot";
 import type { GemProps } from "../src/components/gems/gem-engine";
 
 const fakeCanvas = () => ({
@@ -21,6 +21,15 @@ describe("headshotSignature", () => {
     const crown = { gem: "lapis", size: 32, hat: "crown" } as GemProps;
     const beret = { gem: "lapis", size: 32, hat: "beret" } as GemProps;
     expect(headshotSignature(crown)).not.toBe(headshotSignature(beret));
+  });
+});
+
+describe("headshotKey", () => {
+  it("keeps one portrait per look and wakefulness", () => {
+    const look = { gem: "lapis", size: 40 } as GemProps;
+    expect(headshotKey("lapis", look)).not.toBe(headshotKey("lapis", { ...look, live: false }));
+    expect(headshotKey("lapis", look)).not.toBe(headshotKey("lapis", { ...look, color: [1, 2, 3] }));
+    expect(headshotKey("lapis", look)).toBe(headshotKey("lapis", { ...look, size: 96, activity: "thinking" }));
   });
 });
 

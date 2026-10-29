@@ -13,6 +13,12 @@ export function headshotSignature(p: GemProps): string {
     fur, furColor, hairKnobs, furKnobs, auras, sparkles, auraColor });
 }
 
+// One portrait per look and wakefulness: a tile in its own color never replaces the agent's
+// portrait, and an offline gem (drawn asleep) keeps its own. The engine hashes the key.
+export function headshotKey(key: string, p: GemProps): string {
+  return `${key}#${p.live === false ? "asleep" : "awake"}#${headshotSignature(p)}`;
+}
+
 type Slot = { signature: string; pending: Promise<void> };
 const slots = new WeakMap<EngineApi, Map<string, Slot>>();
 

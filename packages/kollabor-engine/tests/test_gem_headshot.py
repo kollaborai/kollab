@@ -14,7 +14,9 @@ LIMIT = 256 * 1024
 
 
 @pytest_asyncio.fixture
-async def client():
+async def client(monkeypatch, tmp_path):
+    # Before the app is built, so nothing here can touch the real home folder.
+    monkeypatch.setenv("HOME", str(tmp_path))
     async with AsyncClient(
         transport=ASGITransport(app=create_app()), base_url="http://test"
     ) as ac:
