@@ -185,6 +185,7 @@ class FakeConfigService:
         self.values[key] = value
 
     def save_key(self, key, value, save_target=None):
+        self.values[key] = value
         self.saved.append((key, value, save_target))
         return True
 
@@ -195,6 +196,9 @@ def make_panel_ctx(tmp_path, monkeypatch, responder="", loadouts=None, extra=Non
     from plugins.voice_plugin import VoicePlugin
 
     monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    monkeypatch.setenv(
+        "KOLLAB_PROMPT_OVERRIDES_DIR", str(tmp_path / "prompt-overrides")
+    )
     _, pm = make_world(responder=responder, loadouts=loadouts, extra=extra)
     config_service = FakeConfigService(
         {
@@ -358,3 +362,141 @@ async def test_a_saved_agent_cli_quick_model_shows_as_same_as_chat(
     fields = {f["path"]: f for s in described["sections"] for f in s["fields"]}
     assert fields["quick_model"]["value"] == ""
     assert "agent-q" not in fields["quick_model"]["options"]
+
+
+@pytest.mark.asyncio
+async def test_voice_prompt_section_shows_engine_defaults(tmp_path, monkeypatch):
+    from kollabor_engine.voice_settings import DEFAULT_PROMPT, PERSONALITIES
+
+    from kollabor.panels.voice import PERSONALITY_LABELS, VoicePanel
+
+    ctx, _, _ = make_panel_ctx(tmp_path, monkeypatch)
+    described = await VoicePanel().describe(ctx, {})
+    titles = [section["title"] for section in described["sections"]]
+    assert titles.index("Voice Prompt") == titles.index("Voice Preferences") + 1
+    fields = {f["path"]: f for s in described["sections"] for f in s["fields"]}
+    assert fields["voice_prompt"]["type"] == "textarea"
+    assert fields["voice_prompt"]["label"] == "Instructions"
+    assert fields["voice_prompt"]["value"] == DEFAULT_PROMPT
+    assert fields["voice_personality"]["value"] == "max_gen_z"
+    assert fields["voice_personality"]["option_labels"]["max_gen_z"] == "Max Gen Z"
+    assert list(PERSONALITY_LABELS) == list(PERSONALITIES)
+    assert fields["voice_reasoning"]["value"] == "off"
+    assert fields["voice_reasoning"]["option_labels"] == {
+        "off": "Off (Fastest)",
+        "low": "Low",
+    }
+
+
+@pytest.mark.asyncio
+async def test_voice_prompt_saves_where_the_engine_reads_it(tmp_path, monkeypatch):
+    from kollabor_engine.voice_settings import DEFAULT_PROMPT, VoiceSettingsService
+    from kollabor_voice.speech_settings import (
+        load_speech_preferences as load_prefs,
+    )
+
+    from kollabor.panels.voice import VoicePanel
+
+    ctx, _, config_service = make_panel_ctx(tmp_path, monkeypatch)
+    before = load_prefs()
+    changes = {
+        "voice_prompt": "Keep it under ten words.",
+        "voice_personality": "neutral",
+        "voice_reasoning": "low",
+    }
+    result = await VoicePanel().act(
+        ctx, "save", {"changes": changes, "target": "device"}
+    )
+    assert result["ok"], result
+    assert ("voice.livekit.personality", "neutral", "global") in config_service.saved
+    assert ("voice.livekit.reasoning", "low", "global") in config_service.saved
+    assert load_prefs() == before  # never a speech preference
+    engine = VoiceSettingsService(config=config_service)
+    assert engine.get_prompt(None) == {
+        "text": "Keep it under ten words.",
+        "personality": "neutral",
+    }
+    assert engine.reasoning() == "low"
+    assert engine.overlay(None).startswith("Keep it under ten words.\n")
+    fields = {f["path"]: f for s in result["panel"]["sections"] for f in s["fields"]}
+    assert fields["voice_prompt"]["value"] == "Keep it under ten words."
+
+    cleared = await VoicePanel().act(
+        ctx, "save", {"changes": {"voice_prompt": ""}, "target": "device"}
+    )
+    assert cleared["ok"], cleared
+    assert engine.get_prompt(None)["text"] == DEFAULT_PROMPT
+    assert engine.get_prompt(None)["personality"] == "neutral"  # kept
+
+
+@pytest.mark.asyncio
+async def test_voice_prompt_refuses_bad_values(tmp_path, monkeypatch):
+    from kollabor.panels.voice import VoicePanel
+
+    ctx, _, config_service = make_panel_ctx(tmp_path, monkeypatch)
+    changes = {
+        "voice_prompt": "x" * (32 * 1024 + 1),
+        "voice_personality": "pirate",
+        "voice_reasoning": "high",
+    }
+    result = await VoicePanel().act(
+        ctx, "save", {"changes": changes, "target": "device"}
+    )
+    assert not result["ok"]
+    assert set(result["errors"]) == set(changes)
+    assert config_service.saved == []
+    assert not list((tmp_path / "prompt-overrides").rglob("*.md"))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_prompt_write_still_saves_reasoning_and_names_its_rows(
+    tmp_path, monkeypatch
+):
+    from kollabor.panels.voice import VoicePanel
+    from kollabor_ai.prompt_overrides import PromptOverrideStore
+
+    ctx, _, config_service = make_panel_ctx(tmp_path, monkeypatch)
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("disk is full")
+
+    monkeypatch.setattr(PromptOverrideStore, "save_override", refuse)
+    changes = {
+        "voice_prompt": "Short.",
+        "voice_personality": "neutral",
+        "voice_reasoning": "low",
+    }
+    result = await VoicePanel().act(
+        ctx, "save", {"changes": changes, "target": "device"}
+    )
+    assert not result["ok"]
+    assert set(result["errors"]) == {"voice_prompt", "voice_personality"}
+    assert ("voice.livekit.reasoning", "low", "global") in config_service.saved
+
+
+@pytest.mark.asyncio
+async def test_a_refused_speech_save_saves_no_quick_model_or_prompt(
+    tmp_path, monkeypatch
+):
+    from kollabor.panels.voice import VoicePanel
+
+    ctx, plugin, config_service = make_panel_ctx(
+        tmp_path,
+        monkeypatch,
+        loadouts={"fast-or": {"provider_profile": "orr", "model": "x-1b"}},
+    )
+
+    async def refuse(_changes):
+        raise OSError("disk is full")
+
+    monkeypatch.setattr(plugin, "configure_voice", refuse)
+    result = await VoicePanel().act(
+        ctx,
+        "save",
+        {
+            "changes": {"quick_model": "fast-or", "voice_reasoning": "low"},
+            "target": "device",
+        },
+    )
+    assert not result["ok"]
+    assert config_service.saved == []

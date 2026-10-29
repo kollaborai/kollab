@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from kollabor_voice.bootstrap import prepared_runtime_python
@@ -30,6 +31,17 @@ from .base import (
 from .config import apply_config_changes, validate_config_changes
 
 TITLE = "Voice Configuration"
+
+# Voice Prompt rows (#295) live in the engine's prompt store and config.
+PROMPT_FIELDS = ("voice_prompt", "voice_personality", "voice_reasoning")
+PERSONALITY_LABELS = {
+    "max_gen_z": "Max Gen Z",
+    "neutral": "Neutral",
+    "professional": "Professional",
+}
+REASONING_LABELS = {"off": "Off (Fastest)", "low": "Low"}
+# No config service (a bare test bus): show the defaults, never open the real file.
+_DEFAULTS_ONLY = SimpleNamespace(get=lambda key, default=None: default)
 
 
 def voice_plugin(ctx):
@@ -102,6 +114,45 @@ def _quick_model_choices(ctx, plugin):
     return current, list(labels), labels
 
 
+def _prompt_settings(config_service):
+    """The engine's voice prompt settings over this daemon's config: one store."""
+    from kollabor_engine.voice_settings import VoiceSettingsService
+
+    return VoiceSettingsService(config=config_service or _DEFAULTS_ONLY)
+
+
+def _save_prompt(config_service, changes: dict) -> dict[str, str]:
+    """Save the Voice Prompt rows; ``{path: reason}`` for each one refused."""
+    from kollabor_engine.voice_runtime_host import RuntimeHostError
+    from kollabor_engine.voice_settings import PREFIX
+
+    if config_service is None:
+        return {path: "configuration is not available" for path in changes}
+    settings = _prompt_settings(config_service)
+    refused: dict[str, str] = {}
+    if "voice_prompt" in changes or "voice_personality" in changes:
+        current = settings.get_prompt(None)
+        try:
+            settings.update_prompt(
+                None,
+                {
+                    "text": changes.get("voice_prompt", current["text"]),
+                    "personality": changes.get(
+                        "voice_personality", current["personality"]
+                    ),
+                },
+            )
+        except (RuntimeHostError, OSError) as exc:
+            for path in ("voice_prompt", "voice_personality"):
+                if path in changes:
+                    refused[path] = str(exc)
+    if "voice_reasoning" in changes and not apply_config_changes(
+        config_service, {PREFIX + "reasoning": changes["voice_reasoning"]}, "global"
+    ):
+        refused["voice_reasoning"] = "could not be saved to ~/.kollab/config.json"
+    return refused
+
+
 def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
     """One field definition for both interfaces and both speech engines."""
     preferences = load_preferences()
@@ -112,6 +163,9 @@ def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
     transcription = state.get("transcription", {})
     engines = available_stt_engines()
     quick_model, quick_options, quick_labels = _quick_model_choices(ctx, plugin)
+    _, config_service = _llm_handle(ctx, plugin)
+    prompt_settings = _prompt_settings(config_service)
+    prompt = prompt_settings.get_prompt(None)
     return [
         {
             "id": "setup",
@@ -155,6 +209,47 @@ def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
                     help=(
                         "Answers when you talk; typed messages use this chat's model. "
                         "Saved in ~/.kollab/config.json."
+                    ),
+                ),
+            ],
+        },
+        {
+            "id": "prompt",
+            "title": "Voice Prompt",
+            "fields": [
+                make_field(
+                    "voice_prompt",
+                    "textarea",
+                    "Instructions",
+                    value=prompt["text"],
+                    help=(
+                        "Added to the instructions of every spoken reply. Typed "
+                        "messages never see it. Clear it to go back to the default."
+                    ),
+                ),
+                make_field(
+                    "voice_personality",
+                    "dropdown",
+                    "Personality",
+                    value=prompt["personality"],
+                    options=list(PERSONALITY_LABELS),
+                    option_labels=PERSONALITY_LABELS,
+                    help=(
+                        "How spoken replies sound: Max Gen Z, Neutral or "
+                        "Professional. Saved in ~/.kollab/config.json."
+                    ),
+                ),
+                make_field(
+                    "voice_reasoning",
+                    "dropdown",
+                    "Reasoning",
+                    value=prompt_settings.reasoning(),
+                    options=list(REASONING_LABELS),
+                    option_labels=REASONING_LABELS,
+                    help=(
+                        "Spoken replies think less so they come back fast. Off is "
+                        "fastest; Low thinks a little first. Typed messages keep this "
+                        "chat's own effort."
                     ),
                 ),
             ],
@@ -415,6 +510,9 @@ class VoicePanel:
         for key in ("context_lines", "vibevoice_steps"):
             if isinstance(changes.get(key), float) and changes[key].is_integer():
                 changes[key] = int(changes[key])
+        prompt_changes = {
+            key: changes.pop(key) for key in PROMPT_FIELDS if key in changes
+        }
         if not errors:
             errors.update(
                 speech_errors({**load_preferences(), **changes}, check_files=True)
@@ -423,19 +521,26 @@ class VoicePanel:
             return error_result("Some voice settings were not saved", errors)
         # Quick Model is a config key (a loadout name), not a speech preference.
         quick = changes.pop("quick_model", None)
-        if quick is not None:
-            _, config_service = _llm_handle(ctx, voice_plugin(ctx))
-            if config_service is None or not apply_config_changes(
-                config_service, {RESPONDER_KEY: quick}, "global"
-            ):
-                return error_result(
-                    "Some voice settings were not saved",
-                    {"quick_model": "configuration is not available"},
-                )
         try:
             await voice_plugin(ctx).configure_voice(changes)
         except (OSError, ValueError) as exc:
             return error_result(f"Could not save voice settings: {exc}")
+        # Rows kept outside preferences.json save last: a refusal names exactly the
+        # rows that were not saved, and a refused speech save above saved none.
+        if quick is not None or prompt_changes:
+            _, config_service = _llm_handle(ctx, voice_plugin(ctx))
+            refused = (
+                _save_prompt(config_service, prompt_changes) if prompt_changes else {}
+            )
+            if quick is not None and (
+                config_service is None
+                or not apply_config_changes(
+                    config_service, {RESPONDER_KEY: quick}, "global"
+                )
+            ):
+                refused["quick_model"] = "configuration is not available"
+            if refused:
+                return error_result("Some voice settings were not saved", refused)
         return ok_result(
             "Voice settings saved for this device", panel=await self.describe(ctx, {})
         )

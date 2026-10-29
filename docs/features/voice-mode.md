@@ -314,3 +314,21 @@ VibeVoice worker never plays audio itself or changes the Codex speech hook.
 Dependencies, voice presets and default weights download on first use and are
 cached. Heavy libraries stay out of the main Kollab process. Custom model
 directories and custom voice prompts are user-owned files and are preserved.
+
+## Voice Prompt settings
+
+Settings → Voice → Voice Prompt in the web UI, or `/voice config` in the terminal, holds three settings. They change
+spoken replies only; typed messages never see them.
+
+- **Instructions**: text added to the instructions of every spoken reply, up to 32 KiB. Clear it to go back to the
+  default: "You are speaking out loud. Answer in short natural sentences, no markdown, no lists, no code blocks. Say
+  what you did, not how you did it." It is saved as `~/.kollab/prompt-overrides/voice/default.md`, the file the
+  engine's `PUT /voice/settings/prompt` writes.
+- **Personality**: Max Gen Z (the default), Neutral or Professional. Saved as `voice.livekit.personality` in
+  `~/.kollab/config.json`.
+- **Reasoning**: Off (the default, and the fastest) or Low. Saved as `voice.livekit.reasoning` in
+  `~/.kollab/config.json`. Typed messages keep the chat's own effort.
+
+These settings are the default voice prompt: every agent without a voice prompt of its own speaks
+with them. An agent given its own voice prompt through the engine API keeps it. In
+the terminal, Instructions is a one-line field; a line break typed in the web UI shows there as ⏎.

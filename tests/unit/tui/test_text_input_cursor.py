@@ -5,6 +5,7 @@ and typing prepended. Under tmux/screen the backspace key arrives as 0x08,
 which the parser used to name "Ctrl+H" -- a dead key for every text widget.
 """
 
+import re
 import unittest
 
 from kollabor_tui.key_parser import KeyParser, KeyPress
@@ -73,6 +74,18 @@ class TestTypeThenBackspace(unittest.TestCase):
         widget.handle_input(_key("Backspace"))
         widget.handle_input(_key("Backspace"))
         self.assertEqual(str(widget.get_pending_value()), "a")
+
+
+class TestLineBreakDisplay(unittest.TestCase):
+    def test_a_line_break_shows_as_one_return_sign(self):
+        broken, plain = _widget("one\ntwo"), _widget("one two")
+        self.assertNotIn("\n", "".join(broken.render()))
+        self.assertIn("one⏎two", "".join(broken.render()))
+        # render_modern draws a multi-row block: the break adds no row of its own.
+        modern, same = broken.render_modern(60), plain.render_modern(60)
+        self.assertEqual("".join(modern).count("\n"), "".join(same).count("\n"))
+        bare = re.sub(r"\x1b\[[0-9;]*m", "", "".join(modern))  # per-cell colours
+        self.assertIn("one⏎two", bare)
 
 
 if __name__ == "__main__":

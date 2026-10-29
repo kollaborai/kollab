@@ -633,6 +633,7 @@ export type PanelFieldType =
   | "spinbox"
   | "dropdown"
   | "text_input"
+  | "textarea"
   | "label";
 
 /** One setting, as built by the daemon's `make_field`. */

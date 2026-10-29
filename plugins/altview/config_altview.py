@@ -141,7 +141,7 @@ class ConfigAltView(AltView):
             return CheckboxWidget(cfg, config_path, self.config_service)
         elif wtype == "dropdown":
             return DropdownWidget(cfg, config_path, self.config_service)
-        elif wtype == "text_input":
+        elif wtype in ("text_input", "textarea"):  # a textarea is one line here
             return TextInputWidget(cfg, config_path, self.config_service)
         elif wtype == "slider":
             return SliderWidget(cfg, config_path, self.config_service)

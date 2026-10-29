@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Voice Prompt settings: Settings → Voice → Voice Prompt (and `/voice config`
+  in the terminal) edits the instructions added to every spoken reply, and
+  picks a Personality (Max Gen Z, Neutral or Professional) and a Reasoning
+  level (Off or Low). Every agent without a voice prompt of its own speaks
+  with these; clearing Instructions goes back to the default. Settings panels
+  gain a multi-line `textarea` field (#295).
 - `KOLLAB_WEBUI_NO_BROWSER=1` starts the web UI without opening a browser tab.
   The desktop app sets it in place of `BROWSER=true`, which does nothing on
   Windows (#268).
