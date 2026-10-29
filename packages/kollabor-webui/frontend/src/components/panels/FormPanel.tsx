@@ -9,7 +9,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { FieldRenderer, type Draft } from "./FieldRenderer";
 import { confirmStep } from "./confirm";
-import { titleCase } from "./panel-model";
+import { savePaths, titleCase } from "./panel-model";
 
 function matches(field: PanelField, q: string): boolean {
   return [field.label, field.help, field.path].some((text) =>
@@ -252,7 +252,11 @@ export function FormPanel({
                       : buttonLabel(action, target)}
                 </Button>
                 {target && paths[target] ? (
-                  <PathText path={paths[target]} tail={3} className="text-muted-foreground text-[0.6875rem]" />
+                  <span className="flex flex-col items-end">
+                    {savePaths((panel.sections ?? []).flatMap((s) => s.fields), draft, paths[target]).map((path) => (
+                      <PathText key={path} path={path} tail={3} className="text-muted-foreground text-[0.6875rem]" />
+                    ))}
+                  </span>
                 ) : null}
               </div>
             )),

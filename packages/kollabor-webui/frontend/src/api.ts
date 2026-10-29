@@ -651,6 +651,7 @@ export type PanelField = {
   options?: string[] | null;
   /** Dropdown only: option -> the text to show; the option is still what is saved. */
   option_labels?: Record<string, string> | null;
+  save_path?: string | null;
   placeholder?: string | null;
   editable: boolean;
   managed_by?: string | null;
