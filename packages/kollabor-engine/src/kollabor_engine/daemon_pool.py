@@ -543,7 +543,9 @@ class DaemonPool:
 
         taken.update(
             str(row["identity"])
-            for row in agents_in_folder((row for _hub, row in live_agents_on_machine()), here)
+            for row in agents_in_folder(
+                (row for _hub, row in live_agents_on_machine()), here
+            )
             if row.get("identity")
         )
         # Presence can be late or temporarily stale. The pool already knows
@@ -551,7 +553,8 @@ class DaemonPool:
         owned_rows = (
             {"identity": handle.identity, "project": handle.project}
             for handle in self._daemons.values()
-            if getattr(handle, "identity", "") and getattr(handle, "pid", 0)
+            if getattr(handle, "identity", "")
+            and getattr(handle, "pid", 0)
             and getattr(handle, "alive", False)
         )
         taken.update(row["identity"] for row in agents_in_folder(owned_rows, here))

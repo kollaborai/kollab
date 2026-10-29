@@ -78,7 +78,9 @@ export async function prepareRemoteOpen(
   if (networkOf(network, handle).live) return "open";
   const latest = await api.listSessions();
   const current = networkOf(latest.network ?? { device: "", remote: [] }, handle);
-  if (current.live || current.localAgentRunning !== false) return "open";
+  if (current.live || current.localAgentRunning == null) return "open";
+  // An agent here is still starting or has not answered yet: wait for it, never start a second one.
+  if (current.localAgentRunning) return "wait";
 
   const carrier = { profile, approval_mode: "trust_all", workspace: current.folder || undefined };
   try {

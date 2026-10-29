@@ -195,10 +195,10 @@ function carrierApi(snapshots: AgentNetwork[], failure?: Error) {
   return { api, created };
 }
 
-test("opening a remote agent reuses an existing local agent after a quiet network probe", async () => {
+test("a local agent that has not answered yet is waited for, and no second one starts", async () => {
   const network = remoteNetwork(true);
   const { api, created } = carrierApi([network]);
-  assert.equal(await prepareRemoteOpen(api, network, "koordinator@prod", "default"), "open");
+  assert.equal(await prepareRemoteOpen(api, network, "koordinator@prod", "default"), "wait");
   assert.deepEqual(created, []);
 });
 
