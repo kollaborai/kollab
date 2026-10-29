@@ -13,7 +13,7 @@ registerHooks({
     }
   },
 });
-const { initialRoomState, reduceVoiceEvent, isInterrupting, remoteNotice } = await import("../src/voice/room-state.ts");
+const { initialRoomState, reduceVoiceEvent, isActive, isInterrupting, remoteNotice } = await import("../src/voice/room-state.ts");
 const { VoiceRoomController } = await import("../src/voice/room-controller.ts");
 
 let seq = 0;
@@ -221,6 +221,7 @@ test("a model out of memory before ready keeps Low On Resources and its reason",
   const s = h.controller.getState();
   assert.equal(s.state, "resource_shortage");
   assert.equal(s.error, "MemoryError: VibeVoice");
+  assert.equal(isActive(s), false); // no Stop button; the composer mic starts it again
   assert.ok(!h.calls.includes("join") && !h.calls.includes("mic:true"));
   assert.ok(h.calls.includes("stop:error"));
 });

@@ -44,7 +44,7 @@ export const initialRoomState: VoiceRoomState = {
 
 /** The voice is live: the mic is (or is about to be) open. */
 export const isActive = (s: VoiceRoomState) =>
-  !["idle", "stopped", "error", "disconnected"].includes(s.state);
+  !["idle", "stopped", "error", "resource_shortage", "disconnected"].includes(s.state);
 
 /**
  * livekit-server listens on this computer's loopback only (voice_livekit.py), so

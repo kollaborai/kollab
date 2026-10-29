@@ -391,13 +391,11 @@ def test_the_speech_lock_is_released_by_the_thread_that_took_it(service, caplog,
 
 
 def test_readiness_tells_a_memory_shortage_from_a_path_that_names_memory():
-    path = map_readiness(
-        {
-            "state": "error",
-            "detail": "FileNotFoundError: /x/memoryerror-cache/model.bin",
-        }
-    )
-    assert path.state == "error"
+    for detail in (
+        "FileNotFoundError: /x/memoryerror-cache/model.bin",
+        "FileNotFoundError: /x/OutOfMemoryCache/model.bin",
+    ):
+        assert map_readiness({"state": "error", "detail": detail}).state == "error"
     metal = map_readiness(
         {
             "state": "error",
