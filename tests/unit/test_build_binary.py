@@ -146,3 +146,25 @@ def test_agent_smoke_fails_when_stop_leaves_the_agent_online(tmp_path: Path, mon
     monkeypatch.setattr(build_binary.time, "monotonic", lambda: next(clock))
     with pytest.raises(SystemExit, match="left the agent online"):
         build_binary.agent_smoke(tmp_path / "kollab.exe")
+
+
+def test_pex_gets_bare_wheel_names_from_the_wheels_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # pex reads a Windows path's drive letter as a URL scheme and never finds the wheel (#268).
+    folder = tmp_path / "wheels"
+    folder.mkdir()
+    wheels = [folder / "kollab-0.18.5-py3-none-any.whl", folder / "kollabor_ai-0.18.5-py3-none-any.whl"]
+    out = tmp_path / "out"
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(command: list[str], **kwargs: Any) -> None:
+        calls.append((command, kwargs))
+        binary = out / build_binary.binary_filename()
+        binary.write_bytes(b"")
+        binary.with_name(binary.name + ".sha256").write_text("")
+
+    monkeypatch.setattr(build_binary, "run", run)
+    monkeypatch.setattr(build_binary, "floor_platform", lambda path: path)
+    build_binary.build(wheels, out, tmp_path)
+    command, kwargs = calls[0]
+    assert kwargs["cwd"] == folder
+    assert [arg for arg in command if arg.endswith(".whl")] == [wheel.name for wheel in wheels]
