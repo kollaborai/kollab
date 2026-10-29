@@ -758,6 +758,31 @@ async def test_a_failed_start_is_not_reused_by_the_next_create():
     assert second.voice_session_id != first.voice_session_id
     assert len(backend.start_calls) == 2
 
+@pytest.mark.asyncio
+async def test_a_start_out_of_memory_ends_in_a_resource_shortage():
+    class ShortStart(FakeRuntimeBackend):
+        async def start_session(self, binding):
+            self.start_calls.append(binding)
+            raise RuntimeHostError(
+                "resource_shortage", 503, "MemoryError: VibeVoice", retryable=True
+            )
+
+    backend = ShortStart()
+    host = _host(backend)
+    first = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    short = await host.get_status("owner-1", first.voice_session_id)
+    assert (short.state, short.detail, short.retryable) == (
+        "resource_shortage",
+        "MemoryError: VibeVoice",
+        True,
+    )
+
+    second = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    assert second.voice_session_id != first.voice_session_id
+    assert len(backend.start_calls) == 2
+
 
 @pytest.mark.asyncio
 async def test_host_generation_fence_revokes_voice_admission_capability():

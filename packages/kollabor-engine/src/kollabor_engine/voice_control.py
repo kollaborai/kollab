@@ -52,7 +52,7 @@ MAX_TRANSCRIPT_BYTES = 16 * 1024
 TURN_IDLE_TIMEOUT_S = 600.0
 PARTIAL_INTERVAL_S = 0.25
 MAX_SPOKEN_CHARS = 600
-TERMINAL_STATES = {"stopped", "error"}
+TERMINAL_STATES = {"stopped", "error", "resource_shortage"}
 GREETING_INSTRUCTION = "Greet the user briefly and ask what they want to talk about."
 _LOCAL_PROVIDERS = {"ollama", "lmstudio", "local", "mlx", "llamacpp"}
 
