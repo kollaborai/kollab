@@ -147,6 +147,9 @@ class GoalTurnDriver:
             record is None
             or record.status != "active"
             or record.goal_id in self._running_goals
+            # dispatched and never settled (a daemon that died mid-turn) is
+            # ambiguous work: never continue past it on its own (spec 7.4)
+            or self.service._goal_turn_in_flight(record.goal_id)
         ):
             return None
         self.schedule(record.goal_id)

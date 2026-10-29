@@ -12,7 +12,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from kollabor.goals.driver import GoalTurnDriver
-from kollabor.goals.service import GoalControl, GoalService
+from kollabor.goals.service import (
+    BoundaryContext,
+    GoalControl,
+    GoalService,
+    TurnOutcome,
+)
 from kollabor.state.goal_store import GoalStore
 
 
@@ -391,6 +396,22 @@ class DriverTests(unittest.TestCase):
     def test_watchdog_skips_a_paused_goal(self):
         goal_id = self._create()
         self.service.pause(goal_id)
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_watchdog_never_continues_past_an_unsettled_attempt(self):
+        # a daemon that died mid-turn leaves its attempt dispatched
+        goal_id = self._create()
+        start = TurnOutcome(
+            turn_id="goal-start", origin="goal", status="ok", goal_id=goal_id
+        )
+        self.assertIsNotNone(
+            self.service.maybe_continue(goal_id, start, BoundaryContext())
+        )
         driver, coord = self._make_driver()
         self._bus(coord)
         started: list[str] = []

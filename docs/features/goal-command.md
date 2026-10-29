@@ -44,6 +44,9 @@ RPC — the daemon owns the conversation identity, store, and driver, and
   yielded, or you `/resume`d into its conversation) is scheduled again. A turn
   that is still running counts as pending work, so the goal waits for it to
   settle, and the checklist above still decides whether a turn may dispatch.
+  A goal whose last turn was cut off (an attempt dispatched and never settled,
+  as when a daemon dies mid-turn) is left alone: that work is ambiguous and is
+  never re-run on its own.
 - **Bounds** (independent of any token budget): 40 goal turns / 2h active
   time by default; per-request token accounting; budgets are dispatch gates
   with documented in-flight overshoot; resumed budgets are total ceilings.
