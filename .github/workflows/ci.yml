@@ -62,10 +62,15 @@ jobs:
 
       # The voice package runs on its own 3.12/3.13 runtime and needs numpy,
       # which the workspace venv lacks, so tests/unit never collected it.
+      # The LiveKit pins match the runtime in kollabor_voice/manifest.json;
+      # without them test_livekit_worker.py skips itself (#403).
       - name: Run voice package tests
         run: >-
           uv run --no-project --python 3.12 --with numpy==2.5.3
           --with pytest --with pytest-asyncio
+          --with livekit==1.1.20 --with livekit-agents==1.8.8
+          --with livekit-plugins-silero==1.8.8 --with onnxruntime==1.30.0
+          --with livekit-local-inference==0.2.7
           python -m pytest packages/kollabor-voice/tests -q
 
       # The web UI's own tests never ran in CI: four vitest files and the
