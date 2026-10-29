@@ -351,7 +351,8 @@ export class PhoneTransport {
             failed = true;
             break;
           }
-          this.diagnosticQueue.shift();
+          // A full queue may have dropped the head while it was sent.
+          if (this.diagnosticQueue[0] === payload) this.diagnosticQueue.shift();
         }
       } finally {
         this.flushingDiagnostics = null;
