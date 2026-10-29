@@ -1,8 +1,10 @@
 """Voice settings for the model calls of one LiveKit voice turn, and no other turn.
 
 The engine puts its voice settings in the turn's origin context (prompt overlay,
-reasoning, voice provider profile). This applies them around that turn's model
-calls only; the stored conversation, the system prompt and normal chat are never
+reasoning, voice provider profile). The quick model (Settings → Voice → Quick
+Model) comes from config instead, and names a loadout so its provider's own
+credentials carry the call. This applies them around that turn's model calls
+only; the stored conversation, the system prompt and normal chat are never
 edited. Anything that is not a validated voice-origin context gets nothing.
 """
 
@@ -31,7 +33,9 @@ def with_overlay(history: list[Any], overlay: str | None) -> list[Any]:
     for index, message in enumerate(shaped):
         is_dict = isinstance(message, dict)
         role = message.get("role") if is_dict else getattr(message, "role", None)
-        content = message.get("content") if is_dict else getattr(message, "content", None)
+        content = (
+            message.get("content") if is_dict else getattr(message, "content", None)
+        )
         if role == "system" and isinstance(content, str):
             merged = f"{content}\n\n{overlay}"
             shaped[index] = (
@@ -49,20 +53,67 @@ async def voice_provider(
 ) -> AsyncIterator[None]:
     """Run model calls on the voice profile with the voice reasoning, then put chat's back.
 
-    The profile switches only when the voice profile differs from the active one.
-    Reasoning runs at the lowest level the model takes.
+    The quick model (kollabor.voice.responder_model, a loadout name) wins: it
+    may name another provider, whose own profile and credentials carry the
+    call (an OpenRouter fast model while the chat runs elsewhere). Without
+    one, the profile switches only when the turn's voice profile differs from
+    the active one. Reasoning runs at the lowest level the model takes.
     """
     active = getattr(api_service, "_profile", None)
-    wanted = settings.get("voice_provider_profile_id")
-    voice_profile = None
-    if wanted and wanted != getattr(active, "name", None) and profile_manager is not None:
-        voice_profile = profile_manager.get_profile(wanted)
-        if voice_profile is None:
-            logger.warning("voice profile %r not found; using the active profile", wanted)
-    if voice_profile is not None:
-        if not await api_service.reinitialize_provider(voice_profile):
-            await api_service.reinitialize_provider(active)
-            raise RuntimeError(f"voice profile {wanted!r} could not start")
+    quick = _quick_loadout(api_service, profile_manager)
+    switched = False
+    if quick is not None:
+        profile = (
+            profile_manager.get_profile(quick.provider_profile)
+            if profile_manager is not None
+            else None
+        )
+        if profile is None:
+            logger.warning(
+                "quick model %r has no provider profile %r; using the active profile",
+                quick.name,
+                quick.provider_profile,
+            )
+        elif getattr(profile, "name", None) != getattr(active, "name", None):
+            if not await api_service.reinitialize_provider(profile):
+                await api_service.reinitialize_provider(active)
+                raise RuntimeError(
+                    f"quick model provider {quick.provider_profile!r} could not start"
+                )
+            switched = True
+    if quick is None:
+        wanted = settings.get("voice_provider_profile_id")
+        voice_profile = None
+        if (
+            wanted
+            and wanted != getattr(active, "name", None)
+            and profile_manager is not None
+        ):
+            voice_profile = profile_manager.get_profile(wanted)
+            if voice_profile is None:
+                logger.warning(
+                    "voice profile %r not found; using the active profile", wanted
+                )
+        if voice_profile is not None:
+            if not await api_service.reinitialize_provider(voice_profile):
+                await api_service.reinitialize_provider(active)
+                raise RuntimeError(f"voice profile {wanted!r} could not start")
+            switched = True
+    previous_provider = getattr(api_service, "_provider", None)
+    swapped_model = False
+    if quick is not None:
+        from kollabor_ai.fast_model import with_model
+
+        provider = with_model(previous_provider, quick.model)
+        swapped_model = provider is not previous_provider
+        if swapped_model:
+            api_service._provider = provider
+        logger.info(
+            "voice turn on the quick model %r (%s via %s)",
+            quick.model,
+            quick.name,
+            quick.provider_profile,
+        )
     config = getattr(getattr(api_service, "_provider", None), "config", None)
     has_effort = config is not None and hasattr(config, "effort")
     previous = config.effort if has_effort else None
@@ -79,5 +130,20 @@ async def voice_provider(
     finally:
         if has_effort:
             config.effort = previous
-        if voice_profile is not None and not await api_service.reinitialize_provider(active):
+        if swapped_model:
+            api_service._provider = previous_provider
+        if switched and not await api_service.reinitialize_provider(active):
             logger.error("could not restore the active profile after a voice turn")
+
+
+def _quick_loadout(api_service: Any, profile_manager: Any) -> Any:
+    """The configured quick model as a Loadout, or None. Exact names only."""
+    from kollabor_voice.responder import responder_model
+
+    from kollabor_ai.loadout_manager import LoadoutManager
+
+    config = getattr(api_service, "config", None)
+    name = responder_model(config)
+    if not name or profile_manager is None:
+        return None
+    return LoadoutManager(profile_manager, config).get(name)
