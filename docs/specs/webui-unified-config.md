@@ -162,7 +162,7 @@ current value:
   "managed_by": null, "secret": false, "is_set": true }
 ```
 
-`type` is one of `checkbox | slider | spinbox | dropdown | text_input | label`.
+`type` is one of `checkbox | slider | spinbox | dropdown | text_input | textarea | label`.
 A dropdown's `options` are the values that get saved. When they are ids, the
 widget dict also carries `option_labels` (`{"koordinator": "Koordinator"}`):
 the text the terminal's `/config` dropdown and the web select show for each
@@ -281,7 +281,7 @@ and usable by any panel:
 | component | job |
 |-----------|-----|
 | `PanelHost.tsx` | Dialog on desktop, full-height Sheet below 768px. fetches the panel, keeps dirty values on the client, sends actions, re-renders from the returned panel. its open state lives in `App.tsx`, so both Settings buttons call one setter (this replaces the DOM-click workaround) |
-| `FieldRenderer.tsx` | checkbox → Switch · slider → Slider + number readout · spinbox → number Input · dropdown → Select · text_input → Input · `editable: false` → read-only row · `managed_by` → "Managed by X" badge · `secret` → password Input that is never prefilled and shows "Set" / "Not set"; empty means unchanged, clearing is its own button |
+| `FieldRenderer.tsx` | checkbox → Switch · slider → Slider + number readout · spinbox → number Input · dropdown → Select · text_input → Input · textarea → multi-line text, up to 32 KiB; the terminal shows it as one line · `editable: false` → read-only row · `managed_by` → "Managed by X" badge · `secret` → password Input that is never prefilled and shows "Set" / "Not set"; empty means unchanged, clearing is its own button |
 | `PickerList.tsx` | search, grouped rows, current marker, row and toolbar actions, `empty_groups`, optional `controls`, `summary` rows and a read-only `notice` |
 | (in `PanelHost`) | `reveal` (one-time secret + countdown; no copy button, matching the terminal's private-view rule) and `poll` (re-send an action until the panel reports a final state) |
 | `WizardSteps.tsx` | step header, `FieldRenderer` per step, Back / Next / Test Connection / Save and Activate |
@@ -315,7 +315,7 @@ and usable by any panel:
 ### security
 
 - **whitelist.** `save` accepts only paths whose field is `editable`
-  (checkbox, slider, spinbox, dropdown, text_input) in the current
+  (checkbox, slider, spinbox, dropdown, text_input, textarea) in the current
   `describe()`. labels, injected loadout rows, managed paths and unknown
   paths get 400.
 - **validate on the server:** bools, min/max/step, dropdown options, strings

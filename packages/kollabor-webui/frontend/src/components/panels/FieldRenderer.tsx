@@ -317,6 +317,22 @@ export function FieldRenderer({
     );
   }
 
+  if (field.type === "textarea") {
+    return (
+      <FieldShell id={id} field={field} dirty={dirty} error={error}>
+        <textarea
+          id={id}
+          value={value === null || value === undefined ? "" : String(value)}
+          placeholder={field.placeholder ?? undefined}
+          disabled={disabled}
+          rows={4}
+          onChange={(event) => set(event.target.value)}
+          className="min-h-24 w-full min-w-0 resize-y rounded-md border bg-muted/50 px-3 py-2 text-base leading-5 shadow-xs transition-[color,box-shadow] outline-none selection:bg-primary selection:text-primary-foreground placeholder:text-muted-foreground focus-visible:bg-muted disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30 dark:focus-visible:bg-input/50"
+        />
+      </FieldShell>
+    );
+  }
+
   if (field.secret) {
     const cleared = dirty && value === null;
     const typed = typeof value === "string" ? value : "";

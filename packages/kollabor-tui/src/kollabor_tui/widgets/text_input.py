@@ -44,7 +44,7 @@ class TextInputWidget(BaseWidget):
 
         # Display text or placeholder
         if text:
-            display_text = text
+            display_text = text.replace("\n", "⏎")
         elif placeholder and not self.focused:
             display_text = placeholder
         else:
@@ -100,10 +100,10 @@ class TextInputWidget(BaseWidget):
 
         # Display text with block cursor
         if text:
-            display = text
+            display = text.replace("\n", "⏎")
             if self.focused and self._show_cursor:
                 cursor_pos = min(self.cursor_position, len(display))
-                display = self._apply_block_cursor(text, cursor_pos)
+                display = self._apply_block_cursor(display, cursor_pos)
         elif placeholder and not self.focused:
             # Show placeholder in dim when empty and unfocused
             display = f"{S.DIM}{placeholder}{S.RESET_DIM}"
