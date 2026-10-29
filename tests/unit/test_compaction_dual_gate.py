@@ -144,6 +144,31 @@ class TestDualGate(unittest.TestCase):
         _wire_history(plugin, history, prompt_tokens=150_000)
         self.assertFalse(plugin._should_compact(history))
 
+    def test_over_threshold_compacts_at_two_older_messages(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, min_human_turns=6, keep_recent=3)
+        history = [
+            _msg("user", "brief"),
+            _msg("assistant", "a"),
+            _msg("user", "hub", hub_message=True),
+            _msg("assistant", "b"),
+            _msg("user", "hub2", hub_message=True),
+        ]
+        _wire_history(plugin, history, prompt_tokens=150_000)
+        self.assertTrue(plugin._should_compact(history))
+
+    def test_estimated_count_still_waits_for_min_turns(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, min_human_turns=6, keep_recent=4)
+        history = [_msg("user", "brief")]
+        for i in range(4):
+            history += [
+                _msg("assistant", "x" * 100_000),
+                _msg("user", f"hub{i}", hub_message=True),
+            ]
+        history.append(_msg("assistant", "done"))
+        _wire_history(plugin, history, prompt_tokens=0)
+        self.assertGreaterEqual(plugin._estimate_history_tokens(history), 100_000)
+        self.assertFalse(plugin._should_compact(history))
+
 
 class TestContextWidget(unittest.TestCase):
     def test_remote_state_drives_context_widget_and_labels_estimate(self) -> None:
