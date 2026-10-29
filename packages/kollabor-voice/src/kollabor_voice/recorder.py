@@ -24,7 +24,7 @@ import numpy as np
 
 try:
     import sounddevice as _sd
-except ImportError:  # pragma: no cover - optional extra guard
+except (ImportError, OSError):  # not installed, or no PortAudio library (#403)
     _sd = None
 
 SAMPLE_RATE = 16_000

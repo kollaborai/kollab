@@ -74,6 +74,20 @@ test("transcript chunks reassemble and a final is never replaced", () => {
   assert.equal(s.lines[0].text, "hello world");
 });
 
+test("a speech error shows on the status and leaves the reply's text", () => {
+  let s = reduceVoiceEvent(
+    initialRoomState,
+    ev("voice.transcript", { turn_id: "t", speaker: "assistant", revision: 1, final: true, chunk_index: 0, chunk_count: 1, display_text_chunk: "All good now." }),
+  );
+  s = reduceVoiceEvent(s, ev("voice.error", { code: "tts_failed", message: "Speech failed.", retryable: true }));
+  assert.equal(s.error, "Speech failed.");
+  assert.equal(s.retryable, true);
+  assert.deepEqual(
+    s.lines.map((l) => [l.speaker, l.text, l.final]),
+    [["assistant", "All good now.", true]],
+  );
+});
+
 test("a model out of memory shows Low On Resources with the reason", () => {
   const s = reduceVoiceEvent(
     initialRoomState,
