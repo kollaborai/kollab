@@ -100,9 +100,13 @@ export type PhoneIdentity = {
   room: string;
   host: string;
   expires: number;
-  seed: string;
+  /** The phone's Ed25519 public key; its private keys are sealed in IndexedDB. */
+  key?: string;
+  /** Only where the browser cannot keep sealed WebCrypto keys. */
+  seed?: string;
   approved: boolean;
 };
+type PhoneKeys = { sign: CryptoKey; box: CryptoKey };
 type Pending = {
   method: string;
   resolve: (value: Json) => void;
@@ -154,11 +158,140 @@ function storedIdentity(raw: string): PhoneIdentity | null {
     const value = JSON.parse(raw);
     if (
       value && ID.test(value.id) && KEY.test(value.room) &&
-      KEY.test(value.host) && KEY.test(value.seed) &&
+      KEY.test(value.host) && (KEY.test(value.key) || KEY.test(value.seed)) &&
       Number.isSafeInteger(value.expires) && typeof value.approved === "boolean"
     ) return value;
   } catch { /* Invalid storage cannot replace an approved saved link. */ }
   return null;
+}
+
+// PKCS #8 headers (RFC 8410) for a 32-byte Ed25519 seed and a 32-byte X25519 key.
+const ED25519_PKCS8 = "302e020100300506032b657004220420";
+const X25519_PKCS8 = "302e020100300506032b656e04220420";
+const KEYS = "kollab-phonelink-keys";
+
+function keyDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open(KEYS, 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("keys");
+    open.onsuccess = () => resolve(open.result);
+    open.onerror = () => reject(open.error);
+  });
+}
+async function keyStore<T>(
+  mode: IDBTransactionMode,
+  run: (store: IDBObjectStore) => IDBRequest<T>,
+): Promise<T> {
+  const db = await keyDatabase();
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const transaction = db.transaction("keys", mode);
+      const request = run(transaction.objectStore("keys"));
+      transaction.oncomplete = () => resolve(request.result);
+      transaction.onerror = transaction.onabort = () =>
+        reject(transaction.error ?? request.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/** A seed's Ed25519 key and its X25519 twin as non-extractable WebCrypto keys:
+ * the same keys on the wire, which script on this page can use but never copy out. */
+export async function importSeed(
+  seed: Uint8Array,
+): Promise<PhoneKeys & { key: string }> {
+  const pair = sodium.crypto_sign_seed_keypair(seed);
+  const curve = sodium.crypto_sign_ed25519_sk_to_curve25519(pair.privateKey);
+  const signDer = join(sodium.from_hex(ED25519_PKCS8), seed);
+  const boxDer = join(sodium.from_hex(X25519_PKCS8), curve);
+  try {
+    return {
+      key: hex(pair.publicKey),
+      sign: await crypto.subtle.importKey("pkcs8", signDer, { name: "Ed25519" }, false, ["sign"]),
+      box: await crypto.subtle.importKey("pkcs8", boxDer, { name: "X25519" }, false, ["deriveBits"]),
+    };
+  } finally {
+    for (const secret of [pair.privateKey, curve, signDer, boxDer]) sodium.memzero(secret);
+  }
+}
+
+/** HSalsa20 of a 32-byte key and a zero input: crypto_box_beforenm's last step. */
+function hsalsa20(key: Uint8Array): Uint8Array {
+  const view = new DataView(key.buffer, key.byteOffset, 32);
+  const x = new Uint32Array(16); // x[6..9] stay 0: the zero input
+  [x[0], x[5], x[10], x[15]] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574]; // "expand 32-byte k"
+  for (let i = 0; i < 4; i++) {
+    x[1 + i] = view.getUint32(i * 4, true);
+    x[11 + i] = view.getUint32(16 + i * 4, true);
+  }
+  const rotl = (value: number, shift: number) => (value << shift) | (value >>> (32 - shift));
+  const quarter = (a: number, b: number, c: number, d: number) => {
+    x[b] ^= rotl(x[a] + x[d], 7);
+    x[c] ^= rotl(x[b] + x[a], 9);
+    x[d] ^= rotl(x[c] + x[b], 13);
+    x[a] ^= rotl(x[d] + x[c], 18);
+  };
+  for (let round = 0; round < 20; round += 2) {
+    quarter(0, 4, 8, 12); quarter(5, 9, 13, 1); quarter(10, 14, 2, 6); quarter(15, 3, 7, 11);
+    quarter(0, 1, 2, 3); quarter(5, 6, 7, 4); quarter(10, 11, 8, 9); quarter(15, 12, 13, 14);
+  }
+  const out = new Uint8Array(32);
+  const write = new DataView(out.buffer);
+  [0, 5, 10, 15, 6, 7, 8, 9].forEach((word, i) => write.setUint32(i * 4, x[word], true));
+  x.fill(0);
+  return out;
+}
+
+/** crypto_box_beforenm with the phone's WebCrypto X25519 key (the standard
+ * libsodium-wrappers build does not export crypto_core_hsalsa20). */
+export async function hostBoxKey(box: CryptoKey, hostCurve: Uint8Array): Promise<Uint8Array> {
+  const host = await crypto.subtle.importKey("raw", new Uint8Array(hostCurve), { name: "X25519" }, false, []);
+  const shared = new Uint8Array(
+    await crypto.subtle.deriveBits({ name: "X25519", public: host }, box, 256),
+  );
+  try {
+    return hsalsa20(shared);
+  } finally {
+    sodium.memzero(shared);
+  }
+}
+
+/** A seed becomes sealed keys in IndexedDB. A browser that cannot keep them
+ * (no WebCrypto Ed25519 and X25519, or no IndexedDB) keeps the seed, as before. */
+async function sealed(identity: PhoneIdentity): Promise<PhoneIdentity> {
+  if (!identity.seed) return identity;
+  const seed = sodium.from_hex(identity.seed);
+  try {
+    const { key, sign, box } = await importSeed(seed);
+    await keyStore("readwrite", (store) => store.put({ sign, box }, identity.id));
+    return {
+      id: identity.id,
+      room: identity.room,
+      host: identity.host,
+      expires: identity.expires,
+      key,
+      approved: identity.approved,
+    };
+  } catch {
+    return identity;
+  } finally {
+    sodium.memzero(seed);
+  }
+}
+
+/** Drops the sealed keys of links this phone replaced. */
+function pruneKeys(keep: string): Promise<unknown> {
+  return keyStore("readwrite", (store) => {
+    const request = store.openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      if (cursor.key !== keep) cursor.delete();
+      cursor.continue();
+    };
+    return request;
+  }).catch(() => undefined);
 }
 
 export async function phoneIdentity(): Promise<PhoneIdentity> {
@@ -192,12 +325,13 @@ export async function phoneIdentity(): Promise<PhoneIdentity> {
         "This QR code has expired or is invalid. Create a new one on your computer.",
       );
     }
+    const scanned = await sealed(identity);
     try {
-      sessionStorage.setItem(PENDING, JSON.stringify(identity));
+      sessionStorage.setItem(PENDING, JSON.stringify(scanned));
     } catch {
       /* This window still owns the invitation. */
     }
-    return identity;
+    return scanned;
   }
   let readable = false;
   let pending: string | null = null;
@@ -231,7 +365,13 @@ export async function phoneIdentity(): Promise<PhoneIdentity> {
     throw new Error(
       "This browser's saved link is invalid. Scan a new QR code.",
     );
-  return identity;
+  // A link an older loader saved with its seed moves into sealed keys here.
+  const ready = await sealed(identity);
+  if (ready !== identity)
+    try {
+      localStorage.setItem(STORAGE, JSON.stringify(ready));
+    } catch { /* The seed stays until a later launch can save the sealed link. */ }
+  return ready;
 }
 
 /** Browser implementation of the existing session-bound NaCl relay envelopes. */
@@ -239,8 +379,9 @@ export class PhoneTransport {
   private socket: WebSocket | null = null;
   private session = "";
   private hostSession = "";
-  private keypair!: { publicKey: Uint8Array; privateKey: Uint8Array };
-  private curvePrivate!: Uint8Array;
+  private key = "";
+  private signer: CryptoKey | Uint8Array | null = null;
+  private hostBox: Uint8Array | null = null;
   private roomHash = "";
   private pending = new Map<string, Pending>();
   private seen = new Map<string, number>();
@@ -276,7 +417,7 @@ export class PhoneTransport {
   }
 
   get pairingCode() {
-    return pairingCode(hex(this.keypair.publicKey));
+    return pairingCode(this.key);
   }
 
   /** Queue fixed event codes and allowlisted transport metadata; never raw errors. */
@@ -387,15 +528,42 @@ export class PhoneTransport {
     return this.opening;
   }
 
+  /** This link's keys: sealed WebCrypto keys, or the seed where the browser has none. */
+  private async loadKeys() {
+    const host = new Uint8Array(
+      sodium.crypto_sign_ed25519_pk_to_curve25519(sodium.from_hex(this.identity.host)),
+    );
+    if (this.identity.seed) {
+      const pair = sodium.crypto_sign_seed_keypair(sodium.from_hex(this.identity.seed));
+      const curve = sodium.crypto_sign_ed25519_sk_to_curve25519(pair.privateKey);
+      this.key = hex(pair.publicKey);
+      this.signer = pair.privateKey;
+      this.hostBox = sodium.crypto_box_beforenm(host, curve);
+      sodium.memzero(curve);
+      return;
+    }
+    const keys = await keyStore<PhoneKeys | undefined>("readonly", (store) =>
+      store.get(this.identity.id),
+    ).catch(() => undefined);
+    if (!keys || !this.identity.key)
+      throw new Error("This browser's saved link is invalid. Scan a new QR code.");
+    this.key = this.identity.key;
+    this.signer = keys.sign;
+    this.hostBox = await hostBoxKey(keys.box, host);
+  }
+
+  private async sign(message: Uint8Array) {
+    const signer = this.signer;
+    if (!signer) throw lost();
+    return signer instanceof Uint8Array
+      ? sodium.crypto_sign_detached(message, signer)
+      : new Uint8Array(await crypto.subtle.sign("Ed25519", signer, new Uint8Array(message)));
+  }
+
   private async open() {
     await sodium.ready;
+    if (!this.hostBox) await this.loadKeys();
     if (this.closed) throw lost();
-    this.keypair = sodium.crypto_sign_seed_keypair(
-      sodium.from_hex(this.identity.seed),
-    );
-    this.curvePrivate = sodium.crypto_sign_ed25519_sk_to_curve25519(
-      this.keypair.privateKey,
-    );
     this.roomHash = hex(await sha256(sodium.from_hex(this.identity.room)));
     this.session = randomId();
     this.hostSession = "";
@@ -433,7 +601,7 @@ export class PhoneTransport {
               !KEY.test(frame.nonce)
             )
               throw lost();
-            const key = hex(this.keypair.publicKey);
+            const key = this.key;
             const message = [
               PROTOCOL,
               location.origin,
@@ -442,24 +610,23 @@ export class PhoneTransport {
               this.identity.room,
               this.session,
             ].join("\n");
-            socket.send(
-              JSON.stringify({
-                type: "register",
-                key,
-                room: this.identity.room,
-                session: this.session,
-                signature: hex(
-                  sodium.crypto_sign_detached(
-                    sodium.from_string(message),
-                    this.keypair.privateKey,
-                  ),
+            void this.sign(sodium.from_string(message))
+              .then((signature) =>
+                socket.send(
+                  JSON.stringify({
+                    type: "register",
+                    key,
+                    room: this.identity.room,
+                    session: this.session,
+                    signature: hex(signature),
+                  }),
                 ),
-              }),
-            );
+              )
+              .catch(() => socket.close());
           } else if (frame.type === "registered") {
             if (
               frame.protocol !== PROTOCOL ||
-              frame.key !== hex(this.keypair.publicKey) ||
+              frame.key !== this.key ||
               frame.session !== this.session
             )
               throw lost();
@@ -615,6 +782,7 @@ export class PhoneTransport {
     } catch {
       saved = false;
     }
+    if (saved) void pruneKeys(this.identity.id);
     this.onState(saved ? "connected" : "temporary", this.pairingCode);
   }
 
@@ -628,20 +796,17 @@ export class PhoneTransport {
     )
       throw lost();
     const encrypted = unbase64(frame.ciphertext);
-    const plaintext = sodium.crypto_box_open_easy(
+    const plaintext = sodium.crypto_box_open_easy_afternm(
       encrypted.slice(24),
       encrypted.slice(0, 24),
-      sodium.crypto_sign_ed25519_pk_to_curve25519(
-        sodium.from_hex(this.identity.host),
-      ),
-      this.curvePrivate,
+      this.hostBox as Uint8Array,
     );
     const body = JSON.parse(sodium.to_string(plaintext));
     const now = Math.floor(Date.now() / 1000);
     if (
       body.v !== 1 ||
       body.from !== this.identity.host ||
-      body.to !== hex(this.keypair.publicKey) ||
+      body.to !== this.key ||
       body.from_session !== this.hostSession ||
       body.to_session !== this.session ||
       body.room !== this.roomHash ||
@@ -677,7 +842,7 @@ export class PhoneTransport {
     const now = Math.floor(Date.now() / 1000);
     const body = {
       v: 1,
-      from: hex(this.keypair.publicKey),
+      from: this.key,
       to: this.identity.host,
       from_session: this.session,
       to_session: this.hostSession,
@@ -692,13 +857,10 @@ export class PhoneTransport {
     const ciphertext = base64(
       join(
         nonce,
-        sodium.crypto_box_easy(
+        sodium.crypto_box_easy_afternm(
           sodium.from_string(JSON.stringify(body)),
           nonce,
-          sodium.crypto_sign_ed25519_pk_to_curve25519(
-            sodium.from_hex(this.identity.host),
-          ),
-          this.curvePrivate,
+          this.hostBox as Uint8Array,
         ),
       ),
     );
@@ -947,10 +1109,10 @@ export class PhoneTransport {
     if (this.retry) clearTimeout(this.retry);
     this.socket?.close();
     for (const key of [
-      this.curvePrivate,
+      this.hostBox,
       this.incoming,
       this.outgoing,
-      this.keypair?.privateKey,
+      this.signer instanceof Uint8Array ? this.signer : null,
     ])
       if (key) sodium.memzero(key);
   }

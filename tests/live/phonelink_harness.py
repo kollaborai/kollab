@@ -187,6 +187,7 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
         manager.records[identifier] = {
             "origin": ORIGIN, "name": "Scratch Phone", "key": "", "host": host.public_key, "seen": 0,
             "created": int(time.time()), "expires": int(time.time()) + 300,
+            "network": "scratch",  # offer() writes it; revoke and expiry read it
         }
         manager.clients[identifier] = host
         import aiohttp

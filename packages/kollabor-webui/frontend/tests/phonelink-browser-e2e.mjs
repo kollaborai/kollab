@@ -91,6 +91,39 @@ try {
       }
     };
   }, relayPort);
+  // PHONE_E2E_SEED_LINK=1 pairs the way older loaders did (the raw seed in localStorage),
+  // then relaunches with sealed keys allowed: the link moves into WebCrypto keys.
+  const seedLink = process.env.PHONE_E2E_SEED_LINK === "1";
+  let sealKeys = !seedLink;
+  await context.exposeFunction("e2eSealKeys", () => sealKeys);
+  await context.addInitScript(() => {
+    const importKey = crypto.subtle.importKey.bind(crypto.subtle);
+    crypto.subtle.importKey = async (format, ...rest) => {
+      if (format === "pkcs8" && !(await window.e2eSealKeys())) throw new Error("older loader");
+      return importKey(format, ...rest);
+    };
+  });
+  const link = () =>
+    page.evaluate(async () => {
+      const identity = JSON.parse(localStorage.getItem("kollab.phonelink.identity.v1") ?? "null");
+      const keys = await new Promise((resolve, reject) => {
+        const open = indexedDB.open("kollab-phonelink-keys", 1);
+        open.onupgradeneeded = () => open.result.createObjectStore("keys");
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const store = open.result.transaction("keys").objectStore("keys");
+          const ids = store.getAllKeys();
+          const record = store.get(identity?.id ?? "-");
+          record.onerror = () => reject(record.error);
+          record.onsuccess = () => {
+            const value = record.result;
+            resolve({ ids: ids.result.length, sign: value?.sign.extractable ?? null, box: value?.box.extractable ?? null });
+            open.result.close();
+          };
+        };
+      });
+      return { seed: typeof identity?.seed === "string", key: identity?.key ?? null, ...keys };
+    });
   const shot = async (name) => shots && (fs.mkdirSync(shots, { recursive: true }), page.screenshot({ path: path.join(shots, `${name}.png`) }));
 
   console.error("page ready");
@@ -113,6 +146,16 @@ try {
     console.error("HOST STATUS:", JSON.stringify(await control("GET", "/status")));
     throw error;
   });
+  const paired = await link();
+  console.error("paired link:", JSON.stringify(paired));
+  if (seedLink) {
+    assert.equal(paired.seed, true, "an older loader's link keeps its raw seed");
+    assert.equal(paired.sign, null, "and has no sealed keys");
+  } else {
+    assert.equal(paired.seed, false, "a new link stores no seed");
+    assert.match(paired.key ?? "", /^[0-9a-f]{64}$/, "only its public key");
+    assert.deepEqual([paired.sign, paired.box, paired.ids], [false, false, 1], "one link, non-extractable keys");
+  }
   const historyViewport = page.locator('[data-slot="aui_thread-viewport"]');
   if (!(await historyViewport.count())) {
     await page.getByText("Synthetic PhoneLink History", { exact: true }).first().click();
@@ -234,6 +277,7 @@ try {
   assert.ok(seen > 0, "computer records when the phone was last seen");
 
   // Next launch: no fragment, nothing new from the relay but the loader.
+  sealKeys = true;
   fetched.length = 0;
   await page.goto(`${origin}/relay/v1/phone/`);
   await page.locator("#root > *").first().waitFor({ timeout: Number(process.env.PHONE_E2E_TIMEOUT_MS ?? 60000) }).catch(async (error) => {
@@ -245,6 +289,12 @@ try {
     throw error;
   });
   assert.ok(fetched.every((p) => !p.endsWith(".gz")), "relaunch uses the verified copy on the phone");
+  const relaunched = await link();
+  console.error("relaunched link:", JSON.stringify(relaunched));
+  assert.equal(relaunched.seed, false, "the relaunched link stores no seed");
+  assert.match(relaunched.key ?? "", /^[0-9a-f]{64}$/);
+  if (!seedLink) assert.equal(relaunched.key, paired.key, "the same link");
+  assert.deepEqual([relaunched.sign, relaunched.box, relaunched.ids], [false, false, 1], "sealed, non-extractable");
 
   await page.getByText("synthetic-history-170", { exact: false }).first().waitFor({
     state: "attached",
