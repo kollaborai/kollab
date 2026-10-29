@@ -433,6 +433,34 @@ def _git_subcommand(argv: Sequence[str]) -> int | None:
     return at
 
 
+def _recursive_or_forced(tokens: Sequence[str]) -> bool:
+    """rm-style -r or -f in any spelling (tokens are lowercased): -r, -f, -rf, -rv, and --recursive or --force
+    or any abbreviation of them, which git and GNU rm accept (--f, --rec)."""
+    for token in tokens:
+        if token.startswith("--"):
+            if len(token) > 2 and ("--recursive".startswith(token) or "--force".startswith(token)):
+                return True
+        elif token.startswith("-") and ("r" in token[1:] or "f" in token[1:]):
+            return True
+    return False
+
+
+def _gh_command(tokens: Sequence[str]) -> tuple[str, ...]:
+    """gh's first two command words after its options: ("pr", "merge") for `gh -R owner/repo pr merge 1`."""
+    words: list[str] = []
+    skip = False
+    for token in tokens[1:]:
+        if skip:
+            skip = False
+        elif token in {"-r", "--repo"}:
+            skip = True  # the repo value follows
+        elif not token.startswith("-"):
+            words.append(token)
+            if len(words) == 2:
+                break
+    return tuple(words)
+
+
 def _is_hard_blocked(argv: Sequence[str]) -> bool:
     tokens = tuple(token.lower() for token in argv)
     executable = Path(tokens[0]).name
@@ -440,14 +468,10 @@ def _is_hard_blocked(argv: Sequence[str]) -> bool:
         return True
     if executable in _INTERPRETERS_AND_WRAPPERS or _VERSIONED_INTERPRETER.fullmatch(executable):
         return True
-    if any(token in {"--restart", "--update", "--reset-config"} for token in tokens):
+    if any(token.split("=", 1)[0] in {"--restart", "--update", "--reset-config"} for token in tokens):
         return True
-    if executable == "rm":
-        for token in tokens[1:]:
-            if token in {"--recursive", "--force"} or (
-                token.startswith("-") and not token.startswith("--") and ("r" in token[1:] or "f" in token[1:])
-            ):
-                return True
+    if executable == "rm" and _recursive_or_forced(tokens[1:]):
+        return True
     if executable == "find" and any(token in _FIND_RUNS_OR_DELETES for token in tokens[1:]):
         return True
     if executable == "git" and len(argv) > 1:
@@ -469,15 +493,23 @@ def _is_hard_blocked(argv: Sequence[str]) -> bool:
             return True  # -O<pager>: opens the matches in that program
         if subcommand == "branch" and any(token in {"-d", "--delete"} for token in rest):
             return True
-    if executable == "gh" and tokens[1:3] == ("pr", "merge"):
+        if subcommand == "rm":
+            # --cached only touches the index; after a separator it is a pathspec, not the option
+            cut = next((at for at, token in enumerate(rest) if token in {"--", "--end-of-options"}), len(rest))
+            options = rest[:cut]
+            if "--cached" not in options and _recursive_or_forced(rest):
+                return True
+    if executable == "gh" and _gh_command(tokens) == ("pr", "merge"):
         return True
     if executable == "brew" and len(tokens) > 2 and tokens[1] == "services":
         if tokens[2] in {"install", "uninstall", "start", "stop", "restart", "cleanup"}:
             return True
-    if executable == "kollab" and "--hub" in tokens:
-        hub_index = tokens.index("--hub")
-        if tokens[hub_index + 1 : hub_index + 2] and tokens[hub_index + 1] in {"stop", "kill"}:
-            return True
+    if executable == "kollab":
+        for at, token in enumerate(tokens):
+            name, _, value = token.partition("=")
+            following = tokens[at + 1] if at + 1 < len(tokens) else ""
+            if name == "--hub" and (value or following) in {"stop", "kill", "halt"}:
+                return True
     return False
 
 
