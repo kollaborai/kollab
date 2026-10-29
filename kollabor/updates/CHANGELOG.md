@@ -83,6 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Settings → Voice: the path under **Save for This Device** names the file each
+  changed row is saved to, so Quick Model, Personality, Reasoning and
+  Instructions no longer show `preferences.json` (#412).
 - Voice: a voice model that runs out of memory now shows Low On Resources with the reason, instead of a general error, refs #295
 - Goals: `/resume` keeps a conversation's goal. The resumed chat used to get a new conversation id, so `/goal` answered "no active goal" and the goal was never driven or paused again, refs #400
 - Goals: a goal whose last turn was cut off by an agent that stopped mid-turn is paused with the reason, instead of staying active with nothing driving it; `/goal resume` continues it, refs #397

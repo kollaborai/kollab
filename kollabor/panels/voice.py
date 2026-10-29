@@ -20,6 +20,9 @@ from kollabor_voice.speech_settings import (
     load_speech_preferences as load_preferences,
 )
 
+from kollabor_ai.prompt_overrides import get_overrides_dir
+from kollabor_config.config_utils import get_global_config_path
+
 from .base import (
     PanelError,
     display_path,
@@ -203,6 +206,7 @@ def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
                     "quick_model",
                     "dropdown",
                     "Quick Model",
+                    save_path=display_path(get_global_config_path()),
                     value=quick_model,
                     options=quick_options,
                     option_labels=quick_labels,
@@ -221,6 +225,9 @@ def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
                     "voice_prompt",
                     "textarea",
                     "Instructions",
+                    save_path=display_path(
+                        get_overrides_dir() / "voice" / "default.md"
+                    ),
                     value=prompt["text"],
                     help=(
                         "Added to the instructions of every spoken reply. Typed "
@@ -231,6 +238,7 @@ def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
                     "voice_personality",
                     "dropdown",
                     "Personality",
+                    save_path=display_path(get_global_config_path()),
                     value=prompt["personality"],
                     options=list(PERSONALITY_LABELS),
                     option_labels=PERSONALITY_LABELS,
@@ -243,6 +251,7 @@ def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
                     "voice_reasoning",
                     "dropdown",
                     "Reasoning",
+                    save_path=display_path(get_global_config_path()),
                     value=prompt_settings.reasoning(),
                     options=list(REASONING_LABELS),
                     option_labels=REASONING_LABELS,

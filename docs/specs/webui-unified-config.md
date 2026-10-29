@@ -169,6 +169,9 @@ the text the terminal's `/config` dropdown and the web select show for each
 option. An option with no label shows as itself, labels never reach `save`
 (it validates the option), and values that are user data (model names, paths)
 carry none.
+A field that saves outside the panel's save target carries `save_path` (the
+file, as `~/...`); the web footer under the save button then lists the files
+of the changed fields instead of the panel's one file (#412).
 `editable` is false for `label` rows, for the loadout rows that
 `_with_loadout_rows` injects, and for managed paths.
 
