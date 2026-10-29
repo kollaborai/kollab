@@ -910,7 +910,9 @@ class PhoneLink:
                 raise RelayError("phone session is unavailable")
             diagnostic = normalize_phone_diagnostic(payload)
             if diagnostic is None:
-                raise RelayError("invalid phone diagnostic")
+                # Never valid, so answer rather than fail: the phone drops it
+                # instead of resending it ahead of every later report.
+                return {"accepted": False}
             self._event(
                 "phone_diagnostic",
                 identifier=identifier,

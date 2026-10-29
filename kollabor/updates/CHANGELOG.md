@@ -37,10 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
-- PhoneLink: a diagnostic the computer refuses is dropped instead of retried
-  forever, so the phone's later connection reports still reach the engine log;
-  revoke and an unknown-phone revoke are tested with their actor and cause
-  (#366).
+- PhoneLink: a phone diagnostic the computer can never accept is answered
+  instead of failed, so the phone drops it rather than resending it ahead of
+  every later connection report; revoke and an unknown-phone revoke are tested
+  with their actor and cause (#366).
 - Save paths under the Settings save buttons no longer break mid-word: the
   home folder reads as `~` and a long path shows its last folders, with the
   full path on hover (#371).

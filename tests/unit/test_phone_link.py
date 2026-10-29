@@ -632,12 +632,15 @@ async def test_revoke_and_denied_events_carry_their_actor_and_cause(setup_link):
     await manager.revoke(offer["id"], actor=actor)
     history = await manager.event_history()
 
-    denied = next(event for event in history["events"] if event["event"] == "denied")
+    events = history["events"]
+    denied = next((event for event in events if event["event"] == "denied"), None)
+    assert denied is not None, events
     assert denied["cause"] == "phone_not_saved"
-    assert denied["actor"]
-    revoked = next(event for event in history["events"] if event["event"] == "revoked")
+    assert denied["actor"]["client_kind"] == "webui"
+    revoked = next((event for event in events if event["event"] == "revoked"), None)
+    assert revoked is not None, events
     assert revoked["cause"] == "user_action"
-    assert revoked["actor"]
+    assert revoked["actor"]["method"] == "POST"
 
 
 @pytest.mark.asyncio
@@ -651,12 +654,11 @@ async def test_phone_diagnostics_are_allowlisted_and_invalid_payload_is_not_reco
         "accepted": True
     }
     secret = "https://relay.example/private?token=must-not-be-recorded"
-    with pytest.raises(RelayError, match="peer application request failed"):
-        await phone.request(
-            host.public_key,
-            "phone_diagnostic",
-            {"event": "offline", "url": secret},
-        )
+    assert await phone.request(
+        host.public_key,
+        "phone_diagnostic",
+        {"event": "offline", "url": secret},
+    ) == {"accepted": False}
 
     history = await manager.event_history()
     serialized = json.dumps(history)

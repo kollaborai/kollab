@@ -131,8 +131,6 @@ const lost = () =>
   new Error(
     "Connection to your computer was lost. An action already sent may still finish there.",
   );
-/** The computer answered and said no: retrying the same request cannot help. */
-class AppRequestRefused extends Error {}
 
 /** 12 characters in groups of four; the computer shows the same code. */
 export function pairingCode(key: string) {
@@ -349,15 +347,12 @@ export class PhoneTransport {
           const payload = this.diagnosticQueue[0]!;
           try {
             await this.request("phone_diagnostic", payload, undefined, 5000);
-          } catch (error) {
-            if (error instanceof AppRequestRefused) {
-              this.diagnosticQueue.shift();  // refused: drop it, send the rest
-              continue;
-            }
+          } catch {
             failed = true;
             break;
           }
-          this.diagnosticQueue.shift();
+          // A full queue may have dropped the head while it was sent.
+          if (this.diagnosticQueue[0] === payload) this.diagnosticQueue.shift();
         }
       } finally {
         this.flushingDiagnostics = null;
@@ -669,7 +664,7 @@ export class PhoneTransport {
     if (!pending || payload.method !== pending.method) return;
     if (payload.error)
       pending.reject(
-        new AppRequestRefused(
+        new Error(
           "Your computer refused this app request. Check PhoneLink there.",
         ),
       );
