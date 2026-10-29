@@ -597,3 +597,64 @@ async def test_invalid_handler_result_has_fixed_error(pair, result):
     right.set_request_handler(handle)
     with pytest.raises(RelayError, match="peer application request failed"):
         await left.request(right.public_key, "message", {})
+
+
+@pytest.mark.asyncio
+async def test_phone_diagnostic_application_method_is_allowlisted_and_bounded(pair):
+    left, right, _ = pair
+    received = []
+
+    async def handle(peer, method, payload):
+        received.append((peer, method, payload))
+        return {"accepted": True}
+
+    right.set_request_handler(handle)
+    assert await left.request(
+        right.public_key, "phone_diagnostic", {"event": "visibility_visible"}
+    ) == {"accepted": True}
+    assert received == [
+        (left.public_key, "phone_diagnostic", {"event": "visibility_visible"})
+    ]
+
+    with pytest.raises(RelayError):
+        await left.request(
+            right.public_key,
+            "phone_diagnostic",
+            {"event": "offline", "padding": "x" * 2048},
+        )
+
+
+def test_connection_listener_dispatch_removal_and_close_code_capture(tmp_path, caplog):
+    from types import SimpleNamespace
+
+    from plugins.hub.relay_client import RelayConnectionEvent
+
+    client = RelayClient(tmp_path, state_dir=tmp_path / "relay-state")
+    received = []
+    remove = client.add_connection_listener(received.append)
+    event = RelayConnectionEvent("socket_opened")
+    client._notify_connection_listeners(event)
+    assert received == [event]
+
+    remove()
+    remove()
+    client._notify_connection_listeners(RelayConnectionEvent("reconnecting", retry_count=1))
+    assert received == [event]
+
+    client.add_connection_listener(received.append)
+    client._ws = SimpleNamespace(close_code=1001)
+    client._clear_connection()
+    assert received[-1] == RelayConnectionEvent(
+        "socket_closed", close_code=1001, close_reason="going_away"
+    )
+
+    client._ws = SimpleNamespace(close_code=5000)
+    client._clear_connection()
+    assert received[-1] == RelayConnectionEvent(
+        "socket_closed", close_code=None, close_reason="unknown"
+    )
+
+    client.add_connection_listener(lambda _: (_ for _ in ()).throw(RuntimeError("private-url")))
+    with caplog.at_level("WARNING", logger="plugins.hub.relay_client"):
+        client._notify_connection_listeners(RelayConnectionEvent("socket_opened"))
+    assert "private-url" not in caplog.text
