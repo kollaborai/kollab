@@ -10,6 +10,17 @@ import { COAT_KNOBS, HAIR_COLORS, HAT_STYLES, type Activity, type Aura, type Fur
 // Dev only (/coat-tuner.html; the build only takes index.html): tune hair and fur live on the real engine. The sliders write HAIR_COATS and FUR_COATS, which the engine reads every frame.
 type Mock = { title: string; cut: GemCut | null; hair?: HairStyle; fur?: FurStyle; hat?: HatStyle; auras?: Aura[]; sparkles?: Sparkle };
 const MOCKS: Mock[] = [
+  // The curly styles first, then every other hair style the gems can be born with.
+  { title: "Crop", cut: "person", hair: "crop" },
+  { title: "Bob", cut: "person", hair: "bob" },
+  { title: "Mane", cut: "person", hair: "mane" },
+  { title: "Buzz", cut: "person", hair: "buzz" },
+  { title: "Fringe", cut: "person", hair: "fringe" },
+  { title: "Page", cut: "person", hair: "page" },
+  { title: "Plume", cut: "person", hair: "plume" },
+  { title: "Crest", cut: "person", hair: "crest" },
+  { title: "Quiff", cut: "person", hair: "quiff" },
+  { title: "Halo", cut: "person", hair: "halo" },
   { title: "Short", cut: "person", hair: "short" },
   { title: "Long", cut: "person", hair: "long" },
   { title: "Spiky", cut: "person", hair: "spiky" },

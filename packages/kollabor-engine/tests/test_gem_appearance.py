@@ -241,45 +241,45 @@ class TestBirths:
         # client's fallback draw must never diverge.
         expected = {
             "lapis": {
-                "face": "diamond",
+                "face": "drowsy",
                 "hat": "wizard",
                 "hair": "long",
                 "hairColor": [170, 170, 175],
             },
             "ruby": {
-                "face": "pixel",
-                "hat": "cap",
-                "fur": "short",
+                "face": "bean",
+                "hat": "bucket",
+                "fur": "long",
                 "furColor": [150, 60, 35],
             },
             "opal": {
-                "face": "triclops",
-                "hat": "cap",
-                "hair": "long",
+                "face": "drowsy",
+                "hat": "bucket",
+                "hair": "bob",
                 "hairColor": [170, 170, 175],
             },
             "peridot": {
-                "face": "kawaii",
+                "face": "drowsy",
                 "hat": "wizard",
-                "fur": "shaggy",
+                "fur": "velvet",
                 "furColor": [235, 232, 225],
             },
             "sapphire": {
-                "face": "pill",
+                "face": "smile",
                 "hat": "crown",
-                "fur": "short",
+                "fur": "velvet",
                 "furColor": "gem",
             },
             "garnet": {
-                "face": "diamond",
+                "face": "kawaii",
                 "hat": "cap",
                 "fur": "short",
                 "furColor": [95, 60, 35],
             },
             "bismuth": {
-                "face": "pill",
-                "hat": "wizard",
-                "fur": "short",
+                "face": "bean",
+                "hat": "sailor",
+                "fur": "velvet",
                 "furColor": "gem",
             },
         }
@@ -366,7 +366,11 @@ class TestBirths:
                 if group not in ("Halloween", "Christmas")
             }
 
-        assert everyday("EYE_STYLES") == set(gem_appearance.BIRTH_FACES)
+        appearance_ts = GEM_FACE_TS.with_name("gem-appearance.tsx").read_text(encoding="utf-8")
+        faces = re.search(r"export const EVERYDAY_FACES: EyeStyle\[\] = \[(.*?)\]", appearance_ts)
+        assert faces is not None
+        assert re.findall(r'"([a-z0-9_-]+)"', faces.group(1)) == list(gem_appearance.BIRTH_FACES)
+        assert set(gem_appearance.BIRTH_FACES) <= {id_ for id_, _ in entry.findall(block("EYE_STYLES"))}
         assert everyday("HAT_STYLES") == set(gem_appearance.BIRTH_HATS)
         assert re.findall(r'id: "([a-z]+)"', block("HAIR_STYLES")) == list(
             gem_appearance.BIRTH_HAIRS

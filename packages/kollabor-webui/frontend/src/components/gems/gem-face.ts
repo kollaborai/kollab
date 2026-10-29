@@ -23,7 +23,11 @@ export type EyeStyle =
   | "buttons"
   | "spider"
   | "coal"
-  | "sparkle";
+  | "sparkle"
+  | "gleam"
+  | "bean"
+  | "smile"
+  | "drowsy";
 
 export type HatStyle =
   | "none"
@@ -36,6 +40,16 @@ export type HatStyle =
   | "headphones"
   | "hardhat"
   | "beret"
+  | "sailor"
+  | "chef"
+  | "cowboy"
+  | "bucket"
+  | "boater"
+  | "graduate"
+  | "aviator"
+  | "flower"
+  | "halo"
+  | "propeller"
   | "witch"
   | "horns"
   | "pumpkin"
@@ -65,6 +79,10 @@ type Option<T> = { id: T; label: string; group: string };
 
 export const EYE_STYLES: Option<EyeStyle>[] = [
   { id: "pill", label: "Pill", group: "Classic" },
+  { id: "gleam", label: "Gleam", group: "Friendly" },
+  { id: "bean", label: "Bean", group: "Friendly" },
+  { id: "smile", label: "Smile", group: "Friendly" },
+  { id: "drowsy", label: "Drowsy", group: "Friendly" },
   { id: "dot", label: "Adventure", group: "Classic" },
   { id: "disney", label: "Storybook", group: "Classic" },
   { id: "kawaii", label: "Kawaii", group: "Classic" },
@@ -94,6 +112,16 @@ export const HAT_STYLES: Option<HatStyle>[] = [
   { id: "headphones", label: "Headphones", group: "Everyday" },
   { id: "hardhat", label: "Hard Hat", group: "Everyday" },
   { id: "beret", label: "Beret", group: "Everyday" },
+  { id: "sailor", label: "Sailor", group: "Everyday" },
+  { id: "chef", label: "Chef", group: "Everyday" },
+  { id: "cowboy", label: "Cowboy", group: "Everyday" },
+  { id: "bucket", label: "Bucket", group: "Everyday" },
+  { id: "boater", label: "Boater", group: "Everyday" },
+  { id: "graduate", label: "Graduate", group: "Everyday" },
+  { id: "aviator", label: "Aviator", group: "Everyday" },
+  { id: "flower", label: "Flower", group: "Everyday" },
+  { id: "halo", label: "Halo", group: "Everyday" },
+  { id: "propeller", label: "Propeller", group: "Everyday" },
   { id: "witch", label: "Witch", group: "Halloween" },
   { id: "horns", label: "Horns", group: "Halloween" },
   { id: "pumpkin", label: "Pumpkin", group: "Halloween" },
@@ -106,17 +134,31 @@ export const HAT_STYLES: Option<HatStyle>[] = [
  * Hair and fur grow from the gem in 3D (gem-fur.ts), apart from its hat, which
  * sits on top. A gem can wear both: fur all over, hair on its head.
  */
-export type HairStyle = "short" | "long" | "spiky" | "mohawk";
-export type FurStyle = "short" | "shaggy";
+export type HairStyle = "short" | "long" | "spiky" | "mohawk" | "buzz" | "crop" | "fringe" | "bob" | "page" | "mane" | "plume" | "crest" | "quiff" | "halo";
+export type FurStyle = "short" | "shaggy" | "velvet" | "plush" | "long" | "flowing";
 export const HAIR_STYLES: { id: HairStyle; label: string }[] = [
   { id: "short", label: "Short" },
   { id: "long", label: "Long" },
   { id: "spiky", label: "Spiky" },
   { id: "mohawk", label: "Mohawk" },
+  { id: "buzz", label: "Buzz" },
+  { id: "crop", label: "Tight Coils" },
+  { id: "fringe", label: "Fringe" },
+  { id: "bob", label: "Loose Curls" },
+  { id: "page", label: "Page" },
+  { id: "mane", label: "Soft Waves" },
+  { id: "plume", label: "Plume" },
+  { id: "crest", label: "Crest" },
+  { id: "quiff", label: "Quiff" },
+  { id: "halo", label: "Halo" },
 ];
 export const FUR_STYLES: { id: FurStyle; label: string }[] = [
   { id: "short", label: "Short" },
   { id: "shaggy", label: "Shaggy" },
+  { id: "velvet", label: "Velvet" },
+  { id: "plush", label: "Plush" },
+  { id: "long", label: "Long" },
+  { id: "flowing", label: "Flowing" },
 ];
 /** What a coat's look turns on (gem-fur.ts CoatStyle), set over its style's own; `hair` marks the knobs only hair has. */
 export type CoatKnob = "dark" | "tip" | "length" | "lie" | "sway" | "clump" | "fall" | "bangs" | "gloss" | "hairline" | "back" | "strip";
@@ -307,6 +349,10 @@ export function workPhase(activity: Activity, atDesk = false) {
 
 const EYE_GAP: Record<EyeStyle, number> = {
   pill: 0.14,
+  gleam: 0.17,
+  bean: 0.17,
+  smile: 0.18,
+  drowsy: 0.18,
   dot: 0.2,
   disney: 0.19,
   kawaii: 0.17,
@@ -484,6 +530,53 @@ function drawEye(f: FaceFrame, ex: number, ey: number, side: -1 | 0 | 1, k: numb
   }
   const { gaze, squint, wide, ink } = m;
   switch (style) {
+    case "gleam":
+    case "bean": {
+      // Compact, high-contrast eyes with a single soft glint.
+      const rx = s * (style === "gleam" ? 0.047 : 0.039) * wide;
+      const ry = s * (style === "gleam" ? 0.054 : 0.064) * Math.max(0.12, f.blink) * squint;
+      const x = ex + gaze.x * s * 0.012;
+      const y = ey + gaze.y * s * 0.01;
+      ctx.fillStyle = ink;
+      ctx.beginPath();
+      ctx.ellipse(x, y, rx, ry, 0, 0, TAU);
+      ctx.fill();
+      if (f.blink > 0.55) {
+        ctx.fillStyle = f.dark ? "rgba(20,24,40,0.8)" : "rgba(255,255,255,0.95)";
+        ctx.beginPath();
+        ctx.arc(x - rx * 0.3, y - ry * 0.32, rx * 0.25, 0, TAU);
+        ctx.fill();
+      }
+      return;
+    }
+    case "smile": {
+      // Upward arches read as relaxed closed smiles even in the sidebar.
+      ctx.strokeStyle = ink;
+      ctx.lineWidth = Math.max(1, s * 0.025);
+      ctx.beginPath();
+      ctx.arc(ex, ey + s * 0.02, s * 0.045, 1.12 * Math.PI, 1.88 * Math.PI);
+      ctx.stroke();
+      return;
+    }
+    case "drowsy": {
+      // A soft lid over a small rounded eye, with a glint when open.
+      const rx = s * 0.045;
+      const ry = s * 0.038 * Math.max(0.12, f.blink) * squint;
+      ctx.fillStyle = ink;
+      ctx.beginPath();
+      ctx.ellipse(ex + gaze.x * s * 0.01, ey + s * 0.01, rx, ry, 0, 0, TAU);
+      ctx.fill();
+      ctx.strokeStyle = ink;
+      ctx.lineWidth = Math.max(1, s * 0.018);
+      line(ctx, ex - rx * 1.1, ey - s * 0.014, ex + rx * 1.1, ey - s * 0.014);
+      if (f.blink > 0.55) {
+        ctx.fillStyle = f.dark ? "rgba(20,24,40,0.8)" : "rgba(255,255,255,0.95)";
+        ctx.beginPath();
+        ctx.arc(ex - rx * 0.25, ey, rx * 0.2, 0, TAU);
+        ctx.fill();
+      }
+      return;
+    }
     case "dot": {
       const r = s * 0.033 * wide;
       const x = ex + gaze.x * s * 0.02;

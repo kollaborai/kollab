@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { cn } from "@/lib/utils";
-import { useGemLook, useLookKey } from "./gem-appearance";
+import { useGemAppearance, useGemLook, useLookKey } from "./gem-appearance";
 import { GEM_PAD, gemEngine, type GemProps } from "./gem-engine";
+import { captureHeadshot, headshotKey } from "./gem-headshot";
 import { seasonFor, type Aura, type EyeStyle, type FurStyle, type HairStyle, type HatStyle, type Season, type Sparkle } from "./gem-face";
 import { gemSpec, isPoolGem, type GemCut } from "./gem-specs";
 
@@ -61,10 +62,30 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
   const propsRef = useRef(props);
   propsRef.current = props;
 
+  // A saved look in a real list (not a studio preview, not a tile that sets its own look) keeps a
+  // headshot, so a browser that cannot draw gems shows this gem instead of a blob. It is taken
+  // while the gem is idle or offline (each keeps its own portrait); work props are never baked in.
+  const appearanceState = useGemAppearance();
+  const api = appearanceState?.api ?? null;
+  const ownLook = own.face ?? own.hat ?? own.cut ?? own.hair ?? own.hairColor ?? own.fur ?? own.furColor
+    ?? own.hairKnobs ?? own.furKnobs ?? own.auras ?? own.sparkles ?? own.auraColor;
+  const keepsHeadshot = !!api && !appearanceState?.preview && appearanceState?.appearance != null
+    && ownLook === undefined && (own.season ?? "auto") === "auto"
+    && !own.activity && (own.live === false || (own.state ?? "idle") === "idle");
+  const shotKey = key ? headshotKey(key, props) : "";
+  const captureRef = useRef<(() => void) | null>(null);
+  captureRef.current = keepsHeadshot
+    ? () => {
+        const canvas = canvasRef.current;
+        if (canvas && api) captureHeadshot(api, shotKey, propsRef.current, canvas);
+      }
+    : null;
+  const [headshot, setHeadshot] = useState<string | null>(null);
+
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (!gemEngine.mount(canvas, propsRef.current)) {
+    if (!gemEngine.mount(canvas, propsRef.current, () => captureRef.current?.())) {
       setFallback(true);
       return;
     }
@@ -77,6 +98,25 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
     if (canvasRef.current) gemEngine.update(canvasRef.current, propsRef.current);
   }, [signature]);
 
+  useEffect(() => {
+    if (!fallback || !api || !key) return;
+    let cancelled = false;
+    let url: string | null = null;
+    api.getGemHeadshot(shotKey).then(
+      (png) => {
+        if (cancelled) return;
+        url = URL.createObjectURL(png);
+        setHeadshot(url);
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+      setHeadshot(null);
+    };
+  }, [fallback, api, key, shotKey]);
+
   // Sized in rem, so gems scale with the UI around them (styles.css shrinks the
   // root font on mouse-driven screens); the engine still draws at `size` pixels.
   const rem = (px: number) => `${px / 16}rem`;
@@ -84,6 +124,17 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
   const a11y = label ? { role: "img", "aria-label": label } : { "aria-hidden": true };
 
   if (fallback) {
+    if (headshot) {
+      return (
+        <img
+          src={headshot}
+          alt={label ?? ""}
+          aria-hidden={label ? undefined : true}
+          className={cn("inline-block shrink-0", gem.live === false && "opacity-40 grayscale", className)}
+          style={{ ...box, borderRadius: "46%", objectFit: "cover" }}
+        />
+      );
+    }
     const rgb = gem.color?.length === 3 ? `rgb(${gem.color.join(",")})` : gemSpec(gem.gem, gem.caste).color;
     return (
       <span
