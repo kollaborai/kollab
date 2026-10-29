@@ -978,6 +978,7 @@ reports the release, so the two never install it at once.
 - Type hints on public functions
 - `async def` for all hooks (even if no await)
 - `logging.getLogger(__name__)` for logging
+- File locks go through `kollabor_config.file_lock` (`locked_file`, `lock`, `try_lock`, `unlock`), never `fcntl` directly: it also works on Windows (#268)
 
 ### Async/Await Patterns
 - Main event loop: `asyncio.run()` in `cli_main()`
