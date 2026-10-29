@@ -1769,8 +1769,8 @@ class ProfileManager:
         If profile doesn't exist but env vars are set (KOLLAB_{NAME}_MODEL),
         auto-creates the profile from env vars.
 
-        If profile exists AND env vars are set, env vars override the stored config
-        (creates a new profile from env vars, replacing the stored one).
+        If profile exists AND env vars are set, env vars override only the fields
+        they name; every other field keeps its stored value.
 
         Args:
             name: Profile name to activate
@@ -1840,11 +1840,23 @@ class ProfileManager:
         if not model:
             return False
 
+        # Fields the env names; a stored profile keeps every field not in here (#326)
+        set_fields: dict = {"model": model}
+
         # Get string fields
         base_url = os.environ.get(f"{prefix}BASE_URL", "").strip()
+        if base_url:
+            set_fields["base_url"] = base_url
         api_key = os.environ.get(f"{prefix}API_KEY", "").strip()
-        provider = os.environ.get(f"{prefix}PROVIDER", "").strip() or "custom"
+        if api_key:
+            set_fields["api_key"] = api_key
+        provider_env = os.environ.get(f"{prefix}PROVIDER", "").strip()
+        provider = provider_env or "custom"
+        if provider_env:
+            set_fields["provider"] = provider_env
         description = os.environ.get(f"{prefix}DESCRIPTION", "").strip()
+        if description:
+            set_fields["description"] = description
 
         # Parse numeric fields
         max_tokens = None
@@ -1852,6 +1864,7 @@ class ProfileManager:
         if max_tokens_str:
             try:
                 max_tokens = int(max_tokens_str)
+                set_fields["max_tokens"] = max_tokens
             except ValueError:
                 logger.warning(f"Invalid MAX_TOKENS value: {max_tokens_str}")
 
@@ -1860,6 +1873,7 @@ class ProfileManager:
         if temp_str:
             try:
                 temperature = float(temp_str)
+                set_fields["temperature"] = temperature
             except ValueError:
                 logger.warning(f"Invalid TEMPERATURE value: {temp_str}")
 
@@ -1870,6 +1884,7 @@ class ProfileManager:
         if timeout_str:
             try:
                 timeout = int(timeout_str)
+                set_fields["timeout"] = timeout
             except ValueError:
                 logger.warning(f"Invalid TIMEOUT value: {timeout_str}")
 
@@ -1878,21 +1893,26 @@ class ProfileManager:
         if top_p_str:
             try:
                 top_p = float(top_p_str)
+                set_fields["top_p"] = top_p
             except ValueError:
                 logger.warning(f"Invalid TOP_P value: {top_p_str}")
 
         effort = os.environ.get(f"{prefix}EFFORT", "").strip().lower()
+        if effort:
+            set_fields["effort"] = effort
 
         # Parse boolean fields
         streaming = True
         streaming_str = os.environ.get(f"{prefix}STREAMING", "").strip().lower()
         if streaming_str:
             streaming = streaming_str in ("true", "1", "yes", "on")
+            set_fields["streaming"] = streaming
 
         supports_tools = True
         tools_str = os.environ.get(f"{prefix}SUPPORTS_TOOLS", "").strip().lower()
         if tools_str:
             supports_tools = tools_str in ("true", "1", "yes", "on")
+            set_fields["supports_tools"] = supports_tools
 
         # Parse extra headers (JSON)
         extra_headers = {}
@@ -1903,8 +1923,21 @@ class ProfileManager:
                 if not isinstance(extra_headers, dict):
                     extra_headers = {}
                     logger.warning("EXTRA_HEADERS must be a JSON object")
+                else:
+                    set_fields["extra_headers"] = extra_headers
             except json.JSONDecodeError:
-                logger.warning(f"Invalid EXTRA_HEADERS JSON: {headers_str}")
+                # Headers carry tokens: name the variable, never log its value.
+                logger.warning("Invalid %sEXTRA_HEADERS JSON (value not logged)", prefix)
+
+        stored = self._profiles.get(name)
+        if stored is not None:
+            # Env vars override only the fields they name; the rest keeps its
+            # stored value (#326).
+            from dataclasses import replace
+
+            self._profiles[name] = replace(stored, **set_fields)
+            logger.info(f"Profile '{name}': env vars override {sorted(set_fields)}")
+            return True
 
         # Create the profile
         profile = LLMProfile(
