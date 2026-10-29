@@ -7,6 +7,11 @@ export type PhoneLinkState = {
 };
 export type PhoneLinkOffer = { id: string; name: string; expires_at: number; fingerprint: string; link: string; qr_svg: string };
 
+const phoneLinkHeaders = (confirmationShown = false) => ({
+  "X-Kollab-Client": "webui",
+  ...(confirmationShown ? { "X-Kollab-Confirmation-Shown": "true" } : {}),
+});
+
 export type Session = {
   harness?: string;
   provider?: string;
@@ -957,19 +962,46 @@ export class EngineApi {
   }
 
   phoneLinkState(refresh = false) {
-    return this.json<PhoneLinkState>(refresh ? "/phonelink/refresh" : "/phonelink", { method: refresh ? "POST" : "GET", cache: "no-store" });
+    return this.json<PhoneLinkState>(
+      refresh ? "/phonelink/refresh" : "/phonelink",
+      {
+        method: refresh ? "POST" : "GET",
+        headers: phoneLinkHeaders(),
+        cache: "no-store",
+      },
+    );
   }
 
   linkPhone(name: string) {
-    return this.json<PhoneLinkOffer>("/phonelink/phones", { method: "POST", body: JSON.stringify({ name }), cache: "no-store" });
+    return this.json<PhoneLinkOffer>("/phonelink/phones", {
+      method: "POST",
+      headers: phoneLinkHeaders(),
+      body: JSON.stringify({ name }),
+      cache: "no-store",
+    });
   }
 
-  approvePhoneLink(id: string, key: string) {
-    return this.json<PhoneLinkState>(`/phonelink/phones/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ key }), cache: "no-store" });
+  approvePhoneLink(id: string, key: string, confirmationShown = false) {
+    return this.json<PhoneLinkState>(
+      `/phonelink/phones/${encodeURIComponent(id)}/approve`,
+      {
+        method: "POST",
+        headers: phoneLinkHeaders(confirmationShown),
+        body: JSON.stringify({ key }),
+        cache: "no-store",
+      },
+    );
   }
 
-  revokePhoneLink(id: string) {
-    return this.json<PhoneLinkState>(`/phonelink/phones/${encodeURIComponent(id)}`, { method: "DELETE", cache: "no-store" });
+  revokePhoneLink(id: string, confirmationShown = false) {
+    return this.json<PhoneLinkState>(
+      `/phonelink/phones/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+        headers: phoneLinkHeaders(confirmationShown),
+        cache: "no-store",
+      },
+    );
   }
 
   /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */

@@ -20,6 +20,79 @@ const STORAGE = "kollab.phonelink.identity.v1";
 const PENDING = "kollab.phonelink.pending.v1";
 const LEGACY_CHUNK = 8192;
 const MAX_BODY = 8 * 1024 * 1024;
+const MAX_PHONE_DIAGNOSTICS = 32;
+const PHONE_DIAGNOSTIC_EVENTS = new Set([
+  "pagehide",
+  "visibility_hidden",
+  "visibility_visible",
+  "online",
+  "offline",
+  "load_failure",
+  "render_failure",
+  "runtime_error",
+  "unhandled_rejection",
+  "relay_socket_opened",
+  "relay_socket_closed",
+  "relay_reconnecting",
+  "relay_error",
+]);
+type PhoneCloseReason =
+  | "normal"
+  | "going_away"
+  | "protocol_error"
+  | "unsupported_data"
+  | "invalid_payload"
+  | "policy_violation"
+  | "message_too_big"
+  | "mandatory_extension"
+  | "internal_error"
+  | "service_restart"
+  | "try_again_later"
+  | "bad_gateway"
+  | "tls_handshake"
+  | "application"
+  | "unknown";
+const PHONE_CLOSE_REASONS = new Set<PhoneCloseReason>([
+  "normal",
+  "going_away",
+  "protocol_error",
+  "unsupported_data",
+  "invalid_payload",
+  "policy_violation",
+  "message_too_big",
+  "mandatory_extension",
+  "internal_error",
+  "service_restart",
+  "try_again_later",
+  "bad_gateway",
+  "tls_handshake",
+  "application",
+  "unknown",
+]);
+function closeReasonForCode(code: number): PhoneCloseReason {
+  const known: Record<number, PhoneCloseReason> = {
+    1000: "normal",
+    1001: "going_away",
+    1002: "protocol_error",
+    1003: "unsupported_data",
+    1007: "invalid_payload",
+    1008: "policy_violation",
+    1009: "message_too_big",
+    1010: "mandatory_extension",
+    1011: "internal_error",
+    1012: "service_restart",
+    1013: "try_again_later",
+    1014: "bad_gateway",
+    1015: "tls_handshake",
+  };
+  return known[code] ?? (code >= 3000 && code <= 4999 ? "application" : "unknown");
+}
+type PhoneDiagnostic = {
+  event: string;
+  close_code?: number;
+  close_reason?: PhoneCloseReason;
+  retry_count?: number;
+};
 type Json = Record<string, any>;
 export type PhoneIdentity = {
   id: string;
@@ -185,6 +258,9 @@ export class PhoneTransport {
   private lastSend = 0;
   private closed = false;
   private retry: ReturnType<typeof setTimeout> | null = null;
+  private reconnectCount = 0;
+  private diagnosticQueue: PhoneDiagnostic[] = [];
+  private flushingDiagnostics: Promise<void> | null = null;
   private onState: (state: string, code?: string) => void;
 
   readonly identity: PhoneIdentity;
@@ -202,12 +278,104 @@ export class PhoneTransport {
     return pairingCode(hex(this.keypair.publicKey));
   }
 
+  /** Queue fixed event codes and allowlisted transport metadata; never raw errors. */
+  reportDiagnostic(
+    event: string,
+    fields: {
+      close_code?: number;
+      close_reason?: PhoneCloseReason;
+      retry_count?: number;
+    } = {},
+  ): Promise<void> {
+    if (this.closed || !PHONE_DIAGNOSTIC_EVENTS.has(event))
+      return Promise.resolve();
+    const payload: PhoneDiagnostic = { event };
+    if (
+      Number.isSafeInteger(fields.close_code) &&
+      fields.close_code! >= 1000 &&
+      fields.close_code! <= 4999
+    )
+      payload.close_code = fields.close_code;
+    if (
+      event === "relay_socket_closed" &&
+      payload.close_code !== undefined &&
+      typeof fields.close_reason === "string" &&
+      PHONE_CLOSE_REASONS.has(fields.close_reason)
+    )
+      payload.close_reason = fields.close_reason;
+    if (
+      Number.isSafeInteger(fields.retry_count) &&
+      fields.retry_count! >= 0 &&
+      fields.retry_count! <= 1_000_000
+    )
+      payload.retry_count = fields.retry_count;
+    const last = this.diagnosticQueue[this.diagnosticQueue.length - 1];
+    if (
+      last?.event === payload.event &&
+      last.close_code === payload.close_code &&
+      last.close_reason === payload.close_reason &&
+      last.retry_count === payload.retry_count
+    )
+      return Promise.resolve();
+    if (this.diagnosticQueue.length >= MAX_PHONE_DIAGNOSTICS)
+      this.diagnosticQueue.shift();
+    this.diagnosticQueue.push(payload);
+    return this.flushDiagnostics();
+  }
+
+  private flushDiagnostics(): Promise<void> {
+    if (this.flushingDiagnostics) return this.flushingDiagnostics;
+    if (
+      this.closed ||
+      !this.outgoing ||
+      !this.incoming ||
+      this.socket?.readyState !== WebSocket.OPEN ||
+      this.diagnosticQueue.length === 0
+    )
+      return Promise.resolve();
+    let failed = false;
+    const flush = async () => {
+      try {
+        while (
+          !this.closed &&
+          this.outgoing &&
+          this.incoming &&
+          this.socket?.readyState === WebSocket.OPEN &&
+          this.diagnosticQueue.length > 0
+        ) {
+          const payload = this.diagnosticQueue[0]!;
+          try {
+            await this.request("phone_diagnostic", payload, undefined, 5000);
+          } catch {
+            failed = true;
+            break;
+          }
+          this.diagnosticQueue.shift();
+        }
+      } finally {
+        this.flushingDiagnostics = null;
+        if (
+          !failed &&
+          this.diagnosticQueue.length > 0 &&
+          !this.closed &&
+          this.outgoing &&
+          this.incoming &&
+          this.socket?.readyState === WebSocket.OPEN
+        )
+          void this.flushDiagnostics();
+      }
+    };
+    this.flushingDiagnostics = flush();
+    return this.flushingDiagnostics;
+  }
+
   connect(): Promise<void> {
     if (this.outgoing && this.socket?.readyState === WebSocket.OPEN)
       return Promise.resolve();
     if (this.opening) return this.opening;
     this.opening = this.open()
       .catch((error) => {
+        this.reportDiagnostic("relay_error");
         this.socket?.close();
         throw error;
       })
@@ -330,19 +498,24 @@ export class PhoneTransport {
         }
       };
       socket.onerror = () => {
+        this.reportDiagnostic("relay_error");
         if (!settled) {
           settled = true;
           clearTimeout(timer);
           reject(lost());
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         clearTimeout(timer);
         if (!settled) {
           settled = true;
           reject(lost());
         }
         if (this.socket !== socket) return;
+        this.reportDiagnostic("relay_socket_closed", {
+          close_code: event.code,
+          close_reason: closeReasonForCode(event.code),
+        });
         this.incoming = this.outgoing = null;
 
         this.frameCompression = false;
@@ -352,11 +525,16 @@ export class PhoneTransport {
         this.pending.clear();
         if (!this.closed) {
           this.onState("offline", this.pairingCode);
-          if (this.identity.approved && !this.retry)
+          if (this.identity.approved && !this.retry) {
+            this.reconnectCount += 1;
+            this.reportDiagnostic("relay_reconnecting", {
+              retry_count: this.reconnectCount,
+            });
             this.retry = setTimeout(() => {
               this.retry = null;
               void this.connect().catch(() => undefined);
             }, 3000);
+          }
         }
       };
     });
@@ -426,6 +604,8 @@ export class PhoneTransport {
     this.sent = 0;
     this.received = -1;
     this.identity.approved = true;
+    this.reconnectCount = 0;
+    this.reportDiagnostic("relay_socket_opened");
     let saved = true;
     try {
       localStorage.setItem(STORAGE, JSON.stringify(this.identity));
@@ -761,6 +941,7 @@ export class PhoneTransport {
 
   close() {
     this.closed = true;
+    this.diagnosticQueue = [];
     if (this.retry) clearTimeout(this.retry);
     this.socket?.close();
     for (const key of [

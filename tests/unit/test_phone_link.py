@@ -301,8 +301,14 @@ async def test_expired_and_consumed_invitation_and_revoke(setup_link):
     await secure_phone(setup_link)
     with pytest.raises(PhoneLinkError, match="no longer waiting"):
         await manager.approve(offer["id"], phone.public_key)
+    marker = (offer["id"], phone.public_key)
+    error_key = f"maintenance:{offer['id']}"
+    manager._pending_announced.add(marker)
+    manager._maintenance_errors[error_key] = ("socket", time.monotonic())
     await manager.revoke(offer["id"])
     assert not manager.sessions and not manager.clients and not manager.records
+    assert marker not in manager._pending_announced
+    assert error_key not in manager._maintenance_errors
     with pytest.raises(RelayError, match="not approved"):
         await manager._receive(offer["id"], phone.public_key, "phone_http", {})
 
@@ -512,3 +518,84 @@ async def test_session_change_and_replay_are_rejected(setup_link):
         await manager._receive(offer["id"], phone.public_key, "phone_http", {"packet": encrypted})
     host._set_peers({"type": "peers", "peers": [{"key": phone.public_key, "session": secrets.token_hex(16)}]})
     assert not manager.sessions and not manager.exchanges
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_history_redacts_pairing_material_and_hashes_actor(setup_link):
+    manager, offer, host, phone, *_ = setup_link
+    session_secret = "private-web-session"
+    actor = {
+        "route": "/phonelink",
+        "method": "GET",
+        "client_kind": "webui",
+        "remote_addr": "127.0.0.1",
+        "user_agent": "Firefox/123.0 private-ua-tail",
+        "web_session": session_secret,
+        "confirmation_shown": False,
+    }
+
+    await manager.status(actor=actor)
+    history = await manager.event_history()
+    serialized = json.dumps(history)
+
+    for secret in (
+        offer["id"],
+        offer["link"],
+        offer["qr_svg"],
+        phone.public_key,
+        session_secret,
+        "private-ua-tail",
+    ):
+        assert secret not in serialized
+    assert any(event["event"] == "pairing_code_shown" for event in history["events"])
+    assert all(
+        "pairing_code" not in event and "code" not in event
+        for event in history["events"]
+    )
+    logged_actor = next(event["actor"] for event in history["events"] if event.get("actor"))
+    assert logged_actor["web_session_ref"] == hashlib.sha256(session_secret.encode()).hexdigest()[:12]
+    assert logged_actor["user_agent"] == "Firefox/123"
+
+
+@pytest.mark.asyncio
+async def test_phone_diagnostics_are_allowlisted_and_invalid_payload_is_not_recorded(
+    setup_link, caplog
+):
+    manager, offer, host, phone, *_ = setup_link
+    await secure_phone(setup_link)
+
+    assert await phone.request(host.public_key, "phone_diagnostic", {"event": "visibility_visible"}) == {
+        "accepted": True
+    }
+    secret = "https://relay.example/private?token=must-not-be-recorded"
+    with pytest.raises(RelayError, match="peer application request failed"):
+        await phone.request(
+            host.public_key,
+            "phone_diagnostic",
+            {"event": "offline", "url": secret},
+        )
+
+    history = await manager.event_history()
+    serialized = json.dumps(history)
+    assert "visibility_visible" in serialized
+    assert secret not in serialized
+    assert secret not in caplog.text
+    assert offer["id"] not in serialized
+
+
+@pytest.mark.asyncio
+async def test_last_seen_persistence_remains_throttled_to_sixty_seconds(setup_link):
+    manager, offer, *_ = setup_link
+    row = manager.records[offer["id"]]
+    saved = []
+    manager._persist = lambda: saved.append(row["seen"])
+    row["seen"] = int(time.time())
+
+    manager._touch(offer["id"], row)
+    assert saved == []
+    row["seen"] -= 61
+    manager._touch(offer["id"], row)
+
+    assert len(saved) == 1
+    history = await manager.event_history()
+    assert sum(event["event"] == "last_seen_updated" for event in history["events"]) == 1

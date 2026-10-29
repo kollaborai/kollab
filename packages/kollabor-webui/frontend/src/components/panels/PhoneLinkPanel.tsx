@@ -338,7 +338,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                       )
                         return;
                       void run(async () => {
-                        setState(await api.revokePhoneLink(phone.id));
+                        setState(await api.revokePhoneLink(phone.id, phone.linked));
                         if (offer?.id === phone.id) setOffer(null);
                       });
                     }}
@@ -366,7 +366,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                       onClick={() =>
                         void run(async () => {
                           setState(
-                            await api.approvePhoneLink(phone.id, pending.key),
+                            await api.approvePhoneLink(phone.id, pending.key, true),
                           );
                         })
                       }
