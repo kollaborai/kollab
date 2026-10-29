@@ -33,12 +33,12 @@ capability endpoint before offering a QR code.
 - Pairing uses a fresh private relay room per phone, separate from the agent
   network's room. The QR carries an expiring invitation in the URL fragment,
   never a query parameter, engine token, or phone private key. The browser
-  generates its own identity and keeps it on that phone, as non-extractable
-  WebCrypto keys in IndexedDB: script on the page can use them, but cannot
-  copy them out. A browser without WebCrypto Ed25519 and X25519 keeps a raw
-  seed in browser storage instead, as before. On a browser with them, a link
-  an older loader saved with its seed moves into sealed keys at its next
-  launch, with no new pairing.
+  generates its own identity and keeps it on that phone. Where the browser
+  can (WebCrypto Ed25519 and X25519, and IndexedDB), its private keys are
+  non-extractable WebCrypto keys in IndexedDB: script on the page can use
+  them but cannot copy them out, and a link an older loader saved with its
+  seed moves into them at its next launch, with no new pairing. Elsewhere the
+  raw seed stays in browser storage, as before.
 - Scanning requests access. Only an explicit local approval pins that phone's
   key. An invitation admits at most one phone and expires after five minutes.
 - A phone runs the full app and reaches the engine roots that app calls:
@@ -168,9 +168,9 @@ served by the computer ([390](../screenshots/phone-access/phonelink-app-390.png)
   A hash of the loader pinned in the QR would not close this: the directory
   serves the page that checks it, too. What would close it is the planned
   mobile app (#369, not built yet), with the loader inside the app.
-- On a browser with WebCrypto Ed25519 and X25519, the phone's private keys
-  cannot be read out of the browser's storage; elsewhere the seed is stored
-  as before. A script running on the page (an XSS on the directory's origin,
+- Where the browser keeps sealed keys (WebCrypto Ed25519 and X25519, and
+  IndexedDB), the phone's private keys cannot be read out of its storage;
+  elsewhere the seed is stored as before. A script running on the page (an XSS on the directory's origin,
   for example) can still use the keys while it runs, and a relay connection
   it opens then lasts until that connection drops. Revoke the phone if you
   suspect that.
