@@ -579,6 +579,20 @@ class ConversationManager:
             logger.warning(f"Failed to load session stats from {snapshot_file}: {e}")
             return None
 
+    def _snapshot_conversation_uid(self, session_id: str) -> Optional[str]:
+        """The conversation uid saved in this session's snapshot, if any."""
+        snapshot_file = self.snapshots_dir / f"{session_id}_snapshot.json"
+        if not snapshot_file.exists():
+            return None
+        try:
+            with open(snapshot_file, "r") as f:
+                metadata = json.load(f).get("metadata")
+        except Exception as e:
+            logger.warning(f"Cannot read conversation uid from {snapshot_file}: {e}")
+            return None
+        uid = metadata.get("conversation_uid") if isinstance(metadata, dict) else None
+        return uid if isinstance(uid, str) and uid else None
+
     def load_session(self, session_id: str) -> bool:
         """Load session from storage.
 
@@ -624,8 +638,10 @@ class ConversationManager:
                 ),
                 "topics": loaded_metadata.get("topics", []),
                 "model_used": loaded_metadata.get("model_used"),
-                # legacy files lack it: mint now, persists on next save
+                # streaming logs never carry it, but the snapshot saved with
+                # every message does; mint one only when neither has it (#400)
                 "conversation_uid": loaded_metadata.get("conversation_uid")
+                or self._snapshot_conversation_uid(session_id)
                 or uuid4().hex,
             }
 
