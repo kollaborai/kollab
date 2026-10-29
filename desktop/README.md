@@ -181,6 +181,32 @@ then an installed `kollab.exe` (`where.exe`, then `~\.local\bin`), and starts
 with `taskkill /T /F`; that is forceful, unlike the other platforms, because a
 GUI app has no console to send Ctrl+C through.
 
+## Phone (iOS)
+
+The same crate builds the phone app (#369). `src/lib.rs` is the entry point for
+both; the tray, single-instance, window-state and autostart plugins are
+desktop-only. The phone app opens the PhoneLink loader
+(`https://kollabor.ai/relay/v1/phone/`, set in `src-tauri/tauri.ios.conf.json`),
+so it links to a computer the same way the QR code does in Safari. Scanning the
+QR code inside the app is not built yet, and there are no store builds.
+
+Build and run it in the iPhone simulator (Xcode with an iOS simulator runtime,
+and `rustup target add aarch64-apple-ios aarch64-apple-ios-sim`):
+
+```bash
+cargo install tauri-cli --version 2.12.0 --locked   # the release workflow's version
+cd desktop/src-tauri
+cargo tauri ios build --target aarch64-sim --debug
+xcrun simctl boot "iPhone 18 Pro"
+xcrun simctl install booted gen/apple/build/arm64-sim/Kollab.app
+xcrun simctl launch booted ai.kollabor.kollab
+```
+
+`gen/apple/` is the generated Xcode project and is committed. To regenerate it,
+move it away and run `cargo tauri ios init --ci`: the iOS minimum (15.0) comes
+from `bundle.iOS.minimumSystemVersion` in `tauri.conf.json`, the microphone
+text from `src-tauri/Info.ios.plist`.
+
 ## Startup
 
 The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
@@ -274,12 +300,17 @@ updated in place: the prompt offers the release page instead.
 
 | Path | What it is |
 | --- | --- |
-| `src-tauri/src/main.rs` | App logic: runtime, window, menus, quitting |
+| `src-tauri/src/main.rs` | Desktop binary: calls `kollab_desktop_lib::run()` |
+| `src-tauri/src/lib.rs` | Entry point for the desktop and phone apps; the phone app's window |
+| `src-tauri/src/desktop.rs` | Desktop app logic: runtime, window, menus, quitting |
 | `src-tauri/src/updater.rs` | Self-update from the latest GitHub release |
 | `src-tauri/tauri.conf.json` | Identifier `ai.kollabor.kollab`, the macOS `binaries/kollab` sidecar (bundled as `Contents/Resources/kollab`) |
 | `src-tauri/tauri.release.json` | Generated release version, formats and opaque sidecar file mappings (Linux packages, Windows `runtime/kollab.exe`) |
 | `../scripts/check_desktop_package_windows.py` | Installs the NSIS installer silently and checks launch, render, close and relaunch |
 | `src-tauri/Info.plist` | Microphone usage text; local networking allowed |
+| `src-tauri/tauri.ios.conf.json` | Phone app start page: the PhoneLink loader |
+| `src-tauri/Info.ios.plist` | Phone app microphone usage text |
+| `src-tauri/gen/apple/` | Generated Xcode project for the phone app |
 | `ui/index.html` | Bundled loading, install and error page |
 | `app-icon.png` | 1024 px icon source (the Kollab mark) |
 | `src-tauri/icons/` | App icons from `cargo tauri icon`, plus `tray.png` (template image) |
