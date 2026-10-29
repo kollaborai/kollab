@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Voice: words said while the agent is working get a spoken answer within
+  2.5 s from the Quick Model, read from what the agent's tools are doing (a
+  tool's name and how long it has run, never its command or paths), and the
+  running turn keeps going. Asking it to do something says one line at once
+  and queues the words for their own turn. With no Quick Model, or none that
+  answers in time, the newest tool's state is said instead (#388).
 - Voice Quick Model: Settings → Voice → Quick Model (`/voice config` in the
   terminal) picks the model that answers out loud from any configured
   provider's models — the `/llm` list, so a fast OpenRouter model works while

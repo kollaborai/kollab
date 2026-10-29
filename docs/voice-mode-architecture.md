@@ -33,6 +33,14 @@ flowchart LR
 
 ## 2. Fast responder model
 
+**Built (#388):** words said while a turn runs get an answer from the Quick Model
+(`kollabor/llm/voice_aside.py`), on a provider of its own, within 2.5 s. Its snapshot
+is each tool's name and state from the display tap (`kollabor_voice.responder`), never
+a command or a path. It replies `ANSWER` (the voice turn's whole reply) or `FORWARD`
+(one line now, then the words queue for their own turn). No Quick Model, a timeout or
+a reply that does not parse says the newest tool's state and queues the words. One
+call runs at a time, ten in five minutes. An open ask wins: a yes or no goes to it.
+
 - A separate fast, cheap model instance (for example Haiku or a similar small model). Its only job is to talk to the human quickly in voice mode.
 - Right before each reply, it gets a snapshot of the UI activity view. That is the same summarized view the human sees (for example "ran git status", "editing src/foo.py", "tests passing"). It does NOT get full file reads, raw command text, or tool output.
 - It can:

@@ -139,6 +139,12 @@ class YesApprovals:
         self._cut.add(turn)  # on_reply_done drops its asks, late ones too
         self._asked.clear()
 
+    def has_open_ask(self) -> bool:
+        """The agent's last reply asked for an OK that a yes would still answer."""
+        if not self._asked:
+            return False
+        return not self._asked_until or time.monotonic() < self._asked_until
+
     def take(self, tool_data: Mapping[str, Any]) -> bool:
         """True once for a call the user's yes approved."""
         if not self._approved:
