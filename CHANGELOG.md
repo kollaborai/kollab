@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Voice Quick Model: Settings → Voice → Quick Model (`/voice config` in the
+  terminal) picks the model that answers out loud from any configured
+  provider's models — the `/llm` list, so a fast OpenRouter model works while
+  the chat stays on its own provider, using that provider's connection. Same
+  as Chat keeps the chat's model; typed messages always use the chat's model
+  (#260).
 - Network kill switch: `kollab --hub halt` stops every agent on every device
   of your network; resume and network-wide revoke need two machines that count
   (`kollab --hub resume --confirm`). Also `/connect halt|resume` and Settings →
