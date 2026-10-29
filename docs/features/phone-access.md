@@ -36,8 +36,9 @@ capability endpoint before offering a QR code.
   generates its own identity and keeps it on that phone, as non-extractable
   WebCrypto keys in IndexedDB: script on the page can use them, but cannot
   copy them out. A browser without WebCrypto Ed25519 and X25519 keeps a raw
-  seed in browser storage instead, as before. A link saved with its seed by an older
-  loader moves into sealed keys at its next launch, with no new pairing.
+  seed in browser storage instead, as before. On a browser with them, a link
+  an older loader saved with its seed moves into sealed keys at its next
+  launch, with no new pairing.
 - Scanning requests access. Only an explicit local approval pins that phone's
   key. An invitation admits at most one phone and expires after five minutes.
 - A phone runs the full app and reaches the engine roots that app calls:
