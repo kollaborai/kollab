@@ -8,11 +8,15 @@
  *   GET    /prompts/{bundle}/sections/{key}      -> PromptSectionContent
  *   PUT    /prompts/{bundle}/sections/{key}      { content }  (upsert override)
  *   DELETE /prompts/{bundle}/sections/{key}      (remove the override)
- *   GET    /prompts/{bundle}/preview             -> { prompt, tokens }
+ *   GET    /prompts/{bundle}/preview[?variant=]  -> { prompt, tokens }
+ *   GET    /prompts/libraries                    -> { libraries, roles }
+ *   POST   /prompts/libraries                    { name }
+ *   GET|PUT|DELETE /prompts/libraries/{lib}/sections/{key}
+ *   GET|PUT /prompts/{bundle}/composition        { variants }
  *
- * Overrides are per user, per bundle, and per section in
- * ~/.kollab/prompt-overrides; deleting one falls back to the shipped section.
- * The server only overrides sections a bundle already has; it cannot add keys.
+ * A role's own copy of a section lives in ~/.kollab/prompt-overrides; deleting
+ * it falls back to the library text. Libraries live in ~/.kollab/prompt-libraries
+ * ("defaults" edits reach every role) and each role's picks in ~/.kollab/prompt-roles.
  */
 import { EngineApi } from "./api";
 
@@ -52,6 +56,37 @@ export type PromptPreview = {
 };
 
 export type PromptsIndex = { prompts: PromptEntry[] };
+
+/** One section of a library; `used_by` counts roles whose All Models variant sends it. */
+export type LibrarySection = {
+  key: string;
+  title: string;
+  tokens: number;
+  kind: PromptSectionKind;
+  source_path: string | null;
+  /** Defaults only: the shipped text has a saved edit. */
+  edited: boolean;
+  used_by: number;
+};
+
+/** "defaults" is the shipped _base set (builtin); the rest are the user's. */
+export type PromptLibrary = {
+  name: string;
+  builtin: boolean;
+  sections: LibrarySection[];
+};
+
+export type PromptLibraries = { libraries: PromptLibrary[]; roles: string[] };
+
+/** A role's picks: drop _base keys, add "library/key" sections, per variant. */
+export type CompositionVariant = {
+  exclude: string[];
+  add: string[];
+  /** Providers that switch to this variant; absent on "all". */
+  providers?: string[];
+};
+
+export type Composition = { variants: Record<string, CompositionVariant> };
 export type PromptSections = { sections: PromptSection[] };
 
 /** A non-2xx prompt-section response, with the server's `detail` when present. */
@@ -127,11 +162,70 @@ export class PromptsApi {
     );
   }
 
-  async preview(bundle: string): Promise<PromptPreview> {
+  async preview(bundle: string, variant?: string): Promise<PromptPreview> {
+    const query = variant ? `?variant=${encodeURIComponent(variant)}` : "";
     const { prompt, tokens } = await this.json<{ prompt: string; tokens: number }>(
-      `/prompts/${encodeURIComponent(bundle)}/preview`,
+      `/prompts/${encodeURIComponent(bundle)}/preview${query}`,
     );
     return { rendered: prompt, tokens };
+  }
+
+  listLibraries(): Promise<PromptLibraries> {
+    return this.json("/prompts/libraries");
+  }
+
+  async createLibrary(name: string): Promise<void> {
+    await this.check(
+      await this.transport.request("/prompts/libraries", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      }),
+    );
+  }
+
+  getLibrarySection(
+    library: string,
+    key: string,
+  ): Promise<{ content: string; edited: boolean; tokens: number }> {
+    return this.json(this.libraryPath(library, key));
+  }
+
+  /** Defaults: an edit every role gets. A user library: adds or replaces the section. */
+  async saveLibrarySection(library: string, key: string, content: string): Promise<void> {
+    await this.check(
+      await this.transport.request(this.libraryPath(library, key), {
+        method: "PUT",
+        body: JSON.stringify({ content }),
+      }),
+    );
+  }
+
+  /** Defaults: back to the shipped text. A user library: deletes the section. */
+  async deleteLibrarySection(library: string, key: string): Promise<void> {
+    await this.check(
+      await this.transport.request(this.libraryPath(library, key), { method: "DELETE" }),
+    );
+  }
+
+  async getComposition(bundle: string): Promise<Composition> {
+    const { variants } = await this.json<Composition>(
+      `/prompts/${encodeURIComponent(bundle)}/composition`,
+    );
+    return { variants };
+  }
+
+  async saveComposition(bundle: string, composition: Composition): Promise<Composition> {
+    const response = await this.transport.request(
+      `/prompts/${encodeURIComponent(bundle)}/composition`,
+      { method: "PUT", body: JSON.stringify(composition) },
+    );
+    await this.check(response);
+    const { variants } = (await response.json()) as Composition;
+    return { variants };
+  }
+
+  private libraryPath(library: string, key: string): string {
+    return `/prompts/libraries/${encodeURIComponent(library)}/sections/${encodeURIComponent(key)}`;
   }
 
   private async json<T>(path: string): Promise<T> {

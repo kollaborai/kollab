@@ -1,6 +1,6 @@
 # Web Settings Panels
 
-The web UI (`kollab --web-ui`) has a **Settings** dialog with nine tabs. Most mirror the terminal's fullscreen screens (`/config`, `/llm`, `/model`, `/setup`, `/connect`, `/voice config`) through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. The Prompts tab is browser-only: it inspects default and agent-bundle sections and saves per-user overrides without changing bundled files. On a phone the dialog is a full-screen sheet.
+The web UI (`kollab --web-ui`) has a **Settings** dialog with nine tabs. Most mirror the terminal's fullscreen screens (`/config`, `/llm`, `/model`, `/setup`, `/connect`, `/voice config`) through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. The Prompts tab is browser-only: it edits shared prompt libraries and picks which sections each role sends, per model variant, without changing bundled files ([Prompt Libraries and Roles](prompt-libraries.md)). On a phone the dialog is a full-screen sheet.
 
 Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-unified-config.md).
 
@@ -16,7 +16,7 @@ Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-uni
 | Network | Overview shows the network and this device. Access contains trust, device name, join requests, and New Join Code. Knocks contains incoming and outgoing knocks, missed knocks, blocked routes, contacts, and who may knock. | The network state the terminal `/connect` and `/connect knocks` use. |
 | PhoneLink | Link a phone with an expiring QR code and local approval over the existing Kollab connection. | Private phone identities on this computer; no provider credential sync to the phone. |
 | Voice | Transcript context, speech engine, Kokoro and VibeVoice settings, plus transcription, microphone and current readiness (terminal `/voice config`). | **Save for This Device**, to `~/.kollab/voice/preferences.json` on the device running Kollab. Saving never starts listening. |
-| Prompts | Browse the default prompt and agent-bundle sections in assembly order, edit sections marked editable, and preview the assembled prompt. | Per-user overrides under `~/.kollab/prompt-overrides/<bundle>/<section>.md`; bundled prompt files are unchanged. |
+| Prompts | Libraries (Defaults plus your own) and Roles. Tick the sections a role sends, per variant (All Models, Local Models...), edit a section for every role or only one, and preview the assembled prompt. | Library edits in `~/.kollab/prompt-libraries/<library>/<key>.md`, role picks in `~/.kollab/prompt-roles/<role>.json`, a role's own copy in `~/.kollab/prompt-overrides/<role>/<key>.md`; bundled prompt files are unchanged. |
 
 A change that is not saved yet is marked "changed" on its field; closing the dialog with unsaved changes asks first.
 

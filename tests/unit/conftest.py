@@ -56,3 +56,11 @@ def _private_hub_socket_folder(monkeypatch):
     monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", Path(folder))
     yield
     shutil.rmtree(folder, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _private_prompt_compositions(monkeypatch, tmp_path_factory):
+    """Prompt renders read a throwaway library and role folder, never ~/.kollab's."""
+    folder = tmp_path_factory.mktemp("prompt-compositions")
+    monkeypatch.setenv("KOLLAB_PROMPT_LIBRARIES_DIR", str(folder / "libraries"))
+    monkeypatch.setenv("KOLLAB_PROMPT_ROLES_DIR", str(folder / "roles"))

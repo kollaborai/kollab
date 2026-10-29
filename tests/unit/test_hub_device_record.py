@@ -112,6 +112,7 @@ def test_migration_moves_state_preserving_wire_key(home, tmp_path):
     workspace = tmp_path / "project"
     workspace.mkdir()
     legacy_key = _seed_legacy(workspace, home)
+    legacy_state = json.loads((_legacy_state_dir(workspace, home) / "state.json").read_text())
     assert migrate_legacy_network_state(workspace) is True
 
     # device record now knows the network, with the legacy key as membership key
@@ -123,8 +124,20 @@ def test_migration_moves_state_preserving_wire_key(home, tmp_path):
     # workspace record holds the same RelayState bytes
     state_file = workspace_dir(workspace) / "networks" / slug / "state.json"
     assert state_file.exists()
-    legacy_state = json.loads((_legacy_state_dir(workspace, home) / "state.json").read_text())
     assert json.loads(state_file.read_text()) == legacy_state
+
+
+def test_migration_leaves_one_layout_and_moves_every_file(home, tmp_path):
+    # a copy of two files left a stale v1 beside the v2 and dropped the sqlite stores
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    _seed_legacy(workspace, home)
+    legacy = _legacy_state_dir(workspace, home)
+    (legacy / "peer-links.sqlite3").write_bytes(b"db")
+    assert migrate_legacy_network_state(workspace) is True
+    assert not legacy.exists()
+    slug = origin_slug("https://relay.example.com")
+    assert (workspace_dir(workspace) / "networks" / slug / "peer-links.sqlite3").read_bytes() == b"db"
 
 
 def test_migration_is_idempotent(home, tmp_path):
@@ -266,3 +279,37 @@ def test_slug_spelling_wins_over_flat_when_both_present(home):
 
     reloaded = DeviceRecord()
     assert reloaded.primary == slug_alpha
+
+
+def test_migration_carries_private_records(home, tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    _seed_legacy(workspace, home)
+    private = _legacy_state_dir(workspace, home) / "private"
+    private.mkdir(mode=0o700)
+    control = private / "network_control.json"
+    control.write_text('{"founder": "x"}')
+    os.chmod(control, 0o600)
+    assert migrate_legacy_network_state(workspace) is True
+    slug = origin_slug("https://relay.example.com")
+    moved = workspace_dir(workspace) / "networks" / slug / "private" / "network_control.json"
+    assert moved.read_text() == '{"founder": "x"}'
+
+
+def test_migration_waits_while_a_relay_owner_holds_the_legacy_folder(home, tmp_path):
+    from plugins.hub.relay_owner import WorkspaceRelayOwner
+    from plugins.hub.relay_state import default_workspace_state_dir
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    _seed_legacy(workspace, home)
+    legacy = _legacy_state_dir(workspace, home)
+    owner = WorkspaceRelayOwner(workspace, legacy)
+    assert owner.acquire(f"/tmp/ks-own-{os.getpid()}.sock", "daemon")
+    try:
+        assert migrate_legacy_network_state(workspace) is False
+        assert not workspace_dir(workspace).exists()
+        assert default_workspace_state_dir(workspace) == legacy
+    finally:
+        owner.release()
+    assert migrate_legacy_network_state(workspace) is True

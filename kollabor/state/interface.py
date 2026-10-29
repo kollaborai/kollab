@@ -31,6 +31,21 @@ from .snapshots import (
     SystemPromptSnapshot,
 )
 
+OFFER_FAILED = "connect offer could not be created"
+
+
+def offer_failure(result: Any = None) -> dict[str, str]:
+    """A failed join-code offer, keeping a refusal ``reason`` a person can act on.
+
+    The reason is the network's own line (``NetworkControl.admit_refusal``,
+    e.g. "Only your main device can add new devices. Make the code on mac."),
+    never exception text, so no join code can ride along (issue #355).
+    """
+    reason = result.get("reason") if isinstance(result, dict) else None
+    if isinstance(reason, str) and reason and len(reason) <= 300 and reason.isprintable():
+        return {"error": OFFER_FAILED, "reason": reason}
+    return {"error": OFFER_FAILED}
+
 
 def enrollment_result(
     result: Any, *, allow_failed: bool = False
@@ -62,6 +77,12 @@ def enrollment_result(
         note = result.get("note")
         if isinstance(note, str) and len(note) <= 200 and note.isprintable():
             approved["note"] = note
+        # What the person checks after joining: the founder machine's short
+        # fingerprint and the one-machine warning (plain display strings).
+        for extra, limit in (("founder_fingerprint", 32), ("warning", 200)):
+            value = result.get(extra)
+            if isinstance(value, str) and 0 < len(value) <= limit and value.isprintable():
+                approved[extra] = value
         return approved
     if allow_failed and status == "failed":
         failed = {"status": "failed"}

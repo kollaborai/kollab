@@ -36,6 +36,7 @@ Monorepo with extracted packages:
 - `response_processor.py` - Response processing
 - `response_parser.py` - Response parsing
 - `prompt_renderer.py` - Dynamic system prompt rendering
+- `prompt_composition.py` - Prompt libraries (`~/.kollab/prompt-libraries/`, `defaults` edits reach every role's `_base` sections) and role picks (`~/.kollab/prompt-roles/<role>.json`: per-variant `exclude` of `_base` keys and `add` of `library/key` sections; a variant with `providers` wins for that provider). `render_system_prompt` appends added sections only when given a bundle, so the per-turn rail is untouched; session context can never be excluded. Doc `docs/features/prompt-libraries.md`
 - `providers/` - Provider implementations (OpenAI, Anthropic, etc.)
 - `oauth/` - OAuth token management
 

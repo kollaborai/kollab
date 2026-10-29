@@ -8,6 +8,8 @@ export type PhoneLinkState = {
 export type PhoneLinkOffer = { id: string; name: string; expires_at: number; fingerprint: string; link: string; qr_svg: string };
 
 export type Session = {
+  /** A halt waiter's line ("Network halted by mac. Resume needs ..."): the chat runs no turn. */
+  halted?: string;
   harness?: string;
   provider?: string;
   acp_waiting?: boolean;
@@ -809,7 +811,15 @@ export function errorText(reason: unknown): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
+/**
+ * Panels served with no engine session (spec "TUI and Web UI", R4-N7): a halted
+ * machine runs no daemon, so these go to `/network/halt/{name}?folder=`.
+ */
+export const SESSIONLESS_PANELS = new Set(["connect-halt", "connect-halt-new"]);
+
 export class EngineApi {
+  /** The folder the session-less halt panels ask about (the open chat's, else the sidebar's). */
+  haltFolder = "";
   private baseUrl: string;
   private token: string | null;
   private config: Promise<EngineConfig | null> | null = null;
@@ -1039,7 +1049,25 @@ export class EngineApi {
       Object.entries(params).filter(([, value]) => value !== ""),
     ).toString();
     return this.json<PanelDescription>(
-      `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}${query ? `?${query}` : ""}`,
+      SESSIONLESS_PANELS.has(name)
+        ? this.panelPath(sessionId, name) // the halt panels take no filters
+        : `${this.panelPath(sessionId, name)}${query ? `?${query}` : ""}`,
+      { signal },
+    );
+  }
+
+  /** `/network/halt/{name}?folder=` for SESSIONLESS_PANELS, `/sessions/{id}/panels/{name}` for the rest. */
+  panelPath(sessionId: string, name: string, suffix = ""): string {
+    if (!SESSIONLESS_PANELS.has(name)) {
+      return `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}${suffix}`;
+    }
+    return `/network/halt/${encodeURIComponent(name)}${suffix}?folder=${encodeURIComponent(this.haltFolder)}`;
+  }
+
+  /** The halt screen for one folder with no chat open (the sidebar's halted line). */
+  haltPanel(folder: string, signal?: AbortSignal) {
+    return this.json<PanelDescription>(
+      `/network/halt/connect-halt?folder=${encodeURIComponent(folder)}`,
       { signal },
     );
   }
@@ -1058,7 +1086,7 @@ export class EngineApi {
   ): Promise<PanelActionResult> {
     try {
       return await this.json<PanelActionResult>(
-        `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}/actions/${encodeURIComponent(action)}`,
+        this.panelPath(sessionId, name, `/actions/${encodeURIComponent(action)}`),
         { method: "POST", body: JSON.stringify(payload), signal },
       );
     } catch (error) {

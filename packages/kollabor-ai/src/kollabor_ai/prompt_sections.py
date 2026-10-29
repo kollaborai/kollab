@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .prompt_composition import DEFAULTS_LIBRARY, is_base_section, library_store
 from .prompt_overrides import DEFAULT_BUNDLE, PromptOverrideStore
 
 logger = logging.getLogger(__name__)
@@ -308,6 +309,12 @@ class PromptSectionWalker:
             return {"content": override, "source": "override"}
         for section in self.walk(bundle):
             if section.key == key and section.source_path is not None:
+                # What the role gets without its own copy: a defaults-library
+                # edit of a _base section, else the file.
+                if is_base_section(section.source_path):
+                    shared = library_store().get_override(DEFAULTS_LIBRARY, key)
+                    if shared is not None:
+                        return {"content": shared, "source": "library"}
                 try:
                     content = Path(section.source_path).read_text(encoding="utf-8")
                 except OSError as exc:

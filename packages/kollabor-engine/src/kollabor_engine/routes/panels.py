@@ -182,3 +182,47 @@ async def panel_action(session_id: str, name: str, action: str, request: Request
     # outcome (a failed connection test) and stays 200
     status = 400 if not outcome.get("ok") and outcome.get("errors") else 200
     return JSONResponse(outcome, status_code=status, headers=_NO_STORE)
+
+
+# ------------------------------------------------- session-less halt panels
+# Spec: docs/specs/network-sync-and-control.md "TUI and Web UI" (R3-F7,
+# R4-N7). A halted machine runs no daemon, so these two panels never need an
+# engine session: the call goes to halt.sock while the listener holds the
+# folder, else to the folder's network owner over its hub socket.
+
+HALT_PANELS = frozenset({"connect-halt", "connect-halt-new"})
+network_router = APIRouter(prefix="/network/halt", tags=["panels"])
+
+
+def _halt_target(name: str, request: Request) -> Tuple[Any, Any]:
+    from kollabor.panels import require_panel
+    from plugins.hub.halt_context import HaltContext
+
+    if name not in HALT_PANELS:
+        raise PanelError(f"unknown panel '{name}'", status=404)
+    folder = request.query_params.get("folder", "")
+    if not folder or len(folder) > 4096 or not os.path.isabs(folder) or not os.path.isdir(folder):
+        raise PanelError("folder must be an existing absolute path")
+    return require_panel(name), HaltContext(os.path.realpath(folder))
+
+
+@network_router.get("/{name}")
+async def describe_halt_panel(name: str, request: Request):
+    try:
+        panel, ctx = _halt_target(name, request)
+        body = await panel.describe(ctx, {})
+    except Exception as exc:
+        return _failure("network", exc)
+    return JSONResponse(body, headers=_NO_STORE)
+
+
+@network_router.post("/{name}/actions/{action}")
+async def halt_panel_action(name: str, action: str, request: Request):
+    try:
+        panel, ctx = _halt_target(name, request)
+        payload = await _json_body(request)
+        outcome = await panel.act(ctx, action, payload)
+    except Exception as exc:
+        return _failure("network", exc)
+    status = 400 if not outcome.get("ok") and outcome.get("errors") else 200
+    return JSONResponse(outcome, status_code=status, headers=_NO_STORE)
