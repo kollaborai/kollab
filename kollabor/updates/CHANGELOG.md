@@ -54,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
-- Goals: an active `/goal` whose loop stopped (the provider was down, or a `/resume` into its conversation) is picked up again within a minute, refs #389
+- Goals: an active `/goal` whose loop stopped (the provider was down, or a `/resume` into its conversation) is picked up again within a minute once no turn is running, refs #389
 - Context compaction: an agent over its context budget now compacts once it has
   older messages to summarize, even before 6 human turns, when the provider
   reports its token count, so a hub agent that works from one brief no longer

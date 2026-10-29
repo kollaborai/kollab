@@ -370,8 +370,14 @@ class GoalTurnDriver:
         if qp is None:
             return BoundaryContext(queue_empty=False, pending_work=True)
         queue_empty = qp.processing_queue.empty()
+        # a running turn took its message off the queue before it ran, so an
+        # empty queue alone is not idle: same settle rule as the queue
+        # processor's note_chain_end (#389)
+        lock = getattr(qp, "_turn_lock", None)
+        busy = bool(qp.is_processing) or (lock is not None and lock.locked())
         return BoundaryContext(
             queue_empty=queue_empty,
+            pending_work=busy,
             invalidated=bool(qp.cancel_processing),
         )
 

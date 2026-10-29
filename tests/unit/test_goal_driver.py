@@ -430,6 +430,45 @@ class DriverTests(unittest.TestCase):
         asyncio.run(tick())
         self.assertGreaterEqual(self.store.get(goal_id).turn_count, 1)
 
+    def test_boundary_counts_a_running_turn_as_pending_work(self):
+        driver, coord = self._make_driver()
+        qp = coord._queue_processor
+        self.assertFalse(driver._boundary_ctx().pending_work)
+        qp.is_processing = True
+        self.assertTrue(driver._boundary_ctx().pending_work)
+        qp.is_processing = False
+
+        async def locked() -> None:
+            qp._turn_lock = asyncio.Lock()
+            async with qp._turn_lock:
+                self.assertTrue(driver._boundary_ctx().pending_work)
+
+        asyncio.run(locked())
+
+    def test_watchdog_never_starts_a_goal_turn_over_a_running_turn(self):
+        # a user turn takes its message off the queue before it runs, so the
+        # queue is empty while it is in flight
+        goal_id = self._create()
+        driver, coord = self._make_driver(turn_script=[[FakeResult("read", "x")]])
+        self._bus(coord)
+        qp = coord._queue_processor
+        qp.is_processing = True
+
+        async def scenario() -> None:
+            self.assertEqual(driver.check_stalled(), goal_id)
+            await asyncio.sleep(0.05)
+            self.assertEqual(self.store.get(goal_id).turn_count, 0)
+            self.assertIn(goal_id, driver._yielded_goals)
+            qp.is_processing = False  # the user's turn settles
+            driver.wake_yielded()
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if self.store.get(goal_id).turn_count >= 1:
+                    return
+
+        asyncio.run(scenario())
+        self.assertGreaterEqual(self.store.get(goal_id).turn_count, 1)
+
     def test_watch_keeps_running_after_a_failed_check(self):
         driver, _coord = self._make_driver()
         calls: list[int] = []
