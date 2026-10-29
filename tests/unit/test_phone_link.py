@@ -633,6 +633,35 @@ async def test_lifecycle_history_redacts_pairing_material_and_hashes_actor(setup
 
 
 @pytest.mark.asyncio
+async def test_revoke_and_denied_events_carry_their_actor_and_cause(setup_link):
+    manager, offer, *_ = setup_link
+    actor = {
+        "route": "/phonelink",
+        "method": "POST",
+        "client_kind": "webui",
+        "remote_addr": "127.0.0.1",
+        "user_agent": "Firefox/123.0",
+        "confirmation_shown": True,
+    }
+
+    with pytest.raises(PhoneLinkError):
+        await manager.revoke("not-a-phone", actor=actor)
+    await secure_phone(setup_link)
+    await manager.revoke(offer["id"], actor=actor)
+    history = await manager.event_history()
+
+    events = history["events"]
+    denied = next((event for event in events if event["event"] == "denied"), None)
+    assert denied is not None, events
+    assert denied["cause"] == "phone_not_saved"
+    assert denied["actor"]["client_kind"] == "webui"
+    revoked = next((event for event in events if event["event"] == "revoked"), None)
+    assert revoked is not None, events
+    assert revoked["cause"] == "user_action"
+    assert revoked["actor"]["method"] == "POST"
+
+
+@pytest.mark.asyncio
 async def test_phone_diagnostics_are_allowlisted_and_invalid_payload_is_not_recorded(
     setup_link, caplog
 ):
@@ -643,12 +672,11 @@ async def test_phone_diagnostics_are_allowlisted_and_invalid_payload_is_not_reco
         "accepted": True
     }
     secret = "https://relay.example/private?token=must-not-be-recorded"
-    with pytest.raises(RelayError, match="peer application request failed"):
-        await phone.request(
-            host.public_key,
-            "phone_diagnostic",
-            {"event": "offline", "url": secret},
-        )
+    assert await phone.request(
+        host.public_key,
+        "phone_diagnostic",
+        {"event": "offline", "url": secret},
+    ) == {"accepted": False}
 
     history = await manager.event_history()
     serialized = json.dumps(history)
