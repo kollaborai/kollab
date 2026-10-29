@@ -2,7 +2,7 @@
 
 Tests _should_compact() and _on_llm_turn_complete() gate logic:
   Gate 1: prompt_tokens >= token_threshold_k * 1000
-  Gate 2: human turns >= min_human_turns
+  Gate 2: human turns >= min_human_turns, or older messages to summarize
 
 Both gates must pass for compaction to trigger.
 
@@ -119,6 +119,30 @@ class TestDualGate(unittest.TestCase):
         _wire_history(plugin, history, prompt_tokens=250_000)
 
         self.assertTrue(plugin._should_compact(history))
+
+    def test_over_threshold_compacts_under_min_turns_with_older_messages(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, min_human_turns=6, keep_recent=4)
+        history = [_msg("user", "brief")]
+        for i in range(4):
+            history += [
+                _msg("assistant", f"step{i}"),
+                _msg("user", f"hub{i}", hub_message=True),
+            ]
+        history.append(_msg("assistant", "done"))
+        _wire_history(plugin, history, prompt_tokens=150_000)
+        self.assertTrue(plugin._should_compact(history))
+
+    def test_over_threshold_short_history_still_waits(self) -> None:
+        plugin = _make_plugin(token_threshold_k=100, min_human_turns=6, keep_recent=4)
+        history = [
+            _msg("user", "brief"),
+            _msg("assistant", "a"),
+            _msg("user", "hub", hub_message=True),
+            _msg("assistant", "b"),
+            _msg("user", "two"),
+        ]
+        _wire_history(plugin, history, prompt_tokens=150_000)
+        self.assertFalse(plugin._should_compact(history))
 
 
 class TestContextWidget(unittest.TestCase):

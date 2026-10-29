@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Context compaction: an agent over its context budget now compacts once it has
+  older messages to summarize, even before 6 human turns, so a hub agent that
+  works from one brief no longer rides over budget until the hard cap (#390).
 - Save paths under the Settings save buttons no longer break mid-word: the
   home folder reads as `~` and a long path shows its last folders, with the
   full path on hover (#371).
