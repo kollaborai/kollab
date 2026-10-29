@@ -47,7 +47,10 @@ def _number_words(n: int) -> str:
 
 def _spell(match: re.Match[str]) -> str:
     run = match.group()
-    return _number_words(int(run)) if run.isdigit() and len(run) <= 9 else run
+    # Seven to nine bare digits are an id or a phone number unless round (1000000).
+    if not run.isdigit() or len(run) > 9 or (len(run) > 6 and not run.endswith("000")):
+        return run
+    return _number_words(int(run))
 
 
 _STEPS = (

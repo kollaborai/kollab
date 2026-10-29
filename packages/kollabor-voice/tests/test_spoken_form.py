@@ -57,6 +57,10 @@ from kollabor_voice.spoken_form import spoken_form
         ("refs #374 and #123456", "refs 374 and 123456"),
         ("-5 degrees", "-5 degrees"),
         ("1234567890 bytes", "1234567890 bytes"),
+        ("Call 5551234 now", "Call 5551234 now"),
+        ("Order 123456789 shipped", "Order 123456789 shipped"),
+        ("2500000 users", "two million five hundred thousand users"),
+        ("900021 rows", "nine hundred thousand twenty-one rows"),
     ],
 )
 def test_reply_becomes_speakable(reply, spoken):
