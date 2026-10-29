@@ -102,6 +102,23 @@ async def test_signature_does_not_verify_for_a_different_key_or_a_changed_file(s
         verify(manifest, host.public_key)
 
 
+def test_a_phone_reaches_only_the_roots_the_app_calls():
+    # #368: widening this is a decision. The app calls each of these, nothing else.
+    assert phone_link.API_ROOTS == {
+        "sessions", "agents", "profiles", "workspaces", "mcp", "hub", "sidebar",
+        "rosters", "teams", "prompts", "phone-app",
+    }  # fmt: skip
+
+
+@pytest.mark.asyncio
+async def test_the_computers_own_roots_refuse_a_phone(setup_link, app_dir):  # noqa: F811
+    packet = await secure_phone(setup_link)
+    for path in ("/models", "/phonelink/invite", "/network/status", "/api/update/apply"):
+        identifier = secrets.token_hex(16)
+        result = await packet(op="start", id=identifier, method="GET", path=path, headers=[], size=0)
+        assert "available only on the computer" in result.get("error", ""), path
+
+
 @pytest.mark.asyncio
 async def test_phone_app_paths_are_read_only_and_confined(setup_link, app_dir):  # noqa: F811
     packet = await secure_phone(setup_link)

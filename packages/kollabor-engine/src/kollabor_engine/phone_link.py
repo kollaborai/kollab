@@ -54,9 +54,12 @@ PHONE_FRAME_MAX_BYTES = 256 * 1024
 _PHONE_FRAME_MAGIC = b"KLPZ1"
 _PHONE_FRAME_COMPRESSION_THRESHOLD = 512
 MAX_BODY = 8 * 1024 * 1024
+# The phone runs the full app (src/phonelink/app-main.tsx renders App): these are the
+# roots that app calls (#368). Everything else, PhoneLink management among it, is the
+# computer's only.
 API_ROOTS = frozenset(
     {
-        "sessions", "agents", "profiles", "models", "workspaces", "mcp", "hub", "sidebar", "rosters", "teams",
+        "sessions", "agents", "profiles", "workspaces", "mcp", "hub", "sidebar", "rosters", "teams",
         "prompts", "phone-app",
     }
 )

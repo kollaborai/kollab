@@ -36,6 +36,12 @@ capability endpoint before offering a QR code.
   generates its own identity and keeps it on that phone.
 - Scanning requests access. Only an explicit local approval pins that phone's
   key. An invitation admits at most one phone and expires after five minutes.
+- A phone runs the full app and reaches the engine roots that app calls:
+  `sessions`, `agents`, `profiles`, `workspaces`, `mcp`, `hub`, `sidebar`,
+  `rosters`, `teams`, `prompts` and `phone-app` (`API_ROOTS` in
+  `kollabor_engine/phone_link.py`). Everything else is the computer's only:
+  PhoneLink management, the network and connect panels, and updates. A lost
+  phone keeps that reach until you revoke it on the computer.
 - A phone is a trusted app viewer/controller, not an agent-network member.
   It is not enrolled for network configuration sync or given an agent identity.
   Provider calls and tools still run on the computer; no credential setup is
@@ -154,6 +160,9 @@ served by the computer ([390](../screenshots/phone-access/phonelink-app-390.png)
   secrets, and the relay can no longer change what runs after it, but a
   malicious directory could serve a modified loader to a new phone. Use a
   directory you trust for the QR scan; compare the fingerprint on both screens.
+  A hash of the loader pinned in the QR would not close this: the directory
+  serves the page that checks it, too. The mobile app (#369) ships the loader
+  inside the app, which does.
 - The relay still sees only encrypted packets; it cannot sign for the computer.
 - The signature proves the computer built the file list, not that it is
   harmless; approve only phones you trust with the app's controls.
