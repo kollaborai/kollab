@@ -58,6 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   older messages to summarize, even before 6 human turns, when the provider
   reports its token count, so a hub agent that works from one brief no longer
   rides over budget until the hard cap (#390).
+- PhoneLink: a phone diagnostic the computer can never accept is answered
+  instead of failed, so the phone drops it rather than resending it ahead of
+  every later connection report; revoke and an unknown-phone revoke are tested
+  with their actor and cause (#366).
 - Save paths under the Settings save buttons no longer break mid-word: the
   home folder reads as `~` and a long path shows its last folders, with the
   full path on hover (#371).
