@@ -490,8 +490,11 @@ def _is_hard_blocked(argv: Sequence[str]) -> bool:
             return True  # -O<pager>: opens the matches in that program
         if subcommand == "branch" and any(token in {"-d", "--delete"} for token in rest):
             return True
-        if subcommand == "rm" and "--cached" not in rest and _recursive_or_forced(rest):  # --cached: index only
-            return True
+        if subcommand == "rm":
+            # --cached only touches the index; after "--" it is a pathspec, not the option
+            options = rest[: rest.index("--")] if "--" in rest else rest
+            if "--cached" not in options and _recursive_or_forced(rest):
+                return True
     if executable == "gh" and _gh_command(tokens) == ("pr", "merge"):
         return True
     if executable == "brew" and len(tokens) > 2 and tokens[1] == "services":

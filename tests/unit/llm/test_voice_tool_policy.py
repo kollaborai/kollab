@@ -72,6 +72,8 @@ def test_voice_policy_blocks_tools_outside_fixed_allowlist(tmp_path: Path, tool_
         "git rm -r -f src",
         "git rm -rf build",
         "git rm --force notes.md",
+        "git rm -r build -- --cached",
+        "git rm -r -f build -- --cached",
         "gh -R kollaborai/kollab pr merge 1",
         "gh --repo=kollaborai/kollab pr merge 1",
         "kollab --hub=stop all",
