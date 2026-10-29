@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new odds; your own picks never change (#373).
 
 ### Security
+- PhoneLink: the phone's private keys are non-extractable WebCrypto keys in
+  IndexedDB, so script on the page can no longer copy them out of storage.
+  A link saved before moves over at its next launch with no new pairing; a
+  browser without WebCrypto Ed25519 and X25519 keeps its seed, as before (#368).
 - PhoneLink: an approved phone reaches only the engine roots its app calls;
   `models`, which no route served, is gone from the list. The phone guide
   lists what a phone can reach and the parts only the computer has (#368).
