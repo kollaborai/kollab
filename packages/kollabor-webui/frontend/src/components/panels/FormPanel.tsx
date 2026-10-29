@@ -1,9 +1,12 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, Search } from "lucide-react";
 import type { PanelAction, PanelField, PanelForm, PanelSection } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PathText } from "@/components/ui/path-text";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { cn } from "@/lib/utils";
 import { FieldRenderer, type Draft } from "./FieldRenderer";
 import { confirmStep } from "./confirm";
 import { titleCase } from "./panel-model";
@@ -79,30 +82,104 @@ export function FormPanel({
   const flat = Boolean(panel.context) && panel.sections?.length === 1;
   const actions = panel.actions ?? [];
   const paths = panel.save_targets ?? {};
+  // A long form on a wide screen is a split view: section list left, the picked section's fields right.
+  const isMobile = useIsMobile();
+  const split = !small && !flat && !isMobile;
+  const [picked, setPicked] = useState<string | null>(null);
+  const current = sections.find((s) => s.id === picked) ?? sections[0];
+  // A failed save shows the first section with an error, so the message is never off screen.
+  useEffect(() => {
+    const failed = (panel.sections ?? []).find((s) => s.fields.some((f) => f.path in errors));
+    if (failed) setPicked(failed.id);
+  }, [errors, panel.sections]);
+
+  const fieldsOf = (section: PanelSection) =>
+    section.fields.map((field) => (
+      <FieldRenderer
+        key={field.path}
+        field={field}
+        draft={draft}
+        error={errors[field.path]}
+        disabled={busy}
+        onChange={onDraftChange}
+      />
+    ));
+  const search = (
+    <>
+      <div className={flat ? "hidden" : "relative"}>
+        <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
+        <Input
+          type="search"
+          aria-label="Search settings"
+          placeholder="Search settings"
+          className="pl-8"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </div>
+      {q ? (
+        <p className="text-muted-foreground text-xs" aria-live="polite">
+          Showing {shown} of {total} settings
+        </p>
+      ) : null}
+    </>
+  );
+  const noMatch = (
+    <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-6 text-center text-sm">
+      No settings match your search.
+    </p>
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {split ? (
+        <div className="flex min-h-0 flex-1 gap-3 px-6 pt-3 pb-3">
+          <nav aria-label="Settings sections" className="bg-sidebar flex w-56 shrink-0 flex-col rounded-lg">
+            <div className="flex flex-col gap-1 p-2">{search}</div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+              {sections.map((section) => {
+                const changed = section.fields.filter((f) => f.path in draft).length;
+                return (
+                  <button
+                    key={section.id}
+                    type="button"
+                    aria-current={section.id === current?.id ? "true" : undefined}
+                    onClick={() => setPicked(section.id)}
+                    className={cn(
+                      "hover:bg-accent flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
+                      section.id === current?.id && "bg-highlight/15",
+                      section.fields.some((f) => f.path in errors) && "text-destructive",
+                    )}
+                  >
+                    <span className="min-w-0 flex-1 break-words">{section.title}</span>
+                    <span className={cn("shrink-0 text-xs font-normal", changed ? "text-highlight" : "text-muted-foreground")}>
+                      {changed ? `${changed} changed` : section.fields.length}
+                    </span>
+                  </button>
+                );
+              })}
+              {!sections.length ? <p className="text-muted-foreground px-3 py-2 text-sm">No settings match your search.</p> : null}
+            </div>
+          </nav>
+          <section
+            aria-label={current?.title ?? "Settings"}
+            className="bg-card min-w-0 flex-1 overflow-y-auto rounded-lg px-4 pb-2"
+          >
+            {current ? (
+              <>
+                <h3 className="pt-3 pb-1 text-sm font-medium">{current.title}</h3>
+                {fieldsOf(current)}
+              </>
+            ) : null}
+          </section>
+        </div>
+      ) : (
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-3 sm:px-6">
         {/* Where the dialog sits on a fractional pixel, the scroller's clip edge and this box's edge snap a device
             row apart and a row of scrolled settings showed above the search; the 1px shadow in the box's own
             colour covers that row. */}
         <div className="bg-background sticky top-0 z-10 flex flex-col gap-1 pt-3 pb-3 shadow-[0_-1px_0_var(--color-background)]">
-          <div className={flat ? "hidden" : "relative"}>
-            <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
-            <Input
-              type="search"
-              aria-label="Search settings"
-              placeholder="Search settings"
-              className="pl-8"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
-          {q ? (
-            <p className="text-muted-foreground text-xs" aria-live="polite">
-              Showing {shown} of {total} settings
-            </p>
-          ) : null}
+          {search}
         </div>
 
         <div className="flex flex-col gap-2">
@@ -112,16 +189,7 @@ export function FormPanel({
             if (flat) {
               return (
                 <div key={section.id} className="px-3">
-                  {section.fields.map((field) => (
-                    <FieldRenderer
-                      key={field.path}
-                      field={field}
-                      draft={draft}
-                      error={errors[field.path]}
-                      disabled={busy}
-                      onChange={onDraftChange}
-                    />
-                  ))}
+                  {fieldsOf(section)}
                 </div>
               );
             }
@@ -141,28 +209,14 @@ export function FormPanel({
                     {section.fields.length}
                   </span>
                 </summary>
-                <div className="px-3 pb-1">
-                  {section.fields.map((field) => (
-                    <FieldRenderer
-                      key={field.path}
-                      field={field}
-                      draft={draft}
-                      error={errors[field.path]}
-                      disabled={busy}
-                      onChange={onDraftChange}
-                    />
-                  ))}
-                </div>
+                <div className="px-3 pb-1">{fieldsOf(section)}</div>
               </details>
             );
           })}
-          {!sections.length ? (
-            <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-6 text-center text-sm">
-              No settings match your search.
-            </p>
-          ) : null}
+          {!sections.length ? noMatch : null}
         </div>
       </div>
+      )}
 
       <footer className="bg-muted/30 flex shrink-0 flex-col gap-2 px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:px-6">
         <p className="text-muted-foreground text-xs sm:pt-2" aria-live="polite">
@@ -198,12 +252,7 @@ export function FormPanel({
                       : buttonLabel(action, target)}
                 </Button>
                 {target && paths[target] ? (
-                  <span
-                    className="text-muted-foreground text-[0.6875rem] break-all"
-                    title={paths[target] ?? undefined}
-                  >
-                    {paths[target]}
-                  </span>
+                  <PathText path={paths[target]} tail={3} className="text-muted-foreground text-[0.6875rem]" />
                 ) : null}
               </div>
             )),

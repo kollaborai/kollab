@@ -14,6 +14,7 @@ from kollabor.panels import (
     list_panels,
     require_panel,
 )
+from kollabor.panels.base import display_path
 from kollabor.panels.config import apply_config_changes
 from kollabor_config.managed_config import ManagedConfig, write_managed_config
 from kollabor_config.secrets import is_secret_path
@@ -158,7 +159,7 @@ def test_save_writes_each_key_notifies_and_returns_the_fresh_panel(home):
     assert config.saved == [(slider["path"], new, "global")]
     config._notify_reload_callbacks.assert_called_once()
     assert fields_of(out["panel"])[slider["path"]]["value"] == new
-    assert str(home / ".kollab" / "config.json") in out["message"]
+    assert "to ~/.kollab/config.json" in out["message"]
 
 
 def test_hub_arrival_wake_is_a_dropdown_that_saves_to_the_folder(home):
@@ -311,3 +312,10 @@ def test_apply_config_changes_reports_a_failed_write_and_skips_notify():
     assert apply_config_changes(config, {"a.b": 1}, "local") is False
     config._notify_reload_callbacks.assert_not_called()
     assert apply_config_changes(config, {}, "local") is True
+
+
+def test_display_path_writes_only_the_home_directory_as_tilde(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "me"))
+    assert display_path(tmp_path / "me" / ".kollab" / "config.json") == "~/.kollab/config.json"
+    assert display_path(tmp_path / "me") == "~"
+    assert display_path(tmp_path / "me2" / "x") == str(tmp_path / "me2" / "x")

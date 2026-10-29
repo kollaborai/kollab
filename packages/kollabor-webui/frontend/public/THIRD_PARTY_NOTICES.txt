@@ -1,0 +1,5 @@
+Third-party software in this web bundle under terms other than MIT/ISC/BSD:
+
+@paper-design/shaders 0.0.76 (https://github.com/paper-design/shaders)
+  PolyForm Shield License 1.0.0
+  https://polyformproject.org/licenses/shield/1.0.0

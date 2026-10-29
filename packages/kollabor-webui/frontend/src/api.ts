@@ -7,6 +7,11 @@ export type PhoneLinkState = {
 };
 export type PhoneLinkOffer = { id: string; name: string; expires_at: number; fingerprint: string; link: string; qr_svg: string };
 
+const phoneLinkHeaders = (confirmationShown = false) => ({
+  "X-Kollab-Client": "webui",
+  ...(confirmationShown ? { "X-Kollab-Confirmation-Shown": "true" } : {}),
+});
+
 export type Session = {
   /** A halt waiter's line ("Network halted by mac. Resume needs ..."): the chat runs no turn. */
   halted?: string;
@@ -416,20 +421,21 @@ export type NetworkWorkspaceGroup = { label: string; agents: NetworkAgent[] };
 export type NetworkDeviceGroup = { device: string; workspaces: NetworkWorkspaceGroup[] };
 
 /** One network this device belongs to (#158): its devices grouped by workspace.
- * `live: false`: no agent here carries it now, so its rows are the last roster
- * seen and opening one first starts an agent in `folder`. */
+ * `live: false` means no local agent answered the network probe; it does not
+ * imply that no local agent is running. */
 export type NetworkGroup = {
   id: string;
   name: string;
   trust?: string;
   live?: boolean;
   folder?: string;
+  /** A non-solo local agent exists in this network's hub, or null if unknown. */
+  local_agent_running?: boolean | null;
   devices: NetworkDeviceGroup[];
 };
 
 /** This computer's relay name and the agents on other computers; `remote` is empty off a network.
- * `live: false`: no agent here is on the network, so `remote` is the last roster seen and opening
- * one first starts an agent in `folder` to carry the network.
+ * `live: false`: no local agent answered the network probe, so `remote` is the last roster seen.
  * Multi-network (#158): `networks` groups those rows per membership
  * (NETWORKS > DEVICES > WORKSPACES > AGENTS) and `contacts` lists accepted
  * knock contacts; an engine without them falls back to the flat fields. */
@@ -438,6 +444,7 @@ export type AgentNetwork = {
   remote: NetworkAgent[];
   live?: boolean;
   folder?: string;
+  local_agent_running?: boolean | null;
   networks?: NetworkGroup[];
   contacts?: ContactPeer[];
 };
@@ -967,19 +974,46 @@ export class EngineApi {
   }
 
   phoneLinkState(refresh = false) {
-    return this.json<PhoneLinkState>(refresh ? "/phonelink/refresh" : "/phonelink", { method: refresh ? "POST" : "GET", cache: "no-store" });
+    return this.json<PhoneLinkState>(
+      refresh ? "/phonelink/refresh" : "/phonelink",
+      {
+        method: refresh ? "POST" : "GET",
+        headers: phoneLinkHeaders(),
+        cache: "no-store",
+      },
+    );
   }
 
   linkPhone(name: string) {
-    return this.json<PhoneLinkOffer>("/phonelink/phones", { method: "POST", body: JSON.stringify({ name }), cache: "no-store" });
+    return this.json<PhoneLinkOffer>("/phonelink/phones", {
+      method: "POST",
+      headers: phoneLinkHeaders(),
+      body: JSON.stringify({ name }),
+      cache: "no-store",
+    });
   }
 
-  approvePhoneLink(id: string, key: string) {
-    return this.json<PhoneLinkState>(`/phonelink/phones/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ key }), cache: "no-store" });
+  approvePhoneLink(id: string, key: string, confirmationShown = false) {
+    return this.json<PhoneLinkState>(
+      `/phonelink/phones/${encodeURIComponent(id)}/approve`,
+      {
+        method: "POST",
+        headers: phoneLinkHeaders(confirmationShown),
+        body: JSON.stringify({ key }),
+        cache: "no-store",
+      },
+    );
   }
 
-  revokePhoneLink(id: string) {
-    return this.json<PhoneLinkState>(`/phonelink/phones/${encodeURIComponent(id)}`, { method: "DELETE", cache: "no-store" });
+  revokePhoneLink(id: string, confirmationShown = false) {
+    return this.json<PhoneLinkState>(
+      `/phonelink/phones/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+        headers: phoneLinkHeaders(confirmationShown),
+        cache: "no-store",
+      },
+    );
   }
 
   /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */

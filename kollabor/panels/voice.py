@@ -18,7 +18,14 @@ from kollabor_voice.speech_settings import (
     load_speech_preferences as load_preferences,
 )
 
-from .base import PanelError, error_result, make_field, ok_result, unknown_action
+from .base import (
+    PanelError,
+    display_path,
+    error_result,
+    make_field,
+    ok_result,
+    unknown_action,
+)
 from .config import validate_config_changes
 
 TITLE = "Voice Configuration"
@@ -226,7 +233,7 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     "preferences_path",
                     "label",
                     "Preferences File",
-                    value=str(service_root() / "preferences.json"),
+                    value=display_path(service_root() / "preferences.json"),
                     help="Saved for every chat on this device; independent of Project and Global configuration.",
                 ),
             ],
@@ -315,7 +322,7 @@ class VoicePanel:
             "actions": [
                 {"id": "save", "label": "Save for This Device", "targets": ["device"]}
             ],
-            "save_targets": {"device": str(service_root() / "preferences.json")},
+            "save_targets": {"device": display_path(service_root() / "preferences.json")},
         }
 
     async def act(self, ctx: Any, action: str, payload: dict[str, Any]) -> dict:

@@ -21,6 +21,13 @@ export type GemLookVocabulary = {
   birthFaces: readonly string[];
   birthHats: readonly string[];
   birthColors: readonly (readonly [number, number, number])[];
+  /** The coat a gem is born with (gem_appearance.py BIRTH_*): styles without
+   * "none", hair in natural shades, fur in its own or a natural color.
+   * Absent, a gem the engine never rolled wears no coat. */
+  birthHairs?: readonly string[];
+  birthFurs?: readonly string[];
+  birthHairColors?: readonly (readonly [number, number, number])[];
+  birthFurColors?: readonly LookColor[];
 };
 
 export type ResolvedGemLook = {
@@ -89,6 +96,45 @@ export function drawn<T>(key: string, salt: string, pool: readonly T[]): T | und
   return best;
 }
 
+/** The share of gems born furry, then born with hair; the rest are born bare.
+ * The engine's roll uses the same shares (gem_appearance.py, kept in step by
+ * the engine's appearance tests). */
+export const BORN_FUR_SHARE = 0.85;
+export const BORN_HAIR_SHARE = 0.1;
+
+/**
+ * The coat a gem is born with when the engine never rolled one: a fixed draw
+ * from its key at the birth odds — furry BORN_FUR_SHARE of keys, then hair
+ * BORN_HAIR_SHARE, bare the rest — the same draw the engine's roll makes
+ * (gem_appearance.py `_birth_coat`), so a gem dresses alike on every device.
+ */
+function bornCoat(
+  key: string | null | undefined,
+  vocabulary: GemLookVocabulary,
+): {
+  hair?: string;
+  /** The birth pools hold readonly shades; the engine's LookColor takes them as number[]. */
+  hairColor?: LookColor | readonly [number, number, number];
+  fur?: string;
+  furColor?: LookColor;
+} {
+  if (!key) return {};
+  const share = fnv(`coat:${key}`) / 2 ** 32;
+  if (share < BORN_FUR_SHARE && vocabulary.birthFurs?.length) {
+    return {
+      fur: drawn(key, "fur", vocabulary.birthFurs),
+      furColor: drawn(key, "furColor", vocabulary.birthFurColors ?? []),
+    };
+  }
+  if (share < BORN_FUR_SHARE + BORN_HAIR_SHARE && vocabulary.birthHairs?.length) {
+    return {
+      hair: drawn(key, "hair", vocabulary.birthHairs),
+      hairColor: drawn(key, "hairColor", vocabulary.birthHairColors ?? []),
+    };
+  }
+  return {};
+}
+
 const isColor = (value: unknown): value is [number, number, number] =>
   Array.isArray(value) &&
   value.length === 3 &&
@@ -110,9 +156,10 @@ function knobSettings(value: unknown, ranges: Readonly<Record<string, readonly [
 
 /**
  * One gem's look (`key` from lookKey): the user's Gem Studio picks over the
- * eyes, hat and color it was born with. The engine rolls a pool gem's eyes
- * and hat the first time it sees it alive in its own folder; every other
- * agent is born with a fixed draw from its key. Ids outside the vocabulary are
+ * eyes, hat, coat and color it was born with. The engine rolls a pool gem's
+ * eyes, hat and coat the first time it sees it alive in its own folder; every
+ * other agent is born with the same fixed draw from its key (bornCoat and
+ * drawn, mirrored by the engine's roll). Ids outside the vocabulary are
  * skipped so the renderer's defaults apply (a newer engine file read by an
  * older web UI, say).
  */
@@ -143,15 +190,19 @@ export function resolveGemLook(
     const cut = known(own.cut, vocabulary.cuts);
     if (cut) look.cut = cut;
   }
+  // The engine's coat roll, or the same fixed draw it would make for a gem it
+  // never rolled (a roll of bare, hair:"none", is a roll: it is not redrawn).
+  const coat = rolled.hair === undefined && rolled.fur === undefined ? bornCoat(key, vocabulary) : {};
   if (vocabulary.hairs) {
-    const hair = known(own.hair, vocabulary.hairs) ?? known(rolled.hair, vocabulary.hairs);
-    const hairColor = lookColor(own.hairColor) ?? lookColor(rolled.hairColor);
+    const hair =
+      known(own.hair, vocabulary.hairs) ?? known(rolled.hair, vocabulary.hairs) ?? known(coat.hair, vocabulary.hairs);
+    const hairColor = lookColor(own.hairColor) ?? lookColor(rolled.hairColor) ?? lookColor(coat.hairColor);
     if (hair) look.hair = hair;
     if (hairColor) look.hairColor = hairColor;
   }
   if (vocabulary.furs) {
-    const fur = known(own.fur, vocabulary.furs) ?? known(rolled.fur, vocabulary.furs);
-    const furColor = lookColor(own.furColor) ?? lookColor(rolled.furColor);
+    const fur = known(own.fur, vocabulary.furs) ?? known(rolled.fur, vocabulary.furs) ?? known(coat.fur, vocabulary.furs);
+    const furColor = lookColor(own.furColor) ?? lookColor(rolled.furColor) ?? lookColor(coat.furColor);
     if (fur) look.fur = fur;
     if (furColor) look.furColor = furColor;
   }
