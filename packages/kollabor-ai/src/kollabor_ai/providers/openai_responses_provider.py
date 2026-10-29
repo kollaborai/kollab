@@ -610,6 +610,7 @@ class OpenAIResponsesProvider(LLMProvider):
                 for item in output_items
                 if isinstance(item, dict)
                 and item.get("type") == "image_generation_call"
+                and not (item.get("status") == "failed" and not item.get("result"))
             ]
             if image_items and len(unified.get_generated_images()) != len(image_items):
                 raise ProviderError(

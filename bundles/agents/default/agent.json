@@ -3,7 +3,8 @@
   "tools": ["*"],
   "skills": [
     "dead-code",
-    "explore-agent-system"
+    "explore-agent-system",
+    "kollabor-harness"
   ],
   "vault_enabled": true
 }

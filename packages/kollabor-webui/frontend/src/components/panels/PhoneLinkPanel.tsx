@@ -16,7 +16,7 @@ type PhoneLinkPanelProps = {
 export function PhoneLinkPanel(props: PhoneLinkPanelProps) {
   if (window.location.pathname.startsWith("/relay/v1/phone/")) {
     return (
-      <section className="mx-auto grid max-w-2xl gap-3 px-6 py-6">
+      <section className="grid w-full gap-3 px-6 py-6">
         <h3 className="text-lg font-semibold">
           Manage PhoneLink on Your Computer
         </h3>
@@ -104,7 +104,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
       <section
         aria-label="PhoneLink"
-        className="mx-auto grid max-w-2xl min-w-0 gap-5 pb-3"
+        className="grid w-full min-w-0 gap-5 pb-3"
       >
         <div className="min-w-0">
           <h3 className="text-lg font-semibold">PhoneLink</h3>
@@ -113,7 +113,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
             running on this computer.
           </p>
         </div>
-        <ol className="grid list-decimal gap-4 pl-5 text-sm">
+        <ol className="grid list-decimal gap-6 pl-5 text-sm xl:grid-cols-3">
           <li className="min-w-0 pl-1">
             <div className="grid min-w-0 flex-1 gap-3">
               <div>
@@ -338,7 +338,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                       )
                         return;
                       void run(async () => {
-                        setState(await api.revokePhoneLink(phone.id));
+                        setState(await api.revokePhoneLink(phone.id, phone.linked));
                         if (offer?.id === phone.id) setOffer(null);
                       });
                     }}
@@ -366,7 +366,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                       onClick={() =>
                         void run(async () => {
                           setState(
-                            await api.approvePhoneLink(phone.id, pending.key),
+                            await api.approvePhoneLink(phone.id, pending.key, true),
                           );
                         })
                       }

@@ -7,7 +7,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
@@ -613,7 +613,10 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
         plugin._compaction_status = "paused"
         plugin._conversation_logger.session_id = "new-session"
 
-        plugin._sync_session_budget()
+        renderer = MagicMock()
+        plugin.renderer = renderer
+        with patch("plugins.context_compaction_plugin.publish_semantic") as publish:
+            plugin._sync_session_budget()
 
         self.assertEqual(plugin._turn_count, 0)
         self.assertEqual(plugin._compaction_round, 0)
@@ -625,6 +628,9 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
         self.assertIsNone(plugin._token_estimate_scale)
         self.assertIsNone(plugin._last_hard_cap_guard_turn)
         self.assertEqual(plugin._compaction_status, "idle")
+        publish.assert_any_call(
+            renderer, "context_compaction_status", status="idle", message="", action=""
+        )
 
     def test_session_budget_restores_turns_and_age_from_session_stats(self):
         import time

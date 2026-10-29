@@ -6,6 +6,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from ..phone_link import PhoneLinkError
+from ..phonelink_events import actor_from_request
 
 
 def _is_loopback(host: str) -> bool:
@@ -27,8 +28,10 @@ def _guard(request: Request) -> None:
 router = APIRouter(prefix="/phonelink", tags=["phonelink"])
 
 
-async def _call(request, method, *args, **kwargs):
+async def _call(request, method, *args, actor_route: str | None = None, **kwargs):
     _guard(request)
+    if actor_route is not None:
+        kwargs["actor"] = actor_from_request(request, actor_route)
     try:
         value = await getattr(request.app.state.phone_link, method)(*args, **kwargs)
     except PhoneLinkError as exc:
@@ -42,24 +45,47 @@ async def _call(request, method, *args, **kwargs):
 
 @router.get("")
 async def status(request: Request):
-    return await _call(request, "status")
+    return await _call(request, "status", actor_route="/phonelink")
+
+
+@router.get("/events")
+async def events(request: Request):
+    return await _call(request, "event_history")
 
 
 @router.post("/refresh")
 async def refresh(request: Request):
-    return await _call(request, "status", refresh=True)
+    return await _call(
+        request, "status", refresh=True, actor_route="/phonelink/refresh"
+    )
 
 
 @router.post("/phones")
 async def offer(request: Request, body: dict = Body(default_factory=dict)):
-    return await _call(request, "offer", body.get("name", ""))
+    return await _call(
+        request,
+        "offer",
+        body.get("name", ""),
+        actor_route="/phonelink/phones",
+    )
 
 
 @router.post("/phones/{identifier}/approve")
 async def approve(request: Request, identifier: str, body: dict = Body(default_factory=dict)):
-    return await _call(request, "approve", identifier, body.get("key", ""))
+    return await _call(
+        request,
+        "approve",
+        identifier,
+        body.get("key", ""),
+        actor_route="/phonelink/phones/{identifier}/approve",
+    )
 
 
 @router.delete("/phones/{identifier}")
 async def revoke(request: Request, identifier: str):
-    return await _call(request, "revoke", identifier)
+    return await _call(
+        request,
+        "revoke",
+        identifier,
+        actor_route="/phonelink/phones/{identifier}",
+    )
