@@ -9623,6 +9623,24 @@ class HubPlugin(BasePlugin):
         failures.append((time.time(), f"{target}: {reason}"))
         del failures[:-10]
         logger.warning("hub dispatch failed: %s: %s", target, reason)
+        alerted = getattr(self, "_dispatch_alerted", None)
+        if alerted is None:
+            alerted = self._dispatch_alerted = {}
+        now = time.time()
+        if now - alerted.get(target, 0.0) < 300:
+            return
+        alerted[target] = now
+        tap = getattr(self, "_display_tap", None)
+        if tap is not None:
+            try:
+                tap.publish(
+                    {
+                        "type": "supervisor_alert",
+                        "message": f"A message to {target} was not delivered: {reason}",
+                    }
+                )
+            except Exception:
+                logger.debug("dispatch failure publish failed", exc_info=True)
 
     def _dispatch_failure_lines(self) -> List[str]:
         failures = getattr(self, "_dispatch_failures", None) or []

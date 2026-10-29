@@ -70,6 +70,21 @@ async def test_health_status_handler_returns_the_sections_the_tui_renders(tmp_pa
     }
 
 
+def test_dispatch_failure_publishes_one_alert_per_target_per_window(tmp_path):
+    plugin = _coordinator(tmp_path)
+    plugin._display_tap = MagicMock()
+
+    plugin._record_dispatch_failure("lapis", "not online, no match")
+    plugin._record_dispatch_failure("lapis", "not online, no match")
+    plugin._record_dispatch_failure("ruby", "socket send failed, queued")
+
+    publish = plugin._display_tap.publish
+    assert publish.call_count == 2
+    first, second = [c.args[0]["message"] for c in publish.call_args_list]
+    assert "lapis" in first
+    assert "ruby" in second
+
+
 def test_health_status_frame_round_trips_over_a_real_socket():
     async def run():
         async def on_health():
