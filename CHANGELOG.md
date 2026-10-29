@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Context compaction: a reply that hit the length limit and was continued no longer counts its prompt twice. The doubled count could trip the hard cap and cut a long reply to 8,000 characters, refs #396
+- Voice: a spoken yes can no longer run a recursive or forced `git rm` in any spelling, abbreviations such as `--f` included (`--cached` before any `--` still works), or `kollab --hub halt`, and `gh -R <repo> pr merge`, `kollab --hub=stop` and `--restart=...` are refused like their plain forms, refs #295
+- Goals: an active `/goal` whose loop stopped (the provider was down, or a `/resume` into its conversation) is picked up again within a minute once no turn is running, refs #389
 - Context compaction: a round keeps fewer recent messages verbatim, down to 2, when they would fill more than a quarter of the compaction threshold, so a few large messages or tool results are summarized instead of kept, refs #390
 - Context compaction: an agent over its context budget now compacts once it has
   older messages to summarize, even before 6 human turns, when the provider

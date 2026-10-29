@@ -12,7 +12,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from kollabor.goals.driver import GoalTurnDriver
-from kollabor.goals.service import GoalControl, GoalService
+from kollabor.goals.service import (
+    BoundaryContext,
+    GoalControl,
+    GoalService,
+    TurnOutcome,
+)
 from kollabor.state.goal_store import GoalStore
 
 
@@ -362,6 +367,158 @@ class DriverTests(unittest.TestCase):
         final = self.store.get(rec.goal_id)
         self.assertEqual(final.status, "paused")
         self.assertIn("artifact_missing", final.blocked_reason or "")
+
+    def _bus(self, coord, uid="conv-1"):
+        state = SimpleNamespace(get_conversation_uid=lambda: uid)
+        coord.event_bus = SimpleNamespace(
+            get_service=lambda name: state if name == "state_service" else None
+        )
+
+    def test_watchdog_schedules_a_stalled_active_goal(self):
+        goal_id = self._create()
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertEqual(driver.check_stalled(), goal_id)
+        self.assertEqual(started, [goal_id])
+
+    def test_watchdog_skips_a_goal_its_loop_is_driving(self):
+        goal_id = self._create()
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        driver._running_goals.add(goal_id)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_watchdog_skips_a_paused_goal(self):
+        goal_id = self._create()
+        self.service.pause(goal_id)
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_watchdog_never_continues_past_an_unsettled_attempt(self):
+        # a daemon that died mid-turn leaves its attempt dispatched
+        goal_id = self._create()
+        start = TurnOutcome(
+            turn_id="goal-start", origin="goal", status="ok", goal_id=goal_id
+        )
+        self.assertIsNotNone(
+            self.service.maybe_continue(goal_id, start, BoundaryContext())
+        )
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_a_turn_that_raises_settles_its_attempt(self):
+        goal_id = self._create()
+        driver, _coord = self._make_driver(turn_script=[[FakeResult("read", "x")]])
+
+        def boom(record: Any) -> str:
+            raise RuntimeError("render failed")
+
+        self.service.render_goal_context = boom
+        asyncio.run(driver.start(goal_id))
+        self.assertEqual(self.store.get(goal_id).status, "paused")
+        self.assertFalse(self.service._goal_turn_in_flight(goal_id))
+
+    def test_watchdog_leaves_other_conversations_alone(self):
+        self._create()
+        driver, coord = self._make_driver()
+        self._bus(coord, uid="conv-2")
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_watchdog_without_a_state_service_does_nothing(self):
+        self._create()
+        driver, _coord = self._make_driver()
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+
+    def test_watchdog_pickup_runs_a_goal_turn(self):
+        goal_id = self._create()
+        driver, coord = self._make_driver(turn_script=[[FakeResult("read", "x")]])
+        self._bus(coord)
+
+        async def tick() -> None:
+            self.assertEqual(driver.check_stalled(), goal_id)
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if self.store.get(goal_id).turn_count >= 1:
+                    return
+
+        asyncio.run(tick())
+        self.assertGreaterEqual(self.store.get(goal_id).turn_count, 1)
+
+    def test_boundary_counts_a_running_turn_as_pending_work(self):
+        driver, coord = self._make_driver()
+        qp = coord._queue_processor
+        self.assertFalse(driver._boundary_ctx().pending_work)
+        qp.is_processing = True
+        self.assertTrue(driver._boundary_ctx().pending_work)
+        qp.is_processing = False
+
+        async def locked() -> None:
+            qp._turn_lock = asyncio.Lock()
+            async with qp._turn_lock:
+                self.assertTrue(driver._boundary_ctx().pending_work)
+
+        asyncio.run(locked())
+
+    def test_watchdog_never_starts_a_goal_turn_over_a_running_turn(self):
+        # a user turn takes its message off the queue before it runs, so the
+        # queue is empty while it is in flight
+        goal_id = self._create()
+        driver, coord = self._make_driver(turn_script=[[FakeResult("read", "x")]])
+        self._bus(coord)
+        qp = coord._queue_processor
+        qp.is_processing = True
+
+        async def scenario() -> None:
+            self.assertEqual(driver.check_stalled(), goal_id)
+            await asyncio.sleep(0.05)
+            self.assertEqual(self.store.get(goal_id).turn_count, 0)
+            self.assertIn(goal_id, driver._yielded_goals)
+            qp.is_processing = False  # the user's turn settles
+            driver.wake_yielded()
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if self.store.get(goal_id).turn_count >= 1:
+                    return
+
+        asyncio.run(scenario())
+        self.assertGreaterEqual(self.store.get(goal_id).turn_count, 1)
+
+    def test_watch_keeps_running_after_a_failed_check(self):
+        driver, _coord = self._make_driver()
+        calls: list[int] = []
+
+        def boom() -> None:
+            calls.append(1)
+            raise RuntimeError("db locked")
+
+        driver.check_stalled = boom
+
+        async def run_briefly() -> None:
+            task = asyncio.get_running_loop().create_task(driver.watch(interval=0.01))
+            await asyncio.sleep(0.08)
+            task.cancel()
+
+        asyncio.run(run_briefly())
+        self.assertGreaterEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

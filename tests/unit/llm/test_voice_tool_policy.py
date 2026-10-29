@@ -68,6 +68,21 @@ def test_voice_policy_blocks_tools_outside_fixed_allowlist(tmp_path: Path, tool_
         "brew services restart kollab",
         "kollab --hub stop all",
         "kollab --reset-config",
+        "git rm -r docs",
+        "git rm -r -f src",
+        "git rm -rf build",
+        "git rm --force notes.md",
+        "git rm -r build -- --cached",
+        "git rm -r -f build -- --cached",
+        "git rm -r build --end-of-options --cached",
+        "git rm --f notes.md",
+        "git rm --forc notes.md",
+        "rm --rec build",
+        "gh -R kollaborai/kollab pr merge 1",
+        "gh --repo=kollaborai/kollab pr merge 1",
+        "kollab --hub=stop all",
+        "kollab --hub halt",
+        "kollab --reset-config=yes",
     ],
 )
 def test_voice_policy_hard_blocks_destructive_commands(tmp_path: Path, command: str):
@@ -78,6 +93,26 @@ def test_voice_policy_hard_blocks_destructive_commands(tmp_path: Path, command: 
     )
     assert decision.allowed is False
     assert decision.reason_code == "command_blocked"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git rm notes.md",
+        "git rm -r --cached build",
+        "git rm --cached -r -f build",
+        "git rm --cached -- -r",
+        "kollab --hub status",
+        "kollab --hub msg lapis stop",
+    ],
+)
+def test_voice_policy_safe_lookalikes_are_not_hard_blocked(tmp_path: Path, command: str):
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": command, "cwd": str(tmp_path)},
+        _voice_context(),
+        repository_root=tmp_path,
+    )
+    assert decision.reason_code != "command_blocked"
 
 
 def test_voice_policy_rejects_shell_composition_before_execution(tmp_path: Path):
