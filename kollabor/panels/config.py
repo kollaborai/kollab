@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 TITLE = "System Configuration"
 TARGETS = ("local", "global")
 MAX_TEXT_BYTES = 4096
+MAX_TEXTAREA_BYTES = 32 * 1024  # multi-line text: the voice prompt's own cap
 MAX_CHANGES = 500
 _LOADOUT_SECTION = "LLM Settings"
 
@@ -242,6 +243,11 @@ def validate_config_changes(
                 errors[path] = "must be text"
             elif len(value.encode("utf-8")) > MAX_TEXT_BYTES:
                 errors[path] = f"longer than {MAX_TEXT_BYTES} bytes"
+        elif field["type"] == "textarea":
+            if not isinstance(value, str):
+                errors[path] = "must be text"
+            elif len(value.encode("utf-8")) > MAX_TEXTAREA_BYTES:
+                errors[path] = f"longer than {MAX_TEXTAREA_BYTES} bytes"
         else:
             errors[path] = "read-only"
     return errors

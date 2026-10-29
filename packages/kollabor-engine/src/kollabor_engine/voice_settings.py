@@ -283,7 +283,11 @@ class VoiceSettingsService:
         return "agent-" + hashlib.sha256(agent_id.encode()).hexdigest()[:16]
 
     def get_prompt(self, agent_id: str | None) -> dict[str, str]:
-        text = self._store().get_override(PROMPT_BUNDLE, self._prompt_key(agent_id))
+        store = self._store()
+        text = store.get_override(PROMPT_BUNDLE, self._prompt_key(agent_id))
+        if text is None and agent_id:
+            # No prompt of its own: Settings -> Voice -> Voice Prompt (#295).
+            text = store.get_override(PROMPT_BUNDLE, "default")
         return {
             "text": text if text is not None else DEFAULT_PROMPT,
             "personality": self._value("personality"),
