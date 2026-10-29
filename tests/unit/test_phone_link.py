@@ -7,6 +7,7 @@ import json
 import secrets
 import sys
 import time
+import types
 
 import pytest
 import pytest_asyncio
@@ -535,6 +536,29 @@ async def test_session_change_and_replay_are_rejected(setup_link):
         await manager._receive(offer["id"], phone.public_key, "phone_http", {"packet": encrypted})
     host._set_peers({"type": "peers", "peers": [{"key": phone.public_key, "session": secrets.token_hex(16)}]})
     assert not manager.sessions and not manager.exchanges
+
+
+@pytest.mark.asyncio
+async def test_quiet_phone_is_logged_disconnected_once(setup_link):
+    manager, offer, host, phone, *_ = setup_link
+    manager.records["quiet-phone"] = {
+        "key": "phone-key",
+        "name": "My iPhone",
+        "network": "relay.example",
+        "expires": 0,
+    }
+    manager.sessions["quiet-phone"] = types.SimpleNamespace(
+        used=time.monotonic() - 46, last_request_at=time.time() - 46
+    )
+    manager._announce_idle_sessions()
+    manager._announce_idle_sessions()
+    history = await manager.event_history()
+    drops = [
+        e
+        for e in history["events"]
+        if e["event"] == "disconnected" and e.get("cause") == "idle_timeout"
+    ]
+    assert len(drops) == 1
 
 
 @pytest.mark.asyncio

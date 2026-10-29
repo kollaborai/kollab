@@ -23,6 +23,7 @@ const MAX_BODY = 8 * 1024 * 1024;
 const MAX_PHONE_DIAGNOSTICS = 32;
 const PHONE_DIAGNOSTIC_EVENTS = new Set([
   "pagehide",
+  "freeze",
   "visibility_hidden",
   "visibility_visible",
   "online",
@@ -306,7 +307,7 @@ export class PhoneTransport {
     if (
       Number.isSafeInteger(fields.retry_count) &&
       fields.retry_count! >= 0 &&
-      fields.retry_count! <= 1_000_000
+      fields.retry_count! <= 10_000
     )
       payload.retry_count = fields.retry_count;
     const last = this.diagnosticQueue[this.diagnosticQueue.length - 1];

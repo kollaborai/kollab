@@ -40,6 +40,7 @@ LIFECYCLE_EVENTS = frozenset(
 PHONE_DIAGNOSTIC_EVENTS = frozenset(
     {
         "pagehide",
+        "freeze",
         "visibility_hidden",
         "visibility_visible",
         "online",

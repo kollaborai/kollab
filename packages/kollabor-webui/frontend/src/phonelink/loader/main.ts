@@ -167,6 +167,7 @@ async function main() {
     });
     activeTransport = transport;
     window.addEventListener("pagehide", () => transport.reportDiagnostic("pagehide"), { once: true });
+    document.addEventListener("freeze", () => transport.reportDiagnostic("freeze"));
     document.addEventListener("visibilitychange", () =>
       transport.reportDiagnostic(
         document.visibilityState === "hidden" ? "visibility_hidden" : "visibility_visible",

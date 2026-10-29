@@ -219,6 +219,7 @@ class PhoneLink:
         self.records: dict[str, dict] = {}
         self.clients: dict[str, RelayClient] = {}
         self.sessions: dict[str, PhoneSession] = {}
+        self._idle_announced: set[str] = set()
         self.exchanges: dict[tuple[str, str], HttpExchange] = {}
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
@@ -501,6 +502,7 @@ class PhoneLink:
         network: str | None = None,
     ) -> None:
         session = self.sessions.pop(identifier, None)
+        self._idle_announced.discard(identifier)
         if session is not None:
             row = self.records.get(identifier, {})
             self._event(
@@ -522,6 +524,29 @@ class PhoneLink:
                 if exchange.task:
                     exchange.task.cancel()
                 self.exchanges.pop(key, None)
+
+    def _announce_idle_sessions(self) -> None:
+        """Log a linked phone once when it stops sending requests (the 45 s status() window)."""
+        now = time.monotonic()
+        for identifier, session in tuple(self.sessions.items()):
+            if now - session.used < 45 or identifier in self._idle_announced:
+                continue
+            self._idle_announced.add(identifier)
+            row = self.records.get(identifier, {})
+            self._event(
+                "disconnected",
+                identifier=identifier,
+                peer=row.get("key"),
+                cause="idle_timeout",
+                device_name=row.get("name"),
+                network=row.get("network"),
+                idle_seconds=now - session.used,
+                last_request_at=(
+                    int(session.last_request_at)
+                    if session.last_request_at is not None
+                    else None
+                ),
+            )
 
     async def _maintain(self) -> None:
         try:
@@ -553,6 +578,7 @@ class PhoneLink:
                             if exchange.task:
                                 exchange.task.cancel()
                             self.exchanges.pop(key, None)
+                    self._announce_idle_sessions()
                 # Saved phone approval is device-wide. A busy or absent agent
                 # daemon must not disconnect it, and connection attempts must
                 # never hold the lock needed to revoke another phone.
@@ -611,7 +637,8 @@ class PhoneLink:
                             "invite_opened",
                             identifier=identifier,
                             peer=peer_item["key"],
-                            actor=actor,
+                            # The phone opened the invite; a web UI poll only noticed it.
+                            actor=None,
                             record_state="pending",
                         )
                         self._event(
@@ -914,6 +941,7 @@ class PhoneLink:
             raise RelayError("invalid phone session packet") from None
         session.used = time.monotonic()
         session.last_request_at = time.time()
+        self._idle_announced.discard(identifier)
         self._touch(identifier, row)
         try:
             result = await self._http(
