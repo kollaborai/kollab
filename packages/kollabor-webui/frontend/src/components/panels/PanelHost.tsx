@@ -750,7 +750,7 @@ export function PanelHost({
       >
         <TabsList
           aria-label="Settings sections"
-          className="mx-4 w-auto shrink-0 justify-start overflow-x-auto [scrollbar-width:none] sm:mx-6 [&::-webkit-scrollbar]:hidden"
+          className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 md:h-9 md:flex-nowrap md:overflow-x-auto [&::-webkit-scrollbar]:hidden"
         >
           {SETTINGS_TABS.filter((item) => sessionId || item.id === "network").map((item) => (
             <TabsTrigger
