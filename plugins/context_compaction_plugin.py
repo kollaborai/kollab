@@ -1129,7 +1129,6 @@ class ContextCompactionPlugin(BasePlugin):
         self._last_summarization_model = None
         self._last_compaction_duration_seconds = None
         self._set_compaction_status("idle", "")
-        self._compaction_status_message = ""
         self._session_turn_budget_warned = False
         self._persist_session_budget_state()
 

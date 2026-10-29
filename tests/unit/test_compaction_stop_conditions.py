@@ -150,8 +150,10 @@ class TestCannotShrinkStop(unittest.TestCase):
         plugin = _make_plugin(history, reported=44_000)
         plugin._compaction_status = "paused"
 
-        self.assertFalse(plugin._should_compact(history))
+        with patch("plugins.context_compaction_plugin.publish_semantic") as publish:
+            self.assertFalse(plugin._should_compact(history))
         self.assertEqual(plugin._compaction_status, "idle")
+        self.assertEqual(publish.call_args.kwargs["status"], "idle")
 
 
 class TestBoundedCoordinationDeferral(unittest.TestCase):
