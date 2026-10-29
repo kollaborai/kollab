@@ -6,6 +6,7 @@ from typing import Any
 
 from kollabor_voice.bootstrap import prepared_runtime_python
 from kollabor_voice.control import service_root
+from kollabor_voice.responder import RESPONDER_KEY
 from kollabor_voice.speech_settings import (
     KOKORO_VOICES,
     MAX_CONTEXT_LINES,
@@ -26,7 +27,7 @@ from .base import (
     ok_result,
     unknown_action,
 )
-from .config import validate_config_changes
+from .config import apply_config_changes, validate_config_changes
 
 TITLE = "Voice Configuration"
 
@@ -51,7 +52,57 @@ def setup_status() -> str:
     return "Not installed yet"
 
 
-def voice_sections(plugin, live=None) -> list[dict]:
+def _llm_handle(ctx, plugin):
+    """The profile manager (loadout listing) and config service, or Nones.
+
+    The web panel ctx carries them directly; the terminal /voice config view
+    reaches the same objects through the event bus's llm_service.
+    """
+    profile_manager = getattr(ctx, "_profile_manager", None)
+    config_service = getattr(getattr(ctx, "_llm_service", None), "config", None)
+    if profile_manager is None or config_service is None:
+        bus = getattr(ctx, "_event_bus", None) or getattr(plugin, "_event_bus", None)
+        service = bus.get_service("llm_service") if bus is not None else None
+        profile_manager = profile_manager or getattr(service, "profile_manager", None)
+        config_service = config_service or getattr(service, "config", None)
+    return profile_manager, config_service
+
+
+def _quick_model_choices(ctx, plugin):
+    """Quick Model options: Same as Chat, then every loadout across providers.
+
+    The same list /llm shows: explicit loadouts, then each configured
+    provider's models (registry plus cached live catalog — how an OpenRouter
+    fast model appears). A saved name that no longer resolves stays listed so
+    the current value is never hidden.
+    """
+    profile_manager, config_service = _llm_handle(ctx, plugin)
+    current = ""
+    labels = {"": "Same as Chat"}
+    agents: set[str] = set()
+    if config_service is not None:
+        value = config_service.get(RESPONDER_KEY, "")
+        if isinstance(value, str) and value.strip():
+            current = value.strip()
+    if profile_manager is not None:
+        from kollabor_ai.loadout_manager import LoadoutManager
+
+        for loadout in LoadoutManager(profile_manager, config_service).list_loadouts():
+            profile = profile_manager.get_profile(loadout.provider_profile)
+            if profile is not None and profile.get_provider() == "acp":
+                agents.add(loadout.name)  # an agent CLI cannot answer one voice turn
+                continue
+            labels.setdefault(
+                loadout.name, f"{loadout.name} · {loadout.provider_profile}"
+            )
+    if current in agents:
+        current = ""  # the voice turn ignores it, so the panel shows what runs
+    if current and current not in labels:
+        labels[current] = f"{current} · missing provider profile"
+    return current, list(labels), labels
+
+
+def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
     """One field definition for both interfaces and both speech engines."""
     preferences = load_preferences()
     state = {**plugin.status(), **(live or {})}
@@ -60,6 +111,7 @@ def voice_sections(plugin, live=None) -> list[dict]:
     speech = state.get("speech", {})
     transcription = state.get("transcription", {})
     engines = available_stt_engines()
+    quick_model, quick_options, quick_labels = _quick_model_choices(ctx, plugin)
     return [
         {
             "id": "setup",
@@ -93,6 +145,18 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     step=1,
                     help="Previous microphone transcript lines sent to the agent with each new utterance (1–50).",
                 ),
+                make_field(
+                    "quick_model",
+                    "dropdown",
+                    "Quick Model",
+                    value=quick_model,
+                    options=quick_options,
+                    option_labels=quick_labels,
+                    help=(
+                        "Answers when you talk; typed messages use this chat's model. "
+                        "Saved in ~/.kollab/config.json."
+                    ),
+                ),
             ],
         },
         {
@@ -121,8 +185,10 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     value=preferences["tts_engine"],
                     options=list(TTS_ENGINES),
                     option_labels=TTS_ENGINES,
-                    help=("Local synthesis. Selecting VibeVoice prepares its isolated runtime "
-                          "and warms the model in the background."),
+                    help=(
+                        "Local synthesis. Selecting VibeVoice prepares its isolated runtime "
+                        "and warms the model in the background."
+                    ),
                 ),
                 make_field(
                     "kokoro_voice",
@@ -152,16 +218,20 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     "text_input",
                     "Custom VibeVoice Prompt",
                     value=preferences["vibevoice_prompt"],
-                    help=("Optional absolute path to your trusted cached .pt voice prompt. "
-                          "Leave blank to use the selected preset."),
+                    help=(
+                        "Optional absolute path to your trusted cached .pt voice prompt. "
+                        "Leave blank to use the selected preset."
+                    ),
                 ),
                 make_field(
                     "vibevoice_model",
                     "text_input",
                     "VibeVoice Model",
                     value=preferences["vibevoice_model"],
-                    help=("Microsoft VibeVoice-Realtime-0.5B or an existing absolute model directory. "
-                          "The default model download is pinned."),
+                    help=(
+                        "Microsoft VibeVoice-Realtime-0.5B or an existing absolute model directory. "
+                        "The default model download is pinned."
+                    ),
                 ),
                 make_field(
                     "vibevoice_device",
@@ -311,18 +381,20 @@ class VoicePanel:
         live = None
         try:
             live = await VoiceClient().call("status")
-        except (OSError, TimeoutError, ValueError, RuntimeError):
+        except OSError, TimeoutError, ValueError, RuntimeError:
             pass
         return {
             "panel": self.name,
             "kind": self.kind,
             "title": TITLE,
             "scope_note": "Saved for every chat on the device running Kollab. Saving does not enable the microphone.",
-            "sections": voice_sections(voice_plugin(ctx), live),
+            "sections": voice_sections(voice_plugin(ctx), live, ctx),
             "actions": [
                 {"id": "save", "label": "Save for This Device", "targets": ["device"]}
             ],
-            "save_targets": {"device": display_path(service_root() / "preferences.json")},
+            "save_targets": {
+                "device": display_path(service_root() / "preferences.json")
+            },
         }
 
     async def act(self, ctx: Any, action: str, payload: dict[str, Any]) -> dict:
@@ -349,6 +421,17 @@ class VoicePanel:
             )
         if errors:
             return error_result("Some voice settings were not saved", errors)
+        # Quick Model is a config key (a loadout name), not a speech preference.
+        quick = changes.pop("quick_model", None)
+        if quick is not None:
+            _, config_service = _llm_handle(ctx, voice_plugin(ctx))
+            if config_service is None or not apply_config_changes(
+                config_service, {RESPONDER_KEY: quick}, "global"
+            ):
+                return error_result(
+                    "Some voice settings were not saved",
+                    {"quick_model": "configuration is not available"},
+                )
         try:
             await voice_plugin(ctx).configure_voice(changes)
         except (OSError, ValueError) as exc:

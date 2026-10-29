@@ -3,7 +3,9 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages/kollabor-voice/src"))
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[2] / "packages/kollabor-voice/src")
+)
 
 from kollabor_voice.responder import RESPONDER_KEY, activity_snapshot, responder_model
 
@@ -47,6 +49,17 @@ def test_specific_beats_shared_beats_none():
     assert responder_model(Cfg(**{RESPONDER_KEY: "flash"})) == "flash"
 
 
+def test_responder_is_a_loadout_name_own_key_only():
+    # The voice quick model names a loadout (provider + model in one), so it
+    # never falls back to the shared fast-model id: that key is a bare model
+    # id for compaction and dreaming, not a loadout name.
+    assert responder_model(Cfg(**{SHARED_KEY: "haiku"})) is None
+    assert responder_model(Cfg(**{RESPONDER_KEY: " fast-or "})) == "fast-or"
+    assert responder_model(Cfg(**{RESPONDER_KEY: "  "})) is None
+    assert responder_model(None) is None
+    assert responder_model(Cfg(**{RESPONDER_KEY: 42})) is None
+
+
 def test_with_model_copies_not_mutates():
     p = Prov()
     q = with_model(p, "haiku")
@@ -57,7 +70,11 @@ def test_with_model_copies_not_mutates():
 def test_snapshot_is_summary_only():
     snap = activity_snapshot(
         [
-            {"tool": "Bash", "command": "curl -H 'Authorization: sekrit' x", "status": "ok"},
+            {
+                "tool": "Bash",
+                "command": "curl -H 'Authorization: sekrit' x",
+                "status": "ok",
+            },
             {"tool": "Edit", "target": "/src/secret/foo.py", "output": "RAWOUT"},
         ]
     )
