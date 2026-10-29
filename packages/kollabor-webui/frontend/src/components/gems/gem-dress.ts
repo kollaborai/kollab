@@ -2,7 +2,7 @@
  * How a gem is dressed and what floats around it: hats (everyday, Halloween,
  * Christmas), seasonal dressing (holiday lights, bats, a dangling spider,
  * snow) and activity effects (thought bubble, alert badges, zzz, notes). The
- * Steven Universe touches live here too: a resting gem sits in a bubble, a
+ * A few gem-flavor touches live here too: a resting gem sits in a bubble, a
  * gem that drops offline poofs first, and a booting gem regenerates in a
  * column of light.
  */
@@ -756,7 +756,7 @@ export function drawActivityEffects(f: FaceFrame, alpha: number) {
         ctx.fill();
       }
     }
-    // Resting, bubbled the way the Crystal Gems keep a gem safe.
+    // Resting, bubbled the way a treasured gem is kept safe.
     const appear = fresh ? Math.min(1, Math.max(0, (since - 0.35) / 0.4)) : 1;
     if (appear > 0) {
       const r = s * 0.52;
