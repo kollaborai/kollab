@@ -987,24 +987,20 @@ class VoiceControl:
                         },
                     )
                 elif kind == "voice_aside":
-                    # The Quick Model's line for words said while a turn ran (#388):
-                    # said now; the words wait in the queue for their own reply.
+                    # The Quick Model's line for words said while a turn ran (#388).
+                    # An answer ends this voice turn; a forward's words wait in the
+                    # queue for their own reply, under the same turn id.
                     line = self.policy.sentence(str(event.get("text") or ""))
                     if line:
                         said.append(line)
-                        revision += 1
-                        await self._publish_assistant(
-                            binding,
-                            generation,
-                            turn_id,
-                            partial_id,
-                            revision,
-                            False,
-                            raw,
-                            " ".join(said),
-                            partial=True,
-                        )
                         yield {"text": line}
+                    if event.get("end_turn") is True:
+                        await self._final_response(
+                            binding, generation, turn_id, line, said
+                        )
+                        completed = True
+                        yield {"done": True, "turn_id": turn_id}
+                        return
                 elif kind == "permission_request":
                     await emit(
                         "voice.permission",

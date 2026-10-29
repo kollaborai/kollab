@@ -1159,3 +1159,19 @@ async def test_an_aside_line_is_said_and_the_words_wait_for_their_own_turn(rig):
         assert await asyncio.wait_for(said, 3) == {"text": "The linter is clean."}
         assert (await anext(turn))["done"] is True
     await rig.control.shutdown()
+
+
+async def test_an_aside_answer_is_the_whole_reply_and_ends_the_turn(rig):
+    # The Quick Model answered (#388): its line is the voice turn's whole reply,
+    # and the stream ends with no turn_complete from the daemon.
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        snapshot = voice_snapshot(view, "what are you doing")
+        turn = await rig.control.open_turn(view["voice_session_id"], snapshot)
+        answer = {"type": "voice_aside", "text": "Running the tests.", "end_turn": True}
+        rig.session.queues[0].put_nowait({**answer, "request_id": snapshot.turn_id})
+        line = await asyncio.wait_for(anext(turn), 3)
+        assert line == {"text": "Running the tests."}
+        assert (await asyncio.wait_for(anext(turn), 3))["done"] is True
+        assert rig.session.cancels == []  # an answer that ran its course is no barge-in
+    await rig.control.shutdown()

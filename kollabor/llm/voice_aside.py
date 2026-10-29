@@ -2,8 +2,8 @@
 
 The Quick Model (Settings → Voice → Quick Model) answers from what the user can see
 of the running turn, on a provider of its own: the running turn never rides it. An
-answer is that voice turn's whole reply, published on the display tap with the
-voice turn's id, so the Engine says it like any reply and nothing is queued.
+answer is that voice turn's whole reply: one voice_aside event with the voice turn's
+id and end_turn, which only that turn's stream reads (the Engine's _stream_turn).
 FORWARD, or no Quick Model, a timeout or a reply that does not parse, says one line
 now; the words then wait in the queue for their own turn, as they always have.
 """
@@ -57,20 +57,11 @@ class VoiceAside:
             finally:
                 self._busy = False
         kind, line = verdict or ("FORWARD", local_line(events, now))
-        if kind == "ANSWER":
-            publish("response", text=line, request_id=turn_id, voice_aside=True)
-            publish(
-                "turn_complete",
-                request_id=turn_id,
-                voice_aside=True,
-                input_tokens=0,
-                output_tokens=0,
-                tool_calls=0,
-                stop_reason="end_turn",
-            )
-            return True
-        publish("voice_aside", text=line, request_id=turn_id)
-        return False
+        # Never a response or turn_complete: every listener reads those as the
+        # running turn's (the hub marks the agent idle, open windows reload).
+        answered = kind == "ANSWER"
+        publish("voice_aside", text=line, request_id=turn_id, end_turn=answered)
+        return answered
 
     def _take_slot(self) -> bool:
         now = self._clock()

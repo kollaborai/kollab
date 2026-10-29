@@ -47,13 +47,10 @@ def responder_model(config: Any) -> Optional[str]:
 
 
 def running_turn(events: Iterable[dict]) -> list[dict]:
-    """The display tap events since the last turn_complete.
-
-    An aside's own turn_complete (#388) does not end the running turn.
-    """
+    """The display tap events since the last turn_complete."""
     turn: list[dict] = []
     for event in events:
-        if event.get("type") == "turn_complete" and not event.get("voice_aside"):
+        if event.get("type") == "turn_complete":
             turn = []
         else:
             turn.append(event)

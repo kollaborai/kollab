@@ -53,20 +53,9 @@ def test_an_answer_is_the_voice_turns_whole_reply():
     done = asyncio.run(VoiceAside().answer("what's up", "t1", events(), ask, publish))
     assert done is True
     answer = {"text": "The tests are still running.", "request_id": "t1"}
-    assert publish.events == [
-        ("response", {**answer, "voice_aside": True}),
-        (
-            "turn_complete",
-            {
-                "request_id": "t1",
-                "voice_aside": True,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "tool_calls": 0,
-                "stop_reason": "end_turn",
-            },
-        ),
-    ]
+    # One event only this voice turn's stream reads: never a response or
+    # turn_complete, which every listener takes for the running turn's.
+    assert publish.events == [("voice_aside", {**answer, "end_turn": True})]
     snapshot, text = ask.calls[0]
     assert "- terminal: running for 30 s" in snapshot and text == "what's up"
 
@@ -77,7 +66,7 @@ def test_forward_says_its_line_and_queues_the_words():
     done = asyncio.run(aside.answer("also lint", "t2", events(), ask, publish))
     assert done is False
     line = {"text": "I'll tell it to run the linter next.", "request_id": "t2"}
-    assert publish.events == [("voice_aside", line)]
+    assert publish.events == [("voice_aside", {**line, "end_turn": False})]
 
 
 @pytest.mark.parametrize("reply", ["Sure, it runs.", None, RuntimeError("x"), "slow"])
@@ -90,6 +79,7 @@ def test_no_usable_reply_says_the_newest_tool_and_queues_the_words(reply, monkey
     )
     [(kind, fields)] = publish.events
     assert kind == "voice_aside" and fields["request_id"] == "t3"
+    assert fields["end_turn"] is False
     assert fields["text"] == (
         "Still working: terminal has been running for 30 seconds. I'll pass that on."
     )

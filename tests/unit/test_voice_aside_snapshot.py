@@ -45,12 +45,8 @@ def test_snapshot_is_the_running_turn_names_and_times_only():
     assert "tok" not in snap and "s.py" not in snap and "old turn" not in snap
 
 
-def test_an_asides_own_turn_complete_does_not_end_the_running_turn():
-    aside = [
-        ev("response", T - 5, text="Still on it.", voice_aside=True),
-        ev("turn_complete", T - 5, voice_aside=True),
-    ]
-    events = EVENTS + aside
+def test_an_aside_in_the_history_leaves_the_running_turn_alone():
+    events = EVENTS + [ev("voice_aside", T - 5, text="Still on it.", end_turn=True)]
     assert [e["type"] for e in running_turn(events)][:2] == ["message", "tool_start"]
     assert "- terminal: running for 40 s" in aside_snapshot(events, T)
 
