@@ -149,10 +149,8 @@ def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
                     options=quick_options,
                     option_labels=quick_labels,
                     help=(
-                        "The model that answers out loud, from any configured provider "
-                        "(for example a fast OpenRouter model); it uses that provider's "
-                        "own connection. Same as Chat keeps this chat's model. It never "
-                        "changes the model your typed messages use."
+                        "Answers when you talk: pick a fast model from any provider you "
+                        "set up. Typed messages always use this chat's model."
                     ),
                 ),
             ],
@@ -387,7 +385,7 @@ class VoicePanel:
             "title": TITLE,
             "scope_note": (
                 "Saved for every chat on the device running Kollab. Saving does not "
-                "enable the microphone. Quick Model is saved to global configuration."
+                "enable the microphone. Quick Model saves to ~/.kollab/config.json."
             ),
             "sections": voice_sections(voice_plugin(ctx), live, ctx),
             "actions": [
