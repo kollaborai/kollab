@@ -511,17 +511,29 @@ async def test_renewals_follow_the_relay_and_survive_a_failed_write(running, mon
         return real_publish(*args, **kwargs)
 
     monkeypatch.setattr(selfhost, "publish", flaky)
+    printed = []
+
+    async def wait_for(text):
+        # Each phase waits for its own line: a loaded runner can take longer
+        # than a fixed window to reach the next renewal (#385).
+        for _ in range(200):
+            printed.append(capsys.readouterr().out)
+            if text in "".join(printed):
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"never printed {text!r}: {''.join(printed)!r}")
+
     task = asyncio.create_task(selfhost.keep_published(app, True))
     try:
-        await asyncio.sleep(0.3)
+        await wait_for("disk full")
         state.ready = False
-        await asyncio.sleep(0.3)
+        await wait_for("relay not ready: key file is identity only")
         state.ready = True
-        await asyncio.sleep(0.3)
+        await wait_for("relay ready again")
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-    out = capsys.readouterr().out
+    out = "".join(printed) + capsys.readouterr().out
     assert "publishing failed" in out and "disk full" in out
     assert "relay not ready: key file is identity only" in out
     assert "relay ready again" in out
