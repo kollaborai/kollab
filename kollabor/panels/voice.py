@@ -153,8 +153,8 @@ def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
                     options=quick_options,
                     option_labels=quick_labels,
                     help=(
-                        "Answers when you talk: pick a fast model from any provider you "
-                        "set up. Typed messages always use this chat's model."
+                        "Answers when you talk; typed messages use this chat's model. "
+                        "Saved in ~/.kollab/config.json."
                     ),
                 ),
             ],
@@ -387,10 +387,7 @@ class VoicePanel:
             "panel": self.name,
             "kind": self.kind,
             "title": TITLE,
-            "scope_note": (
-                "Saved for every chat on the device running Kollab. Saving does not "
-                "enable the microphone. Quick Model saves to ~/.kollab/config.json."
-            ),
+            "scope_note": "Saved for every chat on the device running Kollab. Saving does not enable the microphone.",
             "sections": voice_sections(voice_plugin(ctx), live, ctx),
             "actions": [
                 {"id": "save", "label": "Save for This Device", "targets": ["device"]}
