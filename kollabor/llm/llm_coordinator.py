@@ -2056,7 +2056,7 @@ class LLMService:
         )
 
     async def _answer_voice_aside(self, text: str, origin: dict) -> bool:
-        """True when the Quick Model answered; False: a line was said, queue the words."""
+        """True when answered or stopped; False: a line was said, queue the words."""
         from functools import partial
 
         from kollabor_tui.display_tap import publish_semantic, resolve_tap
@@ -2072,6 +2072,7 @@ class LLMService:
             tap.get_snapshot() if tap is not None else [],
             partial(quick_model_reply, self.api_service, self.profile_manager),
             lambda kind, **fields: publish_semantic(self.event_bus, kind, **fields),
+            stop=self.cancel_current_request,  # a spoken stop is ESC
         )
 
     async def submit_human_input(

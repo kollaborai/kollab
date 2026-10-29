@@ -41,6 +41,17 @@ a command or a path. It replies `ANSWER` (the voice turn's whole reply) or `FORW
 a reply that does not parse says the newest tool's state and queues the words. One
 call runs at a time, ten in five minutes. An open ask wins: a yes or no goes to it.
 
+**Built (#388, part 2):** the worker reads each turn's stream in a task of its own
+(`TurnReader` in `kollabor_voice/livekit_worker.py`). A reply quiet for `HAND_BACK_S`
+(3 s) hands the floor back: LiveKit has no speech to interrupt, so words said then are
+a new voice turn and reach the aside, and the turn's later sentences are announced
+(`session.say`) once nobody speaks. Talking over the agent's voice, a reply or an
+announcement, still stops its turn: the stream closes and the Engine reads that as a
+talk-over. A spoken stop needs no model (`responder.is_stop`: "stop", "cancel that",
+"never mind"), and the Quick Model can say `STOP` too. Either stops the running turn
+as ESC does; the Engine marks the line (`"stop": true`) and the worker stops every
+turn still running there. The words of a stop are not queued.
+
 - A separate fast, cheap model instance (for example Haiku or a similar small model). Its only job is to talk to the human quickly in voice mode.
 - Right before each reply, it gets a snapshot of the UI activity view. That is the same summarized view the human sees (for example "ran git status", "editing src/foo.py", "tests passing"). It does NOT get full file reads, raw command text, or tool output.
 - It can:

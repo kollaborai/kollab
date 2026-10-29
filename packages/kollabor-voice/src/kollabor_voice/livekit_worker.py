@@ -59,6 +59,9 @@ READINESS_POLL_S = 1.0
 READY_TIMEOUT_S = 1200
 PARENT_POLL_S = 1.0
 GREETING = "Greet the user briefly and ask what they want to talk about."
+# A reply quiet this long hands the floor back (#388): its turn runs on, the rest
+# is said once nobody speaks, and words said in the quiet get an answer of their own.
+HAND_BACK_S = 3.0
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,11 @@ class TurnError(RuntimeError):
         self.code, self.retryable = code, retryable
 
 
+class StopLine(str):
+    """A spoken stop's answer (#388): said like any line, then every other turn
+    still running here stops, with what it would still say."""
+
+
 class TurnClient:
     """POST /turns and yield the reply's spoken sentences as the Engine streams them."""
 
@@ -184,7 +192,7 @@ class TurnClient:
                         raise TurnError("turn_failed", str(line["error"]))
                     text = line.get("text")
                     if isinstance(text, str) and text.strip():
-                        yield text
+                        yield StopLine(text) if line.get("stop") is True else text
             except (aiohttp.ClientError, OSError):
                 pass  # the connection broke mid-reply: an early end, said below
             if not done:
@@ -367,6 +375,45 @@ class Turn:
         return (time.monotonic() - self.started) * 1000
 
 
+class TurnReader:
+    """One turn's sentences, read off the Engine by a task of its own (#388).
+
+    llm_node says them while it holds the floor. A reply quiet for HAND_BACK_S hands
+    the floor back: its turn runs on and the Worker announces the rest when nobody
+    speaks. Cancelling the task closes the stream, which the Engine reads as a
+    talk-over: the turn stops.
+    """
+
+    def __init__(self, worker: "Worker", turn: Turn):
+        self.worker, self.turn = worker, turn
+        self.sentences: asyncio.Queue = asyncio.Queue()  # sentences, then None
+        self.carried = False  # the floor went back: the rest is announced
+        self.dropped = False  # talked over or stopped: no more of it is said
+        self.task = asyncio.create_task(self._read(), name="voice-turn")
+
+    async def _read(self) -> None:
+        worker = self.worker
+        try:
+            stream = worker.turns.stream(self.turn.body)
+            async with contextlib.aclosing(stream) as sentences:
+                async for sentence in sentences:
+                    if isinstance(sentence, StopLine):
+                        worker.hush(keep=self)
+                    if self.carried:
+                        worker.announce(self, sentence)
+                    else:
+                        self.sentences.put_nowait(sentence)
+        except TurnError as exc:
+            if not worker.stopping.is_set():
+                worker.error(exc.code, str(exc), exc.retryable, self.turn.id)
+        finally:
+            self.sentences.put_nowait(None)
+            if self in worker.carried:
+                worker.carried.discard(self)
+                if not worker.stopping.is_set():
+                    worker._show()
+
+
 def _turn_text(chat_ctx) -> tuple[str, bool]:
     """The user's words, or the greeting instruction generate_reply appended."""
     for item in reversed(chat_ctx.items):
@@ -395,18 +442,28 @@ class KollabAgent(Agent):
             return
         turn = self.turn = worker.begin_turn(text, greeting)
         await worker.cuts_sent()  # a reply this turn talked over is cut first
-        worker.keep_played_text(turn, _SpeechHandleContextVar.get(None))
+        reader = TurnReader(worker, turn)
+        worker.keep_played_text(turn, _SpeechHandleContextVar.get(None), reader)
         try:
-            async with contextlib.aclosing(worker.turns.stream(turn.body)) as sentences:
-                async for sentence in sentences:
-                    if turn.heard_text:
-                        sentence = " " + sentence  # LiveKit joins played text as sent
-                    else:
-                        turn.heard_text = True
-                        worker.metric("llm_first_token", turn.elapsed_ms(), turn.id)
-                    yield sentence
-        except TurnError as exc:
-            worker.error(exc.code, str(exc), exc.retryable, turn.id)
+            while True:
+                try:
+                    sentence = await asyncio.wait_for(
+                        reader.sentences.get(), HAND_BACK_S
+                    )
+                except asyncio.TimeoutError:
+                    worker.carry(reader)  # quiet: the floor goes back, the turn runs on
+                    return
+                if sentence is None:
+                    return
+                if turn.heard_text:
+                    sentence = " " + sentence  # LiveKit joins played text as sent
+                else:
+                    turn.heard_text = True
+                    worker.metric("llm_first_token", turn.elapsed_ms(), turn.id)
+                yield sentence
+        finally:
+            if not reader.carried:
+                reader.task.cancel()  # a talk-over, or the end: the stream closes
 
     async def tts_node(self, text, model_settings):
         # Each sentence is one utterance. The default node re-splits the text and
@@ -512,6 +569,12 @@ class Worker:
         self.stt_ms = self.language = None  # last utterance, joins the next turn
         self.user_speaking, self.agent_state, self.shown = False, "idle", None
         self.spoke_over = False  # the user started over the agent: the next turn is a talk-over
+        # Turns whose reply handed the floor back (#388): they run on, and what they
+        # still say is announced when nobody speaks.
+        self.carried: set[TurnReader] = set()
+        self.announcements: asyncio.Queue = asyncio.Queue()  # (reader, sentence)
+        self.quiet = asyncio.Event()  # nobody speaks: an announcement may play
+        self.announcer: asyncio.Task | None = None
 
     # -- events: one ordered queue to the Engine ------------------------------------
 
@@ -652,6 +715,9 @@ class Worker:
             self.greeting_task = asyncio.create_task(
                 self.greet(), name="voice-greeting"
             )
+            self.announcer = asyncio.create_task(
+                self._announce(), name="voice-announcements"
+            )
             self.room.on_join(self._joined)
             waits = [
                 asyncio.create_task(self.stopping.wait()),
@@ -718,12 +784,14 @@ class Worker:
             self._show()
 
     def _show(self) -> None:
+        busy = self.user_speaking or self.agent_state in ("thinking", "speaking")
+        (self.quiet.clear if busy else self.quiet.set)()
         if self.user_speaking:
             now = "hearing"
-        else:
-            now = {"thinking": "thinking", "speaking": "speaking"}.get(
-                self.agent_state, "listening"
-            )
+        elif self.agent_state in ("thinking", "speaking"):
+            now = self.agent_state
+        else:  # a turn that handed the floor back is still at work
+            now = "thinking" if self.carried else "listening"
         if now != self.shown:
             self.shown = now
             self.state(now)
@@ -749,13 +817,16 @@ class Worker:
         self.stt_ms, self.language = stt_ms or None, language
         return " ".join(pieces), language
 
-    def keep_played_text(self, turn: Turn, speech) -> None:
+    def keep_played_text(
+        self, turn: Turn, speech, reader: TurnReader | None = None
+    ) -> None:
         """A talk-over leaves the reply cut short: tell the Engine the part that was played.
 
         `speech` is the reply's own SpeechHandle (the context var is set where its
         task is created). Its done callback can come after the next turn began
         (`cuts_sent` holds that turn until the cut is out), so the turn id is bound
-        here, never read off `self.turn`.
+        here, never read off `self.turn`. A talk-over stops the turn too, even
+        after its reply handed the floor back (`reader`).
         """
         if speech is None:
             return
@@ -764,6 +835,7 @@ class Worker:
         def done(handle) -> None:
             if not handle.interrupted or self.stopping.is_set():  # closing is no talk-over
                 return
+            self.drop(reader)
             for item in reversed(handle.chat_items):
                 if item.type == "message" and item.role == "assistant":
                     if item.interrupted:
@@ -773,6 +845,54 @@ class Worker:
             self.cut(turn.id, "")
 
         speech.add_done_callback(done)
+
+    # -- turns that handed the floor back (#388) ----------------------------------
+
+    def carry(self, reader: TurnReader) -> None:
+        """The reply went quiet: the floor goes back and its turn runs on."""
+        reader.carried = True
+        while not reader.sentences.empty():  # what came in as it went quiet
+            sentence = reader.sentences.get_nowait()
+            if sentence is not None:
+                self.announce(reader, sentence)
+        if not reader.task.done():
+            self.carried.add(reader)
+        self._show()
+
+    def announce(self, reader: TurnReader, sentence: str) -> None:
+        self.announcements.put_nowait((reader, sentence.strip()))
+
+    def drop(self, reader: TurnReader | None) -> None:
+        """That turn's voice was talked over, or a stop was said: the turn stops (its
+        stream closes, the Engine's talk-over) and what it would still say goes."""
+        if reader is not None:
+            reader.dropped = True
+            reader.task.cancel()
+
+    def hush(self, keep: TurnReader) -> None:
+        """A spoken stop: every other turn still running here stops."""
+        for reader in list(self.carried):
+            if reader is not keep:
+                self.drop(reader)
+
+    async def _announce(self) -> None:
+        while True:
+            reader, sentence = await self.announcements.get()
+            while not self.quiet.is_set():
+                await self.quiet.wait()
+            if reader.dropped or not sentence:
+                continue
+            self.agent.turn = None  # no reply's metrics: this is none
+            try:
+                handle = self.session.say(
+                    sentence, allow_interruptions=True, add_to_chat_ctx=False
+                )
+                await handle.wait_for_playout()
+            except Exception as exc:
+                log.warning("Announcement failed: %s", type(exc).__name__)
+                continue
+            if handle.interrupted:
+                self.drop(reader)  # talked over, like a reply: that turn stops
 
     def begin_turn(self, text: str, greeting: bool) -> Turn:
         turn = Turn(str(uuid.uuid4()), time.monotonic())  # the Engine takes canonical UUIDs only
@@ -804,6 +924,12 @@ class Worker:
         if self.greeting_task:
             self.greeting_task.cancel()
             await asyncio.gather(self.greeting_task, return_exceptions=True)
+        # Announcements end, and turns still running stop as a reply's do on close.
+        readers = [reader.task for reader in list(self.carried)]
+        tasks = [task for task in (self.announcer, *readers) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         # The service first: fence so no older stream of this room listens or speaks
         # past this point, then give the lease back. The Engine sends SIGKILL 3 s after
         # SIGTERM and LiveKit's own teardown can take 2 s, so it goes last and bounded.

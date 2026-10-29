@@ -60,6 +60,46 @@ def test_an_answer_is_the_voice_turns_whole_reply():
     assert "- terminal: running for 30 s" in snapshot and text == "what's up"
 
 
+def test_a_spoken_stop_stops_the_turn_with_no_model_call():
+    publish, ask, stopped = Recorder(), model("ANSWER x"), []
+    aside = VoiceAside()
+    done = asyncio.run(
+        aside.answer("Stop.", "t5", events(), ask, publish, lambda: stopped.append(1))
+    )
+    assert done is True and stopped == [1] and ask.calls == []
+    line = {"text": "Okay, stopping.", "request_id": "t5"}
+    assert publish.events == [("voice_aside", {**line, "end_turn": True, "stop": True})]
+
+
+def test_the_quick_models_stop_stops_the_turn_and_a_forward_never_does():
+    stopped = []
+    for reply, said in (
+        ("STOP Okay, I'll stop it.", "halt that"),
+        ("FORWARD Sure.", "lint"),
+    ):
+        publish, ask = Recorder(), model(reply)
+        stop = lambda said=said: stopped.append(said)  # noqa: E731
+        asyncio.run(VoiceAside().answer(said, "t6", events(), ask, publish, stop))
+    assert stopped == ["halt that"]
+
+
+def test_the_chats_aside_stop_is_its_esc(monkeypatch):
+    import kollabor_tui.display_tap as display_tap
+
+    monkeypatch.setattr(display_tap, "resolve_tap", lambda source: None)
+    monkeypatch.setattr(display_tap, "publish_semantic", lambda *a, **k: None)
+    stops = []
+    chat = SimpleNamespace(
+        _voice_aside=None,
+        event_bus=None,
+        api_service=None,
+        profile_manager=None,
+        cancel_current_request=lambda: stops.append(1),
+    )
+    answer = LLMService._answer_voice_aside(chat, "stop", {"turn_id": "t8"})
+    assert asyncio.run(answer) is True and stops == [1]
+
+
 def test_forward_says_its_line_and_queues_the_words():
     publish, ask = Recorder(), model("FORWARD I'll tell it to run the linter next.")
     aside = VoiceAside()

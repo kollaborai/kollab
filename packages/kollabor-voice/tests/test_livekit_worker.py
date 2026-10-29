@@ -96,11 +96,12 @@ class FakeEngine:
                     continue
                 if step == "cut":
                     return writer.transport.abort()
-                line = (
-                    {"done": True, "turn_id": request["turn_id"]}
-                    if step == "done"
-                    else {"text": step}
-                )
+                if isinstance(step, dict):
+                    line = step  # a line as the Engine writes it
+                elif step == "done":
+                    line = {"done": True, "turn_id": request["turn_id"]}
+                else:
+                    line = {"text": step}
                 data = json.dumps(line).encode() + b"\n"
                 writer.write(b"%x\r\n%s\r\n" % (len(data), data))
                 await writer.drain()
@@ -451,6 +452,22 @@ def test_turn_stream_reports_a_refused_or_cut_off_turn():
     assert run(outcome([S1, "done"])) == [S1]
 
 
+def test_turn_stream_marks_a_stop_line():
+    async def lines():
+        engine = FakeEngine([[{"text": "Okay, stopping.", "stop": True}, S1, "done"]])
+        await engine.start()
+        client = lw.TurnClient(dataclasses.replace(CONFIG, engine_url=engine.url))
+        try:
+            return [s async for s in client.stream({"turn_id": "t1"})]
+        finally:
+            await client.close()
+            await engine.stop()
+
+    stop, plain = run(lines())
+    assert stop == "Okay, stopping." and isinstance(stop, lw.StopLine)
+    assert plain == S1 and not isinstance(plain, lw.StopLine)
+
+
 # -- the session ----------------------------------------------------------------
 
 
@@ -565,6 +582,105 @@ def test_words_over_the_reply_cancel_it_and_become_the_next_turn():
     # said over the agent: a yes in it never answers what the reply asked
     assert "talk_over" not in rig.engine.requests[0]
     assert rig.engine.requests[1]["talk_over"] is True
+
+
+def test_a_quiet_reply_hands_the_floor_back_and_its_turn_runs_on(monkeypatch):
+    # #388: words said while the agent works are no talk-over; it says the rest later
+    monkeypatch.setattr(lw, "HAND_BACK_S", 0.5)
+
+    async def scenario():
+        async with Rig(
+            scripts=[[S1, "wait", S2, "done"], ["Still on it.", "done"]], tts_chunks=10
+        ) as rig:
+            await rig.say("is the build green")
+            await until(lambda: rig.adapter.spoken == [S1])
+            await until(lambda: rig.worker.carried and rig.worker.shown == "thinking")
+            await until(lambda: rig.worker.agent_state == "listening")
+            await rig.say("how is it going")
+            await until(lambda: rig.adapter.spoken == [S1, "Still on it."])
+            assert not rig.engine.disconnected.is_set()  # the first turn runs on
+            rig.engine.gate.set()  # its result
+            await until(lambda: rig.adapter.spoken == [S1, "Still on it.", S2])
+            await until(lambda: not rig.worker.carried)
+            await until(lambda: rig.worker.shown == "listening")
+        return rig
+
+    rig = run(scenario())
+    first, second = rig.engine.requests
+    assert second["display_text"] == "how is it going" and "talk_over" not in second
+    assert interrupted_posts(rig.poster) == []  # nothing was cut
+
+
+def test_words_over_a_reply_that_handed_the_floor_back_still_stop_its_turn(monkeypatch):
+    monkeypatch.setattr(lw, "HAND_BACK_S", 0.5)
+
+    async def scenario():
+        async with Rig(
+            scripts=[[S1, "wait", S2, "done"], ["Okay.", "done"]], tts_chunks=100
+        ) as rig:
+            await rig.say("is the build green")
+            await until(lambda: rig.adapter.spoken == [S1])
+            await until(lambda: rig.worker.carried and rig.room.output.frames >= 3)
+            await rig.say("stop that")  # over the reply still playing
+            await until(rig.engine.disconnected.is_set)  # the Engine stops the turn
+            await until(lambda: interrupted_posts(rig.poster))
+            rig.engine.gate.set()
+            await until(lambda: "Okay." in rig.adapter.spoken)
+            await rig.worker.drain()
+        return rig
+
+    rig = run(scenario())
+    assert S2 not in rig.adapter.spoken  # nothing late from the stopped turn
+    [(path, body)] = interrupted_posts(rig.poster)
+    assert path == f"turns/{rig.engine.requests[0]['turn_id']}/interrupted"
+
+
+def test_words_over_an_announcement_drop_what_its_turn_still_says(monkeypatch):
+    monkeypatch.setattr(lw, "HAND_BACK_S", 0.5)
+    s3 = "Two tests were skipped."
+
+    async def scenario():
+        async with Rig(
+            scripts=[[S1, "wait", S2, s3, "done"], ["Okay.", "done"]], tts_chunks=100
+        ) as rig:
+            await rig.say("is the build green")
+            await until(lambda: rig.adapter.spoken == [S1])
+            await until(lambda: rig.worker.carried)
+            rig.engine.gate.set()
+            await until(lambda: rig.adapter.spoken == [S1, S2], timeout=10)
+            await until(lambda: rig.worker.agent_state == "speaking")
+            await rig.say("wait what")  # over the announcement
+            await until(lambda: "Okay." in rig.adapter.spoken, timeout=10)
+            await asyncio.sleep(0.3)
+        return rig
+
+    rig = run(scenario(), timeout=30)
+    assert rig.adapter.spoken == [S1, S2, "Okay."]  # the rest of it went
+    assert rig.engine.requests[1]["talk_over"] is True  # said over the agent
+
+
+def test_a_spoken_stop_stops_every_turn_still_running(monkeypatch):
+    monkeypatch.setattr(lw, "HAND_BACK_S", 0.5)
+    stopping = {"text": "Okay, stopping.", "stop": True}
+
+    async def scenario():
+        async with Rig(
+            scripts=[[S1, "wait", S2, "done"], [stopping, "done"]], tts_chunks=10
+        ) as rig:
+            await rig.say("run the tests")
+            await until(lambda: rig.adapter.spoken == [S1])
+            await until(lambda: rig.worker.carried)
+            await until(lambda: rig.worker.agent_state == "listening")
+            await rig.say("stop")
+            await until(lambda: rig.adapter.spoken == [S1, "Okay, stopping."])
+            await until(rig.engine.disconnected.is_set)  # the Engine stops that turn
+            rig.engine.gate.set()  # whatever it would still say
+            await until(lambda: not rig.worker.carried)
+            await asyncio.sleep(0.3)
+        return rig
+
+    rig = run(scenario())
+    assert S2 not in rig.adapter.spoken
 
 
 def test_words_after_the_reply_is_done_are_no_talk_over():
@@ -887,6 +1003,9 @@ def test_a_page_that_comes_back_hears_the_rooms_state():
             rig.room.join()
             await until(lambda: rig.adapter.spoken == [hello])
             await until(lambda: said(rig)[-1] == "listening")
+            # The greeting's handle resolves a few loop turns after its last state:
+            # a reload is a join after the greeting is over.
+            await until(rig.worker.greeting_task.done)
             greeting = said(rig)[first:]
             back = len(said(rig))
             rig.room.join()  # the page reloads

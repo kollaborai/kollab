@@ -47,7 +47,7 @@ Monorepo with extracted packages:
 - `streaming_handler.py` - Streaming response handling
 - `session_manager.py` - Session lifecycle
 - `status_service.py` - LLM status reporting
-- `voice_aside.py` - Words said while a turn runs get a Quick Model answer at once, on its own provider; the turn keeps going (#388)
+- `voice_aside.py` - Words said while a turn runs get a Quick Model answer at once, on its own provider; the turn keeps going, and a spoken stop ends it (#388)
 - `permissions/` - Tool permission system
   - `hook.py` - Event bus integration at SECURITY priority (approval modes, risk assessment, response handling)
   - `README.md` - Permission system docs

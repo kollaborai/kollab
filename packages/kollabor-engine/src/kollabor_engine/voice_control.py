@@ -993,7 +993,10 @@ class VoiceControl:
                     line = self.policy.sentence(str(event.get("text") or ""))
                     if line:
                         said.append(line)
-                        yield {"text": line}
+                        # A stop's line also tells the worker to stop every turn
+                        # still running there, with what it would still say.
+                        stop = event.get("stop") is True
+                        yield {"text": line, "stop": True} if stop else {"text": line}
                     if event.get("end_turn") is True:
                         await self._final_response(
                             binding, generation, turn_id, line, said

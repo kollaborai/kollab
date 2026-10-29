@@ -1175,3 +1175,18 @@ async def test_an_aside_answer_is_the_whole_reply_and_ends_the_turn(rig):
         assert (await asyncio.wait_for(anext(turn), 3))["done"] is True
         assert rig.session.cancels == []  # an answer that ran its course is no barge-in
     await rig.control.shutdown()
+
+
+async def test_a_stop_asides_line_is_marked_for_the_worker(rig):
+    # A spoken stop (#388): the worker stops every other turn when it reads the mark.
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        snapshot = voice_snapshot(view, "stop")
+        turn = await rig.control.open_turn(view["voice_session_id"], snapshot)
+        stop = {"type": "voice_aside", "text": "Okay, stopping.", "stop": True}
+        line = {**stop, "end_turn": True, "request_id": snapshot.turn_id}
+        rig.session.queues[0].put_nowait(line)
+        said = await asyncio.wait_for(anext(turn), 3)
+        assert said == {"text": "Okay, stopping.", "stop": True}
+        assert (await asyncio.wait_for(anext(turn), 3))["done"] is True
+    await rig.control.shutdown()

@@ -22,11 +22,20 @@ ASIDE_PROMPT = (
     "ANSWER <one or two short spoken sentences> when they ask what the agent is doing "
     "or how it is going, or just chat.\n"
     "FORWARD <one short spoken sentence saying you passed it on> when they ask the "
-    "agent to do, change or stop something, or ask what the activity cannot answer.\n"
+    "agent to do or change something, or ask what the activity cannot answer.\n"
+    "STOP <one short spoken sentence saying it stops> when they ask the agent to "
+    "stop or cancel what it is doing.\n"
     "Never invent files, results or progress the activity does not show."
 )
 # A live GLM reply wrote "FORWARD — I've passed it on": dashes go with the colon.
-_VERDICT = re.compile(r"(ANSWER|FORWARD)\b[\s:*\-–—]*(.*)", re.IGNORECASE)
+_VERDICT = re.compile(r"(ANSWER|FORWARD|STOP)\b[\s:*\-–—]*(.*)", re.IGNORECASE)
+# A spoken stop needs no model (#388): the whole utterance, never a word inside one.
+_STOP = re.compile(
+    r"(?:(?:ok(?:ay)?|please|no)[ ,.!]+)*(?:stop|cancel|abort|never ?mind|forget it)"
+    r"(?:[ ,.!]+(?:it|that|this|now|please|everything|stop))*[ .!]*",
+    re.IGNORECASE,
+)
+STOP_LINE = "Okay, stopping."
 
 
 def responder_model(config: Any) -> Optional[str]:
@@ -104,6 +113,11 @@ def aside_snapshot(events: Iterable[dict], now: float, limit: int = MAX_EVENTS) 
     return "\n".join([header, *(lines or ["- no tool has run yet in this turn"])])
 
 
+def is_stop(text: str) -> bool:
+    """The whole utterance asks the agent to stop: "stop", "okay, cancel that"."""
+    return _STOP.fullmatch(text.strip()) is not None
+
+
 def local_line(events: Iterable[dict], now: float) -> str:
     """The newest tool said plainly, for when the Quick Model gives no answer."""
     calls = tool_entries(running_turn(events), now)
@@ -122,12 +136,13 @@ def local_line(events: Iterable[dict], now: float) -> str:
 
 
 def parse_aside(text: Optional[str]) -> Optional[tuple[str, str]]:
-    """("ANSWER" or "FORWARD", what to say) from the reply's first line, else None."""
+    """("ANSWER", "FORWARD" or "STOP", what to say) from the reply's first line."""
     for line in (text or "").splitlines():
         line = line.strip().lstrip("*\"'`")
         if not line:
             continue
         match = _VERDICT.match(line)
-        said = match.group(2).strip().strip("*\"'`").strip()[:300] if match else ""
+        said = match.group(2).strip().strip("*\"'`") if match else ""
+        said = said.lstrip("-–— ").strip()[:300]  # a dash inside the quotes too
         return (match.group(1).upper(), said) if said else None
     return None
