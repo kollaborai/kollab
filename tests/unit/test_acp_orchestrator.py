@@ -665,3 +665,75 @@ async def test_restart_start_failure_closes_replacement_and_clears_state(monkeyp
     assert orchestrator.runner is None
     assert orchestrator.active is False
     assert orchestrator._binding is None
+
+
+@pytest.mark.asyncio
+async def test_an_arrival_row_that_fails_is_written_at_the_flush(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        real_record = orchestrator._record_user
+        failures = [OSError("disk full")]
+
+        def flaky_record(*args, **kwargs):
+            if failures:
+                raise failures.pop()
+            return real_record(*args, **kwargs)
+
+        monkeypatch.setattr(orchestrator, "_record_user", flaky_record)
+        orchestrator.runner.is_processing = True
+        for note in ("FIRST_NOTE", "SECOND_NOTE"):
+            orchestrator.observe_notification(
+                HubMessage(
+                    action="message",
+                    from_agent="peer-id-1",
+                    from_identity="peer-1",
+                    to="*",
+                    content=note,
+                    thread_id=None,
+                    reply_to="",
+                )
+            )
+        rows = [
+            m
+            for m in llm.conversation_history
+            if m.metadata.get("source") == "observation"
+        ]
+        assert [("SECOND_NOTE" in m.content) for m in rows] == [True]
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        rows = [
+            m
+            for m in llm.conversation_history
+            if m.metadata.get("source") == "observation"
+        ]
+        assert len(rows) == 2
+        assert sum("FIRST_NOTE" in m.content for m in rows) == 1
+        assert sum("SECOND_NOTE" in m.content for m in rows) == 1
+        batches = [
+            update["text"]
+            for update in orchestrator.runner._updates
+            if str(update["request_id"]).startswith("observations-")
+        ]
+        assert len(batches) == 1 and "FIRST_NOTE" in batches[0]
+    finally:
+        await orchestrator.close()

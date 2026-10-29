@@ -87,6 +87,7 @@ class ACPOrchestrator:
         self._binding_conversation_id: str | None = None
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_rows: list[str] = []
+        self._unwritten_observations: list[AgentHudEntry] = []
         self._observation_count = 0
 
     @property
@@ -170,6 +171,7 @@ class ACPOrchestrator:
         self._observations.clear()
         self._observation_count = 0
         self._observation_rows.clear()
+        self._unwritten_observations.clear()
         self._selected_profile = profile
         self.hub_plugin = self.event_bus.get_service("hub_plugin") or self.hub_plugin
         if not getattr(self.hub_plugin, "enabled", True):
@@ -308,6 +310,7 @@ class ACPOrchestrator:
             logger.warning(
                 "ACP observation history write failed (%s)", type(error).__name__
             )
+            self._unwritten_observations.append(entry)
         else:
             self._observation_rows.append(row_id)
         if not self.is_processing:
@@ -321,6 +324,24 @@ class ACPOrchestrator:
         if discarded:
             entries.insert(0, AgentHudEntry("status", "observations", f"{discarded} older observations omitted."))
         text = format_agent_hud(entries)
+        # A row that failed on arrival gets another try first, so each message
+        # still lands in history once; one that fails again waits for the next.
+        unwritten, self._unwritten_observations = self._unwritten_observations, []
+        for entry in unwritten:
+            row_id = f"observations-{uuid.uuid4().hex}"
+            try:
+                self._record_user(
+                    row_id,
+                    format_agent_hud([entry]),
+                    "observation",
+                    None,
+                    track_completion=True,
+                )
+            except Exception:
+                self._unwritten_observations.append(entry)
+            else:
+                self._observation_rows.append(row_id)
+        del self._unwritten_observations[:-20]
         rows, self._observation_rows = self._observation_rows, []
         # The turn takes the newest arrival row's id, so its reply threads under
         # that row; the older rows' bookkeeping goes now.
