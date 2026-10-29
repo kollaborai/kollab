@@ -21,16 +21,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .config_utils import get_config_directory
-
-try:  # pragma: no cover - Windows uses msvcrt below
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
-
-try:  # pragma: no cover - only imported on Windows
-    import msvcrt
-except ImportError:  # pragma: no cover
-    msvcrt = None  # type: ignore[assignment]
+from .file_lock import lock, unlock
 
 STATE_VERSION = 1
 MAX_STATE_BYTES = 4 * 1024 * 1024
@@ -691,17 +682,8 @@ class ProvisionedStateFile:
             )
             fd = os.open(self.lock_path, flags, 0o600)
             _check_private_file(os.fstat(fd), "provisioned state lock")
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                locked = True
-            elif msvcrt is not None:  # pragma: no cover
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                locked = True
-            else:  # pragma: no cover
-                raise ProvisionedStateError("no supported file-lock backend")
+            lock(fd)
+            locked = True
             yield
         except ProvisionedStateError:
             raise
@@ -711,11 +693,8 @@ class ProvisionedStateFile:
             try:
                 if fd is not None:
                     try:
-                        if locked and fcntl is not None:
-                            fcntl.flock(fd, fcntl.LOCK_UN)
-                        elif locked and msvcrt is not None:  # pragma: no cover
-                            os.lseek(fd, 0, os.SEEK_SET)
-                            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                        if locked:
+                            unlock(fd)
                     finally:
                         os.close(fd)
             finally:

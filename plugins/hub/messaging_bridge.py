@@ -26,7 +26,6 @@ Config keys (under plugins.hub.*):
 """
 
 import asyncio
-import fcntl
 import hashlib
 import logging
 import time
@@ -37,6 +36,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+from kollabor_config.file_lock import try_lock, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -431,7 +432,8 @@ class BridgePollLock:
         fd = None
         try:
             fd = open(self._lock_path, "w")
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not try_lock(fd.fileno()):
+                raise BlockingIOError("bridge poll lock is held")
             self._fd = fd
             return True
         except (BlockingIOError, OSError):
@@ -446,7 +448,7 @@ class BridgePollLock:
         """Release the lock if held. Safe to call repeatedly."""
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+                unlock(self._fd.fileno())
                 self._fd.close()
             except OSError as e:
                 logger.debug(f"bridge poll lock release error: {e}")

@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import psutil
 
 from kollabor_config.config_utils import get_config_directory
+from kollabor_config.file_lock import try_lock, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -467,19 +468,8 @@ class HandoverStore:
         if os.name != "nt":
             self.lock_path.chmod(0o600)
         try:
-            if os.name == "nt":
-                import msvcrt
-
-                self._lock_file.seek(0)
-                if self._lock_file.read(1) == b"":
-                    self._lock_file.write(b"0")
-                    self._lock_file.flush()
-                self._lock_file.seek(0)
-                msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not try_lock(self._lock_file.fileno()):
+                raise BlockingIOError("handover lock is held")
         except (OSError, BlockingIOError) as exc:
             self._lock_file.close()
             self._lock_file = None
@@ -491,15 +481,7 @@ class HandoverStore:
         if self._lock_file is None:
             return
         try:
-            if os.name == "nt":
-                import msvcrt
-
-                self._lock_file.seek(0)
-                msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+            unlock(self._lock_file.fileno())
         except OSError:
             pass
         finally:

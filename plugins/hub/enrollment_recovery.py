@@ -19,13 +19,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows relies on single-owner locking.
-    fcntl = None
-
 from nacl.exceptions import CryptoError
 from nacl.secret import SecretBox
+
+from kollabor_config.file_lock import lock, unlock
 
 _VERSION = 1
 _MAX_BYTES = 2 * 1024 * 1024
@@ -110,14 +107,15 @@ class EnrollmentRecoveryJournal:
         with self._thread_lock:
             flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(self._lock_path, flags, 0o600)
+            locked = False
             try:
                 self._check_file(os.fstat(fd), "journal lock")
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
+                lock(fd)
+                locked = True
                 yield
             finally:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                if locked:
+                    unlock(fd)
                 os.close(fd)
 
     def _read_unlocked(self) -> dict[str, Any]:

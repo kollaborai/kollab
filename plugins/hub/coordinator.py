@@ -1,6 +1,5 @@
 """Coordinator election and work queue management."""
 
-import fcntl
 import json
 import logging
 import os
@@ -8,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from kollabor_agent.runtime import AgentRuntime
+from kollabor_config.file_lock import try_lock, unlock
 
 from .models import WorkSlot
 from .presence import _atomic_write, get_hub_dir
@@ -40,7 +40,8 @@ class CoordinatorElection:
         """
         try:
             self._lock_fd = open(self._lock_path, "w")
-            fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not try_lock(self._lock_fd.fileno()):
+                raise BlockingIOError("coordinator lock is held")
 
             # We got the lock - we're the coordinator
             self._is_coordinator = True
@@ -77,7 +78,7 @@ class CoordinatorElection:
         """Release the coordinator lock."""
         if self._lock_fd:
             try:
-                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
+                unlock(self._lock_fd.fileno())
                 self._lock_fd.close()
             except Exception as e:
                 logger.error(f"Error releasing lock: {e}")
