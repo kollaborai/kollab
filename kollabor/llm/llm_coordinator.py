@@ -433,6 +433,7 @@ class LLMService:
         self.event_bus = event_bus
         self.renderer = renderer
         self.profile_manager = profile_manager
+        self._voice_aside = None  # VoiceAside, made on the first spoken aside (#388)
         self.agent_manager = agent_manager
         self._initialize_active_operation_tracking()
 
@@ -1984,6 +1985,11 @@ class LLMService:
         if (voice or trusted_origin_context) and self._queue_processor.processing_queue.full():
             return {"status": "rejected", "reason": "Agent input queue is full"}
 
+        # Words said while a turn runs get an answer now (#388); the turn keeps going.
+        if trusted_origin_context and self._voice_aside_due(trusted_origin_context):
+            if await self._answer_voice_aside(display_text, trusted_origin_context):
+                return {"status": "submitted"}
+
         # A hidden voice turn (the greeting) is an instruction, not something the
         # user said: it is never shown as a user message.
         hidden_voice_turn = bool(
@@ -2036,6 +2042,37 @@ class LLMService:
             )
 
         return {"status": "queued"}
+
+    def _voice_aside_due(self, origin: dict) -> bool:
+        """A spoken message while a turn runs gets an aside (#388): never the greeting,
+        never while that turn is being stopped, never while the agent's ask is open
+        (a yes or no is for the ask)."""
+        return (
+            self.is_processing
+            and not self.cancel_processing
+            and origin.get("voice_hidden") is not True
+            and bool(origin.get("turn_id"))
+            and not self.tool_executor.yes_approvals.has_open_ask()
+        )
+
+    async def _answer_voice_aside(self, text: str, origin: dict) -> bool:
+        """True when the Quick Model answered; False: a line was said, queue the words."""
+        from functools import partial
+
+        from kollabor_tui.display_tap import publish_semantic, resolve_tap
+
+        from .voice_aside import VoiceAside, quick_model_reply
+
+        if self._voice_aside is None:
+            self._voice_aside = VoiceAside()
+        tap = resolve_tap(self.event_bus)
+        return await self._voice_aside.answer(
+            text,
+            str(origin["turn_id"]),
+            tap.get_snapshot() if tap is not None else [],
+            partial(quick_model_reply, self.api_service, self.profile_manager),
+            lambda kind, **fields: publish_semantic(self.event_bus, kind, **fields),
+        )
 
     async def submit_human_input(
         self,

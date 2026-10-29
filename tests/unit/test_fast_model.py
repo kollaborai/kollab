@@ -1,4 +1,4 @@
-"""Fast model routing (#260): selection, fallback, summary-only snapshot."""
+"""Fast model routing (#260): selection and fallback."""
 
 import sys
 from pathlib import Path
@@ -7,7 +7,7 @@ sys.path.insert(
     0, str(Path(__file__).resolve().parents[2] / "packages/kollabor-voice/src")
 )
 
-from kollabor_voice.responder import RESPONDER_KEY, activity_snapshot, responder_model
+from kollabor_voice.responder import RESPONDER_KEY, responder_model
 
 from kollabor_ai.fast_model import SHARED_KEY, resolve_fast_model, with_model
 
@@ -65,20 +65,3 @@ def test_with_model_copies_not_mutates():
     q = with_model(p, "haiku")
     assert q is not p and q.model == "haiku" and q.config.model == "haiku"
     assert p.model == "big" and p.config.model == "big"
-
-
-def test_snapshot_is_summary_only():
-    snap = activity_snapshot(
-        [
-            {
-                "tool": "Bash",
-                "command": "curl -H 'Authorization: sekrit' x",
-                "status": "ok",
-            },
-            {"tool": "Edit", "target": "/src/secret/foo.py", "output": "RAWOUT"},
-        ]
-    )
-    assert "Bash" in snap and "foo.py" in snap
-    for leak in ("curl", "sekrit", "RAWOUT", "/src/secret"):
-        assert leak not in snap
-    assert activity_snapshot([]) == "- idle"

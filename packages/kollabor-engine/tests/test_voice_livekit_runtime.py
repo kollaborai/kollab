@@ -1136,3 +1136,42 @@ def test_child_output_goes_to_the_log_dir_and_starts_over_when_big(tmp_path):
     # no log dir (tests, embedders): output goes nowhere, as before
     with LiveKitRuntime(engine_url=lambda: "", engine_token=lambda: "")._log("x") as log:
         assert log == asyncio.subprocess.DEVNULL
+
+
+async def test_an_aside_line_is_said_and_the_words_wait_for_their_own_turn(rig):
+    # Words said while a turn runs (#388): the daemon's Quick Model line is said at
+    # once, then the stream waits for the queued words' own reply, same turn id.
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        snapshot = voice_snapshot(view, "also run the linter")
+        turn = await rig.control.open_turn(view["voice_session_id"], snapshot)
+        queue = rig.session.queues[0]
+        aside = {"type": "voice_aside", "text": "Got it, I'll pass that on."}
+        queue.put_nowait({**aside, "request_id": snapshot.turn_id})
+        line = await asyncio.wait_for(anext(turn), 3)
+        assert line == {"text": "Got it, I'll pass that on."}
+        said = asyncio.ensure_future(anext(turn))
+        await asyncio.sleep(0.2)
+        assert not said.done()  # the words have not had their own turn yet
+        shown = {**SHOWN, "content": "The linter is clean."}
+        for event in (shown, {"type": "turn_complete"}):
+            queue.put_nowait({**event, "request_id": snapshot.turn_id})
+        assert await asyncio.wait_for(said, 3) == {"text": "The linter is clean."}
+        assert (await anext(turn))["done"] is True
+    await rig.control.shutdown()
+
+
+async def test_an_aside_answer_is_the_whole_reply_and_ends_the_turn(rig):
+    # The Quick Model answered (#388): its line is the voice turn's whole reply,
+    # and the stream ends with no turn_complete from the daemon.
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        snapshot = voice_snapshot(view, "what are you doing")
+        turn = await rig.control.open_turn(view["voice_session_id"], snapshot)
+        answer = {"type": "voice_aside", "text": "Running the tests.", "end_turn": True}
+        rig.session.queues[0].put_nowait({**answer, "request_id": snapshot.turn_id})
+        line = await asyncio.wait_for(anext(turn), 3)
+        assert line == {"text": "Running the tests."}
+        assert (await asyncio.wait_for(anext(turn), 3))["done"] is True
+        assert rig.session.cancels == []  # an answer that ran its course is no barge-in
+    await rig.control.shutdown()
