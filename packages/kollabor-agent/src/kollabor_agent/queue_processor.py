@@ -1577,9 +1577,11 @@ class QueueProcessor:
                 token_io.upload_display = prompt_tokens
                 token_io.finish(completion_tokens)
 
-                # Store and accumulate stats
-                self.session_stats["input_tokens"] = prompt_tokens
-                self.session_stats["input_tokens_estimated"] = usage_is_estimated
+                # Store and accumulate stats. input_tokens is the context size:
+                # the last request already carried the whole conversation, so
+                # a continuation's summed prompts would count it twice (#396)
+                self.session_stats["input_tokens"] = token_usage.get("prompt_tokens", 0)
+                self.session_stats["input_tokens_estimated"] = final_usage_estimated
                 self.session_stats["output_tokens"] = completion_tokens
                 # Cache metrics (anthropic + openai)
                 self.session_stats["cache_creation_tokens"] = cache_creation_tokens
