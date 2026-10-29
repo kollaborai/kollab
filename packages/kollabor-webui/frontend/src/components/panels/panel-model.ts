@@ -230,3 +230,9 @@ export function parseExpiry(expiresAt: unknown): number | null {
   }
   return null;
 }
+
+// Where a save writes: each changed field's own file, else the panel's save target (#412).
+export function savePaths(fields: Pick<PanelField, "path" | "save_path">[], changed: Record<string, unknown>, fallback: string): string[] {
+  const files = [...new Set(fields.filter((f) => f.path in changed).map((f) => f.save_path || fallback))];
+  return files.length ? files : [fallback];
+}
