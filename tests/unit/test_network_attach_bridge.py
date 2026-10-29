@@ -32,6 +32,7 @@ async def devices(bridges):
             target=bridge.attach_target,
             peer_name=bridge._peer_name,
             notice=notices.append,
+            halt_active=lambda b=bridge: b.commands.client.control.halt_book().active(),
         )
     for bridge in (left, right):
         bridge.set_trust_level("open")
@@ -327,3 +328,42 @@ def test_a_relay_state_from_the_attach_allow_list_loads_without_it(tmp_path):
     again.save()
 
     assert "attach_allowed" not in json.loads(again.state_path.read_text())
+
+
+# ------------------------------------------- F19 requester side: halt on THIS device
+
+
+@pytest.mark.asyncio
+async def test_a_halt_on_the_requester_refuses_new_outbound_channels(devices):
+    """P1: the requester's own halt gates open() too, not just the target's."""
+    left, right, _ = devices
+    control = left.commands.client.control
+    _haltable(right, left)  # give the shared network a second counting machine
+    control.halt_act("halt", {"reason": "requester halt", "confirmed": True})
+    with pytest.raises(AttachRefused, match="is halted"):
+        await _open(left, right)
+    # resume restores outbound attach
+    control.halt_act("propose_resume", {"confirmed": True})
+    proposal = next(iter(control.halt_book().proposals))
+    peer_control = right.commands.client.control
+    peer_control.learn("peer", control.halt_payload())
+    peer_control.halt_act("confirm_resume", {"hash": proposal, "confirmed": True})
+    control.learn("peer", peer_control.halt_payload())
+    assert not control.halt_book().active()
+    assert await _open(left, right)
+
+
+@pytest.mark.asyncio
+async def test_an_outbound_channel_from_before_the_halt_is_withdrawn_by_the_recheck(devices):
+    """P1: a requester channel opened before the halt dies at the next recheck."""
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, _ = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+
+    _haltable(right, left)
+    control = left.commands.client.control
+    control.halt_act("halt", {"reason": "requester halt", "confirmed": True})
+    await left.network_attach.recheck()
+    assert not left.network_attach._channels
+    assert await asyncio.wait_for(reader.read(), 5) == b""

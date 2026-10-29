@@ -8,8 +8,9 @@ revocation transit to second networks is in (F18, 8f71bc9e, #365). Receipt
 tiers: D13 (on 8f71bc9e) proves the F17 sweep and F18 transit live,
 including partition convergence and F15a revocation crossing; D11 (on
 ff1bcfb, a pre-fix baseline) proves F15a+F15b issuer-side behaviors live —
-F15b itself has no Docker run, and its mid-flight pid-swap identity is
-unit-proven only; halted-network admission is gated in code (F19,
+F15b itself has no Docker run; its mid-flight pid-swap subcase — a reused
+pid that switches identity between selection and signal — is unit-proven
+only; halted-network admission is gated in code (F19,
 99c53cc1, #361 finding 2) with unit tests
 (tests/unit/test_network_attach_bridge.py) and no live receipt. Still
 open: a detached process using `env -i` can lift its local halt — no fix
