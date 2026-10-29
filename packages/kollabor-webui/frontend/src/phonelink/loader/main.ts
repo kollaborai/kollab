@@ -150,6 +150,8 @@ async function run(stored: Stored) {
 }
 
 async function main() {
+  let activeTransport: PhoneTransport | null = null;
+  let failureEvent: "load_failure" | "render_failure" = "load_failure";
   try {
     const identity = await phoneIdentity();
     const fingerprint = await hostFingerprint(identity.host);
@@ -163,6 +165,21 @@ async function main() {
         { code, fingerprint },
       );
     });
+    activeTransport = transport;
+    window.addEventListener("pagehide", () => transport.reportDiagnostic("pagehide"), { once: true });
+    document.addEventListener("freeze", () => transport.reportDiagnostic("freeze"));
+    document.addEventListener("visibilitychange", () =>
+      transport.reportDiagnostic(
+        document.visibilityState === "hidden" ? "visibility_hidden" : "visibility_visible",
+      ),
+    );
+    window.addEventListener("online", () => transport.reportDiagnostic("online"));
+    window.addEventListener("offline", () => transport.reportDiagnostic("offline"));
+    window.addEventListener("error", () => transport.reportDiagnostic("runtime_error"));
+    window.addEventListener("unhandledrejection", () =>
+      transport.reportDiagnostic("unhandled_rejection"),
+    );
+
     const stored = await readStored(identity.host);
     let app: Stored;
     let offline = false;
@@ -178,8 +195,10 @@ async function main() {
     transport.installFetch();
     running = true;
     banner(offline ? "Reconnecting to your computer… Keep Kollab running there." : "");
+    failureEvent = "render_failure";
     await run(app);
   } catch (error) {
+    activeTransport?.reportDiagnostic(failureEvent);
     screen(error instanceof Error ? error.message : String(error), { retry: true, alert: true });
   }
 }
