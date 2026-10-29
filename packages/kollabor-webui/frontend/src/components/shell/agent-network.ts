@@ -1,4 +1,4 @@
-import type { AgentNetwork, AgentPoolEntry, NetworkAgent, NetworkGroup } from "@/api";
+import type { AgentNetwork, AgentPoolEntry, EngineApi, NetworkAgent, NetworkGroup } from "@/api";
 
 /** Remote agents grouped by the computer they run on, computers and agents sorted by name. */
 export function groupRemoteByDevice(
@@ -52,22 +52,53 @@ export function targetsOn(
 }
 
 /**
- * The network an agent on another computer is on: whether an agent here carries
- * it (`live`), the folder to start one in when none does, and that network's
- * rows. Folders here can be on different networks, so one going quiet leaves the
- * others live. A snapshot without per-network blocks answers with its flat fields.
+ * The network an agent on another computer is on: whether it answered, whether
+ * a local agent exists in its folder, and that network's rows.
  */
 export function networkOf(
   network: AgentNetwork,
   handle: string,
-): { live: boolean; folder?: string; agents: NetworkAgent[] } {
+): { live: boolean; folder?: string; agents: NetworkAgent[]; localAgentRunning?: boolean | null } {
   for (const net of network.networks ?? []) {
     const agents = net.devices.flatMap((device) => device.workspaces.flatMap((ws) => ws.agents));
     if (agents.some((agent) => agent.handle === handle)) {
-      return { live: net.live !== false, folder: net.folder, agents };
+      return { live: net.live !== false, folder: net.folder, agents, localAgentRunning: net.local_agent_running };
     }
   }
-  return { live: network.live !== false, folder: network.folder, agents: network.remote };
+  return { live: network.live !== false, folder: network.folder, agents: network.remote, localAgentRunning: network.local_agent_running };
+}
+
+/** Check the local carrier immediately before starting one for a remote chat. */
+export async function prepareRemoteOpen(
+  api: Pick<EngineApi, "listSessions" | "createSession">,
+  network: AgentNetwork,
+  handle: string,
+  profile: string,
+): Promise<"open" | "wait"> {
+  if (networkOf(network, handle).live) return "open";
+  const latest = await api.listSessions();
+  const current = networkOf(latest.network ?? { device: "", remote: [] }, handle);
+  if (current.live || current.localAgentRunning == null) return "open";
+  // An agent here is still starting or has not answered yet: wait for it, never start a second one.
+  if (current.localAgentRunning) return "wait";
+
+  const carrier = { profile, approval_mode: "trust_all", workspace: current.folder || undefined };
+  try {
+    await api.createSession({ ...carrier, identity: "koordinator", agent: "koordinator" });
+  } catch (reason) {
+    const body = reason && typeof reason === "object" && "body" in reason ? reason.body : null;
+    const detail = body && typeof body === "object" && "detail" in body ? body.detail : null;
+    if (!(reason instanceof Error) || !("status" in reason) || reason.status !== 409
+      || typeof detail !== "string" || !detail.startsWith("hub identity 'koordinator' is already in use in ")) {
+      throw reason;
+    }
+    // A different window may have started the carrier during this request.
+    const retry = await api.listSessions();
+    const refreshed = networkOf(retry.network ?? { device: "", remote: [] }, handle);
+    if (refreshed.live || refreshed.localAgentRunning == null) return "open";
+    if (!refreshed.localAgentRunning) await api.createSession(carrier);
+  }
+  return "wait";
 }
 
 /**

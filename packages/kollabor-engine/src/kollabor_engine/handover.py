@@ -230,7 +230,7 @@ class HandoverStore:
 
 
     def prune_dead_sessions(self) -> int:
-        """Drop records whose PID/start-time identity no longer exists."""
+        """Drop dead records and identical aliases of the same live process."""
         self._require_acquired()
         sessions = self._data["sessions"]
         retained = [
@@ -241,10 +241,29 @@ class HandoverStore:
                 float(row.get("daemon_started_at", 0) or 0),
             )
         ]
+        # A prior engine could register one daemon twice. Remove only aliases
+        # with identical process, socket, workspace and conversation metadata;
+        # retain the oldest session ID and never touch the conversation log.
+        fingerprints: Dict[tuple, Dict[str, Any]] = {}
+        for row in retained:
+            fingerprint = (
+                row["daemon_pid"], row["daemon_started_at"], row["identity"],
+                _normalized_path(row["workspace"]), _normalized_path(row["socket_path"]),
+                row.get("conversation_id") or "", row.get("session_log") or "",
+            )
+            previous = fingerprints.get(fingerprint)
+            if previous is None or row["created_at"] < previous["created_at"]:
+                fingerprints[fingerprint] = row
+        canonical_ids = {id(row) for row in fingerprints.values()}
+        retained = [row for row in retained if id(row) in canonical_ids]
         removed = len(sessions) - len(retained)
         if removed:
             self._data["sessions"] = retained
-            self._write()
+            try:
+                self._write()
+            except BaseException:
+                self._data["sessions"] = sessions
+                raise
         return removed
 
     def prepare_handover(self) -> int:
@@ -266,7 +285,8 @@ class HandoverStore:
             if row.get("session_id")
         }
         results: List[Dict[str, Any]] = []
-        for record in self._data["sessions"]:
+        seen_pids: set[int] = set()
+        for record in sorted(self._data["sessions"], key=lambda item: item["created_at"]):
             if record.get("source") != WEBUI_SOURCE:
                 continue
             pid = int(record.get("daemon_pid", 0) or 0)
@@ -282,6 +302,10 @@ class HandoverStore:
             present = by_session.get(str(record["session_id"]))
             if present is not None and not self._matches_presence(record, present):
                 continue
+            if pid in seen_pids:
+                logger.warning("ignoring another owner record for daemon pid %s", pid)
+                continue
+            seen_pids.add(pid)
             row = self._presence_row(record)
             if present is not None:
                 # Prefer current presence facts such as the actual display name

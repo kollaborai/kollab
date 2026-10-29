@@ -20,6 +20,7 @@ from kollabor_ai.session_naming import generate_session_name
 
 from .. import hidden_agents, sidebar_order
 from ..daemon_pool import get_daemon_pool
+from ..folders import hub_folder
 from ..history_paging import (
     HistoryPageTooLarge,
     InvalidHistoryCursor,
@@ -463,6 +464,72 @@ async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any
     }
 
 
+def _mark_local_network_agents(
+    network: Dict[str, Any], registry: Dict[str, EngineSession], pool: Any
+) -> Dict[str, Any]:
+    """Separate an unanswered network probe from the absence of local agents."""
+    from plugins.hub.presence import live_agents_on_machine
+
+    folders: set[str] = set()
+    uncertain = False
+
+    def add_folder(folder: Any) -> None:
+        nonlocal uncertain
+        if not folder:
+            uncertain = True
+            return
+        resolved = hub_folder(folder)
+        if resolved:
+            folders.add(resolved)
+        else:
+            uncertain = True
+
+    for session in registry.values():
+        if (
+            getattr(session, "alive", False)
+            and not getattr(session, "device", "")
+            and not getattr(session, "solo", False)
+        ):
+            add_folder(getattr(session, "workspace", None))
+
+    try:
+        for _hub, row in live_agents_on_machine():
+            if not row.get("solo", False):
+                add_folder(row.get("project"))
+    except Exception:
+        # Uncertainty cannot authorize starting another agent.
+        uncertain = True
+        logger.warning("could not inspect local agent presence", exc_info=True)
+
+    # New launches have not yet reached the session registry. Count them as
+    # possible carriers until their final solo/network state is known.
+    all_handles = getattr(pool, "all", None)
+    if callable(all_handles):
+        for handle in all_handles():
+            if getattr(handle, "session_id", None) in registry:
+                continue
+            if getattr(handle, "pid", 0) and getattr(handle, "alive", False):
+                add_folder(getattr(handle, "project", None))
+    starting_folders = getattr(pool, "starting_folders", None)
+    if callable(starting_folders):
+        for folder in starting_folders():
+            add_folder(folder)
+
+    def present(folder: Any) -> Optional[bool]:
+        if not folder:
+            return None
+        target = hub_folder(folder)
+        if not target:
+            return None
+        return True if target in folders else None if uncertain else False
+
+    network["local_agent_running"] = present(network.get("folder"))
+    for group in network.get("networks") or []:
+        if isinstance(group, dict):
+            group["local_agent_running"] = present(group.get("folder"))
+    return network
+
+
 # Every agent the network has shown, so the sidebar keeps them while they are
 # offline or no agent here is on the network (packages/kollabor-webui/README.md).
 NETWORK_CACHE = "engine-network.json"
@@ -482,8 +549,9 @@ def _network_view(live: Dict[str, Any], now: Optional[float] = None) -> Dict[str
     answered for, its agents show as they are and the ones it no longer lists
     show with ``state: "offline"``. A network seen within NETWORK_CACHE_DAYS
     that no agent here answers for now shows its last roster with ``live:
-    False``: nothing here can tell who is up, and opening one first starts an
-    agent in that network's ``folder`` to carry it. Each row keeps
+    False``: nothing here can tell who is up. A separate local-process check
+    decides whether opening one needs an agent in that network's ``folder``.
+    Each row keeps
     ``last_seen`` (epoch seconds). ``networks`` lists them, live ones first;
     the flat ``remote`` holds every row once, ``live`` is whether any network
     is live and, with none, ``folder`` is the folder of the one seen last.
@@ -682,6 +750,9 @@ async def list_sessions():
     rows = sessions + discovered
     hidden_agents.stamp_instances(rows, found)
     order_state = sidebar_order.read_order_state()
+    network = merge_view_and_memberships(
+        _network_view(await _network_snapshot(registry))
+    )
     return {
         "sessions": rows,
         "discovered": discovered,
@@ -692,9 +763,7 @@ async def list_sessions():
         "order": order_state.order,
         "order_revision": order_state.revision,
         "order_warning": order_state.warning,
-        "network": merge_view_and_memberships(
-            _network_view(await _network_snapshot(registry))
-        ),
+        "network": _mark_local_network_agents(network, registry, pool),
     }
 
 

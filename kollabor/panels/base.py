@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
+from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -120,6 +122,14 @@ class UnknownPanelError(PanelError):
 def unknown_action(panel: str, action: str) -> PanelError:
     """The error ``act()`` raises for an action it does not have (404)."""
     return PanelError(f"unknown action '{action}' for panel '{panel}'", status=404)
+
+
+def display_path(path: Any) -> str:
+    """``path`` as people read it: the home directory written as ``~``."""
+    text, home = str(path), str(Path.home())
+    if text == home or text.startswith(home + os.sep):
+        return "~" + text[len(home) :]
+    return text
 
 
 def ok_result(message: str = "", **extra: Any) -> dict[str, Any]:

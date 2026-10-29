@@ -19,6 +19,7 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { LiquidMetalBorder } from "@/components/ui/liquid-metal-border";
 import { SheetContent } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -749,13 +750,13 @@ export function PanelHost({
       >
         <TabsList
           aria-label="Settings sections"
-          className="mx-4 w-auto shrink-0 justify-start overflow-x-auto [scrollbar-width:none] sm:mx-6 [&::-webkit-scrollbar]:hidden"
+          className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 md:h-9 md:flex-nowrap md:overflow-x-auto [&::-webkit-scrollbar]:hidden"
         >
-          {SETTINGS_TABS.map((item) => (
+          {SETTINGS_TABS.filter((item) => sessionId || item.id === "network").map((item) => (
             <TabsTrigger
               key={item.id}
               value={item.id}
-              className="flex-none px-2.5 sm:px-3"
+              className="h-9 flex-none px-2.5 sm:px-3 md:h-full"
             >
               {item.label}
             </TabsTrigger>
@@ -766,17 +767,19 @@ export function PanelHost({
             role="tabpanel"
             aria-label="Session"
             className={cn(
-              "mx-auto min-h-0 w-full max-w-3xl flex-1 flex-col",
+              "min-h-0 w-full flex-1 flex-col",
               tab === "session" ? "flex" : "hidden",
             )}
           >
-            <SessionSettings
-              api={api}
-              session={session}
-              displayName={displayName}
-              profiles={profiles}
-              onSessionUpdated={onSessionUpdated}
-            />
+            {sessionId ? (
+              <SessionSettings
+                api={api}
+                session={session}
+                displayName={displayName}
+                profiles={profiles}
+                onSessionUpdated={onSessionUpdated}
+              />
+            ) : null}
           </div>
           <div
             role="tabpanel"
@@ -786,10 +789,10 @@ export function PanelHost({
               tab === "prompts" ? "flex" : "hidden",
             )}
           >
-            <PromptsPage api={promptsApi} />
+            {sessionId ? <PromptsPage api={promptsApi} /> : null}
           </div>
           {tab === "phonelink" && open ? (
-            <div role="tabpanel" aria-label="PhoneLink" className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
+            <div role="tabpanel" aria-label="PhoneLink" className="flex min-h-0 w-full flex-1 flex-col">
               <PhoneLinkPanel api={api} onOpenNetwork={() => changeTab("network")} />
             </div>
           ) : null}
@@ -797,7 +800,7 @@ export function PanelHost({
             <div
               role="tabpanel"
               aria-label={activeTab.label}
-              className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col"
+              className="flex min-h-0 w-full flex-1 flex-col"
             >
               {panelBody()}
             </div>
@@ -817,8 +820,13 @@ export function PanelHost({
           {body}
         </SheetContent>
       ) : (
-        <DialogContent className="flex h-[min(52rem,92dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(72rem,94vw)]">
-          {body}
+        <DialogContent className="flex h-[min(52rem,92dvh)] w-full flex-col gap-0 overflow-hidden border-0 bg-transparent p-0 sm:max-w-[min(72rem,94vw)]">
+          <LiquidMetalBorder
+            frameClassName="flex min-h-0 flex-1 flex-col"
+            className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background"
+          >
+            {body}
+          </LiquidMetalBorder>
         </DialogContent>
       )}
     </Dialog>

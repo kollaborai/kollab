@@ -1,6 +1,7 @@
 """The web UI's networks: every agent on this computer is asked, one answer per network."""
 
 import asyncio
+import subprocess
 from contextlib import aclosing
 from types import SimpleNamespace
 
@@ -74,6 +75,58 @@ def local_agents(monkeypatch, tmp_path):
 
 def _answers(network):
     return [(a["network"], a["device"], a["remote"], a["folder"]) for a in network["networks"]]
+
+
+def test_quiet_network_reports_existing_local_process_by_hub(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    other = tmp_path / "other"
+    repo.mkdir()
+    other.mkdir()
+    (repo / "subfolder").mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "true")
+    # This live process has stale presence and did not answer network_status.
+    monkeypatch.setattr(
+        "plugins.hub.presence.live_agents_on_machine",
+        lambda: [(repo, {"project": str(repo / "subfolder"), "solo": False})],
+    )
+    network = {"live": False, "folder": str(repo), "networks": [
+        {"folder": str(repo), "live": False}, {"folder": str(other), "live": False},
+    ]}
+    pool = SimpleNamespace(all=lambda: [], starting_folders=lambda: [])
+
+    result = sessions_route._mark_local_network_agents(network, {}, pool)
+
+    assert result["live"] is False
+    assert result["local_agent_running"] is True
+    assert [group["local_agent_running"] for group in result["networks"]] == [True, False]
+
+
+def test_solo_and_remote_sessions_do_not_count_as_local_network_carriers(tmp_path):
+    network = {"folder": str(tmp_path), "networks": [{"folder": str(tmp_path)}]}
+    registry = {
+        "solo": SimpleNamespace(alive=True, solo=True, device="", workspace=str(tmp_path)),
+        "remote": SimpleNamespace(alive=True, solo=False, device="far", workspace=str(tmp_path)),
+    }
+    pool = SimpleNamespace(all=lambda: [], starting_folders=lambda: [])
+
+    result = sessions_route._mark_local_network_agents(network, registry, pool)
+
+    assert result["local_agent_running"] is False
+    assert result["networks"][0]["local_agent_running"] is False
+
+
+def test_starting_agent_and_unknown_presence_prevent_a_second_launch(tmp_path, monkeypatch):
+    pool = SimpleNamespace(all=lambda: [], starting_folders=lambda: [str(tmp_path)])
+    network = {"folder": str(tmp_path)}
+    assert sessions_route._mark_local_network_agents(network, {}, pool)["local_agent_running"] is True
+
+    def unavailable():
+        raise OSError("presence unavailable")
+
+    monkeypatch.setattr("plugins.hub.presence.live_agents_on_machine", unavailable)
+    pool.starting_folders = lambda: []
+    assert sessions_route._mark_local_network_agents(network, {}, pool)["local_agent_running"] is None
 
 
 @pytest.mark.asyncio

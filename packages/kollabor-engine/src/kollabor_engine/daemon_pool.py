@@ -511,6 +511,10 @@ class DaemonPool:
     def all(self) -> List[DaemonHandle]:
         return list(self._daemons.values())
 
+    def starting_folders(self) -> List[str]:
+        """Folders with an agent being launched by this engine."""
+        return [folder for _identity, folder in self._starting.values()]
+
     def _assign_identity(
         self, preferred: Optional[str] = None, folder: Optional[str] = None
     ) -> str:
@@ -533,6 +537,27 @@ class DaemonPool:
             for agent in agents_in_folder(self._bridge.get_agents(use_cache=False), here)
             if agent.get("identity")
         }
+        # A stalled agent may miss heartbeat freshness while its process and
+        # socket still exist. It still owns its name in this folder.
+        from plugins.hub.presence import live_agents_on_machine
+
+        taken.update(
+            str(row["identity"])
+            for row in agents_in_folder(
+                (row for _hub, row in live_agents_on_machine()), here
+            )
+            if row.get("identity")
+        )
+        # Presence can be late or temporarily stale. The pool already knows
+        # which live processes it owns or has adopted in this hub.
+        owned_rows = (
+            {"identity": handle.identity, "project": handle.project}
+            for handle in self._daemons.values()
+            if getattr(handle, "identity", "")
+            and getattr(handle, "pid", 0)
+            and getattr(handle, "alive", False)
+        )
+        taken.update(row["identity"] for row in agents_in_folder(owned_rows, here))
 
         if requested and requested in taken:
             raise ValueError(

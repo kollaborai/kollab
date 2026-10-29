@@ -1773,6 +1773,10 @@ class TerminalLLMChat:
             self.renderer.message_renderer.pipe_mode = True
 
         try:
+            # Config hooks (.kollab/hooks.json) load before LLM/MCP init, as in
+            # _deferred_startup, so pipe runs fire them too
+            await self._load_config_hooks()
+
             # Initialize LLM core service
             await self._initialize_llm_core()
 
