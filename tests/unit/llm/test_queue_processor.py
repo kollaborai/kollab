@@ -2185,7 +2185,10 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.assertEqual(self.session_stats["total_input_tokens"], 11)
         self.assertEqual(self.session_stats["total_output_tokens"], 5)
-        self.assertTrue(self.session_stats["input_tokens_estimated"])
+        # the context size is the last request's prompt, which the provider
+        # reported: not the two prompts added together (#396)
+        self.assertEqual(self.session_stats["input_tokens"], 11)
+        self.assertFalse(self.session_stats["input_tokens_estimated"])
 
 
 class TestQueueProcessorToolContinuation(unittest.TestCase):
