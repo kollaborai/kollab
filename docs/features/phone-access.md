@@ -161,8 +161,8 @@ served by the computer ([390](../screenshots/phone-access/phonelink-app-390.png)
   malicious directory could serve a modified loader to a new phone. Use a
   directory you trust for the QR scan; compare the fingerprint on both screens.
   A hash of the loader pinned in the QR would not close this: the directory
-  serves the page that checks it, too. The mobile app (#369) ships the loader
-  inside the app, which does.
+  serves the page that checks it, too. What would close it is the planned
+  mobile app (#369, not built yet), with the loader inside the app.
 - The relay still sees only encrypted packets; it cannot sign for the computer.
 - The signature proves the computer built the file list, not that it is
   harmless; approve only phones you trust with the app's controls.
