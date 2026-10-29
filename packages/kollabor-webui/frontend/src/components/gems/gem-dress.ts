@@ -42,6 +42,16 @@ export const HAT_SIZES: Record<Exclude<HatStyle, "none">, { band: number; fit: n
   headphones: { band: 0.3, fit: 1, rise: 0.06 },
   hardhat: { band: 0.2, fit: 0.84, rise: 0.17 },
   beret: { band: 0.21, fit: 0.74, rise: 0.12 },
+  sailor: { band: 0.18, fit: 0.65, rise: 0.18 },
+  chef: { band: 0.16, fit: 0.55, rise: 0.27 },
+  cowboy: { band: 0.17, fit: 0.55, rise: 0.21 },
+  bucket: { band: 0.19, fit: 0.72, rise: 0.18 },
+  boater: { band: 0.17, fit: 0.55, rise: 0.16 },
+  graduate: { band: 0.15, fit: 0.5, rise: 0.18 },
+  aviator: { band: 0.2, fit: 0.8, rise: 0.19 },
+  flower: { band: 0.14, fit: 0.5, rise: 0.28 },
+  halo: { band: 0.14, fit: 0.5, rise: 0.21 },
+  propeller: { band: 0.19, fit: 0.72, rise: 0.24 },
   witch: { band: 0.15, fit: 0.4, rise: 0.5 },
   horns: { band: 0.15, fit: 0.56, rise: 0.21 },
   pumpkin: { band: 0.17, fit: 0.4, rise: 0.26 },
@@ -240,6 +250,83 @@ export function drawHat(f: FaceFrame, fit: HatFit) {
       ctx.beginPath();
       ctx.arc(-0.03 * k, -0.12 * k, 0.018 * k, 0, TAU);
       ctx.fill();
+      break;
+    }
+    case "sailor": {
+      ctx.fillStyle = "#f7f4e8";
+      ctx.beginPath();
+      ctx.moveTo(-0.18 * k, 0); ctx.lineTo(-0.14 * k, -0.15 * k);
+      ctx.quadraticCurveTo(0, -0.2 * k, 0.14 * k, -0.15 * k);
+      ctx.lineTo(0.18 * k, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#244773"; ctx.fillRect(-0.18 * k, -0.045 * k, 0.36 * k, 0.045 * k);
+      break;
+    }
+    case "chef": {
+      ctx.fillStyle = "#faf8ef";
+      ctx.beginPath(); ctx.roundRect(-0.15 * k, -0.13 * k, 0.3 * k, 0.14 * k, 0.02 * k); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-0.14 * k, -0.10 * k);
+      ctx.bezierCurveTo(-0.27 * k, -0.15 * k, -0.19 * k, -0.27 * k, -0.08 * k, -0.22 * k);
+      ctx.bezierCurveTo(-0.04 * k, -0.32 * k, 0.07 * k, -0.32 * k, 0.09 * k, -0.22 * k);
+      ctx.bezierCurveTo(0.2 * k, -0.27 * k, 0.27 * k, -0.15 * k, 0.14 * k, -0.10 * k);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#e4e0d7"; ctx.fillRect(-0.15 * k, -0.045 * k, 0.3 * k, 0.045 * k);
+      break;
+    }
+    case "cowboy": {
+      ctx.fillStyle = "#b77a3f"; ctx.strokeStyle = "#714321";
+      ctx.beginPath(); ctx.moveTo(-0.16 * k, 0); ctx.lineTo(-0.13 * k, -0.17 * k);
+      ctx.quadraticCurveTo(-0.07 * k, -0.23 * k, 0, -0.16 * k);
+      ctx.quadraticCurveTo(0.07 * k, -0.23 * k, 0.13 * k, -0.17 * k);
+      ctx.lineTo(0.16 * k, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#704222"; ctx.fillRect(-0.15 * k, -0.055 * k, 0.3 * k, 0.045 * k);
+      ctx.fillStyle = "#b77a3f"; ctx.beginPath(); ctx.moveTo(-0.29 * k, -0.055 * k);
+      ctx.quadraticCurveTo(-0.24 * k, 0.09 * k, 0, 0.035 * k);
+      ctx.quadraticCurveTo(0.24 * k, 0.09 * k, 0.29 * k, -0.055 * k);
+      ctx.quadraticCurveTo(0, 0.02 * k, -0.29 * k, -0.055 * k); ctx.fill(); ctx.stroke();
+      break;
+    }
+    case "bucket": {
+      ctx.fillStyle = "#598b74"; ctx.beginPath();
+      ctx.moveTo(-0.25 * k, 0); ctx.lineTo(-0.17 * k, -0.17 * k);
+      ctx.quadraticCurveTo(0, -0.2 * k, 0.17 * k, -0.17 * k);
+      ctx.lineTo(0.25 * k, 0); ctx.quadraticCurveTo(0, 0.05 * k, -0.25 * k, 0); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = "rgba(255,255,255,0.4)"; ctx.beginPath(); ctx.moveTo(-0.18 * k, -0.055 * k); ctx.lineTo(0.18 * k, -0.055 * k); ctx.stroke();
+      break;
+    }
+    case "boater": {
+      ctx.fillStyle = "#e9cd82"; ctx.beginPath(); ctx.ellipse(0, 0, 0.25 * k, 0.04 * k, 0, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.roundRect(-0.17 * k, -0.16 * k, 0.34 * k, 0.16 * k, 0.02 * k); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#aa3541"; ctx.fillRect(-0.17 * k, -0.055 * k, 0.34 * k, 0.05 * k);
+      break;
+    }
+    case "graduate": {
+      ctx.fillStyle = "#303549"; ctx.beginPath(); ctx.moveTo(-0.13 * k, 0); ctx.lineTo(-0.13 * k, -0.1 * k);
+      ctx.lineTo(0.13 * k, -0.1 * k); ctx.lineTo(0.13 * k, 0); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-0.27 * k, -0.13 * k); ctx.lineTo(0, -0.21 * k); ctx.lineTo(0.27 * k, -0.13 * k); ctx.lineTo(0, -0.055 * k); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = "#f3c84b"; ctx.lineWidth = Math.max(0.8, 0.018 * k); ctx.beginPath(); ctx.moveTo(0, -0.13 * k); ctx.lineTo(0.22 * k, -0.14 * k); ctx.lineTo(0.22 * k, -0.025 * k); ctx.stroke();
+      break;
+    }
+    case "aviator": {
+      ctx.fillStyle = "#87512e"; ctx.beginPath(); ctx.ellipse(0, 0, 0.2 * k, 0.17 * k, 0, Math.PI, TAU); ctx.lineTo(0.2 * k, 0.06 * k); ctx.lineTo(0.12 * k, 0.06 * k); ctx.lineTo(0.12 * k, 0); ctx.lineTo(-0.12 * k, 0); ctx.lineTo(-0.12 * k, 0.06 * k); ctx.lineTo(-0.2 * k, 0.06 * k); ctx.closePath(); ctx.fill(); ctx.stroke();
+      for (const x of [-0.085, 0.085]) { ctx.fillStyle = "#a9dce6"; ctx.strokeStyle = "#d8b878"; ctx.lineWidth = Math.max(0.8, 0.024 * k); ctx.beginPath(); ctx.arc(x * k, -0.085 * k, 0.06 * k, 0, TAU); ctx.fill(); ctx.stroke(); }
+      break;
+    }
+    case "flower": {
+      ctx.fillStyle = "#e86592";
+      for (let i = 0; i < 5; i += 1) { const a = i * TAU / 5; ctx.beginPath(); ctx.ellipse(Math.sin(a) * 0.09 * k, (-0.14 + Math.cos(a) * 0.09) * k, 0.065 * k, 0.085 * k, -a, 0, TAU); ctx.fill(); ctx.stroke(); }
+      ctx.fillStyle = "#ffd657"; ctx.beginPath(); ctx.arc(0, -0.14 * k, 0.055 * k, 0, TAU); ctx.fill();
+      break;
+    }
+    case "halo": {
+      ctx.strokeStyle = "#e5a824"; ctx.lineWidth = Math.max(1.2, 0.04 * k); ctx.beginPath(); ctx.ellipse(0, -0.14 * k, 0.19 * k, 0.055 * k, 0, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = "#fff3ae"; ctx.lineWidth = Math.max(0.6, 0.012 * k); ctx.stroke();
+      break;
+    }
+    case "propeller": {
+      ctx.fillStyle = "#e94f46"; ctx.beginPath(); ctx.ellipse(0, 0, 0.19 * k, 0.15 * k, 0, Math.PI, TAU); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#f4c43e"; ctx.beginPath(); ctx.moveTo(0, -0.15 * k); ctx.lineTo(0, 0); ctx.lineTo(0.19 * k, 0); ctx.quadraticCurveTo(0.18 * k, -0.15 * k, 0, -0.15 * k); ctx.fill();
+      ctx.strokeStyle = "#424451"; ctx.lineWidth = Math.max(0.8, 0.018 * k); ctx.beginPath(); ctx.moveTo(0, -0.14 * k); ctx.lineTo(0, -0.22 * k); ctx.stroke();
+      ctx.fillStyle = "#4db2df"; ctx.beginPath(); ctx.ellipse(0, -0.23 * k, 0.18 * k, 0.035 * k, -0.12, 0, TAU); ctx.fill(); ctx.stroke();
       break;
     }
     case "witch": {
