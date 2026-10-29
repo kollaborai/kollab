@@ -6,10 +6,22 @@ when it resolves section includes, so a PUT here changes what agents
 receive on their next prompt build. Bundled files are never modified.
 """
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, HTTPException  # type: ignore[import-not-found]
 
+from kollabor_ai.prompt_composition import (
+    ALL_VARIANT,
+    DEFAULTS_LIBRARY,
+    CompositionError,
+    create_library,
+    is_base_section,
+    library_store,
+    list_user_libraries,
+    load_composition,
+    save_composition,
+)
 from kollabor_ai.prompt_overrides import (
     DEFAULT_BUNDLE,
     PromptOverrideError,
@@ -192,8 +204,12 @@ async def delete_override(bundle: str, key: str) -> Dict[str, Any]:
 
 
 @router.get("/{bundle}/preview")
-async def preview_prompt(bundle: str) -> Dict[str, Any]:
-    """Rendered prompt with overrides applied (what the agent would get)."""
+async def preview_prompt(bundle: str, variant: Optional[str] = None) -> Dict[str, Any]:
+    """Rendered prompt with overrides applied (what the agent would get).
+
+    ``variant`` renders one of the role's composition variants; without it the
+    preview is the All Models variant (the engine has no active provider).
+    """
     walker = get_walker()
     agent = _resolve_bundle(bundle, walker)
     try:
@@ -215,9 +231,187 @@ async def preview_prompt(bundle: str) -> Dict[str, Any]:
             agent_manager=walker.agent_manager,
             prompt_bundle=bundle,
             override_store=get_store(),
+            variant=variant,
         )
     except SectionInfoError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"prompt preview failed: {exc}")
     return {"bundle": bundle, "tokens": count_tokens(rendered), "prompt": rendered}
+
+
+# --- Libraries and role compositions -------------------------------------
+#
+# The page's Libraries list shared sections ("defaults" is the shipped _base
+# set; others are the user's own) and its Roles pick from them. See
+# kollabor_ai.prompt_composition for the files and how a render uses them.
+
+
+def _role_names(walker: PromptSectionWalker) -> list:
+    names = [DEFAULT_BUNDLE]
+    try:
+        for agent in walker.agent_manager.list_agents():
+            name = str(getattr(agent, "name", "") or "")
+            if name and name != DEFAULT_BUNDLE:
+                names.append(name)
+    except Exception:
+        pass
+    return sorted(set(names), key=lambda n: (n != DEFAULT_BUNDLE, n))
+
+
+def _defaults_sections(walker: PromptSectionWalker) -> list:
+    """The _base sections, in the order the default prompt assembles them."""
+    try:
+        sections = walker.walk(DEFAULT_BUNDLE)
+    except SectionInfoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    # base_prompt.md only lists includes: its sections are the rows, not it.
+    return [
+        s
+        for s in sections
+        if s.source_path and is_base_section(s.source_path) and s.key != "base_prompt"
+    ]
+
+
+def _uses(role: str, ref: str, library: str) -> bool:
+    """Does the role's All Models variant send this section?"""
+    variant = load_composition(role)["variants"][ALL_VARIANT]
+    if library == DEFAULTS_LIBRARY:
+        return ref not in variant["exclude"]
+    return f"{library}/{ref}" in variant["add"]
+
+
+@router.get("/libraries")
+async def list_libraries() -> Dict[str, Any]:
+    """Every library with its sections, and how many roles send each one."""
+    walker = get_walker()
+    roles = _role_names(walker)
+    libs = library_store()
+
+    def used_by(library: str, key: str) -> int:
+        return sum(1 for role in roles if _uses(role, key, library))
+
+    defaults = []
+    for s in _defaults_sections(walker):
+        edited = libs.get_override(DEFAULTS_LIBRARY, s.key)
+        defaults.append(
+            {
+                **s.as_dict(),
+                "edited": edited is not None,
+                "tokens": count_tokens(edited) if edited is not None else s.tokens,
+                "used_by": used_by(DEFAULTS_LIBRARY, s.key),
+            }
+        )
+    libraries = [{"name": DEFAULTS_LIBRARY, "builtin": True, "sections": defaults}]
+    for name in list_user_libraries():
+        rows = []
+        for item in libs.list_overrides(name):
+            content = libs.get_override(name, item["section_key"]) or ""
+            rows.append(
+                {
+                    "key": item["section_key"],
+                    "title": _title(content) or item["section_key"],
+                    "kind": "editable",
+                    "source_path": item["path"],
+                    "tokens": count_tokens(content),
+                    "edited": False,
+                    "used_by": used_by(name, item["section_key"]),
+                }
+            )
+        libraries.append({"name": name, "builtin": False, "sections": rows})
+    return {"libraries": libraries, "roles": roles}
+
+
+def _title(content: str) -> str:
+    from kollabor_ai.prompt_sections import _section_title
+
+    return _section_title(content)
+
+
+@router.post("/libraries")
+async def create_user_library(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    name = body.get("name")
+    try:
+        path = create_library(name if isinstance(name, str) else "")
+    except CompositionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"name": name, "path": str(path)}
+
+
+def _defaults_section(walker: PromptSectionWalker, key: str) -> Any:
+    for section in _defaults_sections(walker):
+        if section.key == key:
+            return section
+    raise HTTPException(status_code=404, detail=f"unknown defaults section: {key}")
+
+
+@router.get("/libraries/{library}/sections/{key}")
+async def get_library_section(library: str, key: str) -> Dict[str, Any]:
+    libs = library_store()
+    content = libs.get_override(library, key)
+    edited = content is not None
+    if library == DEFAULTS_LIBRARY and content is None:
+        section = _defaults_section(get_walker(), key)
+        try:
+            content = Path(section.source_path).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"cannot read {key}: {exc}")
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"no section {library}/{key}")
+    return {
+        "library": library,
+        "key": key,
+        "edited": edited and library == DEFAULTS_LIBRARY,
+        "content": content,
+        "tokens": count_tokens(content),
+    }
+
+
+@router.put("/libraries/{library}/sections/{key}")
+async def put_library_section(
+    library: str, key: str, body: Dict[str, Any] = Body(...)
+) -> Dict[str, Any]:
+    """Save a section: a defaults edit reaches every role; a user library gains one."""
+    content = body.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(
+            status_code=422, detail='body must be {"content": "..."} (string)'
+        )
+    if library == DEFAULTS_LIBRARY:
+        section = _defaults_section(get_walker(), key)
+        if section.kind != "editable":
+            raise HTTPException(
+                status_code=400, detail=f"section {key} is {section.kind}, not editable"
+            )
+    elif library not in list_user_libraries():
+        raise HTTPException(status_code=404, detail=f"unknown library: {library}")
+    try:
+        path = library_store().save_override(library, key, content)
+    except PromptOverrideError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"library": library, "key": key, "path": str(path), "tokens": count_tokens(content)}
+
+
+@router.delete("/libraries/{library}/sections/{key}")
+async def delete_library_section(library: str, key: str) -> Dict[str, Any]:
+    """Defaults: back to the shipped text. A user library: the section is gone."""
+    if not library_store().delete_override(library, key):
+        raise HTTPException(status_code=404, detail=f"nothing saved for {library}/{key}")
+    return {"library": library, "key": key, "deleted": True}
+
+
+@router.get("/{bundle}/composition")
+async def get_composition(bundle: str) -> Dict[str, Any]:
+    _resolve_bundle(bundle, get_walker())
+    return {"bundle": bundle, **load_composition(bundle)}
+
+
+@router.put("/{bundle}/composition")
+async def put_composition(bundle: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Replace the role's picks: {"variants": {"all": {"exclude": [], "add": []}, ...}}."""
+    _resolve_bundle(bundle, get_walker())
+    try:
+        saved = save_composition(bundle, body)
+    except CompositionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"bundle": bundle, **saved}

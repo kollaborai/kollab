@@ -224,3 +224,15 @@ def test_looks_like_join_code_catches_codes_not_device_names():
     assert not looks_like_join_code("home-server")
     assert not looks_like_join_code("kollabor.ai")
     assert not looks_like_join_code("7qk4-m2xp")  # lower case is left to the private form
+
+
+def test_f4_a_join_code_may_carry_a_network_anchor_after_the_secret():
+    from plugins.hub.enrollment_codes import looks_like_join_code, parse_short_enrollment_code, split_join_code
+
+    assert split_join_code("ABCD-EFGH-1234-5678-9ABC") == ("ABCD-EFGH", "1234-5678-9ABC")
+    assert split_join_code("abcd-efgh-1234-5678-9abc") == ("abcd-efgh", "1234-5678-9ABC")
+    assert split_join_code("ABCD-EFGH") == ("ABCD-EFGH", "")
+    assert bytes(parse_short_enrollment_code("ABCD-EFGH-1234-5678-9ABC")) == b"ABCDEFGH"
+    assert looks_like_join_code("ABCD-EFGH-1234-5678-9ABC") and looks_like_join_code("ABCD-EFGH")
+    with pytest.raises(ValueError):
+        split_join_code("ABCD-EFGH-12U4-5678-9ABC")  # U is not in the alphabet

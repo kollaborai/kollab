@@ -25,5 +25,5 @@ test("the System Prompts settings tab opens directly", () => {
   assert.deepEqual(panelCommandRequest("/prompts", []), { tab: "prompts" });
   assert.equal(PANEL_NAME.prompts, "prompts");
   assert.equal(promptsTab?.label, "Prompts");
-  assert.ok(promptsTab?.scope.includes("~/.kollab/prompt-overrides"));
+  assert.ok(promptsTab?.scope.includes("~/.kollab"));
 });

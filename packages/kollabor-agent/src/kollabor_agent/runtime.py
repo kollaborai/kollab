@@ -126,6 +126,13 @@ def get_agent_tool_scope(agent: Any) -> Optional[List[str]]:
     return list(tools)
 
 
+def _tool_shells() -> List[List[float]]:
+    from .shell_executor import TOOL_SHELLS, prune_tool_shells
+
+    prune_tool_shells()  # kill switch F15a: presence never carries a dead or reused pid
+    return [list(e) for e in TOOL_SHELLS]
+
+
 @dataclass
 class AgentRuntime:
     """The ONE object that represents everything about an AI agent.
@@ -658,6 +665,8 @@ class AgentRuntime:
             "cooldown_until": self.cooldown_until,
             "waiting_reason": self.waiting_reason,
             "tags": _presence_tags(self.tags),
+            # kill switch F11: [pid, start] of this process's tool shells (a halt stops what they backgrounded)
+            "tool_shells": _tool_shells() if self.pid == os.getpid() else [],
         }
 
     @classmethod

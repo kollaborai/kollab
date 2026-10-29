@@ -577,9 +577,22 @@ class RelayClient:
         if changed:
             self._store.save()
 
+    @property
+    def control(self):
+        """Who counts on this network and its halt book (``network_control.py``)."""
+        if getattr(self, "_network_control", None) is None:
+            from .network_control import NetworkControl
+
+            self._network_control = NetworkControl(self)
+        return self._network_control
+
     def network_id(self) -> str:
-        """What every envelope and membership list of this network is bound to."""
-        return hashlib.sha256(bytes.fromhex(self.state.room)).hexdigest()
+        """What every envelope and membership list of this network is bound to.
+
+        ``sha256(room)``; a network started after the kill switch binds its
+        founder's machine key in too (``network_id_for``).
+        """
+        return self.control.network_id()
 
     def members(self) -> list[str]:
         """The devices on this network: approved, and not an accepted stranger.
@@ -606,7 +619,11 @@ class RelayClient:
         return listed, list(self.state.revoked)
 
     def accept_membership(
-        self, voucher: str, members: list[tuple[str, str]], revoked: list[str]
+        self,
+        voucher: str,
+        members: list[tuple[str, str]],
+        revoked: list[str],
+        control: dict | None = None,
     ) -> None:
         """Take a member's word on who else is on this network.
 
@@ -619,16 +636,19 @@ class RelayClient:
         device's primary (the inviter whose join code it used): one member's
         word is not enough to cut a device off from its own primary, so only
         a human here (`/connect revoke`) revokes it.
+
+        Revocations come as signed records (`control`), applied only when two
+        counting machines name the key (`network_halt.revocations_to_apply`);
+        the bare `revoked` list is one device's word and is not applied alone.
         """
         self._adopt_bridge_fields()
         if voucher not in self.members():
             raise RelayError("peer is not part of this network")
-        for key in revoked:
-            if key == self.state.inviter:
-                _LOGGER.warning("Refused a member's revocation of this device's primary")
-                continue
-            if key not in (self.public_key, voucher) and key not in self.state.links:
-                self.revoke(key, announce=True)
+        if control is not None:
+            self.control.learn(voucher, control)
+        if revoked and self.state.inviter in revoked:
+            _LOGGER.warning("Refused a member's revocation of this device's primary")
+        self.control.apply_revocations()
         named = set()
         for key, name in members:
             named.add(key)

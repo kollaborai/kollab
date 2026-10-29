@@ -295,3 +295,110 @@ def test_unpack_runtime_rejects_a_venv_without_site_packages(source_root, monkey
     monkeypatch.setattr(release, "PEX_TOOLS_CMD", (str(fake_tools),))
     with pytest.raises(ValueError, match="no site-packages"):
         release.unpack_runtime(source, source_root / "app-runtime-aarch64-apple-darwin")
+
+
+def add_windows_pair(directory, version="1.2.3"):
+    for name in sorted(release.windows_manifest(version)):
+        if not name.endswith(".sha256"):
+            asset = directory / name
+            asset.write_bytes(b"installer payload: " + name.encode())
+            release.write_checksum(asset)
+
+
+def test_windows_installer_is_outside_the_required_manifest_but_named_like_the_others():
+    assert not release.windows_manifest("1.2.3") & release.manifest("1.2.3")
+    assert release.windows_manifest("1.2.3") == {
+        "kollab-desktop-windows-x86_64-1.2.3-setup.exe",
+        "kollab-desktop-windows-x86_64-1.2.3-setup.exe.sha256",
+    }
+
+
+def test_verify_takes_a_release_with_or_without_a_whole_windows_pair(tmp_path):
+    directory = tmp_path / "downloaded"
+    complete_release(directory)
+    release.verify_manifest(directory, "1.2.3")  # a Windows job that failed leaves no pair
+    add_windows_pair(directory)
+    release.verify_manifest(directory, "1.2.3")
+    release.verify_manifest(directory, "1.2.3", windows="required")
+
+
+def test_verify_never_takes_half_a_windows_pair_or_a_changed_installer(tmp_path):
+    directory = tmp_path / "downloaded"
+    complete_release(directory)
+    add_windows_pair(directory)
+    installer = directory / "kollab-desktop-windows-x86_64-1.2.3-setup.exe"
+    installer.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        release.verify_manifest(directory, "1.2.3")
+    installer.with_name(installer.name + ".sha256").unlink()
+    with pytest.raises(ValueError, match="release manifest mismatch"):
+        release.verify_manifest(directory, "1.2.3")
+    installer.unlink()
+    release.verify_manifest(directory, "1.2.3")  # the installer gone with its checksum is the optional case
+
+
+def test_required_windows_rejects_a_release_without_the_installer(tmp_path):
+    directory = tmp_path / "downloaded"
+    complete_release(directory)
+    with pytest.raises(ValueError, match="missing=.*windows-x86_64-1.2.3-setup.exe"):
+        release.verify_manifest(directory, "1.2.3", windows="required")
+
+
+def test_verify_cli_windows_flag_decides_whether_the_installer_is_mandatory(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    version = release.release_version()
+    directory = tmp_path / "downloaded"
+    complete_release(directory, version)
+    command = [sys.executable, str(root / "scripts/desktop_release.py"), "--version", version, "verify", str(directory)]
+    assert subprocess.run(command, capture_output=True, text=True).returncode == 0
+    required = subprocess.run([*command, "--windows", "required"], capture_output=True, text=True)
+    assert required.returncode != 0
+    assert "setup.exe" in required.stderr
+
+
+def test_stage_windows_puts_the_scie_beside_the_app_as_runtime_kollab_exe(source_root, monkeypatch):
+    source = source_root / "kollab-windows-x86_64.exe"
+    source.write_bytes(b"test CLI payload")
+    release.write_checksum(source)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "kollab 1.2.3\n", "")
+
+    monkeypatch.setattr(release.subprocess, "run", run)
+    staged = release.stage("windows-x86_64", source, "1.2.3")
+    assert staged == source_root / "desktop/src-tauri/binaries/kollab-x86_64-pc-windows-msvc.exe"
+    assert staged.read_bytes() == b"test CLI payload"
+    assert calls == [[str(staged), "--version"]]
+    config = json.loads((source_root / "desktop/src-tauri/tauri.release.json").read_text())
+    assert config["version"] == "1.2.3"
+    assert config["bundle"]["targets"] == ["nsis"]
+    assert config["bundle"]["externalBin"] == []
+    assert config["bundle"]["resources"] == {"binaries/kollab-x86_64-pc-windows-msvc.exe": "runtime/kollab.exe"}
+    assert config["bundle"]["windows"]["nsis"]["installMode"] == "currentUser"
+
+
+def test_stage_windows_never_executes_a_corrupted_sidecar(source_root, monkeypatch):
+    source = source_root / "kollab-windows-x86_64.exe"
+    source.write_bytes(b"test CLI payload")
+    release.write_checksum(source)
+    source.write_bytes(b"changed after the checksum")
+    monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: pytest.fail("a corrupted sidecar ran"))
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        release.stage("windows-x86_64", source, "1.2.3")
+
+
+def test_collect_windows_renames_the_nsis_installer_and_writes_its_checksum(tmp_path):
+    bundles, output = tmp_path / "bundle", tmp_path / "dist"
+    (bundles / "nsis").mkdir(parents=True)
+    (bundles / "nsis" / "Kollab_1.2.3_x64-setup.exe").write_bytes(b"installer")
+    result = release.collect("windows-x86_64", bundles, output, "1.2.3")
+    assert [path.name for path in result] == [
+        "kollab-desktop-windows-x86_64-1.2.3-setup.exe",
+        "kollab-desktop-windows-x86_64-1.2.3-setup.exe.sha256",
+    ]
+    release.verify_checksum(output / "kollab-desktop-windows-x86_64-1.2.3-setup.exe")
+    (bundles / "nsis" / "Kollab_1.2.3_arm64-setup.exe").write_bytes(b"another installer")
+    with pytest.raises(ValueError, match="expected exactly one"):
+        release.collect("windows-x86_64", bundles, output, "1.2.3")

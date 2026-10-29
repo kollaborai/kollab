@@ -46,7 +46,7 @@ MAX_WIRE_PACKET_BYTES = 12 * 1024
 MAX_FRAMED_BYTES = MAX_SECURE_MESSAGE_BYTES + 4
 _HEX_SESSION = re.compile(r"[0-9a-f]{32}\Z")
 _SECURE_APP_METHODS = frozenset(
-    {"message", "status", "cancel", "directory", "peer.exchange", "config_sync", "network_members"}
+    {"message", "status", "cancel", "directory", "peer.exchange", "config_sync", "network_members", "network_halt"}
     | ATTACH_METHODS
 )
 SecureDispatch = Callable[[str, str, dict], Awaitable[dict]]

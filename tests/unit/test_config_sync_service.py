@@ -425,6 +425,7 @@ def test_service_is_registered_with_the_secure_transport_methods():
     from plugins.hub import secure_conversation
 
     assert "config_sync" in secure_conversation._SECURE_APP_METHODS
+    assert "network_halt" in secure_conversation._SECURE_APP_METHODS  # found in Docker: no halt ever left a machine
     assert os.path.exists(ConfigSyncService.__module__.replace(".", "/") + ".py")
 
 

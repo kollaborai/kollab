@@ -595,6 +595,8 @@ async def test_connect_palette_lists_subcommands_and_each_reaches_the_owner_daem
         "allow",
         "deny",
         "revoke",
+        "halt",
+        "resume",
         "leave",
         "primary",
         "help",

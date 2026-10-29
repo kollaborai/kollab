@@ -101,6 +101,16 @@ class RiskAssessmentRules:
             re.compile(r"wget.*\|\s*(ba)?sh"),  # wget | bash
             re.compile(r"sudo\s+rm"),  # sudo rm
             re.compile(r":\(\)\s*\{"),  # fork bomb
+            # network kill switch: the CLI (quoted verb, module form), the slash commands, and its files
+            re.compile(r"""--hub\s+['"]?(halt|resume)\b"""),
+            re.compile(r"/connect\s+(revoke|halt|resume)\b"),
+            re.compile(
+                r"(\brm|\bmv|\bcp|\btee|\bln|\bsed\s+-i|\bdd\b[^|;&]*of=|\btruncate|\bchmod|\bchown"
+                r"|\bshred|\bunlink|>)[^|;&]*\.kollab/private\b"
+            ),
+            re.compile(r"\bcd\s+\S*\.kollab/private\b.*(\brm|\bmv|\bcp|\btee|\btruncate|\bchmod|\bunlink|>)"),
+            re.compile(r"\bfind\b[^|;&]*\.kollab/private\b[^|;&]*(-delete|-exec\s+rm)"),
+            re.compile(r"\bpython[\d.]*\s+-c\b.*\.kollab/private\b"),
         ]
     )
 

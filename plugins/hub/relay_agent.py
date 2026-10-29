@@ -39,6 +39,7 @@ from .local_directory import LocalAgentDirectory
 from .membership_runtime import MembershipContext, Memberships
 from .models import HubMessage, MessageScope
 from .network_attach import ATTACH_METHODS, AttachRefused, NetworkAttach
+from .network_control import HALT_METHOD, HaltSync
 from .network_members import METHOD as MEMBERS_METHOD
 from .network_members import MembershipSync
 from .relay_commands import RelayCommands
@@ -85,7 +86,8 @@ KNOCK_ACTIONS = frozenset(
     }
 )
 LINK_RETRY_SECONDS = 60
-_SHORT_CODE_SHAPE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
+_CODE_GROUP = "[0-9A-HJKMNP-TV-Z]{4}"
+_SHORT_CODE_SHAPE = re.compile(rf"{_CODE_GROUP}-{_CODE_GROUP}(?:-{_CODE_GROUP}-{_CODE_GROUP}-{_CODE_GROUP})?\Z")
 _ENROLLMENT_ERRORS = {
     "invalid_request",
     "invalid_contact",
@@ -103,6 +105,7 @@ _ENROLLMENT_ERRORS = {
     "invalid_response",
     "internal",
     "update_required",
+    "network_mismatch",
 }
 
 
@@ -111,7 +114,11 @@ def _safe_enrollment_result(value) -> dict[str, str]:
     if not isinstance(value, dict):
         return {"error": "transport"}
     if value.get("status") in {"approved", "rejected"}:
-        return {"status": value["status"]}
+        out = {"status": value["status"]}
+        for extra in ("founder", "founder_fingerprint", "warning"):  # an approved result's plain strings, nothing else
+            if value["status"] == "approved" and isinstance(value.get(extra), str):
+                out[extra] = value[extra]
+        return out
     if value.get("error") in _ENROLLMENT_ERRORS:
         return {"error": value["error"]}
     return {"error": "transport"}
@@ -274,6 +281,7 @@ class RelayAgentBridge:
         self.secure_transport: SecureConversationTransport | None = None
         self.config_sync: ConfigSyncService | None = None
         self.membership_sync: MembershipSync | None = None
+        self.halt_sync: HaltSync | None = None
         self.network_attach: NetworkAttach | None = None
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
@@ -759,6 +767,16 @@ class RelayAgentBridge:
         here, there = self.device_name(), self._peer_name(peer)
         if peer in state.links or peer not in self.commands.client.state.approvals:
             raise AttachRefused(f"{there} is not a member of {here}'s network")
+        # F19: a halted network admits no new attach channels. The halt book is
+        # this folder's own state (a plain file read, works with the relay down);
+        # the requester side runs through this same method, so both ends refuse.
+        # Opened-before-the-halt channels die at their next _allowed() recheck,
+        # which calls back into here (network_attach.py).
+        if self.commands.client.control.halt_book().active():
+            raise AttachRefused(
+                f"{here}'s network is halted: no attach channels while the halt "
+                "holds (lift it with /connect resume)"
+            )
         trust = self.effective_trust(peer)
         if trust == "manual":
             raise AttachRefused(
@@ -938,6 +956,9 @@ class RelayAgentBridge:
                 self.commands.client, self.commands.client._store.key.encode()
             )
             self.commands.client.set_request_handler(self._receive)
+            # Halts first: a machine that comes back hears an active halt
+            # before any sealed config (spec "Reaching Offline Devices").
+            self.make_halt_sync().start()
             self.make_config_sync().start()
             self.make_membership_sync().start()
             self.network_attach = NetworkAttach(
@@ -945,6 +966,7 @@ class RelayAgentBridge:
                 target=self.attach_target,
                 peer_name=self._peer_name,
                 notice=self._config_notice,
+                halt_active=lambda: self.commands.client.control.halt_book().active(),
             )
             try:
                 from .peer_transport import PeerMeshRuntime
@@ -1072,6 +1094,9 @@ class RelayAgentBridge:
         if self.membership_sync is not None:
             await self.membership_sync.close()
             self.membership_sync = None
+        if self.halt_sync is not None:
+            await self.halt_sync.close()
+            self.halt_sync = None
         if self.network_attach is not None:
             await self.network_attach.close()
             self.network_attach = None
@@ -1312,6 +1337,8 @@ class RelayAgentBridge:
         if source_agent != self.identity.agent_id:
             raise RelayError("only the active local issuer agent can decide requests")
         self._local_agent(source_agent)
+        if decision != "reject":
+            self._admit_refusal()
         try:
             return await self._ensure_enrollment_issuer().decide(
                 enrollment_id, decision=decision
@@ -1372,6 +1399,7 @@ class RelayAgentBridge:
         ):
             raise RelayError("invalid local enrollment offer")
         self._local_agent(params["agent_id"])
+        self._admit_refusal()
         return _safe_enrollment_offer_result(
             await self._ensure_enrollment_issuer().create_offer(params["domain"])
         )
@@ -1932,7 +1960,8 @@ class RelayAgentBridge:
             store = self._state()
         stranger = peer in store.state.links
         if stranger and (
-            method in {"peer.forward", "peer.exchange", MEMBERS_METHOD} or method in ATTACH_METHODS
+            method in {"peer.forward", "peer.exchange", MEMBERS_METHOD, HALT_METHOD}
+            or method in ATTACH_METHODS
         ):
             # A stranger reaches allowed agents only; it is not a network member.
             raise RelayError("peer is not part of this network")
@@ -1989,6 +2018,10 @@ class RelayAgentBridge:
             if self.membership_sync is None:
                 raise RelayError("network membership is unavailable")
             return await self.membership_sync.receive(peer, payload)
+        if method == HALT_METHOD:
+            if self.halt_sync is None:
+                raise RelayError("network halt is unavailable")
+            return await self.halt_sync.receive(peer, payload)
         if method == "message":
             message = validate_message(
                 payload,
@@ -2124,7 +2157,8 @@ class RelayAgentBridge:
 
     async def _receive_secure_application(self, peer, method, payload):
         if method not in {
-            "message", "status", "cancel", "directory", "peer.exchange", "config_sync", MEMBERS_METHOD
+            "message", "status", "cancel", "directory", "peer.exchange", "config_sync", MEMBERS_METHOD,
+            HALT_METHOD,
         } and method not in ATTACH_METHODS:
             raise RelayError("unsupported secure conversation operation")
         try:
@@ -2816,6 +2850,115 @@ class RelayAgentBridge:
             online=self._members_online,
         )
         return self.membership_sync
+
+    def make_halt_sync(self) -> HaltSync:
+        """Trades halt books with every member online (``network_halt``)."""
+        self.halt_sync = HaltSync(
+            client=self.commands.client,
+            transport=self.secure_transport,
+            online=self._members_online,
+        )
+        self.commands.client.control.on_halt_change = self._halt_changed
+        return self.halt_sync
+
+    def _halt_changed(self, network: str) -> None:
+        """A halt became active here: hand it to the listener (spec step 1), which sweeps us too."""
+        from . import halt_runtime as hr
+        from .network_halt import halt_scope
+
+        control = self._network_control()
+        if not control.halt_book().active():
+            return
+        try:
+            if network in (hr.read_halt().get("scopes") or {}):
+                return  # the listener already holds it
+        except (OSError, ValueError):
+            pass
+        order = {
+            "network": network,
+            "scope": halt_scope(control.view(), control.machine_hex, [str(self.workspace)]),
+            "folder": str(self.workspace),
+        }
+
+        async def go() -> None:
+            try:
+                reply = await hr.hand_off(order)
+                # F17/#363: the reply carries every sweep error (F13); discarding it whole left
+                # "swept nothing, no reason anywhere" in the daemon's log (D11's hole).
+                if reply.get("errors"):
+                    logger.warning("network halt: hand-off reported errors: %s", reply["errors"])
+            except Exception as error:
+                logger.warning("network halt: hand-off failed (%s)", type(error).__name__)
+
+        try:
+            asyncio.get_running_loop().create_task(go(), name="kollab-halt-hand-off")
+        except RuntimeError:
+            asyncio.run(go())
+
+    async def _peer_heads(self) -> list[str]:
+        """Before issuing: ask members online for this folder's latest order (spec "Data")."""
+        from .network_control import HALT_METHOD, REQUEST_SECONDS
+
+        if self.secure_transport is None:
+            return []
+        control = self._network_control()
+        me = self.commands.client.public_key
+
+        async def ask(key: str):
+            try:
+                reply = await self.secure_transport.request(
+                    key, HALT_METHOD, control.halt_payload(), timeout=REQUEST_SECONDS
+                )
+                control.halt_merge(reply)
+                return (reply.get("heads") or {}).get(me)
+            except Exception:
+                return None
+
+        heads = await asyncio.gather(*(ask(k) for k in self._members_online()))
+        return [h for h in heads if isinstance(h, str)]
+
+    # The three calls the halt panels use (spec "The Halt Listener"); the
+    # listener (slice B) serves the same names over its own links.
+    def _network_control(self):
+        if self.commands is None:
+            raise RelayError("this folder does not run its network; ask its owner")
+        return self.commands.client.control
+
+    async def hub_halt_snapshot(self) -> dict:
+        return self._network_control().halt_snapshot(set(self._members_online()))
+
+    async def hub_halt_act(self, action: str, payload: dict | None = None) -> dict:
+        from .halt_runtime import tool_shell_refusal
+        from .network_halt import CONFIRMED_ACTIONS, HaltError, require_confirmed
+
+        # F10/NEW-1: every act that needs a person (roster acts and counting included), judged by the caller
+        if action in CONFIRMED_ACTIONS and tool_shell_refusal():  # an agent's shell never drives the controls
+            raise RelayError(tool_shell_refusal())
+        payload = dict(payload or {})
+        try:
+            require_confirmed(action, payload)
+        except HaltError as error:
+            raise RelayError(str(error)) from None
+        if action in ("halt", "propose_resume"):
+            payload["peer_heads"] = await self._peer_heads()
+        try:
+            result = self._network_control().halt_act(action, payload)
+        except HaltError as error:
+            raise RelayError(str(error)) from None
+        if self.halt_sync is not None:
+            self.halt_sync._delivered.clear()  # send the change to every member now
+            self.halt_sync._retry_at.clear()
+        return result
+
+    async def hub_halt_members(self) -> list[dict]:
+        return self._network_control().halt_members()
+
+    def _admit_refusal(self) -> None:
+        """Only a counting machine adds a device (spec "Counting Machines")."""
+        if self.commands is not None:
+            refusal = self.commands.client.control.admit_refusal()
+            if refusal:
+                raise RelayError(refusal)
 
     def _members_online(self) -> dict[str, str]:
         """Members reachable now: on the relay roster, or by a signed locator."""

@@ -54,7 +54,7 @@ _SHORT_CODE_START_RE = re.compile(
 _REDACTED = "<redacted>"
 _LABEL_WIDTH = 13
 _POLL_SECONDS = 2.0
-_SHORT_CODE_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}")
+_SHORT_CODE_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?:(?:-[0-9A-HJKMNP-TV-Z]{4}){3})?")
 _OFFER_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 logger = logging.getLogger(__name__)
@@ -154,6 +154,8 @@ class ConnectOutcome:
     # A second line: for an approved join what happens to settings and logins,
     # for a failed one why.
     note: str = ""
+    # Third line of an approved join: the founder machine and the one-machine warning.
+    check: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, ConnectStatus):
@@ -180,14 +182,21 @@ class ConnectOutcome:
             or ConnectAltView._filter_text(self.note, 200) != self.note
         ):
             raise ValueError("outcome note must be one short printable line")
+        if self.check and (
+            self.status is not ConnectStatus.APPROVED
+            or not isinstance(self.check, str)
+            or len(self.check) > 400
+            or ConnectAltView._filter_text(self.check, 400) != self.check
+        ):
+            raise ValueError("outcome check must be short printable text")
 
     @classmethod
     def pending(cls, receipt_id: str) -> ConnectOutcome:
         return cls(ConnectStatus.PENDING, receipt_id)
 
     @classmethod
-    def approved(cls, detail: str = "", note: str = "") -> ConnectOutcome:
-        return cls(ConnectStatus.APPROVED, detail=detail, note=note)
+    def approved(cls, detail: str = "", note: str = "", check: str = "") -> ConnectOutcome:
+        return cls(ConnectStatus.APPROVED, detail=detail, note=note, check=check)
 
     @classmethod
     def connected(cls, detail: str = "") -> ConnectOutcome:
@@ -403,7 +412,10 @@ class ConnectAltView(AltView):
         if self._validation_error:
             self._write_line(2, y + 5, self._validation_error, width, _bad)
         self._write_line(2, y + 7, "tab switch  enter submit  esc cancel", width, paint_keys)
-        hints = ["no code? run /connect code on a device already on the network"]
+        hints = [
+            "no code? run /connect code on a device already on the network",
+            "using another relay? press tab and type its domain",
+        ]
         if self._on_attach is not None:
             hints.append(
                 f"first device? an empty code plus enter starts a network on {self.domain}"
@@ -473,6 +485,10 @@ class ConnectAltView(AltView):
         if outcome is not None and outcome.note:
             for line in textwrap.wrap(outcome.note, max(10, width - 3)):
                 self._write_line(2, row, line, width, _dim)
+                row += 1
+        if outcome is not None and outcome.check:
+            for line in textwrap.wrap(outcome.check, max(10, width - 3)):
+                self._write_line(2, row, line, width, paint_tip)
                 row += 1
         if self._stage == "waiting":
             if self._wait_note:
@@ -766,6 +782,12 @@ class ConnectScreenState:
     note: str = ""
     # The first-launch guide opened this screen: add the steps for the other computer.
     guide: bool = False
+    # Why no code was made, in the network's own words (issue #355); "" when unknown.
+    code_reason: str = ""
+    # `Running` or `Halted by <device> at <time> (their clock): <reason>`; "" hides the row.
+    network_state: str = ""
+    # `h` opens the Halt and Resume view.
+    halt_key: bool = False
 
 
 _WANTS_TO_JOIN = " wants to join"
@@ -774,7 +796,9 @@ _WANTS_TO_JOIN = " wants to join"
 _NETWORK_TAGLINE = "link your computers so your agents work together"
 _CODE_TAGLINE = "one code joins one computer"
 _JOIN_TAGLINE = "join with a code from your other computer"
-_SCREEN_LABELS = frozenset({"network", "this device", "config", "join code", "requests", "knocks", "online"})
+_SCREEN_LABELS = frozenset(
+    {"network", "network state", "this device", "config", "join code", "requests", "knocks", "online"}
+)
 _ENTRY_LABELS = frozenset({"network", "domain", "join code"})
 
 
@@ -801,7 +825,7 @@ def _fit(text: str, width: int) -> str:
 def _block(label: str, values: list[str], width: int) -> list[str]:
     """`label` on the first row, blank label under it, values in one column."""
     return [
-        _fit(" " + (label if index == 0 else "").ljust(_LABEL_WIDTH) + value, width)
+        _fit(" " + (label if index == 0 else "").ljust(max(_LABEL_WIDTH, len(label) + 1)) + value, width)
         for index, value in enumerate(values)
     ]
 
@@ -816,6 +840,8 @@ def _code_value(state: ConnectScreenState) -> str:
         return "used   press c for a new code"
     if state.code_status == "creating":
         return "creating…"
+    if state.code_reason:
+        return state.code_reason
     unreachable = state.snapshot is not None and not state.snapshot.relay_online
     reason = "can't connect" if unreachable else "could not create a code"
     return f"{reason}   press c to try again"
@@ -853,14 +879,17 @@ def _network_value(snapshot: ConnectSnapshot) -> str:
 
 def _footer(state: ConnectScreenState) -> str:
     if state.note:
-        return " esc close"
+        return " h halt and resume  esc close" if state.halt_key else " esc close"
     keys = []
     requests = state.snapshot.requests if state.snapshot and not state.code_only else ()
     if len(requests) > 1:
         keys.append("up/down select")
     if requests:
         keys += ["a accept", "r reject"]
-    keys += ["c new code", "esc close"]
+    keys += ["c new code"]
+    if state.halt_key:
+        keys.append("h halt and resume")
+    keys.append("esc close")
     return " " + "  ".join(keys)
 
 
@@ -897,6 +926,8 @@ def connect_screen_lines(
         lines += _block("join code", [_code_value(state)], width)
     else:
         lines += _block("network", [_network_value(snapshot)], width)
+        if state.network_state:
+            lines += _block("network state", [state.network_state], width)
         lines += _block("this device", [snapshot.device or "unnamed"], width)
         if snapshot.config_from:
             source = display_name(snapshot.config_from)
@@ -991,6 +1022,8 @@ class ConnectScreenAltView(AltView):
         snapshot: ConnectSnapshot | None = None,
         note: str = "",
         guide: bool = False,
+        on_halt: Callable[[], Any] | None = None,
+        on_network_state: Callable[[], Any] | None = None,
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect-screen",
@@ -1013,6 +1046,10 @@ class ConnectScreenAltView(AltView):
         self.code_only = code_only
         self._note = note
         self._guide = guide
+        self._on_halt = on_halt
+        self._on_network_state = on_network_state
+        self._network_state = ""
+        self._code_reason = ""
         self._fixed_snapshot = snapshot
         self._renderer: Any = None
         self._private_code: PrivateCode | None = None
@@ -1064,6 +1101,17 @@ class ConnectScreenAltView(AltView):
             (self.code_only or self._note) and key_press.name == "Enter"
         ):
             return True
+        if (key_press.char or "").lower() == "h" and self._on_halt is not None and not self.code_only:
+            result = self._on_halt()  # read-only windows reach Halt and Resume too (R3-F8)
+            if inspect.isawaitable(result):
+                await result
+            # The nested view's exit thawed the main loop, which can write its prompt over this
+            # screen; draw the whole frame again.
+            invalidate = getattr(self._renderer, "invalidate_render_cache", None)
+            if callable(invalidate):
+                invalidate()
+            self.request_render()
+            return False
         if self._note:
             return False
         count = len(self._snapshot.requests) if self._snapshot else 0
@@ -1111,6 +1159,16 @@ class ConnectScreenAltView(AltView):
 
     async def _refresh(self) -> None:
         """Reload requests and roster; on any failure keep what is on screen."""
+        if self._on_network_state is not None:
+            try:
+                state = self._on_network_state()
+                if inspect.isawaitable(state):
+                    state = await state
+                self._network_state = state if isinstance(state, str) else ""
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._network_state = ""
         try:
             result = self._on_load() if self._on_load is not None else None
             if inspect.isawaitable(result):
@@ -1127,6 +1185,7 @@ class ConnectScreenAltView(AltView):
     async def _create(self) -> None:
         self._clear_code()
         self._code_status = "creating"
+        self._code_reason = ""
         self.request_render()
         try:
             if self._on_create is None:
@@ -1134,6 +1193,9 @@ class ConnectScreenAltView(AltView):
             result = self._on_create(self._domain)
             if inspect.isawaitable(result):
                 result = await result
+            reason = result.get("reason") if isinstance(result, dict) else None
+            if isinstance(reason, str) and reason and reason.isprintable():
+                self._code_reason = reason[:300]  # the network's refusal line (#355), never a code
             if not isinstance(result, dict) or set(result) != {
                 "status",
                 "offer_id",
@@ -1233,6 +1295,9 @@ class ConnectScreenAltView(AltView):
             code_only=self.code_only,
             note=self._note,
             guide=self._guide,
+            code_reason=self._code_reason,
+            network_state=self._network_state,
+            halt_key=self._on_halt is not None and not self.code_only,
         )
 
     def _clear_code(self) -> None:

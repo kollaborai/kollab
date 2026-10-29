@@ -13,11 +13,109 @@ import logging
 import os
 import platform
 import signal
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
+
+# Kill switch F11: [pid, start] of every tool shell this agent started, newest last. Presence carries it so
+# a halt also stops what a shell backgrounded (`cmd &`, nohup) after the shell itself exited. Listeners
+# (the hub's presence publish) run on every record, so the entry is on disk before the command runs far.
+MAX_TOOL_SHELLS = 64
+TOOL_SHELLS: List[List[float]] = []
+TOOL_SHELL_LISTENERS: List[Callable[[], None]] = []
+# ps start times are whole seconds and the record is the agent's clock from just before the spawn
+START_DRIFT = 2.0
+
+
+def _group_alive(pid: int) -> bool:
+    """The shell or anything left in its process group still runs (a tool shell leads its group)."""
+    for check in (os.kill, os.killpg):
+        try:
+            check(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def _etime_seconds(text: str) -> int | None:
+    """``ps -o etime`` ([[dd-]hh:]mm:ss) as seconds; None when it is not one."""
+    days, _, rest = text.rpartition("-")
+    parts = rest.split(":")
+    if not (days == "" or days.isdigit()) or not 2 <= len(parts) <= 3 or not all(x.isdigit() for x in parts):
+        return None
+    seconds = 0
+    for x in parts:
+        seconds = seconds * 60 + int(x)
+    return seconds + int(days or 0) * 86400
+
+
+def _pid_starts(pids) -> Dict[int, float]:
+    """Epoch start of each pid we still hold a row for, in one ``ps`` call (empty when ps is missing).
+
+    Kill switch F15a: the pid-reuse check for the presence rows. Same etime trick as the hub's
+    ``halt_runtime.process_info`` (a package must not import from plugins), whole-second precision.
+    """
+    if not pids:
+        return {}
+    try:
+        out = subprocess.run(
+            ["/bin/ps", "-o", "pid=,etime=", "-p", ",".join(str(p) for p in sorted(pids))],
+            capture_output=True, text=True, timeout=10,
+            # minimal env: nothing from the environment (secrets included) rides along
+            env={"LC_ALL": "C", "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        )
+    except Exception:  # best effort (ps missing, mocked, slow): unseen starts keep their rows
+        return {}
+    starts: Dict[int, float] = {}
+    now = time.time()
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        elapsed = _etime_seconds(parts[1])
+        if elapsed is not None:
+            starts[int(parts[0])] = float(int(now) - elapsed)
+    return starts
+
+
+def prune_tool_shells() -> None:
+    """Kill switch F15a: drop rows whose shell and group are gone or whose pid a new process reused.
+
+    Runs on every presence publish and before recording a new shell: an idle agent would otherwise
+    carry dead pids all night, and a reused pid that now leads a group (other agents' tty-less jobs)
+    would have that group swept by a halt. A pid whose start ``ps`` cannot see is kept — only a
+    proven mismatch drops it. Keeps the newest ``MAX_TOOL_SHELLS``.
+    """
+    starts = _pid_starts({int(e[0]) for e in TOOL_SHELLS})
+    kept = []
+    for entry in TOOL_SHELLS:
+        pid, started = int(entry[0]), float(entry[1])
+        if not _group_alive(pid):
+            continue
+        began = starts.get(pid)
+        if began is not None and abs(began - started) > START_DRIFT:
+            continue
+        kept.append(entry)
+    TOOL_SHELLS[:] = kept[-MAX_TOOL_SHELLS:]
+
+
+def record_tool_shell(pid: int, started: float) -> None:
+    """Remember a tool shell; drop entries the prune rejects, keep the newest 64."""
+    prune_tool_shells()
+    # F12: the third field is the shell's parent at record time (this agent); the halt checks it
+    TOOL_SHELLS[:] = (list(TOOL_SHELLS) + [[pid, started, os.getpid()]])[-MAX_TOOL_SHELLS:]
+    for listener in list(TOOL_SHELL_LISTENERS):
+        try:
+            listener()
+        except Exception as e:  # presence is best effort; the command still runs
+            logger.debug(f"tool shell listener failed: {e}")
 
 
 @dataclass
@@ -118,6 +216,9 @@ class ShellExecutor:
         # Filter sensitive environment variables
         if env is None:
             env = self._filter_env(os.environ.copy())
+        # Accident guard (network-sync-and-control.md section 1): set on every
+        # tool child, after the filter, whether the caller passed env or not.
+        env = {**env, "KOLLAB_TOOL_SHELL": "1", "KOLLAB_AGENT_PID": str(os.getpid())}
 
         try:
             # Voice-originated commands pass argv sequences and never enter a
@@ -139,6 +240,9 @@ class ShellExecutor:
                 self._current_process = await self._create_unix_process(
                     command, cwd, env
                 )
+            pid = getattr(self._current_process, "pid", None)
+            if not self._is_windows and isinstance(pid, int):
+                record_tool_shell(pid, start_time)
 
             try:
                 stdout, stderr = await asyncio.wait_for(

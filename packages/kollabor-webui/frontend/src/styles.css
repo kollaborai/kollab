@@ -38,6 +38,10 @@
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
+  /* The one accent color (a gem from the roster: peridot). Change it here;
+     every highlight, the active tab line and the main save button follow. */
+  --highlight: #3f6b0c;
+  --highlight-foreground: #ffffff;
 }
 
 /* No lines: sections separate by shade. Page 0.145, chrome (sidebar and
@@ -68,6 +72,8 @@
   --sidebar-primary: var(--primary);
   --sidebar-primary-foreground: var(--primary-foreground);
   --sidebar-accent: var(--secondary);
+  --highlight: #78be21;
+  --highlight-foreground: #0a0c0f;
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: transparent;
   --sidebar-ring: oklch(0.556 0 0);
@@ -97,6 +103,8 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-highlight: var(--highlight);
+  --color-highlight-foreground: var(--highlight-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);

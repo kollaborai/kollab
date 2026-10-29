@@ -47,9 +47,16 @@ MAX_LISTED = 64
 # (the `1` in `_send`, `_v1_only`, and the undated branches of `open_members` and
 # `_take`) two releases or 90 days after the first release that ships version 2,
 # whichever is later.
-_DOMAIN = {1: b"kollab-network-members-v1\n", 2: b"kollab-network-members-v2\n"}
+# Version 3 adds `control`: the kill switch's member rows, founder record,
+# confirmations, opt-outs and signed revocation records (network_control.py).
+_DOMAIN = {
+    1: b"kollab-network-members-v1\n",
+    2: b"kollab-network-members-v2\n",
+    3: b"kollab-network-members-v3\n",
+}
 _FIELDS = {1: frozenset({"v", "voucher", "to", "net", "members", "revoked", "sig"})}
 _FIELDS[2] = _FIELDS[1] | {"issued_at"}
+_FIELDS[3] = _FIELDS[2] | {"control"}
 _ENTRY = frozenset({"key", "name"})
 
 
@@ -65,10 +72,11 @@ def seal_members(
     members: list[tuple[str, str]],
     revoked: list[str],
     issued_at: int | None = None,
+    control: dict | None = None,
 ) -> dict:
-    """The signed list one device sends one member: dated (v2) with `issued_at`, else v1."""
+    """The signed list one device sends one member: v3 with `control`, dated v2, else v1."""
     body = {
-        "v": 1 if issued_at is None else 2,
+        "v": 1 if issued_at is None else 2 if control is None else 3,
         "voucher": key.verify_key.encode().hex(),
         "to": to,
         "net": net,
@@ -77,15 +85,18 @@ def seal_members(
     }
     if issued_at is not None:
         body["issued_at"] = issued_at
+    if control is not None and issued_at is not None:
+        body["control"] = control
     return {**body, "sig": key.sign(_signed_bytes(body)).signature.hex()}
 
 
 def open_members(
     payload: object, *, peer: str, own_key: str, net: str
-) -> tuple[list[tuple[str, str]], list[str], int | None]:
+) -> tuple[list[tuple[str, str]], list[str], int | None, dict | None]:
     """Check a list came from `peer`, for this device, on this network, unaltered.
 
-    Returns the members, the revoked and `issued_at` (None for an undated v1 list).
+    Returns the members, the revoked, `issued_at` (None for an undated v1 list)
+    and the v3 `control` block (None before v3).
     Raises RelayError for anything else: a wrong shape, a list signed by another
     key, one meant for another device or network, a bad signature.
     """
@@ -95,14 +106,16 @@ def open_members(
     if payload["voucher"] != peer or payload["to"] != own_key or payload["net"] != net:
         raise RelayError("invalid membership list")
     members, revoked, sig = payload["members"], payload["revoked"], payload["sig"]
-    issued_at = payload["issued_at"] if version == 2 else None
+    issued_at = payload["issued_at"] if version >= 2 else None
+    control = payload["control"] if version == 3 else None
     if (
         not isinstance(members, list)
         or len(members) > MAX_LISTED
         or not isinstance(revoked, list)
         or len(revoked) > MAX_REVOKED
         or not isinstance(sig, str)
-        or (version == 2 and (type(issued_at) is not int or not 0 < issued_at <= MAX_STAMP))
+        or (version >= 2 and (type(issued_at) is not int or not 0 < issued_at <= MAX_STAMP))
+        or (version == 3 and not isinstance(control, dict))
     ):
         raise RelayError("invalid membership list")
     entries: list[tuple[str, str]] = []
@@ -123,7 +136,7 @@ def open_members(
         VerifyKey(bytes.fromhex(peer)).verify(_signed_bytes(body), bytes.fromhex(sig))
     except (BadSignatureError, ValueError):
         raise RelayError("invalid membership list") from None
-    return entries, list(revoked), issued_at
+    return entries, list(revoked), issued_at, control
 
 
 class MembershipSync:
@@ -175,9 +188,15 @@ class MembershipSync:
 
     async def tick(self) -> None:
         client = self._client
+        try:  # F15a: a revocation applies once two counting machines signed it, not only when a list arrives
+            client.control.apply_revocations()
+        except Exception as error:
+            logger.warning("network members: revocations not applied (%s)", type(error).__name__)
         members, revoked = client.membership()
+        # Halts, proposals, chain heads and the control records join the digest,
+        # so any change to them resends the list.
         digest = hashlib.sha256(
-            json.dumps([members, revoked], sort_keys=True).encode()
+            json.dumps([members, revoked, client.control.digest()], sort_keys=True).encode()
         ).hexdigest()
         online = self._online()
         issued_at = 0
@@ -214,7 +233,7 @@ class MembershipSync:
         revoked: list[str],
         issued_at: int,
     ) -> None:
-        """Offer the dated list; a member that refuses it may predate it, so try v1.
+        """Offer v3, then the dated v2; a member that refuses both may predate them, so try v1.
 
         A member that took only v1 is offered v1 alone while its relay session
         lasts; an upgrade restarts it, which is a new session. Raises when
@@ -222,14 +241,15 @@ class MembershipSync:
         """
         client = self._client
         known = self._v1_only.get(key) == session
-        for version in ((1,) if known else (2, 1)):
+        for version in ((1,) if known else (3, 2, 1)):
             payload = seal_members(
                 key=client._store.key,
                 to=key,
                 net=client.network_id(),
                 members=listed,
                 revoked=revoked,
-                issued_at=issued_at if version == 2 else None,
+                issued_at=issued_at if version >= 2 else None,
+                control=client.control.wire() if version == 3 else None,
             )
             reply = await self._transport.request(
                 key, METHOD, payload, timeout=REQUEST_SECONDS
@@ -274,11 +294,11 @@ class MembershipSync:
         """One list from a member; the reply says only whether it was taken."""
         client = self._client
         try:
-            members, revoked, issued_at = open_members(
+            members, revoked, issued_at, control = open_members(
                 payload, peer=peer, own_key=client.public_key, net=client.network_id()
             )
             self._take(peer, issued_at)
-            client.accept_membership(peer, members, revoked)
+            client.accept_membership(peer, members, revoked, control)
         except RelayError as error:
             logger.info("network members: refused a list (%s)", failure_text(error))
             return {"error": "invalid"}

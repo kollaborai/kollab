@@ -78,3 +78,71 @@ def test_smoke_rejects_missing_provenance_line(
     with patch.object(build_binary.subprocess, "run", return_value=result):
         with pytest.raises(SystemExit, match="expected Build: live/0.18.0"):
             build_binary.smoke(tmp_path / "kollab", "0.18.0", expected)
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "name", "filename"),
+    [
+        ("Linux", "x86_64", "linux-x86_64", "kollab-linux-x86_64"),
+        ("Darwin", "arm64", "macos-aarch64", "kollab-macos-aarch64"),
+        ("Windows", "AMD64", "windows-x86_64", "kollab-windows-x86_64.exe"),
+    ],
+)
+def test_binary_is_named_as_pex_names_it_on_each_platform(
+    monkeypatch: pytest.MonkeyPatch, system: str, machine: str, name: str, filename: str
+) -> None:
+    monkeypatch.setattr(build_binary.platform, "system", lambda: system)
+    monkeypatch.setattr(build_binary.platform, "machine", lambda: machine)
+    assert build_binary.platform_name() == name
+    assert build_binary.binary_filename() == filename
+
+
+def test_unknown_platform_still_has_no_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(build_binary.platform, "system", lambda: "FreeBSD")
+    with pytest.raises(SystemExit, match="no kollab binary for FreeBSD"):
+        build_binary.platform_name()
+
+
+STATUS_ONLINE = "1 agent(s) online:\n\n  lapis *  pid=4242  idle\n\nnetwork: not connected\n"
+STATUS_NONE = "no agents online\n\nnetwork: not connected\n"
+
+
+def fake_kollab(monkeypatch: pytest.MonkeyPatch, statuses: list[str], stop_calls: list[list[str]]) -> None:
+    """A stand-in kollab: `--detached` starts nothing, `--hub status` answers from `statuses` in order."""
+    monkeypatch.setattr(build_binary.time, "sleep", lambda _: None)
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        args = command[1:]
+        if args[:2] == ["--hub", "stop"]:
+            stop_calls.append(args)
+        stdout = statuses.pop(0) if args[:2] == ["--hub", "status"] else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(build_binary.subprocess, "run", run)
+
+
+def test_agent_smoke_passes_once_the_agent_is_online_and_stops_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stops: list[list[str]] = []
+    fake_kollab(monkeypatch, [STATUS_NONE, STATUS_ONLINE, STATUS_NONE], stops)
+    build_binary.agent_smoke(tmp_path / "kollab.exe")
+    assert stops == [["--hub", "stop", "lapis"]]
+
+
+def test_agent_smoke_names_what_a_runtime_without_daemon_start_prints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stops: list[list[str]] = []
+    fake_kollab(monkeypatch, [STATUS_NONE] * 50, stops)
+    with pytest.raises(SystemExit, match="started no agent that answers `--hub status`"):
+        build_binary.agent_smoke(tmp_path / "kollab.exe", timeout=0.0)
+    assert stops == []
+
+
+def test_agent_smoke_fails_when_stop_leaves_the_agent_online(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_kollab(monkeypatch, [STATUS_ONLINE] * 40, [])
+    clock = iter(range(0, 10_000, 40))
+    monkeypatch.setattr(build_binary.time, "monotonic", lambda: next(clock))
+    with pytest.raises(SystemExit, match="left the agent online"):
+        build_binary.agent_smoke(tmp_path / "kollab.exe")
