@@ -1,21 +1,24 @@
-"""PhoneLink lifecycle events that no other test names (#366)."""
+"""PhoneLink lifecycle events, each driven through the code that emits it (#366)."""
 
 from types import SimpleNamespace
 
 import pytest
 from kollabor_engine import phone_link
+from kollabor_engine.phonelink_events import opaque_ref
 
 from tests.unit.test_phone_link import setup_link  # noqa: F401
 
 
 @pytest.mark.asyncio
 async def test_invite_opened_is_recorded(setup_link):  # noqa: F811
-    manager, *_ = setup_link
+    manager, offer, _host, phone, *_ = setup_link
     await manager.status()
     history = await manager.event_history()
     event = next((e for e in history["events"] if e["event"] == "invite_opened"), None)
     assert event is not None, history["events"]
     assert event["record_state"] == "pending"
+    assert event["phone_ref"] == opaque_ref(offer["id"])
+    assert event["device_ref"] == opaque_ref(phone.public_key)
 
 
 @pytest.mark.asyncio
@@ -34,7 +37,18 @@ async def test_relay_error_is_recorded(setup_link):  # noqa: F811
 
 
 @pytest.mark.asyncio
-async def test_relay_socket_opened_is_recorded(setup_link, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize(
+    "kind, event_name, fields",
+    [
+        ("socket_opened", "relay_socket_opened", {}),
+        ("socket_closed", "relay_socket_closed", {"close_code": 1006}),
+        ("reconnecting", "relay_reconnecting", {"retry_count": 2, "retry_seconds": 4}),
+        ("error", "relay_error", {"error_kind": "socket"}),
+    ],
+)
+async def test_relay_lifecycle_events_are_recorded(
+    setup_link, monkeypatch, kind, event_name, fields  # noqa: F811
+):
     manager, *_ = setup_link
     identifier = next(iter(manager.records))
 
@@ -56,7 +70,7 @@ async def test_relay_socket_opened_is_recorded(setup_link, monkeypatch):  # noqa
 
         async def connect(self, *args, **kwargs):
             for listener in self.listeners:
-                listener(SimpleNamespace(kind="socket_opened"))
+                listener(SimpleNamespace(kind=kind, **fields))
 
         async def close(self):
             pass
@@ -66,8 +80,9 @@ async def test_relay_socket_opened_is_recorded(setup_link, monkeypatch):  # noqa
     manager.clients.pop(identifier)
     await phone_link.PhoneLink._client(manager, identifier)
     history = await manager.event_history()
-    event = next(
-        (e for e in history["events"] if e["event"] == "relay_socket_opened"), None
-    )
+    event = next((e for e in history["events"] if e["event"] == event_name), None)
     assert event is not None, history["events"]
+    assert event["phone_ref"] == opaque_ref(identifier)
     assert event["device_name"] == "My iPhone"
+    for name, value in fields.items():
+        assert event[name] == value
