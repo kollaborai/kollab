@@ -797,7 +797,7 @@ class GoalStore:
                 reason = None
                 if report["ambiguous"]:
                     status = "paused"
-                    reason = "reconcile: dispatch outcome unknown after owner crash"
+                    reason = "a turn was cut off before it finished: check its work, then /goal resume"
 
                 sets = (
                     "lease_epoch=?",
@@ -807,7 +807,11 @@ class GoalStore:
                     "record_version=record_version+1",
                 )
                 if report["ambiguous"]:
-                    sets_extended = sets + ("status=?", "blocked_reason=?")
+                    sets_extended = sets + (
+                        "status=?",
+                        "blocked_reason=?",
+                        "last_reason=?",
+                    )
                     self._conn.execute(
                         f"UPDATE goals SET {', '.join(sets_extended)} WHERE goal_id=?",
                         (
@@ -816,6 +820,7 @@ class GoalStore:
                             now + lease_seconds,
                             now,
                             status,
+                            reason,
                             reason,
                             goal_id,
                         ),

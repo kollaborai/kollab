@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Goals: a goal whose last turn was cut off by an agent that stopped mid-turn is paused with the reason, instead of staying active with nothing driving it; `/goal resume` continues it, refs #397
 - Goals: an active `/goal` whose loop stopped (the provider was down, or a `/resume` into its conversation) is picked up again within a minute once no turn is running, refs #389
 - Context compaction: a round keeps fewer recent messages verbatim, down to 2, when they would fill more than a quarter of the compaction threshold, so a few large messages or tool results are summarized instead of kept, refs #390
 - Context compaction: an agent over its context budget now compacts once it has

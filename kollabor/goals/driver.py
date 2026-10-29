@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -133,8 +134,9 @@ class GoalTurnDriver:
         A loop that yields waits for a settled turn to wake it. When that turn
         never comes (the provider was down, a /resume into the conversation),
         the goal stays active with nothing driving it. schedule() is idempotent
-        and maybe_continue still lets user input win. Returns the goal id it
-        scheduled, or None.
+        and maybe_continue still lets user input win. A goal whose last turn was
+        cut off by a process that is gone is paused instead (#397). Returns the
+        goal id it scheduled, or None.
         """
         uid = self._conversation_uid()
         if not uid:
@@ -147,13 +149,58 @@ class GoalTurnDriver:
             record is None
             or record.status != "active"
             or record.goal_id in self._running_goals
-            # dispatched and never settled (a daemon that died mid-turn) is
-            # ambiguous work: never continue past it on its own (spec 7.4)
-            or self.service._goal_turn_in_flight(record.goal_id)
         ):
+            return None
+        if self.service._goal_turn_in_flight(record.goal_id):
+            # dispatched and never settled, and no loop here drives it: that
+            # work is ambiguous, never continued on its own (spec 7.4). Once
+            # the process that dispatched it is gone, pause the goal so the
+            # user can check that work and /goal resume (#397)
+            if not self._dispatcher_alive(record.goal_id):
+                self._pause_unsettled(record.goal_id)
             return None
         self.schedule(record.goal_id)
         return record.goal_id
+
+    def _dispatcher_alive(self, goal_id: str) -> bool:
+        """True while another live process may still own an unsettled attempt."""
+        try:
+            unsettled = {
+                attempt.attempt_id
+                for attempt in self.service.store.unfinished_attempts(goal_id)
+                if attempt.state in ("dispatched", "acked")
+            }
+            events = self.service.store.events(goal_id, limit=200)
+        except GoalStoreError:
+            return True  # cannot tell: leave it alone
+        for event in events:
+            if event.kind != "turn_started" or event.turn_id not in unsettled:
+                continue
+            # daemon ids are "<host>:<pid>"; goals.db is local to this machine
+            pid_text = (event.daemon_id or "").rpartition(":")[2]
+            if not pid_text.isdigit():
+                return True  # an owner we cannot check: leave it alone
+            pid = int(pid_text)
+            if pid == os.getpid():
+                continue  # this process, and no loop here drives it
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                return True
+            return True
+        return False
+
+    def _pause_unsettled(self, goal_id: str) -> None:
+        try:
+            _record, report = self.service.store.recover_lease(
+                goal_id, self.service.daemon_id
+            )
+        except GoalStoreError as exc:  # LeaseHeld is a GoalStoreError
+            logger.warning("goal %s: unsettled attempt left alone: %s", goal_id, exc)
+            return
+        logger.warning("goal %s paused, its last turn was cut off: %s", goal_id, report)
 
     async def watch(self, interval: float = 60.0) -> None:
         """Run check_stalled every ``interval`` seconds for the daemon's life."""

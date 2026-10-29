@@ -5,6 +5,9 @@ level (spec sections 8.3, 8.5, 9.3).
 """
 
 import asyncio
+import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -418,6 +421,46 @@ class DriverTests(unittest.TestCase):
         driver.schedule = started.append
         self.assertIsNone(driver.check_stalled())
         self.assertEqual(started, [])
+
+    def _dispatch_from(self, goal_id: str, daemon_id: str) -> None:
+        # another process dispatches a goal turn and never settles it
+        other = GoalService(self.store, daemon_id=daemon_id)
+        start = TurnOutcome(
+            turn_id="goal-start", origin="goal", status="ok", goal_id=goal_id
+        )
+        self.assertIsNotNone(other.maybe_continue(goal_id, start, BoundaryContext()))
+
+    def test_watchdog_pauses_a_goal_whose_dispatcher_is_gone(self):
+        goal_id = self._create()
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        self._dispatch_from(goal_id, f"testhost:{gone.pid}")
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+        record = self.store.get(goal_id)
+        self.assertEqual(record.status, "paused")
+        self.assertIn("cut off", record.last_reason or "")
+        self.assertFalse(self.service._goal_turn_in_flight(goal_id))
+        # the user checks that work and resumes: the watchdog drives it again
+        self.service.resume(goal_id)
+        self.assertEqual(driver.check_stalled(), goal_id)
+        self.assertEqual(started, [goal_id])
+
+    def test_watchdog_leaves_a_live_dispatcher_alone(self):
+        goal_id = self._create()
+        self._dispatch_from(goal_id, f"testhost:{os.getppid()}")
+        driver, coord = self._make_driver()
+        self._bus(coord)
+        started: list[str] = []
+        driver.schedule = started.append
+        self.assertIsNone(driver.check_stalled())
+        self.assertEqual(started, [])
+        self.assertEqual(self.store.get(goal_id).status, "active")
+        self.assertTrue(self.service._goal_turn_in_flight(goal_id))
 
     def test_a_turn_that_raises_settles_its_attempt(self):
         goal_id = self._create()
