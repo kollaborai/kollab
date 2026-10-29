@@ -65,6 +65,39 @@ def test_requested_busy_identity_is_rejected() -> None:
         pool._assign_identity("lapis")
 
 
+def test_pool_holds_a_live_identity_when_presence_is_missing(tmp_path) -> None:
+    pool = daemon_pool.DaemonPool()
+    pool._bridge.get_agents = lambda use_cache=False: []
+    pool._daemons["original"] = SimpleNamespace(
+        identity="koordinator", project=str(tmp_path), pid=1234, alive=True,
+    )
+
+    with pytest.raises(ValueError, match="koordinator.*already in use"):
+        pool._assign_identity("koordinator", str(tmp_path))
+    assert pool._assign_identity("koordinator", str(tmp_path / "other")) == "koordinator"
+
+
+def test_remote_session_does_not_hold_the_local_identity(tmp_path) -> None:
+    pool = daemon_pool.DaemonPool()
+    pool._bridge.get_agents = lambda use_cache=False: []
+    pool._daemons["remote"] = SimpleNamespace(
+        identity="koordinator", project=str(tmp_path), pid=0, alive=True,
+    )
+
+    assert pool._assign_identity("koordinator", str(tmp_path)) == "koordinator"
+
+
+def test_a_stale_presence_with_a_live_process_still_holds_its_name(tmp_path, monkeypatch) -> None:
+    pool = daemon_pool.DaemonPool()
+    pool._bridge.get_agents = lambda use_cache=False: []
+    monkeypatch.setattr(
+        "plugins.hub.presence.live_agents_on_machine",
+        lambda: [(tmp_path, {"identity": "koordinator", "project": str(tmp_path)})],
+    )
+    with pytest.raises(ValueError, match="koordinator.*already in use"):
+        pool._assign_identity("koordinator", str(tmp_path))
+
+
 @pytest.mark.parametrize("name", ["koordinator", "lapis"])
 def test_every_identity_is_held_per_folder(name, tmp_path) -> None:
     pool = daemon_pool.DaemonPool()

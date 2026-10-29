@@ -421,20 +421,21 @@ export type NetworkWorkspaceGroup = { label: string; agents: NetworkAgent[] };
 export type NetworkDeviceGroup = { device: string; workspaces: NetworkWorkspaceGroup[] };
 
 /** One network this device belongs to (#158): its devices grouped by workspace.
- * `live: false`: no agent here carries it now, so its rows are the last roster
- * seen and opening one first starts an agent in `folder`. */
+ * `live: false` means no local agent answered the network probe; it does not
+ * imply that no local agent is running. */
 export type NetworkGroup = {
   id: string;
   name: string;
   trust?: string;
   live?: boolean;
   folder?: string;
+  /** A non-solo local agent exists in this network's hub, or null if unknown. */
+  local_agent_running?: boolean | null;
   devices: NetworkDeviceGroup[];
 };
 
 /** This computer's relay name and the agents on other computers; `remote` is empty off a network.
- * `live: false`: no agent here is on the network, so `remote` is the last roster seen and opening
- * one first starts an agent in `folder` to carry the network.
+ * `live: false`: no local agent answered the network probe, so `remote` is the last roster seen.
  * Multi-network (#158): `networks` groups those rows per membership
  * (NETWORKS > DEVICES > WORKSPACES > AGENTS) and `contacts` lists accepted
  * knock contacts; an engine without them falls back to the flat fields. */
@@ -443,6 +444,7 @@ export type AgentNetwork = {
   remote: NetworkAgent[];
   live?: boolean;
   folder?: string;
+  local_agent_running?: boolean | null;
   networks?: NetworkGroup[];
   contacts?: ContactPeer[];
 };

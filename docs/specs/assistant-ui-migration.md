@@ -178,6 +178,13 @@ use the shared local SVG marks for Codex, Claude and Gemini; Antigravity uses th
 Google mark and other CLI profiles use the generic CLI badge. The device heading
 keeps `This Computer` together while the adjacent device name may truncate.
 
+One local daemon has one session row, even when its saved owner record contains
+multiple session IDs. The engine retains the oldest equivalent record on restart,
+without deleting conversation history or stopping the daemon. Records with
+conflicting conversation metadata remain saved, but never create another owner
+for the same live PID. Distinct processes, including agents with the same name in
+different workspaces, remain distinct rows.
+
 The desktop divider uses the shared `SidebarProvider` width variable and
 `SidebarRail` separator. Pointer dragging captures the pointer, supports either
 sidebar side, and clamps the width to 220–480px while leaving at least 320px for

@@ -752,7 +752,8 @@ class Agent:
                 rendered_skill = renderer.render(skill.content)
                 parts.append(f"\n\n## Skill: {skill_name}\n\n{rendered_skill}")
 
-        # Level 1: Skills catalog (name + description only for inactive skills)
+        # Level 1: Skills catalog (name + description + path for inactive skills).
+        # The model cannot run /skills load, so the path is how it reads one.
         inactive_skills = [
             (name, skill)
             for name, skill in self.skills.items()
@@ -760,11 +761,14 @@ class Agent:
         ]
         if inactive_skills:
             catalog_lines = [
-                "\n\navailable skills (use /skills load <name> to activate):"
+                "\n\navailable skills (when a task matches one, read the file "
+                "listed under it before you start; never guess a skill's path):"
             ]
             for name, skill in sorted(inactive_skills, key=lambda x: x[0]):
                 desc = skill.description or "no description"
                 catalog_lines.append(f"  - {name}: {desc}")
+                if skill.file_path:
+                    catalog_lines.append(f"    file: {skill.file_path}")
             parts.append("\n".join(catalog_lines))
 
         # Cache-boundary sentinel: everything above this marker is static

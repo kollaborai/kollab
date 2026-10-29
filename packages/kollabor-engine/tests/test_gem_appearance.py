@@ -34,14 +34,19 @@ class TestNormalize:
         doc = {
             "season": "halloween",
             "born": {"lapis": {"face": "kawaii", "hat": "beret"}},
-            "gems": {"lapis": {"face": "disney", "hat": "crown", "color": [30, 90, 180]}},
+            "gems": {
+                "lapis": {"face": "disney", "hat": "crown", "color": [30, 90, 180]}
+            },
         }
         assert gem_appearance.normalize(doc) == doc
 
     def test_drops_malformed_fields(self):
         doc = {
             "season": "Not A Slug",
-            "born": {"ruby": {"face": "pill", "color": [1, 2, 3]}, "Bad Name": {"face": "pill"}},
+            "born": {
+                "ruby": {"face": "pill", "color": [1, 2, 3]},
+                "Bad Name": {"face": "pill"},
+            },
             "gems": {
                 "lapis": {"face": 7, "hat": "crown", "color": [256, 0, 0]},
                 "ruby": {"color": [True, 0, 0]},
@@ -65,9 +70,21 @@ class TestNormalize:
                 "maya": {"avatar": {"kind": "image", "url": picture}},
                 "lapis": {"avatar": {"kind": "initials"}, "color": [1, 2, 3]},
                 "theo": {"avatar": {"kind": "gem", "extra": 1}},
-                "svg": {"avatar": {"kind": "image", "url": "data:image/svg+xml;base64,PHN2Zz4="}},
-                "web": {"avatar": {"kind": "image", "url": "https://example.com/a.png"}},
-                "big": {"avatar": {"kind": "image", "url": "data:image/png;base64," + "A" * 200_000}},
+                "svg": {
+                    "avatar": {
+                        "kind": "image",
+                        "url": "data:image/svg+xml;base64,PHN2Zz4=",
+                    }
+                },
+                "web": {
+                    "avatar": {"kind": "image", "url": "https://example.com/a.png"}
+                },
+                "big": {
+                    "avatar": {
+                        "kind": "image",
+                        "url": "data:image/png;base64," + "A" * 200_000,
+                    }
+                },
                 "empty": {"avatar": {"kind": "emoji", "value": "  "}},
                 "odd": {"avatar": {"kind": "sticker"}},
             },
@@ -83,10 +100,26 @@ class TestNormalize:
 
     def test_keeps_hair_fur_and_auras_and_drops_bad_ones(self):
         doc = {
-            "born": {"lapis": {"hair": "long", "hairColor": [95, 60, 35], "auras": ["glow"], "sparkles": "lots"}},
+            "born": {
+                "lapis": {
+                    "hair": "long",
+                    "hairColor": [95, 60, 35],
+                    "auras": ["glow"],
+                    "sparkles": "lots",
+                }
+            },
             "gems": {
-                "lapis": {"hair": "mohawk", "hairColor": "gem", "fur": "shaggy", "furColor": [225, 190, 120]},
-                "ruby": {"auras": ["glow", "orbit", "glow", "Bad", 3], "sparkles": "few", "auraColor": [200, 30, 50]},
+                "lapis": {
+                    "hair": "mohawk",
+                    "hairColor": "gem",
+                    "fur": "shaggy",
+                    "furColor": [225, 190, 120],
+                },
+                "ruby": {
+                    "auras": ["glow", "orbit", "glow", "Bad", 3],
+                    "sparkles": "few",
+                    "auraColor": [200, 30, 50],
+                },
                 "opal": {
                     "hair": "Not A Slug",
                     "hairColor": "blue",
@@ -100,8 +133,17 @@ class TestNormalize:
         # A born look keeps its coat, never an aura.
         assert clean["born"] == {"lapis": {"hair": "long", "hairColor": [95, 60, 35]}}
         assert clean["gems"] == {
-            "lapis": {"hair": "mohawk", "hairColor": "gem", "fur": "shaggy", "furColor": [225, 190, 120]},
-            "ruby": {"auras": ["glow", "orbit"], "sparkles": "few", "auraColor": [200, 30, 50]},
+            "lapis": {
+                "hair": "mohawk",
+                "hairColor": "gem",
+                "fur": "shaggy",
+                "furColor": [225, 190, 120],
+            },
+            "ruby": {
+                "auras": ["glow", "orbit"],
+                "sparkles": "few",
+                "auraColor": [200, 30, 50],
+            },
         }
 
     def test_keeps_coat_knobs_and_drops_bad_ones(self):
@@ -127,26 +169,38 @@ class TestNormalize:
         # Nothing is born with knob settings.
         assert clean["born"] == {"lapis": {"hair": "long"}}
         assert clean["gems"] == {
-            "lapis": {"hair": "long", "hairKnobs": {"length": 0.7, "lie": 2.0}, "furKnobs": {"length": 10.0}},
+            "lapis": {
+                "hair": "long",
+                "hairKnobs": {"length": 0.7, "lie": 2.0},
+                "furKnobs": {"length": 10.0},
+            },
         }
 
     def test_non_object_is_empty(self):
         assert gem_appearance.normalize(["nope"]) == EMPTY
 
-    def test_an_agent_in_another_folder_or_on_another_computer_keeps_its_own_picks(self):
+    def test_an_agent_in_another_folder_or_on_another_computer_keeps_its_own_picks(
+        self,
+    ):
         looks = {
             "koordinator": {"face": "visor"},
-            "koordinator@/Users/me/dev/webapp": {"face": "kawaii", "color": [30, 90, 180]},
+            "koordinator@/Users/me/dev/webapp": {
+                "face": "kawaii",
+                "color": [30, 90, 180],
+            },
             "koordinator@home-server": {"hat": "crown"},
         }
-        doc = {"born": dict(looks), "gems": {
-            **looks,
-            "koordinator@": {"face": "pill"},
-            "koordinator@bad\nline": {"face": "pill"},
-            "Koordinator@home-server": {"face": "pill"},
-            "koordinator@" + "x" * 1025: {"face": "pill"},
-            "lapis\n": {"face": "pill"},
-        }}
+        doc = {
+            "born": dict(looks),
+            "gems": {
+                **looks,
+                "koordinator@": {"face": "pill"},
+                "koordinator@bad\nline": {"face": "pill"},
+                "Koordinator@home-server": {"face": "pill"},
+                "koordinator@" + "x" * 1025: {"face": "pill"},
+                "lapis\n": {"face": "pill"},
+            },
+        }
         clean = gem_appearance.normalize(doc)
         assert clean["gems"] == looks
         # Only the engine rolls born looks, and only for a gem's bare name.
@@ -167,27 +221,125 @@ class TestBirths:
         assert born["lapis"] == look
         assert set(born) == {"lapis", "ruby"}
 
-    def test_some_gems_are_born_with_hair_or_fur(self, appearance_store, monkeypatch):
-        rolls = iter([0.1, 0.3, 0.9])
-        monkeypatch.setattr(gem_appearance.random, "random", lambda: next(rolls))
-        gem_appearance.record_births(["lapis", "ruby", "opal"])
-        born = gem_appearance.load_appearance()["born"]
-        assert born["lapis"]["hair"] in gem_appearance.BIRTH_HAIRS
-        assert tuple(born["lapis"]["hairColor"]) in gem_appearance.BIRTH_HAIR_COLORS
-        assert born["ruby"]["fur"] in gem_appearance.BIRTH_FURS
-        assert "furColor" not in born["ruby"]
-        assert born["opal"]["hair"] == "none" and "fur" not in born["opal"]
+    def test_most_gems_are_born_furry(self):
+        coats = [gem_appearance._birth_coat(f"gem{i}") for i in range(1000)]
+        furry = [coat for coat in coats if "fur" in coat]
+        assert 800 <= len(furry) <= 900
+        for coat in furry:
+            assert coat["fur"] in gem_appearance.BIRTH_FURS
+            assert coat["furColor"] in gem_appearance.BIRTH_FUR_COLORS
+        for coat in coats:
+            if coat.get("hair") not in (None, "none"):
+                assert coat["hair"] in gem_appearance.BIRTH_HAIRS
+                assert tuple(coat["hairColor"]) in gem_appearance.BIRTH_HAIR_COLORS
 
-    def test_a_gem_born_before_hair_gets_its_coat_roll_once(self, appearance_store, monkeypatch):
+    def test_the_roll_matches_the_web_uis_draw_for_the_same_name(
+        self, appearance_store
+    ):
+        # Computed by the web UI's own resolveGemLook over the same vocabulary
+        # (gem-appearance.tsx GEM_LOOK_VOCABULARY): the engine's roll and the
+        # client's fallback draw must never diverge.
+        expected = {
+            "lapis": {
+                "face": "diamond",
+                "hat": "wizard",
+                "hair": "long",
+                "hairColor": [170, 170, 175],
+            },
+            "ruby": {
+                "face": "pixel",
+                "hat": "cap",
+                "fur": "short",
+                "furColor": [150, 60, 35],
+            },
+            "opal": {
+                "face": "triclops",
+                "hat": "cap",
+                "hair": "long",
+                "hairColor": [170, 170, 175],
+            },
+            "peridot": {
+                "face": "kawaii",
+                "hat": "wizard",
+                "fur": "shaggy",
+                "furColor": [235, 232, 225],
+            },
+            "sapphire": {
+                "face": "pill",
+                "hat": "crown",
+                "fur": "short",
+                "furColor": "gem",
+            },
+            "garnet": {
+                "face": "diamond",
+                "hat": "cap",
+                "fur": "short",
+                "furColor": [95, 60, 35],
+            },
+            "bismuth": {
+                "face": "pill",
+                "hat": "wizard",
+                "fur": "short",
+                "furColor": "gem",
+            },
+        }
+        gem_appearance.record_births(list(expected))
+        assert gem_appearance.load_appearance()["born"] == expected
+
+    def test_a_redrawn_birth_is_the_same_look(self, appearance_store):
+        gem_appearance.record_births(["lapis", "ruby"])
+        first = gem_appearance.load_appearance()["born"]
+        appearance_store.unlink()
+        gem_appearance.record_births(["lapis", "ruby"])
+        assert gem_appearance.load_appearance()["born"] == first
+
+    def test_a_gem_born_before_coats_gets_its_coat_drawn_once(self, appearance_store):
         appearance_store.parent.mkdir(parents=True)
-        appearance_store.write_text(json.dumps({"born": {"lapis": {"face": "pill", "hat": "cap"}}}))
-        monkeypatch.setattr(gem_appearance.random, "random", lambda: 0.1)
+        appearance_store.write_text(
+            json.dumps({"born": {"lapis": {"face": "pill", "hat": "cap"}}})
+        )
         gem_appearance.record_births([])
-        lapis = gem_appearance.load_appearance()["born"]["lapis"]
-        assert lapis["face"] == "pill" and lapis["hair"] in gem_appearance.BIRTH_HAIRS
-        monkeypatch.setattr(gem_appearance.random, "random", lambda: 0.9)
+        lapis = json.loads(appearance_store.read_text())["born"]["lapis"]
+        assert lapis["face"] == "pill" and lapis["hat"] == "cap"
+        assert "hair" in lapis or "fur" in lapis
         gem_appearance.record_births([])
-        assert gem_appearance.load_appearance()["born"]["lapis"] == lapis
+        assert json.loads(appearance_store.read_text())["born"]["lapis"] == lapis
+
+    def test_a_coat_recorded_bare_before_fur_was_common_is_drawn_again(
+        self, appearance_store
+    ):
+        appearance_store.parent.mkdir(parents=True)
+        appearance_store.write_text(
+            json.dumps(
+                {
+                    "born": {
+                        # An old bare roll (fur was rare then) draws its coat again.
+                        "lapis": {"face": "pill", "hat": "cap", "hair": "none"},
+                        # A drawn coat sticks: this hair is never rolled over.
+                        "ruby": {
+                            "face": "dot",
+                            "hat": "top",
+                            "hair": "short",
+                            "hairColor": [30, 26, 24],
+                        },
+                    }
+                }
+            )
+        )
+        gem_appearance.record_births([])
+        born = gem_appearance.load_appearance()["born"]
+        # Stored colors are JSON lists, the draw's tuples.
+        assert born["lapis"] == json.loads(
+            json.dumps(
+                {"face": "pill", "hat": "cap", **gem_appearance._birth_coat("lapis")}
+            )
+        )
+        assert born["ruby"] == {
+            "face": "dot",
+            "hat": "top",
+            "hair": "short",
+            "hairColor": [30, 26, 24],
+        }
 
     def test_unreadable_file_is_left_alone(self, appearance_store):
         appearance_store.parent.mkdir(parents=True)
@@ -197,7 +349,9 @@ class TestBirths:
 
         assert appearance_store.read_text() == "{not json"
 
-    @pytest.mark.skipif(not GEM_FACE_TS.exists(), reason="web UI source not in this checkout")
+    @pytest.mark.skipif(
+        not GEM_FACE_TS.exists(), reason="web UI source not in this checkout"
+    )
     def test_birth_styles_match_the_web_ui(self):
         text = GEM_FACE_TS.read_text(encoding="utf-8")
         entry = re.compile(r'\{ id: "([a-z0-9_-]+)", label: "[^"]*", group: "(\w*)" \}')
@@ -206,14 +360,28 @@ class TestBirths:
             return text.split(f"export const {const}", 1)[1].split("export const", 1)[0]
 
         def everyday(const):
-            return {id_ for id_, group in entry.findall(block(const)) if group not in ("Halloween", "Christmas")}
+            return {
+                id_
+                for id_, group in entry.findall(block(const))
+                if group not in ("Halloween", "Christmas")
+            }
 
         assert everyday("EYE_STYLES") == set(gem_appearance.BIRTH_FACES)
         assert everyday("HAT_STYLES") == set(gem_appearance.BIRTH_HATS)
-        assert re.findall(r'id: "([a-z]+)"', block("HAIR_STYLES")) == list(gem_appearance.BIRTH_HAIRS)
-        assert re.findall(r'id: "([a-z]+)"', block("FUR_STYLES")) == list(gem_appearance.BIRTH_FURS)
+        assert re.findall(r'id: "([a-z]+)"', block("HAIR_STYLES")) == list(
+            gem_appearance.BIRTH_HAIRS
+        )
+        assert re.findall(r'id: "([a-z]+)"', block("FUR_STYLES")) == list(
+            gem_appearance.BIRTH_FURS
+        )
         shades = re.findall(r"rgb: \[(\d+), (\d+), (\d+)\]", block("HAIR_COLORS"))
-        assert [tuple(map(int, shade)) for shade in shades] == list(gem_appearance.BIRTH_HAIR_COLORS)
+        assert [tuple(map(int, shade)) for shade in shades] == list(
+            gem_appearance.BIRTH_HAIR_COLORS
+        )
+        # Fur is born in the body's own color or a natural shade.
+        assert gem_appearance.BIRTH_FUR_COLORS == ("gem",) + tuple(
+            gem_appearance.BIRTH_HAIR_COLORS
+        )
 
 
 @pytest.mark.asyncio
@@ -227,7 +395,9 @@ class TestAppearanceRoutes:
             "born": {},
             "gems": {"lapis": {"hat": "crown", "color": [10, 20, 30]}},
         }
-        saved = (await client.put("/agents/appearance", json={**doc, "home": "/forged"})).json()
+        saved = (
+            await client.put("/agents/appearance", json={**doc, "home": "/forged"})
+        ).json()
 
         assert saved == {**doc, **HOME}
         assert json.loads(appearance_store.read_text()) == doc
@@ -251,7 +421,9 @@ class TestAppearanceRoutes:
         ).json()
 
         assert saved["gems"] == {"lapis": {"face": "kawaii"}}
-        assert json.loads(appearance_store.read_text())["gems"] == {"lapis": {"face": "kawaii"}}
+        assert json.loads(appearance_store.read_text())["gems"] == {
+            "lapis": {"face": "kawaii"}
+        }
 
     async def test_unreadable_file_reads_as_empty(self, client, appearance_store):
         appearance_store.parent.mkdir(parents=True)
