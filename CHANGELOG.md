@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Voice Quick Model: Settings → Voice → Quick Model (`/voice config` in the
+  terminal) picks the model that answers out loud from any configured
+  provider's models — the `/llm` list, so a fast OpenRouter model works while
+  the chat stays on its own provider, using that provider's connection. Same
+  as Chat keeps the chat's model; typed messages always use the chat's model
+  (#260).
 - Network kill switch: `kollab --hub halt` stops every agent on every device
   of your network; resume and network-wide revoke need two machines that count
   (`kollab --hub resume --confirm`). Also `/connect halt|resume` and Settings →
@@ -17,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   screens, the section list and search on the left and the picked section on
   the right; the desktop dialog has a liquid-metal border and the Prompts
   tab's panes are rounded with margins (#371).
+- Gems: births draw from six friendly eye styles (pill, kawaii and the new
+  gleam, bean, smile and drowsy; the other nine stay pickable), plus 10 new
+  hats (sailor, chef, cowboy, bucket, boater, graduate, aviator, flower, halo,
+  propeller), 10 hair styles and four fur lengths; the curly styles coil into
+  locks. A browser that cannot draw gems (no WebGL) shows each gem's saved
+  headshot, a PNG taken by a browser that can, instead of a plain blob (#380).
 
 ### Changed
 - Gems are born furry 85% of the time (hair 10%, bare 5%), the same on every
@@ -24,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new odds; your own picks never change (#373).
 
 ### Security
+- PhoneLink: the phone app's version is now the release number, so an older
+  build with fresh file times no longer passes the phone's downgrade check;
+  expired, unapproved invitations are pruned from the saved phones instead
+  of counting toward the eight-phone limit. A phone that loaded this release
+  refuses an older one, so roll back by upgrading, not downgrading (#368).
 - Hub capture (`/hub capture`, `kollab --hub capture`, the `hub_capture` tool)
   redacts private keys, `NAME=secret` lines and auth headers; only `--raw`
   shows them. The `hub_capture` tool asks permission (#340).

@@ -78,7 +78,11 @@ async def test_web_rpc_save_tui_read_and_fresh_chat(voice):
     panel = await remote.get_panel("voice")
     assert get_panel("voice").name == "voice"
     fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
-    assert {p for p, f in fields.items() if f["editable"]} == set(speech_defaults())
+    # Speech preferences plus Quick Model, the one editable field saved to
+    # config (a loadout name) instead of this device's preferences.json.
+    assert {p for p, f in fields.items() if f["editable"]} == set(speech_defaults()) | {
+        "quick_model"
+    }
     other = VoicePlugin(event_bus=state._event_bus)
     plugin._pending = [{"event_id": "keep"}]
     plugin._client = SimpleNamespace(call=AsyncMock())
@@ -249,7 +253,10 @@ async def test_voice_status_says_which_install_the_service_runs(voice, monkeypat
     handler = VoiceModeCommandHandler(
         SimpleNamespace(register_command=lambda _: None), state._event_bus
     )
-    install = {"path": "/Applications/Kollab/kollabor_voice", "code": "0123456789abcdef"}
+    install = {
+        "path": "/Applications/Kollab/kollabor_voice",
+        "code": "0123456789abcdef",
+    }
 
     async def call(client, op):
         return {"pid": 4242, "owner": None, "install": install}

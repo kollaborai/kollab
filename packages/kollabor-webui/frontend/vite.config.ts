@@ -182,6 +182,7 @@ const mainConfig = defineConfig({
       "tests/build-provenance.test.ts",
       "tests/voice-turn-groups.test.ts",
       "tests/path-text.test.ts",
+      "tests/gem-headshot.test.ts",
     ],
     environment: "node",
   },
