@@ -188,7 +188,7 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
 1. **Attach:** if a Kollab web UI already answers on the port, the window
    opens it. The app checks `/openapi.json` the same way `kollab --web-ui`
    does. The app never stops a runtime it attached to.
-2. **Spawn:** otherwise the app runs `kollab --web-ui` with `BROWSER=true` in
+2. **Spawn:** otherwise the app runs `kollab --web-ui` with `KOLLAB_WEBUI_NO_BROWSER=1` in
    its own session (setsid), and shows a loading page until the UI answers.
    It uses the newer of:
    - the bundled kollab (`Kollab.app/Contents/Resources/kollab`);

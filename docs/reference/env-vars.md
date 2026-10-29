@@ -345,6 +345,13 @@ Port for the direct-bound `kollabor-webui` server.
 
 Default: `8080`
 
+### KOLLAB_WEBUI_NO_BROWSER
+
+Any non-empty value starts the WebUI without opening a browser tab. The
+desktop app sets it, since its own window shows the UI.
+
+Default: unset (a tab opens on `http://127.0.0.1:<port>`)
+
 ### KOLLAB_WEBUI_HOSTS
 
 Comma-separated literal interface IPs to bind besides `127.0.0.1`, such as the

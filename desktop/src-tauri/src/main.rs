@@ -327,7 +327,7 @@ fn spawn_webui(kollab: &Path, log: &Path) -> std::io::Result<Child> {
     let mut command = Command::new(kollab);
     command
         .arg("--web-ui")
-        .env("BROWSER", "true") // no browser tab: this window is the browser
+        .env("KOLLAB_WEBUI_NO_BROWSER", "1") // no browser tab: this window is the browser
         .env("PYTHONUNBUFFERED", "1") // so the error page shows the latest output
         .current_dir(home_dir())
         .stdin(Stdio::null())
