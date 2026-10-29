@@ -184,7 +184,7 @@ def test_context_overflow_forces_one_compaction_past_the_shrink_floor() -> None:
         Message(content="old"),
         Message(content="new"),
     ]
-    plugin._keep_recent_count = lambda: 1
+    plugin._keep_recent_count = lambda history=None: 1
     plugin._find_split_point = lambda history, keep_recent: 2
     starts = []
     statuses = []
