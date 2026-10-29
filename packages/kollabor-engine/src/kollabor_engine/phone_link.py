@@ -12,6 +12,7 @@ import base64
 import errno
 import gzip
 import hashlib
+import importlib.metadata
 import io
 import json
 import os
@@ -118,6 +119,25 @@ def app_directory() -> Path | None:
     return candidate if candidate and (candidate / "phone-app.js.gz").is_file() else None
 
 
+def _app_serial() -> int:
+    """The signed app version: 10**10 + major * 10**6 + minor * 10**3 + patch.
+
+    Phones refuse an app whose serial is below the one they saved. The 10**10
+    floor keeps every version above the file-time serials (epoch seconds) phones
+    saved before, so the first update is never refused as a downgrade.
+    """
+    try:
+        version = importlib.metadata.version("kollabor-engine")
+    except importlib.metadata.PackageNotFoundError:
+        version = ""
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
+    if not match:
+        return 10**10
+    major, minor, patch = (int(part) for part in match.groups())
+    # ponytail: minor or patch past 999 would spill into the next field.
+    return 10**10 + major * 10**6 + minor * 10**3 + patch
+
+
 def signed_app_manifest(directory: Path, host_key: str, sign) -> bytes:
     """List the app files, then sign that list's hash with the host's device key.
 
@@ -132,7 +152,7 @@ def signed_app_manifest(directory: Path, host_key: str, sign) -> bytes:
         files.append({"name": path.name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
     if not files:
         raise PhoneLinkError("The phone app is not built on this computer.")
-    serial = int(max(path.stat().st_mtime for path in directory.iterdir() if path.is_file()))
+    serial = _app_serial()
     bundle = app_bundle_hash(serial, files)
     signature = sign(app_signed_message(host_key, bundle))
     return json.dumps(
@@ -555,6 +575,7 @@ class PhoneLink:
                     await asyncio.sleep(5)
                     continue
                 async with self._lock:
+                    pruned = {}
                     for identifier, row in tuple(self.records.items()):
                         expired = not row["key"] and row["expires"] < time.time()
                         if expired:
@@ -573,6 +594,17 @@ class PhoneLink:
                             client = self.clients.pop(identifier, None)
                             if client:
                                 await client.close()
+                            pruned[identifier] = self.records.pop(identifier)
+                    if pruned:
+                        # Expired invitations go, so they never count toward
+                        # MAX_PHONES or linger in phones.json.
+                        try:
+                            self._persist()
+                        except Exception as error:
+                            self.records.update(pruned)
+                            self._report_error("prune", error)
+                        else:
+                            self._expired_announced.difference_update(pruned)
                     for key, exchange in tuple(self.exchanges.items()):
                         if time.monotonic() - exchange.used > 45:
                             if exchange.task:

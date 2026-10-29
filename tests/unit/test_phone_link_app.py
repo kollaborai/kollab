@@ -56,6 +56,19 @@ def verify(manifest: dict, host_key: str) -> None:
     )
 
 
+def test_app_serial_is_the_release_version_above_old_file_times(monkeypatch):
+    for version, serial in (
+        ("1.2.3", 10**10 + 1_002_003),
+        ("0.19.0rc1", 10**10 + 19_000),
+        ("weird", 10**10),
+    ):
+        monkeypatch.setattr(
+            phone_link.importlib.metadata, "version", lambda name, v=version: v
+        )
+        assert phone_link._app_serial() == serial
+    assert phone_link._app_serial() > 2_000_000_000
+
+
 @pytest.mark.asyncio
 async def test_computer_serves_a_manifest_signed_by_the_qr_host_key(setup_link, app_dir):  # noqa: F811
     manager, offer, host, phone, *_ = setup_link
@@ -64,6 +77,7 @@ async def test_computer_serves_a_manifest_signed_by_the_qr_host_key(setup_link, 
     assert first["status"] == 200
     manifest = json.loads(body)
     assert manifest["host"] == host.public_key
+    assert manifest["serial"] == phone_link._app_serial()
     verify(manifest, host.public_key)
     for entry in manifest["files"]:
         _, data = await read_all(packet, "/phone-app/" + entry["name"])
