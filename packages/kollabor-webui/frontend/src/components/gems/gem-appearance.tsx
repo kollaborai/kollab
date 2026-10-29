@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import type { EngineApi, GemAppearance, GemLook, LookColor } from "@/api";
-import { AURAS, COAT_KNOBS, EYE_STYLES, FUR_STYLES, HAIR_COLORS, HAIR_STYLES, HAT_STYLES, SEASONS, SPARKLES } from "./gem-face";
+import { AURAS, COAT_KNOBS, EYE_STYLES, FUR_STYLES, HAIR_COLORS, HAIR_STYLES, HAT_STYLES, SEASONS, SPARKLES, type EyeStyle } from "./gem-face";
 import { GEM_CUTS } from "./gem-specs";
 import {
   BORN_FUR_SHARE,
@@ -20,8 +20,9 @@ import {
 } from "./gem-look";
 
 const everyday = (style: { group: string }) => style.group !== "Halloween" && style.group !== "Christmas";
-/** The out-of-season eyes and hats Random Look draws from (the engine's birth roll uses the same). */
-export const EVERYDAY_FACES = EYE_STYLES.filter(everyday).map((style) => style.id);
+/** Visually checked birth eyes, in the same order as the engine birth roll. */
+export const EVERYDAY_FACES: EyeStyle[] = ["pill", "gleam", "bean", "smile", "drowsy", "kawaii"];
+/** The out-of-season hats Random Look draws from. */
 export const EVERYDAY_HATS = HAT_STYLES.filter(everyday).map((style) => style.id);
 
 /** The fur colors a birth draws from: the body's own color or a natural shade
@@ -67,6 +68,8 @@ export const GEM_LOOK_VOCABULARY: GemLookVocabulary = {
 
 type GemAppearanceValue = {
   appearance: GemAppearance | null;
+  api: EngineApi | null;
+  preview: boolean;
   save: (next: GemAppearance) => Promise<GemAppearance>;
 };
 
@@ -108,7 +111,7 @@ export function GemAppearanceProvider({
     },
     [api],
   );
-  const value = useMemo(() => ({ appearance, save }), [appearance, save]);
+  const value = useMemo(() => ({ appearance, save, api, preview: false }), [appearance, save, api]);
   return <GemAppearanceContext.Provider value={value}>{children}</GemAppearanceContext.Provider>;
 }
 
@@ -122,8 +125,8 @@ export function GemAppearancePreview({
 }) {
   const parent = useContext(GemAppearanceContext);
   const value = useMemo(
-    () => ({ appearance, save: parent?.save ?? (async () => appearance) }),
-    [appearance, parent?.save],
+    () => ({ appearance, save: parent?.save ?? (async () => appearance), api: parent?.api ?? null, preview: true }),
+    [appearance, parent?.save, parent?.api],
   );
   return <GemAppearanceContext.Provider value={value}>{children}</GemAppearanceContext.Provider>;
 }

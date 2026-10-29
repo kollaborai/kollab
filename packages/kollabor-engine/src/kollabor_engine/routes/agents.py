@@ -1,10 +1,12 @@
 """Agent identity pool routes for the web UI."""
 
+import hashlib
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Query  # type: ignore[import-not-found]
+from fastapi import APIRouter, Body, HTTPException, Query, Request, Response  # type: ignore[import-not-found]
 
 from ..folders import agents_in_folder, hub_folder
 from ..gem_appearance import load_appearance, record_births, save_appearance
@@ -277,6 +279,45 @@ async def put_gem_appearance(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not save gem appearance: {exc}") from exc
     return {**stored, "home": os.path.realpath(os.getcwd())}
+
+
+def _headshot_path(key: str) -> Path:
+    # Look keys can contain folder paths. Hashing preserves their identity without
+    # allowing any part of the key to become a filesystem path.
+    if not key or len(key.encode("utf-8")) > 4096:
+        raise HTTPException(status_code=400, detail="Invalid look key")
+    return Path.home() / ".kollab" / "hub" / "headshots" / (hashlib.sha256(key.encode()).hexdigest() + ".png")
+
+
+@router.get("/headshot")
+async def get_gem_headshot(key: str = Query(...)) -> Response:
+    try:
+        data = _headshot_path(key).read_bytes()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Headshot not found")
+    return Response(content=data, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.put("/headshot")
+async def put_gem_headshot(request: Request, key: str = Query(...)) -> Response:
+    path = _headshot_path(key)
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > 256 * 1024:
+            raise HTTPException(status_code=413, detail="Headshot too large")
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(status_code=400, detail="Expected PNG")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as temp:
+        temp_path = Path(temp.name)
+        try:
+            temp.write(data)
+            temp.close()
+            os.replace(temp_path, path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    return Response(status_code=204)
 
 
 @router.get("/bundles")
