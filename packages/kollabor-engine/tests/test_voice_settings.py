@@ -412,6 +412,14 @@ async def test_an_agent_without_its_own_prompt_uses_the_settings_prompt(rig):
     assert rig.settings.get_prompt("lapis")["text"] == "Say less."
 
 
+async def test_a_refused_personality_save_puts_the_old_prompt_back(rig, monkeypatch):
+    await rig.http.put("/voice/settings/prompt", json={"text": "Old.", "personality": "neutral"})
+    monkeypatch.setattr(rig.config, "save_key", lambda *_a, **_k: False)
+    res = await rig.http.put("/voice/settings/prompt", json={"text": "New.", "personality": "professional"})
+    assert res.status_code == 503
+    assert rig.settings.get_prompt(None)["text"] == "Old."
+
+
 async def test_prompt_validation_and_scope_errors(rig):
     big = {"text": "x" * (32 * 1024 + 1), "personality": "neutral"}
     assert (await rig.http.put("/voice/settings/prompt", json=big)).status_code == 400

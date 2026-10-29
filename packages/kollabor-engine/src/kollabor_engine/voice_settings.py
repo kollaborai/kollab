@@ -298,11 +298,18 @@ class VoiceSettingsService:
         if len(patch.text.encode()) > MAX_PROMPT_BYTES:
             raise invalid("Voice prompt is larger than 32 KiB.")
         key = self._prompt_key(agent_id)
+        store = self._store()
+        before = store.get_override(PROMPT_BUNDLE, key)
         if patch.text.strip() and patch.text != DEFAULT_PROMPT:
-            self._store().save_override(PROMPT_BUNDLE, key, patch.text)
+            store.save_override(PROMPT_BUNDLE, key, patch.text)
         else:
-            self._store().delete_override(PROMPT_BUNDLE, key)
+            store.delete_override(PROMPT_BUNDLE, key)
         if not self._cfg().save_key(PREFIX + "personality", patch.personality, save_target="global"):
+            # Put the old text back, so a refused save changes nothing.
+            if before is None:
+                store.delete_override(PROMPT_BUNDLE, key)
+            else:
+                store.save_override(PROMPT_BUNDLE, key, before)
             raise RuntimeHostError("runtime_unavailable", 503, "Voice prompt could not be saved.")
         return self.get_prompt(agent_id)
 

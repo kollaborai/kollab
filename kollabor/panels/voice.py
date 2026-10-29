@@ -129,6 +129,7 @@ def _save_prompt(config_service, changes: dict) -> dict[str, str]:
     if config_service is None:
         return {path: "configuration is not available" for path in changes}
     settings = _prompt_settings(config_service)
+    refused: dict[str, str] = {}
     if "voice_prompt" in changes or "voice_personality" in changes:
         current = settings.get_prompt(None)
         try:
@@ -142,12 +143,14 @@ def _save_prompt(config_service, changes: dict) -> dict[str, str]:
                 },
             )
         except (RuntimeHostError, OSError) as exc:
-            return {"voice_prompt": str(exc)}
+            for path in ("voice_prompt", "voice_personality"):
+                if path in changes:
+                    refused[path] = str(exc)
     if "voice_reasoning" in changes and not apply_config_changes(
         config_service, {PREFIX + "reasoning": changes["voice_reasoning"]}, "global"
     ):
-        return {"voice_reasoning": "could not be saved to ~/.kollab/config.json"}
-    return {}
+        refused["voice_reasoning"] = "could not be saved to ~/.kollab/config.json"
+    return refused
 
 
 def voice_sections(plugin, live=None, ctx=None) -> list[dict]:
@@ -518,23 +521,24 @@ class VoicePanel:
             return error_result("Some voice settings were not saved", errors)
         # Quick Model is a config key (a loadout name), not a speech preference.
         quick = changes.pop("quick_model", None)
-        if quick is not None:
-            _, config_service = _llm_handle(ctx, voice_plugin(ctx))
-            if config_service is None or not apply_config_changes(
-                config_service, {RESPONDER_KEY: quick}, "global"
-            ):
-                return error_result(
-                    "Some voice settings were not saved",
-                    {"quick_model": "configuration is not available"},
-                )
         try:
             await voice_plugin(ctx).configure_voice(changes)
         except (OSError, ValueError) as exc:
             return error_result(f"Could not save voice settings: {exc}")
-        # Last, so a refusal here names exactly the rows that were not saved.
-        if prompt_changes:
+        # Rows kept outside preferences.json save last: a refusal names exactly the
+        # rows that were not saved, and a refused speech save above saved none.
+        if quick is not None or prompt_changes:
             _, config_service = _llm_handle(ctx, voice_plugin(ctx))
-            refused = _save_prompt(config_service, prompt_changes)
+            refused = (
+                _save_prompt(config_service, prompt_changes) if prompt_changes else {}
+            )
+            if quick is not None and (
+                config_service is None
+                or not apply_config_changes(
+                    config_service, {RESPONDER_KEY: quick}, "global"
+                )
+            ):
+                refused["quick_model"] = "configuration is not available"
             if refused:
                 return error_result("Some voice settings were not saved", refused)
         return ok_result(

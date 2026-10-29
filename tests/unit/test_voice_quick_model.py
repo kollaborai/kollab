@@ -446,3 +446,57 @@ async def test_voice_prompt_refuses_bad_values(tmp_path, monkeypatch):
     assert set(result["errors"]) == set(changes)
     assert config_service.saved == []
     assert not list((tmp_path / "prompt-overrides").rglob("*.md"))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_prompt_write_still_saves_reasoning_and_names_its_rows(
+    tmp_path, monkeypatch
+):
+    from kollabor.panels.voice import VoicePanel
+    from kollabor_ai.prompt_overrides import PromptOverrideStore
+
+    ctx, _, config_service = make_panel_ctx(tmp_path, monkeypatch)
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("disk is full")
+
+    monkeypatch.setattr(PromptOverrideStore, "save_override", refuse)
+    changes = {
+        "voice_prompt": "Short.",
+        "voice_personality": "neutral",
+        "voice_reasoning": "low",
+    }
+    result = await VoicePanel().act(
+        ctx, "save", {"changes": changes, "target": "device"}
+    )
+    assert not result["ok"]
+    assert set(result["errors"]) == {"voice_prompt", "voice_personality"}
+    assert ("voice.livekit.reasoning", "low", "global") in config_service.saved
+
+
+@pytest.mark.asyncio
+async def test_a_refused_speech_save_saves_no_quick_model_or_prompt(
+    tmp_path, monkeypatch
+):
+    from kollabor.panels.voice import VoicePanel
+
+    ctx, plugin, config_service = make_panel_ctx(
+        tmp_path,
+        monkeypatch,
+        loadouts={"fast-or": {"provider_profile": "orr", "model": "x-1b"}},
+    )
+
+    async def refuse(_changes):
+        raise OSError("disk is full")
+
+    monkeypatch.setattr(plugin, "configure_voice", refuse)
+    result = await VoicePanel().act(
+        ctx,
+        "save",
+        {
+            "changes": {"quick_model": "fast-or", "voice_reasoning": "low"},
+            "target": "device",
+        },
+    )
+    assert not result["ok"]
+    assert config_service.saved == []
