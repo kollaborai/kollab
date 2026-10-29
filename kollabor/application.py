@@ -1531,6 +1531,15 @@ class TerminalLLMChat:
             self.create_background_task(self._check_for_updates(), "version_check")
 
             self._start_parent_watchdog()
+            # Goal watchdog (#389): an active goal whose loop stopped is picked up.
+            if (
+                getattr(self, "_goal_driver", None) is not None
+                and not self._attach_to
+                and not self.pipe_mode
+            ):
+                self.create_background_task(
+                    self._goal_driver.watch(), "goal_watchdog"
+                )
 
             # Load config-based hooks EARLY (before LLM/MCP init so connect events fire)
             await self._load_config_hooks()
