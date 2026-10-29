@@ -13,7 +13,7 @@ registerHooks({
     }
   },
 });
-const { initialRoomState, reduceVoiceEvent, isInterrupting, remoteNotice } = await import("../src/voice/room-state.ts");
+const { initialRoomState, reduceVoiceEvent, isActive, isInterrupting, remoteNotice } = await import("../src/voice/room-state.ts");
 const { VoiceRoomController } = await import("../src/voice/room-controller.ts");
 
 let seq = 0;
@@ -86,6 +86,17 @@ test("a speech error shows on the status and leaves the reply's text", () => {
     s.lines.map((l) => [l.speaker, l.text, l.final]),
     [["assistant", "All good now.", true]],
   );
+});
+
+test("a model out of memory shows Low On Resources with the reason", () => {
+  const s = reduceVoiceEvent(
+    initialRoomState,
+    ev("voice.state", { state: "resource_shortage", detail: "MemoryError: VibeVoice", retryable: true }),
+  );
+  assert.equal(s.state, "resource_shortage");
+  assert.equal(s.detail, "MemoryError: VibeVoice");
+  assert.equal(s.retryable, true);
+  assert.equal(s.error, "MemoryError: VibeVoice");
 });
 
 test("talking over the assistant shows interrupting; remote LLM shows the notice", () => {
@@ -197,6 +208,20 @@ test("a runtime that fails before ready never joins or asks for the mic", async 
   const h = harness({ startsAs: "starting", events: [{ state: "error" }] });
   await h.controller.start("s1", null);
   assert.equal(h.controller.getState().state, "error");
+  assert.ok(!h.calls.includes("join") && !h.calls.includes("mic:true"));
+  assert.ok(h.calls.includes("stop:error"));
+});
+
+test("a model out of memory before ready keeps Low On Resources and its reason", async () => {
+  const h = harness({
+    startsAs: "starting",
+    events: [{ state: "resource_shortage", detail: "MemoryError: VibeVoice", retryable: true }],
+  });
+  await h.controller.start("s1", null);
+  const s = h.controller.getState();
+  assert.equal(s.state, "resource_shortage");
+  assert.equal(s.error, "MemoryError: VibeVoice");
+  assert.equal(isActive(s), false); // no Stop button; the composer mic starts it again
   assert.ok(!h.calls.includes("join") && !h.calls.includes("mic:true"));
   assert.ok(h.calls.includes("stop:error"));
 });

@@ -171,7 +171,8 @@ export class VoiceRoomController {
               if (epoch !== this.epoch) return;
               this.set(reduceVoiceEvent(this.state, e));
               // The engine ended the session (its worker stopped): leave the room and free the mic.
-              if (this.state.state === "error" || this.state.state === "stopped") void this.teardown("error");
+              const ended = ["error", "resource_shortage", "stopped"].includes(this.state.state);
+              if (ended) void this.teardown("error");
             },
           );
         } catch {

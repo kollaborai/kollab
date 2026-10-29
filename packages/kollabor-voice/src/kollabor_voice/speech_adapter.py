@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -44,7 +45,7 @@ class AudioFrame:
 
 @dataclass(frozen=True)
 class SpeechReadiness:
-    state: str  # idle | starting | downloading | ready | error
+    state: str  # idle | starting | downloading | ready | error | resource_shortage
     detail: str = ""
     model: str | None = None
     bytes_done: int | None = None
@@ -67,6 +68,21 @@ class SpeechStats:
     total_ms: int | None = None
 
 
+# How a model load that ran out of memory reads: Python's MemoryError, torch's
+# OutOfMemoryError ("MPS backend out of memory"), Metal's ...ErrorOutOfMemory, or the
+# OS's ENOMEM text. Names match case-sensitively and whole, so a path like
+# "memoryerror-cache/" or "OutOfMemoryCache/" stays an ordinary error.
+_OUT_OF_MEMORY = re.compile(
+    r"OutOfMemory(?:Error)?\b|\bMemoryError\b|(?i:\b(?:out of|cannot allocate) memory\b)"
+)
+
+
+def _failed(detail: str) -> SpeechReadiness:
+    """A retryable failure; one that ran out of memory is a resource shortage."""
+    state = "resource_shortage" if _OUT_OF_MEMORY.search(detail) else "error"
+    return SpeechReadiness(state, detail, retryable=True)
+
+
 def map_readiness(status: dict) -> SpeechReadiness:
     """The single service-state to room-state mapping."""
     stt, tts = status.get("transcription") or {}, status.get("speech") or {}
@@ -87,11 +103,7 @@ def map_readiness(status: dict) -> SpeechReadiness:
     if setup in {"starting", "loading", "warming", "installing", "checking"}:
         return SpeechReadiness("starting", str(status.get("detail", "")))
     if setup == "error" or status.get("error"):
-        return SpeechReadiness(
-            "error",
-            str(status.get("error") or status.get("detail", "")),
-            retryable=True,
-        )
+        return _failed(str(status.get("error") or status.get("detail", "")))
     if stt.get("engine") != "parakeet":
         # Never claim Parakeet when Whisper would run.
         if stt.get("state") == "loading":
@@ -110,9 +122,7 @@ def map_readiness(status: dict) -> SpeechReadiness:
             retryable=True,
         )
     if stt.get("state") == "error" or tts.get("state") == "error":
-        return SpeechReadiness(
-            "error", str(stt.get("detail") or tts.get("detail", "")), retryable=True
-        )
+        return _failed(str(stt.get("detail") or tts.get("detail", "")))
     if stt.get("state") == "ready" and tts.get("state") == "ready":
         return SpeechReadiness("ready")
     if setup in {"ready", "off", "listening"}:

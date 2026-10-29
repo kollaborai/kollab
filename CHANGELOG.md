@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Voice: a voice model that runs out of memory now shows Low On Resources with the reason, instead of a general error, refs #295
 - Goals: `/resume` keeps a conversation's goal. The resumed chat used to get a new conversation id, so `/goal` answered "no active goal" and the goal was never driven or paused again, refs #400
 - Goals: a goal whose last turn was cut off by an agent that stopped mid-turn is paused with the reason, instead of staying active with nothing driving it; `/goal resume` continues it, refs #397
 - Context compaction: a reply that hit the length limit and was continued no longer counts its prompt twice. The doubled count could trip the hard cap and cut a long reply to 8,000 characters, refs #396

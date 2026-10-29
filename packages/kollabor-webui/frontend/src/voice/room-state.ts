@@ -44,7 +44,7 @@ export const initialRoomState: VoiceRoomState = {
 
 /** The voice is live: the mic is (or is about to be) open. */
 export const isActive = (s: VoiceRoomState) =>
-  !["idle", "stopped", "error", "disconnected"].includes(s.state);
+  !["idle", "stopped", "error", "resource_shortage", "disconnected"].includes(s.state);
 
 /**
  * livekit-server listens on this computer's loopback only (voice_livekit.py), so
@@ -114,7 +114,8 @@ export function reduceVoiceEvent(s: VoiceRoomState, e: VoiceEventEnvelope): Voic
         retryable: p.retryable === true,
         download,
         bargedIn: p.barge_in === true ? true : next === "speaking" ? false : s.bargedIn,
-        error: next === "error" ? (str(p.detail) ?? "Voice failed.") : s.error,
+        // A model out of memory ends the session too: its reason shows like an error's.
+        error: next === "error" || next === "resource_shortage" ? (str(p.detail) ?? "Voice failed.") : s.error,
       };
     }
     case "voice.transcript":
