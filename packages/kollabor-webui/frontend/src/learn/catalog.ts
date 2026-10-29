@@ -145,7 +145,7 @@ export const LEARN_TOPICS = [
     ],
     example:
       "Say “summarize the last answer in three steps,” then use /voice off when the conversation is finished.",
-    note: "Opening Learn never turns on the microphone. Use /voice status if you are unsure whether voice is active. Separately, /config > Hub > Dream Model picks a cheaper model ID (supported by your active provider) for background agent dreaming only; blank falls back to the shared kollabor.llm.fast_model, then the active session model, reusing your active profile's endpoint and credentials. Dream Model does not change voice replies: the fast voice-responder call path is not wired yet.",
+    note: "Opening Learn never turns on the microphone. Use /voice status if you are unsure whether voice is active. Voice replies run on the Quick Model: Settings → Voice → Quick Model in the web UI, or /voice config → Quick Model in the terminal. It picks any configured provider's model (for example a fast OpenRouter one) from the /llm list, using that provider's own connection; Same as Chat keeps the chat's model, and typed messages always use the chat's model either way. Separately, /config > Hub > Dream Model picks a cheaper model ID (supported by your active provider) for background agent dreaming only; blank falls back to the shared kollabor.llm.fast_model, then the active session model, reusing your active profile's endpoint and credentials. Dream Model does not change voice replies.",
   },
   {
     id: "system-prompts",

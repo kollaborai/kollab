@@ -1,0 +1,89 @@
+{
+  "name": "voice quick model",
+  "description": "/voice config offers Quick Model (Same as Chat plus every loadout, across providers); picking one saves it to configuration as a loadout name, never to device speech preferences",
+  "config": {
+    "command": "sh -c 'R=$(pwd); cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "shell",
+      "description": "seed a provider profile and an explicit loadout before the app boots",
+      "command": "python3 -c 'import json,pathlib; p=pathlib.Path.home()/\".kollab/config.json\"; d=json.loads(p.read_text()); d.setdefault(\"kollabor\",{}).setdefault(\"llm\",{}).update({\"profiles\":{\"ghost\":{\"provider\":\"anthropic\",\"api_key\":\"test-key\",\"model\":\"claude-haiku-4.5\"}},\"loadouts\":{\"fast-haiku\":{\"provider_profile\":\"ghost\",\"model\":\"claude-haiku-4.5\"}}}); p.write_text(json.dumps(d))'",
+      "assert_contains": ""
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 30
+    },
+    {
+      "action": "section",
+      "title": "Quick Model defaults to Same as Chat and lists the loadout"
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice Configuration",
+      "timeout": 8
+    },
+    {
+      "action": "nav_mode"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Quick Model: Same as Chat",
+      "timeout": 5
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Transcript Context"
+    },
+    {
+      "action": "section",
+      "title": "Pick the loadout and save: it lands in config, not preferences"
+    },
+    {
+      "action": "arrow",
+      "direction": "Down"
+    },
+    {
+      "action": "arrow",
+      "direction": "Right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Quick Model: fast-haiku",
+      "timeout": 5
+    },
+    {
+      "action": "control",
+      "key": "s"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice settings saved for this device",
+      "timeout": 8
+    },
+    {
+      "action": "shell",
+      "description": "the loadout name is saved under the config key; speech preferences never carry it",
+      "command": "sh -c 'grep -q \"responder_model\" \"$HOME/.kollab/config.json\" && grep -q \"fast-haiku\" \"$HOME/.kollab/config.json\" && (test ! -f \"$HOME/.kollab/voice/preferences.json\" || ! grep -q \"quick_model\" \"$HOME/.kollab/voice/preferences.json\") && echo quick-model-routed'",
+      "assert_contains": "quick-model-routed"
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}
