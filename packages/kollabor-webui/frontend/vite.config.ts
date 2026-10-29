@@ -181,6 +181,7 @@ const mainConfig = defineConfig({
       "tests/phone-frame.test.ts",
       "tests/build-provenance.test.ts",
       "tests/voice-turn-groups.test.ts",
+      "tests/path-text.test.ts",
     ],
     environment: "node",
   },

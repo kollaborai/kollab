@@ -131,8 +131,8 @@ Additional events only available in Kollab:
 | `McpToolCallPost` | MCP_TOOL_CALL_POST | After MCP tool call |
 | `SlashCommandExecute` | SLASH_COMMAND_EXECUTE | Slash command executing |
 | `SlashCommandComplete` | SLASH_COMMAND_COMPLETE | Slash command finished |
-| `ShellCommandPre` | SHELL_COMMAND_PRE | Before shell command |
-| `ShellCommandPost` | SHELL_COMMAND_POST | After shell command |
+| `ShellCommandPre` | SHELL_COMMAND_PRE | Before a `!` shell command the user types (the agent's terminal tool fires `PreToolUse`, tool name `terminal`) |
+| `ShellCommandPost` | SHELL_COMMAND_POST | After a `!` shell command the user types |
 | `KeyPress` | KEY_PRESS | Key press detected |
 | `PasteDetected` | PASTE_DETECTED | Paste detected |
 | `CancelRequest` | CANCEL_REQUEST | User cancelled action |

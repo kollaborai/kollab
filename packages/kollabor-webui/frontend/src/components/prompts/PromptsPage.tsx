@@ -22,6 +22,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { bundleName } from "@/components/panels/panel-model";
 import { cn } from "@/lib/utils";
 import { formatTokens } from "@/components/trajectory/trajectory-format";
 import type {
@@ -475,7 +476,7 @@ export function PromptsView(props: {
         <optgroup label="Roles">
           {roles.map((r) => (
             <option key={r} value={`role:${r}`}>
-              {r}
+              {bundleName(r)}
             </option>
           ))}
         </optgroup>
@@ -484,11 +485,11 @@ export function PromptsView(props: {
   );
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col lg:flex-row" data-testid="prompts-page">
+    <div className="relative flex min-h-0 flex-1 flex-col lg:flex-row lg:gap-3 lg:px-6 lg:pb-6" data-testid="prompts-page">
       <aside
         aria-label="Libraries and roles"
         data-testid="prompts-sidebar"
-        className="bg-sidebar hidden w-52 shrink-0 overflow-y-auto px-2 py-3 lg:block"
+        className="bg-sidebar hidden w-52 shrink-0 overflow-y-auto rounded-lg px-2 py-3 lg:block"
       >
         {props.loadError ? (
           <p role="alert" className="text-destructive px-3 py-2 text-xs break-words">
@@ -543,7 +544,7 @@ export function PromptsView(props: {
                     current && "bg-highlight/15",
                   )}
                 >
-                  {r}
+                  {bundleName(r)}
                 </button>
               );
             })}
@@ -554,13 +555,13 @@ export function PromptsView(props: {
       <div
         aria-label="Prompt sections"
         data-testid="prompts-sections"
-        className="flex min-h-0 w-full flex-1 flex-col lg:w-[22rem] lg:flex-none"
+        className="flex min-h-0 w-full flex-1 flex-col lg:w-[22rem] lg:flex-none lg:overflow-hidden lg:rounded-lg lg:bg-card"
       >
         <div className="flex flex-col gap-2 px-4 pt-3 pb-2">
           {picker}
           <div className="flex items-baseline justify-between gap-2">
             <h3 className="text-lg font-semibold" data-testid="target-title">
-              {isRole ? target.name : libraryLabel(target.name)}
+              {isRole ? bundleName(target.name) : libraryLabel(target.name)}
             </h3>
             <span className="text-muted-foreground text-xs whitespace-nowrap" data-testid="target-total">
               {isRole
@@ -572,7 +573,7 @@ export function PromptsView(props: {
             {isRole ? (
               <>
                 Pick the sections this role sends. Runs as any persona:{" "}
-                <code className="font-mono">kollab --agent {target.name} --as lapis</code>
+                <code className="font-mono whitespace-nowrap">kollab --agent {target.name} --as lapis</code>
               </>
             ) : target.name === DEFAULTS_LIBRARY ? (
               "Ships with Kollab. An edit here reaches every role that sends the section."
@@ -719,12 +720,12 @@ function SectionEditor(props: Parameters<typeof PromptsView>[0]) {
   if (selected && !message) {
     if (perTurn) status = "Read-only: rendered each turn and sent ahead of your newest message.";
     else if (isRole && selected.origin === "role") {
-      status = dirty ? `Saves to ${target.name} only.` : `This role only.`;
+      status = dirty ? `Saves to ${bundleName(target.name)} only.` : `This role only.`;
     } else if (isRole && shared === DEFAULTS_LIBRARY) {
-      saveLabel = `Save for ${target.name}`;
+      saveLabel = `Save for ${bundleName(target.name)}`;
       status = stored?.changed
-        ? `${target.name} uses its own copy. Reset to go back to the library text.`
-        : `From Defaults. Saving makes a copy for ${target.name} only.`;
+        ? `${bundleName(target.name)} uses its own copy. Reset to go back to the library text.`
+        : `From Defaults. Saving makes a copy for ${bundleName(target.name)} only.`;
     } else if (shared === DEFAULTS_LIBRARY) {
       saveLabel = "Save to Library";
       status = `Shared. Reaches the ${selected.usedBy ?? 0} roles that send it.`;
@@ -750,7 +751,7 @@ function SectionEditor(props: Parameters<typeof PromptsView>[0]) {
       aria-label="Section editor"
       data-testid="prompts-editor"
       className={cn(
-        "bg-card flex min-w-0 flex-col gap-3 px-4 pt-3 pb-4 lg:static lg:flex lg:flex-1 lg:px-6",
+        "bg-card flex min-w-0 flex-col gap-3 px-4 pt-3 pb-4 lg:static lg:flex lg:flex-1 lg:rounded-lg lg:px-6",
         props.editorOpen ? "absolute inset-0 z-10 md:left-auto md:w-[36rem]" : "hidden lg:flex",
       )}
     >
@@ -761,11 +762,11 @@ function SectionEditor(props: Parameters<typeof PromptsView>[0]) {
         </Button>
         <div className="min-w-0 flex-1">
           <h3 id="prompt-editor-title" data-testid="editor-title" className="truncate text-lg font-semibold">
-            {selected?.title ?? "No section selected"}
+            {selected?.title ?? "No Section Selected"}
           </h3>
           {selected && (
             <p className={cn("text-xs font-medium", shared ? "text-highlight" : "text-muted-foreground")}>
-              {shared ? `${libraryLabel(shared)} · Used by ${selected.usedBy ?? 0} Roles` : perTurn ? "Per-Turn Context" : `${target.name} only`}
+              {shared ? `${libraryLabel(shared)} · Used by ${selected.usedBy ?? 0} Roles` : perTurn ? "Per-Turn Context" : `${bundleName(target.name)} Only`}
               {" · "}
               {tok(selected.tokens)}
             </p>

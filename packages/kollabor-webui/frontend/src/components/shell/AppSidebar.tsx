@@ -727,7 +727,7 @@ export function AppSidebar({
                           // Opens through the network once that computer allows this one.
                           const id = agent.handle || "";
                           const note = id && opening?.id === id ? opening : null;
-                          // Not up, or unknown: no agent here is on the network to say (a click starts one).
+                          // Not up, or unknown: no local agent answered the network probe.
                           const up = (net.live !== false && network.live !== false) && agent.state !== "offline";
                           const seen = agent.last_seen ? `Seen ${since(agent.last_seen)}` : "";
 
