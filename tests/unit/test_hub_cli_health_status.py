@@ -70,6 +70,46 @@ async def test_health_status_handler_returns_the_sections_the_tui_renders(tmp_pa
     }
 
 
+def test_lost_messages_publish_a_banner_queued_ones_do_not(tmp_path, monkeypatch):
+    plugin = _coordinator(tmp_path)
+    plugin._display_tap = MagicMock()
+    clock = [1000.0]
+    monkeypatch.setattr("plugins.hub.plugin.time.time", lambda: clock[0])
+
+    plugin._record_dispatch_failure(
+        "lapis", "offline, queued in its mailbox", queued=True
+    )
+    plugin._record_dispatch_failure("lapis", "not online, no match")
+    plugin._record_dispatch_failure("lapis", "not online, no match")
+    clock[0] += 61
+    plugin._record_dispatch_failure("ruby", "not online, no match")
+    plugin._record_dispatch_failure("lapis", "not online, no match")
+    clock[0] += 300
+    plugin._record_dispatch_failure("lapis", "not online, no match")
+
+    messages = [
+        c.args[0]["message"] for c in plugin._display_tap.publish.call_args_list
+    ]
+    assert messages == [
+        "A message to lapis was not delivered: not online, no match",
+        "A message to ruby was not delivered: not online, no match",
+        "A message to lapis was not delivered: not online, no match",
+    ]
+    assert (
+        len(plugin._dispatch_failure_lines()) >= 1
+    )  # /hub status still lists them all
+
+
+def test_a_failing_banner_never_breaks_the_send_path(tmp_path):
+    plugin = _coordinator(tmp_path)
+    plugin._display_tap = MagicMock()
+    plugin._display_tap.publish.side_effect = RuntimeError("tap closed")
+
+    plugin._record_dispatch_failure("lapis", "not online, no match")
+
+    assert plugin._dispatch_failures[-1][1] == "lapis: not online, no match"
+
+
 def test_health_status_frame_round_trips_over_a_real_socket():
     async def run():
         async def on_health():
