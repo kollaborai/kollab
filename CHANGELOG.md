@@ -54,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
-- Voice: a spoken yes can no longer run a recursive or forced `git rm`, and `gh -R <repo> pr merge`, `kollab --hub=stop` and `--restart=...` are refused like their plain forms, refs #295
+- Voice: a spoken yes can no longer run a recursive or forced `git rm` (`--cached` still works) or `kollab --hub halt`, and `gh -R <repo> pr merge`, `kollab --hub=stop` and `--restart=...` are refused like their plain forms, refs #295
 - Context compaction: an agent over its context budget now compacts once it has
   older messages to summarize, even before 6 human turns, when the provider
   reports its token count, so a hub agent that works from one brief no longer

@@ -89,9 +89,19 @@ def test_voice_policy_hard_blocks_destructive_commands(tmp_path: Path, command: 
     assert decision.reason_code == "command_blocked"
 
 
-def test_voice_policy_plain_git_rm_is_not_hard_blocked(tmp_path: Path):
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git rm notes.md",
+        "git rm -r --cached build",
+        "git rm --cached -r -f build",
+        "kollab --hub status",
+        "kollab --hub msg lapis stop",
+    ],
+)
+def test_voice_policy_safe_lookalikes_are_not_hard_blocked(tmp_path: Path, command: str):
     decision = VoiceToolExecutionGuard().evaluate(
-        {"type": "terminal", "command": "git rm notes.md", "cwd": str(tmp_path)},
+        {"type": "terminal", "command": command, "cwd": str(tmp_path)},
         _voice_context(),
         repository_root=tmp_path,
     )
