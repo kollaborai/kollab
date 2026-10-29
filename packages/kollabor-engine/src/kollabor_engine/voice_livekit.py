@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 WORKER_READY_PREFIX = "WORKER_READY"  # the worker prints "WORKER_READY -" once joined
 WORKER_ERROR_PREFIX = "WORKER_ERROR"  # or "WORKER_ERROR <reason>" when it cannot start
+WORKER_SHORTAGE_PREFIX = "WORKER_SHORTAGE"  # "WORKER_SHORTAGE <reason>": out of memory
 # The worker waits up to 1200 s for its models (a first-run download), then joins.
 WORKER_READY_TIMEOUT_S = 1260.0
 SERVER_READY_TIMEOUT_S = 15.0
@@ -396,6 +397,14 @@ class LiveKitRuntime:
                     "runtime_unavailable",
                     503,
                     text[len(WORKER_ERROR_PREFIX) :].strip() or "Voice worker exited before joining.",
+                    retryable=True,
+                )
+            if text.startswith(WORKER_SHORTAGE_PREFIX):
+                raise RuntimeHostError(
+                    "resource_shortage",
+                    503,
+                    text[len(WORKER_SHORTAGE_PREFIX) :].strip()
+                    or "A voice model ran out of memory.",
                     retryable=True,
                 )
 

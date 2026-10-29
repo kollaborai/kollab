@@ -69,9 +69,11 @@ class SpeechStats:
 
 
 # How a model load that ran out of memory reads: Python's MemoryError, torch's
-# OutOfMemoryError ("MPS backend out of memory"), or the OS's ENOMEM text.
+# OutOfMemoryError ("MPS backend out of memory"), Metal's ...ErrorOutOfMemory, or the
+# OS's ENOMEM text. Names match case-sensitively, so a path like "memoryerror-cache/"
+# stays an ordinary error.
 _OUT_OF_MEMORY = re.compile(
-    r"memoryerror|outofmemory|out of memory|cannot allocate memory", re.IGNORECASE
+    r"OutOfMemory|\bMemoryError\b|(?i:\b(?:out of|cannot allocate) memory\b)"
 )
 
 
