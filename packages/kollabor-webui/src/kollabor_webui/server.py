@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import posixpath
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -282,6 +283,15 @@ def create_app(
         include_in_schema=False,
     )
     async def engine_proxy(path: str, request: Request):
+        first = posixpath.normpath("/" + path).lstrip("/").split("/", 1)[0]
+        if first.lower() == "phonelink" and not _is_local(request):
+            return JSONResponse(
+                {
+                    "detail": "Phones can only be managed on the computer running Kollab."
+                },
+                status_code=403,
+                headers=NO_STORE_HEADERS,
+            )
         query = f"?{request.url.query}" if request.url.query else ""
         upstream = engine.build_request(
             request.method,

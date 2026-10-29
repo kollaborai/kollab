@@ -308,3 +308,45 @@ async def test_legacy_phone_access_environment_does_not_restore_peer_access(
     assert response.status_code == 403
     assert response.headers["cache-control"] == "no-store"
     assert "secret-token" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_remote_page_cannot_manage_phones_through_proxy(monkeypatch):
+    monkeypatch.setattr("kollabor_engine.auth.read_token_from_disk", lambda: "t0ken")
+    # A fresh stream per call: the proxy streams the engine's answer through.
+    engine = httpx.MockTransport(
+        lambda request: httpx.Response(200, stream=httpx.ByteStream(b'{"ok": true}'))
+    )
+    app = make_app(monkeypatch, "http://127.0.0.1:7433", engine)
+
+    list_response = await call(
+        app, "10.8.0.2", "GET", "/engine/phonelink", headers={"Origin": TEST_ORIGIN}
+    )
+    approve_response = await call(
+        app,
+        "10.8.0.2",
+        "POST",
+        "/engine/phonelink/phones/abc/approve",
+        headers={"Origin": TEST_ORIGIN},
+    )
+    traversal_response = await call(
+        app,
+        "10.8.0.2",
+        "GET",
+        "/engine/phonelink/../phonelink",
+        headers={"Origin": TEST_ORIGIN},
+    )
+    local_response = await call(
+        app, "127.0.0.1", "GET", "/engine/phonelink", headers={"Origin": TEST_ORIGIN}
+    )
+    sessions_response = await call(
+        app, "10.8.0.2", "GET", "/engine/sessions", headers={"Origin": TEST_ORIGIN}
+    )
+    assert list_response.status_code == 403
+    assert list_response.json() == {
+        "detail": "Phones can only be managed on the computer running Kollab."
+    }
+    assert approve_response.status_code == 403
+    assert traversal_response.status_code == 403
+    assert local_response.status_code == 200
+    assert sessions_response.status_code == 200
