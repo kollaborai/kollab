@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -40,9 +41,9 @@ CLI_PLATFORMS = ("macos-aarch64", "macos-x86_64", "linux-x86_64", "linux-aarch64
 APP_MARKER = "KOLLAB-APP"
 # The scie's CPython minor version: scripts/build_binary.py PYTHON (a test keeps them equal).
 RUNTIME_PYTHON = "python3.14"
-# Keep in lockstep with scripts/build_binary.py PEX: pex-tools must resolve the
-# same pex generation that built the scie.
-PEX_PIN = "pex==2.103.4"
+# Keep in lockstep with scripts/build_binary.py PEX (a test keeps them equal):
+# pex-tools must resolve the same pex generation that built the scie.
+PEX_PIN = "pex==2.98.2" if platform.system() == "Windows" else "pex==2.103.4"
 # Standalone pex-tools entry point (tests substitute the tuple with a fake script).
 PEX_TOOLS_CMD = ("uvx", "--python", RUNTIME_PYTHON, "--from", PEX_PIN, "pex-tools")
 LAUNCHER = f"""#!/bin/sh

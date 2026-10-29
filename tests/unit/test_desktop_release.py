@@ -267,6 +267,24 @@ def test_app_runtime_matches_the_cli_binary_python():
     assert release.RUNTIME_PYTHON == "python" + build_binary.PYTHON.rsplit(".", 1)[0]
 
 
+@pytest.mark.parametrize("system", ["Darwin", "Linux", "Windows"])
+def test_pex_tools_pin_matches_the_cli_binary_pex(monkeypatch, system):
+    """pex-tools must be the pex that built the scie; only Windows stays on scie-jump 1.12.0 (#268)."""
+    import importlib.util
+    import platform
+
+    monkeypatch.setattr(platform, "system", lambda: system)
+    pins = []
+    for name, attr in (("build_binary", "PEX"), ("desktop_release", "PEX_PIN")):
+        spec = importlib.util.spec_from_file_location(f"fresh_{name}", Path(release.__file__).with_name(f"{name}.py"))
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, module)
+        spec.loader.exec_module(module)
+        pins.append(getattr(module, attr))
+    assert pins[0] == pins[1]
+    assert (pins[0] == "pex==2.98.2") == (system == "Windows")
+
+
 def test_pex_tools_cmd_is_the_standalone_entry_point():
     """The venv pex shim ignores PEX_TOOLS; staging must use pex-tools, never the pex itself."""
     assert release.PEX_TOOLS_CMD[-1] == "pex-tools"
