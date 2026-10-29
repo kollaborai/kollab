@@ -3,6 +3,7 @@ import { CheckCircle2, RefreshCw } from "lucide-react";
 import type { EngineApi, Profile, Session, SessionState } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PathText } from "@/components/ui/path-text";
 import {
   Select,
   SelectContent,
@@ -127,7 +128,7 @@ export function SessionSettings({
           <span className="text-muted-foreground">Type</span>
           <span className="break-words">{bundleName(session.agent)}</span>
           <span className="text-muted-foreground">Workspace</span>
-          <span className="break-all">{workspace}</span>
+          <PathText path={workspace} />
         </div>
         <div className="grid gap-2">
           <label

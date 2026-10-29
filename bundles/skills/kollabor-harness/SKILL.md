@@ -329,10 +329,21 @@ both work:
   `SlashCommandComplete`, `ModalShow`, `ModalHide`, `PasteDetected`,
   `PostToolUseFailure`
 
+which event sees a shell command:
+
+- commands **you (the agent)** run with the terminal tool: `PreToolUse` /
+  `PostToolUse` with `"matcher": "^terminal$"`; the command text is in the
+  `command` field
+- `ShellCommandPre` / `ShellCommandPost` fire only for commands the **user**
+  types with `!` in the input box, never for the terminal tool
+
+a hook's `command` is split with shlex and run with no shell: `>>`, pipes and
+`&&` are passed as plain arguments. put anything shell-like in a script file.
+
 ### matchers
 
 the `matcher` field is a regex tested against tool name (for `PreToolUse`,
-`PostToolUse`) or command string (for `ShellCommandPre`). examples:
+`PostToolUse`) or the user's `!` command string (for `ShellCommandPre`). examples:
 
 - `"file_create|file_edit"` — native file tools
 - `"mcp__.*"` — any MCP tool
@@ -562,7 +573,9 @@ if os.environ.get("KOLLAB_STRICT") == "1":
             sys.exit(2)
 ```
 
-**8. shell command audit — observe + redact secrets:**
+**8. audit commands the user types with `!` — observe + redact secrets**
+(for the agent's own commands use `PreToolUse` with `"matcher": "^terminal$"`;
+the script reads the same `command` field):
 
 ```json
 {
@@ -632,12 +645,13 @@ can be multiple entries in the event's array:
 every event's stdin includes `hook_event_name` plus event-specific fields:
 
 - **PreToolUse / PostToolUse**: `tool_name`, `arguments`, `file`/`path` (native
-  file tools), `tool_id`, and for post: `success`, `output`, `error`
+  file tools), `command` (the `terminal` tool), `tool_id`, and for post:
+  `success`, `output`, `error`
 - **UserPromptSubmit**: `message`, `session_id`
 - **LlmRequestPre**: `model`, `messages`, `message_count`, `temperature`
 - **LlmRequestPost**: `model`, `input_tokens`, `output_tokens`,
   `response_text`
-- **ShellCommandPre/Post**: `command`, `cwd`, and for post: `exit_code`,
+- **ShellCommandPre/Post** (user `!` commands only): `command`, `cwd`, and for post: `exit_code`,
   `stdout`, `stderr`
 - **PermissionRequest**: `tool_name`, `risk_level`, `reason`
 - **McpToolCallPre/Post**: `server`, `tool_name`, `arguments`, `result`

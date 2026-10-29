@@ -7,23 +7,36 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { EngineApi, GemAppearance, GemLook } from "@/api";
+import type { EngineApi, GemAppearance, GemLook, LookColor } from "@/api";
 import { AURAS, COAT_KNOBS, EYE_STYLES, FUR_STYLES, HAIR_COLORS, HAIR_STYLES, HAT_STYLES, SEASONS, SPARKLES } from "./gem-face";
 import { GEM_CUTS } from "./gem-specs";
-import { lookKey, resolveGemLook, type GemLookVocabulary, type ResolvedGemLook } from "./gem-look";
+import {
+  BORN_FUR_SHARE,
+  BORN_HAIR_SHARE,
+  lookKey,
+  resolveGemLook,
+  type GemLookVocabulary,
+  type ResolvedGemLook,
+} from "./gem-look";
 
 const everyday = (style: { group: string }) => style.group !== "Halloween" && style.group !== "Christmas";
 /** The out-of-season eyes and hats Random Look draws from (the engine's birth roll uses the same). */
 export const EVERYDAY_FACES = EYE_STYLES.filter(everyday).map((style) => style.id);
 export const EVERYDAY_HATS = HAT_STYLES.filter(everyday).map((style) => style.id);
 
+/** The fur colors a birth draws from: the body's own color or a natural shade
+ * (gem_appearance.py BIRTH_FUR_COLORS, kept in step by a test). */
+const BIRTH_FUR_COLORS: readonly LookColor[] = ["gem", ...HAIR_COLORS.map((shade) => shade.rgb)];
+
 /** Hair or fur for Random Look, at the engine's birth odds (gem_appearance.py HAIR_SHARE, FUR_SHARE). */
-export function randomCoat(): Pick<GemLook, "hair" | "hairColor" | "fur"> {
+export function randomCoat(): Pick<GemLook, "hair" | "hairColor" | "fur" | "furColor"> {
   const roll = Math.random();
   const pick = <T,>(pool: readonly T[]) => pool[Math.floor(Math.random() * pool.length)];
-  if (roll < 0.25) return { hair: pick(HAIR_STYLES).id, hairColor: pick(HAIR_COLORS).rgb, fur: "none" };
-  if (roll < 0.35) return { hair: "none", fur: pick(FUR_STYLES).id };
-  return { hair: "none", fur: "none" };
+  if (roll < BORN_FUR_SHARE)
+    return { hair: "none", hairColor: undefined, fur: pick(FUR_STYLES).id, furColor: pick(BIRTH_FUR_COLORS) };
+  if (roll < BORN_FUR_SHARE + BORN_HAIR_SHARE)
+    return { hair: pick(HAIR_STYLES).id, hairColor: pick(HAIR_COLORS).rgb, fur: "none", furColor: undefined };
+  return { hair: "none", hairColor: undefined, fur: "none", furColor: undefined };
 }
 
 /** The studio's color swatches; an agent the pool gives no color is born with one. */
@@ -46,6 +59,10 @@ export const GEM_LOOK_VOCABULARY: GemLookVocabulary = {
   birthFaces: EVERYDAY_FACES,
   birthHats: EVERYDAY_HATS,
   birthColors: GEM_SWATCHES,
+  birthHairs: HAIR_STYLES.map((style) => style.id),
+  birthFurs: FUR_STYLES.map((style) => style.id),
+  birthHairColors: HAIR_COLORS.map((shade) => shade.rgb),
+  birthFurColors: BIRTH_FUR_COLORS,
 };
 
 type GemAppearanceValue = {
