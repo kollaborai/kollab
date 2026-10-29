@@ -283,15 +283,6 @@ def create_app(
         include_in_schema=False,
     )
     async def engine_proxy(path: str, request: Request):
-        first = posixpath.normpath("/" + path).lstrip("/").split("/", 1)[0]
-        if first.lower() == "phonelink" and not _is_local(request):
-            return JSONResponse(
-                {
-                    "detail": "Phones can only be managed on the computer running Kollab."
-                },
-                status_code=403,
-                headers=NO_STORE_HEADERS,
-            )
         query = f"?{request.url.query}" if request.url.query else ""
         upstream = engine.build_request(
             request.method,
@@ -305,6 +296,20 @@ def create_app(
             ],
             content=await request.body(),
         )
+        # Judge the path the engine will route: httpx has dropped the query and
+        # the fragment and resolved dot segments, so an encoded ?, # or .. cannot
+        # carry a phone request past this check.
+        base = engine.base_url.path.rstrip("/")
+        routed = posixpath.normpath(upstream.url.path[len(base) :] or "/")
+        first = routed.lstrip("/").split("/", 1)[0]
+        if first.lower() == "phonelink" and not _is_local(request):
+            return JSONResponse(
+                {
+                    "detail": "Phones can only be managed on the computer running Kollab."
+                },
+                status_code=403,
+                headers=NO_STORE_HEADERS,
+            )
         try:
             response = await engine.send(upstream, stream=True)
         except httpx.HTTPError as exc:

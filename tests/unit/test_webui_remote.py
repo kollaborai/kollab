@@ -348,5 +348,16 @@ async def test_remote_page_cannot_manage_phones_through_proxy(monkeypatch):
     }
     assert approve_response.status_code == 403
     assert traversal_response.status_code == 403
+    # An encoded ?, # or .. cannot hide the phonelink segment from the guard.
+    for method, hidden_path in (
+        ("GET", "/engine/phonelink%3Fx"),
+        ("GET", "/engine/phonelink%23x"),
+        ("POST", "/engine/phonelink%3F/phones/abc/approve"),
+        ("GET", "/engine/%252e%252e/phonelink"),
+    ):
+        hidden = await call(
+            app, "10.8.0.2", method, hidden_path, headers={"Origin": TEST_ORIGIN}
+        )
+        assert hidden.status_code == 403, hidden_path
     assert local_response.status_code == 200
     assert sessions_response.status_code == 200
