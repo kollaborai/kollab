@@ -8,6 +8,10 @@ name: Binaries
 # Packaging runs only for a release tag or by hand (workflow_dispatch, e.g. on
 # release/X.Y.Z before tagging). Pull requests and branch pushes build nothing
 # here: PR CI was waiting on this matrix.
+#
+# desktop-windows is provisional (docs/specs/windows-desktop.md): until the
+# native port lands it runs only by hand (workflow_dispatch). A release tag never
+# runs it or waits on it, and no Windows asset is published.
 on:
   # No tags trigger: publish.yml calls this for every release tag. A tags trigger
   # here built every binary and desktop app twice per release.
@@ -303,6 +307,106 @@ jobs:
       - name: Smoke the packaged Linux window and attached-runtime lifecycle
         run: dbus-run-session -- xvfb-run -a python scripts/check_desktop_package.py dist/desktop/*.AppImage
 
+  # Windows builds its own runtime here instead of taking one from `build`: the
+  # scie is no release asset (install.sh and /upgrade know no Windows binary), so
+  # it lives only in the installer. Manual runs only until the native port lands:
+  # the agent check fails until then, and a release must not wait on a job that
+  # is known to fail. Promotion is in docs/specs/windows-desktop.md.
+  desktop-windows:
+    name: desktop/windows-x86_64
+    if: github.event_name == 'workflow_dispatch'
+    needs: frontend
+    runs-on: windows-2025
+    continue-on-error: true
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv (the runtime build and staging run uvx)
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}
+
+      - name: Download the selected frontend
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: ${{ runner.temp }}/kollab-frontend
+
+      - name: Build the Windows binary and check that it runs
+        env:
+          VERSION: ${{ inputs.version }}
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ github.token }}
+        run: python scripts/build_binary.py --frontend-dist "$RUNNER_TEMP/kollab-frontend" --out dist/bin ${VERSION:+--expect-version "$VERSION"}
+
+      # A runtime that cannot start an agent must not ship in an installer that
+      # looks like it works. Until the native port lands this fails with the
+      # runtime's own error; the packaging steps below still run, so the Tauri
+      # Windows build is checked meanwhile.
+      - name: Check that the binary can run agents
+        id: agents
+        continue-on-error: true
+        run: python scripts/build_binary.py --agent-smoke dist/bin/kollab-windows-x86_64.exe
+
+      - name: Verify and stage the Windows sidecar
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python scripts/desktop_release.py --version "$VERSION" stage --platform windows-x86_64 --source dist/bin/kollab-windows-x86_64.exe
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Check pinned Tauri CLI
+        run: npx --yes @tauri-apps/cli@2.12.0 --version
+
+      - name: Test the Windows shell
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+
+      - name: Build the Windows installer
+        working-directory: desktop
+        run: npx --yes @tauri-apps/cli@2.12.0 build --config src-tauri/tauri.release.json --bundles nsis
+
+      - name: Check and collect the Windows installer
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python scripts/desktop_release.py --version "$VERSION" collect --platform windows-x86_64
+          (
+            cd dist/desktop
+            sha256sum -c ./*.sha256
+          )
+
+      - name: Smoke the installed Windows app
+        run: python scripts/check_desktop_package_windows.py dist/desktop/*-setup.exe
+
+      # Not a kollab-* artifact: nothing downloads it into a release.
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: windows-desktop-unverified
+          path: dist/desktop/*
+          if-no-files-found: ignore
+
+      - name: Refuse to release an installer whose runtime cannot run agents
+        if: steps.agents.outcome != 'success'
+        run: |
+          echo "::error::The Windows runtime cannot start an agent yet (docs/specs/windows-desktop.md, 'Port work'); the installer is not released."
+          exit 1
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kollab-desktop-windows-x86_64
+          path: dist/desktop/*
+          if-no-files-found: error
+
   release-manifest:
     name: release/manifest
     needs: [build, desktop, desktop-linux]
@@ -320,7 +424,10 @@ jobs:
           path: dist/bin
           merge-multiple: true
 
-      - name: Verify all CLI, macOS and Linux release assets
+      # The Windows installer pair is optional (desktop-windows is not part of a
+      # release yet) but never half there. Add `--windows required` once the
+      # Windows job is promoted.
+      - name: Verify all CLI, macOS and Linux release assets, and Windows if built
         env:
           VERSION: ${{ inputs.version }}
         run: python scripts/desktop_release.py --version "$VERSION" verify dist/bin

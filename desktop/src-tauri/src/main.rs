@@ -5,10 +5,15 @@
 //! sidecar and an installed CLI. Closing the window hides it to the menu bar;
 //! only Quit stops the runtime the app started, and it asks first.
 
+// A release build on Windows is a GUI program: no console window behind it.
+#![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -35,8 +40,17 @@ mod updater;
 /// How long a spawned web UI gets to answer before the error page shows.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The bundled status page (loading, install, error) on macOS and Linux.
+/// The bundled status page (loading, install, error). Tauri serves the app's own
+/// files from tauri://localhost on macOS and Linux, and from http://tauri.localhost
+/// on Windows, where WebView2 has no custom schemes.
+#[cfg(not(windows))]
 const STATUS_PAGE: &str = "tauri://localhost/index.html";
+#[cfg(windows)]
+const STATUS_PAGE: &str = "http://tauri.localhost/index.html";
+
+/// CreateProcess: a console program started by this GUI app gets no console window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Reports the page title and whether the React root rendered, once it has or
 /// after 10 s, by navigating to `kollab-desktop://report?...`, which
@@ -177,9 +191,26 @@ fn webui_running(url: &Url) -> bool {
     serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| v["info"]["title"] == "Kollab WebUI")
 }
 
+/// A helper process for this GUI app: on Windows it must not flash a console window.
+#[cfg(windows)]
+fn hidden(mut command: Command) -> Command {
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(not(windows))]
+fn hidden(command: Command) -> Command {
+    command
+}
+
+/// The user's home folder, where a spawned runtime starts.
+fn home_dir() -> String {
+    std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| "/".into())
+}
+
 /// The version `kollab --version` prints ("<name> X.Y.Z"), or None if it doesn't run.
 fn kollab_version(bin: &Path) -> Option<Vec<u32>> {
-    let out = Command::new(bin)
+    let out = hidden(Command::new(bin))
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -195,15 +226,24 @@ fn kollab_version(bin: &Path) -> Option<Vec<u32>> {
 
 /// macOS bundles a launcher beside an unpacked, signed Python runtime
 /// (scripts/desktop_release.py stage), since codesign cannot sign a scie.
-/// Linux keeps the scie as opaque package data outside linuxdeploy's reach.
+/// Linux and Windows keep the scie as opaque package data: nothing rewrites it.
 fn bundled_kollab() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     let path = linux_bundled_kollab(&std::env::current_exe().ok()?)?;
     #[cfg(target_os = "macos")]
     let path = macos_bundled_kollab(&std::env::current_exe().ok()?)?;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    let path = windows_bundled_kollab(&std::env::current_exe().ok()?)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     let path = std::env::current_exe().ok()?.with_file_name("kollab");
     path.is_file().then_some(path)
+}
+
+/// The NSIS installer puts the app's resources beside kollab-desktop.exe;
+/// scripts/desktop_release.py stage maps the scie to runtime\kollab.exe there.
+#[cfg(any(windows, test))]
+fn windows_bundled_kollab(executable: &Path) -> Option<PathBuf> {
+    Some(executable.parent()?.join("runtime").join("kollab.exe"))
 }
 
 /// Kollab.app/Contents/MacOS/kollab-desktop -> Kollab.app/Contents/Resources/kollab,
@@ -220,7 +260,26 @@ fn linux_bundled_kollab(executable: &Path) -> Option<PathBuf> {
     Some(executable.parent()?.parent()?.join("share/kollab/runtime/kollab"))
 }
 
+/// A GUI app on Windows gets the user's PATH from Explorer, so `where` finds an
+/// installed kollab; `uv tool install kollab` puts it in ~/.local/bin.
+#[cfg(windows)]
+fn installed_kollab() -> Option<PathBuf> {
+    let from_path = hidden(Command::new("where.exe"))
+        .arg("kollab.exe")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|out| {
+            let text = String::from_utf8(out.stdout).ok()?;
+            text.lines().map(str::trim).find(|line| !line.is_empty()).map(PathBuf::from)
+        });
+    let fallback = PathBuf::from(home_dir()).join(".local").join("bin").join("kollab.exe");
+    from_path.into_iter().chain([fallback]).find(|p| p.is_file())
+}
+
 /// GUI apps don't get the shell's PATH: ask the login shell, then try the usual install spots.
+#[cfg(not(windows))]
 fn installed_kollab() -> Option<PathBuf> {
     let default_shell = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/sh" };
     let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell.into());
@@ -234,7 +293,7 @@ fn installed_kollab() -> Option<PathBuf> {
             let text = String::from_utf8(out.stdout).ok()?;
             text.lines().rev().map(str::trim).find(|l| l.starts_with('/')).map(PathBuf::from)
         });
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = home_dir();
     let fallbacks = [
         format!("{home}/.local/bin/kollab"),
         "/opt/homebrew/bin/kollab".into(),
@@ -261,7 +320,8 @@ fn pick_kollab() -> Option<PathBuf> {
     }
 }
 
-/// Starts `kollab --web-ui` in its own session and process group, its output going to `log`.
+/// Starts `kollab --web-ui` in its own session and process group (on Windows, with
+/// no console window, so `stop_child` can end its tree), its output going to `log`.
 fn spawn_webui(kollab: &Path, log: &Path) -> std::io::Result<Child> {
     let out = std::fs::File::create(log)?;
     let mut command = Command::new(kollab);
@@ -269,17 +329,20 @@ fn spawn_webui(kollab: &Path, log: &Path) -> std::io::Result<Child> {
         .arg("--web-ui")
         .env("BROWSER", "true") // no browser tab: this window is the browser
         .env("PYTHONUNBUFFERED", "1") // so the error page shows the latest output
-        .current_dir(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
+        .current_dir(home_dir())
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);
     // setsid: Quit signals the CLI, its engine and its UI server as one group.
+    #[cfg(unix)]
     unsafe {
         command.pre_exec(|| match libc::setsid() {
             -1 => Err(std::io::Error::last_os_error()),
             _ => Ok(()),
         });
     }
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     command.spawn()
 }
 
@@ -363,7 +426,7 @@ fn boot(app: &AppHandle, operation: u64) {
         }
         // WNOWAIT leaves even an exited leader reserved until cleanup. try_wait
         // here would reap it and make a cached process-group ID unsafe to signal.
-        let exited = app.state::<Spawned>().0.lock().unwrap().owned.as_ref()
+        let exited = app.state::<Spawned>().0.lock().unwrap().owned.as_mut()
             .is_some_and(|child| child_exited(child).unwrap_or(true));
         if exited {
             break;
@@ -398,6 +461,7 @@ fn stop_spawned(app: &AppHandle) -> bool {
 /// An unreaped direct child reserves its PID, including after it exits. Never
 /// turn this observation into try_wait: freeing that PID before the last group
 /// signal could target an unrelated process group that later reuses its number.
+#[cfg(unix)]
 fn child_exited(child: &Child) -> std::io::Result<bool> {
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let result = unsafe {
@@ -436,7 +500,7 @@ fn group_has_peers(group: libc::pid_t) -> std::io::Result<bool> {
 
 /// Linux exposes process groups through /proc, not macOS libproc. The command
 /// name may contain spaces and parentheses, so read fields only after its end.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(all(unix, any(target_os = "linux", test)))]
 fn stat_process_group(stat: &str) -> std::io::Result<libc::pid_t> {
     stat.rsplit_once(") ").and_then(|(_, fields)| fields.split_whitespace().nth(2))
         .and_then(|group| group.parse().ok())
@@ -461,6 +525,7 @@ fn group_has_peers(group: libc::pid_t) -> std::io::Result<bool> {
     Ok(false)
 }
 
+#[cfg(unix)]
 fn signal_owned_group(child: &Child, signal: libc::c_int) -> std::io::Result<()> {
     child_exited(child)?; // ECHILD refuses a cached/reaped PID; WNOWAIT retains ownership.
     if unsafe { libc::killpg(child.id() as libc::pid_t, signal) } != 0 {
@@ -469,6 +534,7 @@ fn signal_owned_group(child: &Child, signal: libc::c_int) -> std::io::Result<()>
     Ok(())
 }
 
+#[cfg(unix)]
 fn stop_child(child: &mut Child) -> std::io::Result<bool> {
     if group_exited(child, Duration::ZERO)? { return Ok(true); }
     eprintln!("kollab-desktop: stopping owned process group {}", child.id());
@@ -481,6 +547,7 @@ fn stop_child(child: &mut Child) -> std::io::Result<bool> {
 
 /// Reap only once the leader exited and has no remaining group members. Until
 /// then the same exact Child stays in the slot, including on a failed Retry.
+#[cfg(unix)]
 fn group_exited(child: &mut Child, timeout: Duration) -> std::io::Result<bool> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -491,6 +558,39 @@ fn group_exited(child: &mut Child, timeout: Duration) -> std::io::Result<bool> {
         if Instant::now() >= deadline {
             return Ok(false);
         }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Windows keeps the child's handle open until it is dropped, so its id cannot
+/// name another process while this app owns it: try_wait observing an exit is safe.
+#[cfg(windows)]
+fn child_exited(child: &mut Child) -> std::io::Result<bool> {
+    Ok(child.try_wait()?.is_some())
+}
+
+/// Windows has no process groups to signal, and a GUI parent has no console to
+/// send Ctrl+C through, so the owned tree (the CLI, its engine and its UI server)
+/// ends with `taskkill /T /F` on the child this app still holds. That is forceful,
+/// unlike the SIGINT-then-SIGTERM stop on macOS and Linux; a graceful stop is a
+/// follow-up (docs/specs/windows-desktop.md).
+#[cfg(windows)]
+fn stop_child(child: &mut Child) -> std::io::Result<bool> {
+    if child_exited(child)? { return Ok(true); }
+    eprintln!("kollab-desktop: stopping owned process tree {}", child.id());
+    let killed = hidden(Command::new("taskkill.exe"))
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !killed.success() {
+        eprintln!("kollab-desktop: taskkill exited with {killed}");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child_exited(child)? { return Ok(true); }
+        if Instant::now() >= deadline { return Ok(false); }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -652,8 +752,22 @@ fn resume_after_update(app: &AppHandle) {
     start_boot(app, true);
 }
 
+/// Ctrl+C or a closed console quit through the same exit path as Quit (without
+/// the question), so a spawned web UI is never orphaned.
+#[cfg(windows)]
+fn quit_on_signals(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!("kollab-desktop: quit signal received");
+            exit_now(&app);
+        }
+    });
+}
+
 /// Ctrl+C, `kill` or a closed terminal quit through the same exit path as
 /// Quit (without the question), so a spawned web UI is never orphaned.
+#[cfg(unix)]
 fn quit_on_signals(app: &AppHandle) {
     use tokio::signal::unix::{signal, SignalKind};
     for kind in [SignalKind::interrupt(), SignalKind::terminate(), SignalKind::hangup()] {
@@ -704,7 +818,9 @@ fn blend_title_bar<'a, M: Manager<Wry>>(
 
 /// The window shows only the bundled status page and the web UI's own origin.
 fn allowed_in_window(url: &Url) -> bool {
-    matches!(url.scheme(), "tauri" | "about" | "data" | "blob") || url.origin() == ui_url().origin()
+    matches!(url.scheme(), "tauri" | "about" | "data" | "blob")
+        || (cfg!(windows) && url.host_str() == Some("tauri.localhost")) // the status page, see STATUS_PAGE
+        || url.origin() == ui_url().origin()
 }
 
 /// The macOS menu bar: the usual items, except that Quit goes through `request_quit`.
@@ -1081,6 +1197,7 @@ mod tests {
         assert_eq!(runtime.begin(), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn linux_stat_parser_handles_command_parentheses_and_rejects_partial_records() {
         assert_eq!(stat_process_group("17 (a command (with) spaces) S 12 41 17 0").unwrap(), 41);
@@ -1105,8 +1222,16 @@ mod tests {
         assert_eq!(macos_bundled_kollab(Path::new("kollab-desktop")), None);
     }
 
+    #[test]
+    fn windows_sidecar_lookup_uses_the_runtime_folder_beside_the_app() {
+        assert_eq!(windows_bundled_kollab(Path::new("/opt/Kollab/kollab-desktop.exe")),
+            Some(PathBuf::from("/opt/Kollab/runtime/kollab.exe")));
+        assert_eq!(windows_bundled_kollab(Path::new("kollab-desktop.exe")), Some(PathBuf::from("runtime/kollab.exe")));
+    }
+
     /// These kernel tests create only private groups with short natural
     /// lifetimes, even if an assertion fails. No Kollab, GUI or user runtime.
+    #[cfg(unix)]
     fn kernel_child(script: &str) -> Child {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", script]).stdin(Stdio::null())
@@ -1121,6 +1246,7 @@ mod tests {
         command.spawn().unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn kernel_wnowait_reserves_the_exited_child_and_reaped_handles_refuse_signals() {
         let mut child = kernel_child("exit 0");
@@ -1135,6 +1261,7 @@ mod tests {
         assert_eq!(signal_owned_group(&child, libc::SIGINT).unwrap_err().raw_os_error(), Some(libc::ECHILD));
     }
 
+    #[cfg(unix)]
     #[test]
     fn kernel_owned_group_stops_with_sigint_and_is_reaped() {
         use std::os::unix::process::ExitStatusExt;
@@ -1145,6 +1272,7 @@ mod tests {
         assert_eq!(child_exited(&child).unwrap_err().raw_os_error(), Some(libc::ECHILD));
     }
 
+    #[cfg(unix)]
     #[test]
     fn kernel_peer_listing_retains_the_exited_leader_until_its_group_drains() {
         use std::io::{BufRead, BufReader};
@@ -1177,6 +1305,7 @@ mod tests {
         assert!(!webui_running(&format!("http://127.0.0.1:{closed}/").parse().unwrap()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn kollab_version_reads_the_last_word() {
         let script = std::env::temp_dir().join("kollab-desktop-test-version.sh");
