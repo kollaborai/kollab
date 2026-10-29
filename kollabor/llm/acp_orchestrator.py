@@ -310,7 +310,13 @@ class ACPOrchestrator:
             logger.warning(
                 "ACP observation history write failed (%s)", type(error).__name__
             )
-            self._unwritten_observations.append(entry)
+            pending = self._unwritten_observations
+            if len(pending) == pending.maxlen:
+                logger.warning(
+                    "ACP observation retry queue is full; the oldest message "
+                    "waiting for a history row is dropped"
+                )
+            pending.append(entry)
         else:
             self._observation_rows.append(row_id)
         if not self.is_processing:
