@@ -25,6 +25,23 @@ from kollabor_config.config_utils import (
 logger = logging.getLogger(__name__)
 
 STALE_THRESHOLD_SECONDS = 60
+WAITER_FALLBACK = "Network halted by another machine. Resume needs a person on two machines: Settings → Network."
+
+
+def waiter_line(socket_path: Path) -> str:
+    """What a halt waiter's status socket says, e.g. "Network halted by mac. Resume needs ..."."""
+    import socket
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1.0)
+            sock.connect(str(socket_path))
+            sock.sendall(b'{"action": "get_status"}\n')
+            reply = json.loads(sock.makefile("rb").readline(65536) or b"{}")
+        line = reply.get("halted") if isinstance(reply, dict) else None
+        return line if isinstance(line, str) and line else WAITER_FALLBACK
+    except (OSError, ValueError):
+        return WAITER_FALLBACK
 CACHE_TTL_SECONDS = 5
 
 
@@ -126,7 +143,8 @@ class HubBridge:
                     if agent_id in seen:
                         continue
                     heartbeat = data.get("last_heartbeat", 0)
-                    if now - heartbeat > STALE_THRESHOLD_SECONDS:
+                    # A halt waiter writes its record once and never beats; its pid is the liveness.
+                    if data.get("state") != "halted" and now - heartbeat > STALE_THRESHOLD_SECONDS:
                         continue
                     if not _pid_alive(data.get("pid")):
                         continue
@@ -204,6 +222,9 @@ class HubBridge:
                 "external": True,
                 "source": "hub_presence",
             })
+            if agent.get("state") == "halted":
+                # A halt waiter: no model, its socket only answers status (halt_runtime._StatusSocket).
+                sessions[-1]["halted"] = waiter_line(socket_path)
         return sessions
 
     def get_agent_by_identity(

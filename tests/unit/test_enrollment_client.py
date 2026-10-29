@@ -41,6 +41,7 @@ from plugins.hub.enrollment_recovery import (
     EnrollmentRecoveryJournal,
     derive_enrollment_recovery_key,
 )
+from plugins.hub.network_halt import join_anchor
 from plugins.hub.provisioning import (
     NetworkPreferences,
     ProvisioningExpectation,
@@ -420,6 +421,7 @@ async def _run_enrollment(
     config_floor=None,
     submitted_probe=None,
     before_enroll=None,
+    code_tail=None,
 ):
     origin = "https://kollabor.ai"
     offer_id = "0123456789abcdef0123456789abcdef"
@@ -427,7 +429,6 @@ async def _run_enrollment(
     # decision/ack); FakeTransport.post below resolves the short code's
     # lookup round trip so enroll_device can find this fixed offer id.
     code = generate_enrollment_code(offer_id)
-    code_text = code.for_private_display()
     verifier = derive_enrollment_code_verifier(code)
     envelope_key = derive_enrollment_envelope_key(code)
     owner_signing_key = SigningKey.generate()
@@ -438,6 +439,10 @@ async def _run_enrollment(
         state_dir=tmp_path / "owner-network",
         label="owner",
     )
+    owner_relay.control.found()
+    # F4-3: the typed code carries the tag of the network it was made on
+    tail = join_anchor(owner_relay.control.network_id()) if code_tail is None else code_tail
+    code_text = f"{code.for_private_display()}-{tail}" if tail else code.for_private_display()
     owner_relay.state.origin = origin
     owner_relay._store.save()
     destination = RelayClient(
@@ -615,6 +620,10 @@ async def _run_enrollment(
                         "status": "approved",
                         "credential": credential.token,
                         "invite": owner_relay.invite(),
+                        "network_control": {
+                            "founder": owner_relay.control.data.get("founder"),
+                            "network": owner_relay.control.network_id(),
+                        },
                         "provisioning_bundle": base64.urlsafe_b64encode(provisioning_bundle)
                         .rstrip(b"=")
                         .decode("ascii"),
@@ -719,7 +728,10 @@ async def test_enrollment_reports_the_submit_once_before_waiting_for_the_decisio
 
     result, *_rest = await _run_enrollment(tmp_path, monkeypatch, submitted_probe=probe)
 
-    assert result == {"status": "approved"}
+    assert result["status"] == "approved"
+    # F4-3: the join result shows the founder and warns while one machine counts
+    assert result["founder_fingerprint"] == result["founder"][:12]
+    assert result["warning"] == "This network has one machine that counts; a halt needs a second one."
     assert seen == [["request"]]
 
 
@@ -727,7 +739,7 @@ async def test_enrollment_reports_the_submit_once_before_waiting_for_the_decisio
 async def test_device_enrollment_completes_signed_encrypted_pairing(tmp_path, monkeypatch):
     result, commands, destination, transport, owner_directory = await _run_enrollment(tmp_path, monkeypatch)
 
-    assert result == {"status": "approved"}, [path for path, _fields in transport.requests]
+    assert result["status"] == "approved", [path for path, _fields in transport.requests]
     assert destination.state.origin == "https://kollabor.ai"
     assert destination.state.inviter
     assert destination.state.approvals == [destination.state.inviter]
@@ -768,7 +780,7 @@ async def test_a_directory_left_pinned_to_another_owner_does_not_break_a_join(
         tmp_path, monkeypatch, before_enroll=_pin_directory_to_another_owner
     )
 
-    assert result == {"status": "approved"}
+    assert result["status"] == "approved"
     assert destination.state.inviter
     assert owner_directory.members()
     assert len(list(destination.state_dir.glob("private-directory.*.replaced"))) == 1
@@ -836,7 +848,7 @@ async def test_joining_device_records_the_issuers_device_name(tmp_path, monkeypa
         tmp_path, monkeypatch, issuer_device_name="laptop-kollab"
     )
 
-    assert result == {"status": "approved"}
+    assert result["status"] == "approved"
     assert commands.agent_bridge.bound == [(destination.state.inviter, "laptop-kollab")]
 
 
@@ -846,7 +858,7 @@ async def test_joining_device_takes_the_networks_name_from_the_signed_decision(t
         tmp_path, monkeypatch, issuer_device_name="laptop-kollab", network_name="laptop-kollab-net"
     )
 
-    assert result == {"status": "approved"}
+    assert result["status"] == "approved"
     assert commands.agent_bridge.named == ["laptop-kollab-net"]
 
 
@@ -856,7 +868,7 @@ async def test_joining_an_issuer_that_sends_no_network_name_still_completes(tmp_
         tmp_path, monkeypatch, issuer_device_name="laptop-kollab"
     )
 
-    assert result == {"status": "approved"}
+    assert result["status"] == "approved"
     assert commands.agent_bridge.named == []
 
 
@@ -871,7 +883,7 @@ async def test_joining_device_hands_the_signed_config_floor_to_the_receiver(tmp_
         config_floor={"config_revision": 1234567, "config_digest": "a" * 64},
     )
 
-    assert result == {"status": "approved"}
+    assert result["status"] == "approved"
     assert handed == [(destination.state_dir, destination.state.inviter, 1234567, "a" * 64)]
 
 
@@ -882,7 +894,7 @@ async def test_joining_an_issuer_that_sends_no_floor_clears_an_old_one(tmp_path,
 
     result, _commands, destination, _transport, _directory = await _run_enrollment(tmp_path, monkeypatch)
 
-    assert result == {"status": "approved"}
+    assert result["status"] == "approved"
     assert handed == [(destination.state_dir, destination.state.inviter, None, None)]
 
 
@@ -915,7 +927,7 @@ def test_a_refused_network_name_never_fails_a_join_that_already_committed(caplog
 async def test_joining_an_older_issuer_without_a_name_still_completes(tmp_path, monkeypatch):
     result, commands, _destination, _transport, _directory = await _run_enrollment(tmp_path, monkeypatch)
 
-    assert result == {"status": "approved"}
+    assert result["status"] == "approved"
     assert commands.agent_bridge.bound == []
 
 
@@ -1097,7 +1109,7 @@ async def test_device_enrollment_trusts_code_authenticated_issuer_not_discovery_
         tmp_path, monkeypatch, publisher_key=SigningKey.generate().verify_key.encode()
     )
 
-    assert result == {"status": "approved"}
+    assert result["status"] == "approved"
     assert destination.state.approvals == [destination.state.inviter]
     commands._attach.assert_awaited_once()
     assert owner_directory.members()
@@ -2074,7 +2086,7 @@ async def test_enroll_device_short_code_looks_up_then_submits_the_request(tmp_pa
     origin = "https://kollabor.ai"
     offer_id = "2" * 32
     code = generate_enrollment_code(offer_id)
-    code_text = code.for_private_display()
+    code_text = f"{code.for_private_display()}-{join_anchor('ab' * 32)}"
     verifier = derive_enrollment_code_verifier(code)
     expected_verifier = verifier.for_protocol()
 
@@ -2205,3 +2217,11 @@ async def test_new_code_retires_the_older_codes_nobody_typed(tmp_path, monkeypat
         assert sorted(record["revoked"] for record in delegations.values()) == [False, True]
     finally:
         await issuer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tail", ["", join_anchor("cd" * 32)])
+async def test_f4_a_code_that_names_no_or_another_network_joins_nothing(tmp_path, monkeypatch, tail):
+    result, _commands, destination, *_ = await _run_enrollment(tmp_path, monkeypatch, code_tail=tail)
+    assert result == {"error": "network_mismatch"}
+    assert destination.state.inviter == "" and not destination.control.data.get("founder")

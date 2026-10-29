@@ -151,11 +151,20 @@ export function PickerList({
               key={action.id}
               type="button"
               size="sm"
-              variant="outline"
+              variant={armed === `toolbar:${action.id}` ? "destructive" : "outline"}
               disabled={busy}
-              onClick={() => onToolbarAction(action)}
+              onClick={() => {
+                const key = `toolbar:${action.id}`;
+                if (action.confirm && armed !== key) {
+                  setArmed(key);
+                  window.setTimeout(() => setArmed((now) => (now === key ? null : now)), 4000);
+                  return;
+                }
+                setArmed(null);
+                onToolbarAction(action);
+              }}
             >
-              {actionLabel(action)}
+              {armed === `toolbar:${action.id}` ? "Confirm" : actionLabel(action)}
             </Button>
           ))}
         </div>
@@ -235,7 +244,7 @@ export function PickerList({
         </section>
       ))}
 
-      {!groups.length && !emptyGroups.length ? (
+      {!groups.length && !emptyGroups.length && (q || emptyText || !panel.notice) ? (
         <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-6 text-center text-sm">
           {q ? "Nothing matches your search." : emptyText || "Nothing to show here yet."}
         </p>

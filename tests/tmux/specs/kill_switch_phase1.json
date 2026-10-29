@@ -1,0 +1,61 @@
+{
+  "name": "kill-switch-phase1",
+  "description": "Non-destructive kill switch paths on a throwaway HOME (issue #349). A terminal-tool `kollab --hub halt` is refused, a halt on a one-machine network says in one plain line that a second machine is needed. The Connect screen's Network State row and the h key are not covered here (see the D2 handoff). Nothing here halts anything: every path that would runs in tests/docker/kill_switch.",
+  "config": {
+    "command": "bash -c 'R=$(pwd); mkdir -p \"$HOME/ws\"; cd \"$HOME/ws\"; export KOLLAB_NO_KEYRING=1 KOLLAB_NO_HUB=1 PYTHONPATH=\"$R\" K=\"$R/.venv/bin/python $R/main.py\"; exec bash --norc'",
+    "app_init_sleep": 2,
+    "show_captures": false,
+    "term_width": 140,
+    "term_height": 40
+  },
+  "setup": [],
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "terminal-tool halt is refused"
+    },
+    {
+      "action": "send_keys",
+      "keys": "KOLLAB_TOOL_SHELL=1 $K --hub halt --reason x"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Network controls run only from a person's terminal",
+      "timeout": 30
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Network controls run only from a person's terminal or Settings"
+    },
+    {
+      "action": "section",
+      "title": "a person's terminal on a one-machine network"
+    },
+    {
+      "action": "send_keys",
+      "keys": "clear; script -q /dev/null $K --hub halt --reason x"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "This network has one machine that can confirm a resume",
+      "timeout": 30
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "A halt needs a second one"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback"
+    }
+  ]
+}

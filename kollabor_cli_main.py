@@ -144,16 +144,9 @@ _prepend_dev_workspace_paths()
 
 def cli_main():
     """Run the interactive app, its headless account-free relay, or `kollab service`."""
-    if sys.argv[1:2] == ["acp"]:
-        from kollabor.acp_stdio import isolated_stdout
-        protocol = isolated_stdout()
-        from kollabor.acp_server import main as acp_main
-        return acp_main(sys.argv[2:], protocol=protocol)
-    if sys.argv[1:3] == ["mcp", "hub"]:
-        from kollabor.acp_stdio import isolated_stdout
-        protocol = isolated_stdout()
-        from kollabor.mcp_hub import main as mcp_hub_main
-        return mcp_hub_main(protocol=protocol)
+    # The model-free relay is an exempt command in halt_runtime.boot_decision.
+    # Dispatch it before importing the full app's kill-switch runtime: the
+    # standalone relay artifact intentionally contains no workspace packages.
     if sys.argv[1:2] == ["relay"]:
         if sys.argv[2:3] == ["run"]:
             from plugins.hub.relay_runtime import main
@@ -171,6 +164,29 @@ def cli_main():
             from plugins.hub.relay_selfhost import main
 
         return main(sys.argv[3:])
+    # Kill switch (spec section 1, "Waiters"): keep argv and the full
+    # environment before anything pops KOLLAB_SERVICE or the detached flag,
+    # then hold, refuse or wait when this folder is halted.
+    from plugins.hub import halt_runtime
+
+    halt_runtime.capture_entry()
+    if sys.argv[1:2] == [halt_runtime.LISTENER_FLAG]:
+        return halt_runtime.listener_main()
+    halt_runtime.boot_check()
+    if sys.argv[1:2] == ["--hub"] and sys.argv[2:3] in (["halt"], ["resume"]):
+        import asyncio
+
+        return asyncio.run(halt_runtime.cli_control(sys.argv[2], sys.argv[3:])) or None
+    if sys.argv[1:2] == ["acp"]:
+        from kollabor.acp_stdio import isolated_stdout
+        protocol = isolated_stdout()
+        from kollabor.acp_server import main as acp_main
+        return acp_main(sys.argv[2:], protocol=protocol)
+    if sys.argv[1:3] == ["mcp", "hub"]:
+        from kollabor.acp_stdio import isolated_stdout
+        protocol = isolated_stdout()
+        from kollabor.mcp_hub import main as mcp_hub_main
+        return mcp_hub_main(protocol=protocol)
     if sys.argv[1:2] == ["service"]:
         from kollabor.service import ACTIONS
         from kollabor.service import main as service_main

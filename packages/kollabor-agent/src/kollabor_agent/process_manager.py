@@ -21,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .shell_executor import record_tool_shell
+
 logger = logging.getLogger(__name__)
 
 
@@ -320,6 +322,9 @@ class SubprocessStrategy(SpawnStrategy):
         env = request.env
         if env is None:
             env = self._filter_env(os.environ.copy())
+        # Accident guard: every spawned child is a tool child (see shell_executor).
+        env = {**env, "KOLLAB_TOOL_SHELL": "1", "KOLLAB_AGENT_PID": str(os.getpid())}
+        started = time.time()
 
         try:
             proc = subprocess.Popen(
@@ -333,6 +338,7 @@ class SubprocessStrategy(SpawnStrategy):
             )
         except Exception as e:
             return SpawnResult(success=False, error=str(e))
+        record_tool_shell(proc.pid, started)  # kill switch F11: a halt also stops what it backgrounds
 
         ring_buf = RingBuffer(maxlen=request.ring_buffer_size)
 

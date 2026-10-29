@@ -1,0 +1,14 @@
+.git
+**/node_modules
+**/__pycache__
+.venv
+desktop
+docs
+tests
+**/frontend/dist
+.kollab
+.env
+.env.*
+*.egg-info
+build
+dist

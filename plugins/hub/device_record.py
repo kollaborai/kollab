@@ -300,6 +300,10 @@ def migrate_legacy_network_state(
     legacy = base / LEGACY_NETWORK_DIR_NAME / digest
     if not legacy.is_dir():
         return False
+    if _legacy_owner_running(workspace, legacy):
+        # A live relay owner (a daemon) still keeps its state here. Moving it
+        # would split the daemon and every other process into two states.
+        return False
 
     state_path = legacy / "state.json"
     payload: dict = {}
@@ -333,8 +337,17 @@ def migrate_legacy_network_state(
     target_dir = workspace_dir(workspace, root) / NETWORKS_DIR_NAME / (slug or "unjoined")
     if target_dir.exists():
         return False  # already migrated by an earlier run
-    _ensure_private_dir(target_dir)
-    if state_path.exists():
-        _write_private(target_dir / "state.json", _read_private(state_path, 65536))
-    _write_private(target_dir / "device.key", _read_private(key_path, 128))
+    _ensure_private_dir(target_dir.parent)
+    # Move the whole folder (sqlite stores, enrollment files, private records), never copy a
+    # part: a copy left two layouts that drifted apart (found in Docker, kill switch D3).
+    os.replace(legacy, target_dir)
     return True
+
+
+def _legacy_owner_running(workspace: Path, legacy: Path) -> bool:
+    from .relay_owner import RelayOwnerError, WorkspaceRelayOwner
+
+    try:
+        return WorkspaceRelayOwner(workspace, legacy).owner() is not None
+    except RelayOwnerError:
+        return False

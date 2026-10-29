@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Any
 
-from .interface import enrollment_result
+from .interface import enrollment_result, offer_failure
 from .local import LocalStateService
 
 logger = logging.getLogger(__name__)
@@ -550,8 +550,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         domain = params.get("domain")
         if (
             set(params) != {"domain"}
-            or not isinstance(domain, str)
-            or not domain
+            or not isinstance(domain, str)  # "" = the daemon's own network
             or len(domain) > 253
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
@@ -562,7 +561,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             # The offer code is deliberately excluded from errors and logs.
             return {"error": "connect offer could not be created"}
         if not isinstance(result, dict) or result.get("error"):
-            return {"error": "connect offer could not be created"}
+            return offer_failure(result)
         offer_id = result.get("offer_id")
         expires_at = result.get("expires_at")
         code = result.get("code")
@@ -574,7 +573,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             and isinstance(expires_at, str)
             and expires_at.isdigit()
             and isinstance(code, str)
-            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
+            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?:(?:-[0-9A-HJKMNP-TV-Z]{4}){3})?", code)
         ):
             return {
                 "status": "offered",

@@ -420,3 +420,49 @@ class TestNetworkOwner:
         await client.get("/sessions/sess_chat/panels/config")
 
         chat.state.get_panel.assert_awaited_once_with("config", {})
+
+
+# -- session-less halt panels (spec "TUI and Web UI", R4-N7) --
+
+
+@pytest.mark.asyncio
+async def test_halt_route_needs_no_session_and_uses_the_folder_context(client, monkeypatch, tmp_path):
+    from plugins.hub import halt_context
+
+    seen = []
+
+    class Ctx:
+        def __init__(self, folder, root=None):
+            seen.append(folder)
+
+        async def hub_halt_snapshot(self):
+            return {"counts": True, "halt_allowed": True, "active": [], "proposals": [], "me": "a" * 64,
+                    "members_online": [], "pending_revocations": [], "unconfirmed_machines": []}
+
+        async def hub_halt_members(self):
+            return []
+
+        async def hub_halt_act(self, action, payload=None):
+            seen.append((action, payload))
+            return {"ok": True}
+
+    monkeypatch.setattr(halt_context, "HaltContext", Ctx)
+    got = await client.get("/network/halt/connect-halt", params={"folder": str(tmp_path)})
+    assert got.status_code == 200 and got.headers["cache-control"] == "no-store"
+    assert got.json()["panel"] == "connect-halt" and seen == [str(tmp_path.resolve())]
+    refused = await client.post(
+        "/network/halt/connect-halt-new/actions/halt",
+        params={"folder": str(tmp_path)},
+        json={"changes": {"reason": "why"}},
+    )
+    assert refused.json()["ok"] is False and "confirm" in refused.json()["message"].lower()
+    assert not [s for s in seen if isinstance(s, tuple)]  # nothing reached the executor
+    acted = await client.post(
+        "/network/halt/connect-halt-new/actions/halt",
+        params={"folder": str(tmp_path)},
+        json={"changes": {"reason": "why"}, "confirmed": True},
+    )
+    assert acted.status_code == 200 and acted.json()["open"]["panel"] == "connect-halt"
+    assert ("halt", {"reason": "why", "confirmed": True}) in seen
+    assert (await client.get("/network/halt/connect", params={"folder": str(tmp_path)})).status_code == 404
+    assert (await client.get("/network/halt/connect-halt", params={"folder": "relative"})).status_code == 400

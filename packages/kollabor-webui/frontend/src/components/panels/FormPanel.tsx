@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FieldRenderer, type Draft } from "./FieldRenderer";
+import { confirmStep } from "./confirm";
 import { titleCase } from "./panel-model";
 
 function matches(field: PanelField, q: string): boolean {
@@ -52,6 +53,18 @@ export function FormPanel({
   onAction: (action: PanelAction, target: string | null) => void;
 }) {
   const [query, setQuery] = useState("");
+  // An action with `confirm` asks for a second click, as PickerList's row actions do.
+  const [armed, setArmed] = useState<string | null>(null);
+  const fire = (action: PanelAction, target: string | null) => {
+    const key = `${action.id}:${target ?? ""}`;
+    if (confirmStep(armed, key, action.confirm) === "arm") {
+      setArmed(key);
+      window.setTimeout(() => setArmed((now) => (now === key ? null : now)), 4000);
+      return;
+    }
+    setArmed(null);
+    onAction(action, target);
+  };
   const q = query.trim().toLowerCase();
   const sections = useMemo(
     () => filterSections(panel.sections ?? [], q),
@@ -62,6 +75,8 @@ export function FormPanel({
   const dirtyCount = Object.keys(draft).length;
   // Short forms (an edit form) open flat; the long config list starts collapsed.
   const small = (panel.sections?.length ?? 0) <= 2;
+  // An action form (a context, one section: Halt Network) is two fields, not a settings list: no search, no section header.
+  const flat = Boolean(panel.context) && panel.sections?.length === 1;
   const actions = panel.actions ?? [];
   const paths = panel.save_targets ?? {};
 
@@ -72,7 +87,7 @@ export function FormPanel({
             row apart and a row of scrolled settings showed above the search; the 1px shadow in the box's own
             colour covers that row. */}
         <div className="bg-background sticky top-0 z-10 flex flex-col gap-1 pt-3 pb-3 shadow-[0_-1px_0_var(--color-background)]">
-          <div className="relative">
+          <div className={flat ? "hidden" : "relative"}>
             <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
             <Input
               type="search"
@@ -94,6 +109,22 @@ export function FormPanel({
           {sections.map((section) => {
             const changed = section.fields.filter((f) => f.path in draft).length;
             const failed = section.fields.some((f) => f.path in errors);
+            if (flat) {
+              return (
+                <div key={section.id} className="px-3">
+                  {section.fields.map((field) => (
+                    <FieldRenderer
+                      key={field.path}
+                      field={field}
+                      draft={draft}
+                      error={errors[field.path]}
+                      disabled={busy}
+                      onChange={onDraftChange}
+                    />
+                  ))}
+                </div>
+              );
+            }
             return (
               <details
                 key={section.id}
@@ -137,7 +168,9 @@ export function FormPanel({
         <p className="text-muted-foreground text-xs sm:pt-2" aria-live="polite">
           {dirtyCount
             ? `${dirtyCount} unsaved change${dirtyCount === 1 ? "" : "s"}`
-            : "No unsaved changes"}
+            : flat
+              ? ""
+              : "No unsaved changes"}
         </p>
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
           {actions.flatMap((action) =>
@@ -148,11 +181,21 @@ export function FormPanel({
               >
                 <Button
                   type="button"
-                  variant={target === "global" ? "outline" : "default"}
+                  variant={
+                    armed === `${action.id}:${target ?? ""}`
+                      ? "destructive"
+                      : target === "global"
+                        ? "outline"
+                        : "default"
+                  }
                   disabled={busy || (dirtyCount === 0 && !panel.context)}
-                  onClick={() => onAction(action, target)}
+                  onClick={() => fire(action, target)}
                 >
-                  {busy ? "Saving…" : buttonLabel(action, target)}
+                  {busy
+                    ? "Saving…"
+                    : armed === `${action.id}:${target ?? ""}`
+                      ? `Confirm ${buttonLabel(action, target)}`
+                      : buttonLabel(action, target)}
                 </Button>
                 {target && paths[target] ? (
                   <span
