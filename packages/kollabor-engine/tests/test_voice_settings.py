@@ -392,6 +392,34 @@ async def test_prompt_overlay_is_per_agent_and_leaves_chat_prompt_alone(rig, tmp
     assert rig.settings.get_prompt("lapis")["text"] == DEFAULT_PROMPT
 
 
+async def test_an_agent_without_its_own_prompt_uses_the_settings_prompt(rig):
+    # Settings -> Voice -> Voice Prompt edits the default scope (#295).
+    res = await rig.http.put(
+        "/voice/settings/prompt", json={"text": "Say less.", "personality": "neutral"}
+    )
+    assert res.status_code == 200
+    assert rig.settings.get_prompt("peridot")["text"] == "Say less."
+    assert rig.settings.overlay("peridot").startswith("Say less.\n")
+    # an agent's own prompt still wins; clearing it falls back to Settings
+    await rig.http.put(
+        "/voice/settings/prompt?session_id=s1",
+        json={"text": "Be brief.", "personality": "neutral"},
+    )
+    assert rig.settings.get_prompt("lapis")["text"] == "Be brief."
+    await rig.http.put(
+        "/voice/settings/prompt?session_id=s1", json={"text": "", "personality": "neutral"}
+    )
+    assert rig.settings.get_prompt("lapis")["text"] == "Say less."
+
+
+async def test_a_refused_personality_save_puts_the_old_prompt_back(rig, monkeypatch):
+    await rig.http.put("/voice/settings/prompt", json={"text": "Old.", "personality": "neutral"})
+    monkeypatch.setattr(rig.config, "save_key", lambda *_a, **_k: False)
+    res = await rig.http.put("/voice/settings/prompt", json={"text": "New.", "personality": "professional"})
+    assert res.status_code == 503
+    assert rig.settings.get_prompt(None)["text"] == "Old."
+
+
 async def test_prompt_validation_and_scope_errors(rig):
     big = {"text": "x" * (32 * 1024 + 1), "personality": "neutral"}
     assert (await rig.http.put("/voice/settings/prompt", json=big)).status_code == 400

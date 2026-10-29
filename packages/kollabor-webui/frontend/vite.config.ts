@@ -183,6 +183,7 @@ const mainConfig = defineConfig({
       "tests/voice-turn-groups.test.ts",
       "tests/path-text.test.ts",
       "tests/gem-headshot.test.ts",
+      "tests/field-renderer-textarea.test.tsx",
     ],
     environment: "node",
   },

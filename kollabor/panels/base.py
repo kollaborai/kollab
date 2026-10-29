@@ -73,6 +73,7 @@ FIELD_TYPES: tuple[str, ...] = (
     "spinbox",
     "dropdown",
     "text_input",
+    "textarea",
     "label",
 )
 

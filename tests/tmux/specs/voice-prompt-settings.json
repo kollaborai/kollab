@@ -1,0 +1,79 @@
+{
+  "name": "voice prompt settings",
+  "description": "/voice config shows the Voice Prompt section: Instructions with the default spoken-reply prompt, Personality (Max Gen Z) and Reasoning (Off, the fastest)",
+  "config": {
+    "command": "sh -c 'R=$(pwd); cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 30
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice Configuration",
+      "timeout": 8
+    },
+    {
+      "action": "nav_mode"
+    },
+    {
+      "action": "nav_mode",
+      "description": "Tab once more: Voice Prompt is section 3, after Voice Preferences"
+    },
+    {
+      "action": "section",
+      "title": "Voice Prompt shows the engine defaults"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Personality: Max Gen Z",
+      "timeout": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Instructions"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "You are speaking out loud"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Personality"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Voice Prompt"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Reasoning"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Reasoning: Off \\(Fastest\\)"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback"
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}

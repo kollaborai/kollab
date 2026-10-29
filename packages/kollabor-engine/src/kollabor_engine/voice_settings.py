@@ -283,7 +283,11 @@ class VoiceSettingsService:
         return "agent-" + hashlib.sha256(agent_id.encode()).hexdigest()[:16]
 
     def get_prompt(self, agent_id: str | None) -> dict[str, str]:
-        text = self._store().get_override(PROMPT_BUNDLE, self._prompt_key(agent_id))
+        store = self._store()
+        text = store.get_override(PROMPT_BUNDLE, self._prompt_key(agent_id))
+        if text is None and agent_id:
+            # No prompt of its own: Settings -> Voice -> Voice Prompt (#295).
+            text = store.get_override(PROMPT_BUNDLE, "default")
         return {
             "text": text if text is not None else DEFAULT_PROMPT,
             "personality": self._value("personality"),
@@ -294,11 +298,18 @@ class VoiceSettingsService:
         if len(patch.text.encode()) > MAX_PROMPT_BYTES:
             raise invalid("Voice prompt is larger than 32 KiB.")
         key = self._prompt_key(agent_id)
+        store = self._store()
+        before = store.get_override(PROMPT_BUNDLE, key)
         if patch.text.strip() and patch.text != DEFAULT_PROMPT:
-            self._store().save_override(PROMPT_BUNDLE, key, patch.text)
+            store.save_override(PROMPT_BUNDLE, key, patch.text)
         else:
-            self._store().delete_override(PROMPT_BUNDLE, key)
+            store.delete_override(PROMPT_BUNDLE, key)
         if not self._cfg().save_key(PREFIX + "personality", patch.personality, save_target="global"):
+            # Put the old text back, so a refused save changes nothing.
+            if before is None:
+                store.delete_override(PROMPT_BUNDLE, key)
+            else:
+                store.save_override(PROMPT_BUNDLE, key, before)
             raise RuntimeHostError("runtime_unavailable", 503, "Voice prompt could not be saved.")
         return self.get_prompt(agent_id)
 

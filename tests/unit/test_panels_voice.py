@@ -18,7 +18,7 @@ from kollabor_voice.speech_settings import speech_defaults
 
 from kollabor.commands.system_commands.handlers.voicemode import VoiceModeCommandHandler
 from kollabor.panels import PanelError, get_panel
-from kollabor.panels.voice import VoicePanel
+from kollabor.panels.voice import PROMPT_FIELDS, VoicePanel
 from kollabor.state.handlers import register_state_handlers
 from kollabor.state.local import LocalStateService, _needs_terminal_reply
 from kollabor.state.remote import RemoteStateService
@@ -30,6 +30,9 @@ from plugins.voice_plugin import VoicePlugin
 @pytest.fixture
 def voice(tmp_path, monkeypatch):
     monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    monkeypatch.setenv(
+        "KOLLAB_PROMPT_OVERRIDES_DIR", str(tmp_path / "prompt-overrides")
+    )
     services = {}
     bus = SimpleNamespace(
         get_service=services.get, register_service=services.__setitem__
@@ -78,10 +81,11 @@ async def test_web_rpc_save_tui_read_and_fresh_chat(voice):
     panel = await remote.get_panel("voice")
     assert get_panel("voice").name == "voice"
     fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
-    # Speech preferences plus Quick Model, the one editable field saved to
-    # config (a loadout name) instead of this device's preferences.json.
+    # Speech preferences plus the fields saved outside preferences.json: Quick
+    # Model (a loadout name in config) and the Voice Prompt rows (#295).
     assert {p for p, f in fields.items() if f["editable"]} == set(speech_defaults()) | {
-        "quick_model"
+        "quick_model",
+        *PROMPT_FIELDS,
     }
     other = VoicePlugin(event_bus=state._event_bus)
     plugin._pending = [{"event_id": "keep"}]
