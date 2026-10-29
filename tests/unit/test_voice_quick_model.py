@@ -500,3 +500,20 @@ async def test_a_refused_speech_save_saves_no_quick_model_or_prompt(
     )
     assert not result["ok"]
     assert config_service.saved == []
+
+
+@pytest.mark.asyncio
+async def test_rows_saved_outside_preferences_name_their_file(tmp_path, monkeypatch):
+    from kollabor.panels.base import display_path
+    from kollabor.panels.voice import VoicePanel
+    from kollabor_config.config_utils import get_global_config_path
+
+    ctx, _, _ = make_panel_ctx(tmp_path, monkeypatch)
+    panel = await VoicePanel().describe(ctx, {})
+    fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
+    outside = ("quick_model", "voice_personality", "voice_reasoning")
+    for path in outside:
+        assert fields[path]["save_path"] == display_path(get_global_config_path())
+    assert fields["voice_prompt"]["save_path"].endswith("voice/default.md")
+    rest = set(fields) - {*outside, "voice_prompt"}
+    assert rest and not [p for p in rest if "save_path" in fields[p]]

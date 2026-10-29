@@ -220,6 +220,7 @@ def make_field(
     managed_by: Optional[str] = None,
     secret: bool = False,
     action: Optional[str] = None,
+    save_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """One field in the wire format.
 
@@ -228,7 +229,8 @@ def make_field(
     managed paths. ``options`` is a list of strings (dropdown); ``option_labels``
     maps an option to the text people read (the option stays what is saved, one
     with no label shows as itself). A picker control sets ``action``: the browser
-    posts ``{path: value}`` to that action.
+    posts ``{path: value}`` to that action. ``save_path`` names the file a field
+    saves to when that is not the panel's own save target.
     """
     field = {
         "path": path,
@@ -249,6 +251,8 @@ def make_field(
     }
     if action:
         field["action"] = action
+    if save_path:
+        field["save_path"] = save_path
     return field
 
 

@@ -1,0 +1,22 @@
+name: windows-locks
+
+on:
+  pull_request:
+    paths:
+      - packages/kollabor-config/src/kollabor_config/file_lock.py
+      - tests/unit/test_file_lock.py
+      - .github/workflows/windows-locks.yml
+  workflow_dispatch:
+
+jobs:
+  lock-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Run lock tests
+        run: python -m pytest -q -p no:cacheprovider --noconftest tests/unit/test_file_lock.py
