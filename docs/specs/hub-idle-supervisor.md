@@ -120,4 +120,5 @@ agent as `dispatch failures` (this is what `kollab --hub status` shows):
   is not visible to the hub plugin; a goal-aware wake would cross that
   boundary. Deferred (tracked in issue #283).
 - Web UI banner: `SupervisorAlertBanner.tsx` renders the published
-  `supervisor_alert` events; mounting it in `App.tsx` is a separate step.
+  `supervisor_alert` events; the banner is mounted in `App.tsx` and also
+  shows undelivered hub messages (one per agent per 5 minutes).
