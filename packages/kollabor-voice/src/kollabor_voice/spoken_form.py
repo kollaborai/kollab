@@ -14,6 +14,45 @@ _VOICE_MARKER = re.compile(
     r"|voice instructions)\b[^\]]*\]",
     re.I,
 )
+_ONES = (
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen"
+    " fourteen fifteen sixteen seventeen eighteen nineteen"
+).split()
+_TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+# A number and any digit groups joined to it by spaces, hyphens, parens or a
+# plus: one group alone is said as words; a run (a date, a phone number, a
+# range) keeps its digits, as do versions, decimals, times, fractions, money,
+# percentages, grouped 12,000, #refs and tokens like x86, file_2, 1st or v2.
+_NUMBER_RUN = re.compile(
+    r"(?<![\w.,:/$€£#-])(?!0\d)\d+(?:[ ()+-]+\d+)*(?![\w:/%]|[.,]\d)"
+)
+
+
+def _number_words(n: int) -> str:
+    """0 <= n < 10**9 in words: 374 -> "three hundred seventy-four"."""
+    if n < 20:
+        return _ONES[n]
+    if n < 100:
+        tens, ones = divmod(n, 10)
+        return _TENS[tens] + (f"-{_ONES[ones]}" if ones else "")
+    if n < 1000:
+        hundreds, rest = divmod(n, 100)
+        return f"{_ONES[hundreds]} hundred" + (
+            f" {_number_words(rest)}" if rest else ""
+        )
+    size, name = (10**6, "million") if n >= 10**6 else (1000, "thousand")
+    high, rest = divmod(n, size)
+    return f"{_number_words(high)} {name}" + (f" {_number_words(rest)}" if rest else "")
+
+
+def _spell(match: re.Match[str]) -> str:
+    run = match.group()
+    # Seven to nine bare digits are an id or a phone number unless round (1000000).
+    if not run.isdigit() or len(run) > 9 or (len(run) > 6 and not run.endswith("000")):
+        return run
+    return _number_words(int(run))
+
+
 _STEPS = (
     (re.compile(r"```.*?(?:```|$)", re.S), " "),  # code blocks are never said
     (re.compile(r"</?[A-Za-z_][\w:-]*(?:\s[^<>]*)?/?>"), " "),  # field tags, html
@@ -29,6 +68,7 @@ _STEPS = (
     (re.compile(r"\s+--?\s+|—|–"), ", "),
     (re.compile(r"(?<!\w)--(?=\w)"), ""),  # --flag
     (re.compile(r"\s=\s"), " equals "),
+    (_NUMBER_RUN, _spell),  # before the symbols go: file_2 and #374 keep digits
     (re.compile(r"(?:->|=>|<-|[*_`#~|<>^=\[\]{}→⟶⇒←])+"), " "),
 )
 
@@ -37,8 +77,9 @@ def spoken_form(text: str) -> str:
     """What a TTS engine should receive for `text`; "" when nothing is left to say.
 
     Strips the voice context markers, tags, code and markdown, unescapes
-    backslashes, says arrows as words and drops other symbols, and keeps
-    punctuation on its word so no engine reads a stray dot as "period".
+    backslashes, says arrows as words, says whole numbers as words, and
+    drops other symbols, and keeps punctuation on its word so no engine
+    reads a stray dot as "period".
     """
     text = _VOICE_MARKER.sub(" ", text)
     for pattern, repl in _STEPS:
