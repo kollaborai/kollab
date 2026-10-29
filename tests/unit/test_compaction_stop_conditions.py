@@ -145,6 +145,14 @@ class TestCannotShrinkStop(unittest.TestCase):
         self.assertFalse(plugin._should_compact(history))
         self.assertEqual(len(_warnings(plugin)), 1)
 
+    def test_paused_status_clears_when_prompt_drops_under_threshold(self) -> None:
+        history = _history()
+        plugin = _make_plugin(history, reported=44_000)
+        plugin._compaction_status = "paused"
+
+        self.assertFalse(plugin._should_compact(history))
+        self.assertEqual(plugin._compaction_status, "idle")
+
 
 class TestBoundedCoordinationDeferral(unittest.TestCase):
     def test_pending_coordination_defers_at_most_a_few_turns_in_a_row(self) -> None:
