@@ -87,7 +87,7 @@ class ACPOrchestrator:
         self._binding_conversation_id: str | None = None
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_rows: list[str] = []
-        self._unwritten_observations: list[AgentHudEntry] = []
+        self._unwritten_observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_count = 0
 
     @property
@@ -324,9 +324,11 @@ class ACPOrchestrator:
         if discarded:
             entries.insert(0, AgentHudEntry("status", "observations", f"{discarded} older observations omitted."))
         text = format_agent_hud(entries)
-        # A row that failed on arrival gets another try first, so each message
-        # still lands in history once; one that fails again waits for the next.
-        unwritten, self._unwritten_observations = self._unwritten_observations, []
+        # A message whose arrival row failed gets one more try here. After a
+        # second failure it reaches history only through the batch row, which
+        # is written when no message has a row of its own.
+        unwritten = list(self._unwritten_observations)
+        self._unwritten_observations.clear()
         for entry in unwritten:
             row_id = f"observations-{uuid.uuid4().hex}"
             try:
@@ -337,14 +339,16 @@ class ACPOrchestrator:
                     None,
                     track_completion=True,
                 )
-            except Exception:
-                self._unwritten_observations.append(entry)
+            except Exception as error:
+                logger.warning(
+                    "ACP observation history write failed again (%s)",
+                    type(error).__name__,
+                )
             else:
                 self._observation_rows.append(row_id)
-        del self._unwritten_observations[:-20]
         rows, self._observation_rows = self._observation_rows, []
-        # The turn takes the newest arrival row's id, so its reply threads under
-        # that row; the older rows' bookkeeping goes now.
+        # The turn takes the newest row's id, so its reply threads under that
+        # row; the older rows' bookkeeping goes now.
         request_id = rows[-1] if rows else f"observations-{uuid.uuid4().hex}"
         try:
             self.admit(
