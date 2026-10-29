@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new odds; your own picks never change (#373).
 
 ### Security
+- PhoneLink: the phone app's version is now the release number, so an older
+  build with fresh file times no longer passes the phone's downgrade check;
+  expired, unapproved invitations are pruned from the saved phones instead
+  of counting toward the eight-phone limit. A phone that loaded this release
+  refuses an older one, so roll back by upgrading, not downgrading (#368).
 - Hub capture (`/hub capture`, `kollab --hub capture`, the `hub_capture` tool)
   redacts private keys, `NAME=secret` lines and auth headers; only `--raw`
   shows them. The `hub_capture` tool asks permission (#340).
