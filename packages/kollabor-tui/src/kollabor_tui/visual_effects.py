@@ -1555,7 +1555,7 @@ class BannerRenderer:
     # Populated after class definition (see module-level code below)
     KMO_VARIATIONS: dict[str, list[str]]
 
-    # KMO mascot variations (BMO's friendly brother)
+    # KMO mascot variations (the friendly little console)
     # Border styles: (top_left, top, top_right, side_left, side_right, bot_left, bot, bot_right)
     _KMO_BORDERS = {
         "block": ("▛", "▀", "▜", "▌", "▐", "▙", "▄", "▟"),
