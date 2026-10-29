@@ -36,6 +36,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -201,10 +202,16 @@ def build(wheels: list[Path], out: Path, scratch: Path) -> Path:
     checksum = binary.with_name(binary.name + ".sha256")
     binary.unlink(missing_ok=True)
     checksum.unlink(missing_ok=True)
+    # pex reads each wheel argument as a URL first: a Windows path's drive letter
+    # becomes the scheme and the wheel is never found (#268). Bare file names have
+    # no colon, so pex runs in the wheels' folder. It also prints its output's path
+    # relative to that folder, which Windows refuses across drives, so the scie is
+    # written there and then moved to out.
+    folder = wheels[0].parent
     run(
         [
             *UVX_PEX, "pex",
-            *map(str, wheels),
+            *(wheel.name for wheel in wheels),
             "--complete-platform", str(floor_platform(scratch / "platform.json")),
             "--console-script", "kollab",
             "--venv",
@@ -215,12 +222,15 @@ def build(wheels: list[Path], out: Path, scratch: Path) -> Path:
             "--scie-python-version", PYTHON,
             "--scie-pbs-stripped",
             "--scie-hash-alg", "sha256",
-            "--output-file", str(out / "kollab"),
-        ]
+            "--output-file", str(folder / "kollab"),
+        ],
+        cwd=folder,
     )
     for path in (binary, checksum):
-        if not path.is_file():
-            raise SystemExit(f"pex wrote no {path.name}; {out} holds {sorted(p.name for p in out.iterdir())}")
+        built = folder / path.name
+        if not built.is_file():
+            raise SystemExit(f"pex wrote no {path.name}; {folder} holds {sorted(p.name for p in folder.iterdir())}")
+        shutil.move(built, path)
     return binary
 
 

@@ -146,3 +146,31 @@ def test_agent_smoke_fails_when_stop_leaves_the_agent_online(tmp_path: Path, mon
     monkeypatch.setattr(build_binary.time, "monotonic", lambda: next(clock))
     with pytest.raises(SystemExit, match="left the agent online"):
         build_binary.agent_smoke(tmp_path / "kollab.exe")
+
+
+def test_pex_gets_bare_wheel_names_from_the_wheels_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # pex reads a Windows path's drive letter as a URL scheme and never finds the wheel (#268).
+    folder = tmp_path / "wheels"
+    folder.mkdir()
+    wheels = [folder / "kollab-0.18.5-py3-none-any.whl", folder / "kollabor_ai-0.18.5-py3-none-any.whl"]
+    out = tmp_path / "out"
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(command: list[str], **kwargs: Any) -> None:
+        calls.append((command, kwargs))
+        output = Path(command[command.index("--output-file") + 1])
+        scie = output.with_name(build_binary.binary_filename())
+        scie.write_bytes(b"scie")
+        scie.with_name(scie.name + ".sha256").write_text("sum")
+
+    monkeypatch.setattr(build_binary, "run", run)
+    monkeypatch.setattr(build_binary, "floor_platform", lambda path: path)
+    binary = build_binary.build(wheels, out, tmp_path)
+    command, kwargs = calls[0]
+    assert kwargs["cwd"] == folder
+    assert [arg for arg in command if arg.endswith(".whl")] == [wheel.name for wheel in wheels]
+    # pex prints its output's path relative to its working folder; Windows refuses that across drives.
+    assert Path(command[command.index("--output-file") + 1]).parent == folder
+    assert binary == out / build_binary.binary_filename()
+    assert binary.read_bytes() == b"scie"
+    assert binary.with_name(binary.name + ".sha256").read_text() == "sum"
