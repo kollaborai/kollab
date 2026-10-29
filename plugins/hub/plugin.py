@@ -3634,7 +3634,7 @@ class HubPlugin(BasePlugin):
         elif queued_for:
             output = f"queued for {', '.join(queued_for)} (offline)"
             self._record_dispatch_failure(
-                ", ".join(queued_for), "offline, queued in its mailbox"
+                ", ".join(queued_for), "offline, queued in its mailbox", queued=True
             )
         elif (msg.metadata or {}).get("_socket_failed"):
             down = ", ".join(msg.metadata["_socket_failed"])
@@ -3642,7 +3642,9 @@ class HubPlugin(BasePlugin):
                 f"queued for {down} (socket send failed; it will read the"
                 " message from its mailbox)"
             )
-            self._record_dispatch_failure(down, "socket send failed, queued")
+            self._record_dispatch_failure(
+                down, "socket send failed, queued", queued=True
+            )
         elif self._presence:
             known = self._presence.scan_all_presence()
             known_ids = {a.identity for a in known}
@@ -9611,7 +9613,9 @@ class HubPlugin(BasePlugin):
             except Exception:
                 logger.debug("supervisor alert publish failed", exc_info=True)
 
-    def _record_dispatch_failure(self, target: str, reason: str) -> None:
+    def _record_dispatch_failure(
+        self, target: str, reason: str, queued: bool = False
+    ) -> None:
         """Remember a send that did not reach ``target`` (issue #283).
 
         The sender already reads the failure in its tool result; this keeps
@@ -9623,13 +9627,17 @@ class HubPlugin(BasePlugin):
         failures.append((time.time(), f"{target}: {reason}"))
         del failures[:-10]
         logger.warning("hub dispatch failed: %s: %s", target, reason)
+        if queued:
+            return  # the mailbox delivers it later; only a lost message gets a banner
         alerted = getattr(self, "_dispatch_alerted", None)
         if alerted is None:
             alerted = self._dispatch_alerted = {}
         now = time.time()
-        if now - alerted.get(target, 0.0) < 300:
+        # One banner per agent per 5 minutes, and one per minute overall, so a
+        # burst of failed sends cannot push a stall alert out of the banner.
+        if now - alerted.get(target, 0.0) < 300 or now - alerted.get("", 0.0) < 60:
             return
-        alerted[target] = now
+        alerted[target] = alerted[""] = now
         tap = getattr(self, "_display_tap", None)
         if tap is not None:
             try:
