@@ -419,6 +419,18 @@ class DriverTests(unittest.TestCase):
         self.assertIsNone(driver.check_stalled())
         self.assertEqual(started, [])
 
+    def test_a_turn_that_raises_settles_its_attempt(self):
+        goal_id = self._create()
+        driver, _coord = self._make_driver(turn_script=[[FakeResult("read", "x")]])
+
+        def boom(record: Any) -> str:
+            raise RuntimeError("render failed")
+
+        self.service.render_goal_context = boom
+        asyncio.run(driver.start(goal_id))
+        self.assertEqual(self.store.get(goal_id).status, "paused")
+        self.assertFalse(self.service._goal_turn_in_flight(goal_id))
+
     def test_watchdog_leaves_other_conversations_alone(self):
         self._create()
         driver, coord = self._make_driver()

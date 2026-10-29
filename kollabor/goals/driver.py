@@ -224,7 +224,13 @@ class GoalTurnDriver:
             pre_out = int(stats.get("total_output_tokens", 0) or 0)
 
             self.service.note_dispatched(goal_id, attempt)
-            turn_status, error = await self._run_one_turn(goal_id, attempt)
+            try:
+                turn_status, error = await self._run_one_turn(goal_id, attempt)
+            except Exception as exc:
+                # settle it as an error turn: an attempt left dispatched reads
+                # as a daemon that died mid-turn, and check_stalled skips it
+                logger.error("goal turn failed: %s", exc)
+                turn_status, error = "error", f"turn failed: {exc}"
 
             final = self.service.store.get(goal_id)
             real_outcome = TurnOutcome(
