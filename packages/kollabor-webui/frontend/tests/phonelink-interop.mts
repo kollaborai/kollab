@@ -40,6 +40,11 @@ const transport = new PhoneTransport(settings.identity, (state) => {
 });
 try {
   await transport.connect();
+  await transport.reportDiagnostic("pagehide");
+  await transport.reportDiagnostic("relay_socket_closed", {
+    close_code: 1001,
+    close_reason: "going_away",
+  });
   const uninstall = transport.installFetch();
   const config = await (await fetch("/api/config")).json();
   assert.equal(config.engine_url, "/engine");

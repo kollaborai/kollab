@@ -38,6 +38,11 @@ from plugins.hub.relay_state import ID, KEY, RelayError, canonical_origin, stric
 
 from .auth import get_token, read_token_from_disk
 from .hub_bridge import network_daemons
+from .phonelink_events import (
+    PhoneLinkEventLog,
+    normalize_phone_diagnostic,
+    safe_event_label,
+)
 
 PHONE_PROTOCOL = "kollab-phonelink/1"
 MAX_PHONES = 8
@@ -186,6 +191,7 @@ class PhoneSession:
 
     sent: int = 0
     used: float = field(default_factory=time.monotonic)
+    last_request_at: float | None = None
 
 
 @dataclass
@@ -213,6 +219,7 @@ class PhoneLink:
         self.records: dict[str, dict] = {}
         self.clients: dict[str, RelayClient] = {}
         self.sessions: dict[str, PhoneSession] = {}
+        self._idle_announced: set[str] = set()
         self.exchanges: dict[tuple[str, str], HttpExchange] = {}
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
@@ -221,6 +228,59 @@ class PhoneLink:
         self._network_cache: tuple[float, dict | None] = (0, None)
         self._capabilities: dict[str, tuple[float, bool]] = {}
         self._closed = False
+        self.event_log = PhoneLinkEventLog()
+        self._pending_announced: set[tuple[str, str]] = set()
+        self._expired_announced: set[str] = set()
+        self._maintenance_errors: dict[str, tuple[str, float]] = {}
+
+    def _event(
+        self,
+        event: str,
+        *,
+        identifier: str | None = None,
+        peer: str | None = None,
+        actor: dict | None = None,
+        **fields,
+    ) -> dict:
+        row = self.records.get(identifier) if identifier is not None else None
+        if row is not None:
+            fields.setdefault("device_name", row.get("name"))
+            fields.setdefault("network", row.get("network"))
+        return self.event_log.emit(
+            event, identifier=identifier, peer=peer, actor=actor, **fields
+        )
+
+    async def event_history(self) -> dict:
+        return {"events": self.event_log.snapshot()}
+
+    @staticmethod
+    def _error_kind(error: BaseException) -> str:
+        name = type(error).__name__.casefold()
+        module = type(error).__module__.casefold()
+        if "timeout" in name:
+            return "timeout"
+        if any(part in name for part in ("ssl", "tls", "certificate")):
+            return "tls"
+        if "dns" in name or module.startswith("dns."):
+            return "dns"
+        if "http" in name or "response" in name:
+            return "http"
+        if isinstance(error, PhoneLinkError):
+            return "configuration"
+        if isinstance(error, RelayError):
+            return "relay"
+        if isinstance(error, (aiohttp.ClientError, OSError)):
+            return "socket"
+        return "unexpected"
+
+    def _report_error(self, key: str, error: BaseException, identifier: str | None = None) -> None:
+        error_kind = self._error_kind(error)
+        now = time.monotonic()
+        previous = self._maintenance_errors.get(key)
+        if previous and previous[0] == error_kind and now - previous[1] < 60:
+            return
+        self._maintenance_errors[key] = (error_kind, now)
+        self._event("relay_error", identifier=identifier, error_kind=error_kind)
 
     async def network(self) -> dict | None:
         if time.monotonic() - self._network_cache[0] < 5:
@@ -321,7 +381,12 @@ class PhoneLink:
                 for identifier, row in records.items():
                     if not ID.fullmatch(identifier) or not isinstance(row, dict):
                         raise ValueError()
-                    canonical_origin(row["origin"])
+                    origin = canonical_origin(row["origin"])
+                    row["origin"] = origin
+                    row["network"] = safe_event_label(
+                        row.get("network") or urlsplit(origin).hostname or "unknown",
+                        max_length=128,
+                    )
                     if (
                         not isinstance(row["name"], str)
                         or not 1 <= len(row["name"]) <= 48
@@ -348,6 +413,20 @@ class PhoneLink:
             self._owner_fd = owner_fd
             self._loaded = True
             self._closed = False
+            for identifier, row in self.records.items():
+                record_state = (
+                    "linked"
+                    if row["key"]
+                    else "expired"
+                    if row["expires"] < time.time()
+                    else "pending"
+                )
+                self._event(
+                    "restored_at_startup",
+                    identifier=identifier,
+                    peer=row["key"] or None,
+                    record_state=record_state,
+                )
             self._task = asyncio.create_task(self._maintain(), name="kollab-phonelink")
 
     def _persist(self) -> None:
@@ -363,7 +442,45 @@ class PhoneLink:
             # crash after its save and before the transport's separate save.
             client.approve(row["key"])
         client.set_request_handler(lambda peer, method, payload: self._receive(identifier, peer, method, payload))
-        client.add_peer_session_listener(lambda _: self._invalidate(identifier))
+        client.add_peer_session_listener(
+            lambda event: self._invalidate(
+                identifier,
+                cause=event.kind,
+                device_name=row["name"],
+                network=row["network"],
+            )
+        )
+
+        def relay_lifecycle(event) -> None:
+            event_names = {
+                "socket_opened": "relay_socket_opened",
+                "socket_closed": "relay_socket_closed",
+                "reconnecting": "relay_reconnecting",
+                "error": "relay_error",
+            }
+            event_name = event_names.get(getattr(event, "kind", ""))
+            if event_name is None:
+                return
+            fields = {}
+            for field_name in (
+                "close_code",
+                "close_reason",
+                "retry_count",
+                "retry_seconds",
+                "error_kind",
+            ):
+                value = getattr(event, field_name, None)
+                if value is not None:
+                    fields[field_name] = value
+            self._event(
+                event_name,
+                identifier=identifier,
+                device_name=row["name"],
+                network=row["network"],
+                **fields,
+            )
+
+        client.add_connection_listener(relay_lifecycle)
         self.clients[identifier] = client
         try:
             await client.connect(row["origin"], ws_url=row["origin"].replace("https://", "wss://", 1) + "/relay/v1/ws")
@@ -375,13 +492,61 @@ class PhoneLink:
             raise
         return client
 
-    def _invalidate(self, identifier: str) -> None:
-        self.sessions.pop(identifier, None)
+    def _invalidate(
+        self,
+        identifier: str,
+        *,
+        cause: str = "session_invalidated",
+        peer: str | None = None,
+        device_name: str | None = None,
+        network: str | None = None,
+    ) -> None:
+        session = self.sessions.pop(identifier, None)
+        self._idle_announced.discard(identifier)
+        if session is not None:
+            row = self.records.get(identifier, {})
+            self._event(
+                "disconnected",
+                identifier=identifier,
+                peer=peer or row.get("key"),
+                cause=cause,
+                device_name=device_name or row.get("name"),
+                network=network or row.get("network"),
+                idle_seconds=time.monotonic() - session.used,
+                last_request_at=(
+                    int(session.last_request_at)
+                    if session.last_request_at is not None
+                    else None
+                ),
+            )
         for key, exchange in tuple(self.exchanges.items()):
             if key[0] == identifier:
                 if exchange.task:
                     exchange.task.cancel()
                 self.exchanges.pop(key, None)
+
+    def _announce_idle_sessions(self) -> None:
+        """Log a linked phone once when it stops sending requests (the 45 s status() window)."""
+        now = time.monotonic()
+        for identifier, session in tuple(self.sessions.items()):
+            if now - session.used < 45 or identifier in self._idle_announced:
+                continue
+            self._idle_announced.add(identifier)
+            row = self.records.get(identifier, {})
+            self._event(
+                "disconnected",
+                identifier=identifier,
+                peer=row.get("key"),
+                cause="idle_timeout",
+                device_name=row.get("name"),
+                network=row.get("network"),
+                idle_seconds=now - session.used,
+                last_request_at=(
+                    int(session.last_request_at)
+                    if session.last_request_at is not None
+                    else None
+                ),
+            )
 
     async def _maintain(self) -> None:
         try:
@@ -393,7 +558,18 @@ class PhoneLink:
                     for identifier, row in tuple(self.records.items()):
                         expired = not row["key"] and row["expires"] < time.time()
                         if expired:
-                            self._invalidate(identifier)
+                            if identifier not in self._expired_announced:
+                                self._event(
+                                    "invite_expired",
+                                    identifier=identifier,
+                                    cause="ttl_expired",
+                                    record_state="expired",
+                                )
+                                self._expired_announced.add(identifier)
+                            self._invalidate(identifier, cause="invite_expired")
+                            self._pending_announced = {
+                                item for item in self._pending_announced if item[0] != identifier
+                            }
                             client = self.clients.pop(identifier, None)
                             if client:
                                 await client.close()
@@ -402,6 +578,7 @@ class PhoneLink:
                             if exchange.task:
                                 exchange.task.cancel()
                             self.exchanges.pop(key, None)
+                    self._announce_idle_sessions()
                 # Saved phone approval is device-wide. A busy or absent agent
                 # daemon must not disconnect it, and connection attempts must
                 # never hold the lock needed to revoke another phone.
@@ -410,13 +587,15 @@ class PhoneLink:
                         try:
                             if await self.directory_ready(row["origin"]) and identifier in self.records:
                                 await self._client(identifier)
-                        except Exception:
-                            pass  # unavailable transport preserves the saved identity
+                                self._maintenance_errors.pop(f"maintenance:{identifier}", None)
+                        except Exception as exc:
+                            # Keep the transport resilient without exposing raw URLs or errors.
+                            self._report_error(f"maintenance:{identifier}", exc, identifier)
                 await asyncio.sleep(5)
         except asyncio.CancelledError:
             pass
 
-    async def status(self, *, refresh: bool = False) -> dict:
+    async def status(self, *, refresh: bool = False, actor: dict | None = None) -> dict:
         await self.start()
         if refresh:
             self._network_cache = (0, None)
@@ -435,11 +614,14 @@ class PhoneLink:
                     if ready
                     else "Your connection service needs a PhoneLink update before it can open Kollab on your phone."
                 )
-            except Exception:
+            except Exception as exc:
+                self._report_error("status", exc)
                 state, message = (
                     "offline",
                     "The connection service could not be reached. Check your connection and try again.",
                 )
+            else:
+                self._maintenance_errors.pop("status", None)
         phones = []
         for identifier, row in self.records.items():
             client = self.clients.get(identifier)
@@ -447,6 +629,25 @@ class PhoneLink:
             pending = []
             if not row["key"] and row["expires"] >= time.time():
                 pending = [{"key": p["key"], "code": pairing_code(p["key"])} for p in peers if not p["approved"]]
+                for peer_item in pending:
+                    marker = (identifier, peer_item["key"])
+                    if marker not in self._pending_announced:
+                        self._pending_announced.add(marker)
+                        self._event(
+                            "invite_opened",
+                            identifier=identifier,
+                            peer=peer_item["key"],
+                            # The phone opened the invite; a web UI poll only noticed it.
+                            actor=None,
+                            record_state="pending",
+                        )
+                        self._event(
+                            "pairing_code_shown",
+                            identifier=identifier,
+                            peer=peer_item["key"],
+                            actor=actor,
+                            record_state="pending",
+                        )
             session = self.sessions.get(identifier)
             connected = bool(
                 session
@@ -475,21 +676,39 @@ class PhoneLink:
             "phones": phones,
         }
 
-    async def offer(self, name: str) -> dict:
+    async def offer(self, name: str, actor: dict | None = None) -> dict:
         await self.start()
         if not isinstance(name, str) or len(name.strip()) > 48 or (name.strip() and not name.strip().isprintable()):
+            self._event(
+                "denied", actor=actor, cause="invalid_name", device_name=name
+            )
             raise PhoneLinkError("Use a phone name of at most 48 printable characters.")
-        status = await self.status(refresh=True)
+        status = await self.status(refresh=True, actor=actor)
         if status["state"] != "ready":
+            self._event(
+                "denied",
+                actor=actor,
+                cause="service_unavailable",
+                device_name=name,
+                network=status.get("network"),
+            )
             raise PhoneLinkError(status["message"])
         network = await self.network()
         async with self._lock:
             if len(self.records) >= MAX_PHONES:
+                self._event(
+                    "denied",
+                    actor=actor,
+                    cause="phone_limit",
+                    device_name=name.strip() or "My Phone",
+                    network=network.get("network") if network else None,
+                )
                 raise PhoneLinkError("Up to eight phones can be saved. Remove a phone before adding another.")
             identifier = secrets.token_hex(16)
             self.records[identifier] = {
                 "name": name.strip() or "My Phone",
                 "origin": network["origin"],
+                "network": safe_event_label(network.get("network"), max_length=128),
                 "key": "",
                 "host": "",
                 "seen": 0,
@@ -525,7 +744,7 @@ class PhoneLink:
                 }
             )
             link = network["origin"] + "/relay/v1/phone/#" + fragment
-            return {
+            result = {
                 "id": identifier,
                 "name": self.records[identifier]["name"],
                 "expires_at": self.records[identifier]["expires"],
@@ -533,15 +752,34 @@ class PhoneLink:
                 "link": link,
                 "qr_svg": segno.make(link, error="m").svg_inline(scale=4, border=4, dark="#000", light="#fff"),
             }
+            self._event(
+                "invite_created",
+                identifier=identifier,
+                actor=actor,
+                record_state="pending",
+            )
+            return result
 
-    async def approve(self, identifier: str, key: str) -> dict:
+    async def approve(self, identifier: str, key: str, actor: dict | None = None) -> dict:
         await self.start()
         async with self._lock:
             row = self.records.get(identifier)
             client = self.clients.get(identifier)
             if not row or not client or row["key"] or row["expires"] < time.time():
+                self._event(
+                    "denied",
+                    identifier=identifier,
+                    actor=actor,
+                    cause="invitation_not_waiting",
+                )
                 raise PhoneLinkError("That invitation is no longer waiting for approval. Create a new QR code.")
             if not any(peer["key"] == key and not peer["approved"] for peer in client.peers()):
+                self._event(
+                    "denied",
+                    identifier=identifier,
+                    actor=actor,
+                    cause="phone_not_waiting",
+                )
                 raise PhoneLinkError("That phone is no longer waiting to connect.")
             # Pin in durable metadata first; no incoming request runs before
             # both metadata and the existing transport's approval are saved.
@@ -553,13 +791,29 @@ class PhoneLink:
                 row["key"] = ""
                 self._persist()
                 raise
-        return await self.status()
+        self._pending_announced = {
+            item for item in self._pending_announced if item[0] != identifier
+        }
+        self._event(
+            "approved",
+            identifier=identifier,
+            peer=key,
+            actor=actor,
+            record_state="linked",
+        )
+        return await self.status(actor=actor)
 
-    async def revoke(self, identifier: str) -> dict:
+    async def revoke(self, identifier: str, actor: dict | None = None) -> dict:
         await self.start()
         async with self._lock:
             row = self.records.get(identifier)
             if row is None:
+                self._event(
+                    "denied",
+                    identifier=identifier,
+                    actor=actor,
+                    cause="phone_not_saved",
+                )
                 raise PhoneLinkError("That phone is no longer saved.")
             del self.records[identifier]
             try:
@@ -567,13 +821,35 @@ class PhoneLink:
             except BaseException:
                 self.records[identifier] = row
                 raise
-            self._invalidate(identifier)
+            self._maintenance_errors.pop(f"maintenance:{identifier}", None)
+            event_name = "revoked" if row["key"] else "invitation_cancelled"
+            self._event(
+                event_name,
+                identifier=identifier,
+                peer=row["key"] or None,
+                actor=actor,
+                cause="user_action",
+                record_state="linked" if row["key"] else "pending",
+                device_name=row["name"],
+                network=row["network"],
+            )
+            self._invalidate(
+                identifier,
+                cause=event_name,
+                peer=row["key"] or None,
+                device_name=row["name"],
+                network=row["network"],
+            )
+            self._pending_announced = {
+                item for item in self._pending_announced if item[0] != identifier
+            }
+            self._expired_announced.discard(identifier)
             client = self.clients.pop(identifier, None)
             if client:
                 # Disconnect the whole phone-only room. It cannot route to
                 # any agent-network peer, and no identity files are deleted.
                 await client.close()
-        return await self.status()
+        return await self.status(actor=actor)
 
     async def _receive(self, identifier: str, peer: str, method: str, payload: dict) -> dict:
         row = self.records.get(identifier)
@@ -588,7 +864,7 @@ class PhoneLink:
             private = PrivateKey.generate()
             shared = Box(private, PublicKey(bytes.fromhex(payload["public_key"]))).shared_key()
             incoming, outgoing = session_keys(shared, host_session, phone_session)
-            self._invalidate(identifier)
+            self._invalidate(identifier, cause="session_replaced")
             frame_compression = payload.get("frame_compression") is True
             coalesce_reads = payload.get("coalesce_reads") is True
             zero_body_autorun = payload.get("zero_body_autorun") is True
@@ -608,6 +884,13 @@ class PhoneLink:
                 coalesce_reads=coalesce_reads,
                 zero_body_autorun=zero_body_autorun,
             )
+            self._event(
+                "connected",
+                identifier=identifier,
+                peer=peer,
+                cause="phone_session",
+                record_state="linked",
+            )
             return {
                 "public_key": private.public_key.encode().hex(),
                 "name": row["name"],
@@ -618,6 +901,26 @@ class PhoneLink:
                 "zero_body_autorun": zero_body_autorun,
             }
         session = self.sessions.get(identifier)
+        if method == "phone_diagnostic":
+            if (
+                not session
+                or (session.host_session, session.phone_session)
+                != (host_session, phone_session)
+            ):
+                raise RelayError("phone session is unavailable")
+            diagnostic = normalize_phone_diagnostic(payload)
+            if diagnostic is None:
+                raise RelayError("invalid phone diagnostic")
+            self._event(
+                "phone_diagnostic",
+                identifier=identifier,
+                peer=peer,
+                phone_event=diagnostic["event"],
+                close_code=diagnostic.get("close_code"),
+                close_reason=diagnostic.get("close_reason"),
+                retry_count=diagnostic.get("retry_count"),
+            )
+            return {"accepted": True}
         if (
             method != "phone_http"
             or not session
@@ -637,7 +940,9 @@ class PhoneLink:
         except Exception:
             raise RelayError("invalid phone session packet") from None
         session.used = time.monotonic()
-        self._touch(row)
+        session.last_request_at = time.time()
+        self._idle_announced.discard(identifier)
+        self._touch(identifier, row)
         try:
             result = await self._http(
                 identifier,
@@ -661,7 +966,7 @@ class PhoneLink:
             "packet": base64.b64encode(session.outgoing.encrypt(response_packet)).decode()
         }
 
-    def _touch(self, row: dict) -> None:
+    def _touch(self, identifier: str, row: dict) -> None:
         """Remember when this phone last spoke; saved at most once a minute."""
         now = int(time.time())
         if now - row["seen"] >= SEEN_SAVE_SECONDS:
@@ -670,6 +975,13 @@ class PhoneLink:
                 self._persist()
             except OSError:
                 pass  # last-seen is informational; never fail the phone's request
+            else:
+                self._event(
+                    "last_seen_updated",
+                    identifier=identifier,
+                    peer=row["key"],
+                    last_seen_at=now,
+                )
 
     def _phone_app(self, identifier: str, path: str) -> tuple[str, bytes]:
         directory = app_directory()
@@ -939,7 +1251,7 @@ class PhoneLink:
                     self._task.cancel()
                     await asyncio.gather(self._task, return_exceptions=True)
                 for identifier in tuple(self.clients):
-                    self._invalidate(identifier)
+                    self._invalidate(identifier, cause="shutdown")
                 await asyncio.gather(*(client.close() for client in self.clients.values()), return_exceptions=True)
             finally:
                 self.clients.clear()

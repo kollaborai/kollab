@@ -164,6 +164,19 @@ async def test_javascript_phone_client_reaches_streaming_engine(tmp_path, monkey
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=45)
             assert process.returncode == 0, stderr.decode() + stdout.decode()
             assert b"passed: JS/Python encryption" in stdout
+            events = (await manager.event_history())["events"]
+            assert any(
+                event["event"] == "phone_diagnostic"
+                and event["phone_event"] == "pagehide"
+                for event in events
+            )
+            assert any(
+                event["event"] == "phone_diagnostic"
+                and event["phone_event"] == "relay_socket_closed"
+                and event["close_code"] == 1001
+                and event["close_reason"] == "going_away"
+                for event in events
+            )
     finally:
         if process and process.returncode is None:
             process.terminate()
