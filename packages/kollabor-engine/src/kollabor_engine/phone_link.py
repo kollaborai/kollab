@@ -132,9 +132,11 @@ def _app_serial() -> int:
         version = ""
     match = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
     if not match:
-        return 10**10
+        # Any fallback would sit below a release a phone already saved.
+        raise PhoneLinkError("The phone app needs this computer's release version.")
     major, minor, patch = (int(part) for part in match.groups())
-    # ponytail: minor or patch past 999 would spill into the next field.
+    if minor > 999 or patch > 999:
+        raise PhoneLinkError("This release version does not fit the phone app serial.")
     return 10**10 + major * 10**6 + minor * 10**3 + patch
 
 

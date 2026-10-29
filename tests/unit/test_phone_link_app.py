@@ -57,16 +57,21 @@ def verify(manifest: dict, host_key: str) -> None:
 
 
 def test_app_serial_is_the_release_version_above_old_file_times(monkeypatch):
+    assert phone_link._app_serial() > 2_000_000_000  # the installed release
     for version, serial in (
         ("1.2.3", 10**10 + 1_002_003),
         ("0.19.0rc1", 10**10 + 19_000),
-        ("weird", 10**10),
+        ("weird", None),
+        ("0.1000.0", None),
     ):
         monkeypatch.setattr(
             phone_link.importlib.metadata, "version", lambda name, v=version: v
         )
-        assert phone_link._app_serial() == serial
-    assert phone_link._app_serial() > 2_000_000_000
+        if serial is None:
+            with pytest.raises(phone_link.PhoneLinkError):
+                phone_link._app_serial()
+        else:
+            assert phone_link._app_serial() == serial
 
 
 @pytest.mark.asyncio
