@@ -3,12 +3,15 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[2] / "packages/kollabor-voice/src")
 )
 
 from kollabor_voice.responder import (
     aside_snapshot,
+    is_stop,
     local_line,
     parse_aside,
     running_turn,
@@ -113,3 +116,26 @@ def test_parse_aside_reads_the_first_line_only():
     ):
         assert parse_aside(bad) is None, bad
     assert len(parse_aside("ANSWER " + "a" * 500)[1]) == 300
+
+
+def test_a_stop_verdict_and_a_dash_inside_the_quotes():
+    assert parse_aside("STOP Okay, stopping now.") == ("STOP", "Okay, stopping now.")
+    assert parse_aside('ANSWER: "— Almost done."') == ("ANSWER", "Almost done.")
+
+
+@pytest.mark.parametrize(
+    "said",
+    ["stop", "Stop.", "okay stop", "Please stop.", "stop it", "Stop that now!",
+     "cancel", "Cancel that.", "abort", "No, stop.", "stop, stop"],
+)  # fmt: skip
+def test_a_whole_stop_needs_no_model(said):
+    assert is_stop(said)
+
+
+@pytest.mark.parametrize(
+    "said",
+    ["", "don't stop", "stop?", "can you stop", "stop the tests and run lint",
+     "what are you doing", "unstoppable", "nonstop", "never mind", "forget it"],
+)  # fmt: skip
+def test_a_stop_inside_other_words_is_no_stop(said):
+    assert not is_stop(said)

@@ -6,6 +6,8 @@ answer is that voice turn's whole reply: one voice_aside event with the voice tu
 id and end_turn, which only that turn's stream reads (the Engine's _stream_turn).
 FORWARD, or no Quick Model, a timeout or a reply that does not parse, says one line
 now; the words then wait in the queue for their own turn, as they always have.
+A spoken stop (no model call) or the Quick Model's STOP stops the running turn as
+ESC does, and its line carries stop, so the worker stops what still runs there.
 """
 
 from __future__ import annotations
@@ -38,13 +40,20 @@ class VoiceAside:
         events: list[dict],
         ask_model: Callable[[str, str], Awaitable[Optional[str]]],
         publish: Callable[..., None],
+        stop: Callable[[], Any] = lambda: None,
     ) -> bool:
-        """True when the Quick Model answered; False: a line was said, queue the words."""
-        from kollabor_voice.responder import aside_snapshot, local_line, parse_aside
+        """True when answered or stopped; False: a line was said, queue the words."""
+        from kollabor_voice.responder import (
+            STOP_LINE,
+            aside_snapshot,
+            is_stop,
+            local_line,
+            parse_aside,
+        )
 
         now = time.time()  # the display tap's clock
-        verdict = None
-        if self._take_slot():
+        verdict = ("STOP", STOP_LINE) if is_stop(text) else None
+        if verdict is None and self._take_slot():
             try:
                 reply = await asyncio.wait_for(
                     ask_model(aside_snapshot(events, now), text), ASIDE_TIMEOUT_S
@@ -57,10 +66,15 @@ class VoiceAside:
             finally:
                 self._busy = False
         kind, line = verdict or ("FORWARD", local_line(events, now))
+        if kind == "STOP":
+            stop()  # the words go: "stop and do X" loses the X, it is said again
         # Never a response or turn_complete: every listener reads those as the
         # running turn's (the hub marks the agent idle, open windows reload).
-        answered = kind == "ANSWER"
-        publish("voice_aside", text=line, request_id=turn_id, end_turn=answered)
+        answered = kind != "FORWARD"
+        marks = {"stop": True} if kind == "STOP" else {}
+        publish(
+            "voice_aside", text=line, request_id=turn_id, end_turn=answered, **marks
+        )
         return answered
 
     def _take_slot(self) -> bool:
