@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 from copy import deepcopy
 from datetime import datetime
@@ -35,7 +36,7 @@ from kollabor_ai.profile_manager import redact_profile_endpoint
 
 from .context import ContextListSnapshot, ConversationContext
 from .context_registry import ContextRegistry
-from .interface import StateService, enrollment_result
+from .interface import StateService, enrollment_result, offer_failure
 from .snapshots import (
     ActiveOperationSnapshot,
     AgentListSnapshot,
@@ -2586,7 +2587,7 @@ class LocalStateService(StateService):
             # The one-time code must never reach logs or an RPC exception.
             return {"error": "connect offer could not be created"}
         if not isinstance(result, dict) or result.get("error"):
-            return {"error": "connect offer could not be created"}
+            return offer_failure(result)
         offer_id = result.get("offer_id")
         expires_at = result.get("expires_at")
         code = result.get("code")
@@ -2597,7 +2598,7 @@ class LocalStateService(StateService):
             and isinstance(expires_at, str)
             and expires_at.isdigit()
             and isinstance(code, str)
-            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
+            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?:(?:-[0-9A-HJKMNP-TV-Z]{4}){3})?", code)
         ):
             return {
                 "status": "offered",
@@ -2614,6 +2615,23 @@ class LocalStateService(StateService):
         if handler is None:
             raise ValueError("connect screen is unavailable")
         return (await handler()).to_wire()
+
+    def _halt_context(self) -> Any:
+        """The halt panels' context for this daemon's folder (halt.sock or the network owner)."""
+        from plugins.hub.halt_context import HaltContext
+
+        hub = self._resolve_hub_plugin()
+        folder = getattr(getattr(hub, "_relay_agent", None), "workspace", None) or os.getcwd()
+        return HaltContext(str(folder))
+
+    async def hub_halt_snapshot(self) -> dict[str, Any]:
+        return await self._halt_context().hub_halt_snapshot()
+
+    async def hub_halt_members(self) -> list[dict[str, Any]]:
+        return await self._halt_context().hub_halt_members()
+
+    async def hub_halt_act(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self._halt_context().hub_halt_act(action, payload)
 
     async def hub_connect_decide(self, enrollment_id: str, decision: str) -> str:
         """Accept or reject one join request through the Hub that issued the code."""

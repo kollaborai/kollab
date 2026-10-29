@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -231,7 +232,13 @@ class TestTerminalPluginFilterEnv:
             "EDITOR": "vim",
         }
         result = _filter_env(env)
-        assert result == env
+        assert result == {**env, "KOLLAB_OWNER_PID": str(os.getpid())}
+
+    def test_owner_pid_cannot_be_spoofed_or_agent_tags_inherited(self):
+        from plugins.terminal_plugin import _filter_env
+
+        result = _filter_env({"KOLLAB_OWNER_PID": "1", "KOLLAB_AGENT_PID": "1", "KOLLAB_TOOL_SHELL": "1"})
+        assert result == {"KOLLAB_OWNER_PID": str(os.getpid())}
 
 
 # ---------------------------------------------------------------------------

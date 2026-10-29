@@ -93,3 +93,39 @@ class AltViewStackReuseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AltViewNestedPopTest(unittest.TestCase):
+    """A nested view closing must not restore the main UI under the outer view."""
+
+    def _manager(self):
+        mgr = AltViewStackManager(_FakeEventBus(), None)
+        mgr.restored = []
+
+        async def _restore(session_name, modal_started=True):
+            mgr.restored.append(session_name)
+
+        mgr._restore_main_ui = _restore
+        return mgr
+
+    @staticmethod
+    def _session(name):
+        session = AltViewSession(_FakeView(), _FakeEventBus(), name)
+        session.exit = AsyncMock()
+        return session
+
+    def test_popping_a_nested_view_leaves_the_main_ui_alone(self):
+        mgr = self._manager()
+        outer, inner = self._session("connect"), self._session("connect-halt")
+        mgr._stack.extend([outer, inner])
+        _run(mgr._pop_current(session=inner))
+        self.assertEqual(mgr.restored, [])
+        self.assertEqual(mgr.stack_depth, 1)
+
+    def test_popping_the_last_view_restores_the_main_ui(self):
+        mgr = self._manager()
+        outer = self._session("connect")
+        mgr._stack.append(outer)
+        _run(mgr._pop_current(session=outer))
+        self.assertEqual(mgr.restored, ["connect"])
+        self.assertEqual(mgr.stack_depth, 0)

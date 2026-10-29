@@ -17,6 +17,7 @@ from plugins.altview.connect_altview import ConnectGuideAltView
 from plugins.hub import enrollment_client
 from plugins.hub.enrollment_client import enroll_device
 from plugins.hub.enrollment_codes import generate_enrollment_code
+from plugins.hub.network_halt import join_anchor
 from plugins.hub.relay_client import RelayClient
 from plugins.hub.relay_commands import ConnectSnapshot
 from plugins.hub.relay_state import RelayStateStore
@@ -201,7 +202,7 @@ async def _join_from_lone_state(tmp_path, monkeypatch, **fields):
     origin = "https://kollabor.ai"
     offer_id = "2" * 32
     code = generate_enrollment_code(offer_id)
-    code_text = code.for_private_display()
+    code_text = f"{code.for_private_display()}-{join_anchor('d' * 64)}"
     _write_lone_state(tmp_path / "destination-network")
     client = RelayClient(
         tmp_path / "destination-workspace", state_dir=tmp_path / "destination-network", label="destination"

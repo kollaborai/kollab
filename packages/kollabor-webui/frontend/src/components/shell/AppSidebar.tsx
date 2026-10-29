@@ -17,6 +17,7 @@ import { relayDetachedTouches } from "@/components/shell/touch-relay";
 import { sidebarAgentKey } from "@/components/shell/hidden-agents";
 import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import type { SidebarOrder } from "@/hooks/use-sidebar-order";
+import { HaltedLine } from "@/components/shell/HaltedLine";
 import { buildLocalOrderRows, groupByFolder, orderedDevices, reorderDevicesWithinNetwork, reorderWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { HoverHelp } from "@/components/ui/hover-help";
@@ -151,6 +152,7 @@ export function AppSidebar({
   onApps,
   onAgents,
   onSettings,
+  onHalt,
   onLearn,
   learnActive,
   onWhatsNew,
@@ -204,6 +206,8 @@ export function AppSidebar({
   /** Opens the Agents view: every roster and team this folder can start. */
   onAgents: () => void;
   onSettings: () => void;
+  /** Open Settings on the Halt and Resume screen (works with no chat open). */
+  onHalt: () => void;
   onLearn: () => void;
   learnActive: boolean;
   onWhatsNew: () => void;
@@ -649,6 +653,8 @@ export function AppSidebar({
           onOpenChange={(open) => fold("local", open)}
         >
           <SidebarGroupContent>
+              {/* No folder picked yet: ask about the first listed folder (a halt holds the whole network). */}
+              <HaltedLine api={api} folder={workspacePath.trim() || folderGroups[0]?.folder || ""} onOpen={onHalt} />
               {folderGroups.map((group) => (
                 <Fragment key={group.folder || "-"}>
                   <div className="text-muted-foreground flex h-7 items-center gap-2 px-2.5 text-xs" title={group.folder}>

@@ -254,6 +254,8 @@ CONNECT_SUBCOMMANDS = [
     ),
     SubcommandInfo("deny", "<device> [agent]", "Revoke a device's access"),
     SubcommandInfo("revoke", "<device>", "Remove a device or peer"),
+    SubcommandInfo("halt", '[--reason "text"] [--revoke <device>]', "Halt the network"),
+    SubcommandInfo("resume", "[--confirm <hash> | --local]", "Propose or confirm a resume"),
     SubcommandInfo("leave", "[domain]", "Disconnect and stop reconnecting"),
     SubcommandInfo(
         "primary", "<network>", "Choose which network's primary manages this device"
@@ -1232,6 +1234,10 @@ class HubPlugin(BasePlugin):
 
         # Start presence + clean up orphan sockets from past crashes
         self._presence = PresenceManager(self._identity)
+        # kill switch F11: a new tool shell lands in presence at once, before it can background and exit
+        from kollabor_agent.shell_executor import TOOL_SHELL_LISTENERS
+
+        TOOL_SHELL_LISTENERS[:] = [self._presence.publish]
         PresenceManager.cleanup_stale_sockets()
         self._presence.startup_scan()
 
@@ -10968,6 +10974,8 @@ class HubPlugin(BasePlugin):
             domain = (
                 parts[1]
                 if len(parts) == 2
+                else ""  # attached: the daemon owns the network, so it names the domain
+                if self._attached()
                 else self._relay_network_domain() or "kollabor.ai"
             )
             return await self._open_connect_screen(domain, code_only=True)
@@ -11055,6 +11063,17 @@ class HubPlugin(BasePlugin):
             )
         if op == "offer":
             return await self._run_connect_enrollment_offer(str(args.get("domain", "")))
+        if op in ("halt_snapshot", "halt_members", "halt_act"):
+            # The halt panels' three context methods (plugins/hub/halt_context.py).
+            relay = self._relay_agent
+            try:
+                if op == "halt_snapshot":
+                    return await relay.hub_halt_snapshot()
+                if op == "halt_members":
+                    return await relay.hub_halt_members()
+                return await relay.hub_halt_act(str(args.get("action", "")), args.get("payload") or {})
+            except Exception as exc:  # RelayError/HaltError text is operator-safe
+                return {"halt_error": str(exc) or "the halt call failed"}
         raise ValueError("unknown connect operation")
 
     def _relay_owned_elsewhere(self) -> bool:
@@ -11145,7 +11164,7 @@ class HubPlugin(BasePlugin):
         """The notice, then the path the person picks (constitution, Story 1)."""
         from plugins.altview.connect_altview import ConnectGuideAltView
 
-        from .connect_guide import DEFAULT_DOMAIN, mark_guide_seen
+        from .connect_guide import mark_guide_seen
 
         try:
             startup = getattr(self, "_startup_task", None)
@@ -11164,7 +11183,7 @@ class HubPlugin(BasePlugin):
             elif view.answer == "new_network":
                 text = await self._guided_new_network()
             elif view.answer == "join":
-                text = await self._open_connect_altview(DEFAULT_DOMAIN)
+                text = await self._guided_join()
             else:
                 return
             if text:
@@ -11174,6 +11193,12 @@ class HubPlugin(BasePlugin):
         except Exception as exc:
             # The type only: nothing in this flow holds a code, but a message might.
             logger.warning("Connect guide failed: %s", type(exc).__name__)
+
+    async def _guided_join(self) -> str:
+        """The code form, on the relay this device already knows, else kollabor.ai (Tab edits the domain)."""
+        from .connect_guide import DEFAULT_DOMAIN
+
+        return await self._open_connect_altview(self._relay_network_domain() or DEFAULT_DOMAIN)
 
     async def _connect_has_network(self) -> bool:
         """Whether this device shares a network with another device, asked the way bare
@@ -11364,7 +11389,7 @@ class HubPlugin(BasePlugin):
                 ConnectOutcome,
             )
 
-            from .connect_guide import post_join_line
+            from .connect_guide import join_check_text, post_join_line
 
             def outcome_of(result, domain: str):
                 if not isinstance(result, dict):
@@ -11386,6 +11411,8 @@ class HubPlugin(BasePlugin):
                         return ConnectOutcome.approved(
                             result.get("detail") or self._joined_line(domain),
                             post_join_line() if note is None else note,
+                            join_check_text(result),
+
                         )
                     except (TypeError, ValueError):
                         return ConnectOutcome.approved()
@@ -11548,11 +11575,15 @@ class HubPlugin(BasePlugin):
 
                     line = JoinLine(self._primary_name)
                     self._say_join_line(line)
-                    return {
+                    approved = {
                         "status": "approved",
                         "detail": self._joined_line(domain),
                         "note": line.text(),
                     }
+                    for extra in ("founder_fingerprint", "warning"):
+                        if isinstance(result.get(extra), str):
+                            approved[extra] = result[extra]
+                    return approved
                 except Exception:
                     return {"status": "approved"}
             if status == "rejected":
@@ -11683,6 +11714,21 @@ class HubPlugin(BasePlugin):
 
             stack_mgr = self._altview_stack()
 
+            from kollabor.panels.connect import _halt_data, halt_state_line
+            from plugins.altview.connect_halt_altview import ConnectHaltAltView
+
+            from .halt_context import HaltContext
+
+            halt_ctx = HaltContext(
+                str(getattr(getattr(self, "_relay_agent", None), "workspace", None) or os.getcwd())
+            )
+
+            async def network_state() -> str:
+                return halt_state_line(*(await _halt_data(halt_ctx)))
+
+            async def open_halt() -> None:
+                await stack_mgr.push(ConnectHaltAltView(halt_ctx), "connect-halt", reuse=False)
+
             # Another window owns the relay: a code, a request and a decision
             # all live there, so this screen shows what the shared state says
             # and offers nothing else.
@@ -11696,6 +11742,8 @@ class HubPlugin(BasePlugin):
                     code_only=code_only,
                     snapshot=None if code_only else read_only,
                     note=CONNECT_OWNED_ELSEWHERE if read_only is not None else "",
+                    on_halt=None if code_only else open_halt,
+                    on_network_state=None if code_only else network_state,
                     guide=guide,
                 ),
                 "connect-code" if code_only else "connect-screen",
@@ -11790,8 +11838,31 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: the knock screen is unavailable"
 
+    def _offer_failed(self) -> dict[str, str]:
+        """A failed offer, with the network's refusal line when that is why (#355).
+
+        The line comes from this machine's state, never from exception text.
+        """
+        reason = ""
+        try:
+            commands = getattr(self._relay_agent, "commands", None)
+            if commands is not None:
+                reason = commands.client.control.admit_refusal()
+        except Exception:
+            reason = ""
+        failed = {"error": "connect offer could not be created"}
+        return {**failed, "reason": reason} if reason else failed
+
     async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:
-        """Create a one-device enrollment offer in the owning relay daemon."""
+        """Create a one-device enrollment offer in the owning relay daemon.
+
+        An empty domain means this daemon's own network: a window attached to it
+        often cannot tell which that is.
+        """
+        if isinstance(domain, str) and not domain:
+            from .connect_guide import DEFAULT_DOMAIN
+
+            domain = self._relay_network_domain() or DEFAULT_DOMAIN
         ok, offered = await self._connect_via_owner("offer", {"domain": domain})
         if ok:
             return offered if isinstance(offered, dict) else {"error": "connect offer could not be created"}
@@ -11811,9 +11882,9 @@ class HubPlugin(BasePlugin):
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
         except Exception:
-            return {"error": "connect offer could not be created"}
+            return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
-            return {"error": "connect offer could not be created"}
+            return self._offer_failed()
         offer_id = result.get("offer_id")
         expires_at = result.get("expires_at")
         code = result.get("code")
@@ -11825,7 +11896,7 @@ class HubPlugin(BasePlugin):
             and isinstance(expires_at, str)
             and expires_at.isdigit()
             and isinstance(code, str)
-            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
+            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?:(?:-[0-9A-HJKMNP-TV-Z]{4}){3})?", code)
         ):
             return {
                 "status": "offered",
@@ -15560,6 +15631,9 @@ class HubPlugin(BasePlugin):
             await self._socket_server.stop()
 
         if self._presence:
+            from kollabor_agent.shell_executor import TOOL_SHELL_LISTENERS
+
+            TOOL_SHELL_LISTENERS[:] = []  # a late tool shell must not write the removed presence back
             self._presence.remove()
 
         if self._election:

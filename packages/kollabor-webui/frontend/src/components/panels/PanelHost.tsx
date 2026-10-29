@@ -24,6 +24,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
+import { SESSIONLESS_PANELS } from "@/api";
+import { confirmedPayload } from "./confirm";
 import { serializeDraft, type Draft } from "./FieldRenderer";
 import { FormPanel } from "./FormPanel";
 import { NetworkPanel, type NetworkSection } from "./NetworkPanel";
@@ -193,6 +195,8 @@ export function PanelHost({
 }) {
   const isMobile = useIsMobile();
   const sessionId = session.session_id;
+  // the session-less halt panels (SESSIONLESS_PANELS) ask about this chat's folder
+  if (session.workspace) api.haltFolder = session.workspace;
   // The Prompts tab renders fully client-side against the prompt-section API.
   const promptsApi = useMemo(() => new PromptsApi(api), [api]);
   const [tabs, setTabs] = useState<TabMap>(freshTabs);
@@ -238,7 +242,8 @@ export function PanelHost({
       const mine = epoch.current;
       patchTab(target, (state) => ({ ...state, status: "loading", error: null }));
       const job: Promise<void> = api
-        .getPanel(sessionId, PANEL_NAME[target])
+        // No chat open (the sidebar's halted line): Network opens on Halt and Resume.
+        .getPanel(sessionId, sessionId ? PANEL_NAME[target] : "connect-halt")
         .then(
           (panel) => {
             if (mine !== epoch.current) return;
@@ -421,6 +426,8 @@ export function PanelHost({
     if (!open || !intent || consumed.current === intent.nonce) return;
     if (tab !== "network" || !networkReady) return;
     consumed.current = intent.nonce;
+    const pushed = intent.action === "halt" ? "connect-halt" : "connect-knocks";
+    if (pushed === "connect-halt" && !sessionId) return; // already the root
     if (intent.action === "new_code") {
       setNetworkSection("access");
       setReveal(null);
@@ -434,12 +441,12 @@ export function PanelHost({
     } else {
       setReveal(null);
       const mine = epoch.current;
-      void api.getPanel(sessionId, "connect-knocks").then(
+      void api.getPanel(sessionId, pushed).then(
         (panel) => {
           if (mine !== epoch.current) return;
           patchTab("network", (state) => ({
             ...state,
-            views: state.views[state.views.length - 1]?.panel.panel === "connect-knocks"
+            views: state.views[state.views.length - 1]?.panel.panel === pushed
               ? [...state.views.slice(0, -1), newView(panel)]
               : [...state.views, newView(panel)],
           }));
@@ -576,12 +583,20 @@ export function PanelHost({
     const networkRoot = root?.kind === "picker" ? root : undefined;
     const networkPicker = Boolean(networkRoot && panel.kind === "picker" && (name === "connect" || name === "connect-knocks"));
     const networkKnocksTab = networkPicker && name === "connect-knocks" && state.views.length === 2;
+    // Halt, resume and revoke actions reach this point only after the person's second press (confirm.ts).
+    const sure = (action: PanelAction, payload: Record<string, unknown> = {}) =>
+      confirmedPayload(SESSIONLESS_PANELS.has(name), action.confirm, payload);
     const onRowAction = (action: PanelAction, row: PanelRow) =>
-      void runAction(tab, name, action.id, {
-        id: row.id,
-        ...(action.payload_key ? { [action.payload_key]: row.id } : {}),
-      });
-    const onToolbarAction = (action: PanelAction) => void runAction(tab, name, action.id);
+      void runAction(
+        tab,
+        name,
+        action.id,
+        sure(action, {
+          id: row.id,
+          ...(action.payload_key ? { [action.payload_key]: row.id } : {}),
+        }),
+      );
+    const onToolbarAction = (action: PanelAction) => void runAction(tab, name, action.id, sure(action));
     const onControlChange = (field: PanelField, value: unknown, resetDraft = false) =>
       void runAction(tab, name, field.action || field.path, { [field.path]: value }, {
         reset: resetDraft,
@@ -651,11 +666,11 @@ export function PanelHost({
                 tab,
                 name,
                 action.id,
-                {
+                sure(action, {
                   changes: formChanges(panel, top.draft),
                   ...(target ? { target } : {}),
                   ...(panel.context ? { context: panel.context } : {}),
-                },
+                }),
                 { reset: true },
               )
             }

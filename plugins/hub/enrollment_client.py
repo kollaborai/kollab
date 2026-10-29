@@ -48,6 +48,7 @@ from .enrollment_codes import (
     generate_enrollment_code,
     is_short_enrollment_code,
     parse_short_enrollment_code,
+    split_join_code,
 )
 from .enrollment_delegations import (
     DelegationSessionChangedError,
@@ -61,6 +62,7 @@ from .enrollment_recovery import (
     derive_enrollment_destination_recovery_key,
     derive_enrollment_recovery_key,
 )
+from .network_halt import join_anchor
 
 _SIGNATURE_DOMAIN = b"kollab-relay-enrollment-http/1\0"
 _MESSAGE_SIGNATURE_DOMAIN = b"kollab-relay-enrollment-message/1\0"
@@ -105,7 +107,7 @@ class EnrollmentProtocolError(ValueError):
     """A safe fixed enrollment-protocol failure code."""
 
     def __init__(self, code: str, *, retry_after_seconds: float | None = None):
-        local_codes = {"transport", "invalid_response", "session_changed", "internal"}
+        local_codes = {"transport", "invalid_response", "session_changed", "internal", "network_mismatch"}
         self.code = code if code in _ALLOWED_ERRORS | local_codes else "transport"
         self.retry_after_seconds = retry_after_seconds
         super().__init__(self.code)
@@ -1398,7 +1400,13 @@ async def _finish_destination_enrollment(
     if _DESTINATION_RECOVERY_STATUSES[record["status"]] < _DESTINATION_RECOVERY_STATUSES["credential_imported"]:
         directory.import_device_credential(decision["credential"])
         _store_destination_recovery(journal, record, "credential_imported")
+    founder_key = ""
+    warning = ""
     if _DESTINATION_RECOVERY_STATUSES[record["status"]] < _DESTINATION_RECOVERY_STATUSES["invite_joined"]:
+        from .network_control import JoinRefused, join_network_ok
+
+        if not join_network_ok(decision.get("network_control"), invite["room"], record.get("network_anchor", "")):
+            raise EnrollmentProtocolError("network_mismatch")  # nothing is joined on a split network
         if _destination_state_empty(client):
             client.join_invite(decision["invite"])
         elif not _destination_state_matches_invite(client, invite):
@@ -1407,6 +1415,13 @@ async def _finish_destination_enrollment(
             raise EnrollmentProtocolError("invalid_response")
         _bind_issuer_name(commands, invite["key"], decision.get("issuer_device_name"))
         _bind_network_name(commands, decision.get("network_name"))
+        try:
+            founder_key = client.control.take_join(
+                decision.get("network_control"), anchor=record.get("network_anchor", "")
+            )
+        except JoinRefused as exc:
+            raise EnrollmentProtocolError("network_mismatch") from exc
+        warning = client.control.count_warning(decision.get("network_control"))
         from .config_sync import record_join_floor
 
         record_join_floor(
@@ -1443,7 +1458,12 @@ async def _finish_destination_enrollment(
         raise EnrollmentProtocolError("unavailable")
     _store_destination_recovery(journal, record, "attached")
     journal.delete(record["offer_id"])
-    return {"status": "approved"}
+    # The founder's machine key, so the person can compare it with the inviter's screen.
+    return {
+        "status": "approved",
+        **({"founder": founder_key, "founder_fingerprint": founder_key[:12]} if founder_key else {}),
+        **({"warning": warning} if warning else {}),
+    }
 
 
 async def _drive_destination_enrollment(
@@ -1567,6 +1587,9 @@ async def _drive_destination_enrollment(
                         "phase": "proof",
                         "destination_key": record["destination_key"],
                         "proof_token": pairing_proof.token,
+                        # Kill switch: the issuer signs an admission naming the
+                        # machine key only after this proof of holding it.
+                        **client.control.join_proof(offer_id, record["round_id"]),
                     },
                 )
                 _store_destination_recovery(
@@ -1691,6 +1714,7 @@ async def _drive_destination_enrollment(
                                 "phase": "proof",
                                 "destination_key": record["destination_key"],
                                 "proof_token": pairing_proof.token,
+                                **client.control.join_proof(offer_id, record["round_id"]),
                             },
                         )
                         _store_destination_recovery(
@@ -1765,6 +1789,9 @@ async def enroll_device(
         if not is_short_enrollment_code(private_code):
             raise EnrollmentProtocolError("invalid_request")
         secret = parse_short_enrollment_code(private_code)
+        anchor = split_join_code(private_code)[1]
+        if not anchor:
+            raise EnrollmentProtocolError("network_mismatch")  # a code that names no network (F4-3)
         discovery, _lookup_ca, _lookup_cidrs = await _discover_destination(commands, domain)
         offer_id = await _lookup_enrollment_offer(
             client, discovery, _lookup_ca, _lookup_cidrs, secret
@@ -1843,6 +1870,7 @@ async def enroll_device(
                 "retry_after": 0,
                 "last_error_code": None,
                 "device_name": device_name,
+                "network_anchor": anchor,
             }
             _validate_destination_recovery_record(record, offer_id)
             # The stable round and exact request are durable before the first
@@ -3144,7 +3172,8 @@ class EnrollmentIssuer:
                     older.retired = True
             self._offers[offer_id] = offer
             self._tasks[offer_id] = asyncio.create_task(self._serve_offer(offer), name="kollab-relay-enrollment")
-            displayed_code = code.for_private_display()
+            client.control.found()  # the code carries this network's tag (F4-3)
+            displayed_code = f"{code.for_private_display()}-{join_anchor(client.control.network_id())}"
             code.wipe()
             code = None
             verifier.wipe()
@@ -3442,6 +3471,7 @@ class EnrollmentIssuer:
                     if not isinstance(proof["proof_token"], str) or len(proof["proof_token"]) > 8192:
                         return
                     proof_token = proof["proof_token"]
+                    destination_proof = {k: proof.get(k) for k in ("machine", "machine_sig", "bind_sig")}
                     if offer.recovery_mode:
                         verified_proof = verify_pairing_proof(
                             challenge_token,
@@ -3707,6 +3737,12 @@ class EnrollmentIssuer:
                                 **self._issuer_device_name_field(),
                                 **self._network_name_field(),
                                 **self._config_floor_field(),
+                                **client.control.join_decision_fields(
+                                    destination_proof,
+                                    offer_id=offer.offer_id,
+                                    round_id=round_id,
+                                    folder=destination_key,
+                                ),
                             },
                         )
                         envelope = encrypt_enrollment_envelope(offer.envelope_key, payload)

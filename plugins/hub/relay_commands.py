@@ -823,6 +823,49 @@ class RelayCommands:
         if result != "stored":
             raise RelayError(f"links not declared ({result})")
 
+    async def _halt_command(self, head: str, rest: str) -> str:
+        """``/connect halt [--reason ...] [--revoke <device>]`` and ``/connect resume [--confirm h|--local]``."""
+        import shlex
+
+        from .halt_runtime import RESUME_PROPOSED, parse_flags, tool_shell_refusal
+
+        if tool_shell_refusal():  # `kollab -p "/connect halt"` from an agent's shell
+            return tool_shell_refusal()
+        if self.agent_bridge is None:
+            return "connect: halting requires a running Kollab Hub session"
+        try:
+            if head == "halt":
+                opts = parse_flags(shlex.split(rest), {"--reason": True, "--revoke": True})
+            else:
+                opts = parse_flags(shlex.split(rest), {"--confirm": True, "--local": False})
+        except ValueError as exc:
+            return f"connect: {exc}"
+        try:
+            if head == "halt":
+                revoke = []
+                if opts.get("revoke"):
+                    revoke = [await self._resolve_peer_key(opts["revoke"])]
+                result = await self.agent_bridge.hub_halt_act(
+                    "halt", {"reason": opts.get("reason", ""), "revoke": revoke, "confirmed": True}
+                )
+                return (
+                    f"Halt {result.get('hash', '')[:8]} recorded. The halt listener stops this "
+                    "machine's agents and tells every member online."
+                )
+            if opts.get("local"):
+                return (await self.agent_bridge.hub_halt_act("resume_local", {"confirmed": True})).get("line", "")
+            if opts.get("confirm"):
+                result = await self.agent_bridge.hub_halt_act(
+                    "confirm_resume", {"hash": opts["confirm"], "confirmed": True}
+                )
+                return f"Resume confirmed: lifts {len(result.get('lifted') or [])} halts"
+            result = await self.agent_bridge.hub_halt_act(
+                "propose_resume", {"confirmed": True}
+            )
+            return f"{result.get('hash', '')[:8]}\n{RESUME_PROPOSED}"
+        except (RelayError, ValueError) as exc:
+            return f"connect: {exc}"
+
     async def resume(self) -> None:
         delay = 1.0
         while (
@@ -1001,17 +1044,39 @@ class RelayCommands:
             )
         if head == "status":
             return await self.format_status()
+        if head in ("halt", "resume"):
+            # Typed by a person: `source_agent` names the session's agent, not an
+            # LLM. A model reaches these only through its terminal tool
+            # (`kollab --hub halt`, refused by KOLLAB_TOOL_SHELL) and the HIGH
+            # risk pattern on `/connect (revoke|halt|resume)`.
+            return await self._halt_command(head, rest)
         if head == "revoke":
+            from .halt_runtime import tool_shell_refusal
+
+            if tool_shell_refusal():
+                return tool_shell_refusal()
+            here_only = rest.endswith(" --here-only")
+            rest = rest.removesuffix(" --here-only").strip()
             if not rest:
-                return "usage: /connect revoke <device>"
+                return "usage: /connect revoke <device> [--here-only]"
             try:
                 key = await self._resolve_peer_key(rest)
             except ValueError as exc:
                 return f"connect: {exc}"
+            try:
+                # A revocation that leaves fewer than two counting machines
+                # stays on this machine, and only once the person says so.
+                network_wide = self.client.control.check_revoke(key, here_only=here_only)
+            except RelayError as exc:
+                return f"{exc}\nTo go ahead: /connect revoke {rest} --here-only"
             if key == self.client.state.inviter:
                 # Revoking the primary ends its say over this device's settings.
                 clear_managed_config(primary_key=key)
-            self.client.revoke(key, announce=True)  # every member drops it too
+            if network_wide:
+                # This machine's signed word; members apply it once a second
+                # counting machine signs the same (network_halt.revocations_to_apply).
+                self.client.control.sign_revocation(key)
+            self.client.revoke(key, announce=network_wide)  # refused here at once
             if self.agent_bridge is not None:
                 self.agent_bridge._state()
                 self.agent_bridge.store.revoke(self.client.state.room, key)

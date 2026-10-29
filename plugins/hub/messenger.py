@@ -1692,6 +1692,10 @@ class AgentSocketServer:
                     # nothing here is logged.
                     reply: Dict[str, Any] = {"type": "connect_proxy", "error": "unavailable"}
                     if self._on_connect_proxy:
+                        from .halt_runtime import HALT_CALLER, peer_pid
+
+                        # F10/NEW-1: a halt act is judged by who sent it, not by this daemon
+                        caller = HALT_CALLER.set(peer_pid(writer.get_extra_info("socket")))
                         try:
                             result = self._on_connect_proxy(
                                 str(msg_data.get("op", "")), msg_data.get("args") or {}
@@ -1701,6 +1705,8 @@ class AgentSocketServer:
                             reply = {"type": "connect_proxy", "result": result}
                         except Exception:
                             reply = {"type": "connect_proxy", "error": "failed"}
+                        finally:
+                            HALT_CALLER.reset(caller)
                     writer.write((json.dumps(reply, default=str) + "\n").encode())
                     await writer.drain()
 

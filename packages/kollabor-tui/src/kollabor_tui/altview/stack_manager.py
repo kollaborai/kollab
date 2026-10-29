@@ -290,7 +290,11 @@ class AltViewStackManager:
                     exc_info=True,
                 )
 
-        await self._restore_main_ui(session.session_name, modal_started=modal_started)
+        # A nested view closing returns to the view under it, not to the main UI:
+        # restoring here would repaint the input line and emit MODAL_HIDE under
+        # the outer view that is still on screen.
+        if not self._stack:
+            await self._restore_main_ui(session.session_name, modal_started=modal_started)
 
         # Replay buffered frames if anything was captured while suspended
         if session.display_queue.frame_count > 0:
