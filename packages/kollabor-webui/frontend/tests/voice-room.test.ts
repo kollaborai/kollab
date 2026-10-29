@@ -74,6 +74,16 @@ test("transcript chunks reassemble and a final is never replaced", () => {
   assert.equal(s.lines[0].text, "hello world");
 });
 
+test("a model out of memory shows Low On Resources with the reason", () => {
+  const s = reduceVoiceEvent(
+    initialRoomState,
+    ev("voice.state", { state: "resource_shortage", detail: "MemoryError: VibeVoice", retryable: true }),
+  );
+  assert.equal(s.state, "resource_shortage");
+  assert.equal(s.detail, "MemoryError: VibeVoice");
+  assert.equal(s.retryable, true);
+});
+
 test("talking over the assistant shows interrupting; remote LLM shows the notice", () => {
   const speaking = reduceVoiceEvent(initialRoomState, ev("voice.state", { state: "speaking" }));
   assert.equal(isInterrupting(speaking), false);

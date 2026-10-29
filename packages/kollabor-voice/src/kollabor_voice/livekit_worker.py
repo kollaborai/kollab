@@ -591,6 +591,9 @@ class Worker:
             ready = await self.adapter.readiness(self.binding.owner_id)
             if ready.state == "ready":
                 return
+            if ready.state == "resource_shortage":  # a model ran out of memory
+                self.state("resource_shortage", ready.detail, retryable=ready.retryable)
+                raise AdapterError("resource_shortage", ready.detail, ready.retryable)
             if ready.state == "error":  # includes "Parakeet is not selected"
                 self.error("models_not_ready", ready.detail, ready.retryable)
                 raise AdapterError("models_not_ready", ready.detail, ready.retryable)

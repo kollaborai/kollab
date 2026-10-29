@@ -952,6 +952,25 @@ def test_a_room_never_starts_while_parakeet_is_not_ready(capsys):
     )
 
 
+def test_a_model_out_of_memory_shows_as_a_resource_shortage():
+    rig = Rig()
+    rig.adapter.states = iter(
+        [SpeechReadiness("resource_shortage", "MemoryError: VibeVoice", retryable=True)]
+    )
+    worker = lw.Worker(CONFIG, rig.room, rig.adapter, rig.poster)
+    with pytest.raises(AdapterError) as err:
+        run(worker.run())
+    assert err.value.code == "resource_shortage"
+    assert rig.room.connected is None
+    states = [e["payload"] for e in events(rig.poster, "voice.state")]
+    assert states[-1] == {
+        "state": "resource_shortage",
+        "detail": "MemoryError: VibeVoice",
+        "retryable": True,
+    }
+    assert not events(rig.poster, "voice.error")
+
+
 def test_download_progress_is_posted_while_models_load(monkeypatch):
     rig = Rig()
     rig.adapter.states = iter(

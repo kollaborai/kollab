@@ -388,3 +388,23 @@ def test_the_speech_lock_is_released_by_the_thread_that_took_it(service, caplog,
     assert service.speech.closed
     assert "Audio stream failed" not in caplog.text
     assert lock_is_free(service.speech.lock)
+
+
+def test_readiness_names_an_out_of_memory_failure():
+    oom = map_readiness(
+        {"state": "error", "detail": "OutOfMemoryError: MPS backend out of memory"}
+    )
+    assert (oom.state, oom.retryable) == ("resource_shortage", True)
+    stt = map_readiness(
+        {
+            "state": "ready",
+            "transcription": {
+                "engine": "parakeet",
+                "state": "error",
+                "detail": "MemoryError: the model did not fit",
+            },
+            "speech": {"state": "ready"},
+        }
+    )
+    assert stt.state == "resource_shortage"
+    assert map_readiness({"state": "error", "detail": "boom"}).state == "error"
