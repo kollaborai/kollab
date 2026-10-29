@@ -48,7 +48,7 @@ a new voice turn and reach the aside, and the turn's later sentences are announc
 (`session.say`) once nobody speaks. Talking over the agent's voice, a reply or an
 announcement, still stops its turn: the stream closes and the Engine reads that as a
 talk-over. A spoken stop needs no model (`responder.is_stop`: "stop", "cancel that",
-"never mind"), and the Quick Model can say `STOP` too. Either stops the running turn
+"abort"), and the Quick Model can say `STOP` too ("never mind" is its call). Either stops the running turn
 as ESC does; the Engine marks the line (`"stop": true`) and the worker stops every
 turn still running there. The words of a stop are not queued.
 

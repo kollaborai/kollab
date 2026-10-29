@@ -31,8 +31,9 @@ ASIDE_PROMPT = (
 # A live GLM reply wrote "FORWARD — I've passed it on": dashes go with the colon.
 _VERDICT = re.compile(r"(ANSWER|FORWARD|STOP)\b[\s:*\-–—]*(.*)", re.IGNORECASE)
 # A spoken stop needs no model (#388): the whole utterance, never a word inside one.
+# "never mind" and "forget it" can drop a side question: the Quick Model decides those.
 _STOP = re.compile(
-    r"(?:(?:ok(?:ay)?|please|no)[ ,.!]+)*(?:stop|cancel|abort|never ?mind|forget it)"
+    r"(?:(?:ok(?:ay)?|please|no)[ ,.!]+)*(?:stop|cancel|abort)"
     r"(?:[ ,.!]+(?:it|that|this|now|please|everything|stop))*[ .!]*",
     re.IGNORECASE,
 )
@@ -115,7 +116,7 @@ def aside_snapshot(events: Iterable[dict], now: float, limit: int = MAX_EVENTS) 
 
 
 def is_stop(text: str) -> bool:
-    """The whole utterance asks the agent to stop: "stop", "okay, cancel that"."""
+    """The whole utterance asks the agent to stop: "stop", "okay, cancel that", "abort"."""
     return _STOP.fullmatch(text.strip()) is not None
 
 

@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back. The turn keeps running, and what it says next is spoken once nobody
   is talking. Words said in that quiet get the Quick Model's answer and never
   stop the work. Talking over the agent's voice still stops its turn, and
-  "stop", "cancel" or "never mind" stops it with no model call (#388).
+  "stop" or "cancel" stops it with no model call (#388).
 - Voice Quick Model: Settings → Voice → Quick Model (`/voice config` in the
   terminal) picks the model that answers out loud from any configured
   provider's models — the `/llm` list, so a fast OpenRouter model works while

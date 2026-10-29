@@ -126,8 +126,7 @@ def test_a_stop_verdict_and_a_dash_inside_the_quotes():
 @pytest.mark.parametrize(
     "said",
     ["stop", "Stop.", "okay stop", "Please stop.", "stop it", "Stop that now!",
-     "cancel", "Cancel that.", "never mind", "Nevermind.", "forget it",
-     "No, stop.", "stop, stop"],
+     "cancel", "Cancel that.", "abort", "No, stop.", "stop, stop"],
 )  # fmt: skip
 def test_a_whole_stop_needs_no_model(said):
     assert is_stop(said)
@@ -136,7 +135,7 @@ def test_a_whole_stop_needs_no_model(said):
 @pytest.mark.parametrize(
     "said",
     ["", "don't stop", "stop?", "can you stop", "stop the tests and run lint",
-     "what are you doing", "unstoppable"],
+     "what are you doing", "unstoppable", "nonstop", "never mind", "forget it"],
 )  # fmt: skip
 def test_a_stop_inside_other_words_is_no_stop(said):
     assert not is_stop(said)
