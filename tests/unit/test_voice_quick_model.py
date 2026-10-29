@@ -321,3 +321,40 @@ async def test_panel_never_offers_an_agent_cli_as_quick_model(tmp_path, monkeypa
     fields = {f["path"]: f for s in described["sections"] for f in s["fields"]}
     assert "agent-q" not in fields["quick_model"]["options"]
     assert "fast-or" in fields["quick_model"]["options"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_model_swap_still_puts_the_chat_profile_back(monkeypatch):
+    import kollabor_ai.fast_model as fast_model
+
+    def broken(provider, model):
+        raise RuntimeError("no copy")
+
+    monkeypatch.setattr(fast_model, "with_model", broken)
+    api, pm = make_world(
+        responder="fast-or",
+        loadouts={"fast-or": {"provider_profile": "orr", "model": "x-1b"}},
+    )
+    with pytest.raises(RuntimeError):
+        async with voice_provider(api, pm, {}):
+            pass
+    assert api._profile.name == "main"
+
+
+@pytest.mark.asyncio
+async def test_a_saved_agent_cli_quick_model_shows_as_same_as_chat(
+    tmp_path, monkeypatch
+):
+    from kollabor.panels.voice import VoicePanel
+
+    ctx, _, _ = make_panel_ctx(
+        tmp_path,
+        monkeypatch,
+        responder="agent-q",
+        loadouts=AGENT_LOADOUT,
+        extra=AGENT_CLI,
+    )
+    described = await VoicePanel().describe(ctx, {})
+    fields = {f["path"]: f for s in described["sections"] for f in s["fields"]}
+    assert fields["quick_model"]["value"] == ""
+    assert "agent-q" not in fields["quick_model"]["options"]

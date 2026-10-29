@@ -70,9 +70,9 @@ async def voice_provider(
         )
         if profile is None or profile.get_provider() == "acp":
             # A missing profile has no connection and an agent CLI (ACP) cannot
-            # answer one model call: the voice turn stays on the chat's model.
+            # answer one model call: the turn runs as if no quick model were set.
             logger.warning(
-                "quick model %r cannot run on provider profile %r; using the chat's model",
+                "quick model %r cannot run on provider profile %r; ignoring it",
                 quick.name,
                 quick.provider_profile,
             )
@@ -104,31 +104,36 @@ async def voice_provider(
             switched = True
     previous_provider = getattr(api_service, "_provider", None)
     swapped_model = False
-    if quick is not None:
-        from kollabor_ai.fast_model import with_model
-
-        provider = with_model(previous_provider, quick.model)
-        swapped_model = provider is not previous_provider
-        if swapped_model:
-            api_service._provider = provider
-        logger.info(
-            "voice turn on the quick model %r (%s via %s)",
-            quick.model,
-            quick.name,
-            quick.provider_profile,
-        )
-    config = getattr(getattr(api_service, "_provider", None), "config", None)
-    has_effort = config is not None and hasattr(config, "effort")
-    previous = config.effort if has_effort else None
-    if has_effort:
-        # No effort field means the model's own default (often medium), not off,
-        # so "off" asks for the lowest level whenever chat already sends an effort
-        # (the model takes one) and sends none otherwise.
-        # ponytail: providers read config.effort per request; a second concurrent
-        # call (curator, dreaming) during a voice call would see it too.
-        low = settings.get("voice_reasoning") == "low" or previous
-        config.effort = "low" if low else None
+    config = None
+    has_effort = False
+    previous = None
+    # ponytail: the turn swaps the one shared api_service (profile, provider,
+    # effort), as the voice profile switch always has, so any other call on this
+    # service while the turn runs rides the voice model too. Give the turn its own
+    # provider object if that ever bites.
     try:
+        if quick is not None:
+            from kollabor_ai.fast_model import with_model
+
+            provider = with_model(previous_provider, quick.model)
+            swapped_model = provider is not previous_provider
+            if swapped_model:
+                api_service._provider = provider
+            logger.info(
+                "voice turn on the quick model %r (%s via %s)",
+                quick.model,
+                quick.name,
+                quick.provider_profile,
+            )
+        config = getattr(getattr(api_service, "_provider", None), "config", None)
+        has_effort = config is not None and hasattr(config, "effort")
+        previous = config.effort if has_effort else None
+        if has_effort:
+            # No effort field means the model's own default (often medium), not
+            # off, so "off" asks for the lowest level whenever chat already sends
+            # an effort (the model takes one) and sends none otherwise.
+            low = settings.get("voice_reasoning") == "low" or previous
+            config.effort = "low" if low else None
         yield
     finally:
         if has_effort:

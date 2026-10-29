@@ -79,6 +79,7 @@ def _quick_model_choices(ctx, plugin):
     profile_manager, config_service = _llm_handle(ctx, plugin)
     current = ""
     labels = {"": "Same as Chat"}
+    agents: set[str] = set()
     if config_service is not None:
         value = config_service.get(RESPONDER_KEY, "")
         if isinstance(value, str) and value.strip():
@@ -89,10 +90,13 @@ def _quick_model_choices(ctx, plugin):
         for loadout in LoadoutManager(profile_manager, config_service).list_loadouts():
             profile = profile_manager.get_profile(loadout.provider_profile)
             if profile is not None and profile.get_provider() == "acp":
-                continue  # an agent CLI cannot answer one voice turn
+                agents.add(loadout.name)  # an agent CLI cannot answer one voice turn
+                continue
             labels.setdefault(
                 loadout.name, f"{loadout.name} · {loadout.provider_profile}"
             )
+    if current in agents:
+        current = ""  # the voice turn ignores it, so the panel shows what runs
     if current and current not in labels:
         labels[current] = f"{current} · missing provider profile"
     return current, list(labels), labels
