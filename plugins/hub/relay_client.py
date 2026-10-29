@@ -57,7 +57,13 @@ from .relay_state import (
     validate_public_key,
 )
 
-__all__ = ["PeerSessionEvent", "RelayClient", "RelayError", "parse_invite"]
+__all__ = [
+    "PeerSessionEvent",
+    "RelayConnectionEvent",
+    "RelayClient",
+    "RelayError",
+    "parse_invite",
+]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,16 +95,21 @@ APPLICATION_METHODS = frozenset(
         "peer.forward",
         "phone_session",
         "phone_http",
+        "phone_diagnostic",
     }
 )
 MAX_APPLICATION_PAYLOAD = 24 * 1024
 
 MAX_PHONE_APPLICATION_PAYLOAD = 320 * 1024
-_PHONE_APPLICATION_METHODS = frozenset({"phone_session", "phone_http"})
-
+MAX_PHONE_DIAGNOSTIC_PAYLOAD = 1024
+_PHONE_APPLICATION_METHODS = frozenset(
+    {"phone_session", "phone_http", "phone_diagnostic"}
+)
 
 
 def _application_payload_limit(method: str) -> int:
+    if method == "phone_diagnostic":
+        return MAX_PHONE_DIAGNOSTIC_PAYLOAD
     return (
         MAX_PHONE_APPLICATION_PAYLOAD
         if method in _PHONE_APPLICATION_METHODS
@@ -182,6 +193,69 @@ class PeerSessionEvent:
 PeerSessionListener = Callable[[PeerSessionEvent], None]
 
 
+RelayConnectionEventKind = Literal[
+    "socket_opened", "socket_closed", "reconnecting", "error"
+]
+RelayErrorKind = Literal[
+    "relay", "timeout", "dns", "tls", "socket", "http", "configuration", "unexpected"
+]
+RelayCloseReason = Literal[
+    "normal",
+    "going_away",
+    "protocol_error",
+    "unsupported_data",
+    "invalid_payload",
+    "policy_violation",
+    "message_too_big",
+    "mandatory_extension",
+    "internal_error",
+    "service_restart",
+    "try_again_later",
+    "bad_gateway",
+    "tls_handshake",
+    "application",
+    "unknown",
+]
+_CLOSE_REASON_BY_CODE: dict[int, RelayCloseReason] = {
+    1000: "normal",
+    1001: "going_away",
+    1002: "protocol_error",
+    1003: "unsupported_data",
+    1007: "invalid_payload",
+    1008: "policy_violation",
+    1009: "message_too_big",
+    1010: "mandatory_extension",
+    1011: "internal_error",
+    1012: "service_restart",
+    1013: "try_again_later",
+    1014: "bad_gateway",
+    1015: "tls_handshake",
+}
+
+
+def _close_reason_for_code(code: int | None) -> RelayCloseReason:
+    if type(code) is not int:
+        return "unknown"
+    return _CLOSE_REASON_BY_CODE.get(
+        code, "application" if 3000 <= code <= 4999 else "unknown"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RelayConnectionEvent:
+    """Safe transport lifecycle data; never includes URL or exception text."""
+
+    kind: RelayConnectionEventKind
+    close_code: int | None = None
+    close_reason: RelayCloseReason | None = None
+    retry_count: int | None = None
+    retry_seconds: float | None = None
+    error_kind: RelayErrorKind | None = None
+
+
+RelayConnectionListener = Callable[[RelayConnectionEvent], None]
+
+
 class RelayClient:
     def __init__(
         self, workspace: Path, state_dir: Path | None = None, label: str | None = None
@@ -204,6 +278,9 @@ class RelayClient:
         self._peers: dict[str, str] = {}
         self._peer_session_listeners: dict[int, PeerSessionListener] = {}
         self._next_peer_session_listener_id = 0
+        self._connection_listeners: dict[int, RelayConnectionListener] = {}
+        self._next_connection_listener_id = 0
+        self._retry_count = 0
         self._pending: dict[str, tuple[str, asyncio.Future]] = {}
         self._application_pending: dict[str, _ApplicationPending] = {}
         self._request_handler: RequestHandler | None = None
@@ -307,6 +384,38 @@ class RelayClient:
                 # Listener failures must not interrupt revocation or transport
                 # cleanup, and callback exception text may contain private data.
                 _LOGGER.warning("relay peer-session listener failed")
+
+    def add_connection_listener(
+        self, listener: RelayConnectionListener
+    ) -> Callable[[], None]:
+        """Subscribe to safe socket lifecycle events; the returned removal is idempotent."""
+        if not callable(listener):
+            raise TypeError("connection listener must be callable")
+        token = self._next_connection_listener_id
+        self._next_connection_listener_id += 1
+        self._connection_listeners[token] = listener
+        active = True
+
+        def remove() -> None:
+            nonlocal active
+            if active:
+                active = False
+                self._connection_listeners.pop(token, None)
+
+        return remove
+
+    def _notify_connection_listeners(self, event: RelayConnectionEvent) -> None:
+        for listener in tuple(self._connection_listeners.values()):
+            try:
+                result = listener(event)
+                if inspect.isawaitable(result):
+                    close = getattr(result, "close", None)
+                    if callable(close):
+                        close()
+                    raise TypeError("connection listeners must be synchronous")
+            except Exception:
+                # Callback exception text may contain relay URLs or other secrets.
+                _LOGGER.warning("relay connection listener failed")
 
     def join_invite(self, token: str) -> str:
         if self._task is not None and not self._task.done():
@@ -724,6 +833,10 @@ class RelayClient:
         self._state = "disconnected"
 
     def _clear_connection(self):
+        ws = self._ws
+        close_code = getattr(ws, "close_code", None) if ws is not None else None
+        if type(close_code) is not int or not 1000 <= close_code <= 4999:
+            close_code = None
         previous_local_session = self._session_id or None
         previous_peers = dict(self._peers)
         approved = set(self.state.approvals)
@@ -754,6 +867,33 @@ class RelayClient:
                     "local_disconnected", None, previous_local_session, None
                 )
             )
+        if ws is not None:
+            self._notify_connection_listeners(
+                RelayConnectionEvent(
+                    "socket_closed",
+                    close_code=close_code,
+                    close_reason=_close_reason_for_code(close_code),
+                )
+            )
+
+    @staticmethod
+    def _connection_error_kind(error: BaseException) -> RelayErrorKind:
+        name = type(error).__name__.casefold()
+        if isinstance(error, TimeoutError) or "timeout" in name:
+            return "timeout"
+        if isinstance(error, dns.exception.DNSException):
+            return "dns"
+        if isinstance(error, ssl.SSLError) or any(
+            part in name for part in ("certificate", "tls", "ssl")
+        ):
+            return "tls"
+        if isinstance(error, aiohttp.ClientResponseError):
+            return "http"
+        if isinstance(error, RelayError):
+            return "relay"
+        if isinstance(error, (aiohttp.ClientError, OSError)):
+            return "socket"
+        return "unexpected"
 
     async def _run(self):
         delay = 1.0
@@ -765,6 +905,7 @@ class RelayClient:
             except asyncio.CancelledError:
                 raise
             except (
+                RelayError,
                 aiohttp.ClientError,
                 dns.exception.DNSException,
                 OSError,
@@ -780,6 +921,11 @@ class RelayClient:
                     if isinstance(exc, RelayError)
                     else "relay transport unavailable"
                 )
+                self._notify_connection_listeners(
+                    RelayConnectionEvent(
+                        "error", error_kind=self._connection_error_kind(exc)
+                    )
+                )
             finally:
                 was_online = self._state == "online"
                 self._clear_connection()
@@ -787,8 +933,21 @@ class RelayClient:
             if self._closed:
                 break
             self._state = "reconnecting"
-            delay = 1.0 if was_online else min(delay * 2, 30.0)
-            await asyncio.sleep(delay + secrets.randbelow(1000) / 1000)
+            if was_online:
+                delay = 1.0
+                self._retry_count = 0
+            else:
+                delay = min(delay * 2, 30.0)
+            self._retry_count += 1
+            retry_seconds = delay + secrets.randbelow(1000) / 1000
+            self._notify_connection_listeners(
+                RelayConnectionEvent(
+                    "reconnecting",
+                    retry_count=self._retry_count,
+                    retry_seconds=retry_seconds,
+                )
+            )
+            await asyncio.sleep(retry_seconds)
 
     async def _connection(self):
         context = ssl.create_default_context(cafile=self._ca or None)
@@ -872,6 +1031,9 @@ class RelayClient:
                 self._set_peers(await self._receive_frame(ws))
                 self._state, self._error = "online", ""
                 self._first_attempt.set()
+                self._notify_connection_listeners(
+                    RelayConnectionEvent("socket_opened")
+                )
             try:
                 async for message in ws:
                     if message.type == aiohttp.WSMsgType.TEXT:
