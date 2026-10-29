@@ -615,6 +615,32 @@ async def test_lifecycle_history_redacts_pairing_material_and_hashes_actor(setup
 
 
 @pytest.mark.asyncio
+async def test_revoke_and_denied_events_carry_their_actor_and_cause(setup_link):
+    manager, offer, *_ = setup_link
+    actor = {
+        "route": "/phonelink",
+        "method": "POST",
+        "client_kind": "webui",
+        "remote_addr": "127.0.0.1",
+        "user_agent": "Firefox/123.0",
+        "confirmation_shown": True,
+    }
+
+    with pytest.raises(PhoneLinkError):
+        await manager.revoke("not-a-phone", actor=actor)
+    await secure_phone(setup_link)
+    await manager.revoke(offer["id"], actor=actor)
+    history = await manager.event_history()
+
+    denied = next(event for event in history["events"] if event["event"] == "denied")
+    assert denied["cause"] == "phone_not_saved"
+    assert denied["actor"]
+    revoked = next(event for event in history["events"] if event["event"] == "revoked")
+    assert revoked["cause"] == "user_action"
+    assert revoked["actor"]
+
+
+@pytest.mark.asyncio
 async def test_phone_diagnostics_are_allowlisted_and_invalid_payload_is_not_recorded(
     setup_link, caplog
 ):
