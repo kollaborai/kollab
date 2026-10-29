@@ -236,7 +236,11 @@ class ContextCompactionPlugin(BasePlugin):
                     "min_value": 1,
                     "max_value": 20,
                     "step": 1,
-                    "help": "Minimum human messages before compaction can fire",
+                    "help": (
+                        "Human messages before compaction can fire. "
+                        "Over the threshold, older messages to summarize are enough "
+                        "when the provider reports token usage."
+                    ),
                 },
                 {
                     "type": "slider",
@@ -1224,7 +1228,7 @@ class ContextCompactionPlugin(BasePlugin):
 
         Uses a dual-gate approach:
             1. Token gate: prompt_tokens exceeds token_threshold_k
-            2. Turn gate: at least min_human_turns have occurred
+            2. Turn gate: at least min_human_turns have occurred, or a reported count has older messages to summarize
 
         Both gates must pass. This prevents compaction from firing on
         a 2-message conversation with a huge system prompt, and also
@@ -1275,7 +1279,12 @@ class ContextCompactionPlugin(BasePlugin):
             for msg in history
             if msg.role == "user" and not msg.metadata.get("hub_message")
         )
-        if human_turns < min_turns:
+        # A reported count over the threshold compacts once older messages can
+        # be summarized, even before min_human_turns: a hub agent whose work
+        # comes in one brief has few. The estimate runs ~2.3x high, so it waits.
+        if human_turns < min_turns and (
+            estimated or self._find_split_point(history, self._keep_recent_count()) < 2
+        ):
             return False
 
         # Determine threshold source for logging
