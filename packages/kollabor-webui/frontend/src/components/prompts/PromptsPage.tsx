@@ -484,11 +484,11 @@ export function PromptsView(props: {
   );
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col lg:flex-row" data-testid="prompts-page">
+    <div className="relative flex min-h-0 flex-1 flex-col lg:flex-row lg:gap-3 lg:px-6 lg:pb-6" data-testid="prompts-page">
       <aside
         aria-label="Libraries and roles"
         data-testid="prompts-sidebar"
-        className="bg-sidebar hidden w-52 shrink-0 overflow-y-auto px-2 py-3 lg:block"
+        className="bg-sidebar hidden w-52 shrink-0 overflow-y-auto rounded-lg px-2 py-3 lg:block"
       >
         {props.loadError ? (
           <p role="alert" className="text-destructive px-3 py-2 text-xs break-words">
@@ -554,7 +554,7 @@ export function PromptsView(props: {
       <div
         aria-label="Prompt sections"
         data-testid="prompts-sections"
-        className="flex min-h-0 w-full flex-1 flex-col lg:w-[22rem] lg:flex-none"
+        className="flex min-h-0 w-full flex-1 flex-col lg:w-[22rem] lg:flex-none lg:overflow-hidden lg:rounded-lg lg:bg-card"
       >
         <div className="flex flex-col gap-2 px-4 pt-3 pb-2">
           {picker}
@@ -750,7 +750,7 @@ function SectionEditor(props: Parameters<typeof PromptsView>[0]) {
       aria-label="Section editor"
       data-testid="prompts-editor"
       className={cn(
-        "bg-card flex min-w-0 flex-col gap-3 px-4 pt-3 pb-4 lg:static lg:flex lg:flex-1 lg:px-6",
+        "bg-card flex min-w-0 flex-col gap-3 px-4 pt-3 pb-4 lg:static lg:flex lg:flex-1 lg:rounded-lg lg:px-6",
         props.editorOpen ? "absolute inset-0 z-10 md:left-auto md:w-[36rem]" : "hidden lg:flex",
       )}
     >

@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`kollab --hub resume --confirm`). Also `/connect halt|resume` and Settings →
   Network → Halt and Resume. Agents and skills are never touched
   (`docs/features/network-kill-switch.md`, #349).
+- Web UI Settings: long forms (Configuration, Voice) are a split view on wide
+  screens, the section list and search on the left and the picked section on
+  the right; the desktop dialog has a liquid-metal border and the Prompts
+  tab's panes are rounded with margins (#371).
+
+### Changed
+- Gems are born furry 85% of the time (hair 10%, bare 5%), the same on every
+  device, and fur color is drawn too. Gems recorded bare are dressed once at
+  the new odds; your own picks never change (#373).
 
 ### Security
 - Hub capture (`/hub capture`, `kollab --hub capture`, the `hub_capture` tool)
@@ -28,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Save paths under the Settings save buttons no longer break mid-word: the
+  home folder reads as `~` and a long path shows its last folders, with the
+  full path on hover (#371).
 - Web UI help is a hover, not a link: the "Learn about profiles", "Learn more
   about workspaces" and PhoneLink "How It Works" links are gone. Hovering
   Manage Profiles, the workspace picker's Use button or PhoneLink's connection

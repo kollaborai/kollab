@@ -37,6 +37,7 @@ def no_real_presence(monkeypatch):
     import kollabor_engine.hub_bridge as hub_bridge  # type: ignore[import-not-found]
 
     monkeypatch.setattr(hub_bridge, "_find_presence_dirs", lambda: [])
+    monkeypatch.setattr("plugins.hub.presence.live_agents_on_machine", lambda: [])
 
 
 @pytest.fixture(autouse=True)

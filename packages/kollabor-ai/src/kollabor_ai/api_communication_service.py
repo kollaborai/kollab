@@ -299,6 +299,9 @@ class APICommunicationService:
             if (
                 not isinstance(item, dict)
                 or item.get("type") != "image_generation_call"
+                # A service-reported failed image has no artifact to save; the
+                # transformer turns it into text, so it is not "expected".
+                or (item.get("status") == "failed" and not item.get("result"))
             ):
                 continue
             item_id = item.get("id")
@@ -308,6 +311,17 @@ class APICommunicationService:
                 image_ids.add(item_id)
             count += 1
         return count
+
+    @staticmethod
+    def _reported_failed_image(raw_response: Any) -> bool:
+        """True when the service returned an image item marked failed."""
+        output = raw_response.get("output") if isinstance(raw_response, dict) else None
+        return isinstance(output, list) and any(
+            isinstance(item, dict)
+            and item.get("type") == "image_generation_call"
+            and item.get("status") == "failed"
+            for item in output
+        )
 
     def _verify_generated_image_artifacts(
         self,
@@ -324,7 +338,13 @@ class APICommunicationService:
         ):
             return
 
-        if expected == 0 and image_generation_signaled:
+        # Progress with no item at all means the stream lost it; a failed item
+        # the service reported already reaches the model as text.
+        if (
+            expected == 0
+            and image_generation_signaled
+            and not self._reported_failed_image(raw_response)
+        ):
             provider = (
                 getattr(self._provider, "provider_name", None)
                 or getattr(self, "provider_type", None)

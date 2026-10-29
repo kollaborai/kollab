@@ -634,6 +634,12 @@ chat says why:
 server-kollab uses trust manual: its agents take requests only through /connect authorize
 ```
 
+When a network-status probe does not answer, the sidebar checks whether an
+eligible local agent already runs in that network's hub before starting a
+carrier. A running or still-starting local agent prevents another launch;
+unknown process state also prevents one. Only a confirmed empty hub starts a
+carrier. If the existing agent cannot answer, the chat reports the open failure.
+
 An open agent is the control a person has at that keyboard: on a network
 shared with other people, run `trust agents` there, or revoke their devices.
 The server's own screen says `mac-kollab opened koordinator from the

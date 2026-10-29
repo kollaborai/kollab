@@ -3,7 +3,8 @@
   "tools": ["*"],
   "skills": [
     "debugging",
-    "kollab-development"
+    "kollab-development",
+    "kollabor-harness"
   ],
   "default_skills": ["kollab-development"],
   "vault_enabled": true
