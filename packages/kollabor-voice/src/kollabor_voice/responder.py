@@ -14,10 +14,21 @@ MAX_EVENTS = 8
 
 
 def responder_model(config: Any) -> Optional[str]:
-    """Fast model id for voice replies, or None to use the session model."""
-    from kollabor_ai.fast_model import resolve_fast_model
+    """Quick-model loadout name for voice replies, or None to use the session model.
 
-    return resolve_fast_model(config, RESPONDER_KEY)
+    A loadout name carries its own provider profile (endpoint and credentials),
+    so the quick model may run on a different provider than the chat — an
+    OpenRouter fast model while the chat itself stays where it is. Resolution
+    is the /llm one: an explicit loadout, else an implicit per-provider model.
+    No kollabor.llm.fast_model fallback: that key holds a bare model id for
+    compaction and dreaming, which is not a loadout name.
+    """
+    if config is None:
+        return None
+    value = config.get(RESPONDER_KEY, "")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def activity_snapshot(events: Iterable[dict], limit: int = MAX_EVENTS) -> str:

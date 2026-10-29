@@ -15,3 +15,7 @@ test("an option with no label, or a field with no labels at all, reads as itself
   assert.equal(optionLabel({}, "none"), "none");
   assert.equal(optionLabel(field, ""), "");
 });
+
+test("the empty option reads as the daemon's label for it (Same as Chat)", () => {
+  assert.equal(optionLabel({ option_labels: { "": "Same as Chat" } }, ""), "Same as Chat");
+});

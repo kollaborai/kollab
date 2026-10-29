@@ -68,14 +68,20 @@ test("voice lesson documents the Dream Model control without overstating voice i
   // Credential reuse, not new auth.
   assert.match(guidance, /endpoint and credentials/);
 
-  // Scope truth: dreaming only; voice replies are NOT affected.
+  // Scope truth: dreaming only; voice replies are the Quick Model's job.
   assert.match(guidance, /dreaming only/);
-  assert.match(guidance, /voice-responder call path is not wired/);
   assert.match(guidance, /does not change voice replies/);
+
+  // The Quick Model control: where it lives and what it accepts.
+  assert.match(guidance, /Settings → Voice → Quick Model/);
+  assert.match(guidance, /\/voice config → Quick Model/);
+  assert.match(guidance, /any configured provider's model/);
+  assert.match(guidance, /OpenRouter/);
+  assert.match(guidance, /Same as Chat/);
 
   // Guard against invented integration claims.
   assert.doesNotMatch(guidance, /voice (?:replies|responses) (?:now )?use/);
-  assert.doesNotMatch(guidance, /fast model for (?:your )?voice/i);
+  assert.doesNotMatch(guidance, /not wired/);
 });
 
 test("voice lesson keeps its microphone lifecycle steps intact", () => {
