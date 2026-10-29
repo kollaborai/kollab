@@ -359,5 +359,13 @@ async def test_remote_page_cannot_manage_phones_through_proxy(monkeypatch):
             app, "10.8.0.2", method, hidden_path, headers={"Origin": TEST_ORIGIN}
         )
         assert hidden.status_code == 403, hidden_path
+
+    # An engine behind a path keeps the guard: a request may not climb out of it.
+    prefixed = make_app(monkeypatch, "http://127.0.0.1:7433/api", engine)
+    for hidden_path in ("/engine/phonelink", "/engine/..%2fphonelink"):
+        hidden = await call(
+            prefixed, "10.8.0.2", "GET", hidden_path, headers={"Origin": TEST_ORIGIN}
+        )
+        assert hidden.status_code == 403, hidden_path
     assert local_response.status_code == 200
     assert sessions_response.status_code == 200

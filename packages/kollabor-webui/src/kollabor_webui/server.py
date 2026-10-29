@@ -299,8 +299,10 @@ def create_app(
         # Judge the path the engine will route: httpx has dropped the query and
         # the fragment and resolved dot segments, so an encoded ?, # or .. cannot
         # carry a phone request past this check.
-        base = engine.base_url.path.rstrip("/")
-        routed = posixpath.normpath(upstream.url.path[len(base) :] or "/")
+        routed = posixpath.normpath(upstream.url.path or "/")
+        base = posixpath.normpath(engine.base_url.path or "/")
+        if base != "/" and (routed == base or routed.startswith(base + "/")):
+            routed = routed[len(base) :] or "/"
         first = routed.lstrip("/").split("/", 1)[0]
         if first.lower() == "phonelink" and not _is_local(request):
             return JSONResponse(
