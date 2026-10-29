@@ -434,12 +434,15 @@ def _git_subcommand(argv: Sequence[str]) -> int | None:
 
 
 def _recursive_or_forced(tokens: Sequence[str]) -> bool:
-    """rm-style -r or -f in any spelling (tokens are lowercased): --recursive, --force, -r, -f, -rf, -rv..."""
-    return any(
-        token in {"--recursive", "--force"}
-        or (token.startswith("-") and not token.startswith("--") and ("r" in token[1:] or "f" in token[1:]))
-        for token in tokens
-    )
+    """rm-style -r or -f in any spelling (tokens are lowercased): -r, -f, -rf, -rv, and --recursive or --force
+    or any abbreviation of them, which git and GNU rm accept (--f, --rec)."""
+    for token in tokens:
+        if token.startswith("--"):
+            if len(token) > 2 and ("--recursive".startswith(token) or "--force".startswith(token)):
+                return True
+        elif token.startswith("-") and ("r" in token[1:] or "f" in token[1:]):
+            return True
+    return False
 
 
 def _gh_command(tokens: Sequence[str]) -> tuple[str, ...]:
@@ -491,8 +494,9 @@ def _is_hard_blocked(argv: Sequence[str]) -> bool:
         if subcommand == "branch" and any(token in {"-d", "--delete"} for token in rest):
             return True
         if subcommand == "rm":
-            # --cached only touches the index; after "--" it is a pathspec, not the option
-            options = rest[: rest.index("--")] if "--" in rest else rest
+            # --cached only touches the index; after a separator it is a pathspec, not the option
+            cut = next((at for at, token in enumerate(rest) if token in {"--", "--end-of-options"}), len(rest))
+            options = rest[:cut]
             if "--cached" not in options and _recursive_or_forced(rest):
                 return True
     if executable == "gh" and _gh_command(tokens) == ("pr", "merge"):
