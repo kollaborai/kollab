@@ -98,6 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Windows: stdio MCP servers start when their command is a `.cmd` launcher such as
+  `npx`, and backslashes in a Windows path in an MCP command are kept (#428).
 - Settings → Voice: the path under **Save for This Device** names the file each
   changed row is saved to, so Quick Model, Personality, Reasoning and
   Instructions no longer show `preferences.json` (#412).
