@@ -110,3 +110,32 @@ describe("expanding a tool loads its full output", () => {
     expect(recovered).not.toContain(errorMessage);
   });
 });
+
+describe("history output cache", () => {
+  beforeEach(() => {
+    mocks.getHistoryOutput.mockReset();
+  });
+
+  it("shares one request between two cards loading the same output", async () => {
+    let finish: (value: { session_id: string; content: string }) => void = () => {};
+    mocks.getHistoryOutput.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const first = fetchHistoryOutput("session-shared", "opaque-output-ref");
+    const second = fetchHistoryOutput("session-shared", "opaque-output-ref");
+    finish({ session_id: "session-shared", content: "one full output" });
+    await expect(Promise.all([first, second])).resolves.toEqual(["one full output", "one full output"]);
+    expect(mocks.getHistoryOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the 20 most recently loaded outputs and drops the oldest", async () => {
+    mocks.getHistoryOutput.mockImplementation(async (sessionId: string, reference: string) => ({
+      session_id: sessionId,
+      content: `full ${reference}`,
+    }));
+    for (let i = 0; i < 21; i += 1) await fetchHistoryOutput("session-bound", `ref-${i}`);
+    expect(mocks.getHistoryOutput).toHaveBeenCalledTimes(21);
+    await fetchHistoryOutput("session-bound", "ref-20");
+    expect(mocks.getHistoryOutput).toHaveBeenCalledTimes(21);
+    await fetchHistoryOutput("session-bound", "ref-0");
+    expect(mocks.getHistoryOutput).toHaveBeenCalledTimes(22);
+  });
+});

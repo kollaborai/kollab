@@ -35,6 +35,10 @@ const historyOutputApi = new EngineApi();
 
 /** Full tool outputs already loaded once, keyed by sessionId + "\u0000" + reference. */
 const historyOutputCache = new Map<string, unknown>();
+/** Outputs can be megabytes: keep the most recently loaded few, oldest out first. */
+const HISTORY_OUTPUT_CACHE_LIMIT = 20;
+/** Loads in flight, so two cards showing the same output share one request. */
+const pendingHistoryOutputs = new Map<string, Promise<unknown>>();
 
 /** References whose last load failed, so a reopened card shows Retry instead of silently refetching. */
 const failedHistoryOutputs = new Set<string>();
@@ -50,15 +54,26 @@ async function fetchHistoryOutput(
 ): Promise<unknown> {
   const key = historyOutputKey(sessionId, reference);
   if (historyOutputCache.has(key)) return historyOutputCache.get(key);
-  try {
-    const response = await api.getHistoryOutput(sessionId, reference);
-    historyOutputCache.set(key, response.content);
-    failedHistoryOutputs.delete(key);
-    return response.content;
-  } catch (error) {
-    failedHistoryOutputs.add(key);
-    throw error;
-  }
+  const pending = pendingHistoryOutputs.get(key);
+  if (pending) return pending;
+  const load = (async () => {
+    try {
+      const response = await api.getHistoryOutput(sessionId, reference);
+      historyOutputCache.set(key, response.content);
+      if (historyOutputCache.size > HISTORY_OUTPUT_CACHE_LIMIT) {
+        historyOutputCache.delete(historyOutputCache.keys().next().value as string);
+      }
+      failedHistoryOutputs.delete(key);
+      return response.content;
+    } catch (error) {
+      failedHistoryOutputs.add(key);
+      throw error;
+    } finally {
+      pendingHistoryOutputs.delete(key);
+    }
+  })();
+  pendingHistoryOutputs.set(key, load);
+  return load;
 }
 
 const pressable = "active:scale-[0.98]";
