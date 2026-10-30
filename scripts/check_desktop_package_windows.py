@@ -92,12 +92,19 @@ def quit_app(app: Path, env: dict[str, str], process: subprocess.Popen, log: Pat
     wait_log(process, log, "second launch asked to quit")
 
 
-def report_webui(port: str, table: dict[int, tuple[int, str]], waited: float) -> None:
-    """Why the app reported no web UI: every kollab process alive, then whether the UI answers in the next 60 s."""
-    print(f"no web UI reported {waited:.0f} s after the app started; kollab processes alive:")
-    for pid, (ppid, command) in sorted(table.items()):
-        if "kollab" in command.lower():
-            print(f"  {pid} (parent {ppid}) {command[:220]}")
+def report_webui(env: dict[str, str], app: int, table: dict[int, tuple[int, str]], waited: float) -> None:
+    """Why the app reported no web UI: every process under it, whether the UI answers in the next 60 s, and where
+    the same web UI command stops when run again (its stack after 30 s, and its imports)."""
+    port = env["KOLLAB_WEBUI_PORT"]
+    print(f"no web UI reported {waited:.0f} s after the app started; processes under it:")
+    under, webui = {app}, ""
+    while grown := {pid for pid, (ppid, _) in table.items() if ppid in under and pid not in under}:
+        under |= grown
+    for pid in sorted(under - {app}):
+        ppid, command = table[pid]
+        print(f"  {pid} (parent {ppid}) {command[:220]}")
+        if "kollabor_webui import main" in command:
+            webui = command
     start = time.monotonic()
     while True:
         try:
@@ -110,6 +117,27 @@ def report_webui(port: str, table: dict[int, tuple[int, str]], waited: float) ->
                 print(f"the web UI on port {port} never answered: {exc}")
                 return
         time.sleep(3)
+    if not webui:
+        print("no web UI process to run again")
+        return
+    python = webui.split('"')[1] if webui.startswith('"') else webui.split()[0]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        rerun = {**env, "KOLLAB_WEBUI_PORT": str(probe.getsockname()[1]), "PYTHONUNBUFFERED": "1"}
+    code = (
+        "import faulthandler; faulthandler.dump_traceback_later(30, exit=True); "
+        "from kollabor_webui import main; main()"
+    )
+    print(f"--- {python} -X importtime -c <web UI main, stack dump after 30 s>")
+    try:
+        done = subprocess.run(
+            [python, "-X", "importtime", "-c", code], env=rerun, capture_output=True, encoding="utf-8",
+            errors="replace", timeout=90, cwd=env.get("USERPROFILE"),
+        )
+        print(f"exit {done.returncode}; output:\n{done.stdout[-3000:]}")
+        print("\n".join(done.stderr.splitlines()[-80:]))
+    except subprocess.TimeoutExpired as exc:
+        print(f"still running after 90 s; last stderr:\n{str(exc.stderr or '')[-4000:]}")
 
 
 def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path) -> None:
@@ -149,7 +177,7 @@ def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path
         except Exception:
             if not owned:  # the app never reported its web UI; the report must not hide that failure
                 try:
-                    report_webui(env["KOLLAB_WEBUI_PORT"], process_table(), time.monotonic() - started)
+                    report_webui(env, process.pid, process_table(), time.monotonic() - started)
                 except Exception as exc:
                     print(f"(could not report on the web UI: {exc})")
             runtime_log = Path(os.environ.get("LOCALAPPDATA", "")) / "ai.kollabor.kollab" / "logs" / "webui.log"
