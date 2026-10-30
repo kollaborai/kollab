@@ -64,6 +64,10 @@ jobs:
       - name: Kill switch smoke
         run: uv run python scripts/windows_halt_smoke.py --kollab .venv/Scripts/kollab.exe
 
+      # The #439 gate: a halt on this Windows machine stops the other machine of its network too.
+      - name: Relay halt smoke
+        run: uv run python scripts/windows_relay_halt_smoke.py --kollab .venv/Scripts/kollab.exe
+
       - name: Engine smoke
         run: uv run python scripts/engine_smoke.py
 
