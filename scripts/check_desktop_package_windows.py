@@ -92,6 +92,10 @@ def quit_app(app: Path, env: dict[str, str], process: subprocess.Popen, log: Pat
 def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path) -> None:
     """The app starts its bundled runtime; --quit stops it through stdin and leaves no runtime process."""
     env = {k: v for k, v in env.items() if k != "KOLLAB_DESKTOP_SELFTEST_CLOSE"}
+    # The build's own smoke ran this binary under a home it then deleted, and the scie cache still points at
+    # the venv it made there: the Windows pin (pex 2.98.2) cannot recover from that (pex#3226). A fresh scie
+    # base gives this run what a new user's first launch gets.
+    env["SCIE_BASE"] = str(root / "scie-base")
     with socket.socket() as probe:  # a free port with no web UI on it, so the app starts its own
         probe.bind(("127.0.0.1", 0))
         env["KOLLAB_WEBUI_PORT"] = str(probe.getsockname()[1])
