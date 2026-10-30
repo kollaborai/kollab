@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,7 +120,7 @@ async def open_stream(path: str):
     if os.name == "nt":
         from kollabor_config import local_ipc
 
-        return local_ipc.connect(path)
+        return await local_ipc.connect(path)  # connect() is async: awaiting returns (reader, writer)
     return await asyncio.open_unix_connection(path)
 
 
@@ -462,6 +463,9 @@ def main() -> int:
         hosts_add()  # step 3: discovery dials https://relay.win-smoke.test, so it must resolve to loopback
         relay_halt_smoke(args.kollab, homes, projects, envs, logs)  # steps 4-9
     except BaseException:
+        error = sys.exc_info()[1]
+        print(f"--- smoke step raised {type(error).__name__}: {error}")
+        print(traceback.format_exc())
         for path in [*sorted(base.rglob("kollab.log")), base / "relay.log", *logs.values()]:
             if path.exists():
                 print(f"--- last 60 lines of {path}")
