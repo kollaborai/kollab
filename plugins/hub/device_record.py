@@ -53,6 +53,14 @@ def origin_slug(origin: str) -> str:
 
 
 def _check_private_dir(path: Path) -> None:
+    if os.name == "nt":  # no POSIX owner or mode bits: private_fs checks the owner and the access list
+        from kollabor_config import private_fs
+
+        try:
+            private_fs.check_private_dir(path)
+        except OSError as exc:
+            raise DeviceRecordError("device record directories must be private") from exc
+        return
     info = path.lstat()
     if (
         not stat.S_ISDIR(info.st_mode)
@@ -63,6 +71,14 @@ def _check_private_dir(path: Path) -> None:
 
 
 def _ensure_private_dir(path: Path) -> Path:
+    if os.name == "nt":  # private_fs makes the folder private (owner and access list), then checks it
+        from kollabor_config import private_fs
+
+        try:
+            private_fs.ensure_private_dir(path)
+        except OSError as exc:
+            raise DeviceRecordError("device record directories must be private") from exc
+        return path
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     _check_private_dir(path)
@@ -70,10 +86,18 @@ def _ensure_private_dir(path: Path) -> Path:
 
 
 def _read_private(path: Path, limit: int) -> bytes:
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if os.name == "nt":  # no O_NOFOLLOW there: private_fs refuses a link or junction itself
+        from kollabor_config import private_fs
+
+        descriptor = private_fs.open_nofollow(path, os.O_RDONLY)
+    else:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if (
+        if os.name == "nt":
+            if not stat.S_ISREG(info.st_mode) or not private_fs.owned_private(path, info):
+                raise DeviceRecordError("device record files must be private and owned by this user")
+        elif (
             not stat.S_ISREG(info.st_mode)
             or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) & 0o077
