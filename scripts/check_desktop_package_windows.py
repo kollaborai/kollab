@@ -6,7 +6,7 @@ Linux smoke (scripts/check_desktop_package.py), which checks the native shell,
 the installed layout and the WebView2 window; a second launch with ``--quit``
 ends it. Then the app starts its bundled runtime itself and ``--quit`` ends it
 again: the app closes the runtime's stdin, the runtime stops its engine and UI
-server, and no runtime process may be left.
+server, the engine logs its shutdown, and no runtime process may be left.
 """
 
 from __future__ import annotations
@@ -39,7 +39,8 @@ def process_table() -> dict[int, tuple[int, str]]:
             " | ConvertTo-Csv -NoTypeInformation",
         ],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=True,
     )
@@ -62,6 +63,25 @@ def descendants(table: dict[int, tuple[int, str]], root: int) -> dict[int, str]:
     return found
 
 
+def runtime_version(runtime: Path, env: dict[str, str]) -> None:
+    """Read the runtime's version the way the app does: no console window, no stdin, the app's environment."""
+    shown = subprocess.run(
+        [str(runtime), "--version"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=600,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    out = shown.stdout.decode(errors="replace")
+    err = shown.stderr.decode(errors="replace")
+    print(f"runtime --version as the app runs it: exit {shown.returncode}\n{out}{err[-4000:]}")
+    last = (out.split() or [""])[-1]
+    assert shown.returncode == 0 and all(part[:1].isdigit() for part in last.split(".")), (
+        "the app cannot read the runtime's version, so it would show the install page"
+    )
+
+
 def quit_app(app: Path, env: dict[str, str], process: subprocess.Popen, log: Path) -> None:
     """A second launch with --quit ends the running app."""
     subprocess.run([str(app), "--quit"], env=env, capture_output=True, timeout=30)
@@ -69,12 +89,13 @@ def quit_app(app: Path, env: dict[str, str], process: subprocess.Popen, log: Pat
     wait_log(process, log, "second launch asked to quit")
 
 
-def quit_owned_runtime(app: Path, env: dict[str, str], root: Path) -> None:
+def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path) -> None:
     """The app starts its bundled runtime; --quit stops it through stdin and leaves no runtime process."""
     env = {k: v for k, v in env.items() if k != "KOLLAB_DESKTOP_SELFTEST_CLOSE"}
     with socket.socket() as probe:  # a free port with no web UI on it, so the app starts its own
         probe.bind(("127.0.0.1", 0))
         env["KOLLAB_WEBUI_PORT"] = str(probe.getsockname()[1])
+    runtime_version(runtime, env)
     log = root / "desktop-runtime.log"
     owned: dict[int, str] = {}
     with log.open("wb") as stream:
@@ -92,6 +113,11 @@ def quit_owned_runtime(app: Path, env: dict[str, str], root: Path) -> None:
             table = process_table()
             left = {pid: command for pid, command in owned.items() if table.get(pid, (0, ""))[1] == command}
             assert not left, f"Quit left the runtime running: {left}"
+            # The engine's lifespan ends with this line: a stopped engine never writes it.
+            shutdown = "Engine shutdown - persistent WebUI agents detached"
+            logs = [p for p in root.rglob("*.log") if shutdown in p.read_text(errors="replace")]
+            assert logs, f"the engine never logged {shutdown!r}: it was ended, not shut down"
+            print(f"engine shutdown logged in {logs[0].relative_to(root)}")
         except Exception:
             runtime_log = Path(os.environ.get("LOCALAPPDATA", "")) / "ai.kollabor.kollab" / "logs" / "webui.log"
             if runtime_log.is_file():
@@ -145,7 +171,7 @@ def main() -> None:
                         process.wait(timeout=30)
             print(log.read_text(errors="replace"))
             server.shutdown()
-        quit_owned_runtime(app, env, root)
+        quit_owned_runtime(app, runtime, env, root)
     print("passed installed app: rendered, close to tray, second launch, clean quit")
 
 

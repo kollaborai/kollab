@@ -209,19 +209,32 @@ fn home_dir() -> String {
 }
 
 /// The version `kollab --version` prints ("<name> X.Y.Z"), or None if it doesn't run.
+/// A runtime that fails is logged, so "no kollab found" beside a bundled runtime says why.
 fn kollab_version(bin: &Path) -> Option<Vec<u32>> {
-    let out = hidden(Command::new(bin))
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    text.split_whitespace()
-        .last()?
-        .split('.')
-        .map(|part| part.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok())
-        .collect()
+    let out = match hidden(Command::new(bin)).arg("--version").stdin(Stdio::null()).output() {
+        Ok(out) => out,
+        Err(error) => {
+            eprintln!("kollab-desktop: {} --version did not start: {error}", bin.display());
+            return None;
+        }
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let version = text.split_whitespace().last().and_then(|word| {
+        word.split('.')
+            .map(|part| part.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok())
+            .collect()
+    });
+    if version.is_none() {
+        let errors = String::from_utf8_lossy(&out.stderr);
+        let errors = errors.trim();
+        let tail = &errors[errors.char_indices().rev().nth(2000).map_or(0, |(at, _)| at)..];
+        eprintln!(
+            "kollab-desktop: {} --version printed no version ({}): {text:?} {tail}",
+            bin.display(),
+            out.status
+        );
+    }
+    version
 }
 
 /// macOS bundles a launcher beside an unpacked, signed Python runtime

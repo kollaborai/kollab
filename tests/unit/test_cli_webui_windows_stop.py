@@ -54,5 +54,5 @@ def test_terminate_child_stops_gracefully_on_windows(tmp_path):
         proc.stdout.close()
         if proc.poll() is None:
             proc.kill()
-    assert marker.exists()
-    assert proc.poll() is not None
+    assert marker.read_text() == "graceful"  # the SIGBREAK handler ran: not terminate()
+    assert proc.wait(timeout=5) == 0

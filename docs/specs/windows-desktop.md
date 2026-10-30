@@ -64,7 +64,7 @@ dependency). Now:
 | --- | --- |
 | `bundled_kollab` / `windows_bundled_kollab` | `runtime\kollab.exe` beside `kollab-desktop.exe`, where NSIS puts the staged resource. |
 | `installed_kollab` | `where.exe kollab.exe` (a GUI app gets the user's PATH from Explorer), then `~\.local\bin\kollab.exe`. |
-| `spawn_webui` | `CREATE_NO_WINDOW`; working directory `%USERPROFILE%`. |
+| `spawn_webui` | `CREATE_NO_WINDOW`; working directory `%USERPROFILE%`; stdin is a pipe and `KOLLAB_STOP_ON_STDIN_EOF=1` is set, so closing stdin asks the runtime to stop. |
 | `child_exited`, `stop_child` | `Child::try_wait` (the open handle keeps the id from naming another process). Stop closes the runtime's stdin; `kollab --web-ui` then stops its UI server and engine with Ctrl+Break, each in its own process group, and exits. After 10 s, `taskkill /PID n /T /F` is the fallback, then a wait of up to 5 s. |
 | `quit_on_signals` | `tokio::signal::ctrl_c`. |
 | `STATUS_PAGE`, `allowed_in_window` | WebView2 serves the app's files from `http://tauri.localhost/`, not `tauri://localhost/`. |
