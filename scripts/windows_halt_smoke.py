@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +74,19 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
     wait_until(online, 90, "an agent online in `kollab --hub status`")
 
     network_halt.network_control_refusal = lambda *args, **kwargs: ""  # no console on a runner
+
+    def traced(call):  # cli_control prints only the error's message; a failed run needs its line
+        async def run(*args, **kwargs):
+            try:
+                return await call(*args, **kwargs)
+            except Exception:
+                traceback.print_exc()
+                raise
+
+        return run
+
+    halt_runtime._via_owner = traced(halt_runtime._via_owner)
+    halt_runtime._act = traced(halt_runtime._act)
     code = asyncio.run(halt_runtime.cli_control("halt", ["--here-only", "--reason", "windows smoke"]))
     assert code == 0, f"halt exited {code}"
     wait_until(lambda: not online(), 60, "no agent online after the halt")
