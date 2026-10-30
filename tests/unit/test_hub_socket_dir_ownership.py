@@ -19,6 +19,9 @@ from plugins.hub import presence
 from plugins.hub.local_directory import LocalAgentDirectory, LocalDirectoryError
 from plugins.hub.messenger import require_own_socket
 
+# Unix socket ownership; on Windows local_ipc checks the endpoint file instead (#268).
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="unix socket ownership")
+
 
 def _make_dir(path: Path, mode: int) -> Path:
     path.mkdir(parents=True, exist_ok=True)

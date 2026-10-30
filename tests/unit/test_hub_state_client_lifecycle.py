@@ -48,7 +48,7 @@ async def test_connect_waits_for_writer_even_when_close_fails(
 
 
 async def _exercise_connect(monkeypatch, socket_path, reader, writer) -> None:
-    async def open_connection(_socket_path: str) -> tuple[Any, Any]:
+    async def open_connection(_socket_path: str, **_kw: Any) -> tuple[Any, Any]:
         return reader, writer
 
     monkeypatch.setattr(
@@ -56,9 +56,7 @@ async def _exercise_connect(monkeypatch, socket_path, reader, writer) -> None:
         "discover_peer_socket",
         staticmethod(lambda _identity: socket_path),
     )
-    monkeypatch.setattr(
-        "kollabor_rpc.open_unix_connection_with_large_buffer", open_connection
-    )
+    monkeypatch.setattr("kollabor_config.local_ipc.connect", open_connection)
 
     async with HubStateClient.connect("peer"):
         pass
