@@ -247,7 +247,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     )
     from .phone_link import PhoneLink
 
-    app.state.phone_link = PhoneLink(app)
+    app.state.phone_link = PhoneLink(app, port=port)
     _wire_voice(app, port)
     if port is not None:
         from .handover import HandoverStore
