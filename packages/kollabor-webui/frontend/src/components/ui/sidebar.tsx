@@ -3,7 +3,7 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { PanelLeftIcon } from "lucide-react"
 import { Slot } from "radix-ui"
 
-import { useIsMobile } from "@/hooks/use-mobile"
+import { SIDEBAR_BREAKPOINT, useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 import {
   clampSidebarWidth,
@@ -78,7 +78,7 @@ function SidebarProvider({
   open?: boolean
   onOpenChange?: (open: boolean) => void
 }) {
-  const isMobile = useIsMobile()
+  const isMobile = useIsMobile(SIDEBAR_BREAKPOINT)
   const [openMobile, setOpenMobile] = React.useState(false)
   const styleWidth = (style as Record<string, string | number> | undefined)?.["--sidebar-width"]
   const [savedWidth, setSavedWidth] = React.useState<number | null>(() => {

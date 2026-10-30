@@ -263,8 +263,8 @@ function RuntimeShell({
 
   return (
     <>
-      {/* Phones only: the sidebar and the session panel are sheets there. */}
-      <ShellHeader className="bg-background flex min-h-12 shrink-0 items-center gap-2 px-3 py-1.5 md:hidden">
+      {/* Below the shared sidebar breakpoint the sidebar and the session panel are sheets. */}
+      <ShellHeader className="bg-background flex min-h-12 shrink-0 items-center gap-2 px-3 py-1.5 lg:hidden">
         <SidebarTrigger className="-ml-1 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-sm font-semibold tracking-tight" title={sessionLabel}>
           {sessionLabel}
@@ -1370,7 +1370,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           ) : null}
           {activeSession?.halted ? (
             <>
-              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 md:hidden">
+              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 lg:hidden">
                 <SidebarTrigger className="-ml-1" />
                 <span className="min-w-0 truncate text-sm font-semibold capitalize">{activeSession.name || activeSession.identity}</span>
               </ShellHeader>
@@ -1420,7 +1420,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             </VoiceRoomProvider>
           ) : (
             <>
-              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 md:hidden">
+              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 lg:hidden">
                 <SidebarTrigger className="-ml-1" />
                 <span className="text-muted-foreground text-sm">No session</span>
               </ShellHeader>
