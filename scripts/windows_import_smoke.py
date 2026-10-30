@@ -54,6 +54,7 @@ def module_names() -> list[str]:
                 parts = parts[:-1]
             if all(part.isidentifier() for part in parts):
                 names.append(".".join(parts))
+    names.insert(0, "kollabor_cli_main")  # the `kollab` entry point
     return [name for name in names if name not in SKIP]
 
 
@@ -63,6 +64,10 @@ def reason(exc: BaseException) -> tuple[bool, str]:
         top = (exc.name or "").split(".")[0]
         if top in UNIX_ONLY:
             return True, f"imports Unix-only module {top}"
+        if top in sys.stdlib_module_names or top.startswith("kollabor") or top == "plugins":
+            # A standard or first-party module missing here is a platform failure, not an
+            # optional package.
+            return True, f"cannot import {exc.name}"
         return False, f"package {top} is not installed"
     frame = traceback.extract_tb(exc.__traceback__)[-1]
     where = f"{Path(frame.filename).name}:{frame.lineno}"
@@ -72,6 +77,9 @@ def reason(exc: BaseException) -> tuple[bool, str]:
 def main() -> int:
     sys.path[:0] = [str(ROOT), *map(str, SRC_DIRS)]
     names = module_names()
+    if len(names) < 2:
+        print("no kollab modules found")
+        return 1
     failed, skipped = [], []
     for name in names:
         try:

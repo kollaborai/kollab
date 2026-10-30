@@ -3,6 +3,7 @@ name: windows-smoke
 on:
   pull_request:
     paths:
+      - "*.py"
       - "kollabor/**"
       - "plugins/**"
       - "packages/*/src/**"
