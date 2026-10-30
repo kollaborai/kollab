@@ -1433,8 +1433,8 @@ class HaltListener:
             return await self.take_halt(request, peer)
         if op in ("describe", "act", "members", "status"):
             link = self._link_for(request.get("folder"), request.get("network"))
-            if link is None:
-                return {"ok": False, "error": "no halted network holds that folder"}
+            if link is None:  # no relay link holds it (none on Windows yet, #439): _act takes the folder's record
+                return {"ok": False, "error": "no halted network holds that folder", "no_link": True}
             if op == "describe":
                 return {"ok": True, "snapshot": await link.hub_halt_snapshot()}
             if op == "members":
@@ -2047,6 +2047,8 @@ async def _act(folder: str, control, action: str, payload: dict, root: Path | No
     """Through the listener while it holds the network, else on this folder's own record."""
     if listener_running(root):
         reply = await sock_call({"op": "act", "folder": folder, "action": action, "payload": payload}, root)
+        if reply.get("no_link"):  # the listener holds no network for this folder
+            return await _via_owner(folder, control, action, root, payload)
         if not reply.get("ok"):
             if action == "resume_local" and not reply.get("error"):
                 # F12 (D7): the listener lifted the halt and exited before it answered; say what happened

@@ -76,8 +76,7 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
 
     network_halt.network_control_refusal = lambda *args, **kwargs: ""  # no console on a runner
     # A network refuses a halt with fewer than two counting machines, since a resume needs a second one to confirm
-    # it: logic with no OS code, tested in tests/unit/test_network_halt.py (and checked live in the Docker harness,
-    # docs/handoff/kill-switch-phase1.md).
+    # it: logic with no OS code, tested in tests/unit/test_network_halt.py.
     # This runner is one machine, so this process lets it halt itself: the smoke proves the Windows halt, the
     # halted launch and the local resume, not that rule. Nothing can own a folder's network on Windows yet (the
     # relay owner refuses there), so _via_owner always takes the halt in this process, where this applies.
@@ -104,7 +103,7 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
                                  errors="replace", timeout=20, env=env)
             print(f"--- kollab --halt-listener exited {ran.returncode}:\n{(ran.stdout + ran.stderr)[-4000:]}")
         except subprocess.TimeoutExpired:
-            print("--- kollab --halt-listener ran 20 s without exiting: a listener can start here")
+            print("--- kollab --halt-listener started and ran 20 s with no error, so it did not fail the halt")
     assert code == 0, f"halt exited {code}"
     wait_until(lambda: not online(), 60, "no agent online after the halt")
     assert halt_runtime.read_halt().get("scopes"), "the halt wrote no scopes"
