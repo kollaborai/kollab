@@ -111,11 +111,11 @@ def report_webui(env: dict[str, str], app: int, table: dict[int, tuple[int, str]
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/openapi.json", timeout=10) as reply:
                 body = reply.read(160)
                 print(f"the web UI answered {time.monotonic() - start:.0f} s later: HTTP {reply.status} {body!r}")
-                return
+                break
         except OSError as exc:
             if time.monotonic() > start + 60:
                 print(f"the web UI on port {port} never answered: {exc}")
-                return
+                break
         time.sleep(3)
     if not webui:
         print("no web UI process to run again")
