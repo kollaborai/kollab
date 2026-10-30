@@ -15,5 +15,7 @@ def test_session_context_uses_a_portable_host_name():
     section = Path(__file__).resolve().parents[2] / "bundles/agents/_base/sections/01-session-context.md"
     text = section.read_text()
 
-    assert "<trender>uname -n</trender>" in text
+    # user@host renders in Python (socket.gethostname), the same on every OS (#438)
+    assert '<trender type="session" field="user" />' in text
     assert "<trender>hostname</trender>" not in text
+    assert "<trender>uname -n</trender>" not in text

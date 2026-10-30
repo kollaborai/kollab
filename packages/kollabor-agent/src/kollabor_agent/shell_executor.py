@@ -19,6 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from kollabor_agent.shell_utils import (
+    AgentShellError,
+    agent_shell,
+    windows_path_entries,
+)
 from kollabor_config import proc_ctl
 
 logger = logging.getLogger(__name__)
@@ -414,21 +419,34 @@ class ShellExecutor:
     async def _create_windows_process(
         self, command: str, cwd: Path, env: Dict[str, str]
     ) -> asyncio.subprocess.Process:
-        """Create process with Windows-specific settings."""
-        # Windows doesn't use start_new_session the same way
-        # We'll use CREATE_NEW_PROCESS_GROUP via creationflags
-        import subprocess
-
-        return await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-            creationflags=(
-                subprocess.CREATE_NEW_PROCESS_GROUP if self._is_windows else 0  # type: ignore[attr-defined]
-            ),
-        )
+        """Spawn a string command through the resolved agent shell (never cmd.exe)."""
+        shell = agent_shell()
+        # The child never searches the current folder or relative PATH entries.
+        path_value = env.get("PATH", "")
+        env = {
+            **env,
+            "PATH": ";".join(windows_path_entries(path_value, str(cwd))),
+        }
+        try:
+            return await asyncio.create_subprocess_exec(
+                *shell.argv(command, interactive=self._interactive),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                ),
+            )
+        except AgentShellError:
+            # agent_shell's message already names KOLLAB_SHELL and its value.
+            raise
+        except OSError as exc:
+            raise RuntimeError(
+                f"Agent shell {shell.path} cannot be started: {exc}. "
+                "Set KOLLAB_SHELL to the absolute path of bash.exe, pwsh.exe or "
+                "powershell.exe."
+            ) from exc
 
     async def _create_unix_process_argv(
         self, argv: Sequence[str], cwd: Path, env: Dict[str, str]

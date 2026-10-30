@@ -1,9 +1,9 @@
 session context:
-  date:              <trender>date '+%Y-%m-%d %Z'</trender>
-  system:            <trender>uname -s</trender> <trender>uname -m</trender>
-  user:              <trender>whoami</trender> @ <trender>uname -n</trender>
-  shell:             <trender>echo $SHELL</trender>
-  working directory: <trender>pwd</trender>
+  date:              <trender type="session" field="date" />
+  system:            <trender type="session" field="system" />
+  user:              <trender type="session" field="user" />
+  shell:             <trender type="session" field="shell" />
+  working directory: <trender type="session" field="cwd" />
 
 git repository:
 <trender>

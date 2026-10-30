@@ -29,6 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
+from kollabor_agent.shell_utils import agent_shell
+from kollabor_config import proc_ctl
 from kollabor_tui.visual_effects import AgnosterSegment
 from plugins.agent_orchestrator.ring_buffer import RingBuffer
 
@@ -61,8 +63,31 @@ def _filter_env(env: dict) -> dict:
         if any(pat in upper for pat in sensitive_patterns):
             continue
         filtered[key] = value
-    filtered["KOLLAB_OWNER_PID"] = str(os.getpid())  # a halt stops this agent's panes with it
+    filtered["KOLLAB_OWNER_PID"] = str(
+        os.getpid()
+    )  # a halt stops this agent's panes with it
     return filtered
+
+
+def _windows_terminal_cmd(command: Optional[str]) -> List[str]:
+    """The /terminal session argv on Windows: the resolved shell, never cmd.exe."""
+    shell = agent_shell()
+    if command:
+        return shell.argv(command)
+    if shell.kind in ("pwsh", "powershell"):
+        # An interactive PowerShell reads the profile; -NoLogo only.
+        return [shell.path, "-NoLogo"]
+    # Git Bash: a true interactive login-style session.
+    return [shell.path, "-i"]
+
+
+def _windows_popen_kwargs() -> Dict[str, Any]:
+    """Popen flags for a Windows terminal session: its own group, no console flash."""
+    return {
+        "creationflags": (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        ),
+    }
 
 
 @dataclass
@@ -287,10 +312,13 @@ Aliases: /t, /term, /tmux"""
                 "KOLLAB_ROOT_SOCKET", Path.cwd().name
             )
 
-            try:
-                cmd_parts = shlex.split(shell_cmd)
-            except ValueError:
-                cmd_parts = ["/bin/sh", "-c", shell_cmd]
+            if os.name == "nt":
+                cmd_parts = _windows_terminal_cmd(command)
+            else:
+                try:
+                    cmd_parts = shlex.split(shell_cmd)
+                except ValueError:
+                    cmd_parts = ["/bin/sh", "-c", shell_cmd]
             proc = subprocess.Popen(
                 cmd_parts,
                 stdin=subprocess.PIPE,
@@ -299,7 +327,9 @@ Aliases: /t, /term, /tmux"""
                 shell=False,
                 cwd=str(Path.cwd()),
                 env=env,
-                start_new_session=True,  # isolate from kollab's process group
+                start_new_session=os.name
+                != "nt",  # isolate from kollab's process group
+                **(_windows_popen_kwargs() if os.name == "nt" else {}),
             )
 
             ring_buf = RingBuffer()
@@ -511,18 +541,14 @@ Aliases: /t, /term, /tmux"""
     ) -> None:
         """Schedule natural-exit cleanup back on the plugin's event loop."""
         try:
-            loop.call_soon_threadsafe(
-                self._handle_session_exit, session_name, session
-            )
+            loop.call_soon_threadsafe(self._handle_session_exit, session_name, session)
         except RuntimeError:
             self.logger.debug(
                 "Skipping terminal session cleanup after event loop shutdown: %s",
                 session_name,
             )
 
-    def _handle_session_exit(
-        self, session_name: str, session: TerminalSession
-    ) -> None:
+    def _handle_session_exit(self, session_name: str, session: TerminalSession) -> None:
         """Cancel a dead session's timer while retaining its captured output."""
         if self.sessions.get(session_name) is not session or session.is_alive():
             return
@@ -581,22 +607,29 @@ Aliases: /t, /term, /tmux"""
                     session.proc.stdin.close()
                 except Exception:
                     pass
-            # Kill the entire process group (sessions use start_new_session=True)
-            try:
-                pgid = os.getpgid(session.proc.pid)
-                os.killpg(pgid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                # Fallback to single-process terminate
-                session.proc.terminate()
+            if os.name == "nt":
+                # proc_ctl kills the whole descendant tree; no process groups exist there.
+                proc_ctl.kill_tree(session.proc.pid, signal.SIGTERM)
+            else:
+                # Kill the entire process group (sessions use start_new_session=True)
+                try:
+                    pgid = os.getpgid(session.proc.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                except ProcessLookupError, PermissionError, OSError:
+                    # Fallback to single-process terminate
+                    session.proc.terminate()
             try:
                 session.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 # Force kill the entire group
-                try:
-                    pgid = os.getpgid(session.proc.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    session.proc.kill()
+                if os.name == "nt":
+                    proc_ctl.kill_tree(session.proc.pid, signal.SIGKILL)
+                else:
+                    try:
+                        pgid = os.getpgid(session.proc.pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    except ProcessLookupError, PermissionError, OSError:
+                        session.proc.kill()
                 session.proc.wait(timeout=2)
             return True
         except Exception as e:
@@ -770,10 +803,13 @@ Aliases: /t, /term, /tmux"""
                 "KOLLAB_ROOT_SOCKET", Path.cwd().name
             )
 
-            try:
-                cmd_parts = shlex.split(command)
-            except ValueError:
-                cmd_parts = ["/bin/sh", "-c", command]
+            if os.name == "nt":
+                cmd_parts = _windows_terminal_cmd(command)
+            else:
+                try:
+                    cmd_parts = shlex.split(command)
+                except ValueError:
+                    cmd_parts = ["/bin/sh", "-c", command]
             proc = subprocess.Popen(
                 cmd_parts,
                 stdin=subprocess.PIPE,
@@ -782,7 +818,9 @@ Aliases: /t, /term, /tmux"""
                 shell=False,
                 cwd=effective_cwd,
                 env=env,
-                start_new_session=True,  # isolate from kollab's process group
+                start_new_session=os.name
+                != "nt",  # isolate from kollab's process group
+                **(_windows_popen_kwargs() if os.name == "nt" else {}),
             )
 
             ring_buf = RingBuffer()
@@ -799,9 +837,7 @@ Aliases: /t, /term, /tmux"""
                 target=self._pump_output,
                 args=(proc, ring_buf, name),
                 kwargs={
-                    "on_exit": lambda: self._notify_session_exit(
-                        loop, name, session
-                    )
+                    "on_exit": lambda: self._notify_session_exit(loop, name, session)
                 },
                 daemon=True,
                 name=f"pump-bg-{name}",
@@ -982,9 +1018,7 @@ Aliases: /t, /term, /tmux"""
             return
         task.cancel()
 
-    def _on_timeout_task_done(
-        self, session_name: str, task: asyncio.Task
-    ) -> None:
+    def _on_timeout_task_done(self, session_name: str, task: asyncio.Task) -> None:
         """Forget a timeout task and consume unexpected task failures."""
         if self._timeout_tasks.get(session_name) is task:
             self._timeout_tasks.pop(session_name, None)

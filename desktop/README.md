@@ -180,6 +180,12 @@ stdin, and the runtime stops its UI server and engine and exits; if it still
 runs after 10 s, the app ends the tree it started with `taskkill /T /F`.
 `kollab-desktop.exe --quit` quits a running app.
 
+Install [Git for Windows](https://git-scm.com) so agents run commands in bash,
+as on macOS; without it they run in PowerShell (7 if installed, else Windows
+PowerShell 5.1 — never cmd.exe). Agents already running switch at their next
+start; `KOLLAB_SHELL` (absolute path to `bash.exe`, `pwsh.exe` or
+`powershell.exe`) picks another shell.
+
 ## Phone (iOS and Android)
 
 The same crate builds the phone app (#369). `src/lib.rs` is the entry point for
