@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from kollabor_config import proc_ctl
+
 logger = logging.getLogger(__name__)
 
 # Kill switch F11: [pid, start] of every tool shell this agent started, newest last. Presence carries it so
@@ -33,6 +35,9 @@ START_DRIFT = 2.0
 
 def _group_alive(pid: int) -> bool:
     """The shell or anything left in its process group still runs (a tool shell leads its group)."""
+    if os.name == "nt":
+        # No process groups on Windows, and os.kill(pid, 0) would terminate the process there.
+        return proc_ctl.pid_alive(pid)
     for check in (os.kill, os.killpg):
         try:
             check(pid, 0)

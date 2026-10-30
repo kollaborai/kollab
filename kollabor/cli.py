@@ -2589,7 +2589,10 @@ def _should_use_daemon() -> bool:
     - explicit flags (--detached, --attach, --no-daemon, --hub, --web-ui)
     - pipe mode (stdin not a tty, or -p flag)
     - info flags (-h, --help, --version, --reset-config, --update, --font-dir, --login)
+    - Windows (no fork; the app runs in-process like --no-daemon)
     """
+    if os.name == "nt":
+        return False
     args = sys.argv[1:]
     if "--no-daemon" in args:
         return False

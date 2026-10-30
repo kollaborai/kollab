@@ -39,6 +39,9 @@ jobs:
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_presence_local_ipc.py tests/unit/test_hub_ipc_clients.py tests/unit/test_attach_local_ipc.py tests/unit/test_deep_thought_local_ipc.py
 
       # Every module imports on Windows, so a Unix-only import never ships unseen (kollab #268).
+      - name: Process stop, locks and launch
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_attach_local_ipc.py tests/unit/test_process_manager_windows_stop.py tests/unit/test_shell_executor_windows_alive.py tests/unit/test_token_storage_lock.py tests/unit/test_cli_windows_no_fork.py tests/unit/test_desktop_release_checksum_lf.py
+
       - name: Every module imports
         run: uv run python scripts/windows_import_smoke.py
 
