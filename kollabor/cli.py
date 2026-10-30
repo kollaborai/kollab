@@ -2242,6 +2242,30 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
             pass
 
 
+def _stop_children_nt(procs: list, timeout: float = 8.0) -> None:
+    """Windows: CTRL_BREAK each child's group once, then wait for all on one deadline (inside the
+    desktop app's 10 s); end what is left. A second CTRL_BREAK would make uvicorn skip its shutdown."""
+    import signal
+    import subprocess
+    import time
+
+    from kollabor_config import proc_ctl
+
+    running = [p for p in procs if p is not None and p.poll() is None]
+    for proc in running:
+        try:
+            os.kill(proc.pid, signal.CTRL_BREAK_EVENT)
+        except OSError:
+            pass
+    deadline = time.monotonic() + timeout
+    for proc in running:
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # A venv's python.exe is a launcher that runs the interpreter as its child: end both.
+            proc_ctl.kill_tree(proc.pid, proc_ctl.HARD)
+
+
 def _stop_on_stdin_eof() -> None:
     """Interrupt the main thread once stdin reaches end-of-file (the desktop app closing it)."""
     import _thread
@@ -2576,8 +2600,11 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
         pass
     finally:
         signal_module.signal(signal_module.SIGTERM, previous_sigterm)
-        _terminate_child(webui_proc)
-        _terminate_child(engine_proc)
+        if os.name == "nt":
+            _stop_children_nt([webui_proc, engine_proc])
+        else:
+            _terminate_child(webui_proc)
+            _terminate_child(engine_proc)
 
 
 def _kill_owned_daemon() -> None:

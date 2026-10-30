@@ -56,3 +56,34 @@ def test_terminate_child_stops_gracefully_on_windows(tmp_path):
             proc.kill()
     assert marker.read_text() == "graceful"  # the SIGBREAK handler ran: not terminate()
     assert proc.wait(timeout=5) == 0
+
+
+class FakeChild:
+    """A child that exits when waited on, or never does."""
+
+    def __init__(self, pid: int, exits: bool):
+        self.pid, self.exits, self.code = pid, exits, None
+
+    def poll(self):
+        return self.code
+
+    def wait(self, timeout=None):
+        if not self.exits:
+            raise subprocess.TimeoutExpired("child", timeout)
+        self.code = 0
+        return 0
+
+
+def test_children_get_one_break_each_and_only_a_stuck_one_is_ended(monkeypatch):
+    import signal
+
+    from kollabor_config import proc_ctl
+
+    breaks, ended = [], []
+    monkeypatch.setattr(signal, "CTRL_BREAK_EVENT", 1, raising=False)
+    monkeypatch.setattr(cli.os, "kill", lambda pid, sig: breaks.append((pid, sig)))
+    monkeypatch.setattr(proc_ctl, "kill_tree", lambda pid, sig: ended.append(pid))
+    webui, engine = FakeChild(11, exits=True), FakeChild(22, exits=False)
+    cli._stop_children_nt([webui, engine, None], timeout=0.1)
+    assert breaks == [(11, 1), (22, 1)]  # a second CTRL_BREAK would make uvicorn skip its shutdown
+    assert ended == [22]

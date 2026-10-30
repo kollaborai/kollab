@@ -87,7 +87,8 @@ def build_uvicorn_config(app):
     """Build a direct-bind server; forwarded client headers are never trusted."""
     import uvicorn  # type: ignore[import-not-found]
 
-    return uvicorn.Config(app, log_level="warning", proxy_headers=False)
+    # An open page holds a stream; a stop waits at most 3 s for it instead of until the page goes away.
+    return uvicorn.Config(app, log_level="warning", proxy_headers=False, timeout_graceful_shutdown=3)
 
 
 
