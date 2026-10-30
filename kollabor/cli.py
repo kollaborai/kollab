@@ -2265,8 +2265,12 @@ def _stop_children_nt(children: dict, timeout: float = 8.0) -> None:
             print(f"  {name}: exited {code} after {time.monotonic() - started:.1f} s", flush=True)
         except subprocess.TimeoutExpired:
             print(f"  {name}: still running after {timeout:.0f} s, ending its tree", flush=True)
-            # A venv's python.exe is a launcher that runs the interpreter as its child: end both.
-            proc_ctl.kill_tree(proc.pid, proc_ctl.HARD)
+            try:
+                # A venv's python.exe is a launcher that runs the interpreter as its child: end both.
+                proc_ctl.kill_tree(proc.pid, proc_ctl.HARD)
+                print(f"  {name}: ended, exit {proc.wait(timeout=2)}", flush=True)
+            except (OSError, subprocess.TimeoutExpired) as error:  # the next child is still stopped
+                print(f"  {name}: could not end it: {error!r}", flush=True)
 
 
 def _stop_on_stdin_eof(stop) -> None:

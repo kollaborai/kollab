@@ -87,3 +87,22 @@ def test_children_get_one_break_each_and_only_a_stuck_one_is_ended(monkeypatch):
     cli._stop_children_nt({"web ui": webui, "engine": engine, "none": None}, timeout=0.1)
     assert breaks == [(11, 1), (22, 1)]  # a second CTRL_BREAK would make uvicorn skip its shutdown
     assert ended == [22]
+
+
+def test_a_failed_kill_still_ends_the_next_child(monkeypatch):
+    import signal
+
+    from kollabor_config import proc_ctl
+
+    ended = []
+
+    def kill_tree(pid, sig):
+        ended.append(pid)
+        if pid == 11:
+            raise OSError("access denied")
+
+    monkeypatch.setattr(signal, "CTRL_BREAK_EVENT", 1, raising=False)
+    monkeypatch.setattr(cli.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(proc_ctl, "kill_tree", kill_tree)
+    cli._stop_children_nt({"web ui": FakeChild(11, exits=False), "engine": FakeChild(22, exits=False)}, timeout=0.1)
+    assert ended == [11, 22]
