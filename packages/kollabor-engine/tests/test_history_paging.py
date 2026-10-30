@@ -256,7 +256,7 @@ def test_10kb_tool_result_pages_as_preview_with_ref_even_when_page_has_room():
         {"role": "tool", "content": original, "metadata": {"tool_call_id": "call-9"}},
     ]
 
-    page = build_history_page("session-1", history)
+    page = build_history_page("session-1", history, tool_output_preview=True)
 
     tool_message = page["history"][-1]
     assert _wire_size(page) < HISTORY_MAX_PAGE_BYTES
@@ -269,9 +269,14 @@ def test_10kb_tool_result_pages_as_preview_with_ref_even_when_page_has_room():
         )
         == original
     )
+    # Without the preview switch (Trajectory), the same tool result stays whole.
+    full_page = build_history_page("session-1", history)
+    assert full_page["history"][-1]["content"] == original
     # A small tool result stays whole: only over-budget output is deferred.
     small = {"role": "tool", "content": "x" * 100, "metadata": {"tool_call_id": "c"}}
-    small_page = build_history_page("session-2", [_message(0), small])
+    small_page = build_history_page(
+        "session-2", [_message(0), small], tool_output_preview=True
+    )
     assert small_page["history"][-1]["content"] == "x" * 100
     assert "history_output_truncated" not in small_page["history"][-1]["metadata"]
 
@@ -288,7 +293,7 @@ def test_oversized_batched_results_message_loads_light_with_ref():
         },
     ]
 
-    page = build_history_page("session-1", history)
+    page = build_history_page("session-1", history, tool_output_preview=True)
 
     batched = page["history"][-1]
     assert batched["metadata"]["history_output_truncated"] is True
@@ -304,6 +309,7 @@ def test_oversized_batched_results_message_loads_light_with_ref():
     plain = build_history_page(
         "session-2",
         [_message(0), {"role": "user", "content": original, "metadata": {}}],
+        tool_output_preview=True,
     )
     assert plain["history"][-1]["content"] == original
 

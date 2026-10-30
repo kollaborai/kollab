@@ -90,8 +90,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headshot, a PNG taken by a browser that can, instead of a plain blob (#380).
 
 ### Changed
-- Web UI: a tool's full output loads when you expand the tool; history pages
-  carry only a preview, so long chats open fast (#456).
 - Gems are born furry 85% of the time (hair 10%, bare 5%), the same on every
   device, and fur color is drawn too. Gems recorded bare are dressed once at
   the new odds; your own picks never change (#373).
@@ -124,6 +122,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Web UI: chat history and Trajectory load again for chats with a very large
+  file edit, where they failed with 413. In the chat a tool's full output
+  loads when you expand the tool, so long chats open fast (#456).
 - /llm: a custom or local endpoint's section lists only what that endpoint
   really serves. The bundled generic "custom" placeholders (grok-4.7 and
   friends) no longer appear when the live /models catalog is cold or the

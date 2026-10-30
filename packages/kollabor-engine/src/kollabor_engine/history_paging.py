@@ -226,17 +226,17 @@ def _is_tool_result_message(message: dict[str, Any]) -> bool:
 
 
 def _page_candidate(
-    session_id: str, history: list[dict[str, Any]], index: int
+    session_id: str, history: list[dict[str, Any]], index: int, tool_preview: bool
 ) -> dict[str, Any]:
-    """Copy one message for a page, deferring heavy tool output eagerly.
+    """Copy one message for a page; with ``tool_preview``, heavy tool output defers.
 
     Tool calls must load light: a tool result whose content exceeds the
-    preview budget pages as the same preview + Show-more reference an
+    preview budget pages as the same preview + output reference an
     over-cap message gets, even when the page has room for the full text.
     The full output still comes from ``/history/output``.
     """
     message = history[index]
-    if _is_tool_result_message(message):
+    if tool_preview and _is_tool_result_message(message):
         content = message.get("content", "")
         content_bytes = (
             content.encode("utf-8")
@@ -329,8 +329,14 @@ def build_history_page(
     after: str | None = None,
     base_payload: dict[str, Any] | None = None,
     byte_limit: int = HISTORY_MAX_PAGE_BYTES,
+    tool_output_preview: bool = False,
 ) -> dict[str, Any]:
     """Return a chronological page while bounding count and JSON wire bytes.
+
+    With `tool_output_preview`, every tool result over the preview budget
+    pages as a preview plus an output reference (the chat loads light and
+    fetches a tool's full output when it is expanded); without it, a tool
+    result stays whole unless it alone exceeds the page cap.
 
     `before` pages toward older messages; `after` fetches messages appended
     since a cached cursor. Cursors are session-bound and validate the history
@@ -359,7 +365,9 @@ def build_history_page(
         for index in range(len(original) - 1, minimum_start - 1, -1):
             if len(reversed_selected) >= page_limit:
                 break
-            candidate = _page_candidate(session_id, original, index)
+            candidate = _page_candidate(
+                session_id, original, index, tool_output_preview
+            )
             next_start = index
             proposed = list(reversed(reversed_selected + [candidate]))
             body = _response(session_id, original, proposed, next_start, page_end, base)
@@ -390,7 +398,9 @@ def build_history_page(
         for index in indexes:
             if len(reversed_selected) >= page_limit:
                 break
-            candidate = _page_candidate(session_id, original, index)
+            candidate = _page_candidate(
+                session_id, original, index, tool_output_preview
+            )
             next_start = index
             body = _response(
                 session_id,

@@ -142,6 +142,8 @@ export type HistoryPageOptions = {
   before?: string;
   after?: string;
   byteLimit?: number;
+  /** Tool output over 4 KB pages as a preview ("preview", the default) or whole. */
+  toolOutput?: "preview" | "full";
 };
 
 export function historyContentToText(content: unknown): string {
@@ -1168,6 +1170,7 @@ export class EngineApi {
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     if (options.before) query.set("before", options.before);
     if (options.after) query.set("after", options.after);
+    query.set("tool_output", options.toolOutput ?? "preview");
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return this.json<HistoryPage>(
       `/sessions/${encodeURIComponent(sessionId)}/history${suffix}`,
@@ -1189,7 +1192,11 @@ export class EngineApi {
     const firstLimit = Number.isFinite(targetCount)
       ? Math.min(HISTORY_MAX_PAGE_SIZE, targetCount)
       : HISTORY_MAX_PAGE_SIZE;
-    const first = await this.getHistoryPage(sessionId, { limit: firstLimit });
+    // Trajectory and voice mode read whole tool output, so they page in full.
+    const first = await this.getHistoryPage(sessionId, {
+      limit: firstLimit,
+      toolOutput: "full",
+    });
     let page = first;
     let history = [...page.history];
     let startIndex = page.start_index;
@@ -1209,6 +1216,7 @@ export class EngineApi {
       page = await this.getHistoryPage(sessionId, {
         limit: nextLimit,
         before: page.older_cursor,
+        toolOutput: "full",
       });
       history = [...page.history, ...history];
       startIndex = page.start_index;
