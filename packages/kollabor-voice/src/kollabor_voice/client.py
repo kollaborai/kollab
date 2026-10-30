@@ -119,9 +119,18 @@ class VoiceClient:
     def setup_status(self) -> dict:
         try:
             data = json.loads((self.root / "setup.json").read_text())
-            try:
-                os.kill(int(data["pid"]), 0)
-            except ProcessLookupError:
+            if os.name == "nt":
+                # os.kill(pid, 0) signals the process on Windows (#460)
+                from kollabor_config.proc_ctl import pid_alive
+
+                running = pid_alive(int(data["pid"]))
+            else:
+                running = True
+                try:
+                    os.kill(int(data["pid"]), 0)
+                except ProcessLookupError:
+                    running = False
+            if not running:
                 if data.get("state") == "error":
                     return data  # it exited after writing why
                 return {
