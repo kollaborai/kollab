@@ -75,8 +75,9 @@ async def _async_main(args: argparse.Namespace) -> int:
         return 1
     print(f"OK: {result.stdout.strip().splitlines()[0]}")
 
-    text = Path(args.prompt).read_text(encoding="utf-8")
-    rendered = render_system_prompt(text, timeout=30)
+    prompt = Path(args.prompt)
+    text = prompt.read_text(encoding="utf-8")
+    rendered = render_system_prompt(text, timeout=30, base_path=prompt.parent)
 
     errors = find_trender_errors(rendered)
     if errors:
