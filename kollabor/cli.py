@@ -2512,9 +2512,15 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     py = [sys.executable]
     if sys.flags.isolated:
         py += ["-I", "-B", *(["-u"] if os.environ.get("PYTHONUNBUFFERED") else [])]
-    # Windows: a process group of their own, so CTRL_BREAK reaches only these children.
+    # Windows: a process group of their own, so CTRL_BREAK reaches only these children,
+    # and no stdin. The desktop app's stdin pipe is read by _stop_on_stdin_eof below, and a
+    # child that inherits a pipe another thread is reading stalls in its C runtime startup
+    # until that read ends: Windows serializes synchronous I/O on one file object.
     group_flags = (
-        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        {
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+            "stdin": subprocess.DEVNULL,
+        }
         if os.name == "nt"
         else {}
     )
