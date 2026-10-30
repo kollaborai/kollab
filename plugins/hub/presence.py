@@ -16,7 +16,13 @@ logger = logging.getLogger(__name__)
 
 # Shared /tmp path space for hub sockets (short paths for the unix socket
 # limit). Never relocated: existing installs keep their sockets here.
-SOCKET_DIR_ROOT = Path("/tmp/kollabor-hub")
+# Windows has no /tmp and no socket path limit: its endpoint files live in the
+# user's profile, which private_fs requires (#268).
+SOCKET_DIR_ROOT = (
+    Path.home() / ".kollab" / "hub-sockets"
+    if os.name == "nt"
+    else Path("/tmp/kollabor-hub")
+)
 
 
 def secure_socket_dir(path: Path, *, create: bool = True) -> Path:
@@ -28,6 +34,8 @@ def secure_socket_dir(path: Path, *, create: bool = True) -> Path:
     user's is refused with an error naming it. ``create=False`` only validates
     a dir that already exists (read-side callers must not create it).
     """
+    if os.name == "nt":
+        return _secure_socket_dir_windows(path, create=create)
     if create:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -41,6 +49,20 @@ def secure_socket_dir(path: Path, *, create: bool = True) -> Path:
         )
     if stat.S_IMODE(info.st_mode) & 0o077:
         os.chmod(path, 0o700)
+    return path
+
+
+def _secure_socket_dir_windows(path: Path, *, create: bool) -> Path:
+    """Windows: the folder must be private to this user (owner and DACL, no junctions on the way)."""
+    from kollabor_config import private_fs
+
+    try:
+        if create:
+            private_fs.ensure_private_dir(path)
+        elif path.exists():
+            private_fs.check_private_dir(path)
+    except PermissionError as exc:
+        raise RuntimeError(f"refusing {path} for hub sockets: {exc}") from exc
     return path
 
 
@@ -106,6 +128,10 @@ def pid_alive(pid: int) -> bool:
     """
     if not pid:
         return False
+    if os.name == "nt":  # no zombies, and os.kill(pid, 0) sends Ctrl+C there (#268)
+        from kollabor_config import proc_ctl
+
+        return proc_ctl.pid_alive(pid)
     try:
         if os.waitpid(pid, os.WNOHANG)[0]:
             return False  # our own child, reaped now

@@ -356,10 +356,16 @@ class LocalAgentDirectory:
             return None
         if project_name is not None and encode_project_path(actual_workspace) != project_name:
             return None
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return None
+        if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C there (#268)
+            from kollabor_config import proc_ctl
+
+            if not proc_ctl.pid_alive(pid):
+                return None
+        else:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return None
         socket_path = data.get("socket_path")
         if not isinstance(socket_path, str) or not self._socket_valid(socket_path):
             return None
