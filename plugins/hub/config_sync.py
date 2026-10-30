@@ -804,9 +804,9 @@ def safe_parts(rel: Any) -> tuple[str, ...] | None:
 # Opening a folder ``O_NOFOLLOW`` fails with ELOOP on a link to a file and ENOTDIR on a
 # link to a folder or a plain file: both mean "not a real folder here".
 _LINK_ERRNOS = (errno.ELOOP, errno.ENOTDIR, errno.EMLINK)
-# Windows has none of these flags. There os.open cannot open a folder (PermissionError)
-# and the opens below pass ``dir_fd``, which Windows refuses, so config sync fails
-# closed on Windows until it moves to private_fs (#268).
+# Windows has none of these flags. There os.open cannot open a folder (PermissionError),
+# so _open_dir stops at its first open, before the ``dir_fd`` opens below: config sync
+# fails closed on Windows until it moves to private_fs (#268).
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 # NONBLOCK: a FIFO planted as a synced file must not hang the open.
 _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)

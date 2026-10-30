@@ -54,7 +54,12 @@ def module_names() -> list[str]:
                 parts = parts[:-1]
             if all(part.isidentifier() for part in parts):
                 names.append(".".join(parts))
-    names.insert(0, "kollabor_cli_main")  # the `kollab` entry point
+    # The root modules: kollabor_cli_main (`kollab`) and main.py. setup.py runs a build.
+    names[:0] = [
+        p.stem
+        for p in sorted(ROOT.glob("*.py"))
+        if p.stem.isidentifier() and p.stem != "setup"
+    ]
     return [name for name in names if name not in SKIP]
 
 
