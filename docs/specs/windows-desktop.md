@@ -1,9 +1,10 @@
 # Windows desktop (issue #268)
 
 Status: packaging path built, runtime port open. On windows-latest the
-`windows-smoke` workflow installs the workspace, imports every module and runs
-the agent smoke (`--agent-smoke` against the venv `kollab.exe`): a detached
-agent starts, shows online in `--hub status` and stops. The packaged binary has
+`windows-smoke` workflow installs the workspace, imports every module whose
+optional packages are installed, and runs the agent smoke (`--agent-smoke`
+against the venv `kollab.exe`): a detached agent starts, shows online in
+`--hub status` and stops. The packaged binary has
 not run on Windows yet; the Windows CI job (`desktop-windows` in
 `.github/workflows/binaries.yml`) is the first place any of it will.
 
@@ -143,6 +144,8 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 ## Not verified
 
 The `windows-smoke` workflow runs on windows-latest from the workspace venv:
-every module imports, and `--agent-smoke` passes against `.venv\Scripts\kollab.exe`.
+every module whose optional packages are installed imports (numpy and a2a are
+not, so 8 modules are skipped), and `--agent-smoke` passes against
+`.venv\Scripts\kollab.exe`.
 Not yet run on Windows: the packaged binary, the Windows-gated Rust (the build
 host is macOS with no Windows target), and the desktop app.
