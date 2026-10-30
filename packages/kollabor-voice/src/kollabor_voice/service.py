@@ -17,11 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-try:
-    import fcntl
-except ImportError:  # Windows: the voice runtime is POSIX-only for now (#268)
-    fcntl = None
-
+from . import file_lock
 from .control import (
     LEASE_SECONDS,
     MAX_REQUEST,
@@ -985,9 +981,7 @@ def main():
         if args.lock_fd is not None
         else (args.root / "service.lock").open("a+")
     )
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    if not file_lock.try_lock(lock.fileno()):
         return
     asyncio.run(serve(args.root))
 
