@@ -22,6 +22,7 @@ from typing import Any, Iterator
 from nacl.exceptions import CryptoError
 from nacl.secret import SecretBox
 
+from kollabor_config import private_fs
 from kollabor_config.file_lock import lock, unlock
 
 _VERSION = 1
@@ -106,10 +107,13 @@ class EnrollmentRecoveryJournal:
         self._check_parent()
         with self._thread_lock:
             flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(self._lock_path, flags, 0o600)
+            if os.name == "nt":  # no O_NOFOLLOW there: private_fs refuses a link or junction itself
+                fd = private_fs.open_nofollow(self._lock_path, flags, 0o600)
+            else:
+                fd = os.open(self._lock_path, flags, 0o600)
             locked = False
             try:
-                self._check_file(os.fstat(fd), "journal lock")
+                self._check_file(os.fstat(fd), "journal lock", self._lock_path)
                 lock(fd)
                 locked = True
                 yield
@@ -121,13 +125,16 @@ class EnrollmentRecoveryJournal:
     def _read_unlocked(self) -> dict[str, Any]:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
-            fd = os.open(self._path, flags)
+            if os.name == "nt":  # no O_NOFOLLOW there: private_fs refuses a link or junction itself
+                fd = private_fs.open_nofollow(self._path, flags)
+            else:
+                fd = os.open(self._path, flags)
         except FileNotFoundError:
             return {"version": _VERSION, "offers": {}}
         except OSError as exc:
             raise EnrollmentRecoveryError("read_failed") from exc
         try:
-            self._check_file(os.fstat(fd), "journal")
+            self._check_file(os.fstat(fd), "journal", self._path)
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 raw = stream.read(_MAX_BYTES + 1)
         finally:
@@ -187,11 +194,12 @@ class EnrollmentRecoveryJournal:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_name, self._path)
-            directory_fd = os.open(self._path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            if os.name != "nt":  # Windows cannot open a folder with os.open, so it has no folder fsync
+                directory_fd = os.open(self._path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         except BaseException:
             try:
                 os.close(fd)
@@ -204,6 +212,12 @@ class EnrollmentRecoveryJournal:
             raise
 
     def _check_parent(self) -> None:
+        if os.name == "nt":  # no POSIX owner or mode bits: private_fs makes and checks the folder
+            try:
+                private_fs.check_private_dir(self._path.parent)
+            except OSError as exc:
+                raise EnrollmentRecoveryError("invalid_parent") from exc
+            return
         try:
             info = self._path.parent.stat()
         except OSError as exc:
@@ -216,9 +230,17 @@ class EnrollmentRecoveryJournal:
             raise EnrollmentRecoveryError("invalid_parent")
 
     @staticmethod
-    def _check_file(info: os.stat_result, label: str) -> None:
+    def _check_file(info: os.stat_result, label: str, path: Path) -> None:
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise EnrollmentRecoveryError("invalid_file")
+        if os.name == "nt":  # owner and access list, where POSIX checks the uid and mode below
+            try:
+                private = private_fs.owned_private(path, info)
+            except OSError as exc:
+                raise EnrollmentRecoveryError("invalid_file") from exc
+            if not private:
+                raise EnrollmentRecoveryError("invalid_file")
+            return
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise EnrollmentRecoveryError("invalid_file")
         if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:

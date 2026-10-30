@@ -20,6 +20,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import private_fs
 from .config_utils import get_config_directory
 from .file_lock import lock, unlock
 
@@ -485,9 +486,17 @@ def _validate_state(state: Any) -> None:
             raise ProvisionedStateError("provisioned install digest does not match")
 
 
-def _check_private_file(info: os.stat_result, label: str) -> None:
+def _check_private_file(info: os.stat_result, label: str, path: Path) -> None:
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise ProvisionedStateError(f"{label} must be a single-link regular file")
+    if os.name == "nt":  # owner and access list, where POSIX checks the uid and mode below
+        try:
+            private = private_fs.owned_private(path, info)
+        except OSError as exc:
+            raise ProvisionedStateError(f"cannot inspect {label}") from exc
+        if not private:
+            raise ProvisionedStateError(f"{label} must be private and owned by the current user")
+        return
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise ProvisionedStateError(f"{label} must be owned by the current user")
     if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:
@@ -680,8 +689,11 @@ class ProvisionedStateFile:
                 | getattr(os, "O_NOFOLLOW", 0)
                 | getattr(os, "O_CLOEXEC", 0)
             )
-            fd = os.open(self.lock_path, flags, 0o600)
-            _check_private_file(os.fstat(fd), "provisioned state lock")
+            if os.name == "nt":  # no O_NOFOLLOW there: private_fs refuses a link or junction itself
+                fd = private_fs.open_nofollow(self.lock_path, flags, 0o600)
+            else:
+                fd = os.open(self.lock_path, flags, 0o600)
+            _check_private_file(os.fstat(fd), "provisioned state lock", self.lock_path)
             lock(fd)
             locked = True
             yield
@@ -701,6 +713,12 @@ class ProvisionedStateFile:
                 self._thread_lock.release()
 
     def _ensure_private_parent(self) -> None:
+        if os.name == "nt":  # no POSIX owner or mode bits: private_fs makes and checks the folder
+            try:
+                private_fs.ensure_private_dir(self.path.parent)
+            except OSError as exc:
+                raise ProvisionedStateError("provisioned state parent must be user-owned") from exc
+            return
         try:
             parent_info = self.path.parent.lstat()
         except FileNotFoundError:
@@ -725,14 +743,17 @@ class ProvisionedStateFile:
     def _read_unlocked(self) -> dict[str, Any]:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
-            fd = os.open(self.path, flags)
+            if os.name == "nt":  # no O_NOFOLLOW there: private_fs refuses a link or junction itself
+                fd = private_fs.open_nofollow(self.path, flags)
+            else:
+                fd = os.open(self.path, flags)
         except FileNotFoundError:
             return {"version": STATE_VERSION, "installs": {}}
         except OSError as exc:
             raise ProvisionedStateError("cannot open provisioned state") from exc
         try:
             info = os.fstat(fd)
-            _check_private_file(info, "provisioned state")
+            _check_private_file(info, "provisioned state", self.path)
             if info.st_size > MAX_STATE_BYTES:
                 raise ProvisionedStateError("provisioned state exceeds its read byte limit")
             with os.fdopen(fd, "rb", closefd=False) as stream:
