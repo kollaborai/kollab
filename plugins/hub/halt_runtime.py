@@ -2044,7 +2044,8 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
 
 
 async def _act(folder: str, control, action: str, payload: dict, root: Path | None) -> dict:
-    """Through the listener while it holds the network, else on this folder's own record."""
+    """Through the listener while it holds the network, else through _via_owner: the process that runs the
+    folder's network, else this folder's own record."""
     if listener_running(root):
         reply = await sock_call({"op": "act", "folder": folder, "action": action, "payload": payload}, root)
         if reply.get("no_link"):  # the listener holds no network for this folder
