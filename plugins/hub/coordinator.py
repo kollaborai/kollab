@@ -98,12 +98,10 @@ class CoordinatorElection:
                 pid = state.get("coordinator_pid", 0)
                 if not isinstance(pid, int):
                     return None
-                try:
-                    os.kill(pid, 0)
-                    return state
-                except (OSError, ProcessLookupError):
-                    # Coordinator is dead, state is stale
-                    return None
+                from .presence import pid_alive
+
+                # A dead coordinator leaves stale state
+                return state if pid_alive(pid) else None
         except (json.JSONDecodeError, Exception):
             pass
         return None
