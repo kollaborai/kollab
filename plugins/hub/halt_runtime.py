@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import fcntl
 import hashlib
 import json
 import logging
@@ -33,6 +32,8 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
+
+from . import file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +97,10 @@ def write_lock(root: Path | None = None) -> Iterator[None]:
     """``halt.write.lock`` around a read-modify-write of ``halt.json``."""
     fd = _lock_fd(private_dir(root) / WRITE_LOCK)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        file_lock.lock(fd)
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        file_lock.unlock(fd)
         os.close(fd)
 
 
@@ -1127,9 +1128,7 @@ class HaltListener:
 
     def take_lock(self) -> bool:
         fd = _lock_fd(private_dir(self.root) / LOCK)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not file_lock.try_lock(fd):
             os.close(fd)
             return False
         self._lock_fd = fd
@@ -1140,7 +1139,7 @@ class HaltListener:
     def drop_lock(self) -> None:
         fd, self._lock_fd = self._lock_fd, None
         if fd is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            file_lock.unlock(fd)
             os.close(fd)
 
     # run ---------------------------------------------------------------
