@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Windows: agent commands run in Git Bash when Git for Windows is installed,
+  else in PowerShell (never cmd.exe); `KOLLAB_SHELL` picks another shell.
 - Windows: the desktop app quits gracefully. Quit closes the runtime's stdin,
   and `kollab --web-ui` stops its UI server and engine with Ctrl+Break, so the
   engine shuts down cleanly; `taskkill` is only the fallback after 10 s. A
