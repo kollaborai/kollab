@@ -6351,9 +6351,7 @@ class HubPlugin(BasePlugin):
                                 continue
 
                             # Check if PID is alive
-                            try:
-                                os.kill(pid, 0)
-                            except (OSError, ProcessLookupError):
+                            if not pid_alive(pid):
                                 # PID is dead — remove presence file
                                 identity = data.get("identity", "?")
                                 presence_dir.unlink(missing_ok=True)
@@ -6378,9 +6376,7 @@ class HubPlugin(BasePlugin):
                             pid = data.get("pid", 0)
                             if not pid:
                                 continue
-                            try:
-                                os.kill(pid, 0)
-                            except (OSError, ProcessLookupError):
+                            if not pid_alive(pid):
                                 pf.unlink(missing_ok=True)
                                 removed += 1
                         except Exception:

@@ -537,6 +537,10 @@ class AgentRuntime:
 
     def is_alive(self) -> bool:
         """Check if the agent's process is still running."""
+        if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C on Windows
+            from kollabor_config import proc_ctl
+
+            return proc_ctl.pid_alive(self.pid)
         try:
             os.kill(self.pid, 0)
             return True

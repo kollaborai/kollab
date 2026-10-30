@@ -122,9 +122,7 @@ class HubConsoleAltView(AltView):
 
     def _refresh_agents(self) -> None:
         """Load live agents from hub presence."""
-        import os
-
-        from plugins.hub.presence import get_presence_dir
+        from plugins.hub.presence import get_presence_dir, pid_alive
 
         agents = []
         presence_dir = get_presence_dir()
@@ -137,9 +135,7 @@ class HubConsoleAltView(AltView):
                 with open(f) as fh:
                     data = json.load(fh)
                 pid = data.get("pid", 0)
-                try:
-                    os.kill(pid, 0)
-                except (OSError, ProcessLookupError):
+                if not pid_alive(pid):
                     continue
                 agents.append(data)
             except Exception:

@@ -203,7 +203,7 @@ def _launchd_state(label: str) -> tuple[bool, bool, str]:
 def _agents(root: Path) -> list[tuple[str, int, bool]]:
     """(identity, pid, service) for each agent answering on its hub socket in this folder."""
     from plugins.hub.messenger import AgentMessenger
-    from plugins.hub.presence import get_presence_dir
+    from plugins.hub.presence import get_presence_dir, pid_alive
     from plugins.hub.project_scope import is_project_scoped
 
     found = []
@@ -211,7 +211,8 @@ def _agents(root: Path) -> list[tuple[str, int, bool]]:
         try:
             data = json.loads(record.read_text())
             pid = int(data["pid"])
-            os.kill(pid, 0)
+            if not pid_alive(pid):
+                continue
             if not is_project_scoped() and Path(data["project"]).resolve() != root:
                 continue
             status = asyncio.run(
