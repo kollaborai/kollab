@@ -8,9 +8,8 @@ Built with Tauri 2.
 
 macOS uses the existing menu bar app. Linux x86_64 builds produce an AppImage
 and a Debian package from the same source; closing the window keeps its tray
-icon available. Windows x86_64 builds an NSIS installer in a provisional job and
-releases none yet (see [Windows](#windows)). The four existing CLI release
-binaries are unchanged.
+icon available. Windows x86_64 ships an NSIS installer (see
+[Windows](#windows)). The four existing CLI release binaries are unchanged.
 
 ## Build
 
@@ -130,11 +129,12 @@ SHA-256 detects corruption and does not replace publisher authentication.
 
 The release job checks the exact flattened asset set and every checksum before
 uploading. It rejects missing files, unexpected names, symlinks, and changed
-payloads. The combined manifest has 20 release files: four CLI/checksum pairs,
-four macOS desktop/checksum pairs, and two Linux desktop/checksum pairs.
+payloads. The combined manifest has 22 release files: four CLI/checksum pairs,
+four macOS desktop/checksum pairs, two Linux desktop/checksum pairs, and the
+Windows installer and its checksum.
 The merged macOS packaging and Apple signing preparation are retained.
-CI downloads and flattens the outputs of all seven native build jobs, then
-checks these 20 files and all ten SHA-256 pairs before a release can publish.
+CI downloads and flattens the outputs of all eight native build jobs, then
+checks these 22 files and all eleven SHA-256 pairs before a release can publish.
 
 CI also opens the packaged AppImage under Xvfb against an isolated test Web UI,
 checks rendered content, closes/reopens the window through a second launch,
@@ -143,9 +143,9 @@ checks the native package/window lifecycle; it does not prove a live model turn.
 
 ## Windows
 
-Windows is built by the provisional `desktop-windows` job in
-`.github/workflows/binaries.yml`, on a manual run only until the native port
-lands (a release tag never runs it, and it never runs on a pull request): it builds the native runtime (`kollab-windows-x86_64.exe`, a pex scie
+Windows is built by the `desktop-windows` job in
+`.github/workflows/binaries.yml` for every release tag and on a manual run (never
+on a pull request): it builds the native runtime (`kollab-windows-x86_64.exe`, a pex scie
 like the other platforms), stages it as `runtime\kollab.exe` and builds an NSIS
 installer, `Kollab_X.Y.Z_x64-setup.exe`, per user with no administrator prompt.
 
@@ -158,18 +158,16 @@ cd desktop && npx @tauri-apps/cli@2.12.0 build --config src-tauri/tauri.release.
 cd .. && python scripts/desktop_release.py collect --platform windows-x86_64
 ```
 
-**It is not released yet.** The native runtime cannot start an agent on Windows
-(`kollab --detached` forks, agents talk over Unix sockets, the hub locks with
-`fcntl`), so `--agent-smoke` fails and the job publishes no installer: the
-release artifact `kollab-desktop-windows-x86_64` is uploaded only when every
-step passed, and the installer built meanwhile goes to the non-release artifact
-`windows-desktop-unverified`. The blockers, the Windows shell changes and the
-ordered port work are in [docs/specs/windows-desktop.md](../docs/specs/windows-desktop.md).
-Until the port lands, attach: if a Kollab web UI already answers on
-`KOLLAB_WEBUI_PORT` (a runtime in WSL or on another machine reached on
-`127.0.0.1`), the installed app's window opens it.
+The installer ships only if the runtime passes its agent check (`--agent-smoke`:
+a detached agent starts, shows online and stops). The release artifact
+`kollab-desktop-windows-x86_64` is uploaded only when every step passed, a
+failed check fails the release, and the installer built meanwhile goes to the
+non-release artifact `windows-desktop-unverified`. The remaining Windows port
+work is in [docs/specs/windows-desktop.md](../docs/specs/windows-desktop.md).
+If a Kollab web UI already answers on `KOLLAB_WEBUI_PORT` (a runtime in WSL or
+on another machine reached on `127.0.0.1`), the installed app's window opens it.
 
-Once released the assets are `kollab-desktop-windows-x86_64-X.Y.Z-setup.exe` and
+The release assets are `kollab-desktop-windows-x86_64-X.Y.Z-setup.exe` and
 `.sha256`, unsigned (SHA-256 detects corruption; it does not authenticate the
 publisher). Windows SmartScreen shows "Windows protected your PC" on first run:
 choose **More info**, then **Run anyway**. Authenticode signing can follow, as

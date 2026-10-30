@@ -190,12 +190,13 @@ jobs:
         run: |
           # The in-app update check (VersionCheckService) and a binary's /upgrade
           # read /releases/latest, and install.sh downloads its binary from it.
-          # Verify CLI, macOS desktop and Linux desktop payloads and checksums
-          # before uploading the complete release set.
-          python scripts/desktop_release.py --version "$TAG" verify dist/bin
+          # Verify CLI, macOS desktop, Linux desktop and Windows installer
+          # payloads and checksums before uploading the complete release set.
+          python scripts/desktop_release.py --version "$TAG" verify dist/bin --windows required
           ls -l dist/bin
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/bin/* --clobber
           else
-            gh release create "$TAG" dist/bin/* --title "$TAG" --generate-notes --verify-tag
+            gh release create "$TAG" dist/bin/* --title "$TAG" --generate-notes --verify-tag \
+              --notes "The Windows installer is unsigned, so Windows SmartScreen shows \"Windows protected your PC\" on first run: choose More info, then Run anyway."
           fi
