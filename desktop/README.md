@@ -210,7 +210,8 @@ text from `src-tauri/Info.ios.plist`.
 
 Build and run it in the Android emulator (JDK 17; the Android SDK with
 `platform-tools`, `ndk;29.0.14206865`, `emulator` and
-`system-images;android-36;google_apis;arm64-v8a`; and
+`system-images;android-36;google_apis;arm64-v8a`, its license accepted so
+Gradle can fetch the SDK platform and build tools it needs; and
 `rustup target add aarch64-linux-android`, with rustup's `cargo` first in
 `PATH`, since Homebrew's `rust` has no Android targets):
 
@@ -218,7 +219,7 @@ Build and run it in the Android emulator (JDK 17; the Android SDK with
 export ANDROID_HOME=<sdk> NDK_HOME="<sdk>/ndk/29.0.14206865" JAVA_HOME=<jdk 17>
 cd desktop/src-tauri
 cargo tauri android build --apk --target aarch64 --debug
-avdmanager create avd -n kollab-phone -k "system-images;android-36;google_apis;arm64-v8a"
+avdmanager create avd -n kollab-phone -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_7
 emulator -avd kollab-phone &
 adb install gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
 adb shell am start -n ai.kollabor.kollab/.MainActivity
