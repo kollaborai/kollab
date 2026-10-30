@@ -14,6 +14,7 @@ import hashlib
 import importlib.metadata
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -21,6 +22,7 @@ import tempfile
 import time
 import zlib
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlsplit
 
@@ -32,6 +34,7 @@ from nacl.secret import SecretBox
 
 from kollabor_config.config_utils import get_config_directory
 from kollabor_config.file_lock import try_lock
+from kollabor_config.proc_ctl import pid_alive
 from plugins.hub.dns.discovery import _PublicResolver, discover
 from plugins.hub.dns.discovery_store import DiscoveryStore
 from plugins.hub.relay_client import RelayClient
@@ -180,6 +183,60 @@ class PhoneLinkError(ValueError):
     pass
 
 
+logger = logging.getLogger(__name__)
+
+OWNER_RECORD = "owner.json"
+
+
+class PhoneLinkHeldElsewhere(PhoneLinkError):
+    """Another engine holds PhoneLink; ``owner`` is its record, or None if it left none."""
+
+    def __init__(self, owner: dict | None):
+        self.owner = owner
+        super().__init__(held_elsewhere_message(owner))
+
+
+def read_owner(directory: Path) -> dict | None:
+    """The engine holding PhoneLink, from owner.json, or None (absent, unreadable, gone)."""
+    try:
+        data = json.loads((directory / OWNER_RECORD).read_text())
+        owner = {
+            "pid": int(data["pid"]),
+            "port": int(data["port"]) if data.get("port") is not None else None,
+            "started": float(data.get("started") or 0),
+            "cwd": str(data.get("cwd") or ""),
+        }
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return owner if pid_alive(owner["pid"]) else None
+
+
+def _tilde(path: str) -> str:
+    home = str(Path.home())
+    if path == home or path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
+    return path
+
+
+def held_elsewhere_message(owner: dict | None) -> str:
+    """The lock error, naming the engine that holds PhoneLink when it left a record."""
+    detail = ""
+    if owner:
+        parts = [f"port {owner['port']}"] if owner.get("port") else []
+        parts.append(f"process {owner['pid']}")
+        if owner.get("started"):
+            at = datetime.fromtimestamp(owner["started"])
+            hour = at.hour % 12 or 12
+            parts.append(f"started {at:%b} {at.day}, {hour}:{at:%M} {at:%p}")
+        if owner.get("cwd"):
+            parts.append(f"in {_tilde(owner['cwd'])}")
+        detail = " (" + ", ".join(parts) + ")"
+    return (
+        f"Another Kollab engine is managing PhoneLink on this computer{detail}. "
+        "Manage phones there, or close that engine and try again."
+    )
+
+
 def _save(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".phone-")
@@ -238,7 +295,8 @@ class HttpExchange:
 
 
 class PhoneLink:
-    def __init__(self, app, directory: Path | None = None):
+    def __init__(self, app, directory: Path | None = None, port: int | None = None):
+        self.port = port
         self.app = app
         self.directory = directory or get_config_directory() / "phonelink"
         self.records: dict[str, dict] = {}
@@ -364,14 +422,38 @@ class PhoneLink:
         )
         try:
             if not try_lock(fd):
-                raise PhoneLinkError(
-                    "Another Kollab engine is managing PhoneLink on this computer. "
-                    "Manage phones there, or close that engine and try again."
-                )
+                raise PhoneLinkHeldElsewhere(read_owner(self.directory))
         except BaseException:
             os.close(fd)
             raise
         return fd
+
+    def _write_owner(self) -> None:
+        """Record this engine as PhoneLink's holder, so other engines can name and reach it."""
+        path = self.directory / OWNER_RECORD
+        tmp = path.with_name(f".{OWNER_RECORD}.{os.getpid()}.tmp")
+        try:
+            record = {
+                "pid": os.getpid(),
+                "port": self.port,
+                "started": time.time(),
+                "cwd": os.getcwd(),
+            }
+            fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                json.dump(record, handle)
+            os.replace(tmp, path)
+        except OSError:
+            logger.warning("PhoneLink owner record could not be written", exc_info=True)
+
+    def _drop_owner(self) -> None:
+        """Remove owner.json while it still names this process (the lock goes with the fd)."""
+        path = self.directory / OWNER_RECORD
+        try:
+            if json.loads(path.read_text()).get("pid") == os.getpid():
+                path.unlink()
+        except (OSError, ValueError, AttributeError):
+            pass
 
     async def start(self) -> None:
         async with self._lock:
@@ -422,6 +504,7 @@ class PhoneLink:
                 os.close(owner_fd)
                 raise
             self._owner_fd = owner_fd
+            self._write_owner()
             self._loaded = True
             self._closed = False
             for identifier, row in self.records.items():
@@ -1284,5 +1367,6 @@ class PhoneLink:
                 self._task = None
                 self._loaded = False
                 if self._owner_fd is not None:
+                    self._drop_owner()
                     os.close(self._owner_fd)
                     self._owner_fd = None

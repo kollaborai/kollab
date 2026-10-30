@@ -226,9 +226,20 @@ class LoadoutManager:
                 seen.add(profile.name)
                 continue
             registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
-            model_names = [
-                name for name, _info in list_models_for_provider(registry_provider)
-            ]
+            # Registry "custom"/"local" entries are generic placeholders that
+            # match no real endpoint (#447): grok-4.7 & co. appeared for any
+            # custom base_url no matter what its live /models catalog said,
+            # because the registry fallback ran unconditionally and the
+            # cached catalog was only ever appended after it. Only the live
+            # catalog describes such an endpoint; cold or failed fetches
+            # leave the section empty, which renders the panel's existing
+            # "no models" note with its retry hint.
+            if provider in _LOCAL_ENDPOINT_PROVIDERS:
+                model_names = []
+            else:
+                model_names = [
+                    name for name, _info in list_models_for_provider(registry_provider)
+                ]
             model_names.extend(
                 str(entry.get("id") or "")
                 for entry in self._cached_catalog(profile)
