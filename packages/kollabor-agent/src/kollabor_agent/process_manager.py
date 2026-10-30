@@ -21,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from kollabor_config import proc_ctl
+
 from .shell_executor import record_tool_shell
 
 logger = logging.getLogger(__name__)
@@ -367,21 +369,37 @@ class SubprocessStrategy(SpawnStrategy):
         loop = asyncio.get_running_loop()
         try:
             # Kill the entire process group (sessions use start_new_session=True)
-            try:
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                proc.terminate()
+            if os.name == "nt":
+                # Windows has no process groups and no polite stop signal for this child:
+                # proc_ctl ends the process tree at once
+                try:
+                    await asyncio.to_thread(proc_ctl.kill_tree, proc.pid, proc_ctl.HARD)
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.terminate()
+            else:
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.terminate()
             try:
                 await loop.run_in_executor(
                     None, lambda: proc.wait(timeout=graceful_timeout)
                 )
             except subprocess.TimeoutExpired:
-                try:
-                    pgid = os.getpgid(proc.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    proc.kill()
+                if os.name == "nt":
+                    try:
+                        await asyncio.to_thread(
+                            proc_ctl.kill_tree, proc.pid, proc_ctl.HARD
+                        )
+                    except (ProcessLookupError, PermissionError, OSError):
+                        proc.kill()
+                else:
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        proc.kill()
                 await loop.run_in_executor(None, lambda: proc.wait(timeout=2))
             return True
         except Exception as e:

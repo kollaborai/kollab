@@ -5,10 +5,10 @@ Stores/loads OAuth tokens (access_token, refresh_token, expires_at)
 Falls back gracefully - no keyring dependency required.
 
 Auto-refreshes expired tokens transparently. Every write holds an
-exclusive flock on <provider>.lock in the same directory (skipped where
-fcntl is unavailable) and replaces the file atomically, so hub agents on
-one machine can never spend the same single-use refresh token and readers
-never see a partially written file.
+exclusive lock on <provider>.lock in the same directory (kollabor_config's
+file_lock, so POSIX and Windows alike) and replaces the file atomically, so
+hub agents on one machine can never spend the same single-use refresh token
+and readers never see a partially written file.
 """
 
 import asyncio
@@ -22,15 +22,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - platforms without flock (Windows)
-    fcntl = None
-
 from kollabor_config.config_utils import (
     get_config_directory,
     get_config_directory_candidates,
 )
+from kollabor_config.file_lock import try_lock
 
 from .openai_oauth import OAuthError, OAuthTokens, OpenAIOAuthClient
 
@@ -86,13 +82,10 @@ class OAuthTokenStorage:
     async def _exclusive_lock(self, provider: str):
         """Hold the provider's cross-process lock without blocking the loop.
 
-        Polls a non-blocking flock() so a task cancelled while it waits (an
-        interrupted turn) holds nothing. A blocking flock() in a worker thread
+        Polls a non-blocking try_lock() so a task cancelled while it waits (an
+        interrupted turn) holds nothing. A blocking lock() in a worker thread
         would take the lock after the cancel and never release it.
         """
-        if fcntl is None:
-            yield
-            return
         self._oauth_dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(
             self._lock_path(provider),
@@ -100,12 +93,8 @@ class OAuthTokenStorage:
             stat.S_IRUSR | stat.S_IWUSR,
         )
         try:
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    await asyncio.sleep(0.05)
+            while not try_lock(fd):
+                await asyncio.sleep(0.05)
             yield
         finally:
             os.close(fd)  # closing the only descriptor releases the lock

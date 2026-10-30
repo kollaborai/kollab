@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Windows: stopping a background process ends everything it started, the
+  ChatGPT sign-in token store takes a real file lock, opening an agent on
+  another device uses local IPC, and a bare `kollab` runs in-process instead
+  of trying to fork. A tool shell liveness check no longer ends the process
+  it checks (#268).
 - Windows: the attached window, the hub client, the MCP hub calls, presence
   checks and Deep Thought's child streams connect over local IPC instead of Unix
   sockets, and a Windows CI job runs their tests (#268).

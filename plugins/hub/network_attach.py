@@ -42,6 +42,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from kollabor_config import local_ipc
+
 from .device_names import NAME_RE
 from .relay_conversations import AGENT_ID
 from .relay_state import ID, RelayError
@@ -225,9 +227,9 @@ class NetworkAttach:
         self._channels[(peer, channel.id)] = channel
         try:
             channel.path = self._socket_path(channel.id)
-            channel.server = await asyncio.start_unix_server(
+            channel.server = await local_ipc.serve(
                 lambda reader, writer: self._connected(channel, reader, writer),
-                path=str(channel.path),
+                channel.path,
             )
             os.chmod(channel.path, 0o600)
         except BaseException:
@@ -327,7 +329,7 @@ class NetworkAttach:
         try:
             socket_path = await self._target(peer, agent_id, name)
             reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(socket_path, limit=4 * READ_BYTES), 10.0
+                local_ipc.connect(socket_path, limit=4 * READ_BYTES), 10.0
             )
         except AttachRefused as refusal:
             return {"refused": str(refusal)}

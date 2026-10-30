@@ -95,7 +95,10 @@ def digest(path: Path) -> str:
 
 def write_checksum(asset: Path) -> Path:
     checksum = asset.with_name(asset.name + ".sha256")
-    checksum.write_text(f"{digest(asset)}  {asset.name}\n", encoding="utf-8")
+    # LF on every OS: sha256sum -c reads a CRLF line as a file name ending in \r (#268)
+    checksum.write_text(
+        f"{digest(asset)}  {asset.name}\n", encoding="utf-8", newline="\n"
+    )
     return checksum
 
 
