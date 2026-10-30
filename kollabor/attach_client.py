@@ -41,9 +41,13 @@ import os
 import select
 import signal
 import sys
-import termios
-import tty
 from typing import Any, Dict, List, Optional
+
+try:
+    import termios
+    import tty
+except ImportError:  # Windows: no raw mode, so _enter_raw_mode leaves the terminal as is (#268)
+    termios = tty = None
 
 
 def _get_loop():
