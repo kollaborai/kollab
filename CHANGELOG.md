@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Windows: the attached window, the hub client, the MCP hub calls, presence
+  checks and Deep Thought's child streams connect over local IPC instead of Unix
+  sockets, and a Windows CI job runs their tests (#268).
 - Windows: the engine behind the web UI and the desktop app opens a chat. It
   starts the session's agent in its own process group, connects to it over
   local IPC and checks that it runs without sending it Ctrl+C. Closing the chat

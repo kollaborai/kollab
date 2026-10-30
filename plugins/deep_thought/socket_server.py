@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from kollabor_config import local_ipc
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,7 +43,7 @@ class ThoughtServer:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.socket_path = get_socket_path(session_id)
-        self._server: Optional[asyncio.AbstractServer] = None
+        self._server: Optional[local_ipc.Endpoint] = None
         self._results: Dict[str, Dict[str, Any]] = {}
         self._completion_events: Dict[str, asyncio.Event] = {}
         self._all_done: Optional[asyncio.Event] = None
@@ -67,9 +69,7 @@ class ThoughtServer:
         if self.socket_path.exists():
             self.socket_path.unlink()
 
-        self._server = await asyncio.start_unix_server(
-            self._handle_connection, path=str(self.socket_path)
-        )
+        self._server = await local_ipc.serve(self._handle_connection, self.socket_path)
         # Set permissions so child processes can connect
         os.chmod(str(self.socket_path), 0o600)
         logger.info(f"ThoughtServer listening on {self.socket_path}")
@@ -199,7 +199,7 @@ class ThoughtServer:
         """Stop the socket server and clean up."""
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
+            await self._server.server.wait_closed()
             self._server = None
         if self.socket_path.exists():
             try:
@@ -226,9 +226,7 @@ class ThoughtClient:
     async def connect(self) -> bool:
         """Connect to the parent's ThoughtServer."""
         try:
-            self._reader, self._writer = await asyncio.open_unix_connection(
-                self.socket_path
-            )
+            self._reader, self._writer = await local_ipc.connect(self.socket_path)
             # Send hello
             hello = (
                 json.dumps(

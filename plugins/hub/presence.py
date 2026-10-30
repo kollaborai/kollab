@@ -373,9 +373,11 @@ class PresenceManager:
     @staticmethod
     async def _socket_responds_async(socket_path: str, timeout: float = 1.0) -> bool:
         """Non-blocking socket liveness check."""
+        from kollabor_config import local_ipc
+
         try:
             _, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(socket_path),
+                local_ipc.connect(socket_path),
                 timeout=timeout,
             )
             writer.close()
@@ -408,17 +410,16 @@ class PresenceManager:
         """Quick synchronous check if a socket file exists and is connectable."""
         import socket as sock_mod
 
+        from kollabor_config import local_ipc
+
         if not Path(socket_path).exists():
             return False
-        s = sock_mod.socket(sock_mod.AF_UNIX, sock_mod.SOCK_STREAM)
         try:
-            s.settimeout(1.0)
-            s.connect(socket_path)
-            return True
+            s = local_ipc.connect_blocking(socket_path, 1.0)
         except (ConnectionRefusedError, OSError, sock_mod.timeout):
             return False
-        finally:
-            s.close()
+        s.close()
+        return True
 
     @staticmethod
     def _cleanup_agent_socket(agent: "AgentRuntime") -> None:

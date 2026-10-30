@@ -52,6 +52,8 @@ import logging
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+from kollabor_config import local_ipc
+
 from .snapshots import (
     ConversationSnapshot,
     HubSnapshot,
@@ -283,7 +285,7 @@ class HubStateClient:
         closes the client (cancelling pending calls with RpcError),
         and closes the socket.
 
-        Uses kollabor_rpc.open_unix_connection_with_large_buffer so
+        Connects through kollabor_config.local_ipc with the 16 MB limit so
         large responses (full conversation history) work without
         hitting the default 64KB StreamReader limit.
 
@@ -325,11 +327,12 @@ class HubStateClient:
         # Local imports keep kollabor_rpc as an optional boundary --
         # callers get an ImportError if they invoke this without
         # kollabor_rpc installed, which is the correct signal.
-        from kollabor_rpc import RpcClient, open_unix_connection_with_large_buffer
+        from kollabor_rpc import RpcClient
+        from kollabor_rpc.transport import LARGE_BUFFER_LIMIT
 
         try:
-            reader, writer = await open_unix_connection_with_large_buffer(
-                str(socket_path)
+            reader, writer = await local_ipc.connect(
+                str(socket_path), limit=LARGE_BUFFER_LIMIT
             )
         except Exception as e:
             raise HubStateClientError(
