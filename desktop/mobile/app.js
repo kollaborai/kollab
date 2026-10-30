@@ -107,27 +107,42 @@ async function cancelScan() {
   try { await scanner("cancel"); } catch { /* already stopped */ }
 }
 
-function openInvite(text) {
+// A directory the phone cannot reach (offline, or a certificate it does not trust) would leave it on the
+// webview's error page, with no way back here, so every link and launch checks it first.
+async function reachable(directory) {
+  show(node("h1", "Kollab"), node("p", "Connecting to your Kollab computer…"));
+  try {
+    // A directory that never answers counts as unreachable after 10 s (Promise.race: older webviews lack
+    // AbortSignal.timeout).
+    await Promise.race([
+      fetch(directory + "status", { mode: "no-cors", cache: "no-store" }),
+      new Promise((_, reject) => setTimeout(reject, 10000)),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const cantReach = (directory) =>
+  `Kollab can't reach ${new URL(directory).host}. Check this phone's internet connection, then try again.`;
+
+async function openInvite(text) {
   const invite = parseInvite(text, Date.now() / 1000);
   if (!invite) return pasteScreen(String(text ?? "").trim(), NOT_PHONELINK);
+  if (!(await reachable(invite.directory))) return pasteScreen(String(text).trim(), cantReach(invite.directory));
   try { localStorage.setItem(DIRECTORY, invite.directory); } catch { /* the link still opens now */ }
   location.replace(invite.url);
 }
 
-// A directory the phone cannot reach would leave it on the webview's error page, with no way back here.
 async function resume(directory) {
-  show(node("h1", "Kollab"), node("p", "Connecting to your Kollab computer…"));
-  try {
-    await fetch(directory + "status", { mode: "no-cors", cache: "no-store" });
-  } catch {
-    return show(
-      node("h1", "Kollab"),
-      node("p", `Kollab can't reach ${new URL(directory).host}. Check this phone's internet connection, then try again.`),
-      button("Scan QR Code", "fill", startScan),
-      button("Try Again", "", () => resume(directory))
-    );
-  }
-  location.replace(directory);
+  if (await reachable(directory)) return location.replace(directory);
+  show(
+    node("h1", "Kollab"),
+    node("p", cantReach(directory)),
+    button("Scan QR Code", "fill", startScan),
+    button("Try Again", "", () => resume(directory))
+  );
 }
 
 let saved = null;

@@ -236,8 +236,16 @@ it, move it away, run `cargo tauri android init --ci`, and put the microphone
 permissions (`RECORD_AUDIO`, `MODIFY_AUDIO_SETTINGS`) back in
 `gen/android/app/src/main/AndroidManifest.xml` and the light status bar icons
 (`enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT))`)
-back in `MainActivity.kt`. The camera permission comes from the barcode
-scanner plugin's own manifest. Voice inside the phone apps is not verified yet.
+back in `MainActivity.kt`, and `gen/android/app/src/debug/` (debug builds
+trust user-installed CAs, for the emulator's scratch https relay). The camera
+permission comes from the barcode scanner plugin's own manifest.
+
+`tests/live/phonelink_emulator.sh` links the debug app in a headless
+emulator to a scratch computer (the PhoneLink harness, its relay on
+`https://relay.localhost:<port>` with a scratch CA installed as a user
+CA): it pastes the link, approves the phone, waits for the web UI, and
+answers Android's microphone prompt, then checks the microphone track is
+live. Speech itself is only checked on a real phone.
 
 ## Startup
 

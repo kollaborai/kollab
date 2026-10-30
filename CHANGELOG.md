@@ -117,6 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Phone app: a link to a computer the phone cannot reach goes back to the paste
+  screen and says so, instead of doing nothing; that link is no longer saved (#442).
 - Windows: the network kill switch runs. `kollab --hub halt` stops this
   machine's agents, a launch during a halt waits, and a resume starts it
   again. Its liveness checks no longer send Ctrl+C: `os.kill(pid, 0)` does

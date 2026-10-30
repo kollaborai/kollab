@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only. A network security config replaces the manifest's usesCleartextTraffic, so cleartext stays
+     allowed here as the debug build had it. User-installed CAs are trusted too, so the Android emulator can link
+     through a scratch https relay (tests/live/phonelink_harness.py, #369). Release builds keep the defaults. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>
