@@ -64,7 +64,11 @@ def reason(exc: BaseException) -> tuple[bool, str]:
         top = (exc.name or "").split(".")[0]
         if top in UNIX_ONLY:
             return True, f"imports Unix-only module {top}"
-        if top in sys.stdlib_module_names or top.startswith("kollabor") or top == "plugins":
+        if (
+            top in sys.stdlib_module_names
+            or top.startswith("kollabor")
+            or top == "plugins"
+        ):
             # A standard or first-party module missing here is a platform failure, not an
             # optional package.
             return True, f"cannot import {exc.name}"
