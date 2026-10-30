@@ -46,3 +46,12 @@ def test_socket_probe_refuses_others_readable_endpoint_on_windows(tmp_path):
         [ICACLS, str(endpoint), "/grant", "*S-1-1-0:(R)"], check=True, capture_output=True
     )
     assert directory._socket_valid(str(endpoint)) is False
+
+
+def test_local_directory_agents_walks_presence_on_windows(tmp_path):
+    """Regression (#439): _presence_path ran os.fstat on the directory handle,
+    but the nt port keeps a plain Path there, so a real presence folder made
+    agents() raise TypeError out of RelayAgentBridge._refresh_directory."""
+    directory = _directory(tmp_path)
+    private_fs.ensure_private_dir(directory.config_dir / "hub" / "presence")
+    assert directory.agents() == []

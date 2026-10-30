@@ -282,7 +282,12 @@ class LocalAgentDirectory:
             for part in parts:
                 parent = _directory_fd(part, parent=parent)
                 opened.append(parent)
-            if stat.S_IMODE(os.fstat(parent).st_mode) & 0o077:
+            if os.name == "nt":  # nt keeps a path, not a descriptor; private_fs holds the ACL check
+                from kollabor_config import private_fs
+
+                if not private_fs.owned_private(parent, mask=0o077):
+                    return
+            elif stat.S_IMODE(os.fstat(parent).st_mode) & 0o077:
                 return
             yield parent, project_name
         except (OSError, LocalDirectoryError):
