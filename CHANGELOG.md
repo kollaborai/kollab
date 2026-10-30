@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Windows: agent commands run in Git Bash when Git for Windows is installed,
-  else in PowerShell (never cmd.exe); `KOLLAB_SHELL` picks another shell.
+- PhoneLink works from every engine on the computer: an engine that does not hold PhoneLink forwards the call to the one that does, and the "managing PhoneLink" message names that engine's port, process, start time and folder (#443).
+- Windows: every release ships the desktop installer
+  (`kollab-desktop-windows-x86_64-X.Y.Z-setup.exe` and its `.sha256`), and a
+  release fails if the Windows runtime cannot start an agent. It is unsigned,
+  so SmartScreen asks once: More info, then Run anyway (#268).
 - Windows: the desktop app quits gracefully. Quit closes the runtime's stdin,
   and `kollab --web-ui` stops its UI server and engine with Ctrl+Break, so the
   engine shuts down cleanly; `taskkill` is only the fallback after 10 s. A
@@ -119,6 +123,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- /llm: a custom or local endpoint's section lists only what that endpoint
+  really serves. The bundled generic "custom" placeholders (grok-4.7 and
+  friends) no longer appear when the live /models catalog is cold or the
+  fetch fails; an empty section shows the existing "no models" note with
+  the retry hint instead (#447).
 - Phone app: a link to a computer the phone cannot reach goes back to the paste
   screen and says so, instead of doing nothing; that link is no longer saved (#442).
 - Windows: the network kill switch runs. `kollab --hub halt` stops this

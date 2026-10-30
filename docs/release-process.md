@@ -144,14 +144,15 @@ scripts/docker-runtime.sh smoke
    stages those binaries, and PyPI publication supplies the downloaded output
    through `KOLLAB_FRONTEND_DIST`. The `connection-service` workflow artifact
    packages the same frontend for the operator's service rollout. These two
-   internal artifacts stay outside the 20-file public release manifest.
+   internal artifacts stay outside the 22-file public release manifest.
    Missing selected output or a failed frontend build stops packaging; old
    checkout output is never a successful build fallback.
 5. Verify the package page, the four CLI binaries and their `.sha256` files,
    both architectures' `kollab-desktop-macos-*` `.app.zip`/`.dmg` pairs,
-   both `kollab-desktop-linux-x86_64-X.Y.Z` packages and their checksums,
+   both `kollab-desktop-linux-x86_64-X.Y.Z` packages, the Windows installer
+   `kollab-desktop-windows-x86_64-X.Y.Z-setup.exe` and their checksums,
    and the install path after publication. `scripts/desktop_release.py` enforces
-   the exact 20-file manifest and verifies every payload from the flattened
+   the exact 22-file manifest and verifies every payload from the flattened
    artifact download directory. Checksums contain basenames, not build paths.
    The Binaries workflow builds and checks this set only for a `v*` tag
    (publish.yml calls it) or a manual run; pull requests and branch pushes
@@ -166,15 +167,12 @@ scripts/docker-runtime.sh smoke
    Unsigned macOS users must use Finder's Control-click > Open flow on first
    launch (see `desktop/README.md`). Apple signing/notarization preparation
    remains available without changing the unsigned release default.
-   Windows is built by the provisional `desktop-windows` job, on a manual run
-   only until the native port lands (a release tag never runs it): a native
-   runtime, an NSIS installer and its `.sha256`, unsigned (SmartScreen: More
-   info, then Run anyway). No release waits on it, and its installer is
-   published only after promotion, once the job passes its agent check (`build_binary.py --agent-smoke`), which the native runtime fails
-   until the port in [docs/specs/windows-desktop.md](specs/windows-desktop.md)
-   lands. `desktop_release.py verify` accepts the installer pair or none of it,
-   never half; promote it to the required 22-file manifest with `--windows
-   required` after the job is green on a manual run.
+   Windows is built by the `desktop-windows` job for every release tag: a
+   native runtime, an NSIS installer and its `.sha256`, unsigned (SmartScreen:
+   More info, then Run anyway; the release notes say so). The installer ships
+   only if the job passes its agent check (`build_binary.py --agent-smoke`), and
+   both workflows run `desktop_release.py verify --windows required`, so a
+   release without the installer, or with half the pair, fails.
 6. Re-run the secret scan on the exact public commit.
 7. Install it locally (Release From Main, in Place, step 6) and check
    `kollab --version` inside and outside the repo.

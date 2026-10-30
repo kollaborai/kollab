@@ -1,13 +1,13 @@
 # Windows desktop (issue #268)
 
-Status: packaging path built, runtime port open. On windows-latest the
+Status: the installer ships with every release; the rest of the runtime port is open. On windows-latest the
 `windows-smoke` workflow installs the workspace, imports every module whose
 optional packages are installed, and runs the agent smoke (`--agent-smoke`
 against the venv `kollab.exe`): a detached agent starts, shows online in
 `--hub status` and stops; and an engine session opens, returns its state and
-closes (`scripts/engine_smoke.py`). The packaged binary has
-not run on Windows yet; the Windows CI job (`desktop-windows` in
-`.github/workflows/binaries.yml`) is the first place any of it will.
+closes (`scripts/engine_smoke.py`). The packaged binary and the
+installed app run on windows-latest in `desktop-windows`
+(`.github/workflows/binaries.yml`), which ships the installer with every release.
 
 ## What blocks Windows
 
@@ -84,8 +84,8 @@ dependency). Now:
 --agent-smoke dist/bin/kollab-windows-x86_64.exe`: with a throwaway home and
 folder, a detached agent must start, show online in `kollab --hub status`, and
 stop. That is native daemon start plus local IPC (blockers 1 to 5), no provider
-and no model turn. It fails today, with the runtime's own error, which the job
-log shows.
+and no model turn. It passes on windows-latest (binaries run 41102797314); a failure shows the
+runtime's own error in the job log.
 
 The packaging steps still run after a failed gate, so the Tauri Windows build,
 the NSIS installer and the installed-app smoke (`scripts/check_desktop_package_windows.py`:
@@ -95,20 +95,21 @@ non-release artifact `windows-desktop-unverified`; the job fails with "the
 installer is not released", and the release artifact `kollab-desktop-windows-x86_64`
 is uploaded only when every step, the gate included, passed.
 
-`desktop-windows` runs only on a manual run (`workflow_dispatch`) until the
-port lands: a release tag never runs it or waits on it, and `release-manifest`
-does not need it. `continue-on-error: true` also keeps a red manual run from
-failing the whole workflow. `desktop_release.py verify` treats the installer pair as optional but never
-half there (a changed installer or a missing checksum still fails).
+`desktop-windows` runs for every release tag (through `publish.yml`) and on a
+manual run, like `desktop` and `desktop-linux`, and `release-manifest` needs it:
+a failed gate fails the job, so the release does not publish. Both workflows run
+`desktop_release.py verify --windows required`, so a release without the
+installer pair, with half of it, or with a changed installer fails. Without the
+flag (a manual `verify`) the pair stays optional, but never half there.
 
 ### Promotion
 
-After the port, on a manual run (`gh workflow run binaries.yml --ref release/X.Y.Z`)
-where `desktop-windows` is green: remove its `if: github.event_name ==
-'workflow_dispatch'` and its `continue-on-error`, add it back to
-`release-manifest`'s `needs`, and pass `--windows required` to `desktop_release.py verify` in `binaries.yml` and
-`publish.yml`. The manifest becomes 22 files and eleven checksum pairs; update
-the counts in `docs/release-process.md` and `desktop/README.md`.
+Done. Binaries run 41102797314 (a manual run) passed `desktop-windows`, agent
+check included, so the job lost its `if: github.event_name ==
+'workflow_dispatch'` and its `continue-on-error`, `release-manifest` needs it,
+and `binaries.yml` and `publish.yml` pass `--windows required`. The manifest is
+22 files and eleven checksum pairs, and `publish.yml` adds the SmartScreen note
+to the release notes.
 
 ## Port work (follow-up, in order)
 
@@ -136,7 +137,7 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 6. **Agent shell.** Done: `kollabor_agent.shell_utils.agent_shell()` resolves the shell — `KOLLAB_SHELL` (absolute bash.exe/pwsh.exe/powershell.exe, never WSL's System32 bash.exe), Git Bash install folders, Git-on-PATH, PowerShell 7, Windows PowerShell 5.1; `shell_executor` spawns string commands through its argv with `CREATE_NO_WINDOW` and a PATH cleaned of relative entries, `/terminal` starts it and stops the tree with `proc_ctl.kill_tree`, the prompt's session block names the resolved shell and its rule line, and raw trenders run through Git Bash or render nothing under PowerShell. The permission patterns cover PowerShell and cmd syntax. `scripts/windows_shell_smoke.py` proves each row on `windows-smoke`. Design: this file's "Agent shell" issue and `docs/specs/windows-desktop.md` (#438). tmux features stay Unix-only.
 7. **No browser tab.** Done: `kollabor_webui.main()` opens no tab when `KOLLAB_WEBUI_NO_BROWSER` is set, and the desktop sets it.
 8. **Desktop.** Graceful stop done: the app starts the runtime with a stdin pipe and `KOLLAB_STOP_ON_STDIN_EOF=1`, Quit closes it, and `kollab --web-ui` stops its UI server and engine with Ctrl+Break (each in its own process group), so the engine runs its shutdown; `taskkill /T /F` after 10 s is the fallback. A second launch with `--quit` quits the running app, which `check_desktop_package_windows.py` uses for a clean Quit with no GUI automation. WebView2 raises `on_navigation` for the `kollab-desktop://` report (the smoke's render check). Open: a Windows updater (`updater.rs` is macOS only: the prompt offers the release page elsewhere).
-9. When 1 to 5 land, `--agent-smoke` passes unchanged; then promote, as above.
+9. Promoted (see Promotion): `--agent-smoke` passes on windows-latest. The Windows work still open is tracked in #438 (agent shell) and #439 (relay owner socket).
 
 ## Issue #268 acceptance, as of this change
 
@@ -144,9 +145,9 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 | --- | --- | --- |
 | 1 | Document the blockers | Done (this file). |
 | 2 | Packaged CLI and engine run on Windows x86_64 | The CLI binary passes `--agent-smoke` on windows-latest (binaries run 41052290042), and from the workspace venv a detached agent and an engine session run (`windows-smoke`). Port work 3 to 6 is still open: the voice lock, the network's private files, the kill switch, the agent shell. |
-| 3 | NSIS/MSI in the tag-triggered workflow, checksums, manifest | Built; released only once the gate passes; manifest pair optional until promotion. |
+| 3 | NSIS/MSI in the tag-triggered workflow, checksums, manifest | Released: `desktop-windows` runs for every release tag, the gate passed (binaries run 41102797314), and both workflows verify the pair with `--windows required`. |
 | 4 | CI smoke: install, launch, render, close and relaunch, clean quit | Install, launch, render, close to the tray and relaunch passed on windows-latest (binaries runs 41052290042 and 41055194942). Clean quit: a second launch with `--quit` ends the app, and the app's own runtime stops through its stdin with no runtime process left (port work 8). |
-| 5 | Unsigned, SmartScreen notes | Done (`desktop/README.md`). |
+| 5 | Unsigned, SmartScreen notes | Done (`desktop/README.md`; `publish.yml` adds the SmartScreen note to the release notes). |
 | 6 | Docs list Windows | Done (`desktop/README.md`, `docs/release-process.md`). |
 
 ## Not verified
