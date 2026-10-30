@@ -32,6 +32,9 @@ jobs:
       - name: Install workspace
         run: uv sync --all-packages
 
+      - name: MCP command splitting
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_mcp_split_command.py
+
       # Every module imports on Windows, so a Unix-only import never ships unseen (kollab #268).
       - name: Every module imports
         run: uv run python scripts/windows_import_smoke.py

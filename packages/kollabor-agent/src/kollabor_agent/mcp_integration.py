@@ -35,6 +35,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def split_command(command: str) -> list[str]:
+    """Split a configured MCP command into the argv that starts it.
+
+    Windows (#428): POSIX shlex drops backslashes (``C:\\srv`` becomes ``C:srv``), so
+    split in Windows mode and drop the quotes around a token. CreateProcess never
+    searches PATHEXT, so resolve the program with ``shutil.which`` (``npx`` finds
+    ``npx.cmd``).
+    """
+    if os.name != "nt":
+        return shlex.split(command)
+    # ponytail: a quote inside a token is not unescaped; parse with CommandLineToArgvW if configs need it.
+    parts = [
+        (
+            part[1:-1]
+            if len(part) > 1 and part[0] == part[-1] and part[0] in "\"'"
+            else part
+        )
+        for part in shlex.split(command, posix=False)
+    ]
+    if parts:
+        parts[0] = shutil.which(parts[0]) or parts[0]
+    return parts
+
+
 class MCPRequestTimeoutError(TimeoutError):
     """Raised when an MCP JSON-RPC request times out and closes the connection."""
 
@@ -128,7 +152,7 @@ class MCPServerConnection:
     async def connect(self) -> bool:
         """Start the MCP server process."""
         try:
-            command_parts = shlex.split(self.command)
+            command_parts = split_command(self.command)
             env = {**os.environ, **self.extra_env}
             self.process = await asyncio.create_subprocess_exec(
                 *command_parts,
@@ -620,7 +644,7 @@ class MCPIntegration:
             command = config["command"]
             try:
                 # Extract the command executable (first word before any args)
-                cmd_parts = shlex.split(command)
+                cmd_parts = split_command(command)
                 if cmd_parts:
                     executable = cmd_parts[0]
                     # Check if executable exists in PATH
@@ -670,10 +694,12 @@ class MCPIntegration:
             return None
 
         try:
-            command_parts = shlex.split(command)
+            command_parts = split_command(command)
         except ValueError:
             return None
-        return shlex.join([*command_parts, *args])
+        # Windows quotes for split_command's Windows mode (#428); POSIX keeps shlex.
+        join = subprocess.list2cmdline if os.name == "nt" else shlex.join
+        return join([*command_parts, *args])
 
     def _load_config_from_dir(self, config_dir: Path, config_type: str):
         """Load MCP config from a specific directory.
@@ -1439,7 +1465,7 @@ class MCPIntegration:
         # Build command as list (safer than shell=True)
         # Parse the command string and add tool arguments
         try:
-            command_parts = shlex.split(command)
+            command_parts = split_command(command)
         except ValueError as e:
             return {"error": f"Invalid command format: {e}"}
 
