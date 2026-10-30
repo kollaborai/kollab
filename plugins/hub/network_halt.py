@@ -964,8 +964,7 @@ class HaltFile:
             raise HaltError(f"{self.path.name} would be too large to read back")
         fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".halt.")
         try:
-            if os.name != "nt":  # no fchmod on Windows; the file inherits the private folder's access list
-                os.fchmod(fd, 0o600)
+            os.fchmod(fd, 0o600)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(body)
                 fh.flush()

@@ -114,6 +114,7 @@ def main() -> int:
     if not args.kollab:
         print("no kollab on PATH; pass --kollab PATH")
         return 2
+    args.kollab = os.path.abspath(args.kollab)  # main() runs the smoke from the project folder
 
     home = Path(tempfile.mkdtemp(prefix="kollab-halt-smoke-"))
     project = home / "project"
