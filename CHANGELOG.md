@@ -122,6 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Conversation and raw API logs stamp times in UTC: a stamp marked Z held
+  local time before, hours off from real UTC (#454).
 - /llm: a custom or local endpoint's section lists only what that endpoint
   really serves. The bundled generic "custom" placeholders (grok-4.7 and
   friends) no longer appear when the live /models catalog is cold or the

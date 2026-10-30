@@ -14,10 +14,10 @@ import re
 import tempfile
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from kollabor_ai.conversation_logger import utc_stamp
 from kollabor_ai.generated_image_artifacts import (
     GeneratedImageArtifactStore,
     redact_generated_image_data,
@@ -1790,7 +1790,7 @@ class APICommunicationService:
             interaction = RawInteraction(
                 turn_id=self.last_turn_id or str(uuid.uuid4()),
                 continuation_of=self._current_parent_turn_id,
-                timestamp=datetime.now().isoformat() + "Z",
+                timestamp=utc_stamp(),
                 session_id=self.current_session_id or "",
                 duration_s=round(duration, 3),
                 cancelled=cancelled,
