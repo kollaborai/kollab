@@ -12,11 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-try:
-    import fcntl
-except ImportError:  # Windows: the voice runtime is POSIX-only for now (#268)
-    fcntl = None
-
+from . import file_lock
 from .control import atomic_json, manifest, prepare_root, service_root
 
 
@@ -109,9 +105,7 @@ def main() -> None:
     root = args.root
     prepare_root(root)
     lock = (root / "service.lock").open("a+")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    if not file_lock.try_lock(lock.fileno()):
         return  # The current owner performs setup and owns audio.
 
     def progress(state, detail):

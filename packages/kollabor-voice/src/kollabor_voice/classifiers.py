@@ -96,10 +96,7 @@ def load_preferences(root=None):
 
 def save_preferences(changes, root=None):
     """Publish one validated device update without losing another client's keys."""
-    # The voice runtime is POSIX-only; importing its lightweight plugin and
-    # reading preferences must still work on other platforms.
-    import fcntl
-
+    from . import file_lock
     from .speech_settings import speech_defaults, speech_errors
 
     if not isinstance(changes, dict) or set(changes) - {
@@ -123,7 +120,7 @@ def save_preferences(changes, root=None):
     path = (root or service_root()) / "preferences.json"
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (path.parent / "preferences.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        file_lock.lock(lock.fileno())
         try:
             preferences = json.loads(path.read_text())
         except FileNotFoundError:
