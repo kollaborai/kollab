@@ -28,15 +28,15 @@ for _ in range(300):
 """
 
 
-def test_stdin_eof_interrupts_main_once(monkeypatch):
-    import _thread
+def test_stdin_eof_sets_stop(monkeypatch, capsys):
+    import threading
 
-    interrupts = []
+    stop = threading.Event()
     fake_stdin = types.SimpleNamespace(buffer=types.SimpleNamespace(read=lambda: b""))
     monkeypatch.setattr(sys, "stdin", fake_stdin)
-    monkeypatch.setattr(_thread, "interrupt_main", lambda: interrupts.append(1))
-    cli._stop_on_stdin_eof()
-    assert len(interrupts) == 1
+    cli._stop_on_stdin_eof(stop)
+    assert stop.is_set()
+    assert "stdin closed" in capsys.readouterr().out  # the desktop app's webui.log shows the stop began
 
 
 @pytest.mark.skipif(os.name != "nt", reason="CTRL_BREAK_EVENT is Windows only")
@@ -84,6 +84,6 @@ def test_children_get_one_break_each_and_only_a_stuck_one_is_ended(monkeypatch):
     monkeypatch.setattr(cli.os, "kill", lambda pid, sig: breaks.append((pid, sig)))
     monkeypatch.setattr(proc_ctl, "kill_tree", lambda pid, sig: ended.append(pid))
     webui, engine = FakeChild(11, exits=True), FakeChild(22, exits=False)
-    cli._stop_children_nt([webui, engine, None], timeout=0.1)
+    cli._stop_children_nt({"web ui": webui, "engine": engine, "none": None}, timeout=0.1)
     assert breaks == [(11, 1), (22, 1)]  # a second CTRL_BREAK would make uvicorn skip its shutdown
     assert ended == [22]

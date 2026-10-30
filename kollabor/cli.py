@@ -2242,36 +2242,38 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
             pass
 
 
-def _stop_children_nt(procs: list, timeout: float = 8.0) -> None:
+def _stop_children_nt(children: dict, timeout: float = 8.0) -> None:
     """Windows: CTRL_BREAK each child's group once, then wait for all on one deadline (inside the
-    desktop app's 10 s); end what is left. A second CTRL_BREAK would make uvicorn skip its shutdown."""
+    desktop app's 10 s); end what is left. A second CTRL_BREAK would make uvicorn skip its shutdown.
+    Every step prints a line: the desktop app keeps this output in its webui.log."""
     import signal
     import subprocess
     import time
 
     from kollabor_config import proc_ctl
 
-    running = [p for p in procs if p is not None and p.poll() is None]
-    for proc in running:
+    running = {name: p for name, p in children.items() if p is not None and p.poll() is None}
+    started = time.monotonic()
+    for name, proc in running.items():
         try:
             os.kill(proc.pid, signal.CTRL_BREAK_EVENT)
-        except OSError:
-            pass
-    deadline = time.monotonic() + timeout
-    for proc in running:
+        except OSError as error:
+            print(f"  {name}: CTRL_BREAK to {proc.pid} failed: {error}", flush=True)
+    for name, proc in running.items():
         try:
-            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            code = proc.wait(timeout=max(0.0, started + timeout - time.monotonic()))
+            print(f"  {name}: exited {code} after {time.monotonic() - started:.1f} s", flush=True)
         except subprocess.TimeoutExpired:
+            print(f"  {name}: still running after {timeout:.0f} s, ending its tree", flush=True)
             # A venv's python.exe is a launcher that runs the interpreter as its child: end both.
             proc_ctl.kill_tree(proc.pid, proc_ctl.HARD)
 
 
-def _stop_on_stdin_eof() -> None:
-    """Interrupt the main thread once stdin reaches end-of-file (the desktop app closing it)."""
-    import _thread
-
+def _stop_on_stdin_eof(stop) -> None:
+    """Set ``stop`` once stdin reaches end-of-file (the desktop app closing it)."""
     sys.stdin.buffer.read()
-    _thread.interrupt_main()
+    print("  stdin closed: stopping the engine and web ui", flush=True)
+    stop.set()
 
 
 def _webui_engine_port(webui_port: int) -> Optional[int]:
@@ -2586,14 +2588,15 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     # kills the process without running `finally` -- orphaning both children.
     # Route it through the same path so cleanup always runs.
     previous_sigterm = signal_module.signal(signal_module.SIGTERM, _on_sigterm)
-    # The desktop app closes our stdin to quit; EOF takes the Ctrl+C path below.
+    # The desktop app closes our stdin to quit: EOF sets `stop`, and the loop below ends.
+    stop = threading.Event()
     if os.name == "nt" and os.environ.get("KOLLAB_STOP_ON_STDIN_EOF") == "1":
-        threading.Thread(target=_stop_on_stdin_eof, daemon=True).start()
+        threading.Thread(target=_stop_on_stdin_eof, args=(stop,), daemon=True).start()
     try:
         if os.name == "nt":
-            # Windows: Popen.wait() ignores Ctrl+C and interrupt_main; poll instead.
-            while webui_proc.poll() is None:
-                time.sleep(0.5)
+            # Windows: Popen.wait() ignores Ctrl+C; poll instead.
+            while webui_proc.poll() is None and not stop.wait(0.5):
+                pass
         else:
             webui_proc.wait()
     except KeyboardInterrupt:
@@ -2601,7 +2604,7 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     finally:
         signal_module.signal(signal_module.SIGTERM, previous_sigterm)
         if os.name == "nt":
-            _stop_children_nt([webui_proc, engine_proc])
+            _stop_children_nt({"web ui": webui_proc, "engine": engine_proc})
         else:
             _terminate_child(webui_proc)
             _terminate_child(engine_proc)
