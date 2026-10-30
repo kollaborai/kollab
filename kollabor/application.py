@@ -15,7 +15,7 @@ from kollabor_agent import AgentManager
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_ai import KollaborConversationLogger, ProfileManager
-from kollabor_config import ConfigService
+from kollabor_config import ConfigService, local_ipc
 from kollabor_events import EventBus
 from kollabor_events.dict_utils import deep_merge
 from kollabor_events.models import CommandResult, EventType
@@ -2163,16 +2163,11 @@ class TerminalLLMChat:
         # default 64KB limit can't hold real state payloads (e.g. conversation
         # history with a large system prompt).
         try:
-            try:
-                from kollabor_rpc import open_unix_connection_with_large_buffer
+            from kollabor_rpc.transport import LARGE_BUFFER_LIMIT
 
-                reader, writer = await open_unix_connection_with_large_buffer(
-                    socket_path
-                )
-            except ImportError:
-                # Fallback if kollabor_rpc not available (shouldn't happen
-                # post-phase-1).
-                reader, writer = await asyncio.open_unix_connection(socket_path)
+            reader, writer = await local_ipc.connect(
+                socket_path, limit=LARGE_BUFFER_LIMIT
+            )
         except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
             self.renderer.message_coordinator.display_message_sequence(
                 [

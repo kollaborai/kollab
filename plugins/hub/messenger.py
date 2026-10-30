@@ -337,6 +337,10 @@ def require_own_socket(path: str) -> None:
     receive everything we send. A missing path falls through so the connect
     attempt raises the real error.
     """
+    if os.name == "nt":
+        # An endpoint file, not a socket: local_ipc checks its owner and the
+        # key handshake (#268).
+        return
     try:
         info = os.lstat(path)
     except OSError:

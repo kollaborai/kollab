@@ -12,6 +12,8 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from kollabor_config import local_ipc
+
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -36,7 +38,7 @@ async def _binding_from_socket() -> dict[str, Any] | None:
         return None
     writer = None
     try:
-        reader, writer = await asyncio.open_unix_connection(socket_path)
+        reader, writer = await local_ipc.connect(socket_path)
         request = {"action": "acp_hub_status", "token": token, "generation": generation}
         writer.write((json.dumps(request) + "\n").encode())
         await writer.drain()
@@ -57,7 +59,7 @@ async def _binding_from_socket() -> dict[str, Any] | None:
 
 async def _call_socket(name: str, arguments: dict[str, Any]) -> Any:
     socket_path = os.environ.get("KOLLAB_ACP_HUB_SOCKET", "")
-    reader, writer = await asyncio.open_unix_connection(socket_path)
+    reader, writer = await local_ipc.connect(socket_path)
     try:
         request = {
             "action": "acp_hub_call", "name": name, "arguments": arguments,

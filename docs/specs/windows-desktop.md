@@ -119,9 +119,12 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 2. **A local IPC transport.** The hub's agent sockets are done: on Windows `AgentSocketServer` serves
    and its clients connect through `kollabor_config.local_ipc` (loopback TCP behind an endpoint file
    at the same path, under `~/.kollab/hub-sockets`). The engine's daemon connection
-   (`daemon_pool`) and its hub queries (`hub_bridge`) use it too. Still AF_UNIX: the attached
-   window's client (`attach_client.py`), `network_attach`, voice, deep_thought and the halt
-   waiter's status socket (`hub_bridge.waiter_line`). One abstraction under `kollabor_rpc` and `plugins/hub/messenger.py` for the sites in blocker 2: named pipes (`\\.\pipe\kollabor-hub-<hash>-<name>`, `ProactorEventLoop` pipe server and client) or loopback TCP with a per-agent token. Keep framing (`LOCAL_MAX_LINE_BYTES`, `LARGE_BUFFER_LIMIT`) and the owner-only access the Unix sockets get from the filesystem. Replace the `/tmp/kollabor-hub` constants with a per-user directory. Design: `local_ipc` in `docs/specs/windows-platform-helpers.md`.
+   (`daemon_pool`) and its hub queries (`hub_bridge`) use it too, and so do the attached window
+   (`application.py`, `attach_client.py`), the hub client (`state/hub_client.py`), the MCP hub
+   calls (`mcp_hub.py`), presence's socket probes and Deep Thought's child streams (their tests
+   run on Windows CI). Still AF_UNIX: `network_attach`, voice, the halt runtime and its waiter's
+   status socket (`hub_bridge.waiter_line`) and the relay's owner socket; `daemon.fork_daemon`
+   still forks. One abstraction under `kollabor_rpc` and `plugins/hub/messenger.py` for the sites in blocker 2: named pipes (`\\.\pipe\kollabor-hub-<hash>-<name>`, `ProactorEventLoop` pipe server and client) or loopback TCP with a per-agent token. Keep framing (`LOCAL_MAX_LINE_BYTES`, `LARGE_BUFFER_LIMIT`) and the owner-only access the Unix sockets get from the filesystem. Replace the `/tmp/kollabor-hub` constants with a per-user directory. Design: `local_ipc` in `docs/specs/windows-platform-helpers.md`.
 3. **One file-lock helper.** Mostly done (voice and OAuth token storage remain, below). `kollabor_config.file_lock` (`lock`, `try_lock`, `unlock`, `locked_file`) keeps `flock` semantics on both platforms, and its tests run on a Windows runner (`.github/workflows/windows-locks.yml`, #414).
    - Every lock in the hub plugin's coordinator, Telegram bridge, task ledger, service locator, private directory and enrollment, and in the engine's handover, MCP settings, sidebar order and PhoneLink, goes through it.
    - The kill switch (`halt_runtime.py`, #423) and the relay and dns files (`relay_owner.py`, `relay_runtime.py`, `relay_selfhost.py`, `dns/storage.py`, `dns/discovery_store.py`, `dns/discovery_publish.py`, #424) lock through `plugins/hub/file_lock.py`, a stdlib-only copy the headless relay ships. `tests/unit/test_hub_file_lock.py` keeps it byte-identical and keeps `fcntl` out of those seven files. The kill switch module loads on Windows (`windows-locks.yml` imports it).

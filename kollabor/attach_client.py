@@ -43,6 +43,8 @@ import signal
 import sys
 from typing import Any, Dict, List, Optional
 
+from kollabor_config import local_ipc
+
 try:
     import termios
     import tty
@@ -106,9 +108,7 @@ class AttachClient:
             from plugins.hub.messenger import require_own_socket
 
             require_own_socket(self.socket_path)
-            self._reader, self._writer = await asyncio.open_unix_connection(
-                self.socket_path
-            )
+            self._reader, self._writer = await local_ipc.connect(self.socket_path)
         except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
             print(f"cannot connect to {self.identity}: {e}", file=sys.stderr)
             return
