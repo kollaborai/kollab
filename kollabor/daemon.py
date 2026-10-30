@@ -45,6 +45,33 @@ class DaemonExited(RuntimeError):
         self.exit_code = exit_code
 
 
+def detached_command(argv: list[str]) -> list[str]:
+    """The command that starts this launch again as a detached agent."""
+    from .binary import kollab_argv
+
+    args = [a for a in argv[1:] if a != "--daemon"]
+    if "--detached" not in args and "-d" not in args:
+        args.insert(0, "--detached")
+    return [*kollab_argv(), *args]
+
+
+def spawn_detached_child(argv: list[str]) -> int:
+    """Windows has no fork: start a detached kollab with the same arguments and return its pid."""
+    import subprocess
+
+    from kollabor_config import proc_ctl
+
+    child = proc_ctl.start_child(
+        detached_command(argv),
+        detached=True,
+        env={**os.environ, DETACHED_CHILD_ENV: "1"},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return child.pid
+
+
 def exec_detached_child(argv: list[str]) -> bool:
     """Replace a forked, detached child with a fresh kollab; False if exec failed.
 
@@ -53,12 +80,7 @@ def exec_detached_child(argv: list[str]) -> bool:
     into Security), so the child must never keep running Python from the forked
     image. The caller falls back to running in-process when this returns.
     """
-    from .binary import kollab_argv
-
-    args = [a for a in argv[1:] if a != "--daemon"]
-    if "--detached" not in args and "-d" not in args:
-        args.insert(0, "--detached")
-    cmd = [*kollab_argv(), *args]
+    cmd = detached_command(argv)
     os.environ[DETACHED_CHILD_ENV] = "1"
     try:
         os.execv(cmd[0], cmd)

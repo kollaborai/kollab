@@ -1,7 +1,11 @@
 # Windows desktop (issue #268)
 
-Status: packaging path built, runtime port open. Nothing here has run on a
-Windows machine yet; the Windows CI job (`desktop-windows` in
+Status: packaging path built, runtime port open. On windows-latest the
+`windows-smoke` workflow installs the workspace, imports every module whose
+optional packages are installed, and runs the agent smoke (`--agent-smoke`
+against the venv `kollab.exe`): a detached agent starts, shows online in
+`--hub status` and stops. The packaged binary has
+not run on Windows yet; the Windows CI job (`desktop-windows` in
 `.github/workflows/binaries.yml`) is the first place any of it will.
 
 ## What blocks Windows
@@ -107,8 +111,13 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 
 ## Port work (follow-up, in order)
 
-1. **Detached start without fork.** A Windows branch in `cli_main` and `kollabor/daemon.py`: start the agent as a `subprocess` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, own readiness through `_wait_for_ready`, and make `stop_daemon` and `DaemonHandle.close` use `TerminateProcess`.
-2. **A local IPC transport.** One abstraction under `kollabor_rpc` and `plugins/hub/messenger.py` for the sites in blocker 2: named pipes (`\\.\pipe\kollabor-hub-<hash>-<name>`, `ProactorEventLoop` pipe server and client) or loopback TCP with a per-agent token. Keep framing (`LOCAL_MAX_LINE_BYTES`, `LARGE_BUFFER_LIMIT`) and the owner-only access the Unix sockets get from the filesystem. Replace the `/tmp/kollabor-hub` constants with a per-user directory. Design: `local_ipc` in `docs/specs/windows-platform-helpers.md`.
+1. **Detached start without fork.** `kollab --detached` is done (`daemon.spawn_detached_child`, through
+   `proc_ctl.start_child`; proven by the agent smoke). Still forking: `fork_daemon`, the attached
+   window's own daemon, and its ready pipe. A Windows branch in `cli_main` and `kollabor/daemon.py`: start the agent as a `subprocess` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, own readiness through `_wait_for_ready`, and make `stop_daemon` and `DaemonHandle.close` use `TerminateProcess`.
+2. **A local IPC transport.** The hub's agent sockets are done: on Windows `AgentSocketServer` serves
+   and its clients connect through `kollabor_config.local_ipc` (loopback TCP behind an endpoint file
+   at the same path, under `~/.kollab/hub-sockets`). Still AF_UNIX: the attach and rpc clients,
+   `network_attach`, voice and deep_thought. One abstraction under `kollabor_rpc` and `plugins/hub/messenger.py` for the sites in blocker 2: named pipes (`\\.\pipe\kollabor-hub-<hash>-<name>`, `ProactorEventLoop` pipe server and client) or loopback TCP with a per-agent token. Keep framing (`LOCAL_MAX_LINE_BYTES`, `LARGE_BUFFER_LIMIT`) and the owner-only access the Unix sockets get from the filesystem. Replace the `/tmp/kollabor-hub` constants with a per-user directory. Design: `local_ipc` in `docs/specs/windows-platform-helpers.md`.
 3. **One file-lock helper.** Mostly done (voice and OAuth token storage remain, below). `kollabor_config.file_lock` (`lock`, `try_lock`, `unlock`, `locked_file`) keeps `flock` semantics on both platforms, and its tests run on a Windows runner (`.github/workflows/windows-locks.yml`, #414).
    - Every lock in the hub plugin's coordinator, Telegram bridge, task ledger, service locator, private directory and enrollment, and in the engine's handover, MCP settings, sidebar order and PhoneLink, goes through it.
    - The kill switch (`halt_runtime.py`, #423) and the relay and dns files (`relay_owner.py`, `relay_runtime.py`, `relay_selfhost.py`, `dns/storage.py`, `dns/discovery_store.py`, `dns/discovery_publish.py`, #424) lock through `plugins/hub/file_lock.py`, a stdlib-only copy the headless relay ships. `tests/unit/test_hub_file_lock.py` keeps it byte-identical and keeps `fcntl` out of those seven files. The kill switch module loads on Windows (`windows-locks.yml` imports it).
@@ -134,7 +143,9 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 
 ## Not verified
 
-Nothing in this change ran on Windows. The Windows-gated Rust has not been
-compiled (the build host is macOS with no Windows target). The Python scripts
-are covered by unit tests with a fake runtime; `agent_smoke` has never run
-against a real daemon on any platform.
+The `windows-smoke` workflow runs on windows-latest from the workspace venv:
+every module whose optional packages are installed imports (numpy and a2a are
+not, so 8 modules are skipped), and `--agent-smoke` passes against
+`.venv\Scripts\kollab.exe`.
+Not yet run on Windows: the packaged binary, the Windows-gated Rust (the build
+host is macOS with no Windows target), and the desktop app.

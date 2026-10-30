@@ -1653,11 +1653,19 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     data = json.load(fh)
                 pid = data.get("pid", 0)
                 # Pid must exist
-                try:
-                    os.kill(pid, 0)
-                except (OSError, ProcessLookupError):
-                    f.unlink(missing_ok=True)
-                    continue
+                if os.name == "nt":
+                    # os.kill(pid, 0) sends Ctrl+C on Windows, so ask the process table (#268).
+                    from kollabor_config import proc_ctl
+
+                    if not proc_ctl.pid_alive(pid):
+                        f.unlink(missing_ok=True)
+                        continue
+                else:
+                    try:
+                        os.kill(pid, 0)
+                    except (OSError, ProcessLookupError):
+                        f.unlink(missing_ok=True)
+                        continue
                 # Pid alive but heartbeat stale = recycled pid, clean up
                 heartbeat_age = _time.time() - (data.get("last_heartbeat") or 0)
                 if heartbeat_age > 30:
@@ -1665,10 +1673,15 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     alive = False
                     if sock:
                         try:
-                            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-                            s.settimeout(1.0)
-                            s.connect(sock)
-                            s.close()
+                            if os.name == "nt":  # an endpoint file, not a socket (#268)
+                                from kollabor_config import local_ipc
+
+                                local_ipc.connect_blocking(sock, 1.0).close()
+                            else:
+                                s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                                s.settimeout(1.0)
+                                s.connect(sock)
+                                s.close()
                             alive = True
                         except Exception:
                             pass
@@ -2757,6 +2770,7 @@ def cli_main() -> None:
             SERVICE_ENV,
             SERVICE_PID_ENV,
             exec_detached_child,
+            spawn_detached_child,
         )
 
         if os.environ.pop(DETACHED_CHILD_ENV, "") == "1":
@@ -2772,6 +2786,12 @@ def cli_main() -> None:
             os.dup2(devnull, 0)  # stdin
             os.dup2(devnull, 1)  # stdout
             os.close(devnull)
+        elif os.name == "nt":
+            # Windows has no fork: a detached copy starts with DETACHED_CHILD_ENV set
+            # and takes the first branch above (#268).
+            sys.stdout.write(f"[detached] pid {spawn_detached_child(sys.argv)}\n")
+            sys.stdout.flush()
+            sys.exit(0)
         else:
             pid = os.fork()
             if pid > 0:

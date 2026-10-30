@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Windows: `kollab --detached` starts an agent with no fork, and the hub's
+  agent sockets run over local IPC there, so `kollab --hub status` shows the
+  agent online and `kollab --hub stop` stops it. A Windows CI job runs this
+  agent smoke on pull requests that change the code, and imports every module
+  whose optional packages are installed (#268).
 - Windows groundwork: `kollabor_config` gains `private_fs`, `proc_ctl` and
   `local_ipc`, cross-platform helpers for owner-only files, process control and
   local sockets. On Windows they use DACL checks, Job Objects and loopback TCP with

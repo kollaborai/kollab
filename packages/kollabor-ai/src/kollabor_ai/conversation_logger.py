@@ -124,6 +124,10 @@ class KollaborConversationLogger:
         dirs are 0700 and the files 0600. mkdir(mode=...) never fixes what
         already exists, hence this bounded one-time walk at logger init.
         """
+        if os.name == "nt":
+            # No uid or mode bits there; the transcripts sit under the user's
+            # profile folder, whose ACL keeps other users out (#268).
+            return
         directories = (self.conversations_dir, self.raw_dir, self.memory_dir)
         for directory in directories:
             try:

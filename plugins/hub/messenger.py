@@ -375,6 +375,7 @@ class AgentSocketServer:
         # Use identity-based name when provided, fall back to agent_id
         self.socket_path = get_socket_dir() / f"{socket_name or agent_id}.sock"
         self._server: Optional[asyncio.AbstractServer] = None
+        self._endpoint: Any = None  # Windows: the local_ipc endpoint behind _server
         self._on_message = on_message
         self._on_get_output = on_get_output
         self._on_shutdown = on_shutdown
@@ -448,14 +449,29 @@ class AgentSocketServer:
             self.socket_path.unlink()
 
         try:
-            self._server = await asyncio.wait_for(
-                asyncio.start_unix_server(
-                    self._accept_connection,
-                    path=str(self.socket_path),
-                    limit=LOCAL_MAX_LINE_BYTES,
-                ),
-                timeout=10.0,
-            )
+            if os.name == "nt":
+                # No unix sockets: a loopback port behind an endpoint file at the same
+                # path; local_ipc's handshake proves the peer is this user (#268).
+                from kollabor_config import local_ipc
+
+                self._endpoint = await asyncio.wait_for(
+                    local_ipc.serve(
+                        self._accept_connection,
+                        self.socket_path,
+                        limit=LOCAL_MAX_LINE_BYTES,
+                    ),
+                    timeout=10.0,
+                )
+                self._server = self._endpoint.server
+            else:
+                self._server = await asyncio.wait_for(
+                    asyncio.start_unix_server(
+                        self._accept_connection,
+                        path=str(self.socket_path),
+                        limit=LOCAL_MAX_LINE_BYTES,
+                    ),
+                    timeout=10.0,
+                )
         except asyncio.TimeoutError:
             raise RuntimeError(f"socket bind timeout: {self.socket_path}")
         except Exception as e:
@@ -2101,6 +2117,9 @@ class AgentSocketServer:
             self._tcp_server.close()
             listeners.append(self._tcp_server)
             self._tcp_server = None
+        if self._endpoint is not None:  # Windows: also removes the endpoint file
+            self._endpoint.close()
+            self._endpoint = None
         if self._server:
             self._server.close()
             listeners.append(self._server)
@@ -2404,6 +2423,15 @@ class AgentMessenger:
                 ctx = build_client_ssl_context(ca)
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port, ssl=ctx),
+                timeout=timeout,
+            )
+        elif os.name == "nt":
+            # ``target`` is an endpoint file naming a loopback port; local_ipc checks
+            # it is ours and runs the handshake (#268).
+            from kollabor_config import local_ipc
+
+            reader, writer = await asyncio.wait_for(
+                local_ipc.connect(target),
                 timeout=timeout,
             )
         else:
