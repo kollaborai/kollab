@@ -258,9 +258,15 @@ class LocalAgentDirectory:
         if projects is not None:
             try:
                 with ExitStack() as stack:
-                    if workspace is not None:
+                    if workspace is not None and os.name != "nt":
                         names = iter([encode_project_path(workspace)])
                     else:
+                        # On Windows the on-disk project directory name
+                        # diverges from encode_project_path(workspace) (run
+                        # 41143955143 wrote _Users_runneradmin_... while the
+                        # scan computed C_Users_runneradmin_...), so scan
+                        # every project dir and let _record()'s resolved
+                        # workspace comparison be the filter.
                         entries = stack.enter_context(os.scandir(projects))
                         names = (entry.name for entry in entries)
                     for number, name in enumerate(names):
@@ -403,7 +409,15 @@ class LocalAgentDirectory:
         actual_workspace = Path(project).resolve()
         if workspace is not None and actual_workspace != workspace:
             return None
-        if project_name is not None and encode_project_path(actual_workspace) != project_name:
+        # nt skips the directory-name cross-check: the writer's directory
+        # name diverges from encode_project_path on Windows (see
+        # _presence_dirs), and the resolved-workspace comparison above is
+        # the authoritative filter.
+        if (
+            project_name is not None
+            and os.name != "nt"
+            and encode_project_path(actual_workspace) != project_name
+        ):
             return None
         if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C there (#268)
             from kollabor_config import proc_ctl
