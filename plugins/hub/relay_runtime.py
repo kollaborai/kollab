@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import fcntl
 import hashlib
 import ipaddress
 import json
@@ -29,6 +28,7 @@ from urllib.parse import unquote, urlsplit
 import aiohttp
 from aiohttp import web
 
+from . import file_lock
 from .relay_state import canonical_origin, strict_json
 
 DEFAULT_IMAGE = "valkey/valkey:8.1.10-alpine"
@@ -799,12 +799,10 @@ class RelayRuntime:
             os.close(self._lock_fd)
             self._lock_fd = None
             raise RuntimeConfigError("runtime lock must be a private regular file owned by this user")
-        try:
-            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+        if not file_lock.try_lock(self._lock_fd):
             os.close(self._lock_fd)
             self._lock_fd = None
-            raise RuntimeConfigError("this runtime state directory is already supervised") from exc
+            raise RuntimeConfigError("this runtime state directory is already supervised")
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self.stop_event.set)

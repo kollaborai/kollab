@@ -5,7 +5,6 @@ Key file I/O with restrictive permissions for Ed25519 private keys.
 Designation names are sanitized to prevent path traversal.
 """
 
-import fcntl
 import json
 import logging
 import os
@@ -14,6 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .. import file_lock
 from .models import AgentRecord, ReputationScore
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ def _locked_atomic_write(path: Path, data: dict, *, compact: bool = False) -> No
     fd = None
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        file_lock.lock(fd)
 
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
@@ -77,7 +77,7 @@ def _locked_atomic_write(path: Path, data: dict, *, compact: bool = False) -> No
             raise
     finally:
         if fd is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            file_lock.unlock(fd)
             os.close(fd)
 
 

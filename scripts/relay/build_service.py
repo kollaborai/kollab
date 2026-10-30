@@ -36,6 +36,7 @@ FILES = (
     "kollabor/binary.py",
     "plugins/__init__.py",
     "plugins/hub/__init__.py",
+    "plugins/hub/file_lock.py",
     "plugins/hub/relay_service.py",
     "plugins/hub/relay_backend.py",
     "plugins/hub/relay_runtime.py",

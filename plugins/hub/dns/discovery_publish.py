@@ -7,7 +7,6 @@ health endpoint confirms the supported protocol.
 """
 
 import argparse
-import fcntl
 import http.client
 import ipaddress
 import json
@@ -19,6 +18,7 @@ from urllib.parse import urlsplit
 import rfc8785
 from nacl.signing import SigningKey
 
+from .. import file_lock
 from .discovery import MAX_INTEGER, SCHEMA, WELL_KNOWN, DiscoveryError, normalize_target, verify_manifest
 from .storage import _locked_atomic_write
 
@@ -81,7 +81,7 @@ def publish(origin: str, state_dir: Path, output: Path, *, relay_control: str | 
     # reentrant across separately opened descriptors, even in one process.
     fd = os.open(state_dir / ".publisher-transaction.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        file_lock.lock(fd)
         key_path, state_path = state_dir / "service.key", state_dir / "publisher.json"
         if key_path.exists() and not state_path.exists():
             raise DiscoveryError(
@@ -141,7 +141,7 @@ def publish(origin: str, state_dir: Path, output: Path, *, relay_control: str | 
         output.chmod(0o644)
         return payload
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        file_lock.unlock(fd)
         os.close(fd)
 
 

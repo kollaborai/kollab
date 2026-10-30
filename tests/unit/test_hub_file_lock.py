@@ -6,6 +6,8 @@ headless relay cannot import a workspace package, so plugins/hub carries its own
 
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -15,6 +17,17 @@ def test_hub_lock_is_the_config_lock():
     assert hub.read_bytes() == config.read_bytes()
 
 
-def test_kill_switch_locks_without_fcntl():
-    source = (ROOT / "plugins/hub/halt_runtime.py").read_text(encoding="utf-8")
-    assert "fcntl" not in source
+@pytest.mark.parametrize(
+    "path",
+    [
+        "plugins/hub/halt_runtime.py",
+        "plugins/hub/relay_owner.py",
+        "plugins/hub/relay_runtime.py",
+        "plugins/hub/relay_selfhost.py",
+        "plugins/hub/dns/storage.py",
+        "plugins/hub/dns/discovery_store.py",
+        "plugins/hub/dns/discovery_publish.py",
+    ],
+)
+def test_hub_locks_without_fcntl(path):
+    assert "fcntl" not in (ROOT / path).read_text(encoding="utf-8")

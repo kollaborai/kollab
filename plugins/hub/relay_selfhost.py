@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import fcntl
 import getpass
 import ipaddress
 import os
@@ -33,6 +32,7 @@ from aiohttp import web
 
 from kollabor.binary import kollab_argv
 
+from . import file_lock
 from .dns.discovery import DOCUMENT_PATHS, WELL_KNOWN, DiscoveryError, DiscoveryTarget, normalize_target
 from .dns.discovery_publish import publish
 from .relay_backend import RelayLimits
@@ -356,11 +356,9 @@ PRINTABLE = {"nginx": nginx_config, "caddy": caddy_config, "systemd": systemd_un
 def _lock(state_dir: Path) -> int:
     """One process per state directory; the descriptor is held until exit."""
     fd = os.open(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    if not file_lock.try_lock(fd):
         os.close(fd)
-        raise RuntimeConfigError(f"{state_dir} is already served by another kollab relay serve") from None
+        raise RuntimeConfigError(f"{state_dir} is already served by another kollab relay serve")
     return fd
 
 
