@@ -106,11 +106,28 @@ class RiskAssessmentRules:
             re.compile(r"/connect\s+(revoke|halt|resume)\b"),
             re.compile(
                 r"(\brm|\bmv|\bcp|\btee|\bln|\bsed\s+-i|\bdd\b[^|;&]*of=|\btruncate|\bchmod|\bchown"
-                r"|\bshred|\bunlink|>)[^|;&]*\.kollab/private\b"
+                r"|\bshred|\bunlink|>)[^|;&]*\.kollab[\\/]private\b"
             ),
-            re.compile(r"\bcd\s+\S*\.kollab/private\b.*(\brm|\bmv|\bcp|\btee|\btruncate|\bchmod|\bunlink|>)"),
-            re.compile(r"\bfind\b[^|;&]*\.kollab/private\b[^|;&]*(-delete|-exec\s+rm)"),
-            re.compile(r"\bpython[\d.]*\s+-c\b.*\.kollab/private\b"),
+            re.compile(r"\bcd\s+\S*\.kollab[\\/]private\b.*(\brm|\bmv|\bcp|\btee|\btruncate|\bchmod|\bunlink|>)"),
+            re.compile(r"\bfind\b[^|;&]*\.kollab[\\/]private\b[^|;&]*(-delete|-exec\s+rm)"),
+            re.compile(r"\bpython[\d.]*\s+-c\b.*\.kollab[\\/]private\b"),
+            # Windows shells (#438): PowerShell and cmd syntax; cmdlets match in any case
+            re.compile(
+                r"(?i)\b(irm|iwr|invoke-restmethod|invoke-webrequest|curl(\.exe)?|wget)\b"
+                r"[^|;&]*\|\s*(iex|invoke-expression)\b"
+            ),
+            re.compile(
+                r"(?i)\b(remove-item|ri|rd|rmdir|del|erase)\b[^|;&]*?(?<![\w\\/])['\"]?"
+                r"[a-z]:[\\/]?\*?['\"]?(?=\s|$)"
+            ),
+            re.compile(r"(?i)\b(rd|rmdir)\s+(/[sq]\s+){2}"),
+            re.compile(r"(?i)\bformat\s+[a-z]:"),
+            re.compile(r"(?i)\b(stop-computer|restart-computer|format-volume|clear-disk)\b"),
+            re.compile(
+                r"(?i)\b(remove-item|ri|del|erase|rd|rmdir|move-item|mi"
+                r"|copy-item|cpi|set-content|sc"
+                r"|add-content|ac|out-file|clear-content|copy|move)\b[^|;&]*\.kollab[\\/]private\b"
+            ),
         ]
     )
 
