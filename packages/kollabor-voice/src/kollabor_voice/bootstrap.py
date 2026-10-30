@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -12,6 +11,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Windows: the voice runtime is POSIX-only for now (#268)
+    fcntl = None
 
 from .control import atomic_json, manifest, prepare_root, service_root
 

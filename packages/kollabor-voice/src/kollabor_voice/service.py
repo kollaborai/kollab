@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -17,6 +16,11 @@ import signal
 import time
 import uuid
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Windows: the voice runtime is POSIX-only for now (#268)
+    fcntl = None
 
 from .control import (
     LEASE_SECONDS,

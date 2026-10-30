@@ -1,0 +1,39 @@
+name: windows-smoke
+
+on:
+  pull_request:
+    paths:
+      - "kollabor/**"
+      - "plugins/**"
+      - "packages/*/src/**"
+      - "packages/*/pyproject.toml"
+      - pyproject.toml
+      - uv.lock
+      - scripts/windows_import_smoke.py
+      - .github/workflows/windows-smoke.yml
+  workflow_dispatch:
+
+jobs:
+  import-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}
+
+      - name: Install workspace
+        run: uv sync --all-packages
+
+      # Every module imports on Windows, so a Unix-only import never ships unseen (kollab #268).
+      - name: Every module imports
+        run: uv run python scripts/windows_import_smoke.py
+
+      - name: kollab --version
+        run: uv run kollab --version
