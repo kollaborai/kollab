@@ -34,6 +34,8 @@ _PASS_HEADERS = (
     "user-agent",
     "origin",
     "sec-fetch-site",
+    "x-kollab-web-session",
+    "x-kollab-confirmation-shown",
 )
 _NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 

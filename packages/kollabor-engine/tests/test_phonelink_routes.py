@@ -193,3 +193,13 @@ def test_a_forwarded_call_is_never_forwarded_again(monkeypatch):
         )
     assert response.status_code == 400
     assert seen == []
+
+
+def test_a_forward_keeps_the_audit_headers(monkeypatch):
+    seen = route_to(monkeypatch, lambda r: httpx.Response(200, json={}))
+    audit = {"x-kollab-web-session": "ws-1", "x-kollab-confirmation-shown": "1"}
+    with TestClient(held_app(status=held()), client=("127.0.0.1", 1)) as client:
+        client.get("/phonelink", headers=audit)
+    (sent,) = seen
+    assert sent.headers["x-kollab-web-session"] == "ws-1"
+    assert sent.headers["x-kollab-confirmation-shown"] == "1"
