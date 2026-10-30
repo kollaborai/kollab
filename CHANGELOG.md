@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Phone app link screen: the Kollab phone app (iOS and Android) opens on a link
+  screen, where Scan QR Code reads the code from Settings → PhoneLink on
+  your computer and Paste Link Instead takes the copied link. It opens only a
+  fresh PhoneLink invite and remembers the directory, so later launches go
+  straight to your computer. Inside the app, the PhoneLink error screen adds
+  Scan QR Code to link again (#369).
 - Voice Prompt settings: Settings → Voice → Voice Prompt (and `/voice config`
   in the terminal) edits the instructions added to every spoken reply, and
   picks a Personality (Max Gen Z, Neutral or Professional) and a Reasoning

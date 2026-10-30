@@ -4,6 +4,7 @@
 // the verified copy on this phone so later launches need no new code from anyone.
 import { AppRefused, verifyFile, verifyManifest, type AppManifest } from "../app-verify";
 import { hostFingerprint, phoneIdentity, PhoneTransport } from "../phone-transport";
+import { appRelink } from "./app-shell";
 
 const DB = "kollab-phonelink-app";
 type Stored = { host: string; manifest: AppManifest & { protocol: string }; files: Record<string, Uint8Array> };
@@ -32,7 +33,17 @@ function screen(message: string, extra: { code?: string; fingerprint?: string; r
     box.append(text("small", "Both screens should show the same code and fingerprint.", "color:#aab0b8;max-width:300px"));
   }
   if (extra.retry) {
-    const button = text("button", "Try Again", "padding:10px 18px;border-radius:8px;border:1px solid #8a9099;background:none;color:inherit;font-size:14px");
+    const relink = appRelink();
+    if (relink) {
+      const scan = text(
+        "button",
+        "Scan QR Code",
+        "min-height:44px;padding:10px 18px;border-radius:8px;border:1px solid #e8eaed;background:#e8eaed;color:#101215;font-weight:600;font-size:14px",
+      );
+      scan.onclick = relink;
+      box.append(scan);
+    }
+    const button = text("button", "Try Again", "min-height:44px;padding:10px 18px;border-radius:8px;border:1px solid #8a9099;background:none;color:inherit;font-size:14px");
     button.onclick = () => location.reload();
     box.append(button);
   }
