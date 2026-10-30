@@ -2,13 +2,13 @@
 title: "Opt-in OpenTelemetry Tracing, Metrics and Logs"
 created: 2026-10-29
 modified: 2026-10-29
-status: draft (adversarial review cycles 1 and 2 addressed; cycle 3 pending; development gated)
+status: draft (adversarial review cycles 1, 2 and 3 addressed; development gated)
 ---
 
 # Opt-in OpenTelemetry tracing, metrics and logs for Kollab
 
 Status: draft. Development is gated until three adversarial review cycles are
-recorded in the [Review log](#29-review-log) and Marco has read the final spec.
+recorded in the [Review log](#29-review-log) and the maintainer has read the final spec.
 
 Branch: `docs/telemetry-otel-spec`. Tracking issue: the GitHub issue titled
 `feat(telemetry): opt-in OpenTelemetry tracing, metrics and logs for agents,
@@ -975,7 +975,7 @@ attributes, which avoids shipping already-deprecated names on day one.
 
 ### 8.1 Trace scope: one trace per turn chain, grouped by conversation
 
-Marco's requirement is conversation and session correlation. A Kollab
+The maintainer's requirement is conversation and session correlation. A Kollab
 conversation can live for days (detached daemons, resume after compaction,
 `session_resume.py`) and can involve several daemons and devices. A trace
 that lasts for hours is hostile to the recommended collector tail sampling
@@ -1305,7 +1305,7 @@ which runs as a `kollab.background compaction` root linked to the anchor,
 
 `GoalService.maybe_continue`, `finish_turn`, `handle_goal_report` add events
 on the chain span (`kollab.goal.continue`, `kollab.goal.report`,
-`kollab.goal.blocked`) with `kollab.goal.id` (pseudonymized) and
+`kollab.goal.blocked`) with `kollab.goal.id` (`pseudonymize("goal", id)`, 17.5) and
 `kollab.goal.status`. Goal text, evidence and attachments are never
 recorded. Goal-triggered chains have `kollab.turn.trigger=goal`.
 
@@ -1331,18 +1331,23 @@ recorded. Goal-triggered chains have `kollab.turn.trigger=goal`.
 * Audio is never recorded. A voice turn's transcript becomes a user message
   in the conversation, and PhoneLink-typed input does too, so they would
   otherwise reach `gen_ai.input.messages` when content capture is on.
-  Decision: messages whose input origin is `voice` or `phone` are replaced
-  in captured content by `{"role": "user", "parts": [], "kollab.redacted":
-  "voice"}` (or `"phone"`), in every content mode. The origin comes from
-  the admit path (`kollab.turn.trigger` of the input, 9.3): telemetry keeps
-  an in-memory map from the message object to its origin, and, only while
-  content capture is on, also writes `metadata["kollab_input_origin"]` on
-  the `ConversationMessage` so a restarted process keeps the marker.
-  Messages created while content capture was off carry no marker and are
-  treated as typed input; the panel's content warning says so. The voice
+  Decision: when telemetry is on in any mode, the admit path (`kollab.turn.trigger`
+  of the input, 9.3) writes `metadata["kollab_input_origin"]` on every new
+  user `ConversationMessage`, with one of three labels: `voice`, `phone` or
+  `typed`. The label is a label, never content, and it is saved with the
+  conversation, so a restarted process keeps it. A user message with no label
+  (one created while telemetry was off, or before this feature) is exported
+  in captured content as `{"role": "user", "parts": [], "kollab.redacted":
+  "unknown"}`, never as typed input. `voice` and `phone` messages are exported
+  as `{"role": "user", "parts": [], "kollab.redacted": "voice"}` (or
+  `"phone"`) in every content mode. When telemetry is off nothing is written,
+  so the 6.3 rule still holds. The panel's content warning says that user
+  messages from before telemetry was turned on export as `unknown`. The voice
   rewrite call (`voice_rewrite`, `plugins/voice_plugin.py`) records no
   content at all. A W9b test captures a voice turn and a PhoneLink turn with
-  content `full` and asserts neither text appears in exported bytes.
+  content `full` and asserts neither text appears in exported bytes. A second
+  test creates a voice message with telemetry off, turns telemetry on, and
+  asserts the message exports as `unknown` and its text is absent.
 
 ### 9.7 Watchdog, cancellation, supersede
 
@@ -1459,9 +1464,15 @@ Lint (`tests/unit/telemetry/test_model_call_inventory.py`, AST based):
   provider is listed; each such module must appear in the table (instrumented
   or excluded with a reason). A URL built at run time cannot be resolved
   statically, so the lint is an inventory with a mandatory decision, not a
-  proof. The runtime complement: in the SDK test layer, the fake provider's
-  HTTP transport (an `httpx.MockTransport`) asserts that every request it
-  receives happens inside an active `chat` span.
+  proof. The runtime check is a debug assertion in one provider HTTP wrapper
+  that every `kollabor_ai` provider sends its requests through (W4 creates
+  the wrapper if the providers do not already share one): every outbound
+  provider request must run inside an active `chat` span. It is enabled in
+  the unit suite and the integration job, and is off in release builds. The
+  fake provider's `httpx.MockTransport` adds a test-only check of the same
+  rule. Neither check sees a call that no test or code path reaches, so the
+  inventory table above is what proves coverage, not the lint. Each new
+  provider call site is added to the table in the same change.
 
 ### 10.5 ACP runners
 
@@ -1525,18 +1536,32 @@ Inside `_execute_mcp_tool` / `mcp_integration.py`, a CLIENT child span per
 MCP request following the pinned MCP conventions: name `{mcp.method.name}
 {target}` (for example `tools/call search`), `mcp.method.name`,
 `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `network.transport`
-(`pipe` for stdio, `tcp` for HTTP), `mcp.session.id` pseudonymized, and the
+(`pipe` for stdio, `tcp` for HTTP), `mcp.session.id` (`pseudonymize("mcp.session", id)`, 17.5), and the
 metric `mcp.client.operation.duration`. `MCP_SERVER_CONNECT/CONNECTED/ERROR`
 events become events on a `kollab.background mcp_discovery` span (linked to
 the anchor) and the counter
 `kollab.mcp.server.connections` by outcome.
 
+The MCP span events and the counter carry only this allow-list: server name
+(for an HTTP server, its host only, pseudonymized outside `plain` mode as
+10.2 does for `server.address`), transport, outcome, `error.type` and
+duration. Stdio command lines, args, env, URL userinfo and query strings
+(where tokens often sit), and raw error text are dropped in every mode before
+any exporter sees them. `error.message` is exported only through the 17.3
+pipeline, and only when content capture is on. A test puts a token in a
+server URL and asserts it is absent from exported bytes, with content capture
+off and on.
+
 Context injection into MCP `params._meta` (`traceparent` only, as the MCP
 conventions and SEP-414 describe; `tracestate` is never sent, 12.1) is off
 by default
 (`kollabor.telemetry.propagate.mcp: false`): MCP servers are often remote
-third parties and would learn trace IDs. When on, only to servers marked
-trusted in MCP config.
+third parties and would learn trace IDs. When on, only to the servers named in
+`kollabor.telemetry.propagate.mcp_servers` (a list of MCP server names,
+`[]` by default). No MCP config key marks a server trusted today, so this
+list is the only trust source. The list is honored only from
+`~/.kollab/config.json` (the 6.2 rule); a copy in project or local config is
+ignored, with the 6.2 WARNING.
 
 ### 11.4 Hub tools as transfers
 
@@ -1587,7 +1612,7 @@ Local socket actions (`AgentSocketServer._handle_connection`, every action at
 
 | Action | Validator | Strict? | Decision | Placement and trust |
 | --- | --- | --- | --- | --- |
-| `message` | `HubMessage.from_dict` | no (unknown keys dropped) | carried | top-level `"otel"` beside the `to_dict()` fields; trust `local` (same uid via `_get_peer_credentials`; where peer credentials are unavailable, `foreign`) |
+| `message` | `HubMessage.from_dict` | no (unknown keys dropped) | carried | top-level `"otel"` beside the `to_dict()` fields. The receiver reads it from the raw frame before `from_dict` runs and removes it before the `HubMessage` is built, so it is never stored, queued, or written to the inbox, replay or trace files. A test with telemetry on asserts that the inbox file and the replayed conversation message contain no `traceparent`; trust `local` (same uid via `_get_peer_credentials`; where peer credentials are unavailable, `foreign`) |
 | `turn_end` | `required <= keys <= required + {from_identity}` | yes | link only | no carrier in any release; the sender records `kollab.hub.turn_end` on its waiting span from its own state, keyed by `thread_id`/`reply_to` (12.4) |
 | `peer_forward`, `peer_secure` | exact key sets `{action, frame}`, `{action, method, payload}` | yes | not traced (carrier) | relay plumbing; the relay request span (12.3) covers it |
 | `rpc_request` (the authenticated branch and attached connections via `_rpc_server.handle_wire`) | `RpcRequest.from_wire` | no | carried | top-level `"otel"` beside `request_id`, `method`, `params`, `timeout`; trust `local` |
@@ -1940,7 +1965,7 @@ why inference, chains and tools are separate instruments in both modes.
 | `kollab.gen_ai.client.estimated_usage` | Counter | {request} | provider |
 | `kollab.agent.turns` | Counter | {turn} | `gen_ai.agent.name`, `kollab.turn.trigger`, `kollab.outcome` |
 | `kollab.agent.rounds` | Histogram | {round} | `gen_ai.agent.name` (rounds per chain) |
-| `kollab.agent.queue.depth` | Observable gauge | {message} | `gen_ai.agent.name`. The callback runs on the SDK's reader thread, so it never touches the `asyncio.Queue`; it reads a plain integer that `QueueProcessor` increments on enqueue and decrements on dequeue and drop, on the event loop (a single int read is atomic under the GIL and under free-threading's per-object locking) |
+| `kollab.agent.queue.depth` | Observable gauge | {message} | `gen_ai.agent.name`. The callback runs on the SDK's reader thread, so it never touches the `asyncio.Queue`; it reads an integer that `QueueProcessor` increments on enqueue and decrements on dequeue and drop, on the event loop, under a `threading.Lock` that the callback also takes |
 | `kollab.agent.queue.dropped` | Counter | {message} | `kollab.queue.strategy` (from `dropped_messages`) |
 | `kollab.agent.queue.wait` | Histogram | s | `kollab.turn.trigger` |
 | `kollab.agent.watchdog.heals` | Counter | {heal} | mode |
@@ -1961,6 +1986,7 @@ why inference, chains and tools are separate instruments in both modes.
 | `kollab.engine.http.server.duration` | Histogram | s | `http.route` (template), `http.request.method`, `http.response.status_code`, `kollab.client.kind` (`desktop`, `web`, `phone`, `cli`, `other`): `phone` for requests arriving through `PhoneLink._http`, `desktop` when the request `Origin` is the Tauri webview origin (`tauri://localhost` or `http://tauri.localhost`), `cli` for engine RPC clients, `web` for other browser origins, else `other` |
 | `kollab.engine.streams.active` | UpDownCounter | {connection} | `kollab.engine.stream.kind` (`sse`, `websocket`), `kollab.client.kind` |
 | `kollab.telemetry.exported` / `.dropped` / `.export_failures` | Counter | {item} | `kollab.telemetry.signal`, reason |
+| `kollab.telemetry.internal_errors` | Counter | {error} | none |
 
 ### 13.3 Error rates
 
@@ -2002,11 +2028,16 @@ on the root logger:
   `code.function.name`, `code.file.path` (package relative),
   `code.line.number`, `exception.type`, `kollab.log.message_id` (the first
   16 hex of SHA-256 over `logger name + ":" + code.file.path + ":" +
-  code.line.number`, stable per call site) and the trace and span ids. A
-  call site that wants a body with content off opts in explicitly with
-  `extra={"kollab_safe_message": "<constant or bounded text>"}`; that text
-  still goes through redaction (17.3) and the 256 character cap. With
-  content capture on, the formatted message is exported after redaction.
+  code.line.number`; it is stable per build only, and it changes whenever the
+  line moves, so it is not promised stable across releases) and the trace and
+  span ids. A call site that wants a body with content off opts in explicitly
+  with `extra={"kollab_safe_message": "<string literal>"}`. The value must be
+  a string literal of at most 256 characters. A CI AST test in
+  `tests/unit/telemetry/` fails on any `kollab_safe_message=` whose value is
+  not an `ast.Constant` str or is longer than 256 characters. Interpolated
+  text, including f-strings and exception text, is never accepted. The
+  literal still goes through redaction (17.3). With content capture on, the
+  formatted message is exported after redaction.
 * Redaction before export: when a body is exported, the handler runs
   `JoinCodeRedactionFilter`, `RedactingLogFilter` (which the root file
   handler does not attach today, section 4.6) and the telemetry pipeline
@@ -2042,13 +2073,30 @@ on the root logger:
   events (baseline) are emitted only when content capture includes events
   (`EVENT_ONLY` or `SPAN_AND_EVENT`), as log records with the event name.
 * `gen_ai.client.operation.exception` (latest mode) is emitted for failed
-  inference with `error.type`, redacted `exception.message` (max 256
-  chars) and no stack trace unless `kollabor.telemetry.exceptions.stacktrace:
-  true` (stack traces contain absolute paths).
+  inference. With content capture off it carries only `error.type` and
+  `exception.type`; it never carries `exception.message`, because a provider
+  400 error can quote the request and the redaction pipeline (17.3) does not
+  catch every form. With content capture on, `exception.message` is exported
+  after redaction, capped at 256 characters. No stack trace unless
+  `kollabor.telemetry.exceptions.stacktrace: true` (stack traces contain
+  absolute paths). Test (default off): a provider exception whose text quotes
+  a seeded prompt is raised through a real inference call, and the seed does
+  not appear in any exported span, event or log bytes.
 * Kollab domain events (`kollab.hub.turn_end`, `kollab.goal.report`,
-  `kollab.watchdog`) are span events by default, mirrored to log events only
-  when `kollabor.telemetry.events_as_logs: true` (for backends without span
-  event support).
+  `kollab.watchdog`) are span events by default. Each event's attributes are
+  classified as in 17.1:
+  * `kollab.hub.turn_end`: `replies`, `failed` and `outcome` (all `safe`).
+    It carries no message text.
+  * `kollab.goal.report`: the goal and status fields declared in
+    `attributes.py` (`safe` or `pseudonymous`). The report body is `content`:
+    it is captured only under the 17.2 mode, after redaction (17.3), within
+    the span budget.
+  * `kollab.watchdog`: `mode` (`safe`). The stall or heal message, when one is
+    attached, is `content` under the same rule as the goal report body.
+  Free-text fields are content and follow 17.2. The events are mirrored to log
+  events only when `kollabor.telemetry.events_as_logs: true` (for backends
+  without span event support) and content capture is on, because the mirror
+  would otherwise carry free text.
 * PhoneLink lifecycle events from `PhoneLinkEventLog` are exported only with
   `kollabor.telemetry.phonelink.export_lifecycle: true`, and only their
   already-normalized form (`normalize_phone_diagnostic`, `safe_event_label`)
@@ -2141,9 +2189,14 @@ and is not used for parity. So:
 * Calls the status bar does not count (10.4: voice asides, voice rewrite,
   compaction, dreaming, health checks, profile tests) record their own cost
   on their `chat` span and on `kollab.gen_ai.client.cost` with
-  `kollab.cost.in_status_bar=false`. A test asserts that these calls leave
-  `session_stats` unchanged and that dashboards can show "status bar" and
-  "all calls" totals separately.
+  `kollab.cost.in_status_bar=false`, when the call uses a metered profile.
+  When the call uses an OAuth or subscription profile, it records its
+  list-price value only on `kollab.gen_ai.client.cost.list_equivalent` and
+  `kollab.cost.list_equivalent_usd`, with `kollab.cost.in_status_bar=false`,
+  as the rule above requires; it never writes `kollab.gen_ai.client.cost` or
+  `kollab.cost.usd`. A test asserts that these calls leave `session_stats`
+  unchanged and that dashboards can show "status bar" and "all calls" totals
+  separately.
 * Provenance: a new function `kollabor_telemetry.cost.resolve_pricing(provider,
   model)` (wrapping a new non-breaking `PricingRegistry.get_pricing_with_match`)
   returns the `ModelPricing` and how it was found: `exact`,
@@ -2235,6 +2288,7 @@ Kill switches (6.2) sit above all of it. None of these keys is added to
 | `kollabor.telemetry.identity_key_sync` | none | `false` | Sync the install key to owned devices (17.5) |
 | `kollabor.telemetry.propagate.hub` | none | `true` | Carriers on carried frames and gated relay messages (12.2), only when enabled |
 | `kollabor.telemetry.propagate.acp` / `.mcp` / `.a2a` | none | `false` | Outbound propagation to third-party processes |
+| `kollabor.telemetry.propagate.mcp_servers` | none | `[]` | MCP server names that may receive trace context (11.3), global config only (6.2) |
 | `kollabor.telemetry.logs.level` | none | `WARNING` | Log export threshold (14.1) |
 | `kollabor.telemetry.logs.inject_ids_in_file` | none | `false` | Append trace ids to file log |
 | `kollabor.telemetry.exceptions.stacktrace` | none | `false` | Include redacted stack traces (5.2, 14.1) |
@@ -2385,7 +2439,7 @@ Every other SDK component that reads the environment when an argument is
 | --- | --- | --- |
 | `TracerProvider` | `OTEL_TRACES_SAMPLER*`, `OTEL_RESOURCE_ATTRIBUTES` and `OTEL_SERVICE_NAME` through `Resource.create()` when no resource is given | `sampler=KollabSampler(...)`, `id_generator=KollabIdGenerator()`, `resource=` built directly with `Resource(attributes, schema_url)` (never `Resource.create()`), `span_limits=` |
 | `SpanLimits` | `OTEL_SPAN_*_COUNT_LIMIT`, `OTEL_ATTRIBUTE_*_LIMIT`, `OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT`, `OTEL_LINK_ATTRIBUTE_COUNT_LIMIT` for every unset field | every field set explicitly (section 19 values) |
-| `BatchSpanProcessor`, `BatchLogRecordProcessor` | `OTEL_BSP_*`, `OTEL_BLRP_*` | `max_queue_size`, `schedule_delay_millis`, `max_export_batch_size`, `export_timeout_millis` |
+| `BatchSpanProcessor`, `BatchLogRecordProcessor` | `OTEL_BSP_*`, `OTEL_BLRP_*` | `max_queue_size`, `schedule_delay_millis`, `max_export_batch_size=64`, `export_timeout_millis` |
 | `PeriodicExportingMetricReader` | `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT` | `export_interval_millis`, `export_timeout_millis` |
 | Metric exporter temporality | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` (stock exporter) | Kollab's exporter sets `preferred_temporality` and `preferred_aggregation` from config |
 | `MeterProvider` | `OTEL_METRICS_EXEMPLAR_FILTER` | `exemplar_filter=` set explicitly (exemplars off by default) |
@@ -2569,11 +2623,18 @@ Size control, because input messages repeat the whole history every round
   `kollab.content.truncated=true`. Content attributes are exempt from the
   4096-character non-content limit (19) but never from this budget.
 * Events (`EVENT_ONLY`, `SPAN_AND_EVENT`) obey the same budget per event.
+* Export request cap: each span and log export call holds at most 64 items
+  (`max_export_batch_size=64`, section 16.2). `KollabSpanExporter` and
+  `KollabLogExporter` also split any call whose serialized request body would
+  exceed 1 MiB into several requests, measured by encoded size, so every
+  request fits the 1 MiB HTTP body limit and the 4 MiB gRPC limit.
 * Test: a 200-message scripted conversation with content on exports every
   span through an OTLP receiver configured with the default 4 MiB gRPC
-  receive limit and a 1 MiB HTTP body limit, with no rejected batch, and the
-  serialized size of every span stays under budget plus 8 KiB of
-  non-content fields.
+  receive limit and a 1 MiB HTTP body limit. The test serializes each export
+  request body and asserts that none exceeds 1 MiB and that no batch is
+  rejected. A per-span size check alone does not prove this, because one
+  request can hold up to 64 spans. The serialized size of every span stays
+  under budget plus 8 KiB of non-content fields.
 
 Never captured, in any mode:
 
@@ -2646,7 +2707,7 @@ collector only. The example collector config adds a second layer
 * File paths: never as attributes. With content on, inside tool arguments,
   with home directory replaced.
 * Device names (`plugins/hub/device_names.py`) and hostnames are PII
-  (for example "Marco's MacBook Pro"): never emitted in `pseudonymous` or
+  (for example "work-laptop"): never emitted in `pseudonymous` or
   `strict` mode. The OTel `host.name` resource detector is not used.
 * IP addresses: never emitted (`client.address`, `network.peer.address` are
   not set). Engine HTTP spans do not record client IPs or user agents.
@@ -2658,6 +2719,8 @@ collector only. The example collector config adds a second layer
 
 `kollabor_telemetry.identity.pseudonymize(kind, value)` returns
 `HMAC-SHA256(install_key, kind + ":" + value)` truncated to 16 hex chars.
+The install key is the 0600 file in 17.6, never exported. A test asserts
+that the same `kind` and `value` give different output for two install keys.
 
 Decision (28.3 item 3): agent names stay readable by default; devices,
 peers, threads, hostnames and paths are hashed.
@@ -2667,6 +2730,12 @@ peers, threads, hostnames and paths are hashed.
 | `pseudonymous` (default) | plain | hashed | plain (generated, random) | hashed | hashed or basename (10.2, 17.3) | plain identity, hashed device |
 | `strict` | hashed | hashed | hashed | hashed | hashed | hashed |
 | `plain` | plain | plain device label (never public keys) | plain | plain | model ids: basename (10.2, same in every mode); other paths (sockets, files in log bodies with content on): home-relative (`~`) | plain |
+
+`plain` needs a panel confirmation and a stored acknowledgement (`kollabor.telemetry.identity_ack`
+in the global config), as content does (17.8). The panel lists the values `plain` releases before it asks.
+Exactly these values are released: agent names; device names and custom host names as plain text;
+conversation, thread, message and slot ids; transfer targets; model ids as basenames; other paths as
+home-relative (`~`). Peer public keys are never released.
 
 Cross-device consistency: each device has its own `install_key`, so the same
 peer hashes differently on two devices. If a user wants consistent
@@ -2713,7 +2782,7 @@ key. The key file starts with a one-byte epoch counter used by rotation
 (8.1). A file, not the keyring, so daemons and launchd-started
 processes can read it without prompts. A daemon that finds no key does not
 create one: it stays NOOP with one WARNING ("run kollab --telemetry once in a
-terminal or enable telemetry in Settings"). Rotating it
+terminal or enable telemetry in Settings"). The `--telemetry-selftest` run never uses this key: it creates its own key in a temporary HOME, removed on exit, so it works without a tty and with an empty HOME. Rotating it
 (`/telemetry rotate-key`) breaks pseudonym continuity on purpose. Disabling
 telemetry does not delete it (no deletions without user action); the docs
 explain how to remove it.
@@ -2813,7 +2882,7 @@ explain how to remove it.
   configured sampler and returns `RECORD_AND_SAMPLE` for exactly two span
   names, `kollab.conversation` and `kollab.conversation.resume`. No other
   name, and in particular not `kollab.conversation.segment`, is forced. They
-  are tiny and make links resolvable.
+  are tiny and make links resolvable. An anchor therefore goes out at any ratio above 0, so conversation ids reach the backend for conversations whose chains the ratio drops, and links from unsampled chains are dangling (their target trace is never exported). An operator who must send no conversation id uses `always_off`, which drops anchors too.
 * `always_off` means nothing: `KollabSampler` returns `DROP` for every span,
   anchors included, so a metrics-only user exports no conversation ids in
   traces.
@@ -2824,8 +2893,14 @@ explain how to remove it.
   0.1, 1000 segments, sampled fraction within 0.07 to 0.13.
 * Foreign links and foreign carriers never influence sampling (no parent is
   taken from them, 12.4).
-* Recommended for heavy automation: ratio `0.1` plus collector tail sampling
-  that keeps all traces with errors (example in section 26). A tail sampler
+* Recommended for heavy automation: ratio `1.0` (the default) plus collector tail sampling
+  that keeps all traces with errors and samples 10 percent of the rest
+  (example in section 26). Errors are kept only when the SDK ratio is 1.0:
+  at 0.1 the SDK drops about 90 percent of traces before the collector sees
+  them, failing ones included. The cost of ratio 1.0 is that every trace
+  leaves the process, so the collector carries the full span volume and must
+  be sized for it. An operator who cannot size it lowers the SDK ratio and
+  accepts that failing traces are lost with the dropped ones. A tail sampler
   decides `decision_wait` after a trace's first span, and the chain span
   ends last, so the policy keys on what ends early: round spans carry
   status `ERROR` and `kollab.round.outcome=error` as soon as the failing
@@ -2837,7 +2912,7 @@ explain how to remove it.
   chain is still lost with this config; users who need every long failed
   chain lower `chain_max_minutes` (for example to 5) so the chain bound,
   not the wait, decides, which the docs recommend together with tail
-  sampling. The W12 e2e stack runs a 3 minute chain whose second round
+  sampling. The W12 e2e stack, at SDK ratio 1.0, runs a 3 minute chain whose second round
   fails and asserts the whole trace is kept.
 * Metrics are never sampled (section 13).
 * Logs are exported regardless of trace sampling. Kollab builds its own log
@@ -2861,8 +2936,12 @@ Spans may carry high-cardinality attributes (ids). Metrics may not. Rules:
   matter for cost). Any other model id is reported as `custom` on metrics in
   `pseudonymous` and `strict` mode (spans keep the reduced id from 10.2), and
   passes through only in `plain` mode, capped at 64 distinct values per
-  process, then `_OTHER`. So the series count per backend is bounded by the
-  registry size plus one, no matter how many processes run.
+  process, then `_OTHER`. The model dimension alone is bounded by the
+  registry size plus 65 (64 custom values and `_OTHER`), no matter how many
+  processes run. Per metric the series budget is the product of each
+  attribute's cap: model (registry size plus 65), `gen_ai.agent.name` (64),
+  `kollab.outcome` and `error.type` (their enums), and MCP servers (32). The
+  SDK's 2000-stream limit per metric is the only hard bound.
 * Tool names in metrics: builtin tool names pass through; MCP tools are
   reported as `kollab.tool.metric_name=mcp:{server}` on `kollab.tool.*`
   metrics and as `kollab.mcp.server={server}` on
@@ -2896,7 +2975,7 @@ Spans may carry high-cardinality attributes (ids). Metrics may not. Rules:
 | `service.name` | `kollab` (override with `OTEL_SERVICE_NAME` only when `honor_otel_env` is true) |
 | `service.namespace` | `kollab` |
 | `service.version` | `kollabor/version.py` version string |
-| `service.instance.id` | stable pseudonym `HMAC-SHA256(install_key, "instance:" + component + ":" + identity or "-")[:16]` as a UUID-shaped string only when the process holds a single-instance guard for that identity (below); random UUIDv4 otherwise |
+| `service.instance.id` | stable pseudonym: the first 16 bytes of `HMAC-SHA256(install_key, "instance:" + component + ":" + identity or "-")`, formatted as a UUID (8-4-4-4-12, 32 hex characters), only when the process holds a single-instance guard for that identity (below); random UUIDv4 otherwise |
 | `kollab.component` | `agent`, `engine`, `relay`, `cli` |
 | `kollab.device.id` | pseudonymized device id (plain label only in `plain` mode) |
 | `kollab.agent.identity` | agent processes only (one identity per daemon); pseudonymized in `strict` |
@@ -2904,9 +2983,9 @@ Spans may carry high-cardinality attributes (ids). Metrics may not. Rules:
 | `kollab.build.sha` | `KOLLAB_BUILD_SHA` / build provenance (`build_info.py`) |
 | `kollab.install.kind` | `pip`, `binary`, `desktop`, `source` |
 | `kollab.schema.version` | Kollab attribute schema version (7.4) |
-| `os.type`, `os.version`, `host.arch` | standard detectors (no `host.name`) |
+| `os.type`, `os.version`, `host.arch` | set by Kollab at startup (no `host.name`) |
 | `process.runtime.name`, `process.runtime.version` | CPython version |
-| `telemetry.sdk.*` | SDK default |
+| `telemetry.sdk.name`, `telemetry.sdk.language`, `telemetry.sdk.version` | set by Kollab explicitly (the direct constructor adds none) |
 | user-supplied | `OTEL_RESOURCE_ATTRIBUTES`, only when `honor_otel_env` is true, merged under Kollab's keys: it can add keys but never override `service.*`, `kollab.*` or `host.*`, and `host.name` is dropped (17.4). The `Resource` is built directly, never with `Resource.create()`, which would read both variables itself (16.2) |
 
 Stable versus random instance ids. Two live processes that share a
@@ -2926,8 +3005,8 @@ stable pseudonym is used only where a single-instance guard is held:
   signal where the id matters for correctness) right after the guard is
   acquired, before the agent loop runs its first chain.
 * `engine`: the engine's single-instance guard (W2b names it).
-* `relay`: the relay service's `flock` (`relay_runtime.py` and
-  `relay_selfhost.py` take one).
+* `relay`: no guard exists on origin/main (`relay_runtime.py` and
+  `relay_selfhost.py` take no flock; W2b adds one). Until then relay uses a random UUIDv4.
 * Everything else gets a random UUIDv4: `cli` attach clients, `kollab -p`
   pipe mode, the in-process terminal agent, `KOLLAB_NO_HUB` runs, and any
   agent that could not take its guard.
@@ -2960,7 +3039,7 @@ not a resource attribute.
 | Collector black hole (accepts TCP, never answers) | Per attempt timeout (below) bounds each export in the worker thread; never on the event loop |
 | Slow DNS for endpoint | Resolution happens in the exporter thread, never on the loop |
 | TLS failure | Logged once per 10 minutes, drops counted |
-| Memory | Bounded: span queue 2048, log queue 2048, metric streams bounded by section 19; content bounded by 17.2 |
+| Memory | Bounded in bytes: the span queue and the log queue each hold at most 8 MiB of encoded content and at most 2048 items. An item that would pass either bound is dropped and counted with `kollab.telemetry.dropped{reason=queue_bytes}`. Metric streams bounded by section 19; content bounded by 17.2. Test: fill each queue with 64 KiB content spans and check with tracemalloc that the queue's memory stays under its cap |
 | Exceptions in instrumentation code | Swallowed at the facade boundary, rate-limited DEBUG log, counter `kollab.telemetry.internal_errors` |
 | SIGKILL / crash | Data in queues is lost; acceptable. Spans already exported remain (8.2 orphan note) |
 | Telemetry thread starvation | Uses SDK worker threads (daemon threads); no asyncio tasks for export |
@@ -3045,7 +3124,7 @@ Developer laptop numbers are informational.
 
 | ID | Scenario | Budget | Statistic | Blocks merge? |
 | --- | --- | --- | --- | --- |
-| D1 | Disabled, per instrumentation seam, measured at real call sites (the `chat` span seam in `call_llm`, the tool seam in `execute_tool`, the round seam), attribute construction included (5.2 guard rule) | < 150 ns per seam | median of 1,000,000 calls via `pytest-benchmark`, reference runner | yes |
+| D1 | Disabled, per instrumentation seam, measured at real call sites (the `chat` span seam in `call_llm`, the tool seam in `execute_tool`, the round seam), attribute construction included (5.2 guard rule) | At most 1.10 times the stub facade in the same job (blocking); < 150 ns per seam (recorded, not blocking) | median of 1,000,000 calls per run via `pytest-benchmark`, alternating runs against the stub, reference runner | yes, per seam, from the PR that adds the seam (round in W3, chat in W4, tool in W6) |
 | D2 | Disabled, scripted session (fake provider, 50 rounds, 200 tools) vs stub facade | < 1 % process CPU time (`time.process_time`, less noisy than wall time on shared runners) | 30 alternating runs each, interleaved A/B; one-sided Mann-Whitney test at p < 0.01 that A is slower by more than 1 %; a failure reruns once before failing | yes |
 | D3 | Disabled, startup | no new imports beyond the stdlib-only facade modules, and `python -X importtime` cumulative delta < 3 ms | median of 5 runs | yes |
 | E1 | Enabled, per span (start and end with 20 attributes) | < 40 microseconds | median, micro benchmark | no (recorded) |
@@ -3054,9 +3133,9 @@ Developer laptop numbers are informational.
 | E4 | Enabled, startup | lazy SDK import < 400 ms, done before the first turn, never during a turn | median of 5 runs, `importtime` | yes for "never during a turn" (asserted by a test), no for the number |
 | E5 | Enabled, collector black hole | turn p90 latency within 5 % of collector-up, exit within `shutdown_timeout_s + 0.5 s` | 200 turns per side (p90 of 200 samples is the 180th value, not the maximum) | yes (failure test, 21.2) |
 
-The disabled budgets D1, D2 and D3 are blocking from W1 on (the first PR
+The disabled budgets D2 and D3 are blocking from W1 on (the first PR
 that adds call sites), not only at the end, so no work item can regress the
-off path unnoticed. The blocking budgets (D1, D2, D3, the E4 assertion, E5)
+off path unnoticed. D1 is blocking per seam, from the PR that adds the seam (round in W3, chat in W4, tool in W6). The blocking budgets (D1, D2, D3, the E4 assertion, E5)
 run in the required `ci/telemetry` job. The others run in the same job and are recorded as
 artifacts with a stored baseline, and the job annotates a regression without
 failing.
@@ -3142,13 +3221,13 @@ exporter; gRPC is pip only.
   and `workflow_dispatch`, and `desktop-windows` only on
   `workflow_dispatch` with `continue-on-error` (4.9). So the PR-time check
   is added to the existing `ci/binary-smoke` job in `ci.yml`: it builds the
-  binary with the extra and runs `--version` and `--telemetry-selftest`.
-  The two-build size delta runs in `binaries.yml` for the four macOS and
+  binary with the extra and runs `--version` and `--telemetry-selftest`. For linux-x86_64 it also builds twice, with and without the extra, and fails the job over the +6 MB budget on every PR.
+  The two-build size delta runs at release in `binaries.yml` for the four macOS and
   Linux targets; Windows is measured only on dispatch runs, and its result
   is informational until the Windows scie is a release asset.
 * Targets (the five in `binaries.yml`, section 4.9), each with
   `--telemetry-selftest` (in-process OTLP/HTTP receiver stub on loopback; one
-  span, one metric and one log must arrive) and the size budget:
+  span, one metric and one log must arrive; the selftest uses a key in its own temporary HOME, see 17.6) and the size budget:
 
 | Target | Runner | Selftest | Notes |
 | --- | --- | --- | --- |
@@ -3331,7 +3410,9 @@ exporter; gRPC is pip only.
    (W0b); unpriced models produce `kollab.cost.status=unpriced` and no cost;
    estimated usage produces no cost; OAuth rounds appear only on the
    list-equivalent metric with the round's `turn_cost`; bypass calls leave
-   `session_stats` unchanged.
+   `session_stats` unchanged; OAuth and subscription bypass calls appear only
+   on `kollab.gen_ai.client.cost.list_equivalent`, never on
+   `kollab.gen_ai.client.cost`.
 8. Redaction tests: seeded fake values of every redacted kind (17.3),
    placed in prompts, tool output, errors, stack traces and exceptions
    raised through real WARNING and ERROR call sites of each allowlisted
@@ -3394,7 +3475,8 @@ Shipped under `docs/telemetry/`:
   `tail_sampling` policies (keep traces with any span in status `ERROR`,
   which includes failed rounds as soon as they end and the
   `kollab.chain.outcome` span; keep slow inference over 30 s;
-  probabilistic 10 percent otherwise) with `decision_wait: 300s` and
+  probabilistic 10 percent otherwise; it sees errors only at SDK ratio 1.0,
+  see 18) with `decision_wait: 300s` and
   `num_traces` sized in a comment for that wait (section 18 explains the
   trade-off and the `chain_max_minutes` recommendation);
   exporters `debug`, `otlphttp` (placeholder), `prometheus` (for metrics),
@@ -3433,7 +3515,7 @@ Shipped under `docs/telemetry/`:
 All work items are full scope; phases order dependencies, they do not cut
 scope. Each item is one PR on its own lane branch
 (`issue-<n>-telemetry-<slug>`), Conventional Commits, CI green, reviewed,
-and none merges until the spec has passed its three review cycles and Marco
+and none merges until the spec has passed its three review cycles and the maintainer
 has read it. Every PR says `refs #<tracking issue>` (the issue named at the
 top of this spec) and keeps the default-off contract test green once W0
 lands, and the disabled performance budgets D1 to D3 green once W1 lands.
@@ -3451,7 +3533,7 @@ side tolerant and the send side behind `enabled()`, so reverting a sender PR
 never strands a receiver.
 
 Release step for R1. W7a has no dependency on the rest and merges early, so
-the release clock starts early. The release manager (Marco, or whoever cuts
+the release clock starts early. The release manager (the maintainer, or whoever cuts
 releases at that time, named in the W7a PR) tags a normal release that
 contains W7a; the W8 PR records that tag. If the release slips, only W8
 waits; nothing else depends on it.
@@ -3485,10 +3567,10 @@ Phase 5  W10 packaging (W2)   W11 UI (W2b, W9c)   W12 e2e, dashboards, docs (all
 | --- | --- | --- | --- | --- | --- |
 | W0 | M | none | Structural contract harness | `tests/integration/test_telemetry_default_off.py`, fake provider and no-op stub facade in `tests/fixtures/` | Harness captures the twelve items of 6.1 with the normalizers listed there, with a temp `HOME` and `USERPROFILE`; run B uses the pure no-op stub (6.1); two runs on current main compare equal after normalization, clean and with user trace and OTLP variables set; it fails when a test-only patch adds an `otel` key to a socket line, a variable to a child env, or a thread; runs in under 60 s in CI |
 | W0b | S | none | Cost fixes before parity (15.3) | `api_communication_service.py` (`effective_model`, `effective_provider_type`), `queue_processor.py` (per-model accumulation, pricing without final usage), `CHANGELOG.md` | Voice turn on a swapped provider is priced and labeled as the Quick Model in `session_stats` and the status bar; a round whose final call returned no usage is priced from its continuations' authoritative usage; a normal single-model round's `turn_cost` is bit-identical to 460d2e3; OAuth rounds unchanged; CHANGELOG names the visible change (X7) |
-| W1 | M | W0 | Package skeleton, facade, config, semconv pin, config sync, perf gates | `packages/kollabor-telemetry/`, every importing package's `pyproject.toml`, root `pyproject.toml`, `uv.lock`, `scripts/telemetry/gen_semconv.py`, `config_sync.py` (`LOCAL_ONLY`, migration), `check_version_parity.py`, `publish.py`, `tests/perf/` | Facade importable with stdlib only on 3.12 and 3.14; import boundary and no-env-mutation tests pass; attribute-guard and attach/detach lints (5.2, 5.3) in place; config source tests (global only, hostile local config ignored with WARNING, local layer equal to global honored, kill switch file, `KOLLAB_TELEMETRY` values) pass; env naming guard passes; generated `semconv.py` matches both pinned registries (GenAI and MCP) and records the manifest blob SHA, and the 7.3 rows are checked against it; config sync snapshot has no telemetry key and the 16.1 migration test passes; per-package dependency test passes; lock pins per 23.1 with the soak rule met; D1 (at real seams), D2 and D3 blocking in `ci/telemetry`; default-off contract unchanged |
+| W1 | M | W0 | Package skeleton, facade, config, semconv pin, config sync, perf gates | `packages/kollabor-telemetry/`, every importing package's `pyproject.toml`, root `pyproject.toml`, `uv.lock`, `scripts/telemetry/gen_semconv.py`, `config_sync.py` (`LOCAL_ONLY`, migration), `check_version_parity.py`, `publish.py`, `tests/perf/` | Facade importable with stdlib only on 3.12 and 3.14; import boundary and no-env-mutation tests pass; attribute-guard and attach/detach lints (5.2, 5.3) in place; config source tests (global only, hostile local config ignored with WARNING, local layer equal to global honored, kill switch file, `KOLLAB_TELEMETRY` values) pass; env naming guard passes; generated `semconv.py` matches both pinned registries (GenAI and MCP) and records the manifest blob SHA, and the 7.3 rows are checked against it; config sync snapshot has no telemetry key and the 16.1 migration test passes; per-package dependency test passes; lock pins per 23.1 with the soak rule met; D2 and D3 blocking in `ci/telemetry`; default-off contract unchanged |
 | W1b | M | W1 | Attribute registry and redaction | `attributes.py` (keys, classification, signals, enums such as `kollab.outcome` and `kollab.link.type`), `redact.py`, `docs/telemetry/schema/1.yaml` (Weaver registry for `kollab.*`) | Every key and enum used anywhere in this spec is declared, with its per-signal subset (8.3); facade drops undeclared keys and disallowed enum values; redaction pipeline unit tests with seeded values for every kind in 17.3; the Weaver registry validates with `weaver registry check` |
-| W2 | L | W1b | SDK bootstrap, Kollab-owned exporters, filtering, exit | `kollabor_telemetry/_otel/*` (exporters, filtering, processors, sampler, idgen, debugfile, shutdown, selftest), `application.py`, engine `__main__.py`, `daemon.py`, `cli.py` (`may_fork`, `--telemetry` passed to a newly started daemon), `plugins/hub/plugin.py` (`hub_exit`), `halt_runtime.py`, `system.py` restart | Spans, metrics, logs reach an in-memory exporter and OTLP/HTTP and gRPC test receivers on the standard per-signal paths (16.1 endpoint rule); the ambient environment test (16.2) passes for HTTP and gRPC; retries and the shutdown deadline tested against 503 with `Retry-After` and a black hole; missing extra gives one warning and NOOP; filtering exporter drops undeclared keys; `record_exception=False` test; `KollabSampler` tests (18, including `always_off` emits nothing); `KollabIdGenerator` test; at-fork test (5.4); every exit path in 21.2 calls the hook (test per row, driven per 21.2); SIGTERM and self-stop tests deliver the final span; black hole exit within budget; no handler installed when off; init refuses with `may_fork`; only the allowed components configured, debug file included when on; View cardinality limit confirmed in the locked version or documented; `--telemetry-selftest` passes locally on macOS and Linux |
-| W2b | M | W2 | Identity, shared state, secrets, status records | `identity.py`, `statefile.py`, `secrets.py`, `status.py`, `state.json`, resource and instance id (20) | Install key creation race test (17.6); `statefile.py` multiprocess test (4 processes, 1000 updates each, no lost update); headers file and `headers_configured` marker tests (16.3); per-process status records written only when enabled and listed by `/telemetry status` (24); two concurrent `kollab -p` get different instance ids, a guarded daemon gets the stable id (20); resource built without `Resource.create()` and unaffected by `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` unless `honor_otel_env` |
+| W2 | L | W1b | SDK bootstrap, Kollab-owned exporters, filtering, exit | `kollabor_telemetry/_otel/*` (exporters, filtering, processors, sampler, idgen, debugfile, shutdown, selftest), `application.py`, engine `__main__.py`, `daemon.py`, `cli.py` (`may_fork`, `--telemetry` passed to a newly started daemon), `plugins/hub/plugin.py` (`hub_exit`), `halt_runtime.py`, `system.py` restart | Spans, metrics, logs reach an in-memory exporter and OTLP/HTTP and gRPC test receivers on the standard per-signal paths (16.1 endpoint rule); the ambient environment test (16.2) passes for HTTP and gRPC; retries and the shutdown deadline tested against 503 with `Retry-After` and a black hole; missing extra gives one warning and NOOP; filtering exporter drops undeclared keys; `record_exception=False` test; `KollabSampler` tests (18, including `always_off` emits nothing); `KollabIdGenerator` test; at-fork test (5.4); every exit path in 21.2 calls the hook (test per row, driven per 21.2); SIGTERM and self-stop tests deliver the final span; black hole exit within budget; no handler installed when off; init refuses with `may_fork`; only the allowed components configured, debug file included when on; View cardinality limit confirmed in the locked version or documented; `--telemetry-selftest` passes locally on macOS and Linux; a run without a tty and with an empty HOME exports one span, one metric and one log |
+| W2b | M | W2 | Identity, shared state, secrets, status records | `identity.py`, `statefile.py`, `secrets.py`, `status.py`, `state.json`, resource and instance id (20) | Install key creation race test (17.6); `statefile.py` multiprocess test (4 processes, 1000 updates each, no lost update); headers file and `headers_configured` marker tests (16.3); per-process status records written only when enabled and listed by `/telemetry status` (24); two concurrent `kollab -p` get different instance ids, a guarded daemon gets the stable id (20), and relay gets one only after the flock guard added here; resource built without `Resource.create()` and unaffected by `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` unless `honor_otel_env`; a test compares the resource's key set with the section 20 table; instance ids are 32 hex characters in 8-4-4-4-12 form |
 | W3 | L | W2b | Agent loop spans | `queue_processor.py` (`is_processing` setter and `note_chain_end` hooks), `goals/service.py`, `context_compaction_plugin.py`, `cli.py` (bare launch starting a daemon) | Golden span trees for: single turn, multi-round with tools, cancel, breaker trip, watchdog heal, goal continuation, compaction in chain and idle, mixed triggers, chain bound split, early round error status and `kollab.chain.outcome`; the five-writer chain test (9.1); race test yields one chain parent per round; admit spans start at enqueue and parent to the consuming chain (9.3); anchor emitted once per conversation, resume spans on resume, re-anchor after key rotation (8.1); conversation scope segment tests including the sampled fraction test (18); context site scan list closed with a decision per site; `--telemetry` on a bare launch that starts a daemon enables that daemon only |
 | W4 | L | W2, W0b | Model call spans and latency | `api_communication_service.py` (`telemetry_purpose`), `streaming_handler.py`, `providers/models.py` (`reasoning_tokens`, excluded from dumps), transformers, `telemetry_hooks.py`, every site in 10.4 | One span per logical call including retries, including the compaction and dreaming retry helpers (10.4); OAuth refresh event; continuation spans linked; TTFT and chunk cadence recorded; model inventory lint passes with every site decided; MockTransport asserts every provider request is inside a `chat` span; span model is `effective_model` (voice test); `UsageInfo` dumps unchanged (X8); path-like model ids reduced; `server.address` hashing for unknown hosts; `gen_ai.request.reasoning.level` in latest mode; provider mapping golden tests per provider |
 | W5 | M | W4, W0b | Usage and cost | `cost.py`, `pricing_registry.py` (`get_pricing_with_match`), `queue_processor.py` (pass `turn_cost` and `cost_start`), `models.json` optional `pricing_tier_threshold` | Round `kollab.cost.usd` equals the `turn_cost` delta; process sum equals `total_cost_usd - cost_start` with `==`, also after a resume; registry-wide parity test; every `kollab.cost.status` and `pricing_source` value covered, `user_models_json` included; bypass calls leave `session_stats` unchanged; OAuth rounds only on the list-equivalent metric with the same value; `calculate_cost` golden unchanged |
@@ -3519,7 +3601,7 @@ check; "works" is not an acceptance criterion.
 2. W0b and W7a merge early. W7a (receive-tolerant) ships in a release, cut
    by the release owner named in the W7a PR (27), before any W8 sender code
    merges.
-3. Dogfood: Marco's devices with `KOLLAB_TELEMETRY=1` against a local LGTM
+3. Dogfood: the maintainer's devices with `KOLLAB_TELEMETRY=1` against a local LGTM
    stack for at least one week, covering koordinator dispatch, two devices
    over the relay (capability learned by the probe, 12.2, and at least one
    device kept on the previous release to exercise the fallback), voice,
@@ -3541,7 +3623,7 @@ check; "works" is not an acceptance criterion.
   packages, their beta transitive packages and `requests` are not
   installed; what remains is pinned exactly in `uv.lock` and the scie is
   checked against it (23.2). Measured in W10 with a two-build delta; the
-  build fails over budget.
+  PR-time linux-x86_64 check and the release check fail over budget.
 * Owning the transport: the Kollab exporters reimplement retry, timeout and
   TLS handling that the stock exporters provide. Mitigation: they reuse the
   upstream protobuf encoders, are small, and are tested against HTTP and
@@ -3584,36 +3666,36 @@ check; "works" is not an acceptance criterion.
 
 ### 28.3 Decisions (formerly open questions)
 
-Each decision below was decided by Marclone (lead) for boss; boss reviews
+Each decision below was decided by the lead agent for the maintainer; the maintainer reviews
 the final spec before development. Items 1 to 5 were taken on 2026-10-29
 after review cycle 1, items 6 to 12 on 2026-10-29 after review cycle 2.
 
-1. Trace scope (decided by Marclone (lead) for boss; boss reviews the final
+1. Trace scope (decided by the lead agent for the maintainer; the maintainer reviews the final
    spec before development): take C1-19. The default is one trace per turn
    chain; a conversation is grouped by `gen_ai.conversation.id` plus span
    links to a conversation anchor. Conversation-scoped traces stay opt-in
    (`trace_scope: conversation`), with segment ownership rules (8.1).
-2. Binary and desktop exporter (decided by Marclone (lead) for boss; boss
+2. Binary and desktop exporter (decided by the lead agent for the maintainer; the maintainer
    reviews the final spec before development): ship the Kollab OTLP HTTP
    exporter in the binary and the desktop runtime within the +6 MB size
    budget; gRPC is pip only (23.2).
-3. Identity default (decided by Marclone (lead) for boss; boss reviews the
+3. Identity default (decided by the lead agent for the maintainer; the maintainer reviews the
    final spec before development): agent names stay readable by default;
    devices, peers, threads, hostnames and paths are hashed (`pseudonymous`
    mode, 17.5).
-4. Handoff parenting (decided by Marclone (lead) for boss; boss reviews the
+4. Handoff parenting (decided by the lead agent for the maintainer; the maintainer reviews the
    final spec before development): an awaited handoff to an owned, trusted
    local agent becomes a child span in the sender's trace when it starts
    an idle receiver's chain, and a link otherwise; remote, foreign or
    unverified peers always get linked traces (9.1, 12.4, 12.5).
-5. Subscription cost (decided by Marclone (lead) for boss; boss reviews the
+5. Subscription cost (decided by the lead agent for the maintainer; the maintainer reviews the
    final spec before development): the status bar is unchanged. OAuth and
    subscription rounds go only to
    `kollab.gen_ai.client.cost.list_equivalent`, flagged as an estimate and
    never summed into real cost. Parity applies to metered profiles only and
    is defined on the per-round `turn_cost` delta; the process sum equals
    `total_cost_usd` minus its value at start or resume (15.3).
-6. Off-mode child environments (decided by Marclone (lead) for boss; boss
+6. Off-mode child environments (decided by the lead agent for the maintainer; the maintainer
    reviews the final spec before development): telemetry off leaves child
    environments unchanged except removing Kollab's own `KOLLAB_TELEMETRY*`
    variables from non-Kollab children. `TRACEPARENT`, `TRACESTATE` and
@@ -3622,32 +3704,32 @@ after review cycle 1, items 6 to 12 on 2026-10-29 after review cycle 2.
    path, never by value. Every off-mode change is listed in section 1 and
    G5. The lead asked to always scrub Kollab's variables; this spec keeps
    them for Kollab-to-Kollab spawns so the kill switch reaches the whole
-   process tree, a refinement flagged for boss's review (12.2).
-7. Cost bugs (decided by Marclone (lead) for boss; boss reviews the final
+   process tree, a refinement flagged for the maintainer's review (12.2).
+7. Cost bugs (decided by the lead agent for the maintainer; the maintainer reviews the final
    spec before development): the voice pricing and missing final usage bugs
    are real; W0b fixes them, including the status bar, as a prerequisite
    of W4 and W5 (15.3, 27).
-8. Transport ownership (decided by Marclone (lead) for boss; boss reviews
+8. Transport ownership (decided by the lead agent for the maintainer; the maintainer reviews
    the final spec before development): Kollab owns the OTLP transport and
    session for HTTP and gRPC and reads no ambient `OTEL_*` or proxy
    environment unless `honor_otel_env` is set; this covers the processors,
    span limits, readers, the resource and every other SDK environment
    reader (16.2).
-9. Phone and remote lockout (decided by Marclone (lead) for boss; boss
+9. Phone and remote lockout (decided by the lead agent for the maintainer; the maintainer
    reviews the final spec before development): mandatory, enforced in the
    engine through a `kollab.origin` ASGI scope marker, with tests (17.8,
    W9c).
-10. Library instrumentation (decided by Marclone (lead) for boss; boss
+10. Library instrumentation (decided by the lead agent for the maintainer; the maintainer
     reviews the final spec before development): dropped from v1. Kollab
     never sets the global providers, so library spans cannot bypass the
     attribute registry, redaction or the ambient environment rules, and no
     library span can be parented to a Kollab span by accident (N2).
-11. Delivery order (decided by Marclone (lead) for boss; boss reviews the
+11. Delivery order (decided by the lead agent for the maintainer; the maintainer reviews the
     final spec before development): a dependency column and phase graph;
     the attribute registry and redaction move to W1b; D1 to D3 block from
     W1; identity, the install key, `state.json` and status records are W2b;
     the W7a release owner is named in the W7a PR (27).
-12. Relay capability (decided by Marclone (lead) for boss; boss reviews the
+12. Relay capability (decided by the lead agent for the maintainer; the maintainer reviews the
     final spec before development): no version field exists on the relay,
     so capability is learned by an optimistic probe with resend, replacing
     `relay_assume_current` (12.2).
@@ -3791,7 +3873,7 @@ processors register their own at-fork hooks; `gen_ai.invoke_agent.duration`,
 | C2-12 | P1 | Sampler force-samples segment roots and ignores `always_off` | Accepted | 18, 8.1: force only `kollab.conversation` and `kollab.conversation.resume`; `always_off` emits nothing; sampled fraction test in W3 |
 | C2-13 | P1 | Tail sampling cannot keep failed long chains | Accepted with modification | 9.1, 18, 26: both remedies, not one: round spans carry ERROR when the round ends plus a zero-duration `kollab.chain.outcome` span, and the example uses `decision_wait: 300s` with the `chain_max_minutes` trade-off documented; 3 minute failing chain in the W12 e2e |
 | C2-14 | P1 | Wrong latest-mode agent and tool metrics; one instrument, two bucket sets | Accepted | 13.1, 7.3: baseline `gen_ai.client.operation.duration` inference only, `kollab.agent.chain.duration` and `kollab.tool.duration`; latest `gen_ai.invoke_agent.*` and `gen_ai.execute_tool.duration`; 7.3 rows checked against the generated names in W1; `gen_ai.request.reasoning.level` added |
-| C2-15 | P1 | Off mode changes child environments and the contract test hides it | Accepted with modification | 1 (X1 to X9 table), G5, 6.1 item 10 run with and without user variables, 12.2, 28.3 item 6. Off mode leaves child environments unchanged; trace variables replaced only in Kollab-to-Kollab spawns when on. Modification flagged for boss: Kollab's own `KOLLAB_TELEMETRY*` variables are removed from non-Kollab children but kept for Kollab-to-Kollab spawns, so the kill switch reaches the whole process tree |
+| C2-15 | P1 | Off mode changes child environments and the contract test hides it | Accepted with modification | 1 (X1 to X9 table), G5, 6.1 item 10 run with and without user variables, 12.2, 28.3 item 6. Off mode leaves child environments unchanged; trace variables replaced only in Kollab-to-Kollab spawns when on. Modification flagged for the maintainer: Kollab's own `KOLLAB_TELEMETRY*` variables are removed from non-Kollab children but kept for Kollab-to-Kollab spawns, so the kill switch reaches the whole process tree |
 | C2-16 | P1 | Log export leaks content and paths with content off; corpus test unbuildable | Accepted | 14.1: log bodies are content; with content off only logger, level, `code.*`, `exception.type`, `kollab.log.message_id` and trace ids, or a `kollab_safe_message` opt-in; 25.1 layer 8 uses seeded exceptions per allowlisted logger |
 | C2-17 | P1 | Voice transcripts are user messages, contradicting "never captured" | Accepted | G6, 9.6, 17.2: option (b), voice and phone origin messages replaced by redacted markers in captured content; origin flag and W9b test |
 | C2-18 | P1 | Library instrumentation breaks propagation and trust rules | Accepted | N2, 16.1, 8.3: `library_instrumentation` and `global_provider` dropped from v1 (28.3 item 10); engine SERVER spans never extract incoming context |
@@ -3819,4 +3901,42 @@ processors register their own at-fork hooks; `gen_ai.invoke_agent.duration`,
 | C2-40 | P2 | Scope gaps without a work item | Accepted | 27: W9f relay metrics and `build_service.py` extra; W1b Weaver registry, W12 live-check; W2 `KollabSampler` and `KollabIdGenerator`; W9c RPC CLIENT and SERVER spans; W3 bare `--telemetry` launch that starts a daemon |
 | C2-41 | P2 | Depends on SDK internals for timeout and fork | Accepted with modification | 21.1: Kollab-owned exporters read the shutdown deadline on each attempt, so no private setter is needed; 5.4 Kollab's at-fork hook registered after the providers, with a test |
 | C2-42 | P2 | `UsageInfo.reasoning_tokens` changes dumped bytes | Accepted | 10.2 field with `exclude=True` (X8), W4 dump test |
-| C2-43 | P2 | Decisions recorded as made by an agent | Accepted | 28.3: every decision marked "decided by Marclone (lead) for boss; boss reviews the final spec before development"; the header gate still requires Marco's read |
+| C2-43 | P2 | Decisions recorded as made by an agent | Accepted | 28.3: every decision marked "decided by the lead agent for the maintainer; the maintainer reviews the final spec before development"; the header gate still requires the maintainer's read |
+
+### Cycle 3 (2026-10-30)
+
+Reviewers: two independent adversarial reviewers, cycle 3 of 3, that did not
+write the spec, each reading one half of the spec after cycle 2 (516b2e62),
+with code claims checked against main at 3f85cd11. Result: 25 findings (2
+P0, 10 P1, 13 P2). Dispositions: 22 accepted, 3 accepted with
+modification, 0 rejected. Findings, proposed fixes and dispositions are in
+`telemetry-otel-reviews/review-cycle3.md`. Names of people were replaced by roles
+throughout this spec and its review files.
+
+| ID | Sev | Section | Disposition | Change |
+|----|-----|---------|-------------|--------|
+| C3-01 | P0 | 9.6 Voice | Accepted with modification | every new user message gets a label, `voice`, `phone` or `typed`, in `metadata["kollab_input_origin"]` when telemetry is on in any mode; unlabeled user messages export as `unknown`; test added for a message created while telemetry was off |
+| C3-02 | P1 | 11.3 MCP | Accepted | allow-list added: server name (HTTP: host only, pseudonymized outside plain), transport, outcome, error.type, duration; command, args, env, URL userinfo and query, and raw error text dropped; error.message only via 17.3 with content on; token-in-URL test added |
+| C3-03 | P1 | 12.1 says the carrier is never persisted into conversation history, but 12.2 puts it at top level of the hub message frame, and HubMessage.from_dict drops unknown keys (4.4). The spec does not say where the carrier is read. Either it is lost before use, or it is kept on the HubMessage object and written with it to the inbox, the replay path (_inject_inbox_replay injects into conversation) or the JSONL delivery trace. Neither case is specified, and the first cannot be built as written. | Accepted | otel key read from the raw frame before HubMessage.from_dict and removed before the HubMessage is built, so it is never stored, queued, or written to inbox, replay or trace files; test added |
+| C3-04 | P2 | 11.3 MCP; 9.5 Goals | Accepted with modification | kollab.goal.id and mcp.session.id now point to pseudonymize() in 17.5; two-install test added to 17.5 |
+| C3-05 | P2 | 11.3 MCP | Accepted with modification | "marked trusted in MCP config" replaced by the new key kollabor.telemetry.propagate.mcp_servers (list, default []), honored only from ~/.kollab/config.json under the 6.2 rule; config table row added |
+| C3-06 | P2 | 10.4 Every model call site | Accepted | debug assertion in one provider HTTP wrapper: every outbound request runs inside an active chat span; enabled in unit suite and integration job, off in release; paragraph now says the inventory, not the lint, proves coverage |
+| C3-07 | P0 | 14.2 | Accepted | With content off, `gen_ai.client.operation.exception` carries only `error.type` and `exception.type`. `exception.message` is exported only with content on, after redaction, capped at 256 chars. Added a default-off test: a provider exception quoting a seeded prompt must not appear in exported bytes. |
+| C3-08 | P1 | 18, 26 | Accepted | Recommended setup is now SDK ratio 1.0 plus collector tail sampling (errors kept, 10 percent of the rest); 0.1 is stated to drop failing traces before the collector sees them; W12 and section 26 say they hold at ratio 1.0; cost of ratio 1.0 stated. |
+| C3-09 | P1 | 15.3 | Accepted | The bypass rule is split by profile. Metered bypass calls record on `kollab.gen_ai.client.cost` with `in_status_bar=false`. OAuth and subscription bypass calls record only on `kollab.gen_ai.client.cost.list_equivalent` and `kollab.cost.list_equivalent_usd`. Layer 7 test extended to cover this. 3414-3419 needed no change; the dashboard already keeps list-equivalent out of real cost. Code check: origin/main `packages/kollabor-ai/src/kollabor_ai/cost_calculator.py` has no OAuth branch, so the premise holds. |
+| C3-10 | P1 | 17.2, 16.2 | Accepted | Set `max_export_batch_size=64`. Added an export request cap of 1 MiB by encoded size, split inside `KollabSpanExporter` and `KollabLogExporter`. The test now serializes each request body and asserts none exceeds 1 MiB and no batch is rejected. |
+| C3-11 | P1 | 21.1 | Accepted | Memory bounded in bytes: each queue holds at most 8 MiB of encoded content and 2048 items, drops are counted with `reason=queue_bytes`, and a tracemalloc test with max-size content spans is added. |
+| C3-12 | P1 | 22, 27 (W1) | Accepted | D1 is blocking per seam from the PR that adds it (round W3, chat W4, tool W6) as a ratio to the stub facade in the same job (at most 1.10, proposed threshold); the 150 ns figure is recorded and non-blocking; "at real seams" removed from the W1 row. |
+| C3-13 | P1 | 17.6, 23.2, W2 | Accepted | `--telemetry-selftest` uses a key in its own temporary HOME (removed on exit), stated in 17.6 and 23.2; W2 adds a test: no tty, empty HOME, one span, one metric and one log exported. |
+| C3-14 | P1 | 20, W2b | Accepted | No relay guard exists on origin/main (only a docstring match in plugins/hub/relay_owner.py:89); relay uses a random UUIDv4 until W2b adds a flock guard, and the W2b acceptance says so. |
+| C3-15 | P1 | 14.1 | Accepted | `kollab_safe_message` must be a string literal of at most 256 chars. Added a CI AST test in `tests/unit/telemetry/` that fails on any non-`ast.Constant` str value or any value over 256 chars. Removed "bounded text". Interpolated and f-string text is stated as never accepted. |
+| C3-16 | P2 | 21.1, 13.2 | Accepted | Added `kollab.telemetry.internal_errors` (Counter, {error}, no attributes) to the 13.2 table. |
+| C3-17 | P2 | 20, 16.2 | Accepted | Section 20 lists the `telemetry.sdk.*` names as set by Kollab, drops "standard detectors", and W2b adds a test that compares the resource key set with the table. |
+| C3-18 | P2 | 20 | Accepted | Instance id is the first 16 bytes of the HMAC rendered as a UUID (8-4-4-4-12, 32 hex characters); W2b acceptance updated. |
+| C3-19 | P2 | 19 | Accepted | Replaced the model-only bound with a per-metric budget (product of each attribute's cap) and stated that the 2000-stream SDK limit is the only hard bound. |
+| C3-20 | P2 | 13.2, 28.2 | Accepted | Removed the free-threading parenthetical. The depth integer is now read under a `threading.Lock` that the callback also takes. 28.2 unchanged: it already says free-threaded builds are not targeted. |
+| C3-21 | P2 | 14.2 | Accepted | Each domain event now lists its attributes with 17.1 classes. `turn_end`: `replies`, `failed`, `outcome`. `goal.report` and `watchdog`: free-text bodies are `content` under the 17.2 mode. Events mirror to logs only when `events_as_logs` is true and content is on. Goal-report field names are generic because the spec never names them; not invented. |
+| C3-22 | P2 | 17.5 | Accepted | `plain` now needs a panel confirmation and a stored acknowledgement (new key `kollabor.telemetry.identity_ack`, modeled on `content_ack`). The panel lists what `plain` releases, and the spec states the exact list. Peer public keys are never released. The "Work Laptop" example is now "work-laptop". |
+| C3-23 | P2 | 18 | Accepted | States that anchors go out at any ratio above 0, that conversation ids reach the backend for dropped chains, that links from unsampled chains are dangling, and that `always_off` is the way to send no ids. |
+| C3-24 | P2 | 23.2, 28.2 | Accepted | Two-build size check for linux-x86_64 added to `ci/binary-smoke` on every PR; the four-target measurement stays at release. |
+| C3-25 | P2 | 14.1 | Accepted | `kollab.log.message_id` is now "stable per build only". The id changes when the line moves. No stability across releases is promised. |
