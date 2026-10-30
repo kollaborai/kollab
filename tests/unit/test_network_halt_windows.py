@@ -110,3 +110,29 @@ def test_stdin_is_console_false_without_a_console(stdin):
         [sys.executable, "-c", code], cwd=repo, stdin=stdin, capture_output=True, text=True, timeout=30
     )
     assert out.stdout.strip() == "False"
+
+
+def test_windows_tagged_orphan_keeps_its_dead_parents_pid(monkeypatch):
+    """Windows does not reparent: a tagged orphan keeps its dead parent's pid, or 0 once that pid was reused."""
+    import types
+
+    from plugins.hub import network_halt as halt
+
+    monkeypatch.setattr(halt, "os", types.SimpleNamespace(**{**vars(os), "name": "nt"}))
+    # Pids no OS hands out here: above macOS's ceiling, below PID_MAX, and not multiples of 4 (Windows).
+    shell, agent_pid, dead, gone, reused, parented = 4190051, 4190101, 4190121, 4190141, 4190143, 4190145
+    tag = {"KOLLAB_AGENT_PID": str(agent_pid)}
+    procs = [
+        halt.Proc(agent_pid, shell, ["/opt/this-install/bin/kollab"], {}, "/work"),
+        halt.Proc(gone, dead, ["python"], tag, "/w", "/usr/bin/python3"),  # its parent exited
+        halt.Proc(reused, 0, ["python"], tag, "/w", "/usr/bin/python3"),  # its parent's pid was reused
+        halt.Proc(parented, shell, ["python"], tag, "/w", "/usr/bin/python3"),  # its parent still runs
+    ]
+    tree = {shell: (1, 0, 0), agent_pid: (shell, 0, 0), gone: (dead, 0, 0), reused: (0, 0, 0), parented: (shell, 0, 0)}
+    info = {shell: (900.0, "explorer.exe", ""), agent_pid: (1000.0, "kollab", "")}
+    info.update({pid: (1001.0, "python", "") for pid in (gone, reused, parented)})
+    install = halt.Install(prefix="/opt/this-install")
+    swept = halt.select_sweep(
+        procs, install=install, scopes=["machine"], agent_pids=[agent_pid], protect=set(), tree=tree, info=info
+    )
+    assert {p.pid for p in swept} == {agent_pid, gone, reused}

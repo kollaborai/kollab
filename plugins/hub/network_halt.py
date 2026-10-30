@@ -1328,6 +1328,8 @@ def _backgrounded(
         return False
 
     def orphan(ppid: int) -> bool:
+        if os.name == "nt":  # no reparenting there: an orphan keeps its dead parent's pid (0 once reused)
+            return ppid == 0 or ppid not in tree
         if ppid == 1:
             return True
         # Linux systemd --user is a subreaper: orphans land on it, not on pid 1
@@ -1610,4 +1612,4 @@ def _stdin_is_console() -> bool:
     except OSError:
         return False
     mode = ctypes.c_uint32()
-    return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    return bool(ctypes.windll.kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))

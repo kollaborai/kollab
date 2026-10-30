@@ -14,25 +14,33 @@ import sys
 
 import pytest
 
-from kollabor_config import local_ipc
+from kollabor_config import local_ipc, proc_ctl
 from plugins.hub import halt_runtime as hr
 from plugins.hub import network_halt as nh
 
 windows_only = pytest.mark.skipif(os.name != "nt", reason="Windows only: real status socket, lock and ping")
 
 
+def _no_signal(*args):
+    raise AssertionError(f"signalled a real process: {args}")
+
+
 def test_group_kill_on_windows_ends_the_tree(monkeypatch):
     calls = []
-    monkeypatch.setattr(hr.proc_ctl, "kill_tree", lambda pid, sig, **kw: calls.append((pid, sig, kw)))
+    monkeypatch.setattr(proc_ctl, "kill_tree", lambda pid, sig, **kw: calls.append((pid, sig, kw)))
+    # A regression to the POSIX path must fail here, not signal a real pid.
+    monkeypatch.setattr(hr.os, "kill", _no_signal)
+    monkeypatch.setattr(hr.os, "killpg", _no_signal, raising=False)
     monkeypatch.setattr(hr.os, "name", "nt")
     kill = hr.group_kill({1234})
     kill(777, 15)
-    assert calls == [(777, hr.proc_ctl.HARD, {"protect": {1234}})]
+    kill(777, 9)
+    assert calls == [(777, proc_ctl.SOFT, {"protect": {1234}}), (777, proc_ctl.HARD, {"protect": {1234}})]
 
 
 def test_alive_on_windows_asks_proc_ctl(monkeypatch):
     asked = []
-    monkeypatch.setattr(hr.proc_ctl, "pid_alive", lambda pid: asked.append(pid) or True)
+    monkeypatch.setattr(proc_ctl, "pid_alive", lambda pid: asked.append(pid) or True)
     monkeypatch.setattr(hr.os, "name", "nt")
     assert hr._alive(4242) is True
     assert asked == [4242]
@@ -116,3 +124,10 @@ def test_alive_and_running_on_windows_host():
 def test_caller_refusal_passes_pytest(monkeypatch):
     monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
     assert hr.caller_refusal(os.getpid()) == ""
+
+
+def test_kill_switch_imports_no_workspace_package_at_load():
+    """It loads before anything else, and the headless relay cannot import a workspace package."""
+    with open(hr.__file__, encoding="utf-8") as source:
+        text = source.read()
+    assert not [line for line in text.splitlines() if line.startswith(("from kollabor", "import kollabor"))]

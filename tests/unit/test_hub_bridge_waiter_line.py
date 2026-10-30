@@ -1,6 +1,7 @@
 """waiter_line asks a halt waiter's status socket, on both platforms."""
 
 import asyncio
+import os
 import shutil
 import tempfile
 import threading
@@ -14,8 +15,8 @@ from kollabor_config import local_ipc
 
 @pytest.fixture
 def sock_path(tmp_path):
-    # unix socket paths are capped near 104 bytes on macOS, so fall back to a short dir
-    if len(str(tmp_path / "w.sock")) <= 100:
+    # unix socket paths are capped near 104 bytes on macOS, so fall back to a short dir; Windows has no cap
+    if os.name == "nt" or len(str(tmp_path / "w.sock")) <= 100:
         yield tmp_path / "w.sock"
         return
     short = Path(tempfile.mkdtemp(dir="/tmp"))

@@ -34,8 +34,6 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
-from kollabor_config import local_ipc, private_fs, proc_ctl
-
 from . import file_lock
 
 logger = logging.getLogger(__name__)
@@ -86,6 +84,8 @@ def kollab_root(root: Path | None = None) -> Path:
 def private_dir(root: Path | None = None) -> Path:
     d = kollab_root(root) / "private"
     if os.name == "nt":  # no mode bits on Windows: private_fs makes the folder private instead
+        from kollabor_config import private_fs
+
         private_fs.ensure_private_dir(d)
         return d
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -96,6 +96,8 @@ def private_dir(root: Path | None = None) -> Path:
 
 def _lock_fd(path: Path) -> int:
     if os.name == "nt":  # no O_NOFOLLOW on Windows: private_fs.open_nofollow opens the lock file instead
+        from kollabor_config import private_fs
+
         return private_fs.open_nofollow(path, os.O_RDWR | os.O_CREAT, 0o600)
     return os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
 
@@ -195,6 +197,8 @@ def caller_refusal(pid: int | None) -> str:
     if not pid or pid < 0:
         return GUARD_REFUSAL
     if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C on Windows: proc_ctl asks without signalling
+        from kollabor_config import proc_ctl
+
         if not proc_ctl.pid_alive(pid):
             return GUARD_REFUSAL
     else:
@@ -231,6 +235,8 @@ def caller_refusal(pid: int | None) -> str:
 def peer_pid(sock: Any) -> int:
     """The pid on the other end of a unix socket (LOCAL_PEERPID / SO_PEERCRED), 0 when it cannot be read."""
     if os.name == "nt":
+        from kollabor_config import local_ipc
+
         return local_ipc.peer_pid(sock)
     import socket
     import struct
@@ -326,6 +332,8 @@ def start_listener(root: Path | None = None, *, spawn: Callable[[list[str]], Any
         return True
     env = {k: v for k, v in os.environ.items() if k not in ("KOLLAB_TOOL_SHELL", "KOLLAB_AGENT_PID")}
     if os.name == "nt":  # no setsid: a detached process outside our job
+        from kollabor_config import proc_ctl
+
         proc_ctl.start_child(
             argv, detached=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, close_fds=True, env=env,
@@ -351,9 +359,12 @@ def sock_path(root: Path | None = None) -> Path:
 
 
 async def sock_call(request: dict, root: Path | None = None, timeout: float = 30.0) -> dict:
-    opening = (
-        local_ipc.connect(sock_path(root)) if os.name == "nt" else asyncio.open_unix_connection(str(sock_path(root)))
-    )
+    if os.name == "nt":
+        from kollabor_config import local_ipc
+
+        opening = local_ipc.connect(sock_path(root))
+    else:
+        opening = asyncio.open_unix_connection(str(sock_path(root)))
     reader, writer = await asyncio.wait_for(opening, timeout)
     try:
         writer.write(json.dumps(request).encode() + b"\n")
@@ -587,6 +598,8 @@ class _StatusSocket:
         return {"type": "error", "error": line}
 
     def _serve_ipc(self, ready: threading.Event) -> None:
+        from kollabor_config import local_ipc
+
         async def client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
                 raw = await asyncio.wait_for(reader.readline(), 5)
@@ -1027,8 +1040,11 @@ def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
     """
     protect = set(protect)
     if os.name == "nt":  # no process groups: end the process and everything it started
+        from kollabor_config import proc_ctl
+
         def kill_tree(pid: int, sig: int) -> None:
-            proc_ctl.kill_tree(pid, proc_ctl.HARD, protect=protect)
+            # SIGTERM waits up to 5 s for the agent to exit first, the grace stop_agent_record gives it
+            proc_ctl.kill_tree(pid, proc_ctl.HARD if sig == proc_ctl.HARD else proc_ctl.SOFT, protect=protect)
 
         return kill_tree
 
@@ -1142,6 +1158,8 @@ async def fallback_stop(
                 continue
             try:
                 if os.name == "nt":
+                    from kollabor_config import proc_ctl
+
                     proc_ctl.terminate(pid)
                 else:
                     os.kill(pid, signal.SIGTERM)
@@ -1157,6 +1175,8 @@ async def fallback_stop(
             elif starts[pid] is not None and same_identity(identify(pid), starts[pid]):
                 try:
                     if os.name == "nt":
+                        from kollabor_config import proc_ctl
+
                         proc_ctl.kill(pid)
                     else:
                         os.kill(pid, signal.SIGKILL)
@@ -1174,6 +1194,8 @@ async def fallback_stop(
 
 def _alive(pid: int) -> bool:
     if os.name == "nt":
+        from kollabor_config import proc_ctl
+
         return proc_ctl.pid_alive(pid)
     try:
         os.kill(pid, 0)
@@ -1287,6 +1309,8 @@ class HaltListener:
         path = sock_path(self.root)
         path.unlink(missing_ok=True)
         if os.name == "nt":  # no AF_UNIX: the loopback endpoint of local_ipc
+            from kollabor_config import local_ipc
+
             self._server = (await local_ipc.serve(self._client, path)).server
             return
         old = os.umask(0o177)
