@@ -90,6 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headshot, a PNG taken by a browser that can, instead of a plain blob (#380).
 
 ### Changed
+- Web UI: a tool's full output loads when you expand the tool; history pages
+  carry only a preview, so long chats open fast (#456).
 - Gems are born furry 85% of the time (hair 10%, bare 5%), the same on every
   device, and fur color is drawn too. Gems recorded bare are dressed once at
   the new odds; your own picks never change (#373).
