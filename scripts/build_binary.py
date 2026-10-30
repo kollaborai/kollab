@@ -277,6 +277,18 @@ def smoke(binary: Path, version: str, expected_build_line: str) -> None:
 AGENT_ONLINE = re.compile(r"^\s+(?P<name>\S+).*\bpid=(?P<pid>\d+)", re.MULTILINE)
 
 
+def agent_log_errors(home: Path, limit: int = 40) -> str:
+    """The error lines of the agent's own logs under ``home``: its stdio goes nowhere, so they say why it failed."""
+    lines = []
+    for path in sorted(home.glob(".kollab/projects/*/logs/*.log")):
+        for line in path.read_text(errors="replace").splitlines():
+            if re.search(r"ERROR|CRITICAL|Traceback|Error:|Exception", line):
+                lines.append(line[:300])
+    if not lines:
+        return "agent logs: no error lines"
+    return "agent log errors (last %d):\n%s" % (min(limit, len(lines)), "\n".join(lines[-limit:]))
+
+
 def agent_smoke(binary: Path, timeout: float = 120.0) -> None:
     """A detached agent starts, shows online in `--hub status`, and stops: native daemon start plus local IPC.
 
@@ -317,7 +329,7 @@ def agent_smoke(binary: Path, timeout: float = 120.0) -> None:
             raise SystemExit(
                 f"{binary.name} --detached started no agent that answers `--hub status` within {timeout:.0f}s\n"
                 f"--detached: exit {started.returncode}\n{log.read_text(errors='replace')[-2000:]}\n"
-                f"--hub status:\n{shown}"
+                f"--hub status:\n{shown}\n{agent_log_errors(home)}"
             )
         deadline = time.monotonic() + 30
         while AGENT_ONLINE.search(kollab("--hub", "status", capture_output=True).stdout):
