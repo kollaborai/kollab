@@ -94,6 +94,15 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
     halt_runtime._via_owner = traced(halt_runtime._via_owner)
     halt_runtime._act = traced(halt_runtime._act)
     code = asyncio.run(halt_runtime.cli_control("halt", ["--here-only", "--reason", "windows smoke"]))
+    if code != 0:  # the listener runs detached with no output: run one here so its error shows
+        from kollabor.binary import kollab_argv
+
+        try:
+            ran = subprocess.run([*kollab_argv(), "--halt-listener"], capture_output=True, text=True,
+                                 errors="replace", timeout=20, env=env)
+            print(f"--- kollab --halt-listener exited {ran.returncode}:\n{(ran.stdout + ran.stderr)[-4000:]}")
+        except subprocess.TimeoutExpired:
+            print("--- kollab --halt-listener was still running after 20 s")
     assert code == 0, f"halt exited {code}"
     wait_until(lambda: not online(), 60, "no agent online after the halt")
     assert halt_runtime.read_halt().get("scopes"), "the halt wrote no scopes"
