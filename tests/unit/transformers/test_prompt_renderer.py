@@ -216,7 +216,7 @@ Recent commits:
             / "01-session-context.md"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("date '+%Y-%m-%d %Z'", section)
+        self.assertIn('<trender type="session" field="date" />', section)
         self.assertNotIn("%H:%M:%S", section)
         self.assertNotIn("%ar", section)
 

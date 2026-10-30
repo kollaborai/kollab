@@ -17,13 +17,17 @@ The import is lazy and optional.
 Hub features depend on the hub plugin being active via the event bus.
 """
 
+import getpass
 import logging
+import os
+import platform
 import re
 import shlex
+import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from .prompt_composition import (
     DEFAULTS_LIBRARY,
@@ -62,6 +66,16 @@ def _get_shell_alias_utils() -> Dict[str, Any]:
             "kollabor_agent.shell_utils not available, shell_aliases feature disabled"
         )
         return {}
+
+
+def _default_shell_resolver() -> Any:
+    """agent_shell() from kollabor-agent, resolved lazily to keep the dependency direction legal."""
+    try:
+        from kollabor_agent.shell_utils import agent_shell
+
+        return agent_shell()
+    except Exception:
+        return None
 
 
 class PromptRenderer:
@@ -124,6 +138,13 @@ class PromptRenderer:
         r'<trender\s+type=["\']active_llm["\']\s*/?>', re.DOTALL
     )
 
+    # Pattern to match <trender type="session" field="..." /> tags
+    TRENDER_SESSION_PATTERN = re.compile(
+        r'<trender\s+type=["\']session["\']'
+        r'(?:\s+field=["\'](?P<field>\w+)["\'])?\s*/?>',
+        re.DOTALL,
+    )
+
     def __init__(
         self,
         timeout: int = 5,
@@ -137,6 +158,7 @@ class PromptRenderer:
         prompt_bundle: Optional[str] = None,
         override_store: Optional[Any] = None,
         variant: Optional[str] = None,
+        shell_resolver: Optional[Callable[[], Any]] = None,
     ):
         """Initialize the prompt renderer.
 
@@ -158,6 +180,9 @@ class PromptRenderer:
         self.base_path = base_path or Path.cwd()
         self.agent_manager = agent_manager
         self._shell_alias_utils = shell_alias_utils
+
+        self._shell_resolver = shell_resolver
+        self._resolved_shell: Optional[Any] = None
         self.event_bus = event_bus
         self.profile_manager = profile_manager
         self.conversation_logger = conversation_logger
@@ -231,6 +256,10 @@ class PromptRenderer:
 
             # Step 1: Process file includes first (allows includes to contain commands)
             result = self._process_includes(result)
+
+            # Step 1b: session facts render in Python before any shell command runs,
+            # so the block works on every OS and names the real agent shell.
+            result = self._process_session(result)
 
             # Step 2: Process shell aliases
             result = self._process_aliases(result)
@@ -463,6 +492,50 @@ class PromptRenderer:
             lines.append("")
 
         return "\n".join(lines)
+
+    def _session_shell(self) -> Any:
+        """The resolved AgentShell; None when kollabor-agent is unavailable."""
+        if self._shell_resolver is not None:
+            if self._resolved_shell is None:
+                self._resolved_shell = self._shell_resolver()
+            return self._resolved_shell
+        if self._resolved_shell is None:
+            self._resolved_shell = _default_shell_resolver()
+        return self._resolved_shell
+
+    def _session_field(self, field: str) -> str:
+        """One session-context fact, rendered in Python on every OS."""
+        if field == "date":
+            return time.strftime("%Y-%m-%d %Z")
+        if field == "system":
+            return f"{platform.system()} {platform.machine()}"
+        if field == "user":
+            return f"{getpass.getuser()} @ {socket.gethostname()}"
+        if field == "shell":
+            shell = self._session_shell()
+            if shell is None:
+                return ""
+            if shell.kind == "posix":
+                # Byte-compatible with the old `echo $SHELL` line on macOS/Linux.
+                return shell.path
+            return f"{shell.label}\n{shell.rule}" if shell.rule else shell.label
+        if field == "cwd":
+            pwd = os.environ.get("PWD", "")
+            try:
+                same = pwd and os.path.realpath(pwd) == os.path.realpath(os.getcwd())
+            except OSError:
+                same = False
+            # $PWD matching getcwd() is what `pwd` prints; Windows paths get forward slashes.
+            if same:
+                return pwd
+            return os.getcwd().replace(os.sep, "/") if os.name == "nt" else os.getcwd()
+        return ""
+
+    def _process_session(self, content: str) -> str:
+        """Process all <trender type="session" ... /> tags."""
+        return self.TRENDER_SESSION_PATTERN.sub(
+            lambda match: self._session_field(match.group("field") or ""), content
+        )
 
     # ── Hub trender tag processors ──────────────────────────────
 
@@ -963,6 +1036,28 @@ class PromptRenderer:
             if not Path(".beads").exists():
                 logger.debug(f"Skipping beads command (no .beads/ dir): {command}")
                 return ""
+
+        # Windows: raw trenders run in Git Bash when present; under PowerShell they
+        # render nothing (bash scripts cannot run there and must not leak error text).
+        shell = self._session_shell()
+        if shell is not None and shell.kind in ("pwsh", "powershell"):
+            return ""
+        if shell is not None and shell.kind == "git-bash":
+            try:
+                result = subprocess.run(
+                    shell.argv(command),
+                    shell=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    cwd=".",
+                )
+                output = (result.stdout or result.stderr or "").strip()
+                if result.returncode != 0:
+                    return f"[trender error: command exited with code {result.returncode}]"
+                return output
+            except (subprocess.TimeoutExpired, OSError):
+                return "[trender error: command failed]"
 
         try:
             logger.debug(f"Executing trender command: {command}")

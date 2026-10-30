@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Windows: a halt taken on a Windows machine now reaches the other machines of its network; the relay owner runs on Windows over local IPC (#439).
+- Windows: agent commands run in Git Bash when Git for Windows is installed,
+  else in PowerShell (never cmd.exe); `KOLLAB_SHELL` picks another shell.
 - PhoneLink works from every engine on the computer: an engine that does not hold PhoneLink forwards the call to the one that does, and the "managing PhoneLink" message names that engine's port, process, start time and folder (#443).
 - Windows: every release ships the desktop installer
   (`kollab-desktop-windows-x86_64-X.Y.Z-setup.exe` and its `.sha256`), and a
@@ -123,6 +125,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Conversation and raw API logs stamp times in UTC: a stamp marked Z held
+  local time before, hours off from real UTC (#454).
 - /llm: a custom or local endpoint's section lists only what that endpoint
   really serves. The bundled generic "custom" placeholders (grok-4.7 and
   friends) no longer appear when the live /models catalog is cold or the
