@@ -175,6 +175,8 @@ class GoalTurnDriver:
             events = self.service.store.events(goal_id, limit=200, kind="turn_started")
         except GoalStoreError:
             return True  # cannot tell: leave it alone
+        from kollabor_config import proc_ctl
+
         for event in events:
             if event.kind != "turn_started" or event.turn_id not in unsettled:
                 continue
@@ -185,12 +187,8 @@ class GoalTurnDriver:
             pid = int(pid_text)
             if pid == os.getpid():
                 continue  # this process, and no loop here drives it
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not proc_ctl.pid_alive(pid):  # os.kill(pid, 0) sends Ctrl+C on Windows
                 continue
-            except PermissionError:
-                return True
             return True
         return False
 
