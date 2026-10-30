@@ -118,11 +118,15 @@ def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def _encode_cursor(
-    session_id: str, kind: str, position: int, digest: str
-) -> str:
+def _encode_cursor(session_id: str, kind: str, position: int, digest: str) -> str:
     payload = _canonical_bytes(
-        {"v": 1, "session": session_id, "kind": kind, "position": position, "digest": digest}
+        {
+            "v": 1,
+            "session": session_id,
+            "kind": kind,
+            "position": position,
+            "digest": digest,
+        }
     )
     signature = hmac.digest(_get_cursor_secret(), payload, "sha256")
     return f"{_b64(payload)}.{_b64(signature)}"
@@ -146,7 +150,11 @@ def _decode_cursor(
         raise InvalidHistoryCursor("Invalid history cursor.") from error
     if not hmac.compare_digest(signature, expected):
         raise InvalidHistoryCursor("Invalid history cursor.")
-    if data.get("v") != 1 or data.get("session") != session_id or data.get("kind") != kind:
+    if (
+        data.get("v") != 1
+        or data.get("session") != session_id
+        or data.get("kind") != kind
+    ):
         raise InvalidHistoryCursor("History cursor does not match this request.")
     position = data.get("position")
     if not isinstance(position, int) or position < 0 or position > len(history):
@@ -155,7 +163,9 @@ def _decode_cursor(
         current_digest = _digest(history[:position])
     else:
         if position >= len(history):
-            raise StaleHistoryCursor("Tool output changed. Refresh recent messages and retry.")
+            raise StaleHistoryCursor(
+                "Tool output changed. Refresh recent messages and retry."
+            )
         current_digest = _digest(history[position])
     if not hmac.compare_digest(str(data.get("digest", "")), current_digest):
         raise StaleHistoryCursor("History changed. Refresh recent messages and retry.")
@@ -166,20 +176,111 @@ def _page_cursor(session_id: str, history: list[dict[str, Any]], position: int) 
     return _encode_cursor(session_id, "page", position, _digest(history[:position]))
 
 
-def _copy_for_page(message: dict[str, Any]) -> dict[str, Any]:
-    return copy.deepcopy(message)
+def _metadata_without_diffs(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Drop the full-file ``diffs`` lists the page never renders.
+
+    A single file_edit stores the whole before/after text of each edited
+    file in ``diffs``; one large file can exceed the page byte cap on its
+    own. The compact previews stay: ``diff_info`` numbers and the entry
+    text are kept, and ``resolve_history_output`` never serves diffs, so
+    no fetch reference is needed for what is dropped here.
+    """
+
+    def _drop_diffs(mapping: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in mapping.items() if key != "diffs"}
+
+    stripped = _drop_diffs(metadata)
+    tool_result = stripped.get("tool_result")
+    if isinstance(tool_result, dict):
+        tool_result = dict(tool_result)
+        inner = tool_result.get("metadata")
+        if isinstance(inner, dict):
+            tool_result["metadata"] = _drop_diffs(inner)
+        stripped["tool_result"] = tool_result
+    batch = stripped.get("xml_tool_results")
+    if isinstance(batch, list):
+        entries: list[Any] = []
+        for entry in batch:
+            if isinstance(entry, dict):
+                entry = dict(entry)
+                inner = entry.get("metadata")
+                if isinstance(inner, dict):
+                    entry["metadata"] = _drop_diffs(inner)
+            entries.append(entry)
+        stripped["xml_tool_results"] = entries
+    return stripped
 
 
-def _truncated_tool_message(
+def _is_tool_result_message(message: dict[str, Any]) -> bool:
+    """The messages the web UI renders as a tool result card.
+
+    Exactly two shapes exist on the wire: native tool results
+    (``role == "tool"``) and the batched XML results message
+    (``role == "user"`` with ``tool_output_batch`` metadata). The web UI
+    keys its tool cards on the same two conditions.
+    """
+    if message.get("role") == "tool":
+        return True
+    metadata = message.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("tool_output_batch") is True
+
+
+def _page_candidate(
     session_id: str, history: list[dict[str, Any]], index: int
 ) -> dict[str, Any]:
+    """Copy one message for a page, deferring heavy tool output eagerly.
+
+    Tool calls must load light: a tool result whose content exceeds the
+    preview budget pages as the same preview + Show-more reference an
+    over-cap message gets, even when the page has room for the full text.
+    The full output still comes from ``/history/output``.
+    """
+    message = history[index]
+    if _is_tool_result_message(message):
+        content = message.get("content", "")
+        content_bytes = (
+            content.encode("utf-8")
+            if isinstance(content, str)
+            else _canonical_bytes(content)
+        )
+        if len(content_bytes) > HISTORY_TOOL_OUTPUT_PREVIEW_BYTES:
+            return _truncated_message(session_id, history, index)
+    return _copy_for_page(message)
+
+
+def _copy_for_page(message: dict[str, Any]) -> dict[str, Any]:
+    page = copy.deepcopy(message)
+    metadata = page.get("metadata")
+    if isinstance(metadata, dict):
+        page["metadata"] = _metadata_without_diffs(metadata)
+    return page
+
+
+def _truncated_message(
+    session_id: str, history: list[dict[str, Any]], index: int
+) -> dict[str, Any]:
+    """Shrink one over-cap message of any role to a preview plus a ref.
+
+    Oversized single messages are not limited to tool results, so the page
+    answers with a bounded preview and an output reference instead of a
+    page-too-large error; ``resolve_history_output`` serves the original
+    content for every role.
+    """
     message = _copy_for_page(history[index])
     content = history[index].get("content", "")
-    content_bytes = content.encode("utf-8") if isinstance(content, str) else _canonical_bytes(content)
-    preview = content_bytes[:HISTORY_TOOL_OUTPUT_PREVIEW_BYTES].decode("utf-8", "ignore")
+    content_bytes = (
+        content.encode("utf-8")
+        if isinstance(content, str)
+        else _canonical_bytes(content)
+    )
+    preview = content_bytes[:HISTORY_TOOL_OUTPUT_PREVIEW_BYTES].decode(
+        "utf-8", "ignore"
+    )
+    shown = "tool output" if _is_tool_result_message(history[index]) else "message"
     message["content"] = (
         preview
-        + "\n\n[Tool output shortened to fit this page. Select Show more to fetch it.]"
+        + f"\n\n[Showing the first {HISTORY_TOOL_OUTPUT_PREVIEW_BYTES // 1024} KB"
+        f" of this {shown}.]"
     )
     metadata = message.get("metadata")
     metadata = dict(metadata) if isinstance(metadata, dict) else {}
@@ -209,7 +310,9 @@ def _response(
             "start_index": start,
             "end_index": end,
             "has_more_older": start > 0,
-            "older_cursor": _page_cursor(session_id, history, start) if start > 0 else None,
+            "older_cursor": (
+                _page_cursor(session_id, history, start) if start > 0 else None
+            ),
             "newer_cursor": _page_cursor(session_id, history, end),
             "has_more_newer": end < len(history),
         }
@@ -256,36 +359,38 @@ def build_history_page(
         for index in range(len(original) - 1, minimum_start - 1, -1):
             if len(reversed_selected) >= page_limit:
                 break
-            candidate = _copy_for_page(original[index])
+            candidate = _page_candidate(session_id, original, index)
             next_start = index
             proposed = list(reversed(reversed_selected + [candidate]))
-            body = _response(
-                session_id, original, proposed, next_start, page_end, base
-            )
+            body = _response(session_id, original, proposed, next_start, page_end, base)
             if len(_canonical_bytes(body)) > byte_limit:
-                if not reversed_selected and original[index].get("role") == "tool":
-                    candidate = _truncated_tool_message(session_id, original, index)
+                if not reversed_selected:
+                    candidate = _truncated_message(session_id, original, index)
                     body = _response(
                         session_id, original, [candidate], next_start, page_end, base
                     )
                 if len(_canonical_bytes(body)) > byte_limit:
                     if not reversed_selected:
-                        raise HistoryPageTooLarge("One history message exceeds the page byte cap.")
+                        raise HistoryPageTooLarge(
+                            "One history message exceeds the page byte cap."
+                        )
                     break
             reversed_selected.append(candidate)
             page_start = next_start
         selected = list(reversed(reversed_selected))
     else:
-        page_end = len(original) if before is None else _decode_cursor(
-            before, session_id, "page", original
-        )[0]
+        page_end = (
+            len(original)
+            if before is None
+            else _decode_cursor(before, session_id, "page", original)[0]
+        )
         indexes = range(page_end - 1, -1, -1)
         reversed_selected: list[dict[str, Any]] = []
         page_start = page_end
         for index in indexes:
             if len(reversed_selected) >= page_limit:
                 break
-            candidate = _copy_for_page(original[index])
+            candidate = _page_candidate(session_id, original, index)
             next_start = index
             body = _response(
                 session_id,
@@ -296,12 +401,16 @@ def build_history_page(
                 base,
             )
             if len(_canonical_bytes(body)) > byte_limit:
-                if not reversed_selected and original[index].get("role") == "tool":
-                    candidate = _truncated_tool_message(session_id, original, index)
-                    body = _response(session_id, original, [candidate], next_start, page_end, base)
+                if not reversed_selected:
+                    candidate = _truncated_message(session_id, original, index)
+                    body = _response(
+                        session_id, original, [candidate], next_start, page_end, base
+                    )
                 if len(_canonical_bytes(body)) > byte_limit:
                     if not reversed_selected:
-                        raise HistoryPageTooLarge("One history message exceeds the page byte cap.")
+                        raise HistoryPageTooLarge(
+                            "One history message exceeds the page byte cap."
+                        )
                     break
             reversed_selected.append(candidate)
             page_start = next_start
