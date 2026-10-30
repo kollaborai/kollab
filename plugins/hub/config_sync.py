@@ -244,7 +244,7 @@ def _read_object(path: Path) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except OSError, ValueError:
+    except (OSError, ValueError):
         raise ConfigSyncError("unreadable") from None
     if not isinstance(data, dict):
         raise ConfigSyncError("unreadable")
@@ -300,9 +300,7 @@ class JoinFloor:
 
     primary_key: str
     revision: int
-    digest: str = (
-        ""  # empty: the primary had stamped no snapshot yet, so only the revision is pinned
-    )
+    digest: str = ""  # empty: the primary had stamped no snapshot yet, so only the revision is pinned
 
 
 def floor_path(root: Path | None = None) -> Path:
@@ -316,10 +314,7 @@ def _well_formed(revision: Any, digest: Any) -> bool:
     return (
         type(revision) is int
         and 0 <= revision < 2**53
-        and (
-            digest == ""
-            or (isinstance(digest, str) and _SHA.fullmatch(digest) is not None)
-        )
+        and (digest == "" or (isinstance(digest, str) and _SHA.fullmatch(digest) is not None))
     )
 
 
@@ -328,7 +323,7 @@ def read_join_floor(root: Path | None = None) -> JoinFloor | None:
     try:
         found = _read_file(kollab_root(root), JOIN_FLOOR_PARTS, 4096)
         data = json.loads(found[0]) if found else None
-    except OSError, ConfigSyncError, ValueError:
+    except (OSError, ConfigSyncError, ValueError):
         return None
     if (
         not isinstance(data, dict)
@@ -346,7 +341,7 @@ def clear_join_floor(root: Path | None = None) -> None:
             os.unlink(JOIN_FLOOR_PARTS[-1], dir_fd=directory)
         finally:
             os.close(directory)
-    except OSError, ConfigSyncError:
+    except (OSError, ConfigSyncError):
         pass  # none there, or a link on the way; a floor left behind is ignored for another primary
 
 
@@ -381,7 +376,7 @@ def record_join_floor(
             {"primary_key": primary_key, "revision": revision, "digest": digest},
             dir_mode=0o700,
         )
-    except OSError, ConfigSyncError:
+    except (OSError, ConfigSyncError):
         logger.warning("config sync: could not save the join floor")
 
 
@@ -454,9 +449,7 @@ class SnapshotBuilder:
                     # A retry reads only the names that failed; the rest keep
                     # the value read before.
                     fetched[name] = (
-                        self._keyring_get(name)
-                        if retry is None or name in retry
-                        else None
+                        self._keyring_get(name) if retry is None or name in retry else None
                     )
                 value = fetched[name] or self._resolved.get(name)
                 if not value:
@@ -485,11 +478,7 @@ class SnapshotBuilder:
             else {}
         )
         self._missing = missing
-        self._core_signature, self._core = signature, (
-            config,
-            mcp,
-            tuple(sorted(unresolved)),
-        )
+        self._core_signature, self._core = signature, (config, mcp, tuple(sorted(unresolved)))
         return self._core
 
     def _scan_files(self) -> tuple[list[FileEntry], int]:
@@ -564,7 +553,7 @@ class SnapshotBuilder:
                 found = _read_file(
                     kollab_root(self._root) / parts[0], parts[1:], MAX_FILE_BYTES
                 )
-            except OSError, ConfigSyncError:
+            except (OSError, ConfigSyncError):
                 return None
             if found is None:
                 return None
@@ -603,7 +592,7 @@ def unpack_json(blob: bytes, *, limit: int) -> Any:
         raise ConfigSyncError("invalid")
     try:
         return _strict_json(raw)
-    except ValueError, UnicodeError:
+    except (ValueError, UnicodeError):
         raise ConfigSyncError("invalid") from None
 
 
@@ -644,7 +633,7 @@ def seal(
         return SealedBox(
             VerifyKey(recipient_public_key).to_curve25519_public_key()
         ).encrypt(plaintext)
-    except CryptoError, ValueError, TypeError:
+    except (CryptoError, ValueError, TypeError):
         raise ConfigSyncError("invalid") from None
 
 
@@ -659,7 +648,7 @@ def open_sealed(
     """Open a bundle addressed to ``recipient_key`` and signed by the primary."""
     try:
         plaintext = SealedBox(recipient_key.to_curve25519_private_key()).decrypt(sealed)
-    except CryptoError, ValueError, TypeError:
+    except (CryptoError, ValueError, TypeError):
         raise ConfigSyncError("wrong_recipient") from None
     if len(plaintext) < 8 or plaintext[:4] != _MAGIC:
         raise ConfigSyncError("invalid")
@@ -669,7 +658,7 @@ def open_sealed(
     blob = plaintext[8 + head_length :]
     try:
         header = _strict_json(plaintext[8 : 8 + head_length])
-    except ValueError, UnicodeError:
+    except (ValueError, UnicodeError):
         raise ConfigSyncError("invalid") from None
     fields = {
         "v", "kind", "issuer", "recipient", "revision", "issued_at", "body",
@@ -685,7 +674,7 @@ def open_sealed(
         VerifyKey(issuer_public_key).verify(
             _DOMAIN + _canonical_json(unsigned), bytes.fromhex(signature)
         )
-    except BadSignatureError, CryptoError, ValueError, TypeError:
+    except (BadSignatureError, CryptoError, ValueError, TypeError):
         raise ConfigSyncError("bad_signature") from None
     revision, issued_at = header["revision"], header["issued_at"]
     if (
@@ -787,9 +776,7 @@ class Applied:
     config_changed: bool = False
     profiles_changed: bool = False
     mcp_changed: bool = False
-    skipped_mcp: tuple[
-        str, ...
-    ] = ()  # enabled servers whose command is not installed here
+    skipped_mcp: tuple[str, ...] = ()  # enabled servers whose command is not installed here
 
 
 def safe_parts(rel: Any) -> tuple[str, ...] | None:
@@ -951,9 +938,7 @@ def _remove(base: Path, parts: tuple[str, ...]) -> None:
         pass
     finally:
         os.close(directory)
-    for depth in range(
-        len(folders), 0, -1
-    ):  # innermost first, up to the first one in use
+    for depth in range(len(folders), 0, -1):  # innermost first, up to the first one in use
         parent = _open_dir(base, folders[: depth - 1])
         try:
             os.rmdir(folders[depth - 1], dir_fd=parent)
@@ -976,7 +961,7 @@ def _tighten(base: Path, parts: tuple[str, ...]) -> None:
             os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
-    except OSError, ConfigSyncError:
+    except (OSError, ConfigSyncError):
         pass  # nothing on disk to tighten, or a link: not ours to change
 
 
@@ -987,7 +972,7 @@ def _local_file(
     plain file, too big, or behind a link."""
     try:
         found = _read_file(kollab_root(root) / parts[0], parts[1:], MAX_FILE_BYTES)
-    except OSError, ConfigSyncError:
+    except (OSError, ConfigSyncError):
         return None
     return None if found is None else (hashlib.sha256(found[0]).hexdigest(), found[1])
 
@@ -1125,9 +1110,7 @@ class Receiver:
             raise ConfigSyncError("invalid")
         keep = core.get("keep", [])
         if not isinstance(keep, list) or not all(
-            isinstance(path, list)
-            and path
-            and all(isinstance(part, str) for part in path)
+            isinstance(path, list) and path and all(isinstance(part, str) for part in path)
             for path in keep
         ):
             raise ConfigSyncError("invalid")
@@ -1155,9 +1138,7 @@ class Receiver:
             _write_json(base, CONFIG_PARTS, current)
             applied.config_changed = True
             applied.profiles_changed = _llm_profiles(before) != _llm_profiles(current)
-        _tighten(
-            base, CONFIG_PARTS
-        )  # keys live here: 0600 on every apply, write or not
+        _tighten(base, CONFIG_PARTS)  # keys live here: 0600 on every apply, write or not
         settings = _read_object(base.joinpath(*MCP_PARTS))
         existing = settings.get("servers")
         existing = existing if isinstance(existing, dict) else {}
@@ -1168,16 +1149,12 @@ class Receiver:
         skipped = set()
         for name, server in servers.items():
             if isinstance(name, str) and isinstance(server, dict):
-                if _mcp_missing(
-                    server
-                ):  # never written, never a reason to touch a local one
+                if _mcp_missing(server):  # never written, never a reason to touch a local one
                     skipped.add(name)
                 else:
                     merged[name] = copy.deepcopy(server)
         # a server the primary switched off is skipped all the same, but nothing missed
-        applied.skipped_mcp = tuple(
-            sorted(n for n in skipped if servers[n].get("enabled", True))
-        )
+        applied.skipped_mcp = tuple(sorted(n for n in skipped if servers[n].get("enabled", True)))
         if merged != existing:
             settings["servers"] = merged
             _write_json(base, MCP_PARTS, settings)
@@ -1292,7 +1269,7 @@ class Receiver:
                 continue
             try:
                 _remove(kollab_root(self._root) / parts[0], parts[1:])
-            except OSError, ConfigSyncError:
+            except (OSError, ConfigSyncError):
                 continue
         write_managed_config(
             ManagedConfig(
