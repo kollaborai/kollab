@@ -1,19 +1,32 @@
-"""The provisional Windows desktop job never runs for, or holds up, a release (#268)."""
+"""The Windows desktop job runs for every release, and a release needs its installer (#268)."""
 
 from pathlib import Path
 
 import yaml
 
-WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "binaries.yml"
+WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 
 
 def _jobs():
-    return yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    return yaml.safe_load((WORKFLOWS / "binaries.yml").read_text())["jobs"]
 
 
-def test_windows_job_runs_only_by_hand():
-    assert _jobs()["desktop-windows"]["if"] == "github.event_name == 'workflow_dispatch'"
+def test_windows_job_runs_for_every_release():
+    job = _jobs()["desktop-windows"]
+    assert "if" not in job
+    assert "continue-on-error" not in job
 
 
-def test_release_manifest_does_not_wait_on_windows():
-    assert "desktop-windows" not in _jobs()["release-manifest"]["needs"]
+def test_release_manifest_waits_on_windows_and_requires_its_installer():
+    manifest = _jobs()["release-manifest"]
+    assert "desktop-windows" in manifest["needs"]
+    assert any(
+        "verify dist/bin --windows required" in step.get("run", "")
+        for step in manifest["steps"]
+    )
+
+
+def test_publish_requires_the_windows_installer():
+    assert (
+        "verify dist/bin --windows required" in (WORKFLOWS / "publish.yml").read_text()
+    )
