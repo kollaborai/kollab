@@ -75,8 +75,10 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
 
     network_halt.network_control_refusal = lambda *args, **kwargs: ""  # no console on a runner
     # A network refuses a halt with fewer than two counting machines, since a resume needs a second one to confirm
-    # it (unit-tested on every OS). This runner is one machine, so this process lets it halt itself: the smoke
-    # proves the Windows halt, the halted launch and the local resume, not that rule.
+    # it: logic with no OS code, tested in tests/unit/test_network_halt.py and the Docker kill switch harness.
+    # This runner is one machine, so this process lets it halt itself: the smoke proves the Windows halt, the
+    # halted launch and the local resume, not that rule. Nothing can own a folder's network on Windows yet (the
+    # relay owner refuses there), so _via_owner always takes the halt in this process, where this applies.
     network_halt.halt_allowed = lambda view: True
 
     def traced(call):  # cli_control prints only the error's message; a failed run needs its line
