@@ -33,7 +33,7 @@ GET_TIMEOUT = 60.0
 CLEANUP_TIMEOUT = 30.0
 REPORT_LINES = 40
 BODY_CHARS = 500
-LOG_PATTERN = re.compile(r"ERROR|CRITICAL|Traceback")
+LOG_PATTERN = re.compile(r"WARNING|ERROR|CRITICAL|Traceback")
 SUCCESS_LINE = (
     "engine started a session and its daemon, got the session state, closed it, "
     "and left no process behind"
@@ -192,8 +192,21 @@ def _homed_pids(home: str, skip: set[int]) -> list[int]:
 def _alive(pid: int) -> bool:
     try:
         return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
-    except psutil.Error:
+    except psutil.NoSuchProcess:
         return False
+    except psutil.Error:  # cannot read it, so it may still run
+        return True
+
+
+def _describe(pids: list[int]) -> str:
+    parts = []
+    for pid in pids:
+        try:
+            proc = psutil.Process(pid)
+            parts.append(f"{pid} {proc.name()} (parent {proc.ppid()})")
+        except psutil.Error:
+            parts.append(f"{pid} (unreadable)")
+    return ", ".join(parts)
 
 
 def _daemon_pids(home: Path) -> list[int]:
@@ -219,7 +232,7 @@ def _wait_for_daemons_gone(home: str, engine_pid: int, daemons: list[int]) -> No
         if not pids:
             return
         if time.monotonic() >= deadline:
-            raise SmokeFailure(f"daemon still running after DELETE: pids {pids}")
+            raise SmokeFailure(f"still running after DELETE: {_describe(pids)}")
         time.sleep(1)
 
 

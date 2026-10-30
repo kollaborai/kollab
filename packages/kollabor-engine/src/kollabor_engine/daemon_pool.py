@@ -200,9 +200,10 @@ class DaemonHandle:
                 self._reader, self._writer = await local_ipc.connect(
                     socket_path, limit=LARGE_BUFFER_LIMIT
                 )
-            except (ConnectionError, TimeoutError) as exc:
-                # Not listening yet or reset mid-handshake: the spawn loop retries
-                # ConnectionRefusedError until its deadline.
+            except (ConnectionError, TimeoutError, PermissionError) as exc:
+                # Not listening yet, reset mid-handshake, or the endpoint file being
+                # replaced: the spawn loop retries ConnectionRefusedError until its
+                # deadline.
                 raise ConnectionRefusedError(str(exc)) from exc
         else:
             self._reader, self._writer = await open_unix_connection_with_large_buffer(
@@ -462,6 +463,12 @@ class DaemonHandle:
         if self.pid and self.alive:
             if process_handle is None:
                 return
+            if os.name == "nt":
+                await self._stop_windows(process_handle, timeout)
+                logger.info(
+                    "daemon %s stopped (session %s)", self.identity, self.session_id
+                )
+                return
             try:
                 process_handle.send_signal(signal.SIGTERM)
             except psutil.NoSuchProcess:
@@ -499,6 +506,50 @@ class DaemonHandle:
                     )
 
         logger.info("daemon %s stopped (session %s)", self.identity, self.session_id)
+
+    async def _stop_windows(
+        self, process_handle: psutil.Process, timeout: float
+    ) -> None:
+        """Ask the daemon to shut down, then end it and every process it started.
+
+        On Windows psutil's SIGTERM is TerminateProcess: the daemon gets no cleanup
+        and its children, such as stdio MCP servers, would outlive it (#268).
+        """
+        try:
+            children = process_handle.children(recursive=True)
+        except psutil.Error:
+            children = []
+        if self.socket_path:
+            from plugins.hub.messenger import AgentMessenger
+
+            try:
+                await AgentMessenger.signal_shutdown(
+                    self.socket_path, reason="session closed"
+                )
+            except Exception as exc:
+                logger.debug("shutdown request to %s failed: %s", self.identity, exc)
+        deadline = time.monotonic() + timeout
+        while self.alive and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        for process in (process_handle, *children):
+            try:
+                process.kill()  # psutil refuses a pid that was reused
+            except psutil.NoSuchProcess:
+                pass
+            except psutil.Error as exc:
+                logger.warning(
+                    "could not end pid %s of daemon %s: %s",
+                    process.pid,
+                    self.identity,
+                    exc,
+                )
+        kill_deadline = time.monotonic() + 2.0
+        while time.monotonic() < kill_deadline and self.alive:
+            await asyncio.sleep(0.05)
+        if self.alive:
+            raise RuntimeError(
+                f"daemon {self.identity} (pid {self.pid}) remained alive after it was ended"
+            )
 
 
 class DaemonPool:
