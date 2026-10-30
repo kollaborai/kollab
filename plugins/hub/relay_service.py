@@ -55,6 +55,12 @@ from .relay_backend import (
     validate_backend_url,
 )
 
+try:  # POSIX only: this module is imported on Windows too
+    import grp
+    import resource
+except ImportError:  # Windows has no groups or descriptor limits
+    grp = resource = None
+
 PROTOCOL = "kollab-relay/1"
 # The relay protocol versions this relay serves, newest first. A client names
 # the ones it speaks in the WebSocket subprotocol header; naming none means
@@ -1635,18 +1641,17 @@ def raise_fd_limit(max_connections: int) -> int:
     maxclients; the caller says so, so a small host still starts.
     """
     need = max_connections + FD_HEADROOM
-    import resource  # POSIX only: this module is imported on Windows too
+    if resource is None:  # Windows has no descriptor limit to raise
+        return max_connections
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft >= need:
         return max_connections
-    import resource  # POSIX only: this module is imported on Windows too
     target = need if hard == resource.RLIM_INFINITY else min(need, hard)
     if target <= FD_HEADROOM:
         raise RelayConfigError(
             f"the file-descriptor hard limit ({hard}) leaves no room for connections; raise LimitNOFILE (ulimit -n)"
         )
     try:
-        import resource  # POSIX only: this module is imported on Windows too
         resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
     except (ValueError, OSError) as exc:
         raise RelayConfigError(f"cannot raise the file-descriptor limit to {target}: {exc}") from exc
@@ -1675,7 +1680,6 @@ def bind_unix_socket(path: str, group: str | None = None) -> socket.socket:
     gid = None
     if group is not None:
         try:
-            import grp  # POSIX only: this module is imported on Windows too
             gid = grp.getgrnam(group).gr_gid
         except KeyError as exc:
             raise RelayConfigError(f"unknown unix socket group {group!r}") from exc
