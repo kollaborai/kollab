@@ -420,7 +420,8 @@ def test_listener_running_never_takes_the_lock(tmp_path, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("listener_running took a lock")
 
-    monkeypatch.setattr(hr.fcntl, "flock", boom)
+    monkeypatch.setattr(hr.file_lock, "lock", boom)
+    monkeypatch.setattr(hr.file_lock, "try_lock", boom)
     assert hr.listener_running(tmp_path) is False
 
 
