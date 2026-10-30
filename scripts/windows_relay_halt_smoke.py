@@ -55,13 +55,28 @@ def start_agent(kollab: str, project: Path, env: dict[str, str], log: Path) -> s
         )
 
 
-def wait_until(check, timeout: float, what: str) -> None:
+def wait_until(check, timeout: float, what: str, why=None) -> None:
     """Poll `check` every 2 s until it is true; past `timeout`, name what never happened."""
     deadline = time.monotonic() + timeout
     while not check():
         if time.monotonic() > deadline:
-            raise SystemExit(f"windows relay halt smoke: not within {timeout:.0f}s: {what}")
+            raise SystemExit(f"windows relay halt smoke: not within {timeout:.0f}s: {what}\n{why() if why else ''}")
         time.sleep(2)
+
+
+def presence_dump(home: Path) -> str:
+    """What the presence folder holds, to debug a socket that never shows up."""
+    lines = [f"  presence folder {home / '.kollab' / 'hub' / 'presence'}:"]
+    for record in sorted((home / ".kollab" / "hub" / "presence").glob("*.json"))[:4]:
+        try:
+            data = json.loads(record.read_text())
+            lines.append(f"  {record.name}: pid={data.get('pid')} project={data.get('project')!r}"
+                         f" socket={data.get('socket_path')!r} keys={sorted(data)[:12]}")
+        except (OSError, ValueError) as exc:
+            lines.append(f"  {record.name}: unreadable ({exc})")
+    if len(lines) == 1:
+        lines.append("  (empty or missing)")
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------- hub sockets
@@ -317,12 +332,14 @@ def relay_halt_smoke(kollab: str, homes: dict, projects: dict, envs: dict, logs:
         return list((homes[name] / ".kollab" / "hub" / "presence").glob("halted-*.json"))
 
     print(f"step 4: win-a --detached: exit {start_agent(kollab, projects['a'], envs['a'], logs['a']).wait(timeout=60)}")
-    wait_until(lambda: folder_socket(homes['a'], projects['a']) is not None, 90, "win-a's daemon socket")
+    wait_until(lambda: folder_socket(homes['a'], projects['a']) is not None, 90, "win-a's daemon socket",
+               why=lambda: presence_dump(homes['a']))
     wait_until(lambda: online("a"), 90, "win-a's agent online in `kollab --hub status`")
 
     print("step 5: win-b --detached (its hub socket carries the enrollment)")
     start_agent(kollab, projects["b"], envs["b"], logs["b"]).wait(timeout=60)
-    wait_until(lambda: folder_socket(homes["b"], projects["b"]) is not None, 90, "win-b's daemon socket")
+    wait_until(lambda: folder_socket(homes["b"], projects["b"]) is not None, 90, "win-b's daemon socket",
+               why=lambda: presence_dump(homes['b']))
     asyncio.run(join_networks(homes["a"], homes["b"], projects["a"], projects["b"]))
     wait_until(lambda: online("b"), 90, "win-b's agent online after joining")
 
