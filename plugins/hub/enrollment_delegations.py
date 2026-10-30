@@ -1094,7 +1094,7 @@ class EnrollmentDelegationStore:
                 fd = private_fs.open_nofollow(self._lock_path, flags, 0o600)
             else:
                 fd = os.open(self._lock_path, flags, 0o600)
-            _check_private_file(os.fstat(fd), "delegation lock")
+            _check_private_file(os.fstat(fd), "delegation lock", self._lock_path)
             lock(fd)
             locked = True
             yield
@@ -1142,7 +1142,7 @@ class EnrollmentDelegationStore:
             raise DelegationPersistenceError("cannot open delegation state") from exc
         try:
             info = os.fstat(fd)
-            _check_private_file(info, "delegation state")
+            _check_private_file(info, "delegation state", self._path)
             if info.st_size > MAX_STATE_BYTES:
                 raise DelegationCapacityError("delegation state exceeds the read byte limit")
             with os.fdopen(fd, "rb", closefd=False) as stream:
@@ -1244,9 +1244,17 @@ class EnrollmentDelegationStore:
         }
 
 
-def _check_private_file(info: os.stat_result, label: str) -> None:
+def _check_private_file(info: os.stat_result, label: str, path: Path) -> None:
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise DelegationPersistenceError(f"{label} must be a single-link regular file")
+    if os.name == "nt":  # owner and access list, where POSIX checks the uid and mode below
+        try:
+            private = private_fs.owned_private(path, info)
+        except OSError as exc:
+            raise DelegationPersistenceError(f"cannot inspect {label}") from exc
+        if not private:
+            raise DelegationPersistenceError(f"{label} must be private and owned by the current user")
+        return
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise DelegationPersistenceError(f"{label} must be owned by the current user")
     if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:

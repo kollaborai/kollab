@@ -113,7 +113,7 @@ class EnrollmentRecoveryJournal:
                 fd = os.open(self._lock_path, flags, 0o600)
             locked = False
             try:
-                self._check_file(os.fstat(fd), "journal lock")
+                self._check_file(os.fstat(fd), "journal lock", self._lock_path)
                 lock(fd)
                 locked = True
                 yield
@@ -134,7 +134,7 @@ class EnrollmentRecoveryJournal:
         except OSError as exc:
             raise EnrollmentRecoveryError("read_failed") from exc
         try:
-            self._check_file(os.fstat(fd), "journal")
+            self._check_file(os.fstat(fd), "journal", self._path)
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 raw = stream.read(_MAX_BYTES + 1)
         finally:
@@ -230,9 +230,17 @@ class EnrollmentRecoveryJournal:
             raise EnrollmentRecoveryError("invalid_parent")
 
     @staticmethod
-    def _check_file(info: os.stat_result, label: str) -> None:
+    def _check_file(info: os.stat_result, label: str, path: Path) -> None:
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise EnrollmentRecoveryError("invalid_file")
+        if os.name == "nt":  # owner and access list, where POSIX checks the uid and mode below
+            try:
+                private = private_fs.owned_private(path, info)
+            except OSError as exc:
+                raise EnrollmentRecoveryError("invalid_file") from exc
+            if not private:
+                raise EnrollmentRecoveryError("invalid_file")
+            return
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise EnrollmentRecoveryError("invalid_file")
         if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:
