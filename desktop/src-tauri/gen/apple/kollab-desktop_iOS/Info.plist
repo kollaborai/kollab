@@ -40,6 +40,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Kollab uses the camera to scan the QR code from your computer.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Kollab uses the microphone when you talk to your agents.</string>
 	<key>NSAppTransportSecurity</key>

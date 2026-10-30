@@ -7,6 +7,12 @@ mod desktop;
 #[cfg(desktop)]
 pub(crate) use desktop::{open_external, resume_after_update, stop_for_update};
 
+// The link screen, where a loader error sends the phone to scan a new QR code (#369).
+#[cfg(target_os = "android")]
+const RELINK: &str = "http://tauri.localhost/?relink";
+#[cfg(target_os = "ios")]
+const RELINK: &str = "tauri://localhost/?relink";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(desktop)]
@@ -14,8 +20,12 @@ pub fn run() {
     #[cfg(mobile)]
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_barcode_scanner::init())
         .setup(|app| {
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                .initialization_script(format!(
+                    "window.__KOLLAB_APP__ = {{ relink() {{ location.replace({RELINK:?}); }} }};"
+                ))
                 .build()?;
             Ok(())
         })

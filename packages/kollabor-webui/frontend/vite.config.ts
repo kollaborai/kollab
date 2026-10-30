@@ -184,6 +184,8 @@ const mainConfig = defineConfig({
       "tests/path-text.test.ts",
       "tests/gem-headshot.test.ts",
       "tests/field-renderer-textarea.test.tsx",
+      "tests/mobile-invite.test.mjs",
+      "tests/phonelink-app-shell.test.ts",
     ],
     environment: "node",
   },

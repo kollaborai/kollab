@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>Kollab</title>
+    <style>
+      html, body { margin: 0; background: #101215; color: #e8eaed; font-family: system-ui, sans-serif; }
+      html.scanning, html.scanning body { background: transparent; }
+      main { min-height: 100dvh; box-sizing: border-box; display: grid; place-content: center; justify-items: center;
+             gap: 16px; padding: 24px; text-align: center; }
+      h1 { font-size: 18px; margin: 0; }
+      p { max-width: 320px; margin: 0; font-size: 14px; color: #aab0b8; text-wrap: balance; }
+      button { padding: 10px 18px; border-radius: 8px; border: 1px solid #8a9099; background: none; color: inherit;
+               font: inherit; font-size: 14px; min-height: 44px; }
+      button.fill { background: #e8eaed; color: #101215; border-color: #e8eaed; font-weight: 600; }
+      button.link { border: 0; padding: 4px; color: #aab0b8; text-decoration: underline; text-underline-offset: 3px; }
+      button.over { background: #101215cc; }
+      button:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 3px; }
+      textarea { width: min(320px, 100%); min-height: 88px; box-sizing: border-box; padding: 10px; border-radius: 8px;
+                 border: 1px solid #2a2e34; background: #0c0d10; color: #e8eaed; font: 13px ui-monospace, monospace;
+                 word-break: break-all; resize: none; }
+      textarea.bad { border-color: #f28b82; }
+      p.err { color: #f28b82; font-size: 13px; text-align: left; }
+      p.hint { color: #e8eaed; background: #101215cc; padding: 8px 12px; border-radius: 8px; }
+      .finder { position: relative; width: 220px; height: 220px; }
+      .finder i { position: absolute; width: 36px; height: 36px; border: 3px solid #e8eaed; }
+      .finder i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; border-radius: 8px 0 0 0; }
+      .finder i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; border-radius: 0 8px 0 0; }
+      .finder i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; border-radius: 0 0 0 8px; }
+      .finder i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; border-radius: 0 0 8px 0; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

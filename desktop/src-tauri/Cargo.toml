@@ -17,6 +17,10 @@ tauri-plugin-dialog = "2.6"
 serde_json = "1"
 tokio = { version = "1", features = ["signal"] }
 
+# The phone app's link screen scans the computer's QR code (#369).
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-barcode-scanner = "2.5"
+
 # Desktop only: menu bar tray, one running copy, window placement, launch at login.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri = { version = "2.10", features = ["tray-icon", "image-png"] }

@@ -185,11 +185,16 @@ GUI app has no console to send Ctrl+C through.
 
 The same crate builds the phone app (#369). `src/lib.rs` is the entry point for
 both; the tray, single-instance, window-state and autostart plugins are
-desktop-only. The phone app opens the PhoneLink loader
-(`https://kollabor.ai/relay/v1/phone/`, set in `src-tauri/tauri.ios.conf.json`
-and `src-tauri/tauri.android.conf.json`),
-so it links to a computer the same way the QR code does in Safari. Scanning the
-QR code inside the app is not built yet, and there are no store builds.
+desktop-only. The phone app opens its own link screen first (`mobile/`, set
+in `src-tauri/tauri.ios.conf.json` and `src-tauri/tauri.android.conf.json`):
+Scan QR Code reads the code from Settings → PhoneLink with the camera, and
+Paste Link Instead takes the copied link. It opens only a fresh PhoneLink
+invite (`mobile/invite.js`), then hands the app to the PhoneLink loader on that
+directory, which links it the same way the QR code does in Safari. Later
+launches go straight to the saved directory. Inside the app, the loader's
+error screen adds Scan QR Code, which comes back to the link screen. Only
+the link screen may use the camera scanner (`src-tauri/capabilities/phone.json`);
+pages a directory serves get no app permissions. There are no store builds.
 
 Build and run it in the iPhone simulator (Xcode with an iOS simulator runtime,
 and `rustup target add aarch64-apple-ios aarch64-apple-ios-sim`):
@@ -205,8 +210,8 @@ xcrun simctl launch booted ai.kollabor.kollab
 
 `gen/apple/` is the generated Xcode project and is committed. To regenerate it,
 move it away and run `cargo tauri ios init --ci`: the iOS minimum (15.0) comes
-from `bundle.iOS.minimumSystemVersion` in `tauri.conf.json`, the microphone
-text from `src-tauri/Info.ios.plist`.
+from `bundle.iOS.minimumSystemVersion` in `tauri.conf.json`, the camera and
+microphone texts from `src-tauri/Info.ios.plist`.
 
 Build and run it in the Android emulator (JDK 17; the Android SDK with
 `platform-tools`, `ndk;29.0.14206865`, `emulator` and
@@ -230,7 +235,8 @@ it, move it away, run `cargo tauri android init --ci`, and put the microphone
 permissions (`RECORD_AUDIO`, `MODIFY_AUDIO_SETTINGS`) back in
 `gen/android/app/src/main/AndroidManifest.xml` and the light status bar icons
 (`enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT))`)
-back in `MainActivity.kt`. Voice inside the phone apps is not verified yet.
+back in `MainActivity.kt`. The camera permission comes from the barcode
+scanner plugin's own manifest. Voice inside the phone apps is not verified yet.
 
 ## Startup
 
@@ -333,9 +339,11 @@ updated in place: the prompt offers the release page instead.
 | `src-tauri/tauri.release.json` | Generated release version, formats and opaque sidecar file mappings (Linux packages, Windows `runtime/kollab.exe`) |
 | `../scripts/check_desktop_package_windows.py` | Installs the NSIS installer silently and checks launch, render, close and relaunch |
 | `src-tauri/Info.plist` | Microphone usage text; local networking allowed |
-| `src-tauri/tauri.ios.conf.json` | iOS phone app start page: the PhoneLink loader |
-| `src-tauri/tauri.android.conf.json` | Android phone app start page: the PhoneLink loader |
-| `src-tauri/Info.ios.plist` | Phone app microphone usage text |
+| `src-tauri/tauri.ios.conf.json` | iOS phone app start page: the link screen in `mobile/` |
+| `src-tauri/tauri.android.conf.json` | Android phone app start page: the link screen in `mobile/` |
+| `src-tauri/capabilities/phone.json` | Lets only the phone app's link screen use the camera scanner |
+| `src-tauri/Info.ios.plist` | Phone app camera and microphone usage texts |
+| `mobile/` | Phone app link screen: scan or paste the PhoneLink link (`invite.js` decides which links open) |
 | `src-tauri/gen/apple/` | Generated Xcode project for the iOS phone app |
 | `src-tauri/gen/android/` | Generated Gradle project for the Android phone app; microphone permissions in `app/src/main/AndroidManifest.xml` |
 | `ui/index.html` | Bundled loading, install and error page |
