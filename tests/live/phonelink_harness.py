@@ -4,16 +4,24 @@
 
 The relay serves only the loader. The host serves the signed phone app and a
 stub engine. Nothing here touches the real ~/.kollab, engine, or web UI.
+
+KOLLAB_PHONELINK_ORIGIN replaces the relay's origin (https://relay.example). With
+KOLLAB_PHONELINK_TLS=<folder holding cert.pem and key.pem> the relay also serves
+https on that origin's port, so the phone app in the Android emulator can link
+through https://relay.localhost:<port> (tests/live/phonelink_emulator.sh).
 """
 
 import asyncio
 import base64
 import json
+import os
 import secrets
 import shutil
+import ssl
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import web
 from fastapi import FastAPI
@@ -24,7 +32,7 @@ from kollabor_engine.phone_link import PhoneLink, decode_phone_frame
 from plugins.hub import phone_portal, relay_service
 from plugins.hub.relay_client import RelayClient
 
-ORIGIN = "https://relay.example"
+ORIGIN = os.environ.get("KOLLAB_PHONELINK_ORIGIN", "https://relay.example")
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "packages/kollabor-webui/frontend/dist/phonelink"
 
@@ -176,6 +184,10 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
     runner = web.AppRunner(relay_service.create_app(relay_service.RelayConfig(ORIGIN, "e" * 32, dev_in_memory=True)))
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", relay_port).start()
+    if tls := os.environ.get("KOLLAB_PHONELINK_TLS"):
+        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        context.load_cert_chain(Path(tls) / "cert.pem", Path(tls) / "key.pem")
+        await web.TCPSite(runner, "127.0.0.1", urlsplit(ORIGIN).port, ssl_context=context).start()
 
     state: dict = {}
 
