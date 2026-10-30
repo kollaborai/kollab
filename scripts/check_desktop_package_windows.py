@@ -18,6 +18,7 @@ import io
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -94,8 +95,8 @@ def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path
     env = {k: v for k, v in env.items() if k != "KOLLAB_DESKTOP_SELFTEST_CLOSE"}
     # The build's own smoke ran this binary under a home it then deleted, and the scie cache still points at
     # the venv it made there: the Windows pin (pex 2.98.2) cannot recover from that (pex#3226). A fresh scie
-    # base gives this run what a new user's first launch gets.
-    env["SCIE_BASE"] = str(root / "scie-base")
+    # base where a new user's is (AppData\Local\scie in their home) gives this run what their first launch gets.
+    env["SCIE_BASE"] = str(root / "AppData" / "Local" / "scie")
     with socket.socket() as probe:  # a free port with no web UI on it, so the app starts its own
         probe.bind(("127.0.0.1", 0))
         env["KOLLAB_WEBUI_PORT"] = str(probe.getsockname()[1])
@@ -124,12 +125,13 @@ def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path
             print(f"engine shutdown logged in {logs[0].relative_to(root)}")
         except Exception:
             runtime_log = Path(os.environ.get("LOCALAPPDATA", "")) / "ai.kollabor.kollab" / "logs" / "webui.log"
-            if runtime_log.is_file():
-                print(runtime_log.read_text(errors="replace")[-8000:])
-            for path in sorted(root.rglob("*.log")):  # the engine's and the agents' logs in this home
-                if path != log:
-                    print(f"--- last 60 lines of {path.relative_to(root)}")
-                    print("\n".join(path.read_text(errors="replace").splitlines()[-60:]))
+            try:  # the app's runtime log, then the engine's and the agents' logs in this home; never hide the failure
+                for path in [runtime_log, *sorted(root.rglob("*.log"))]:
+                    if path != log and path.is_file() and "EBWebView" not in path.parts:  # WebView2 logs are binary
+                        print(f"--- last 60 lines of {path}")
+                        print("\n".join(path.read_text(errors="replace").splitlines()[-60:]))
+            except OSError as exc:
+                print(f"(could not read the logs: {exc})")
             raise
         finally:
             # Cleanup only, so a failed Quit leaves the runner clean; the same command line guards a reused pid.
@@ -148,7 +150,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("installer", type=Path)
     installer = parser.parse_args().installer.resolve()
-    with tempfile.TemporaryDirectory(prefix="kollab-desktop-smoke-", ignore_cleanup_errors=True) as scratch:
+    # The logs this prints can hold text the runner's cp1252 console cannot encode, as kollabor/cli.py knows.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # This folder is the app's home. Under RUNNER_TEMP (D:\a\_temp) it is as deep as C:\Users\<20-letter name>:
+    # the packaged interpreter's DLLs sit ~190 characters below the home, and Windows refused to load
+    # _multiprocessing at 253 characters when the home was under the default temp folder.
+    with tempfile.TemporaryDirectory(
+        prefix="kollab-smoke-", dir=os.environ.get("RUNNER_TEMP"), ignore_cleanup_errors=True
+    ) as scratch:
         root = Path(scratch)
         target = root / "Kollab"
         # NSIS: /S is silent, and /D (the install folder) must come last, unquoted.
