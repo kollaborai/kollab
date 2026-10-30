@@ -31,6 +31,7 @@ from pathlib import Path
 from aiohttp import web
 
 from kollabor.binary import kollab_argv
+
 if os.name == "nt":  # the packaged relay runs on POSIX and ships without kollabor_config
     from kollabor_config import private_fs
 
