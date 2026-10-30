@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 
 # Shared /tmp path space for hub sockets (short paths for the unix socket
 # limit). Never relocated: existing installs keep their sockets here.
-# Windows has no /tmp: its endpoints are files in the user's temp folder (#268).
+# Windows has no /tmp and no socket path limit: its endpoint files live in the
+# user's profile, which private_fs requires (#268).
 SOCKET_DIR_ROOT = (
-    Path(tempfile.gettempdir()) / "kollabor-hub"
+    Path.home() / ".kollab" / "hub-sockets"
     if os.name == "nt"
     else Path("/tmp/kollabor-hub")
 )
