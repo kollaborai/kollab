@@ -12,11 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-try:
-    import fcntl
-except ImportError:  # Windows: the voice runtime is POSIX-only for now (#268)
-    fcntl = None
-
+from . import file_lock
 from .control import atomic_json, manifest, prepare_root, service_root
 
 
@@ -103,15 +99,17 @@ def prepared_runtime_python(root=None):
 
 
 def main() -> None:
+    # client.launch refuses off POSIX too: the service serves on AF_UNIX, and on Windows os.execv
+    # starts a new process, which would drop the setup lock taken below (#268).
+    if os.name != "posix":
+        raise SystemExit("The local voice service currently requires macOS or Linux")
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=service_root())
     args = parser.parse_args()
     root = args.root
     prepare_root(root)
     lock = (root / "service.lock").open("a+")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    if not file_lock.try_lock(lock.fileno()):
         return  # The current owner performs setup and owns audio.
 
     def progress(state, detail):

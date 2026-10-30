@@ -118,6 +118,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that on Windows (#268).
 - Windows: stdio MCP servers start when their command is a `.cmd` launcher such as
   `npx`, and backslashes in a Windows path in an MCP command are kept (#428).
+- Windows: saving voice settings no longer fails on the Unix-only `fcntl`
+  module. The voice package locks through its own copy of the shared lock
+  helper, since its runtime does not install `kollabor-config` (#268).
 - Settings → Voice: the path under **Save for This Device** names the file each
   changed row is saved to, so Quick Model, Personality, Reasoning and
   Instructions no longer show `preferences.json` (#412).
