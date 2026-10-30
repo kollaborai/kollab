@@ -23,8 +23,15 @@ const step = async (what, run) => {
 };
 
 await shot("1-link-screen");
-await step("paste the link", async () => {
+// A link whose computer the phone cannot reach comes back to the paste screen with the reason.
+await step("say when the computer cannot be reached", async () => {
   await page.getByRole("button", { name: "Paste Link Instead" }).click();
+  await page.locator("#link").fill(link.replace(/:\d+\//, ":9/"));
+  await page.getByRole("button", { name: "Link This Phone" }).click();
+  await page.getByText("Kollab can't reach relay.localhost:9.").waitFor({ timeout: 20000 });
+  await shot("1b-cannot-reach");
+});
+await step("paste the link", async () => {
   await page.locator("#link").fill(link);
   await shot("2-pasted");
   await page.getByRole("button", { name: "Link This Phone" }).click();

@@ -112,6 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Phone app: a link to a computer the phone cannot reach goes back to the paste
+  screen and says so, instead of doing nothing; that link is no longer saved (#442).
 - Windows: stdio MCP servers start when their command is a `.cmd` launcher such as
   `npx`, and backslashes in a Windows path in an MCP command are kept (#428).
 - Windows: saving voice settings no longer fails on the Unix-only `fcntl`

@@ -20,7 +20,7 @@ APK=$ROOT/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/debug/ap
 FRONTEND=$ROOT/packages/kollabor-webui/frontend
 [ -f $APK ] || { echo "no debug APK at $APK: build it first (desktop/README.md)"; exit 2; }
 [ -d $FRONTEND/dist/phonelink ] || { echo "no phone bundle: run npm run build in $FRONTEND"; exit 2; }
-T=$(mktemp -d); OUT=$T/screens; mkdir -p $OUT
+T=$(mktemp -d) || exit 1; OUT=$T/screens; mkdir -p $OUT
 export ANDROID_AVD_HOME=${KOLLAB_AVD_HOME:-$T/avd}
 read RELAY CONTROL TLS <<< "$($PY -c 'import socket
 s = [socket.socket() for _ in range(3)]
