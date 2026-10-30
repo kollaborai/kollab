@@ -1666,6 +1666,8 @@ def bind_unix_socket(path: str, group: str | None = None) -> socket.socket:
     connect in between. A leftover socket from a crash is replaced; a live
     one, any other file, or a directory its group or others can write to is refused.
     """
+    if os.name == "nt":  # no AF_UNIX sockets, uid or grp on Windows
+        raise RelayConfigError("--unix-socket needs Linux or macOS")
     if not os.path.isabs(path) or "\0" in path or len(path.encode()) > UNIX_SOCKET_MAX_BYTES:
         raise RelayConfigError(f"unix socket must be an absolute path of at most {UNIX_SOCKET_MAX_BYTES} bytes")
     parent = os.path.dirname(path)

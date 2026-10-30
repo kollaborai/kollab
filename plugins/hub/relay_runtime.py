@@ -30,6 +30,7 @@ from aiohttp import web
 
 if os.name == "nt":  # the packaged relay runs on POSIX and ships without kollabor_config
     from kollabor_config import private_fs
+    from kollabor_config.proc_ctl import on_stop_signal
 
 from . import file_lock
 from .relay_state import canonical_origin, strict_json
@@ -303,15 +304,15 @@ class RuntimeConfig:
 
 class ManagedValkey:
     def __init__(self, config: RuntimeConfig):
+        if os.name == "nt":  # uid/gid container identity is POSIX-only; refuse before docker material renders
+            raise RuntimeConfigError(
+                "managed backend needs Linux or macOS; set an external backend (url_env/url_file) instead"
+            )
         self.config = config
         self.instance = hashlib.sha256(str(config.state_dir).encode()).hexdigest()[:24]
         self.name = f"kollab-relay-{config.node_prefix}-{self.instance[:12]}"
-        if os.name == "nt":  # no uid/gid on Windows; the profile ACLs own the boundary there
-            self.uid = None
-            self.gid = None
-        else:
-            self.uid = os.getuid() or 65532
-            self.gid = os.getgid() if os.getuid() else 65532
+        self.uid = os.getuid() or 65532
+        self.gid = os.getgid() if os.getuid() else 65532
         self.path = config.state_dir / "valkey.conf"
         self.password_path = config.state_dir / "valkey-password"
         self.fingerprint = ""
@@ -840,8 +841,11 @@ class RelayRuntime:
             self._lock_fd = None
             raise RuntimeConfigError("this runtime state directory is already supervised")
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, self.stop_event.set)
+        if os.name == "nt":  # ProactorEventLoop does not implement add_signal_handler
+            on_stop_signal(loop, self.stop_event.set)
+        else:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, self.stop_event.set)
         try:
             app = web.Application()
             app.router.add_get("/relay/v1/health", self._health)

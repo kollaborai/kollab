@@ -54,3 +54,20 @@ def test_local_rpc_answers_on_windows(tmp_path):
             server.close()
 
     assert asyncio.run(scenario()) == {"ok": True}
+
+
+def test_hard_linked_owner_record_is_not_private(tmp_path):
+    """_private_regular keeps the hard-link rejection on Windows (#439).
+
+    os.stat fills st_nlink on Windows too, so a second NTFS hard link to the
+    relay-owner record must stay refused there.
+    """
+    from plugins.hub.relay_owner import _private_regular
+
+    record = tmp_path / "relay-owner.json"
+    record.write_text("{}", encoding="utf-8")
+    assert _private_regular(record.stat(), record) is True
+    os.link(record, tmp_path / "second-link.json")
+    info = record.stat()
+    assert info.st_nlink == 2
+    assert _private_regular(info, record) is False

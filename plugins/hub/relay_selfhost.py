@@ -34,6 +34,7 @@ from kollabor.binary import kollab_argv
 
 if os.name == "nt":  # the packaged relay runs on POSIX and ships without kollabor_config
     from kollabor_config import private_fs
+    from kollabor_config.proc_ctl import on_stop_signal
 
 from . import file_lock
 from .dns.discovery import DOCUMENT_PATHS, WELL_KNOWN, DiscoveryError, DiscoveryTarget, normalize_target
@@ -470,8 +471,11 @@ async def serve(settings: Settings, *, created: bool) -> None:
             raise RuntimeConfigError(f"cannot listen: {exc.strerror or exc}") from None
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, stop.set)
+        if os.name == "nt":  # ProactorEventLoop does not implement add_signal_handler
+            on_stop_signal(loop, stop.set)
+        else:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, stop.set)
         say(setup_text(settings, created=created))
         payload = await publish_once(app)
         advertised = bool(payload["discovery"]["roles"])

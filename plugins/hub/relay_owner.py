@@ -46,7 +46,8 @@ def _private_regular(info: os.stat_result, path: Path) -> bool:
         from kollabor_config import private_fs
 
         try:
-            return private_fs.owned_private(path, info)
+            # os.stat fills st_nlink on Windows too; NTFS hard links to the record stay rejected
+            return private_fs.owned_private(path, info) and info.st_nlink == 1
         except OSError:
             return False
     return (
