@@ -1627,9 +1627,9 @@ done with it.
 
 - `kollabor_config.proc_ctl` (PR #425) holds the Windows stop primitives the kill switch will use:
   - `pid_alive`: OpenProcess plus WaitForSingleObject. `os.kill(pid, 0)` sends Ctrl+C on Windows, so it is never used.
-  - `kill_tree`: the POSIX `group_kill` rule, verbatim. On Windows it takes a Toolhelp tree snapshot before the soft
-    wait, then re-checks each victim's creation time (GetProcessTimes) before TerminateProcess, so a reused pid is
-    skipped.
+  - `kill_tree`: on POSIX, `group_kill` moved verbatim. Windows has no process groups, so it takes a Toolhelp tree
+    snapshot before the soft wait, then re-checks each victim's creation time (GetProcessTimes) before
+    TerminateProcess, so a reused pid is skipped.
   - `ChildJob`: a Job Object with kill-on-close.
   - `local_ipc.peer_pid` reads the caller's pid from the kernel's TCP table.
 - The kill switch does not call any of them yet. Wave 3 group G1 moves `halt_runtime.py` and `network_halt.py` onto

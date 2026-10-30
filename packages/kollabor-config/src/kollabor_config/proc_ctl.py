@@ -160,8 +160,14 @@ if os.name == "nt":
                 if child in created_of or child in protect or child == os.getpid():
                     continue
                 child_created = table[child][1]
+                if not child_created:
+                    logger.warning(
+                        "kill_tree: pid %s has an unreadable creation time; its subtree is left alone",
+                        child,
+                    )
+                    continue
                 # a child created before its parent means the parent pid was reused
-                if not child_created or child_created < (created_of[parent] or 0):
+                if child_created < (created_of[parent] or 0):
                     continue
                 created_of[child] = child_created
                 order.append(child)
@@ -389,9 +395,14 @@ def kill_tree(
         while pid_alive(pid) and time.monotonic() < deadline:
             time.sleep(0.1)
     for member, member_created in members:
-        if not member_created or process_created(member) != member_created:
+        # A readable creation time must still match. With none, only the root is ended (the caller passed no
+        # ``created``, so this is the old behavior); a child needs a readable time to prove it is ours.
+        if member_created and process_created(member) != member_created:
+            logger.warning("kill_tree: skipping pid %s (exited or reused)", member)
+            continue
+        if not member_created and member != pid:
             logger.warning(
-                "kill_tree: skipping pid %s (exited, reused or unreadable)", member
+                "kill_tree: skipping pid %s (creation time unreadable)", member
             )
             continue
         # access denied or already gone: keep going with the rest of the tree

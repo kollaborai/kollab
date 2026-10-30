@@ -145,6 +145,14 @@ def test_corrupted_key_is_refused(work_dir):
     asyncio.run(main())
 
 
+@windows_only
+def test_missing_endpoint_raises_file_not_found(work_dir):
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(local_ipc.connect(work_dir / "missing.json"))
+    with pytest.raises(FileNotFoundError):
+        local_ipc.connect_blocking(work_dir / "missing.json", 5)
+
+
 def _raw_client(port: int) -> bytes:
     # Reads N_s, then answers with N_s as N_c and 32 zero bytes as the MAC. No proof must come back.
     with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:

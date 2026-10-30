@@ -277,3 +277,23 @@ def test_on_stop_signal_ctrl_break_runs_callback() -> None:
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+@windows_only
+def test_kill_tree_rechecks_identity_after_the_snapshot(monkeypatch) -> None:
+    """A victim whose creation time changed after the snapshot (pid reused) is left alone."""
+    child = start_child(SLEEP)
+    try:
+        born = proc_ctl.process_created(child.pid)
+        calls: list[int] = []
+
+        def reused(pid: int) -> int | None:
+            calls.append(pid)
+            return born if len(calls) == 1 else born + 1
+
+        monkeypatch.setattr(proc_ctl, "process_created", reused)
+        kill_tree(child.pid, HARD)
+        assert pid_alive(child.pid)
+    finally:
+        child.kill()
+        child.wait()
