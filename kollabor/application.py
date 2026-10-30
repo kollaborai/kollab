@@ -196,7 +196,7 @@ class TerminalLLMChat:
             if not self._attach_socket:
                 # List available agents
                 available = []
-                from plugins.hub.presence import get_presence_dir
+                from plugins.hub.presence import get_presence_dir, pid_alive
 
                 presence_dir = get_presence_dir()
                 if presence_dir.exists():
@@ -206,11 +206,8 @@ class TerminalLLMChat:
                         try:
                             d = _j.loads(f.read_text())
                             pid = d.get("pid", 0)
-                            try:
-                                os.kill(pid, 0)
+                            if pid_alive(pid):
                                 available.append(d.get("identity", "?"))
-                            except (OSError, ProcessLookupError):
-                                pass
                         except Exception:
                             pass
                 msg = f"agent '{attach_to}' not found"
@@ -1099,7 +1096,7 @@ class TerminalLLMChat:
         """
         import json as _json
 
-        from plugins.hub.presence import get_presence_dir
+        from plugins.hub.presence import get_presence_dir, pid_alive
 
         presence_dir = get_presence_dir()
         if not presence_dir.exists():
@@ -1109,9 +1106,7 @@ class TerminalLLMChat:
                 data = _json.loads(f.read_text())
                 if data.get("identity") == identity:
                     pid = data.get("pid", 0)
-                    try:
-                        os.kill(pid, 0)
-                    except (OSError, ProcessLookupError):
+                    if not pid_alive(pid):
                         continue
                     return str(data.get("socket_path", ""))
             except Exception:

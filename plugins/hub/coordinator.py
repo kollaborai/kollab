@@ -10,7 +10,7 @@ from kollabor_agent.runtime import AgentRuntime
 from kollabor_config.file_lock import try_lock, unlock
 
 from .models import WorkSlot
-from .presence import _atomic_write, get_hub_dir
+from .presence import _atomic_write, get_hub_dir, pid_alive
 from .rosters import roster_names
 
 logger = logging.getLogger(__name__)
@@ -98,12 +98,9 @@ class CoordinatorElection:
                 pid = state.get("coordinator_pid", 0)
                 if not isinstance(pid, int):
                     return None
-                try:
-                    os.kill(pid, 0)
-                    return state
-                except (OSError, ProcessLookupError):
-                    # Coordinator is dead, state is stale
-                    return None
+
+                # A dead coordinator leaves stale state
+                return state if pid_alive(pid) else None
         except (json.JSONDecodeError, Exception):
             pass
         return None

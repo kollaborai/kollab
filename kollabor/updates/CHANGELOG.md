@@ -158,6 +158,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   internal callers goes through ACP admission instead of the native queue; an
   unavailable ACP is refused. Agent and skill generation, which need the
   native tools, say so and keep the form open (#340).
+- Windows: checking whether an agent still runs no longer sends it Ctrl+C.
+  The presence sweep, the hub feed and console, the coordinator check,
+  attach, `kollab service` and goal turns use `pid_alive`, so the hub keeps
+  live agents. On every platform an exited agent that was never reaped now
+  counts as stopped (#268).
 
 ## [0.18.5] - 2026-10-26
 
