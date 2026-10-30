@@ -9,7 +9,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { TrajectoryRecord } from "./trajectory-records";
+import { detailTitle, type TrajectoryRecord } from "./trajectory-records";
 import {
   formatDuration,
   formatKind,
@@ -120,7 +120,7 @@ export function TrajectoryInspector({
               Record {record.index}
             </p>
             <p className="mt-1 line-clamp-2 break-words text-sm font-semibold">
-              {record.summary}
+              {detailTitle(record)}
             </p>
             <p className="text-muted-foreground mt-1 text-[0.6875rem]">
               {formatKind(record.kind)} · turn {record.turn}
@@ -164,7 +164,7 @@ export function TrajectoryInspector({
                 className={cn(
                   "flex-1 border-b-2 px-2 pt-1.5 pb-1 text-xs font-medium transition-colors",
                   tab === item.id
-                    ? "border-foreground text-foreground"
+                    ? "border-highlight text-foreground"
                     : "text-muted-foreground hover:text-foreground border-transparent",
                 )}
                 onClick={() => setTab(item.id)}

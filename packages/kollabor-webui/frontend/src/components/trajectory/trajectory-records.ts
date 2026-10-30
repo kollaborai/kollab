@@ -262,6 +262,15 @@ function toolResultSummary(label: string, output: string): string {
   return `${label} → ${previewText(output)}`;
 }
 
+/**
+ * The inspector's headline. A tool record is titled by its label and input
+ * summary only — its output belongs to the Output tab, never the title.
+ * Every other kind keeps the summary it already shows.
+ */
+export function detailTitle(record: TrajectoryRecord): string {
+  return record.kind === "tool" ? record.title : record.summary;
+}
+
 export function projectTrajectory(history: HistoryMessage[]): TrajectoryRecord[] {
   const records: TrajectoryRecord[] = [];
   const nativeCalls = new Map<string, TrajectoryRecord>();
