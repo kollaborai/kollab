@@ -21,6 +21,14 @@ def test_second_store_reads_the_key_on_windows(tmp_path):
     private_fs.check_private_dir(tmp_path / "relay")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows private folders")
+def test_folder_others_can_read_is_refused_on_windows(tmp_path):
+    (tmp_path / "relay").mkdir()
+    subprocess.run([ICACLS, str(tmp_path / "relay"), "/grant", EVERYONE_READS], check=True, capture_output=True)
+    with pytest.raises(PermissionError, match="not a private folder"):
+        RelayStateStore(tmp_path / "project", tmp_path / "relay")
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows private files")
 def test_key_others_can_read_is_refused_on_windows(tmp_path):
     RelayStateStore(tmp_path / "project", tmp_path / "relay")

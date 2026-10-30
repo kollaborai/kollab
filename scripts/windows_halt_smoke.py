@@ -74,6 +74,10 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
     wait_until(online, 90, "an agent online in `kollab --hub status`")
 
     network_halt.network_control_refusal = lambda *args, **kwargs: ""  # no console on a runner
+    # A network refuses a halt with fewer than two counting machines, since a resume needs a second one to confirm
+    # it (unit-tested on every OS). This runner is one machine, so this process lets it halt itself: the smoke
+    # proves the Windows halt, the halted launch and the local resume, not that rule.
+    network_halt.halt_allowed = lambda view: True
 
     def traced(call):  # cli_control prints only the error's message; a failed run needs its line
         async def run(*args, **kwargs):
