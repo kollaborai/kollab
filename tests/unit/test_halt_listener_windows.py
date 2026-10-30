@@ -23,6 +23,7 @@ def test_listener_main_ignores_no_sighup_on_windows(windows_os, monkeypatch):
     monkeypatch.setattr(halt_runtime, "signal", fake_signal)  # Windows' signal module has no SIGHUP
     monkeypatch.setattr(halt_runtime, "HaltListener", lambda: types.SimpleNamespace(run=lambda: None))
     monkeypatch.setattr(halt_runtime, "asyncio", types.SimpleNamespace(run=lambda coro: 0))
+    monkeypatch.setattr(halt_runtime.logging, "basicConfig", lambda **kwargs: None)  # no root handlers left behind
     assert halt_runtime.listener_main() == 0
     assert ignored == [2]
 

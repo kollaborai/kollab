@@ -42,7 +42,7 @@ def status_online(kollab: str, project: Path, env: dict[str, str]) -> bool:
 
 
 def start_agent(kollab: str, project: Path, env: dict[str, str], log: Path) -> subprocess.Popen:
-    """Launch `kollab --detached`. While the machine is halted, that launch stays on as the waiter."""
+    """Launch `kollab --detached`: it starts a detached child and exits; under a halt that child is the waiter."""
     # A file, not a pipe: the detached agent may keep its inherited handles open for good.
     with log.open("ab") as stream:
         return subprocess.Popen(
@@ -61,6 +61,7 @@ def wait_until(check, timeout: float, what: str) -> None:
 
 def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> None:
     """Start, halt, start again while halted, then resume. Runs after HOME and USERPROFILE are set."""
+    from kollabor_config import proc_ctl
     from plugins.hub import halt_runtime, network_halt
     from plugins.hub.presence import get_presence_dir
 
@@ -75,7 +76,8 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
 
     network_halt.network_control_refusal = lambda *args, **kwargs: ""  # no console on a runner
     # A network refuses a halt with fewer than two counting machines, since a resume needs a second one to confirm
-    # it: logic with no OS code, tested in tests/unit/test_network_halt.py and the Docker kill switch harness.
+    # it: logic with no OS code, tested in tests/unit/test_network_halt.py (and checked live in the Docker harness,
+    # docs/handoff/kill-switch-phase1.md).
     # This runner is one machine, so this process lets it halt itself: the smoke proves the Windows halt, the
     # halted launch and the local resume, not that rule. Nothing can own a folder's network on Windows yet (the
     # relay owner refuses there), so _via_owner always takes the halt in this process, where this applies.
@@ -102,20 +104,22 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
                                  errors="replace", timeout=20, env=env)
             print(f"--- kollab --halt-listener exited {ran.returncode}:\n{(ran.stdout + ran.stderr)[-4000:]}")
         except subprocess.TimeoutExpired:
-            print("--- kollab --halt-listener was still running after 20 s")
+            print("--- kollab --halt-listener ran 20 s without exiting: a listener can start here")
     assert code == 0, f"halt exited {code}"
     wait_until(lambda: not online(), 60, "no agent online after the halt")
     assert halt_runtime.read_halt().get("scopes"), "the halt wrote no scopes"
 
-    waiter = start_agent(kollab, project, env, log)  # halted: this launch waits instead of running
+    launch = start_agent(kollab, project, env, log)  # its detached child sees the halt and waits
     wait_until(lambda: bool(halted()), 60, "a halted-*.json marker in the presence folder")
-    assert waiter.poll() is None, f"the halted launch exited ({waiter.returncode}) instead of waiting"
+    waiter = int(halted()[0].stem.split("-", 1)[1])  # halted-<pid>.json, written by the waiting child
+    time.sleep(5)  # a waiter that saw no halt would restart the launch and drop its marker by now
+    assert halted() and proc_ctl.pid_alive(waiter), f"the halted launch's waiter {waiter} did not stay"
     assert not online(), "an agent came online while the machine was halted"
 
     code = asyncio.run(halt_runtime.cli_control("resume", ["--local"]))
     assert code == 0, f"resume exited {code}"
     wait_until(lambda: online() and not halted(), 90, "the waiter restarted the agent and removed halted-*.json")
-    print(f"waiter: exit {waiter.wait(timeout=60)} once it restarted the launch")
+    print(f"launch: exit {launch.wait(timeout=60)}; waiter {waiter} restarted it after the resume")
 
 
 def kill_home_processes(home: Path) -> None:
