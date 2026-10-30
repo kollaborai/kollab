@@ -28,10 +28,13 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
+
+from kollabor_config import local_ipc, private_fs, proc_ctl
 
 from . import file_lock
 
@@ -82,6 +85,9 @@ def kollab_root(root: Path | None = None) -> Path:
 
 def private_dir(root: Path | None = None) -> Path:
     d = kollab_root(root) / "private"
+    if os.name == "nt":  # no mode bits on Windows: private_fs makes the folder private instead
+        private_fs.ensure_private_dir(d)
+        return d
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
     if d.is_symlink():
         raise OSError("private dir is a link")
@@ -89,6 +95,8 @@ def private_dir(root: Path | None = None) -> Path:
 
 
 def _lock_fd(path: Path) -> int:
+    if os.name == "nt":  # no O_NOFOLLOW on Windows: private_fs.open_nofollow opens the lock file instead
+        return private_fs.open_nofollow(path, os.O_RDWR | os.O_CREAT, 0o600)
     return os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
 
 
@@ -182,16 +190,20 @@ def caller_refusal(pid: int | None) -> str:
     (``nc``, ``zsh``), so an env check alone lets ``nc -U halt.sock`` from a tool shell through. An unknown
     caller, or one already gone, is refused (fail closed).
     """
-    from .network_halt import GUARD_REFUSAL, TOOL_SHELL_VARS, caller_chain, read_process
+    from .network_halt import GUARD_REFUSAL, TOOL_SHELL_VARS, caller_chain, my_uid, read_process
 
     if not pid or pid < 0:
         return GUARD_REFUSAL
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:  # gone before its chain could be read (send and exit): refuse
-        return GUARD_REFUSAL
-    except PermissionError:
-        pass
+    if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C on Windows: proc_ctl asks without signalling
+        if not proc_ctl.pid_alive(pid):
+            return GUARD_REFUSAL
+    else:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:  # gone before its chain could be read (send and exit): refuse
+            return GUARD_REFUSAL
+        except PermissionError:
+            pass
     rows = caller_chain(pid)
     if rows is None:  # F11/NEW-3: ps failed or a link is missing: the chain cannot be cleared
         return GUARD_REFUSAL
@@ -208,7 +220,7 @@ def caller_refusal(pid: int | None) -> str:
         except (OSError, ValueError):
             proc = None
         if proc is None:
-            if uid == os.getuid():  # a process of this user whose environment cannot be read: fail closed
+            if uid == my_uid():  # a process of this user whose environment cannot be read: fail closed
                 return GUARD_REFUSAL
             continue  # another user's (login, sshd, sudo): an agent's tag cannot be cleared or set there
         if any(proc.env.get(v) for v in TOOL_SHELL_VARS):
@@ -218,6 +230,8 @@ def caller_refusal(pid: int | None) -> str:
 
 def peer_pid(sock: Any) -> int:
     """The pid on the other end of a unix socket (LOCAL_PEERPID / SO_PEERCRED), 0 when it cannot be read."""
+    if os.name == "nt":
+        return local_ipc.peer_pid(sock)
     import socket
     import struct
 
@@ -311,6 +325,12 @@ def start_listener(root: Path | None = None, *, spawn: Callable[[list[str]], Any
         spawn(argv)
         return True
     env = {k: v for k, v in os.environ.items() if k not in ("KOLLAB_TOOL_SHELL", "KOLLAB_AGENT_PID")}
+    if os.name == "nt":  # no setsid: a detached process outside our job
+        proc_ctl.start_child(
+            argv, detached=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True, env=env,
+        )
+        return True
     subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
@@ -331,7 +351,10 @@ def sock_path(root: Path | None = None) -> Path:
 
 
 async def sock_call(request: dict, root: Path | None = None, timeout: float = 30.0) -> dict:
-    reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(sock_path(root))), timeout)
+    opening = (
+        local_ipc.connect(sock_path(root)) if os.name == "nt" else asyncio.open_unix_connection(str(sock_path(root)))
+    )
+    reader, writer = await asyncio.wait_for(opening, timeout)
     try:
         writer.write(json.dumps(request).encode() + b"\n")
         await writer.drain()
@@ -499,7 +522,12 @@ def run_waiter(
         if presence is not None:
             presence.unlink(missing_ok=True)
     new_argv = restart_argv(argv)
-    execve(new_argv[0], new_argv, {k: v for k, v in env.items() if k != WAITER_ENV})
+    clean_env = {k: v for k, v in env.items() if k != WAITER_ENV}
+    if os.name == "nt" and execve is os.execve:
+        # Windows exec starts a new process and ends this one: run the launch as a child instead, so
+        # whoever started this launch keeps a live process.
+        raise SystemExit(subprocess.call(new_argv, env=clean_env))
+    execve(new_argv[0], new_argv, clean_env)
 
 
 def _waiters_dir(root: Path | None) -> Path:
@@ -535,6 +563,14 @@ class _StatusSocket:
 
         self.path = path
         path.unlink(missing_ok=True)
+        if os.name == "nt":  # no AF_UNIX: a loopback endpoint (local_ipc), served by the thread's own loop
+            self.identity = identity
+            self.root = root
+            self.closed = False
+            ready = threading.Event()
+            threading.Thread(target=self._serve_ipc, args=(ready,), daemon=True, name="kollab-halt-waiter").start()
+            ready.wait(5)
+            return
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.bind(str(path))
         os.chmod(path, 0o600)
@@ -549,6 +585,35 @@ class _StatusSocket:
         if request.get("action") == "get_status":
             return {"type": "status", "identity": self.identity, "state": "halted", "halted": line}
         return {"type": "error", "error": line}
+
+    def _serve_ipc(self, ready: threading.Event) -> None:
+        async def client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                raw = await asyncio.wait_for(reader.readline(), 5)
+                request = json.loads(raw or b"{}")
+                reply = self.answer(request if isinstance(request, dict) else {})
+                writer.write(json.dumps(reply).encode() + b"\n")
+                await writer.drain()
+            except (OSError, ValueError, asyncio.TimeoutError):
+                pass
+            finally:
+                writer.close()
+
+        async def main() -> None:
+            endpoint = await local_ipc.serve(client, self.path)
+            ready.set()
+            try:
+                while not self.closed:
+                    await asyncio.sleep(0.2)
+            finally:
+                endpoint.close()
+
+        try:
+            asyncio.run(main())
+        except OSError as error:
+            logger.warning("halt waiter: no status endpoint (%s)", type(error).__name__)
+        finally:
+            ready.set()
 
     def _serve(self) -> None:
         while not self.closed:
@@ -568,6 +633,9 @@ class _StatusSocket:
 
     def stop(self) -> None:
         self.closed = True
+        if os.name == "nt":  # no self.sock on Windows: the thread's loop sees closed and closes its endpoint
+            self.path.unlink(missing_ok=True)
+            return
         with contextlib.suppress(OSError):
             self.sock.close()
         self.path.unlink(missing_ok=True)
@@ -705,6 +773,9 @@ def _waiter_lines(screen: Any, width: int, height: int) -> tuple[list[str], bool
 
 @contextlib.contextmanager
 def _waiter_input_mode(enabled: bool) -> Iterator[None]:
+    if os.name == "nt":  # no termios: msvcrt reads keys without a raw mode
+        yield
+        return
     import termios
     import tty
 
@@ -720,6 +791,17 @@ def _waiter_input_mode(enabled: bool) -> Iterator[None]:
 
 
 def _read_key() -> str:
+    if os.name == "nt":
+        import msvcrt
+
+        from .network_halt import _stdin_is_console
+
+        if not _stdin_is_console():
+            return ""
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):  # a special key: arrows as the escape sequences POSIX reads
+            return {"H": "\x1b[A", "P": "\x1b[B", "M": "\x1b[C", "K": "\x1b[D"}.get(msvcrt.getwch(), "\ufffd")
+        return ch
     import codecs
     import select
 
@@ -755,6 +837,12 @@ def _read_key() -> str:
 
 def process_table() -> dict[int, int]:
     """pid -> ppid for every process of this user (one ``ps``, or ``/proc`` where there is no ps)."""
+    if os.name == "nt":
+        from .network_halt import win_processes
+
+        table = {pid: row[0] for pid, row in win_processes().items()}
+        table.pop(os.getpid(), None)
+        return table
     table: dict[int, int] = {}
     try:
         out = subprocess.run(
@@ -782,6 +870,8 @@ def process_tree() -> dict[int, tuple[int, int, int]]:
 
     macOS prints a session pointer for ``sess``, not an id; ``_tree_members`` only trusts it on Linux.
     """
+    if os.name == "nt":
+        return {pid: (ppid, 0, 0) for pid, ppid in process_table().items()}  # parents only, as with no ps
     tree: dict[int, tuple[int, int, int]] = {}
     try:
         out = subprocess.run(
@@ -820,6 +910,10 @@ def process_info() -> dict[int, tuple[float, str, str]]:
     repeats an hour (the end of daylight saving time) cannot reorder starts the way ``lstart`` read as
     local time does. ``command`` is ps's name and can be forged; nothing trusts it for a decision.
     """
+    if os.name == "nt":
+        from .network_halt import win_processes
+
+        return {pid: (start, name, "") for pid, (_ppid, start, name) in win_processes().items()}
     info: dict[int, tuple[float, str, str]] = {}
     try:
         out = subprocess.run(
@@ -932,6 +1026,11 @@ def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
     signalled alone; its group belongs to someone else.
     """
     protect = set(protect)
+    if os.name == "nt":  # no process groups: end the process and everything it started
+        def kill_tree(pid: int, sig: int) -> None:
+            proc_ctl.kill_tree(pid, proc_ctl.HARD, protect=protect)
+
+        return kill_tree
 
     def kill(pid: int, sig: int) -> None:
         try:
@@ -1042,7 +1141,10 @@ async def fallback_stop(
                 out.append((targets.pop(pid), False, f"pid {pid} not killed: identity changed"))
                 continue
             try:
-                os.kill(pid, signal.SIGTERM)
+                if os.name == "nt":
+                    proc_ctl.terminate(pid)
+                else:
+                    os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
         deadline = time.monotonic() + grace
@@ -1054,7 +1156,10 @@ async def fallback_stop(
                 out.append((rec, True, f"stopped {name} (by pid)"))
             elif starts[pid] is not None and same_identity(identify(pid), starts[pid]):
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    if os.name == "nt":
+                        proc_ctl.kill(pid)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
                     out.append((rec, True, f"stopped {name} (by pid, SIGKILL)"))
                 except OSError:
                     out.append((rec, True, f"stopped {name} (by pid)"))
@@ -1068,6 +1173,8 @@ async def fallback_stop(
 
 
 def _alive(pid: int) -> bool:
+    if os.name == "nt":
+        return proc_ctl.pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -1079,6 +1186,8 @@ def _running(pid: int) -> bool:
     """Alive and not a zombie (an exited process its parent has not reaped yet is stopped)."""
     if not _alive(pid):
         return False
+    if os.name == "nt":  # an exited Windows process is not alive: no zombies
+        return True
     try:
         out = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
@@ -1133,7 +1242,11 @@ class HaltListener:
             return False
         self._lock_fd = fd
         os.ftruncate(fd, 0)
-        os.pwrite(fd, str(os.getpid()).encode(), 0)
+        if os.name == "nt":  # no pwrite on Windows: the lock file was truncated, so write from its start
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, str(os.getpid()).encode())
+        else:
+            os.pwrite(fd, str(os.getpid()).encode(), 0)
         return True
 
     def drop_lock(self) -> None:
@@ -1173,6 +1286,9 @@ class HaltListener:
     async def _serve(self) -> None:
         path = sock_path(self.root)
         path.unlink(missing_ok=True)
+        if os.name == "nt":  # no AF_UNIX: the loopback endpoint of local_ipc
+            self._server = (await local_ipc.serve(self._client, path)).server
+            return
         old = os.umask(0o177)
         try:
             self._server = await asyncio.start_unix_server(self._client, path=str(path))

@@ -112,6 +112,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Windows: the network kill switch runs. `kollab --hub halt` stops this
+  machine's agents, a launch during a halt waits, and a resume starts it
+  again. Its liveness checks no longer send Ctrl+C: `os.kill(pid, 0)` does
+  that on Windows (#268).
 - Windows: stdio MCP servers start when their command is a `.cmd` launcher such as
   `npx`, and backslashes in a Windows path in an MCP command are kept (#428).
 - Settings → Voice: the path under **Save for This Device** names the file each

@@ -919,11 +919,19 @@ class HaltFile:
 
     def read(self) -> dict[str, Any]:
         try:
-            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+            if os.name == "nt":
+                from kollabor_config import private_fs
+
+                fd = private_fs.open_nofollow(self.path, os.O_RDONLY)
+            else:
+                fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError:
             return {"networks": {}, "stopped": []}
         with os.fdopen(fd, "rb") as fh:
-            if stat.S_IMODE(os.fstat(fh.fileno()).st_mode) & 0o077:
+            if os.name == "nt":
+                if not private_fs.owned_private(self.path):
+                    raise HaltError(f"{self.path.name} is readable by others")
+            elif stat.S_IMODE(os.fstat(fh.fileno()).st_mode) & 0o077:
                 raise HaltError(f"{self.path.name} is readable by others")
             raw = fh.read(HALT_FILE_LIMIT + 1)
         if len(raw) > HALT_FILE_LIMIT:
@@ -943,7 +951,12 @@ class HaltFile:
         return data
 
     def write(self, data: dict[str, Any]) -> None:
-        self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name == "nt":
+            from kollabor_config import private_fs
+
+            private_fs.ensure_private_dir(self.dir)
+        else:
+            self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.dir.is_symlink():
             raise HaltError("private dir is a link")
         body = canonical(data)
@@ -951,7 +964,8 @@ class HaltFile:
             raise HaltError(f"{self.path.name} would be too large to read back")
         fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".halt.")
         try:
-            os.fchmod(fd, 0o600)
+            if os.name != "nt":  # no fchmod on Windows; the file inherits the private folder's access list
+                os.fchmod(fd, 0o600)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(body)
                 fh.flush()
@@ -984,10 +998,13 @@ def network_control_refusal(env: dict[str, str] | None = None, stdin_tty: bool |
     """The refusal line, or "" when a person's terminal runs the control."""
     env = os.environ if env is None else env
     if stdin_tty is None:
-        try:
-            stdin_tty = os.isatty(0)
-        except OSError:
-            stdin_tty = False
+        if os.name == "nt":
+            stdin_tty = _stdin_is_console()
+        else:
+            try:
+                stdin_tty = os.isatty(0)
+            except OSError:
+                stdin_tty = False
     if env.get("KOLLAB_TOOL_SHELL") or not stdin_tty:
         return GUARD_REFUSAL
     return ""
@@ -1196,6 +1213,13 @@ def exe_path(pid: int) -> str:
 
     F12: ``exec -a tmux sleep`` names itself tmux in ps; the kernel's path does not. "" when unreadable.
     """
+    if os.name == "nt":
+        import psutil
+
+        try:
+            return psutil.Process(pid).exe()
+        except psutil.Error:
+            return ""
     try:
         if sys.platform.startswith("linux"):
             return os.readlink(f"/proc/{pid}/exe").removesuffix(" (deleted)")
@@ -1225,6 +1249,8 @@ def _system_program(path: str, names: frozenset[str]) -> bool:
 
 
 def _sid(pid: int, tree: dict[int, tuple[int, int, int]]) -> int:
+    if os.name == "nt":
+        return 0  # no sessions to group by on Windows
     if sys.platform.startswith("linux"):
         return tree[pid][2]
     try:  # macOS ps prints a session pointer, not an id
@@ -1402,6 +1428,8 @@ def caller_chain(pid: int) -> list[tuple[int, int]] | None:
     fails closed on it. F12: where there is no ``ps`` (a slim Linux image) the chain is read from
     ``/proc``; with neither it is refused.
     """
+    if os.name == "nt":
+        return _win_caller_chain(pid)
     rows: dict[int, tuple[int, int]] = {}
     try:
         out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,uid="], capture_output=True, text=True, timeout=5)
@@ -1429,6 +1457,13 @@ def caller_chain(pid: int) -> list[tuple[int, int]] | None:
 def _ppid(pid: int) -> int:
     if pid == os.getpid():
         return os.getppid()
+    if os.name == "nt":
+        import psutil
+
+        try:
+            return psutil.Process(pid).ppid()
+        except psutil.Error:
+            return 0
     try:
         out = subprocess.run(["/bin/ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
         return int(out.stdout.strip() or 0)
@@ -1438,6 +1473,8 @@ def _ppid(pid: int) -> int:
 
 def read_process(pid: int, with_cwd: bool = True) -> Proc | None:
     """argv, environment and cwd of a same-user process (assumption 3)."""
+    if os.name == "nt":
+        return _win_read_process(pid, with_cwd)
     try:
         if sys.platform.startswith("linux"):
             base = Path(f"/proc/{pid}")
@@ -1487,3 +1524,90 @@ def _read_darwin(pid: int, with_cwd: bool = True) -> Proc | None:
             cwd = line[1:]
     ppid = _ppid(pid)
     return Proc(pid, ppid, argv, env, cwd, exe.decode(errors="replace"))
+
+
+def _win_owner(proc: Any) -> str:
+    """The user that runs ``proc`` (a psutil.Process), "" when it cannot be read."""
+    import psutil
+
+    try:
+        return proc.username() or ""
+    except psutil.Error:
+        return ""
+
+
+def my_uid() -> int | str:
+    """This process's user as ``caller_chain`` reports users: the uid on POSIX, the user name on Windows."""
+    if os.name != "nt":
+        return os.getuid()
+    import psutil
+
+    return _win_owner(psutil.Process())
+
+
+def _win_caller_chain(pid: int) -> list[tuple[int, int | str]] | None:
+    """``caller_chain`` on Windows: (pid, user name), nearest first, from psutil.
+
+    ``Process.parent()`` is None once the parent exited or its pid names a newer process, which ends the
+    chain as pid 1 does on POSIX. A process that cannot be read is None (fail closed).
+    """
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+        chain: list[tuple[int, int | str]] = []
+        for _ in range(64):
+            chain.append((proc.pid, _win_owner(proc)))
+            parent = proc.parent()
+            if parent is None or parent.pid <= 4:  # 0 is the idle process, 4 the kernel
+                return chain
+            proc = parent
+    except psutil.Error:
+        return None
+    return None
+
+
+def _win_read_process(pid: int, with_cwd: bool = True) -> Proc | None:
+    """``read_process`` on Windows: argv, environment, cwd and exe from psutil; None when unreadable."""
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+        with proc.oneshot():
+            cwd = proc.cwd() if with_cwd else ""
+            return Proc(pid, proc.ppid(), proc.cmdline(), proc.environ(), cwd, proc.exe())
+    except psutil.Error:
+        return None
+
+
+def win_processes() -> dict[int, tuple[int, float, str]]:
+    """pid -> (parent pid, start time, name) for this user's processes, from psutil.
+
+    A parent that started after its child is a reused pid, not the parent: that link reads as 0.
+    """
+    import psutil
+
+    me = _win_owner(psutil.Process())
+    rows: dict[int, tuple[int, float, str]] = {}
+    for proc in psutil.process_iter(["pid", "ppid", "create_time", "name", "username"]):
+        info = proc.info
+        if not me or info.get("username") != me or not info.get("create_time"):
+            continue
+        rows[info["pid"]] = (info.get("ppid") or 0, float(info["create_time"]), info.get("name") or "")
+    for pid, (ppid, start, name) in list(rows.items()):
+        parent = rows.get(ppid)
+        if parent is not None and parent[1] > start:
+            rows[pid] = (0, start, name)
+    return rows
+
+
+def _stdin_is_console() -> bool:
+    """Windows: stdin is a console. ``os.isatty`` is also True for NUL, which any process can pass."""
+    import msvcrt
+
+    try:
+        handle = msvcrt.get_osfhandle(0)
+    except OSError:
+        return False
+    mode = ctypes.c_uint32()
+    return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
