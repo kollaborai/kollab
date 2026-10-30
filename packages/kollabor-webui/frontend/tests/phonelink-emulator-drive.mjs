@@ -47,7 +47,8 @@ await step("approve on the computer", async () => {
   }
   throw new Error("nothing pending after 45 s");
 });
-await step("open the web UI", () => page.locator("#root > *").first().waitFor({ timeout: 60000 }));
+// The loader also renders into #root; only the web UI has a textarea (its composer).
+await step("open the web UI", () => page.locator("textarea").first().waitFor({ timeout: 60000 }));
 await shot("4-web-ui");
 
 // The web UI asks for the microphone; Android shows its own prompt, answered here as a person would.
@@ -77,7 +78,10 @@ await step("answer Android's microphone prompt", async () => {
   }
   throw new Error("no prompt in 20 s");
 });
-const microphone = await page.evaluate(() => window.__mic);
+// An unanswered prompt never settles getUserMedia: give up after 10 s so the run still ends and fails.
+const microphone = await page.evaluate(() =>
+  Promise.race([window.__mic, new Promise((resolve) => setTimeout(() => resolve("no answer in 10 s"), 10000))])
+);
 console.log(`microphone: ${microphone}`);
 if (microphone !== "live") failed.push("record from the microphone");
 await shot("6-after-microphone");

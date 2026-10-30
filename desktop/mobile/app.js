@@ -112,7 +112,12 @@ async function cancelScan() {
 async function reachable(directory) {
   show(node("h1", "Kollab"), node("p", "Connecting to your Kollab computer…"));
   try {
-    await fetch(directory + "status", { mode: "no-cors", cache: "no-store" });
+    // A directory that never answers counts as unreachable after 10 s (Promise.race: older webviews lack
+    // AbortSignal.timeout).
+    await Promise.race([
+      fetch(directory + "status", { mode: "no-cors", cache: "no-store" }),
+      new Promise((_, reject) => setTimeout(reject, 10000)),
+    ]);
     return true;
   } catch {
     return false;

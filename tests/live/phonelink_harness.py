@@ -185,6 +185,8 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", relay_port).start()
     if tls := os.environ.get("KOLLAB_PHONELINK_TLS"):
+        if urlsplit(ORIGIN).port is None:
+            raise SystemExit("KOLLAB_PHONELINK_TLS needs a port in KOLLAB_PHONELINK_ORIGIN")
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         context.load_cert_chain(Path(tls) / "cert.pem", Path(tls) / "key.pem")
         await web.TCPSite(runner, "127.0.0.1", urlsplit(ORIGIN).port, ssl_context=context).start()

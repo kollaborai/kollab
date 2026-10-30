@@ -35,7 +35,10 @@ PP=$ROOT; for d in $ROOT/packages/*/src; do PP="$PP:$d"; done
   $PY tests/live/phonelink_harness.py $RELAY $CONTROL $T/scratch > $T/harness.log 2>&1) &
 HARNESS=$!
 for i in {1..60}; do grep -q '^ready' $T/harness.log 2>/dev/null && break; sleep 0.5; done
-grep -q '^ready' $T/harness.log || { echo "the harness did not start:"; tail -5 $T/harness.log; kill $HARNESS; exit 1; }
+grep -q '^ready' $T/harness.log || {
+  echo "the harness did not start:"; tail -5 $T/harness.log
+  pkill -f "phonelink_harness.py $RELAY $CONTROL"; rm -rf $T/home $T/scratch; exit 1
+}
 
 # The phone: a headless Android 16 emulator
 mkdir -p $ANDROID_AVD_HOME
