@@ -3,11 +3,13 @@
 Reviewers: two independent reviewers (neither wrote the spec), each reading one half of the spec at
 `516b2e62` (lines 1 to 1911 and 1912 to 3822). Code claims were checked against `kollaborai/kollab` main at
 `3f85cd11`. Line numbers below are at `516b2e62`.
+A third, independent reviewer read the whole spec at `516b2e62`; its 16 findings and their dispositions
+are appended at the end as C3-I01 to C3-I16.
 
 Severity: as in cycles 1 and 2. P0 blocks development; P1 must be fixed in the spec before the build; P2
 should be fixed.
 
-Result: 25 findings (2 P0, 10 P1, 13 P2); 22 accepted, 3 accepted with modification, 0 rejected.
+Result (first two reviewers): 25 findings (2 P0, 10 P1, 13 P2); 22 accepted, 3 accepted with modification, 0 rejected.
 
 ---
 
@@ -210,3 +212,245 @@ Finding: `kollab.log.message_id` is described as "stable per call site", but it 
 Proposed fix: Change the claim to "stable per build", and say that the id changes when the line moves. Do not promise stability across releases.
 
 Disposition: Accepted. `kollab.log.message_id` is now "stable per build only". The id changes when the line moves. No stability across releases is promised.
+
+---
+
+## Third reviewer (independent, same cycle)
+
+Reviewer: a separate independent cycle 3 reviewer that did not write the spec, reading the whole spec at
+`516b2e62` cold. Code claims were checked at the pinned tree 460d2e3; OTel Python against the 1.45.2 wheels;
+GenAI semconv at `3fe84604`; pex at 2.103.4. Verdict at `516b2e62`: not ready for development (W0 and W0b
+could start). The reviewer's own IDs were C3-01 to C3-16; they are recorded as C3-I01 to C3-I16 so they do
+not collide with the IDs above. None was fixed by `867307a0`.
+
+Result: 16 findings (2 P0, 6 P1, 8 P2); 14 accepted, 1 accepted with modification, 1 mostly a duplicate
+with the remainder accepted with modification, 0 rejected. Every finding was verified against the code
+before it was accepted.
+
+### C3-I01 (P0, 12.2 capability rule, 25.1 layer 4, W7a, W8, 28.2)
+
+Finding: The relay capability probe waits for a `failed` response that never reaches the sender. The real
+send path (`relay_agent.py: _flush_outbound`, `_flush_one`) calls `secure_transport.request(peer, "message",
+payload, timeout=3)`. A receiver's `validate_message` rejection inside `SecureConversation.handle_packet`
+discards the inbound session; the sender's `SecureConversation.request` turns every failure into
+`RelayError("secure conversation transport failed")`, which becomes `{"state": "queued"}` and is retried. A
+rejection looks exactly like an offline or slow peer, so an R2 sender probing a pre-R1 peer would retry with
+a fresh carrier until the message expires, and every probe forces a new TLS handshake.
+
+Proposed fix: Advertise instead of probing. R1 adds `"caps": ["otel"]` at the top level of its `directory`
+result; R2 sends a carrier only to peers whose latest directory response advertised it; a `queued` result
+after a send with `otel` makes the next attempt go without it and refreshes the directory. Delete
+`peers.json`, the probe and the resend; rewrite layer 4 against the secure transport; add an R0 parse test.
+
+Disposition: Accepted. Verified at 460d2e3: `_rpc_directory` reads only `result.get("agents")`, the other
+directory readers read only `agents`, and the secure response check is a superset check, so older
+requesters ignore an extra top-level key. 12.2 rewritten (R1 advertises `caps`, R2 sends only to
+advertising peers, downgrade retry without the carrier, nothing on disk); X1, 4.4, 12.3 enums, 25.1 layer 4
+(secure transport, R0 directory parse test), W7a, W8, 28.1 to 28.3 updated.
+
+### C3-I02 (P0, 6.1, 6.2, 16.1, 16.5, 17.8, 24, W1, W11)
+
+Finding: Kollab's config saver writes the merged four-layer config. `save_config` passes the deep merge to
+`save_merged_config`, and `_diff_from_defaults` keeps every key not in the defaults, so telemetry keys from a
+cloned repository's `.kollab/config.json` are copied into the global file on the next global save; a stale
+daemon can rewrite `enabled: true` after the user turned it off; a panel write through `save_config()` can
+land in the local layer, which telemetry ignores. `save_key` has no cross-process lock.
+
+Proposed fix: Keep telemetry settings out of `config.json`, in a 0600 file written only through a locked
+read-modify-write; keep `config.json` keys as an ignored legacy location. Tests: hostile local config plus a
+global save; stale daemon save after a panel "off"; panel write from a directory with a local config.
+
+Disposition: Accepted. Lead decision: telemetry settings live in `~/.kollab/telemetry.json` (0600), outside
+the merged config, written only by `TelemetrySettings` (locked read-modify-write of changed keys through
+`statefile.py`) on explicit user actions, never by generic saves; panel and `/telemetry` writes always
+target it. Keys in any `config.json` are inert. Migration: an explicit panel import of the global file's keys
+only, content and `plain` reconfirmed; precedence restated in 6.2. The `LOCAL_ONLY` entry and sync migration
+are removed because the file never syncs. The three tests are in W1. The keys added by C3-05 and C3-22 above
+live in the same file.
+
+### C3-I03 (P1, 9.1, 9.7, 8.3, W3)
+
+Finding: The chain span has no guaranteed end. `note_chain_end` acts only with an empty queue and a free
+`_turn_lock`; `_drain_queue` breaks on `cancel_processing` with work still queued; `TurnWatchdog.heal
+("stuck_busy")` lowers `is_processing` while the wedged turn may hold the lock and kicks a new drain, which
+would reuse the still-open chain. Chains can leak or absorb unrelated later work.
+
+Proposed fix: End an open chain on a rising edge; add a `yielded` outcome and a `continued_chain` link;
+`heal` ends the chain with `watchdog_healed` before kicking; a 30 s idle bound; W3 tests for each path.
+
+Disposition: Accepted. 9.1 lists the deferred-end paths and ends each explicitly (cancel with queued input,
+both heals, rising edge with a stale handle, idle bound); `yielded` added to the outcome enum; W3 tests added.
+
+### C3-I04 (P1, 9.1, 9.3, 12.4, W3, W7)
+
+Finding: Hub inputs never become `QueuedInput`. The hub plugin injects the message into history and emits
+`TRIGGER_LLM_CONTINUE`; `_hub_continue` sets `is_processing` directly or returns early; ACP dispatch uses
+`_submit_authenticated_agent_message`. The spec's "CONSUMER span context on the `QueuedInput`" has no path.
+
+Proposed fix: An in-memory `pending_handoffs` deque filled at the CONSUMER span, consumed at the rising edge
+(parent) and the next round (links), admit spans from it, the id carried in the existing event data, all
+three dispatch paths tested.
+
+Disposition: Accepted. 9.1 defines `pending_handoffs` and `note_wake(hub_message_id)` from `_hub_continue`
+and the ACP `request_id`; 9.3 updated; W3 and W7 cover queue, `_hub_continue` and ACP submission.
+
+### C3-I05 (P1, 8.1, G4, W3)
+
+Finding: `/resume` and branch create a new conversation id (`local.resume_conversation` calls
+`generate_session_name()` and `reset_session`; `branch_session` sets a new id), so the
+`kollab.conversation.resume` model does not match the code and resumed conversations lose their link.
+
+Proposed fix: New anchor with `kollab.conversation.resumed_from` and a `resumed_from` link; hook
+`reset_session` with an AST inventory of id sites; keep the resume span only for id-keeping paths; golden
+trees for `/resume`, branch and daemon restart.
+
+Disposition: Accepted. 8.1 table of id-change sites with one `conversation_changed` facade call; anchors for
+resume and branch carry `resumed_from` and a span link; `resumed_from` added to the link enum; AST inventory
+and golden trees in W3.
+
+### C3-I06 (P1, 17.8, 24, W9c, W11)
+
+Finding: The web UI's LAN proxy (`engine_proxy`) forwards LAN browsers to the engine from loopback with no
+marker, so under 17.8's rule they count as the local operator and can turn telemetry on.
+
+Proposed fix: The proxy strips any incoming copy and adds `x-kollab-origin: webui-remote` for non-local
+clients; `is_local_operator` treats it as non-local; the proxy also refuses telemetry writes; a W9c test
+drives the real `engine_proxy` from a non-loopback address.
+
+Disposition: Accepted. 4.5 documents the proxy; 17.8 item 2a adds the header (trusted only to remove
+privilege), the proxy refusal and the test; listed in X5 because the proxy adds the header in off mode too.
+
+### C3-I07 (P1, 4.4, 21.2, 22 E5, 25.1 layer 6, W2)
+
+Finding: Detached daemons already trap SIGTERM (`cli.py: _run_async_main_with_sigterm_cleanup` raises
+`KeyboardInterrupt` for cleanup), and `kollab stop` escalates to SIGKILL after about 2.5 s (1.5 s grace plus
+1.0 s), not 5 s. A telemetry SIGTERM handler would replace the existing one, flush before the agent's own
+cleanup, and with a black-hole collector push the stop into SIGKILL.
+
+Proposed fix: No telemetry signal handler; flush once at the end of the existing cleanup path; cap it at
+`min(shutdown_timeout_s, 0.5 s)` on the stop ladder; correct 4.4; layer 6 drives `kollab stop`.
+
+Disposition: Accepted. 21.2 rewritten: no handler in any mode; order is existing cleanup, then span ends,
+then the flush; on the ladder the flush gets at most 0.5 s and must end 0.3 s before the grace or term
+window closes, else 0 s with drops counted; 4.4 corrected; layer 6, E5, W2 and W3 updated.
+
+### C3-I08 (P1, 22, 5.2, 27)
+
+Finding: D1 is unpassable or vacuous. A disabled `with span(...)` seam costs about 165 ns over an empty call
+on a fast Xeon (CPython 3.13); runners are slower, so an absolute 150 ns fails, and a delta against the stub
+(same call shape) is about zero and proves nothing. The seams do not exist in W1.
+
+Proposed fix: Absolute cost per seam kind against a no-call baseline (400 ns per span seam, 120 ns per
+counter); blocking from the PR that adds each seam; keep D2 as the end-to-end gate.
+
+Disposition: Accepted with modification. Per-seam blocking and the W1 row were already fixed by C3-12 above,
+but C3-12 chose a ratio to the stub, which this finding shows is vacuous. 22 now has D1a (facade call shapes
+against a no-call baseline, the reviewer's numbers, blocking from W1) and D1b (each real seam against the
+merge base, 1.5 microseconds or 2 %, blocking per seam). Modification: D2 also moves from the stub to the
+merge base for the same reason and blocks from W3, when the first seams exist.
+
+### C3-I09 (P2, 17.8, 23.2, 28.2)
+
+Finding: pex ignores `--hash` (`pex/requirements.py` line 384 strips it), so the binary is version-pinned
+but not hash-checked, contrary to 23.2 and 17.8.
+
+Proposed fix: `pip download --require-hashes --only-binary=:all:` into a wheelhouse, then `pex --no-pypi
+--find-links wheelhouse`; or a pex lock. Correct the wording.
+
+Disposition: Accepted. Verified in pex 2.103.4. 23.2 adds the separate verify step and builds only from the
+verified wheelhouse, with the pex lock as the named alternative; 17.8 wording corrected; W10 adds a
+tampered-hash test.
+
+### C3-I10 (P2, 17.2, 19, 21.1, 22 E2)
+
+Finding: With content on, queue and batch bounds are counts (`collections.deque([], max_queue_size)`), so a
+2048-span queue can hold about 147 MB and one 512-item batch about 36 MiB.
+
+Proposed fix: Split exports by encoded size (0.9 MiB HTTP, 3.5 MiB gRPC), state explicit queue and batch
+sizes, add a content byte budget for the queue, add an E2 variant with content on and the collector down.
+
+Disposition: Mostly a duplicate of C3-10 and C3-11 above (batch size 64, 1 MiB request split, 8 MiB byte
+bound per queue). Remainder accepted with modification: configurable `otlp.max_request_bytes` (1 MiB HTTP,
+3.5 MiB gRPC), `queue_max_bytes`, explicit `max_queue_size=2048` and schedule delay, the byte accounting in
+the drop-counting wrapper, oversize item handling, and the E2 variant. Modification: an item over the byte
+bound is dropped and counted rather than re-exported without content, because ended SDK spans are
+read-only.
+
+### C3-I11 (P2, 16.2, 21.1, 23.1)
+
+Finding: `OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED` is read by the SDK itself (trace and logs modules) with
+no constructor override, so the ambient test cannot pass as written and SDK `otel.sdk.*` instruments could
+be exported if Kollab passed its `MeterProvider`. `encode_logs` and `opentelemetry.sdk._logs` are private
+modules, not "public proto-common encoders".
+
+Proposed fix: Correct the row; never pass Kollab's `MeterProvider` to the SDK; test that no `otel.sdk.*`
+metric arrives; call out the private modules and diff them in the drift job.
+
+Disposition: Accepted. Verified in the 1.45.2 wheels. 16.2 row and encoder wording corrected, a lint forbids
+`meter_provider=` in `_otel/`, the ambient test asserts no `otel.sdk.*` metric; 23.1 pins the four OTel
+packages exactly with a private API contract test and drift diffs (vendoring rejected: the encoder needs
+the same-version generated proto classes). Also found: the SDK requires
+`opentelemetry-semantic-conventions==0.66b2`, so 23.1 no longer claims no beta OTel package is installed.
+
+### C3-I12 (P2, 6.1 items 6 and 7, 6.2, X1 to X9)
+
+Finding: The ignored-key WARNING fires on the presence of project or local keys, not on enablement, and
+`TelemetryConfig.load()` must read config at every start, contradicting "one `stat`" and "no telemetry log
+line" in off mode.
+
+Proposed fix: WARNING only when telemetry resolves to enabled; list the read in item 6 or as an X item.
+
+Disposition: Accepted. The WARNING fires only when enabled, else the panel lists the keys; item 6 allows
+exactly two `stat` calls (X3 and X9), and one read only if `telemetry.json` exists, recorded by an audit
+hook; the access is X3 with its reason; item 7 names the one possible off-mode line (an unrecognized
+`KOLLAB_TELEMETRY` value the user set).
+
+### C3-I13 (P2, 17.6, 21.1, 24, 28.1)
+
+Finding: The install key is created only by "foreground interactive" processes, but panel actions run in
+the daemon, and `kollab service` and environment-only launches have no terminal, so they stay NOOP with
+`no_install_key`; the dogfood plan would hit this.
+
+Proposed fix: Any process that resolves telemetry to enabled creates the key with the race-free procedure.
+
+Disposition: Accepted. 17.6 rewritten; `may_fork` processes and off mode never create it; W2b tests for a
+detached daemon, a daemon panel action and `kollab service`. Complements C3-13 above, which covered only
+the selftest.
+
+### C3-I14 (P2, 27)
+
+Finding: Delivery dependency errors: W2's exit tests need `invoke_agent` from W3; W7 uses W6's tool spans
+without depending on W6; D1 blocking in W1 before seams exist; W9b's acknowledgement tests need a writer
+that only W11 provides.
+
+Proposed fix: W2 tests a synthetic span, W3 repeats with `invoke_agent`; W7 depends on W3, W6 and W7a; writer
+API in W2b or W1.
+
+Disposition: Accepted. All four applied: W2 synthetic span and W3 repeat; W7 depends on W3, W6, W7a (table
+and graph); item 3 is a duplicate of C3-12 above (and now D1a/D1b, C3-I08); the `TelemetrySettings` writer
+and `statefile.py` move to W1, so only the UI stays in W11.
+
+### C3-I15 (P2, 17.8, 16.1)
+
+Finding: The content acknowledgement is an ordinary setting that same-user code, such as an agent with
+terminal permission prompted from a phone, can write together with an endpoint and content mode. 17.8
+presents it as a mitigation for exactly that actor.
+
+Proposed fix: Say it plainly; keep it as a guard against accidental misconfiguration; add a visible signal
+and reconfirmation when the acknowledgement was not written by this device's panel.
+
+Disposition: Accepted. 17.8 states it is a consent record, not a security boundary; visibility added that no
+setting hides (persistent "otel: content" indicator, acknowledgement details in the panel, a reconfirm
+prompt when it changed outside the panel, a WARNING when a process starts exporting content); 28.2 lists the
+residual risk.
+
+### C3-I16 (P2, X4, 6.2, 12.2)
+
+Finding: X4 strips every `KOLLAB_TELEMETRY*` name from tool children, so a `kollab -p` started through the
+terminal tool no longer sees `KOLLAB_TELEMETRY=0` and exports if `enabled: true` is stored.
+
+Proposed fix: Keep `KOLLAB_TELEMETRY` when it holds an off value; add a layer 1 test.
+
+Disposition: Accepted. `envscrub.external_child_env` keeps an off value of `KOLLAB_TELEMETRY` and still
+removes on values and every other name; X4, 6.1 item 10 and 12.2 updated; layer 1 test through the real
+terminal tool.
