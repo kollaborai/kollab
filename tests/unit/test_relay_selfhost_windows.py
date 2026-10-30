@@ -43,7 +43,7 @@ def test_serve_stops_on_console_signals(tmp_path, monkeypatch):
     settings = Settings(
         target=normalize_target("relay.example", document=False),
         state_dir=tmp_path / "state",
-        port=0,
+        port=19783,
     )
     monkeypatch.setattr(selfhost, "say", lambda message: None)
 

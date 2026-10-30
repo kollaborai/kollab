@@ -942,8 +942,9 @@ class RelayRuntime:
             finally:
                 if self.health_runner:
                     await self.health_runner.cleanup()
-                for sig in (signal.SIGTERM, signal.SIGINT):
-                    loop.remove_signal_handler(sig)
+                if os.name != "nt":  # ProactorEventLoop does not implement remove_signal_handler
+                    for sig in (signal.SIGTERM, signal.SIGINT):
+                        loop.remove_signal_handler(sig)
                 if self._lock_fd is not None:
                     os.close(self._lock_fd)
                     self._lock_fd = None
