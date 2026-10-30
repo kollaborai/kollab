@@ -126,6 +126,10 @@ def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path
             runtime_log = Path(os.environ.get("LOCALAPPDATA", "")) / "ai.kollabor.kollab" / "logs" / "webui.log"
             if runtime_log.is_file():
                 print(runtime_log.read_text(errors="replace")[-8000:])
+            for path in sorted(root.rglob("*.log")):  # the engine's and the agents' logs in this home
+                if path != log:
+                    print(f"--- last 60 lines of {path.relative_to(root)}")
+                    print("\n".join(path.read_text(errors="replace").splitlines()[-60:]))
             raise
         finally:
             # Cleanup only, so a failed Quit leaves the runner clean; the same command line guards a reused pid.

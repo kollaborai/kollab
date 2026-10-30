@@ -2533,7 +2533,9 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
             time.sleep(0.2)
 
         if not engine_healthy():
-            print("Error: engine failed to start, see ~/.kollab logs", file=sys.stderr)
+            code = engine_proc.poll()
+            why = "did not answer within 30 s" if code is None else f"exited with code {code}"
+            print(f"Error: engine failed to start ({why}), see ~/.kollab logs", file=sys.stderr)
             _terminate_child(engine_proc)
             sys.exit(1)
 
