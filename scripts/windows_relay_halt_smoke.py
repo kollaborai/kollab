@@ -69,13 +69,24 @@ def wait_until(check, timeout: float, what: str) -> None:
 
 def folder_socket(home: Path, project: Path) -> str | None:
     """This home's live daemon socket for `project`, read straight from the presence folder."""
+    if os.name == "nt":  # os.kill(pid, 0) on Windows is TerminateProcess, not a liveness probe
+        from kollabor_config.proc_ctl import pid_alive
+    else:
+
+        def pid_alive(pid: int) -> bool:
+            os.kill(pid, 0)
+            return True
+
+    wanted = os.path.normcase(os.path.realpath(project))
     for record in sorted((home / ".kollab" / "hub" / "presence").glob("*.json")):
         try:
             data = json.loads(record.read_text())
-            os.kill(int(data["pid"]), 0)
+            if not pid_alive(int(data["pid"])):
+                continue
         except (OSError, ValueError, KeyError):
             continue
-        if data.get("project") == str(project) and data.get("socket_path"):
+        recorded = data.get("project")
+        if recorded and os.path.normcase(os.path.realpath(recorded)) == wanted and data.get("socket_path"):
             return data["socket_path"]
     return None
 
