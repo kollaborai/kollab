@@ -1,7 +1,8 @@
-"""The hub's lock helper stays a byte-for-byte copy of kollabor_config.file_lock (#268).
+"""The hub's and the voice package's lock helpers stay byte-for-byte copies of kollabor_config.file_lock (#268).
 
 The kill switch (plugins/hub/halt_runtime.py) loads before anything else and the
 headless relay cannot import a workspace package, so plugins/hub carries its own copy.
+The voice runtime does not install kollabor-config either, so kollabor_voice carries one too.
 """
 
 from pathlib import Path
@@ -11,10 +12,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_hub_lock_is_the_config_lock():
-    hub = ROOT / "plugins/hub/file_lock.py"
+@pytest.mark.parametrize(
+    "copy", ["plugins/hub/file_lock.py", "packages/kollabor-voice/src/kollabor_voice/file_lock.py"]
+)
+def test_lock_copies_are_the_config_lock(copy):
     config = ROOT / "packages/kollabor-config/src/kollabor_config/file_lock.py"
-    assert hub.read_bytes() == config.read_bytes()
+    assert (ROOT / copy).read_bytes() == config.read_bytes()
 
 
 @pytest.mark.parametrize(
@@ -27,7 +30,11 @@ def test_hub_lock_is_the_config_lock():
         "plugins/hub/dns/storage.py",
         "plugins/hub/dns/discovery_store.py",
         "plugins/hub/dns/discovery_publish.py",
+        "packages/kollabor-voice/src/kollabor_voice/bootstrap.py",
+        "packages/kollabor-voice/src/kollabor_voice/service.py",
+        "packages/kollabor-voice/src/kollabor_voice/classifiers.py",
+        "packages/kollabor-voice/src/kollabor_voice/speech_settings.py",
     ],
 )
-def test_hub_locks_without_fcntl(path):
+def test_locks_without_fcntl(path):
     assert "fcntl" not in (ROOT / path).read_text(encoding="utf-8")
