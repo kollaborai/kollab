@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircleIcon,
   CheckIcon,
@@ -32,6 +32,49 @@ import { EngineApi } from "@/api";
 const ANIMATION_DURATION = 200;
 
 const historyOutputApi = new EngineApi();
+
+/** Full tool outputs already loaded once, keyed by sessionId + "\u0000" + reference. */
+const historyOutputCache = new Map<string, unknown>();
+/** Outputs can be megabytes: keep the most recently loaded few, oldest out first. */
+const HISTORY_OUTPUT_CACHE_LIMIT = 20;
+/** Loads in flight, so two cards showing the same output share one request. */
+const pendingHistoryOutputs = new Map<string, Promise<unknown>>();
+
+/** References whose last load failed, so a reopened card shows Retry instead of silently refetching. */
+const failedHistoryOutputs = new Set<string>();
+
+function historyOutputKey(sessionId: string, reference: string): string {
+  return `${sessionId}\u0000${reference}`;
+}
+
+async function fetchHistoryOutput(
+  sessionId: string,
+  reference: string,
+  api: Pick<EngineApi, "getHistoryOutput"> = historyOutputApi,
+): Promise<unknown> {
+  const key = historyOutputKey(sessionId, reference);
+  if (historyOutputCache.has(key)) return historyOutputCache.get(key);
+  const pending = pendingHistoryOutputs.get(key);
+  if (pending) return pending;
+  const load = (async () => {
+    try {
+      const response = await api.getHistoryOutput(sessionId, reference);
+      historyOutputCache.set(key, response.content);
+      if (historyOutputCache.size > HISTORY_OUTPUT_CACHE_LIMIT) {
+        historyOutputCache.delete(historyOutputCache.keys().next().value as string);
+      }
+      failedHistoryOutputs.delete(key);
+      return response.content;
+    } catch (error) {
+      failedHistoryOutputs.add(key);
+      throw error;
+    } finally {
+      pendingHistoryOutputs.delete(key);
+    }
+  })();
+  pendingHistoryOutputs.set(key, load);
+  return load;
+}
 
 const pressable = "active:scale-[0.98]";
 
@@ -340,18 +383,24 @@ function HistoryOutputResult({
   reference: string;
   preview: unknown;
 }) {
-  const [content, setContent] = useState<unknown>();
-  const [loaded, setLoaded] = useState(false);
+  const cacheKey = historyOutputKey(sessionId, reference);
+  const [content, setContent] = useState<unknown>(() => historyOutputCache.get(cacheKey));
+  const [loaded, setLoaded] = useState(() => historyOutputCache.has(cacheKey));
+  const [error, setError] = useState<string | null>(() =>
+    failedHistoryOutputs.has(cacheKey)
+      ? "Full tool output could not be loaded. Check the connection and retry."
+      : null,
+  );
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const requestedRef = useRef(false);
 
-  const showMore = useCallback(async () => {
+  const load = useCallback(async () => {
     if (loading) return;
     setLoading(true);
     setError(null);
     try {
-      const response = await historyOutputApi.getHistoryOutput(sessionId, reference);
-      setContent(response.content);
+      const full = await fetchHistoryOutput(sessionId, reference);
+      setContent(full);
       setLoaded(true);
     } catch {
       setError("Full tool output could not be loaded. Check the connection and retry.");
@@ -360,18 +409,34 @@ function HistoryOutputResult({
     }
   }, [loading, reference, sessionId]);
 
+  // The card content mounts only while the card is open, so expanding the
+  // card is what loads the full output; a cached or failed load is not refetched silently.
+  useEffect(() => {
+    if (loaded || error || requestedRef.current) return;
+    requestedRef.current = true;
+    void load();
+  }, [error, load, loaded]);
+
   return (
     <div data-slot="history-output-preview" className="mt-1 space-y-2">
+      <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
+        {loaded ? "Output:" : "Output preview:"}
+      </p>
       <pre className="bg-muted/50 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
         {formatContent(loaded ? content : preview)}
       </pre>
-      {!loaded ? (
+      {!loaded && loading ? (
+        <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+          <LoaderIcon className="size-3.5 animate-spin" aria-hidden="true" />
+          Loading full output…
+        </p>
+      ) : null}
+      {!loaded && error ? (
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" size="sm" variant="outline" onClick={() => void showMore()} disabled={loading}>
-            {loading ? <LoaderIcon className="size-3.5 animate-spin" aria-hidden="true" /> : null}
-            {loading ? "Loading output…" : "Show more"}
+          <span role="alert" className="text-destructive text-xs">{error}</span>
+          <Button type="button" size="sm" variant="outline" onClick={() => void load()}>
+            Retry
           </Button>
-          {error ? <span role="alert" className="text-destructive text-xs">{error}</span> : null}
         </div>
       ) : null}
     </div>
@@ -400,9 +465,6 @@ function ToolFallbackResult({
   ) {
     return (
       <div data-slot="tool-fallback-result" className={cn("aui-tool-fallback-result", className)} {...props}>
-        <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
-          Output preview:
-        </p>
         <HistoryOutputResult
           sessionId={historyOutput.sessionId}
           reference={historyOutput.reference}
@@ -851,4 +913,6 @@ export {
   ToolFallbackResult,
   ToolFallbackError,
   ToolFallbackApproval,
+  fetchHistoryOutput,
+  historyOutputKey,
 };

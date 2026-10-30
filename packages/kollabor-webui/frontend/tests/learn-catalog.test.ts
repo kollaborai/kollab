@@ -48,7 +48,7 @@ test("PhoneLink lesson no longer advertises manual WireGuard setup", () => {
   assert.match(guidance, /newest messages first/i);
   assert.match(guidance, /load older history on demand/i);
   assert.match(guidance, /retry action if a load fails/i);
-  assert.match(guidance, /Show more to load the full output/i);
+  assert.match(guidance, /expand a tool, so long chats open fast/i);
   assert.doesNotMatch(guidance, /WireGuard|Advanced Settings/i);
 });
 

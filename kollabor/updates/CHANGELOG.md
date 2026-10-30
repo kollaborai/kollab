@@ -124,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Web UI: chat history and Trajectory load again for chats with a very large
+  file edit, where they failed with 413. In the chat a tool's full output
+  loads when you expand the tool, so long chats open fast (#456).
 - Conversation and raw API logs stamp times in UTC: a stamp marked Z held
   local time before, hours off from real UTC (#454).
 - /llm: a custom or local endpoint's section lists only what that endpoint

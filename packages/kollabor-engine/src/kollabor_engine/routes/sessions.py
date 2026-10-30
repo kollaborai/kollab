@@ -10,7 +10,7 @@ import threading
 import time
 from contextlib import aclosing
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not-found]
 from pydantic import BaseModel
@@ -1097,6 +1097,7 @@ async def get_history(
     limit: Optional[int] = None,
     before: Optional[str] = None,
     after: Optional[str] = None,
+    tool_output: Literal["full", "preview"] = "full",
 ):
     registry = get_session_registry()
     session = registry.get(session_id)
@@ -1119,6 +1120,7 @@ async def get_history(
             before=before,
             after=after,
             base_payload=base_payload,
+            tool_output_preview=tool_output == "preview",
         )
     except StaleHistoryCursor as error:
         raise HTTPException(status_code=409, detail=str(error)) from error

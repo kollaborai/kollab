@@ -249,17 +249,14 @@ try {
     console.error("TOOL METRICS:", JSON.stringify(await control("GET", "/metrics")));
     throw error;
   }
-  const showMore = page.getByRole("button", { name: "Show more" }).first();
-  await showMore.waitFor({ state: "visible", timeout: 15000 });
-  await showMore.scrollIntoViewIfNeeded();
-  await showMore.click();
+  // Expanding the card is the trigger: the full output loads with no second click.
   await page.waitForFunction(() =>
     document.querySelector('[data-slot="history-output-preview"] pre')?.textContent?.includes("SYNTHETIC_TOOL_OUTPUT_END"),
     null,
     { timeout: 60000 },
   );
   historyMetrics = await waitForMetrics((metrics) => metrics.tool_output_reads.length > 0);
-  assert.ok(historyMetrics.tool_output_reads.length > 0, "Show more requests the large output lazily");
+  assert.ok(historyMetrics.tool_output_reads.length > 0, "expanding a tool requests the large output lazily");
 
 
   await page.waitForTimeout(1500);
