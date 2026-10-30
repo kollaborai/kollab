@@ -5,6 +5,7 @@ import json
 import secrets
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -104,9 +105,10 @@ async def test_signature_does_not_verify_for_a_different_key_or_a_changed_file(s
 
 def test_a_phone_reaches_only_the_roots_the_app_calls():
     # #368: widening this is a decision. The app calls each of these, nothing else.
+    # #440: voice is the phone's own voice turns; the room stays on loopback.
     assert phone_link.API_ROOTS == {
         "sessions", "agents", "profiles", "workspaces", "mcp", "hub", "sidebar",
-        "rosters", "teams", "prompts", "phone-app",
+        "rosters", "teams", "prompts", "phone-app", "voice",
     }  # fmt: skip
 
 
@@ -117,6 +119,25 @@ async def test_the_computers_own_roots_refuse_a_phone(setup_link, app_dir):  # n
         identifier = secrets.token_hex(16)
         result = await packet(op="start", id=identifier, method="GET", path=path, headers=[], size=0)
         assert "available only on the computer" in result.get("error", ""), path
+
+
+@pytest.mark.asyncio
+async def test_voice_routes_reachable_for_phone(setup_link, app_dir):  # noqa: F811
+    packet = await secure_phone(setup_link)
+    session = str(uuid.uuid4())
+    result = await packet(op="start", id=secrets.token_hex(16), method="POST",
+                          path=f"/voice/sessions/{session}/turns", headers=[], size=0)
+    assert "error" not in result  # past the API_ROOTS gate, same as other app roots
+
+
+@pytest.mark.asyncio
+async def test_phonelink_management_still_computer_only(setup_link, app_dir):  # noqa: F811
+    packet = await secure_phone(setup_link)
+    with pytest.raises(PhoneLinkError, match="available only on the computer"):
+        result = await packet(op="start", id=secrets.token_hex(16), method="GET",
+                              path="/phonelink/approve", headers=[], size=0)
+        if "error" in result:
+            raise PhoneLinkError(result["error"])
 
 
 @pytest.mark.asyncio

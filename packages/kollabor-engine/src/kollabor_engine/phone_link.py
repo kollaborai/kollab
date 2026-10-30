@@ -59,11 +59,13 @@ _PHONE_FRAME_COMPRESSION_THRESHOLD = 512
 MAX_BODY = 8 * 1024 * 1024
 # The phone runs the full app (src/phonelink/app-main.tsx renders App): these are the
 # roots that app calls (#368). Everything else, PhoneLink management among it, is the
-# computer's only.
+# computer's only. Voice is the phone's own voice turns (#440); the room stays on
+# loopback.
 API_ROOTS = frozenset(
     {
         "sessions", "agents", "profiles", "workspaces", "mcp", "hub", "sidebar", "rosters", "teams",
         "prompts", "phone-app",
+        "voice",
     }
 )
 APP_PROTOCOL = "kollab-phonelink-app/1"
