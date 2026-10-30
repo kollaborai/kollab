@@ -203,7 +203,8 @@ def _describe(pids: list[int]) -> str:
     for pid in pids:
         try:
             proc = psutil.Process(pid)
-            parts.append(f"{pid} {proc.name()} (parent {proc.ppid()})")
+            args = " ".join(proc.cmdline()[1:4])  # enough to name it
+            parts.append(f"{pid} {proc.name()} {args} (parent {proc.ppid()})")
         except psutil.Error:
             parts.append(f"{pid} (unreadable)")
     return ", ".join(parts)
@@ -224,10 +225,48 @@ def _daemon_pids(home: Path) -> list[int]:
     return pids
 
 
-def _wait_for_daemons_gone(home: str, engine_pid: int, daemons: list[int]) -> None:
+def _engine_pids(engine: subprocess.Popen[str]) -> set[int]:
+    """The engine, and the interpreter a Windows venv launcher starts for it."""
+    pids = {engine.pid}
+    try:
+        children = psutil.Process(engine.pid).children()
+    except psutil.Error:
+        return pids
+    for child in children:
+        try:
+            if child.cmdline()[1:] == list(engine.args)[1:]:
+                pids.add(child.pid)
+                print(f"engine runs as pid {child.pid} under launcher pid {engine.pid}")
+        except psutil.Error:
+            continue
+    return pids
+
+
+def _log_has(home: Path, text: str) -> bool:
+    for log in (home / ".kollab").rglob("*.log"):
+        try:
+            if text in log.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _check_windows_stop(home: Path) -> None:
+    """Windows has no SIGTERM: the engine asks the daemon to stop over local IPC."""
+    if not _log_has(home, "Shutdown requested: session closed"):
+        raise SmokeFailure("the daemon never got the engine's shutdown request")
+    if _log_has(home, "did not stop on request"):
+        raise SmokeFailure("the daemon did not stop on request and was ended")
+    print("the daemon stopped on the engine's shutdown request")
+
+
+def _wait_for_daemons_gone(
+    home: str, engine_pids: set[int], daemons: list[int]
+) -> None:
     deadline = time.monotonic() + CLEANUP_TIMEOUT
     while True:
-        homed = _homed_pids(home, {engine_pid})
+        homed = _homed_pids(home, engine_pids)
         pids = sorted(set(homed) | {pid for pid in daemons if _alive(pid)})
         if not pids:
             return
@@ -321,9 +360,12 @@ def main() -> int:
             target=_pump_stdout, args=(engine.stdout, lines), daemon=True
         ).start()
         _wait_ready(lines, args.port)
+        engine_pids = _engine_pids(engine)
         token = _read_token(home)
         daemons = _run_session(args.port, token, project, home)
-        _wait_for_daemons_gone(home_str, engine.pid, daemons)
+        _wait_for_daemons_gone(home_str, engine_pids, daemons)
+        if os.name == "nt":
+            _check_windows_stop(home)
     except SmokeFailure as exc:
         failure = exc
     finally:

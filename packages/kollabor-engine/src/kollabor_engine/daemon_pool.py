@@ -531,6 +531,16 @@ class DaemonHandle:
         deadline = time.monotonic() + timeout
         while self.alive and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
+        if self.alive:
+            logger.warning(
+                "daemon %s did not stop on request, ending pid %s",
+                self.identity,
+                self.pid,
+            )
+            try:  # and what it started since the snapshot
+                children += process_handle.children(recursive=True)
+            except psutil.Error:
+                pass
         for process in (process_handle, *children):
             try:
                 process.kill()  # psutil refuses a pid that was reused
