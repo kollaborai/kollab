@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import math
 import os
@@ -13,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import file_lock
 from .relay_state import RelayError
 
 OWNER_RECORD_LIMIT = 2048
@@ -224,9 +224,7 @@ class WorkspaceRelayOwner:
         fd = None
         try:
             fd = self._open_lock()
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+            if not file_lock.try_lock(fd):
                 os.close(fd)
                 return False
             claim = secrets.token_hex(16)
@@ -254,9 +252,7 @@ class WorkspaceRelayOwner:
         fd = None
         try:
             fd = self._open_lock()
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+            if not file_lock.try_lock(fd):
                 record = self._read_record()
                 return (
                     {key: record[key] for key in ("socket_path", "agent_id", "pid")}
@@ -264,7 +260,7 @@ class WorkspaceRelayOwner:
                     else None
                 )
             # The kernel let us take the lock, so any recorded owner is stale.
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            file_lock.unlock(fd)
             return None
         except OSError:
             raise RelayOwnerError("relay owner state is unavailable") from None
@@ -285,7 +281,7 @@ class WorkspaceRelayOwner:
                         os.fsync(self._dir_fd)
                 except (OSError, RelayOwnerError):
                     pass
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                file_lock.unlock(fd)
         finally:
             # An inherited child closes its copy without unlocking the shared
             # open-file description or removing its parent's owner record.

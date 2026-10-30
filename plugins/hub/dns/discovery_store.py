@@ -1,6 +1,5 @@
 """Origin-scoped publisher pins and revision history, separate from agent admission."""
 
-import fcntl
 import hashlib
 import json
 import os
@@ -9,6 +8,7 @@ from pathlib import Path
 
 import rfc8785
 
+from .. import file_lock
 from .discovery import (
     MAX_DOCUMENT,
     DiscoveryError,
@@ -46,7 +46,7 @@ class DiscoveryStore:
         # Lock the entire read/compare/write, not only the atomic replacement.
         fd = os.open(self.directory / f"{name}.transaction.lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            file_lock.lock(fd)
             if path.exists():
                 with path.open("rb") as stream:
                     raw = stream.read(MAX_DOCUMENT + 1)
@@ -74,5 +74,5 @@ class DiscoveryStore:
         except (OSError, json.JSONDecodeError) as exc:
             raise DiscoveryError("cache_unavailable", "could not safely persist publisher identity") from exc
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            file_lock.unlock(fd)
             os.close(fd)
