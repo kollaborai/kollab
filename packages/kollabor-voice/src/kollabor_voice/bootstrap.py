@@ -99,6 +99,10 @@ def prepared_runtime_python(root=None):
 
 
 def main() -> None:
+    # client.launch refuses off POSIX too: the service serves on AF_UNIX, and on Windows os.execv
+    # starts a new process, which would drop the setup lock taken below (#268).
+    if os.name != "posix":
+        raise SystemExit("The local voice service currently requires macOS or Linux")
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=service_root())
     args = parser.parse_args()

@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import os
 import queue
 import shutil
 import subprocess
@@ -1239,3 +1240,15 @@ async def test_ensure_never_shows_an_earlier_setup_failure(root, monkeypatch):
     seen = []
     assert await VoiceClient(root).ensure(seen.append) == {"state": "off"}
     assert [s["detail"] for s in seen] == ["Starting the voice service"]
+
+
+def test_bootstrap_refuses_off_posix(tmp_path, monkeypatch):
+    import types
+
+    from kollabor_voice import bootstrap
+
+    monkeypatch.setattr(sys, "argv", ["voice-bootstrap", "--root", str(tmp_path / "voice")])
+    monkeypatch.setattr(bootstrap, "os", types.SimpleNamespace(**{**vars(os), "name": "nt"}))
+    with pytest.raises(SystemExit, match="macOS or Linux"):
+        bootstrap.main()
+    assert not (tmp_path / "voice").exists()  # refused before any setup or lock
