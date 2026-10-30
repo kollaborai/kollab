@@ -1342,10 +1342,17 @@ async def _handle_cli_attach(identity: str) -> None:
                 data = json.load(fh)
             if data.get("identity") == identity:
                 pid = data.get("pid", 0)
-                try:
-                    os.kill(pid, 0)
-                except (OSError, ProcessLookupError):
-                    continue
+                if os.name == "nt":
+                    # os.kill(pid, 0) sends Ctrl+C on Windows
+                    from kollabor_config import proc_ctl
+
+                    if not proc_ctl.pid_alive(pid):
+                        continue
+                else:
+                    try:
+                        os.kill(pid, 0)
+                    except (OSError, ProcessLookupError):
+                        continue
                 target_socket = data.get("socket_path", "")
                 target_identity = data.get("identity", identity)
                 break
@@ -1361,10 +1368,17 @@ async def _handle_cli_attach(identity: str) -> None:
                 with open(f) as fh:
                     data = json.load(fh)
                 pid = data.get("pid", 0)
-                try:
-                    os.kill(pid, 0)
-                except (OSError, ProcessLookupError):
-                    continue
+                if os.name == "nt":
+                    # os.kill(pid, 0) sends Ctrl+C on Windows
+                    from kollabor_config import proc_ctl
+
+                    if not proc_ctl.pid_alive(pid):
+                        continue
+                else:
+                    try:
+                        os.kill(pid, 0)
+                    except (OSError, ProcessLookupError):
+                        continue
                 available.append(data.get("identity", "?"))
             except Exception:
                 continue
@@ -1521,10 +1535,17 @@ async def stop_agent_record(
     def signal_guard() -> str:
         """F15b: "" when the selected process may still be signalled, else the refusal line."""
         if pid and ident is None:
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return ""  # already gone: the signal path reports it stopped
+            if os.name == "nt":
+                # os.kill(pid, 0) sends Ctrl+C on Windows
+                from kollabor_config import proc_ctl
+
+                if not proc_ctl.pid_alive(pid):
+                    return ""  # already gone: the signal path reports it stopped
+            else:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    return ""  # already gone: the signal path reports it stopped
             return f"not killed: {desig} (pid {pid} identity could not be read)"
         if ident is not None and not same_identity(identity(pid), ident):
             return f"not killed: {desig} (pid {pid} identity changed)"

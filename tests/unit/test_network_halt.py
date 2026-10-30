@@ -205,6 +205,12 @@ def resume(m: M, net: Net, lifts, **kw):
     return nh.make_order(m.folders[0], m.key, net.id, "resume", lifts=lifts, **kw)
 
 
+def test_one_machine_network_refuses_a_halt_order():
+    n = Net()
+    taken = nh.HaltBook(n.id).take(halt(n.founder, n), n.view(), is_member=n.member)
+    assert not taken.taken and taken.reason == "fewer than two counting machines here"
+
+
 def test_resume_needs_two_counting_machines(net):
     book = nh.HaltBook(net.id)
     h = halt(net.prod, net, reason="bad agent")

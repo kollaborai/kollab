@@ -291,8 +291,13 @@ class RelayStateStore:
         self.path = state_dir or default_workspace_state_dir(workspace)
         if self.path.is_symlink():
             raise RelayError("relay state directory must not be a symbolic link")
-        self.path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.path, 0o700)
+        if os.name == "nt":  # no mode bits there: private_fs makes the folder private (#268)
+            from kollabor_config import private_fs
+
+            private_fs.ensure_private_dir(self.path)
+        else:
+            self.path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(self.path, 0o700)
         key_path = self.path / "device.key"
         try:
             descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -347,10 +352,18 @@ class RelayStateStore:
 
     @staticmethod
     def _read_private(path: Path, limit: int) -> str:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        if os.name == "nt":  # no O_NOFOLLOW, O_NONBLOCK or uid there: private_fs refuses a link or junction (#268)
+            from kollabor_config import private_fs
+
+            descriptor = private_fs.open_nofollow(path, os.O_RDONLY)
+        else:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor) as stream:
             info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            if os.name == "nt":  # owner and access list, where POSIX checks the uid and mode below
+                if not stat.S_ISREG(info.st_mode) or not private_fs.owned_private(path, info):
+                    raise RelayError("relay state files must be private to this user")
+            elif not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
                 raise RelayError("relay state files must be owned by this user with mode 0600")
             raw = stream.read(limit + 1)
             if len(raw) > limit:

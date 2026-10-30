@@ -30,12 +30,10 @@ WAITER_FALLBACK = "Network halted by another machine. Resume needs a person on t
 
 def waiter_line(socket_path: Path) -> str:
     """What a halt waiter's status socket says, e.g. "Network halted by mac. Resume needs ..."."""
-    import socket
+    from kollabor_config import local_ipc
 
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(1.0)
-            sock.connect(str(socket_path))
+        with local_ipc.connect_blocking(socket_path, 1.0) as sock:
             sock.sendall(b'{"action": "get_status"}\n')
             reply = json.loads(sock.makefile("rb").readline(65536) or b"{}")
         line = reply.get("halted") if isinstance(reply, dict) else None
