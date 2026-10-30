@@ -1235,11 +1235,19 @@ class AgentSocketServer:
                 # access to the local daemon. The same dispatcher backs the
                 # off-box listener and Unix attach/RPC transport, so enforce
                 # this boundary here before any administrative handler runs.
-                local_operator = (
-                    not require_auth
-                    and peer_cred is not None
-                    and peer_cred[1] == os.getuid()
-                )
+                if os.name == "nt":
+                    # No peer uid on Windows. Its only unauthenticated listener is
+                    # local_ipc, whose handshake proved the peer holds this user's
+                    # endpoint key (#268).
+                    from kollabor_config import local_ipc
+
+                    local_operator = not require_auth and local_ipc.peer_is_me(writer)
+                else:
+                    local_operator = (
+                        not require_auth
+                        and peer_cred is not None
+                        and peer_cred[1] == os.getuid()
+                    )
                 remote_admin = require_auth and action not in (
                     ("peer_forward", "peer_secure")
                     if carrier_only

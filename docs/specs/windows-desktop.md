@@ -4,7 +4,8 @@ Status: packaging path built, runtime port open. On windows-latest the
 `windows-smoke` workflow installs the workspace, imports every module whose
 optional packages are installed, and runs the agent smoke (`--agent-smoke`
 against the venv `kollab.exe`): a detached agent starts, shows online in
-`--hub status` and stops. The packaged binary has
+`--hub status` and stops; and an engine session opens, returns its state and
+closes (`scripts/engine_smoke.py`). The packaged binary has
 not run on Windows yet; the Windows CI job (`desktop-windows` in
 `.github/workflows/binaries.yml`) is the first place any of it will.
 
@@ -113,18 +114,21 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 
 1. **Detached start without fork.** `kollab --detached` is done (`daemon.spawn_detached_child`, through
    `proc_ctl.start_child`; proven by the agent smoke). Still forking: `fork_daemon`, the attached
-   window's own daemon, and its ready pipe. A Windows branch in `cli_main` and `kollabor/daemon.py`: start the agent as a `subprocess` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, own readiness through `_wait_for_ready`, and make `stop_daemon` and `DaemonHandle.close` use `TerminateProcess`.
+   window's own daemon, and its ready pipe. The engine starts its session daemons through
+   `proc_ctl.start_child` too (proven by the engine smoke). A Windows branch in `cli_main` and `kollabor/daemon.py`: start the agent as a `subprocess` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, own readiness through `_wait_for_ready`, and make `stop_daemon` and `DaemonHandle.close` use `TerminateProcess`.
 2. **A local IPC transport.** The hub's agent sockets are done: on Windows `AgentSocketServer` serves
    and its clients connect through `kollabor_config.local_ipc` (loopback TCP behind an endpoint file
-   at the same path, under `~/.kollab/hub-sockets`). Still AF_UNIX: the attach and rpc clients,
-   `network_attach`, voice and deep_thought. One abstraction under `kollabor_rpc` and `plugins/hub/messenger.py` for the sites in blocker 2: named pipes (`\\.\pipe\kollabor-hub-<hash>-<name>`, `ProactorEventLoop` pipe server and client) or loopback TCP with a per-agent token. Keep framing (`LOCAL_MAX_LINE_BYTES`, `LARGE_BUFFER_LIMIT`) and the owner-only access the Unix sockets get from the filesystem. Replace the `/tmp/kollabor-hub` constants with a per-user directory. Design: `local_ipc` in `docs/specs/windows-platform-helpers.md`.
+   at the same path, under `~/.kollab/hub-sockets`). The engine's daemon connection
+   (`daemon_pool`) and its hub queries (`hub_bridge`) use it too. Still AF_UNIX: the attached
+   window's client (`attach_client.py`), `network_attach`, voice, deep_thought and the halt
+   waiter's status socket (`hub_bridge.waiter_line`). One abstraction under `kollabor_rpc` and `plugins/hub/messenger.py` for the sites in blocker 2: named pipes (`\\.\pipe\kollabor-hub-<hash>-<name>`, `ProactorEventLoop` pipe server and client) or loopback TCP with a per-agent token. Keep framing (`LOCAL_MAX_LINE_BYTES`, `LARGE_BUFFER_LIMIT`) and the owner-only access the Unix sockets get from the filesystem. Replace the `/tmp/kollabor-hub` constants with a per-user directory. Design: `local_ipc` in `docs/specs/windows-platform-helpers.md`.
 3. **One file-lock helper.** Mostly done (voice and OAuth token storage remain, below). `kollabor_config.file_lock` (`lock`, `try_lock`, `unlock`, `locked_file`) keeps `flock` semantics on both platforms, and its tests run on a Windows runner (`.github/workflows/windows-locks.yml`, #414).
    - Every lock in the hub plugin's coordinator, Telegram bridge, task ledger, service locator, private directory and enrollment, and in the engine's handover, MCP settings, sidebar order and PhoneLink, goes through it.
    - The kill switch (`halt_runtime.py`, #423) and the relay and dns files (`relay_owner.py`, `relay_runtime.py`, `relay_selfhost.py`, `dns/storage.py`, `dns/discovery_store.py`, `dns/discovery_publish.py`, #424) lock through `plugins/hub/file_lock.py`, a stdlib-only copy the headless relay ships. `tests/unit/test_hub_file_lock.py` keeps it byte-identical and keeps `fcntl` out of those seven files. The kill switch module loads on Windows (`windows-locks.yml` imports it).
    - Still on `fcntl`: `kollabor_voice` (`bootstrap.py`, `service.py`, `classifiers.py`, `speech_settings.py`) and `kollabor_ai/oauth/token_storage.py`, whose packages do not depend on `kollabor-config` yet.
    - The Docker kill-switch harness (`tests/docker/kill_switch/`) has not been rerun since the lock swap. The kill switch's other Unix-only calls (`os.O_NOFOLLOW` in `_lock_fd`, `os.pwrite` in `HaltListener.take_lock`, AF_UNIX, `/bin/ps -U`, `killpg`) move to the helpers in `docs/specs/windows-platform-helpers.md`.
 4. **`os.getuid()` and private files.** `current_user_id()` (Windows: the user SID) for the `os.getuid()` calls, and owner, DACL and no-follow checks for the owner and mode sites: `private_fs` in `docs/specs/windows-platform-helpers.md`.
-5. **Signals and trees.** Job Objects for agent and shell trees in place of `killpg`; `SIGKILL` becomes `TerminateProcess`; replace `add_signal_handler` with `signal.signal` or console control handlers. Design: `proc_ctl` in `docs/specs/windows-platform-helpers.md` (`pid_alive` replaces every `os.kill(pid, 0)` probe, which on Windows sends Ctrl+C).
+5. **Signals and trees.** The engine's session stop is done: it asks the daemon to shut down over local IPC, then ends it and the processes it started (`DaemonHandle._stop_windows`, proven by the engine smoke). Job Objects for agent and shell trees in place of `killpg`; `SIGKILL` becomes `TerminateProcess`; replace `add_signal_handler` with `signal.signal` or console control handlers. Design: `proc_ctl` in `docs/specs/windows-platform-helpers.md` (`pid_alive` replaces every `os.kill(pid, 0)` probe, which on Windows sends Ctrl+C).
 6. **Agent shell.** Decide the Windows shell for agent tools (Git Bash, PowerShell, WSL) and wire `shell_executor`, `shell_utils`, `prompt_renderer` and `acp_bridge`; tmux features stay Unix-only.
 7. **No browser tab.** Done: `kollabor_webui.main()` opens no tab when `KOLLAB_WEBUI_NO_BROWSER` is set, and the desktop sets it.
 8. **Desktop.** Graceful stop (an engine shutdown request, or Job Object `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` plus a console-free Ctrl+Break) instead of `taskkill /F`; confirm that WebView2 raises `on_navigation` for the `kollab-desktop://` report and update links; a Windows updater (`updater.rs` is macOS only: the prompt offers the release page elsewhere); GUI automation for clean Quit in `check_desktop_package_windows.py`, which today ends the app with `taskkill`.
@@ -135,7 +139,7 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 | # | Item | State |
 | --- | --- | --- |
 | 1 | Document the blockers | Done (this file). |
-| 2 | Packaged CLI and engine run on Windows x86_64 | The CLI binary builds and smoke-tests in the job (unverified on a runner). The agent runtime does not run natively: port work 1 to 7. |
+| 2 | Packaged CLI and engine run on Windows x86_64 | The CLI binary builds and smoke-tests in the job (unverified on a runner). From the workspace venv on windows-latest, a detached agent and an engine session run (`windows-smoke`); the rest of port work 1 to 7 is open. |
 | 3 | NSIS/MSI in the tag-triggered workflow, checksums, manifest | Built; released only once the gate passes; manifest pair optional until promotion. |
 | 4 | CI smoke: install, launch, render, close and relaunch, clean quit | Install, launch, render, close, relaunch: written, unverified. Clean quit: not done (port work 8). |
 | 5 | Unsigned, SmartScreen notes | Done (`desktop/README.md`). |
@@ -145,7 +149,8 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 
 The `windows-smoke` workflow runs on windows-latest from the workspace venv:
 every module whose optional packages are installed imports (numpy and a2a are
-not, so 8 modules are skipped), and `--agent-smoke` passes against
-`.venv\Scripts\kollab.exe`.
+not, so 8 modules are skipped), `--agent-smoke` passes against
+`.venv\Scripts\kollab.exe`, and `scripts/engine_smoke.py` opens a session through
+the engine, gets its state and closes it, leaving no process behind.
 Not yet run on Windows: the packaged binary, the Windows-gated Rust (the build
 host is macOS with no Windows target), and the desktop app.

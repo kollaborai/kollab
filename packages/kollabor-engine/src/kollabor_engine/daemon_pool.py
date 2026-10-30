@@ -190,9 +190,25 @@ class DaemonHandle:
         from kollabor_rpc import RpcClient, open_unix_connection_with_large_buffer
 
         self.socket_path = socket_path
-        self._reader, self._writer = await open_unix_connection_with_large_buffer(
-            socket_path
-        )
+        if os.name == "nt":
+            # An endpoint file naming a loopback port; local_ipc checks it is ours
+            # and runs the handshake (#268).
+            from kollabor_config import local_ipc
+            from kollabor_rpc.transport import LARGE_BUFFER_LIMIT
+
+            try:
+                self._reader, self._writer = await local_ipc.connect(
+                    socket_path, limit=LARGE_BUFFER_LIMIT
+                )
+            except (ConnectionError, TimeoutError, PermissionError) as exc:
+                # Not listening yet, reset mid-handshake, or the endpoint file being
+                # replaced: the spawn loop retries ConnectionRefusedError until its
+                # deadline.
+                raise ConnectionRefusedError(str(exc)) from exc
+        else:
+            self._reader, self._writer = await open_unix_connection_with_large_buffer(
+                socket_path
+            )
 
         request = (
             json.dumps(
@@ -345,6 +361,10 @@ class DaemonHandle:
         if self.process_started_at is not None:
             return _pid_matches_start_time(self.pid, self.process_started_at)
 
+        if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C there (#268)
+            from kollabor_config import proc_ctl
+
+            return proc_ctl.pid_alive(self.pid)
         try:
             os.kill(self.pid, 0)
         except ProcessLookupError:
@@ -443,6 +463,12 @@ class DaemonHandle:
         if self.pid and self.alive:
             if process_handle is None:
                 return
+            if os.name == "nt":
+                await self._stop_windows(process_handle, timeout)
+                logger.info(
+                    "daemon %s stopped (session %s)", self.identity, self.session_id
+                )
+                return
             try:
                 process_handle.send_signal(signal.SIGTERM)
             except psutil.NoSuchProcess:
@@ -480,6 +506,60 @@ class DaemonHandle:
                     )
 
         logger.info("daemon %s stopped (session %s)", self.identity, self.session_id)
+
+    async def _stop_windows(
+        self, process_handle: psutil.Process, timeout: float
+    ) -> None:
+        """Ask the daemon to shut down, then end it and every process it started.
+
+        On Windows psutil's SIGTERM is TerminateProcess: the daemon gets no cleanup
+        and its children, such as stdio MCP servers, would outlive it (#268).
+        """
+        try:
+            children = process_handle.children(recursive=True)
+        except psutil.Error:
+            children = []
+        if self.socket_path:
+            from plugins.hub.messenger import AgentMessenger
+
+            try:
+                await AgentMessenger.signal_shutdown(
+                    self.socket_path, reason="session closed"
+                )
+            except Exception as exc:
+                logger.debug("shutdown request to %s failed: %s", self.identity, exc)
+        deadline = time.monotonic() + timeout
+        while self.alive and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        if self.alive:
+            logger.warning(
+                "daemon %s did not stop on request, ending pid %s",
+                self.identity,
+                self.pid,
+            )
+            try:  # and what it started since the snapshot
+                children += process_handle.children(recursive=True)
+            except psutil.Error:
+                pass
+        for process in (process_handle, *children):
+            try:
+                process.kill()  # psutil refuses a pid that was reused
+            except psutil.NoSuchProcess:
+                pass
+            except psutil.Error as exc:
+                logger.warning(
+                    "could not end pid %s of daemon %s: %s",
+                    process.pid,
+                    self.identity,
+                    exc,
+                )
+        kill_deadline = time.monotonic() + 2.0
+        while time.monotonic() < kill_deadline and self.alive:
+            await asyncio.sleep(0.05)
+        if self.alive:
+            raise RuntimeError(
+                f"daemon {self.identity} (pid {self.pid}) remained alive after it was ended"
+            )
 
 
 class DaemonPool:
@@ -676,14 +756,18 @@ class DaemonPool:
             folder = os.path.realpath(cwd)
             self._starting[session_id] = (identity_name, folder)
             try:
-                process = subprocess.Popen(
+                from kollabor_config import proc_ctl
+
+                # Its own session on POSIX; on Windows its own process group, outside
+                # the engine's job, so it outlives the engine as a setsid'd daemon does (#268).
+                process = proc_ctl.start_child(
                     argv,
+                    detached=True,
                     cwd=cwd,
                     env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    start_new_session=True,
                 )
 
                 handle = DaemonHandle(session_id, identity_name, process)

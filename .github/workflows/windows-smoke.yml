@@ -45,3 +45,6 @@ jobs:
       # The #268 gate: a detached agent starts, shows online in `kollab --hub status`, and stops.
       - name: Agent smoke
         run: uv run python scripts/build_binary.py --agent-smoke .venv/Scripts/kollab.exe
+
+      - name: Engine smoke
+        run: uv run python scripts/engine_smoke.py
