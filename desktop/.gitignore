@@ -4,3 +4,4 @@ node_modules/
 dist/
 src-tauri/binaries/
 src-tauri/tauri.release.json
+.kotlin/
