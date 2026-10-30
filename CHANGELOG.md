@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Windows: the desktop app quits gracefully. Quit closes the runtime's stdin,
+  and `kollab --web-ui` stops its UI server and engine with Ctrl+Break, so the
+  engine shuts down cleanly; `taskkill` is only the fallback after 10 s. A
+  second launch with `--quit` quits the running app, and the installer smoke
+  uses it to check a clean Quit (#268).
 - Windows: stopping a background process ends everything it started, the
   ChatGPT sign-in token store takes a real file lock, opening an agent on
   another device uses local IPC, and a bare `kollab` runs in-process instead

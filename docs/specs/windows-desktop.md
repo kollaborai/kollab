@@ -65,7 +65,7 @@ dependency). Now:
 | `bundled_kollab` / `windows_bundled_kollab` | `runtime\kollab.exe` beside `kollab-desktop.exe`, where NSIS puts the staged resource. |
 | `installed_kollab` | `where.exe kollab.exe` (a GUI app gets the user's PATH from Explorer), then `~\.local\bin\kollab.exe`. |
 | `spawn_webui` | `CREATE_NO_WINDOW`; working directory `%USERPROFILE%`. |
-| `child_exited`, `stop_child` | `Child::try_wait` (the open handle keeps the id from naming another process); `taskkill /PID n /T /F`, then wait up to 5 s. Forceful, unlike SIGINT then SIGTERM: a GUI parent has no console for Ctrl+C. |
+| `child_exited`, `stop_child` | `Child::try_wait` (the open handle keeps the id from naming another process). Stop closes the runtime's stdin; `kollab --web-ui` then stops its UI server and engine with Ctrl+Break, each in its own process group, and exits. After 10 s, `taskkill /PID n /T /F` is the fallback, then a wait of up to 5 s. |
 | `quit_on_signals` | `tokio::signal::ctrl_c`. |
 | `STATUS_PAGE`, `allowed_in_window` | WebView2 serves the app's files from `http://tauri.localhost/`, not `tauri://localhost/`. |
 | `windows_subsystem = "windows"` | A release build opens no console window. |
@@ -135,7 +135,7 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 5. **Signals and trees.** The engine's session stop is done: it asks the daemon to shut down over local IPC, then ends it and the processes it started (`DaemonHandle._stop_windows`, proven by the engine smoke). Background processes (`process_manager`) stop as a tree through `proc_ctl.kill_tree`, and the tool-shell liveness check (`shell_executor._group_alive`) uses `proc_ctl.pid_alive`, since `os.kill(pid, 0)` ends a process on Windows. Job Objects for agent and shell trees in place of `killpg`; `SIGKILL` becomes `TerminateProcess`; replace `add_signal_handler` with `signal.signal` or console control handlers. Design: `proc_ctl` in `docs/specs/windows-platform-helpers.md` (`pid_alive` replaces every `os.kill(pid, 0)` probe, which on Windows sends Ctrl+C).
 6. **Agent shell.** Decide the Windows shell for agent tools (Git Bash, PowerShell, WSL) and wire `shell_executor`, `shell_utils`, `prompt_renderer` and `acp_bridge`; tmux features stay Unix-only.
 7. **No browser tab.** Done: `kollabor_webui.main()` opens no tab when `KOLLAB_WEBUI_NO_BROWSER` is set, and the desktop sets it.
-8. **Desktop.** Graceful stop (an engine shutdown request, or Job Object `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` plus a console-free Ctrl+Break) instead of `taskkill /F`; confirm that WebView2 raises `on_navigation` for the `kollab-desktop://` report and update links; a Windows updater (`updater.rs` is macOS only: the prompt offers the release page elsewhere); GUI automation for clean Quit in `check_desktop_package_windows.py`, which today ends the app with `taskkill`.
+8. **Desktop.** Graceful stop done: the app starts the runtime with a stdin pipe and `KOLLAB_STOP_ON_STDIN_EOF=1`, Quit closes it, and `kollab --web-ui` stops its UI server and engine with Ctrl+Break (each in its own process group), so the engine runs its shutdown; `taskkill /T /F` after 10 s is the fallback. A second launch with `--quit` quits the running app, which `check_desktop_package_windows.py` uses for a clean Quit with no GUI automation. WebView2 raises `on_navigation` for the `kollab-desktop://` report (the smoke's render check). Open: a Windows updater (`updater.rs` is macOS only: the prompt offers the release page elsewhere).
 9. When 1 to 5 land, `--agent-smoke` passes unchanged; then promote, as above.
 
 ## Issue #268 acceptance, as of this change
@@ -143,9 +143,9 @@ the counts in `docs/release-process.md` and `desktop/README.md`.
 | # | Item | State |
 | --- | --- | --- |
 | 1 | Document the blockers | Done (this file). |
-| 2 | Packaged CLI and engine run on Windows x86_64 | The CLI binary builds and smoke-tests in the job (unverified on a runner). From the workspace venv on windows-latest, a detached agent and an engine session run (`windows-smoke`); the rest of port work 1 to 7 is open. |
+| 2 | Packaged CLI and engine run on Windows x86_64 | The CLI binary passes `--agent-smoke` on windows-latest (binaries run 41052290042), and from the workspace venv a detached agent and an engine session run (`windows-smoke`). Port work 3 to 6 is still open: the voice lock, the network's private files, the kill switch, the agent shell. |
 | 3 | NSIS/MSI in the tag-triggered workflow, checksums, manifest | Built; released only once the gate passes; manifest pair optional until promotion. |
-| 4 | CI smoke: install, launch, render, close and relaunch, clean quit | Install, launch, render, close, relaunch: written, unverified. Its first run (binaries run 41048374984) stopped one step earlier: checksum files were written with CRLF, so `sha256sum -c` could not find the installer; `write_checksum` now writes LF. Clean quit: not done (port work 8). |
+| 4 | CI smoke: install, launch, render, close and relaunch, clean quit | Install, launch, render, close to the tray and relaunch passed on windows-latest (binaries runs 41052290042 and 41055194942). Clean quit: a second launch with `--quit` ends the app, and the app's own runtime stops through its stdin with no runtime process left (port work 8). |
 | 5 | Unsigned, SmartScreen notes | Done (`desktop/README.md`). |
 | 6 | Docs list Windows | Done (`desktop/README.md`, `docs/release-process.md`). |
 
@@ -156,5 +156,6 @@ every module whose optional packages are installed imports (numpy and a2a are
 not, so 8 modules are skipped), `--agent-smoke` passes against
 `.venv\Scripts\kollab.exe`, and `scripts/engine_smoke.py` opens a session through
 the engine, gets its state and closes it, leaving no process behind.
-Not yet run on Windows: the packaged binary, the Windows-gated Rust (the build
-host is macOS with no Windows target), and the desktop app.
+The packaged binary, the Windows-gated Rust and the installed desktop app run
+on windows-latest in `binaries.yml`; nothing has run on a person's Windows
+machine yet.

@@ -2220,6 +2220,17 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
     """SIGTERM a child Popen, escalating to SIGKILL if it won't die."""
     if proc is None or proc.poll() is not None:
         return
+    if os.name == "nt":
+        # CTRL_BREAK asks the child to shut down gracefully (SIGBREAK) before we force it.
+        import signal
+        import subprocess
+
+        try:
+            os.kill(proc.pid, signal.CTRL_BREAK_EVENT)
+            proc.wait(timeout=10)
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     proc.terminate()
     try:
         proc.wait(timeout=timeout)
@@ -2229,6 +2240,14 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
             proc.wait(timeout=timeout)
         except Exception:
             pass
+
+
+def _stop_on_stdin_eof() -> None:
+    """Interrupt the main thread once stdin reaches end-of-file (the desktop app closing it)."""
+    import _thread
+
+    sys.stdin.buffer.read()
+    _thread.interrupt_main()
 
 
 def _webui_engine_port(webui_port: int) -> Optional[int]:
@@ -2415,6 +2434,7 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     import json
     import socket
     import subprocess
+    import threading
     import time
     import urllib.error
     import urllib.request
@@ -2492,12 +2512,19 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     py = [sys.executable]
     if sys.flags.isolated:
         py += ["-I", "-B", *(["-u"] if os.environ.get("PYTHONUNBUFFERED") else [])]
+    # Windows: a process group of their own, so CTRL_BREAK reaches only these children.
+    group_flags = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        if os.name == "nt"
+        else {}
+    )
     engine_proc = None
     if reuse:
         print(f"  (reusing engine already running on {engine_port})")
     else:
         engine_proc = subprocess.Popen(
-            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)]
+            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
+            **group_flags,
         )
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not engine_healthy():
@@ -2514,7 +2541,7 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     env["KOLLAB_ENGINE_URL"] = engine_url
     env["KOLLAB_WEBUI_PORT"] = str(webui_port)
     webui_proc = subprocess.Popen(
-        [*py, "-c", "from kollabor_webui import main; main()"], env=env
+        [*py, "-c", "from kollabor_webui import main; main()"], env=env, **group_flags
     )
 
     import signal as signal_module
@@ -2527,8 +2554,16 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     # kills the process without running `finally` -- orphaning both children.
     # Route it through the same path so cleanup always runs.
     previous_sigterm = signal_module.signal(signal_module.SIGTERM, _on_sigterm)
+    # The desktop app closes our stdin to quit; EOF takes the Ctrl+C path below.
+    if os.name == "nt" and os.environ.get("KOLLAB_STOP_ON_STDIN_EOF") == "1":
+        threading.Thread(target=_stop_on_stdin_eof, daemon=True).start()
     try:
-        webui_proc.wait()
+        if os.name == "nt":
+            # Windows: Popen.wait() ignores Ctrl+C and interrupt_main; poll instead.
+            while webui_proc.poll() is None:
+                time.sleep(0.5)
+        else:
+            webui_proc.wait()
     except KeyboardInterrupt:
         pass
     finally:

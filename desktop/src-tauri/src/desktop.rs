@@ -343,6 +343,9 @@ fn spawn_webui(kollab: &Path, log: &Path) -> std::io::Result<Child> {
     }
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
+    // Windows: stdin stays open until stop_child closes it, which asks the runtime to stop.
+    #[cfg(windows)]
+    command.stdin(Stdio::piped()).env("KOLLAB_STOP_ON_STDIN_EOF", "1");
     command.spawn()
 }
 
@@ -570,13 +573,25 @@ fn child_exited(child: &mut Child) -> std::io::Result<bool> {
 }
 
 /// Windows has no process groups to signal, and a GUI parent has no console to
-/// send Ctrl+C through, so the owned tree (the CLI, its engine and its UI server)
-/// ends with `taskkill /T /F` on the child this app still holds. That is forceful,
-/// unlike the SIGINT-then-SIGTERM stop on macOS and Linux; a graceful stop is a
-/// follow-up (docs/specs/windows-desktop.md).
+/// send Ctrl+C through. The runtime is first asked to stop by closing its stdin
+/// (KOLLAB_STOP_ON_STDIN_EOF=1); if it has not exited within 10 s, the owned tree
+/// (the CLI, its engine and its UI server) ends with `taskkill /T /F` on the child
+/// this app still holds. That fallback is forceful, unlike the SIGINT-then-SIGTERM
+/// stop on macOS and Linux (docs/specs/windows-desktop.md).
 #[cfg(windows)]
 fn stop_child(child: &mut Child) -> std::io::Result<bool> {
     if child_exited(child)? { return Ok(true); }
+    drop(child.stdin.take());
+    eprintln!("kollab-desktop: asked the runtime to stop (stdin closed)");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if child_exited(child)? {
+            eprintln!("kollab-desktop: runtime stopped after stdin closed");
+            return Ok(true);
+        }
+        if Instant::now() >= deadline { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     eprintln!("kollab-desktop: stopping owned process tree {}", child.id());
     let killed = hidden(Command::new("taskkill.exe"))
         .args(["/PID", &child.id().to_string(), "/T", "/F"])
@@ -936,7 +951,11 @@ fn retry(app: AppHandle) {
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|arg| arg == "--quit") {
+                eprintln!("kollab-desktop: second launch asked to quit");
+                return exit_now(app);
+            }
             eprintln!("kollab-desktop: second launch, focusing the existing window");
             show_window(app);
         }))
