@@ -408,6 +408,8 @@ def kill_tree(
         # access denied or already gone: keep going with the rest of the tree
         try:
             _win_terminate(member)
+        except ProcessLookupError:
+            logger.debug("kill_tree: pid %s already exited", member)
         except OSError as exc:
             logger.warning("kill_tree: could not end pid %s: %s", member, exc)
 

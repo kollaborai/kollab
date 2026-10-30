@@ -57,7 +57,7 @@ def test_windows_branch_stops_the_tree_with_kill_tree(monkeypatch):
     proc = FakeProc()
 
     assert asyncio.run(SubprocessStrategy().kill(proc)) is True
-    assert calls == [(proc.pid, proc_ctl.SOFT)]
+    assert calls == [(proc.pid, proc_ctl.HARD)]
     assert not proc.terminated
 
 
@@ -70,7 +70,7 @@ def test_windows_timeout_escalates_with_hard_kill_tree(monkeypatch):
     proc = FakeProc(first_wait_times_out=True)
 
     assert asyncio.run(SubprocessStrategy().kill(proc)) is True
-    assert calls == [(proc.pid, proc_ctl.SOFT), (proc.pid, proc_ctl.HARD)]
+    assert calls == [(proc.pid, proc_ctl.HARD), (proc.pid, proc_ctl.HARD)]
     assert not proc.killed
 
 

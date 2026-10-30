@@ -36,7 +36,8 @@ START_DRIFT = 2.0
 def _group_alive(pid: int) -> bool:
     """The shell or anything left in its process group still runs (a tool shell leads its group)."""
     if os.name == "nt":
-        # No process groups on Windows, and os.kill(pid, 0) would terminate the process there.
+        # No process groups on Windows (only the shell itself is checked), and os.kill(pid, 0)
+        # would terminate the process there.
         return proc_ctl.pid_alive(pid)
     for check in (os.kill, os.killpg):
         try:

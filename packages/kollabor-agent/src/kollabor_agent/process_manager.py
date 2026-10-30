@@ -370,9 +370,10 @@ class SubprocessStrategy(SpawnStrategy):
         try:
             # Kill the entire process group (sessions use start_new_session=True)
             if os.name == "nt":
-                # Windows has no process groups: proc_ctl ends the process tree
+                # Windows has no process groups and no polite stop signal for this child:
+                # proc_ctl ends the process tree at once
                 try:
-                    await asyncio.to_thread(proc_ctl.kill_tree, proc.pid, proc_ctl.SOFT)
+                    await asyncio.to_thread(proc_ctl.kill_tree, proc.pid, proc_ctl.HARD)
                 except (ProcessLookupError, PermissionError, OSError):
                     proc.terminate()
             else:
