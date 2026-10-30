@@ -2757,6 +2757,7 @@ def cli_main() -> None:
             SERVICE_ENV,
             SERVICE_PID_ENV,
             exec_detached_child,
+            spawn_detached_child,
         )
 
         if os.environ.pop(DETACHED_CHILD_ENV, "") == "1":
@@ -2772,6 +2773,12 @@ def cli_main() -> None:
             os.dup2(devnull, 0)  # stdin
             os.dup2(devnull, 1)  # stdout
             os.close(devnull)
+        elif os.name == "nt":
+            # Windows has no fork: a detached copy starts with DETACHED_CHILD_ENV set
+            # and takes the first branch above (#268).
+            sys.stdout.write(f"[detached] pid {spawn_detached_child(sys.argv)}\n")
+            sys.stdout.flush()
+            sys.exit(0)
         else:
             pid = os.fork()
             if pid > 0:
