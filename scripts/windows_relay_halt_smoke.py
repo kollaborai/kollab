@@ -468,8 +468,8 @@ def main() -> int:
         print(traceback.format_exc())
         for path in [*sorted(base.rglob("kollab.log")), base / "relay.log", *logs.values()]:
             if path.exists():
-                print(f"--- last 60 lines of {path}")
-                print("\n".join(path.read_text(errors="replace").splitlines()[-60:]))
+                print(f"--- last 200 lines of {path}")
+                print("\n".join(path.read_text(errors="replace").splitlines()[-200:]))
         raise
     finally:
         for name in ("a", "b"):  # every home's kollabs, then the homes themselves
