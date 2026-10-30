@@ -39,10 +39,18 @@ class RelayOwnerError(RelayError):
     """Fixed, operator-safe ownership or local forwarding failure."""
 
 
-def _private_regular(info: os.stat_result) -> bool:
+def _private_regular(info: os.stat_result, path: Path) -> bool:
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if os.name == "nt":  # owner and ACL, where POSIX checks the uid and mode below
+        from kollabor_config import private_fs
+
+        try:
+            return private_fs.owned_private(path, info)
+        except OSError:
+            return False
     return (
-        stat.S_ISREG(info.st_mode)
-        and info.st_uid == os.getuid()
+        info.st_uid == os.getuid()
         and stat.S_IMODE(info.st_mode) & 0o077 == 0
         and info.st_nlink == 1
     )
@@ -75,6 +83,15 @@ def _json_object(raw: bytes, limit: int) -> dict:
 
 
 def _socket_path(value: str) -> Path:
+    if os.name == "nt":  # a loopback endpoint file, not a Unix socket
+        if (
+            not isinstance(value, str)
+            or not os.path.isabs(value)
+            or "\x00" in value
+            or len(value) > 240
+        ):
+            raise RelayOwnerError("relay owner requires an absolute socket path")
+        return Path(value)
     if (
         not isinstance(value, str)
         or not value.startswith("/")
@@ -93,8 +110,6 @@ class WorkspaceRelayOwner:
     """
 
     def __init__(self, workspace: Path, state_dir: Path | None = None):
-        if os.name == "nt":  # its folder, lock and socket checks are POSIX-only (#268): no network runs there yet
-            raise RelayOwnerError("relay ownership is not available on Windows yet")
         from .relay_state import default_workspace_state_dir
 
         self.state_dir = state_dir or default_workspace_state_dir(workspace)
@@ -104,51 +119,71 @@ class WorkspaceRelayOwner:
         self._pid = os.getpid()
         try:
             self.state_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-            info = self.state_dir.lstat()
-            if (
-                not stat.S_ISDIR(info.st_mode)
-                or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) & 0o077
-            ):
-                raise RelayOwnerError(
-                    "relay owner directory must be private and owned by this user"
-                )
+            if os.name == "nt":  # owner and ACL, where POSIX checks the uid and mode
+                from kollabor_config import private_fs
+
+                private_fs.ensure_private_dir(self.state_dir)
+            else:
+                info = self.state_dir.lstat()
+                if (
+                    not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077
+                ):
+                    raise RelayOwnerError(
+                        "relay owner directory must be private and owned by this user"
+                    )
             # Pin the checked directory for all lock/record operations. O_NOFOLLOW
             # rejects a symlink substituted between lstat and open.
-            self._dir_fd = os.open(
-                self.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-            )
-            opened = os.fstat(self._dir_fd)
-            if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
-                os.close(self._dir_fd)
-                del self._dir_fd
-                raise RelayOwnerError("relay owner directory changed while opening")
+            if os.name == "nt":  # no O_DIRECTORY/O_NOFOLLOW on nt
+                self._dir_fd = None
+            else:
+                self._dir_fd = os.open(
+                    self.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                )
+                opened = os.fstat(self._dir_fd)
+                if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+                    os.close(self._dir_fd)
+                    del self._dir_fd
+                    raise RelayOwnerError("relay owner directory changed while opening")
         except OSError:
             raise RelayOwnerError("relay owner directory is unavailable") from None
 
     def _open_lock(self) -> int:
-        fd = os.open(
-            "relay-owner.lock",
-            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600,
-            dir_fd=self._dir_fd,
-        )
-        if not _private_regular(os.fstat(fd)):
+        path = self.state_dir / "relay-owner.lock"
+        if os.name == "nt":  # open_nofollow refuses reparse points
+            from kollabor_config import private_fs
+
+            fd = private_fs.open_nofollow(path, os.O_RDWR | os.O_CREAT, 0o600)
+        else:
+            fd = os.open(
+                "relay-owner.lock",
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                0o600,
+                dir_fd=self._dir_fd,
+            )
+        if not _private_regular(os.fstat(fd), path):
             os.close(fd)
             raise RelayOwnerError("relay owner lock must be a private regular file")
         return fd
 
     def _read_record(self) -> dict | None:
+        path = self.state_dir / "relay-owner.json"
         try:
-            fd = os.open(
-                "relay-owner.json",
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                dir_fd=self._dir_fd,
-            )
+            if os.name == "nt":  # open_nofollow refuses reparse points
+                from kollabor_config import private_fs
+
+                fd = private_fs.open_nofollow(path, os.O_RDONLY)
+            else:
+                fd = os.open(
+                    "relay-owner.json",
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=self._dir_fd,
+                )
         except FileNotFoundError:
             return None
         with os.fdopen(fd, "rb") as stream:
-            if not _private_regular(os.fstat(stream.fileno())):
+            if not _private_regular(os.fstat(stream.fileno()), path):
                 raise RelayOwnerError(
                     "relay owner record must be a private regular file"
                 )
@@ -168,15 +203,22 @@ class WorkspaceRelayOwner:
         return data
 
     def _write_record(self, record: dict) -> None:
+        if os.name == "nt":  # full paths, no dir_fd on nt
+            from kollabor_config import private_fs
+
         # Reject unsafe prior records, rather than overwriting a symlink or an
         # object owned by another user. A valid stale record may be replaced.
+        path = self.state_dir / "relay-owner.json"
         try:
-            prior = os.stat(
-                "relay-owner.json", dir_fd=self._dir_fd, follow_symlinks=False
-            )
+            if os.name == "nt":  # follow_symlinks works; only dir_fd is POSIX-only
+                prior = os.stat(path, follow_symlinks=False)
+            else:
+                prior = os.stat(
+                    "relay-owner.json", dir_fd=self._dir_fd, follow_symlinks=False
+                )
         except FileNotFoundError:
             prior = None
-        if prior is not None and not _private_regular(prior):
+        if prior is not None and not _private_regular(prior, path):
             raise RelayOwnerError("relay owner record must be a private regular file")
         raw = (
             json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
@@ -185,27 +227,39 @@ class WorkspaceRelayOwner:
         if len(raw) > OWNER_RECORD_LIMIT:
             raise RelayOwnerError("relay owner record exceeds the size limit")
         name = ".relay-owner-" + secrets.token_hex(12)
-        fd = os.open(
-            name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=self._dir_fd,
-        )
+        if os.name == "nt":
+            fd = private_fs.open_nofollow(
+                self.state_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+        else:
+            fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=self._dir_fd,
+            )
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(
-                name,
-                "relay-owner.json",
-                src_dir_fd=self._dir_fd,
-                dst_dir_fd=self._dir_fd,
-            )
-            os.fsync(self._dir_fd)
+            if os.name == "nt":  # atomic on nt; fails if the destination is open
+                os.replace(self.state_dir / name, path)
+            else:
+                os.replace(
+                    name,
+                    "relay-owner.json",
+                    src_dir_fd=self._dir_fd,
+                    dst_dir_fd=self._dir_fd,
+                )
+            if self._dir_fd is not None:
+                os.fsync(self._dir_fd)
         finally:
             try:
-                os.unlink(name, dir_fd=self._dir_fd)
+                if os.name == "nt":
+                    os.unlink(self.state_dir / name)
+                else:
+                    os.unlink(name, dir_fd=self._dir_fd)
             except FileNotFoundError:
                 pass
 
@@ -279,8 +333,11 @@ class WorkspaceRelayOwner:
                 try:
                     record = self._read_record()
                     if record and record.get("claim") == self._claim:
-                        os.unlink("relay-owner.json", dir_fd=self._dir_fd)
-                        os.fsync(self._dir_fd)
+                        if os.name == "nt":
+                            os.unlink(self.state_dir / "relay-owner.json")
+                        else:
+                            os.unlink("relay-owner.json", dir_fd=self._dir_fd)
+                            os.fsync(self._dir_fd)
                 except (OSError, RelayOwnerError):
                     pass
                 file_lock.unlock(fd)
@@ -293,7 +350,7 @@ class WorkspaceRelayOwner:
     def __del__(self):
         try:
             self.release()
-            if hasattr(self, "_dir_fd"):
+            if getattr(self, "_dir_fd", None) is not None:
                 os.close(self._dir_fd)
         except (OSError, AttributeError):
             pass
@@ -314,11 +371,7 @@ async def local_relay_rpc(
     Authentication is strict; missing credentials never downgrade the server.
     Exceptions are fixed strings and never include request data or remote errors.
     """
-    if os.name == "nt":  # a Unix socket with POSIX owner checks (#268)
-        raise RelayOwnerError("relay local RPC is not available on Windows yet")
     from kollabor_rpc.models import RpcRequest, new_request_id
-
-    from .messenger import AgentSocketServer
 
     path = _socket_path(socket_path)
     if (
@@ -348,36 +401,51 @@ async def local_relay_rpc(
     if len(raw) > RPC_REQUEST_LIMIT:
         raise RelayOwnerError("relay local RPC request exceeds the size limit")
 
+    from kollabor_config import local_ipc
+
     writer = None
     try:
-        info = path.lstat()
-        if (
-            not stat.S_ISSOCK(info.st_mode)
-            or info.st_uid != os.getuid()
-            or stat.S_IMODE(info.st_mode) & 0o077
-        ):
-            raise RelayOwnerError(
-                "relay local RPC requires a private socket owned by this user"
-            )
+        if os.name == "nt":  # endpoint file: a private regular file, not S_ISSOCK
+            info = path.lstat()
+            if not _private_regular(info, path):
+                raise RelayOwnerError(
+                    "relay local RPC requires a private socket owned by this user"
+                )
+        else:
+            info = path.lstat()
+            if (
+                not stat.S_ISSOCK(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o077
+            ):
+                raise RelayOwnerError(
+                    "relay local RPC requires a private socket owned by this user"
+                )
         async with asyncio.timeout(timeout):
-            reader, writer = await asyncio.open_unix_connection(
+            reader, writer = await local_ipc.connect(
                 str(path), limit=RPC_RESPONSE_LIMIT
             )
-            connected_info = path.lstat()
-            if (connected_info.st_dev, connected_info.st_ino) != (
-                info.st_dev,
-                info.st_ino,
-            ):
-                raise RelayOwnerError("relay local RPC socket changed while connecting")
-            credentials = AgentSocketServer._get_peer_credentials(writer)
-            if credentials is None and sys.platform in {"linux", "darwin"}:
-                raise RelayOwnerError(
-                    "relay local RPC peer credentials could not be verified"
-                )
-            if credentials is not None and credentials[1] != os.getuid():
-                raise RelayOwnerError(
-                    "relay local RPC peer has a different user identity"
-                )
+            if os.name != "nt":  # the endpoint key already binds file to server on nt
+                connected_info = path.lstat()
+                if (connected_info.st_dev, connected_info.st_ino) != (
+                    info.st_dev,
+                    info.st_ino,
+                ):
+                    raise RelayOwnerError(
+                        "relay local RPC socket changed while connecting"
+                    )
+            if os.name != "nt":  # the endpoint-key handshake proved the peer
+                from .messenger import AgentSocketServer
+
+                credentials = AgentSocketServer._get_peer_credentials(writer)
+                if credentials is None and sys.platform in {"linux", "darwin"}:
+                    raise RelayOwnerError(
+                        "relay local RPC peer credentials could not be verified"
+                    )
+                if credentials is not None and credentials[1] != os.getuid():
+                    raise RelayOwnerError(
+                        "relay local RPC peer has a different user identity"
+                    )
 
             async def read() -> dict:
                 line = await reader.readline()
