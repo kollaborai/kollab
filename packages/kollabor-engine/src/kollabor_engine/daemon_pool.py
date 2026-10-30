@@ -190,9 +190,19 @@ class DaemonHandle:
         from kollabor_rpc import RpcClient, open_unix_connection_with_large_buffer
 
         self.socket_path = socket_path
-        self._reader, self._writer = await open_unix_connection_with_large_buffer(
-            socket_path
-        )
+        if os.name == "nt":
+            # An endpoint file naming a loopback port; local_ipc checks it is ours
+            # and runs the handshake (#268).
+            from kollabor_config import local_ipc
+            from kollabor_rpc.transport import LARGE_BUFFER_LIMIT
+
+            self._reader, self._writer = await local_ipc.connect(
+                socket_path, limit=LARGE_BUFFER_LIMIT
+            )
+        else:
+            self._reader, self._writer = await open_unix_connection_with_large_buffer(
+                socket_path
+            )
 
         request = (
             json.dumps(
@@ -345,6 +355,10 @@ class DaemonHandle:
         if self.process_started_at is not None:
             return _pid_matches_start_time(self.pid, self.process_started_at)
 
+        if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C there (#268)
+            from kollabor_config import proc_ctl
+
+            return proc_ctl.pid_alive(self.pid)
         try:
             os.kill(self.pid, 0)
         except ProcessLookupError:
@@ -676,14 +690,18 @@ class DaemonPool:
             folder = os.path.realpath(cwd)
             self._starting[session_id] = (identity_name, folder)
             try:
-                process = subprocess.Popen(
+                from kollabor_config import proc_ctl
+
+                # Its own session on POSIX; on Windows its own process group, outside
+                # the engine's job, so it outlives the engine as a setsid'd daemon does (#268).
+                process = proc_ctl.start_child(
                     argv,
+                    detached=True,
                     cwd=cwd,
                     env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    start_new_session=True,
                 )
 
                 handle = DaemonHandle(session_id, identity_name, process)

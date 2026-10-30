@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Windows: the engine behind the web UI and the desktop app opens a chat. It
+  starts the session's agent in its own process group, connects to it over
+  local IPC and checks that it runs without sending it Ctrl+C. A Windows CI job
+  opens a session, reads its state over RPC and closes it (#268).
 - Windows: `kollab --detached` starts an agent with no fork, and the hub's
   agent sockets run over local IPC there, so `kollab --hub status` shows the
   agent online and `kollab --hub stop` stops it. A Windows CI job runs this

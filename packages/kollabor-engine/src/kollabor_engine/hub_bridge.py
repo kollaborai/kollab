@@ -57,6 +57,10 @@ def _pid_alive(pid: Any) -> bool:
         return True
     if pid <= 0:
         return True
+    if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C there (#268)
+        from kollabor_config import proc_ctl
+
+        return proc_ctl.pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -324,10 +328,13 @@ class HubBridge:
             msg.update(payload)
 
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(sock_path),
-                timeout=timeout,
-            )
+            if os.name == "nt":  # an endpoint file naming a loopback port (#268)
+                from kollabor_config import local_ipc
+
+                opening = local_ipc.connect(sock_path)
+            else:
+                opening = asyncio.open_unix_connection(sock_path)
+            reader, writer = await asyncio.wait_for(opening, timeout=timeout)
             try:
                 writer.write((json.dumps(msg) + "\n").encode())
                 await writer.drain()
