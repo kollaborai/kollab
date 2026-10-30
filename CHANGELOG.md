@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Windows: a halt taken on a Windows machine now reaches the other machines of its network; the relay owner runs on Windows over local IPC (#439).
 - Windows: the desktop app quits gracefully. Quit closes the runtime's stdin,
   and `kollab --web-ui` stops its UI server and engine with Ctrl+Break, so the
   engine shuts down cleanly; `taskkill` is only the fallback after 10 s. A
