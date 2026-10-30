@@ -714,6 +714,72 @@ async def test_a_room_seen_empty_just_after_a_page_got_it_back_waits_a_full_grac
     await host.shutdown()
 
 
+class GoneSoonBackend(LeavingBackend):
+    """A room nobody ever joined: wait_abandoned is True after one short poll."""
+
+    async def wait_abandoned(self, binding, handle) -> bool:
+        await asyncio.sleep(0.02)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_a_never_joined_session_with_one_listener_stays_ready_past_the_grace(
+    monkeypatch,
+):
+    from kollabor_engine import voice_runtime_host
+
+    monkeypatch.setattr(voice_runtime_host, "HANDOUT_GRACE_S", 0.01)
+    backend = GoneSoonBackend()
+    host = _host(backend)
+    await host.listener_opened("unknown-session")  # an unknown id does nothing
+    first = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    await host.listener_opened(first.voice_session_id)  # a phone listens over HTTP
+
+    await asyncio.sleep(0.1)  # many graces pass with nobody in the room
+    view = await host.get_status("owner-1", first.voice_session_id)
+    assert (view.state, backend.stop_calls) == ("ready", [])
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_once_its_last_listener_closes_the_session_ends_after_the_grace(monkeypatch):
+    from kollabor_engine import voice_runtime_host
+
+    monkeypatch.setattr(voice_runtime_host, "HANDOUT_GRACE_S", 0.1)
+    backend = GoneSoonBackend()
+    host = _host(backend)
+    first = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    await host.listener_opened(first.voice_session_id)
+    await asyncio.sleep(0.05)  # past the grace already, still alive
+    assert (await host.get_status("owner-1", first.voice_session_id)).state == "ready"
+
+    await host.listener_closed(first.voice_session_id)  # the page closed
+    gone = await _until(host, first.voice_session_id, "stopped")
+    assert [reason for *_, reason in backend.stop_calls] == ["disconnect"]
+    assert gone.generation == 2  # the disconnect fence, as a user stop does
+    await host.listener_closed(first.voice_session_id)  # never below zero
+    assert host._sessions[first.voice_session_id].listeners == 0
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_with_no_listener_the_old_abandonment_behavior_holds(monkeypatch):
+    from kollabor_engine import voice_runtime_host
+
+    monkeypatch.setattr(voice_runtime_host, "HANDOUT_GRACE_S", 0.0)
+    backend = GoneSoonBackend()
+    host = _host(backend)
+    first = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+
+    gone = await _until(host, first.voice_session_id, "stopped")
+    assert gone.state == "stopped"
+    assert [reason for *_, reason in backend.stop_calls] == ["disconnect"]
+    await host.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_a_room_left_after_its_stop_or_its_worker_exit_stops_nothing_more():
     backend = LeavingBackend()

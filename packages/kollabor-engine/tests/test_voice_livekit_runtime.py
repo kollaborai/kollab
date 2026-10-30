@@ -525,6 +525,46 @@ async def test_a_room_nobody_joins_ends_and_one_the_server_cannot_list_stays(rig
     await rig.control.shutdown()
 
 
+async def test_an_open_events_stream_keeps_the_session_alive_and_closes_its_listener(
+    rig, rooms
+):
+    """A phone that only listens to events is a user: alive while open, grace once closed."""
+    closed = []
+    real_closed = rig.control.host.listener_closed
+
+    async def spied_closed(voice_session_id):
+        closed.append(voice_session_id)
+        await real_closed(voice_session_id)
+
+    rig.control.host.listener_closed = spied_closed
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        sid = view["voice_session_id"]
+        record = rig.control.host._sessions[sid]
+
+        async def listen():
+            # ASGI runs the whole response here, so the stream must run as a task
+            async with http.stream("GET", f"/voice/sessions/{sid}/events") as events:
+                assert events.status_code == 200
+                async for _ in events.aiter_lines():
+                    pass
+
+        listening = asyncio.create_task(listen())
+        await asyncio.sleep(1.0)  # past both graces: abandonment alone would have ended it
+        assert (await _state(http, sid))["state"] == "ready"  # the listener keeps it in use
+        assert record.listeners == 1
+
+        stopped = await http.request(
+            "DELETE", f"/voice/sessions/{sid}", json={"generation": 1, "reason": "user"}
+        )
+        assert stopped.status_code == 200
+        await asyncio.wait_for(listening, timeout=5)  # the stop ends the stream
+
+        assert closed == [sid]  # the generator's finally closed the listener
+        assert record.listeners == 0
+    await rig.control.shutdown()
+
+
 async def test_cursor_replay_and_generation_reset(rig):
     async with client(rig.app) as http:
         view = await ready_session(rig, http)

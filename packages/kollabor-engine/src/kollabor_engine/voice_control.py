@@ -552,6 +552,14 @@ class VoiceControl:
         assert isinstance(view, VoiceSessionView)
         return self._decorate(view)
 
+    async def listener_opened(self, voice_session_id: str) -> None:
+        """Tell the host an events stream opened (the session is in use)."""
+        await self.host.listener_opened(voice_session_id)
+
+    async def listener_closed(self, voice_session_id: str) -> None:
+        """Tell the host an events stream closed (the grace starts at the disconnect)."""
+        await self.host.listener_closed(voice_session_id)
+
     async def subscribe(
         self, voice_session_id: str, cursor_value: str | None
     ) -> AsyncIterator[dict[str, Any]]:

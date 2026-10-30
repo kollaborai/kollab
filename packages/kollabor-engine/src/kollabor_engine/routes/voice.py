@@ -180,23 +180,30 @@ async def stop_voice_session(
 async def voice_session_events(
     request: Request, voice_session_id: str, cursor: str | None = Query(default=None)
 ):
+    control = _control(request)
     try:
-        stream = await _control(request).subscribe(
+        stream = await control.subscribe(
             voice_session_id, cursor or request.headers.get("last-event-id")
         )
     except RuntimeHostError as exc:
         return error_response(exc)
 
     async def generator():
-        async for envelope in stream:
-            yield {
-                "id": encode_cursor(
-                    envelope["voice_session_id"],
-                    envelope["generation"],
-                    envelope["sequence"],
-                ),
-                "data": json.dumps(envelope, ensure_ascii=False),
-            }
+        # Opened inside the generator, so it pairs with the finally even when the
+        # response is never streamed (a client that left before the first byte).
+        await control.listener_opened(voice_session_id)
+        try:
+            async for envelope in stream:
+                yield {
+                    "id": encode_cursor(
+                        envelope["voice_session_id"],
+                        envelope["generation"],
+                        envelope["sequence"],
+                    ),
+                    "data": json.dumps(envelope, ensure_ascii=False),
+                }
+        finally:
+            await control.listener_closed(voice_session_id)
 
     return EventSourceResponse(generator())
 
