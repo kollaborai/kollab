@@ -165,3 +165,17 @@ def test_other_providers_keep_registry_fallback():
     registry_ids = [name for name, _info in list_models_for_provider("openai")]
     assert registry_ids
     assert ids == registry_ids
+
+
+def test_model_picker_skips_registry_placeholders_for_custom_endpoints():
+    from types import SimpleNamespace
+
+    from kollabor.commands.system_commands.handlers.model import ModelCommandHandler
+
+    fake = SimpleNamespace(profile_manager=None, _registry_note=lambda info: "")
+    custom = ModelCommandHandler._build_known_models(fake, "custom", "glm-5.3")
+    assert [m["id"] for m in custom] == ["glm-5.3"]
+    anthropic = ModelCommandHandler._build_known_models(
+        fake, "anthropic", "claude-opus-5-5"
+    )
+    assert len(anthropic) > 1
