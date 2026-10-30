@@ -35,6 +35,10 @@ jobs:
       - name: MCP command splitting
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_mcp_split_command.py
 
+      # The network's private state files: device records, enrollment state (kollab #268).
+      - name: Network private files
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_device_record_windows.py tests/unit/test_provisioned_state_windows.py tests/unit/test_enrollment_recovery_windows.py tests/unit/test_enrollment_delegations_windows.py
+
       - name: Local IPC clients
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_presence_local_ipc.py tests/unit/test_hub_ipc_clients.py tests/unit/test_attach_local_ipc.py tests/unit/test_deep_thought_local_ipc.py
 

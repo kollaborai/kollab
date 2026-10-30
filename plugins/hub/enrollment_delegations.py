@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from nacl.exceptions import BadSignatureError
 from nacl.signing import SigningKey, VerifyKey
 
+from kollabor_config import private_fs
 from kollabor_config.file_lock import lock, unlock
 
 STATE_VERSION = 4
@@ -1089,7 +1090,10 @@ class EnrollmentDelegationStore:
         try:
             self._ensure_private_parent()
             flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-            fd = os.open(self._lock_path, flags, 0o600)
+            if os.name == "nt":  # no O_NOFOLLOW there: private_fs refuses a link or junction itself
+                fd = private_fs.open_nofollow(self._lock_path, flags, 0o600)
+            else:
+                fd = os.open(self._lock_path, flags, 0o600)
             _check_private_file(os.fstat(fd), "delegation lock")
             lock(fd)
             locked = True
@@ -1110,6 +1114,12 @@ class EnrollmentDelegationStore:
                 self._thread_lock.release()
 
     def _ensure_private_parent(self) -> None:
+        if os.name == "nt":  # no POSIX owner or mode bits: private_fs makes and checks the folder
+            try:
+                private_fs.ensure_private_dir(self._path.parent)
+            except OSError as exc:
+                raise DelegationPersistenceError("delegation state parent must be user-owned") from exc
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         info = self._path.parent.stat()
         if not stat.S_ISDIR(info.st_mode):
@@ -1122,7 +1132,10 @@ class EnrollmentDelegationStore:
     def _read_state_unlocked(self) -> dict[str, Any]:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
-            fd = os.open(self._path, flags)
+            if os.name == "nt":  # no O_NOFOLLOW there: private_fs refuses a link or junction itself
+                fd = private_fs.open_nofollow(self._path, flags)
+            else:
+                fd = os.open(self._path, flags)
         except FileNotFoundError:
             raise
         except OSError as exc:
