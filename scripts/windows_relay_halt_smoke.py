@@ -64,16 +64,22 @@ def wait_until(check, timeout: float, what: str, why=None) -> None:
         time.sleep(2)
 
 
+def _presence_line(record: Path) -> str:
+    try:
+        data = json.loads(record.read_text())
+        return (f"  {record}: pid={data.get('pid')} project={data.get('project')!r}"
+                f" socket={data.get('socket_path')!r} keys={sorted(data)[:12]}")
+    except (OSError, ValueError) as exc:
+        return f"  {record}: unreadable ({exc})"
+
+
 def presence_dump(home: Path) -> str:
-    """What the presence folder holds, to debug a socket that never shows up."""
-    lines = [f"  presence folder {home / '.kollab' / 'hub' / 'presence'}:"]
+    """What the presence folders hold, to debug a socket that never shows up."""
+    lines = [f"  presence folders under {home / '.kollab'}:"]
     for record in sorted((home / ".kollab" / "hub" / "presence").glob("*.json"))[:4]:
-        try:
-            data = json.loads(record.read_text())
-            lines.append(f"  {record.name}: pid={data.get('pid')} project={data.get('project')!r}"
-                         f" socket={data.get('socket_path')!r} keys={sorted(data)[:12]}")
-        except (OSError, ValueError) as exc:
-            lines.append(f"  {record.name}: unreadable ({exc})")
+        lines.append(_presence_line(record))
+    for record in sorted((home / ".kollab" / "projects").glob("*/hub/presence/*.json"))[:4]:
+        lines.append(_presence_line(record))
     if len(lines) == 1:
         lines.append("  (empty or missing)")
     return "\n".join(lines)
@@ -93,7 +99,9 @@ def folder_socket(home: Path, project: Path) -> str | None:
             return True
 
     wanted = os.path.normcase(os.path.realpath(project))
-    for record in sorted((home / ".kollab" / "hub" / "presence").glob("*.json")):
+    records = sorted((home / ".kollab" / "hub" / "presence").glob("*.json"))
+    records += sorted((home / ".kollab" / "projects").glob("*/hub/presence/*.json"))
+    for record in records:
         try:
             data = json.loads(record.read_text())
             if not pid_alive(int(data["pid"])):
