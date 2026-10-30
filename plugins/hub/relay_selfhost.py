@@ -31,6 +31,8 @@ from pathlib import Path
 from aiohttp import web
 
 from kollabor.binary import kollab_argv
+if os.name == "nt":  # the packaged relay runs on POSIX and ships without kollabor_config
+    from kollabor_config import private_fs
 
 from . import file_lock
 from .dns.discovery import DOCUMENT_PATHS, WELL_KNOWN, DiscoveryError, DiscoveryTarget, normalize_target
@@ -355,7 +357,10 @@ PRINTABLE = {"nginx": nginx_config, "caddy": caddy_config, "systemd": systemd_un
 
 def _lock(state_dir: Path) -> int:
     """One process per state directory; the descriptor is held until exit."""
-    fd = os.open(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    if os.name == "nt":
+        fd = private_fs.open_nofollow(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    else:
+        fd = os.open(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     if not file_lock.try_lock(fd):
         os.close(fd)
         raise RuntimeConfigError(f"{state_dir} is already served by another kollab relay serve")

@@ -28,6 +28,9 @@ from urllib.parse import unquote, urlsplit
 import aiohttp
 from aiohttp import web
 
+if os.name == "nt":  # the packaged relay runs on POSIX and ships without kollabor_config
+    from kollabor_config import private_fs
+
 from . import file_lock
 from .relay_state import canonical_origin, strict_json
 
@@ -63,6 +66,14 @@ def _private_directory(path: Path, *, create: bool = False) -> Path:
     path = path.expanduser().resolve()
     if create:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "nt":  # ACL checks under the user profile, where POSIX inspects uid and mode below
+        try:
+            private_fs.check_private_dir(path)
+        except PermissionError as exc:
+            raise RuntimeConfigError(
+                "config and state directories must be owned by this user with mode 0700"
+            ) from exc
+        return path
     info = path.stat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
         raise RuntimeConfigError("config and state directories must be owned by this user with mode 0700")
@@ -79,11 +90,24 @@ def _private_directory(path: Path, *, create: bool = False) -> Path:
     return path
 
 
+def _open_nofollow(path, flags: int, mode: int = 0o600) -> int:
+    """Open without following a final symlink; on Windows private_fs also refuses reparse points."""
+    if os.name == "nt":
+        return private_fs.open_nofollow(path, flags, mode)
+    return os.open(path, flags | os.O_NOFOLLOW, mode)
+
+
 def _read_private(path: Path, *, limit: int = 65536) -> str:
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    descriptor = _open_nofollow(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(descriptor) as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        private = stat.S_ISREG(info.st_mode)
+        if private:
+            if os.name == "nt":  # ACL ownership, where POSIX checks the uid and mode below
+                private = private_fs.owned_private(path, info)
+            else:
+                private = info.st_uid == os.getuid() and not stat.S_IMODE(info.st_mode) & 0o077
+        if not private:
             raise RuntimeConfigError("config and credential files must be owned by this user with mode 0600")
         raw = stream.read(limit + 1)
         if len(raw) > limit:
@@ -282,8 +306,12 @@ class ManagedValkey:
         self.config = config
         self.instance = hashlib.sha256(str(config.state_dir).encode()).hexdigest()[:24]
         self.name = f"kollab-relay-{config.node_prefix}-{self.instance[:12]}"
-        self.uid = os.getuid() or 65532
-        self.gid = os.getgid() if os.getuid() else 65532
+        if os.name == "nt":  # no uid/gid on Windows; the profile ACLs own the boundary there
+            self.uid = None
+            self.gid = None
+        else:
+            self.uid = os.getuid() or 65532
+            self.gid = os.getgid() if os.getuid() else 65532
         self.path = config.state_dir / "valkey.conf"
         self.password_path = config.state_dir / "valkey-password"
         self.fingerprint = ""
@@ -413,12 +441,12 @@ class ManagedValkey:
         if self.path.exists() or self.path.is_symlink():
             # Root may assign the container's non-root UID to this file, so
             # validate bytes via a no-follow fd rather than owner equality.
-            descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            descriptor = _open_nofollow(self.path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
             with os.fdopen(descriptor) as stream:
                 info = os.fstat(stream.fileno())
                 if (
                     not stat.S_ISREG(info.st_mode)
-                    or info.st_uid != self.uid
+                    or (self.uid is not None and info.st_uid != self.uid)
                     or stat.S_IMODE(info.st_mode) != 0o600
                     or stream.read(4097) != content
                 ):
@@ -793,9 +821,17 @@ class RelayRuntime:
 
     async def run(self):
         lock_path = self.config.state_dir / "runtime.lock"
-        self._lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        self._lock_fd = _open_nofollow(
+            lock_path, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NONBLOCK", 0), 0o600
+        )
         info = os.fstat(self._lock_fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        private = stat.S_ISREG(info.st_mode)
+        if private:
+            if os.name == "nt":  # ACL ownership, where POSIX checks the uid and mode below
+                private = private_fs.owned_private(lock_path, info)
+            else:
+                private = info.st_uid == os.getuid() and not stat.S_IMODE(info.st_mode) & 0o077
+        if not private:
             os.close(self._lock_fd)
             self._lock_fd = None
             raise RuntimeConfigError("runtime lock must be a private regular file owned by this user")
