@@ -196,9 +196,14 @@ class DaemonHandle:
             from kollabor_config import local_ipc
             from kollabor_rpc.transport import LARGE_BUFFER_LIMIT
 
-            self._reader, self._writer = await local_ipc.connect(
-                socket_path, limit=LARGE_BUFFER_LIMIT
-            )
+            try:
+                self._reader, self._writer = await local_ipc.connect(
+                    socket_path, limit=LARGE_BUFFER_LIMIT
+                )
+            except (ConnectionError, TimeoutError) as exc:
+                # Not listening yet or reset mid-handshake: the spawn loop retries
+                # ConnectionRefusedError until its deadline.
+                raise ConnectionRefusedError(str(exc)) from exc
         else:
             self._reader, self._writer = await open_unix_connection_with_large_buffer(
                 socket_path

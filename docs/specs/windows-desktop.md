@@ -4,7 +4,7 @@ Status: packaging path built, runtime port open. On windows-latest the
 `windows-smoke` workflow installs the workspace, imports every module whose
 optional packages are installed, and runs the agent smoke (`--agent-smoke`
 against the venv `kollab.exe`): a detached agent starts, shows online in
-`--hub status` and stops; and an engine session opens, answers over RPC and
+`--hub status` and stops; and an engine session opens, returns its state and
 closes (`scripts/engine_smoke.py`). The packaged binary has
 not run on Windows yet; the Windows CI job (`desktop-windows` in
 `.github/workflows/binaries.yml`) is the first place any of it will.
@@ -151,6 +151,6 @@ The `windows-smoke` workflow runs on windows-latest from the workspace venv:
 every module whose optional packages are installed imports (numpy and a2a are
 not, so 8 modules are skipped), `--agent-smoke` passes against
 `.venv\Scripts\kollab.exe`, and `scripts/engine_smoke.py` opens a session through
-the engine, reads its state over RPC and closes it, leaving no process behind.
+the engine, gets its state and closes it, leaving no process behind.
 Not yet run on Windows: the packaged binary, the Windows-gated Rust (the build
 host is macOS with no Windows target), and the desktop app.

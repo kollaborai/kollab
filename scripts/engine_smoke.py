@@ -1,8 +1,8 @@
 """Engine smoke for Windows CI (kollab #268).
 
 Starts `python -m kollabor_engine serve` with a scratch HOME, opens a session on a
-scratch project, reads the session state over RPC, closes it, and checks that no
-daemon is left behind. On any mismatch it prints what failed and exits 1.
+scratch project, checks the session state and its daemon, closes it, and checks
+that no process is left behind. On any mismatch it prints what failed and exits 1.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ REPORT_LINES = 40
 BODY_CHARS = 500
 LOG_PATTERN = re.compile(r"ERROR|CRITICAL|Traceback")
 SUCCESS_LINE = (
-    "engine started a session, read its state over RPC, closed it, "
+    "engine started a session and its daemon, got the session state, closed it, "
     "and left no process behind"
 )
 
@@ -128,7 +128,8 @@ def _call(
         raise SmokeFailure(step, None, str(exc)) from exc
 
 
-def _run_session(port: int, token: str, project: Path) -> str:
+def _run_session(port: int, token: str, project: Path, home: Path) -> list[int]:
+    """Open a session, check its state and daemon, close it; return the daemon pids."""
     base = f"http://127.0.0.1:{port}"
 
     step = "POST /sessions"
@@ -155,6 +156,15 @@ def _run_session(port: int, token: str, project: Path) -> str:
     )
     if status != 200:
         raise SmokeFailure(step, status, body)
+    try:
+        state = json.loads(body)
+    except ValueError:
+        state = None
+    if not isinstance(state, dict) or not state:
+        raise SmokeFailure(f"{step} returned 200 without a state object", status, body)
+    daemons = _daemon_pids(home)
+    if not daemons:
+        raise SmokeFailure("no live session daemon in hub presence")
 
     step = "DELETE /sessions/<id>"
     status, body = _call(
@@ -162,7 +172,7 @@ def _run_session(port: int, token: str, project: Path) -> str:
     )
     if status != 200:
         raise SmokeFailure(step, status, body)
-    return session_id
+    return daemons
 
 
 def _homed_pids(home: str, skip: set[int]) -> list[int]:
@@ -179,10 +189,33 @@ def _homed_pids(home: str, skip: set[int]) -> list[int]:
     return pids
 
 
-def _wait_for_daemons_gone(home: str, engine_pid: int) -> None:
+def _alive(pid: int) -> bool:
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
+
+
+def _daemon_pids(home: Path) -> list[int]:
+    """Live pids the session daemons wrote to their hub presence files."""
+    pids: list[int] = []
+    for record in (home / ".kollab").rglob("*.json"):
+        if "presence" not in record.parts:
+            continue
+        try:
+            pid = int(json.loads(record.read_text(encoding="utf-8")).get("pid") or 0)
+        except OSError, ValueError, AttributeError, TypeError:
+            continue
+        if pid > 0 and _alive(pid):
+            pids.append(pid)
+    return pids
+
+
+def _wait_for_daemons_gone(home: str, engine_pid: int, daemons: list[int]) -> None:
     deadline = time.monotonic() + CLEANUP_TIMEOUT
     while True:
-        pids = _homed_pids(home, {engine_pid})
+        homed = _homed_pids(home, {engine_pid})
+        pids = sorted(set(homed) | {pid for pid in daemons if _alive(pid)})
         if not pids:
             return
         if time.monotonic() >= deadline:
@@ -242,6 +275,7 @@ def main() -> int:
     engine: subprocess.Popen[str] | None = None
     stderr_file: IO[str] | None = None
     failure: SmokeFailure | None = None
+    daemons: list[int] = []
     try:
         project.mkdir(parents=True)
         _write_config(home)
@@ -275,14 +309,20 @@ def main() -> int:
         ).start()
         _wait_ready(lines, args.port)
         token = _read_token(home)
-        _run_session(args.port, token, project)
-        _wait_for_daemons_gone(home_str, engine.pid)
+        daemons = _run_session(args.port, token, project, home)
+        _wait_for_daemons_gone(home_str, engine.pid, daemons)
     except SmokeFailure as exc:
         failure = exc
     finally:
         if engine is not None:
             _stop_engine(engine)
         _kill_homed(home_str)
+        for pid in daemons:
+            if _alive(pid):
+                try:
+                    psutil.Process(pid).kill()
+                except psutil.Error:
+                    pass
         if stderr_file is not None:
             stderr_file.close()
         if failure is not None:
