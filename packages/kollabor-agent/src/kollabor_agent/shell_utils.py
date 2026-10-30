@@ -5,9 +5,14 @@ providing them to the AI so it can use correct command syntax.
 """
 
 import logging
+import ntpath
 import os
+import platform
 import re
+import stat
 import subprocess
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -228,3 +233,193 @@ def clear_alias_cache():
     """Clear the cached aliases."""
     global _cached_aliases
     _cached_aliases = None
+
+
+POWERSHELL_PREFIX = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+
+_RULES = {
+    "git-bash": (
+        "Git Bash on Windows: write bash. Quote Windows paths and use forward slashes "
+        "(C:/Users/...). Native Windows switches need a doubled slash in Git Bash "
+        "(cmd //c dir, taskkill //F)."
+    ),
+    "pwsh": (
+        "PowerShell 7 (pwsh): write PowerShell, not bash. && and || stop on a failure. "
+        "Get-ChildItem for ls -la, Select-String for grep, Remove-Item -Recurse -Force "
+        "for rm -rf, 2>$null for 2>/dev/null, curl.exe for curl."
+    ),
+    "powershell": (
+        "Windows PowerShell 5.1: write PowerShell, not bash. There is no && or ||, and ; "
+        "runs the next command even after a failure: write cmd1; if ($?) { cmd2 }. "
+        "Get-ChildItem for ls -la, Select-String for grep, Remove-Item -Recurse -Force "
+        "for rm -rf, 2>$null for 2>/dev/null, curl.exe for curl."
+    ),
+}
+_LABELS = {
+    "git-bash": "Git Bash",
+    "pwsh": "PowerShell 7",
+    "powershell": "Windows PowerShell 5.1",
+}
+_KINDS = {"bash.exe": "git-bash", "pwsh.exe": "pwsh", "powershell.exe": "powershell"}
+
+
+class AgentShellError(RuntimeError):
+    """No usable shell for agent commands (a bad KOLLAB_SHELL names itself and its value)."""
+
+
+@dataclass(frozen=True)
+class AgentShell:
+    """The shell that runs agent commands; kind is posix, git-bash, pwsh or powershell."""
+
+    path: str
+    kind: str
+
+    @property
+    def label(self) -> str:
+        return _LABELS.get(self.kind) or os.path.basename(self.path) or self.path
+
+    @property
+    def rule(self) -> str:
+        return _RULES.get(self.kind, "")
+
+    def argv(self, command: str, interactive: bool = False) -> list[str]:
+        if self.kind in ("pwsh", "powershell"):
+            return [
+                self.path,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                POWERSHELL_PREFIX + command,
+            ]
+        return (
+            [self.path, "-i", "-c", command]
+            if interactive
+            else [self.path, "-c", command]
+        )
+
+
+def windows_path_entries(path_value: str, cwd: str) -> list[str]:
+    """PATH entries a Windows shell may search: absolute only, never cwd or inside it."""
+    cwd_norm = ntpath.normcase(ntpath.normpath(cwd))
+    cwd_prefix = cwd_norm.rstrip("\\") + "\\"
+    kept: list[str] = []
+    for part in path_value.split(";"):
+        entry = part.strip().strip('"')
+        if not entry or not ntpath.isabs(entry):
+            continue
+        entry_norm = ntpath.normcase(ntpath.normpath(entry))
+        if entry_norm == cwd_norm or entry_norm.startswith(cwd_prefix):
+            continue
+        kept.append(ntpath.normpath(entry))
+    return kept
+
+
+_cached: AgentShell | None = None
+
+
+def _is_file(path: str) -> bool:
+    try:
+        return not stat.S_ISDIR(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
+def agent_shell(
+    *,
+    environ: Mapping[str, str] | None = None,
+    cwd: str | None = None,
+    system: str | None = None,
+    is_file: Callable[[str], bool] | None = None,
+) -> AgentShell:
+    """The shell for agent commands: $SHELL on POSIX; Git Bash, else PowerShell, on Windows."""
+    global _cached
+    real = environ is None and cwd is None and system is None and is_file is None
+    environ = os.environ if environ is None else environ
+    system = system or platform.system()
+    is_file = is_file or _is_file
+    if system != "Windows":
+        return AgentShell(environ.get("SHELL") or "/bin/sh", "posix")
+    if real and _cached is not None and is_file(_cached.path):
+        return _cached
+    cwd = os.getcwd() if cwd is None else cwd
+    root = environ.get("SystemRoot") or r"C:\Windows"
+    resolved = _resolve_windows(environ, cwd, root, is_file)
+    if real:
+        _cached = resolved
+    return resolved
+
+
+def _resolve_windows(
+    environ: Mapping[str, str],
+    cwd: str,
+    root: str,
+    is_file: Callable[[str], bool],
+) -> AgentShell:
+    """Resolve a Windows shell: KOLLAB_SHELL, then Git Bash, PowerShell 7, PowerShell 5.1."""
+    value = environ.get("KOLLAB_SHELL", "").strip()
+    if value:
+        name = ntpath.basename(value).lower()
+        if (
+            ntpath.isabs(value)
+            and name in _KINDS
+            and ntpath.normcase(value)
+            != ntpath.normcase(ntpath.join(root, "System32", "bash.exe"))
+            and is_file(value)
+        ):
+            return AgentShell(value, _KINDS[name])
+        raise AgentShellError(
+            f"KOLLAB_SHELL={value!r} cannot run agent commands: it must be the absolute "
+            "path of an existing bash.exe, pwsh.exe or powershell.exe, and not WSL's "
+            "System32 bash.exe."
+        )
+    bash_candidates: list[str] = []
+    for var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        base = environ.get(var)
+        if base and ntpath.isabs(base):
+            bash_candidates.append(ntpath.join(base, "Git", "bin", "bash.exe"))
+    local_appdata = environ.get("LOCALAPPDATA")
+    if local_appdata and ntpath.isabs(local_appdata):
+        bash_candidates.append(
+            ntpath.join(local_appdata, "Programs", "Git", "bin", "bash.exe")
+        )
+    scoop = environ.get("SCOOP")
+    if scoop and ntpath.isabs(scoop):
+        bash_candidates.append(
+            ntpath.join(scoop, "apps", "git", "current", "bin", "bash.exe")
+        )
+    profile = environ.get("USERPROFILE")
+    if profile and ntpath.isabs(profile):
+        bash_candidates.append(
+            ntpath.join(profile, "scoop", "apps", "git", "current", "bin", "bash.exe")
+        )
+    for path in bash_candidates:
+        if is_file(path):
+            return AgentShell(path, "git-bash")
+    entries = windows_path_entries(environ.get("PATH", ""), cwd)
+    for entry in entries:
+        if not is_file(ntpath.join(entry, "git.exe")):
+            continue
+        candidate = ntpath.normpath(ntpath.join(entry, "..", "bin", "bash.exe"))
+        if is_file(candidate):
+            return AgentShell(candidate, "git-bash")
+    program_files = environ.get("ProgramFiles")
+    if program_files and ntpath.isabs(program_files):
+        candidate = ntpath.join(program_files, "PowerShell", "7", "pwsh.exe")
+        if is_file(candidate):
+            return AgentShell(candidate, "pwsh")
+    for entry in entries:
+        candidate = ntpath.join(entry, "pwsh.exe")
+        if is_file(candidate):
+            return AgentShell(candidate, "pwsh")
+    candidate = ntpath.join(
+        root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+    )
+    if is_file(candidate):
+        return AgentShell(candidate, "powershell")
+    raise AgentShellError(
+        "No shell for agent commands: install Git for Windows, or set KOLLAB_SHELL to "
+        "the absolute path of bash.exe, pwsh.exe or powershell.exe."
+    )
