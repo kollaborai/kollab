@@ -574,7 +574,14 @@ class ModelCommandHandler(BaseCommandHandler):
         try:
             from kollabor_ai.model_registry import list_models_for_provider
 
-            for name, info in list_models_for_provider(provider):
+            # Registry "custom"/"local" entries are generic placeholders that
+            # match no real endpoint (#447): only the live catalog lists them.
+            seeds = (
+                []
+                if provider in ("custom", "local")
+                else list_models_for_provider(provider)
+            )
+            for name, info in seeds:
                 known.append({"id": name, "note": self._registry_note(info)})
         except Exception as e:  # noqa: BLE001 - registry must never block the picker
             logger.warning(

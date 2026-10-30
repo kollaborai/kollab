@@ -122,6 +122,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- /llm: a custom or local endpoint's section lists only what that endpoint
+  really serves. The bundled generic "custom" placeholders (grok-4.7 and
+  friends) no longer appear when the live /models catalog is cold or the
+  fetch fails; an empty section shows the existing "no models" note with
+  the retry hint instead (#447).
 - Phone app: a link to a computer the phone cannot reach goes back to the paste
   screen and says so, instead of doing nothing; that link is no longer saved (#442).
 - Windows: the network kill switch runs. `kollab --hub halt` stops this
