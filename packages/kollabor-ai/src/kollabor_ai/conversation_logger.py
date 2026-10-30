@@ -29,6 +29,19 @@ logger = logging.getLogger(__name__)
 _TIGHTEN_ENTRY_LIMIT = 4096
 
 
+def utc_stamp(moment: Optional[datetime] = None) -> str:
+    """Return a UTC ISO-8601 stamp ending in "Z" (never "+00:00").
+
+    A naive ``moment`` is read as local wall-clock time, matching the
+    values this logger recorded before stamps became true UTC.
+    """
+    if moment is None:
+        moment = datetime.now(timezone.utc)
+    elif moment.tzinfo is None:
+        moment = moment.astimezone()
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _acp_display_metadata(value: Any) -> Dict[str, Any]:
     """Keep harness cards and replay updates separate from native model calls."""
     if not isinstance(value, dict) or value.get("provider") != "acp":
@@ -509,10 +522,10 @@ class KollaborConversationLogger:
         root_message = {
             "type": "conversation_metadata",
             "sessionId": self.session_id,
-            "startTime": self.conversation_start_time.isoformat() + "Z",
+            "startTime": utc_stamp(self.conversation_start_time),
             "endTime": None,
             "uuid": str(uuid4()),
-            "timestamp": datetime.now().isoformat() + "Z",
+            "timestamp": utc_stamp(),
             "cwd": self._get_working_directory(),
             "gitBranch": self._get_git_branch(),
             "version": (
@@ -566,7 +579,7 @@ class KollaborConversationLogger:
             "type": "user",
             "message": {"role": "user", "content": content},
             "uuid": message_uuid,
-            "timestamp": datetime.now().isoformat() + "Z",
+            "timestamp": utc_stamp(),
             "kollabor_intelligence": {
                 "user_context": user_context or self._analyze_user_context(content),
                 "session_context": self._get_session_context(),
@@ -663,7 +676,7 @@ class KollaborConversationLogger:
             "requestId": f"req_kollabor_{int(time.time())}",
             "type": "assistant",
             "uuid": message_uuid,
-            "timestamp": datetime.now().isoformat() + "Z",
+            "timestamp": utc_stamp(),
         }
 
         # Add kollabor_intelligence only when thinking content or duration exists
@@ -819,7 +832,7 @@ class KollaborConversationLogger:
             "subtype": subtype,
             "content": content,
             "isMeta": False,
-            "timestamp": datetime.now().isoformat() + "Z",
+            "timestamp": utc_stamp(),
             "uuid": message_uuid,
             "level": "info",
         }
@@ -842,9 +855,9 @@ class KollaborConversationLogger:
         end_message = {
             "type": "conversation_end",
             "sessionId": self.session_id,
-            "endTime": datetime.now().isoformat() + "Z",
+            "endTime": utc_stamp(),
             "uuid": str(uuid4()),
-            "timestamp": datetime.now().isoformat() + "Z",
+            "timestamp": utc_stamp(),
             "summary": {
                 "total_messages": self.message_count,
                 "duration": (

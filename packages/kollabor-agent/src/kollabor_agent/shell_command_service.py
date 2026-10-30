@@ -30,6 +30,13 @@ class ShellCommandService:
         r">\s*/dev/sd",
         r"chmod\s+-R\s+777",
         r":\(\)\s*{\s*:\|:&\s*}",  # fork bomb
+        # Windows shells (#438): PowerShell and cmd syntax, any case
+        r"(?i)\b(irm|iwr|invoke-restmethod|invoke-webrequest|curl(\.exe)?|wget)\b"
+        r"[^|;&]*\|\s*(iex|invoke-expression)\b",
+        r"(?i)\b(remove-item|ri)\b[^|;&]*-recurse",
+        r"(?i)\b(rd|rmdir)\s+(/[sq]\s+){2}",
+        r"(?i)\bformat\s+[a-z]:",
+        r"(?i)\b(stop-computer|restart-computer|format-volume|clear-disk)\b",
     ]
 
     # Commands that won't work (need TTY)
