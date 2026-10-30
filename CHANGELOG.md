@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- PhoneLink works from every engine on the computer: an engine that does not hold PhoneLink forwards the call to the one that does, and the "managing PhoneLink" message names that engine's port, process, start time and folder (#443).
 - Windows: every release ships the desktop installer
   (`kollab-desktop-windows-x86_64-X.Y.Z-setup.exe` and its `.sha256`), and a
   release fails if the Windows runtime cannot start an agent. It is unsigned,
