@@ -169,8 +169,7 @@ def load_speech_preferences(root=None):
 
 def save_speech_preferences(changes, root=None):
     """Publish one validated speech update without losing unrelated preference keys."""
-    # The voice runtime is POSIX-only, but reading its settings must work elsewhere.
-    import fcntl
+    from . import file_lock
 
     defaults = speech_defaults()
     if not isinstance(changes, dict) or set(changes) - set(defaults):
@@ -179,7 +178,7 @@ def save_speech_preferences(changes, root=None):
     path = (root or service_root()) / "preferences.json"
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (path.parent / "preferences.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        file_lock.lock(lock.fileno())
         try:
             stored = json.loads(path.read_text())
         except FileNotFoundError:
