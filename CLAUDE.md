@@ -927,8 +927,8 @@ not rely on CI to repair it):
 3. Annotated tag on the merged commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`,
    then `git push origin vX.Y.Z` (push the exact tag, never `--tags`).
    Releases are tagged whenever Marco decides, and agents may create a release
-   tag ONLY when Marco explicitly instructs them to. Desktop Mac/Linux builds
-   run only from the release tag; they are never PR checks or merge
+   tag ONLY when Marco explicitly instructs them to. Desktop Mac, Linux and
+   Windows builds run only from the release tag; they are never PR checks or merge
    requirements.
 4. Once publishing is green: `uv sync --all-extras` and
    `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in

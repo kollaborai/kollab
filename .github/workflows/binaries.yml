@@ -9,9 +9,9 @@ name: Binaries
 # release/X.Y.Z before tagging). Pull requests and branch pushes build nothing
 # here: PR CI was waiting on this matrix.
 #
-# desktop-windows is provisional (docs/specs/windows-desktop.md): until the
-# native port lands it runs only by hand (workflow_dispatch). A release tag never
-# runs it or waits on it, and no Windows asset is published.
+# desktop-windows runs for every release, like desktop and desktop-linux: its
+# installer ships only if the runtime passes the agent check
+# (docs/specs/windows-desktop.md, "The gate").
 on:
   # No tags trigger: publish.yml calls this for every release tag. A tags trigger
   # here built every binary and desktop app twice per release.
@@ -309,15 +309,12 @@ jobs:
 
   # Windows builds its own runtime here instead of taking one from `build`: the
   # scie is no release asset (install.sh and /upgrade know no Windows binary), so
-  # it lives only in the installer. Manual runs only until the native port lands:
-  # the agent check fails until then, and a release must not wait on a job that
-  # is known to fail. Promotion is in docs/specs/windows-desktop.md.
+  # it lives only in the installer. The agent check gates the release
+  # (docs/specs/windows-desktop.md, "The gate").
   desktop-windows:
     name: desktop/windows-x86_64
-    if: github.event_name == 'workflow_dispatch'
     needs: frontend
     runs-on: windows-2025
-    continue-on-error: true
     timeout-minutes: 120
     defaults:
       run:
@@ -347,9 +344,9 @@ jobs:
         run: python scripts/build_binary.py --frontend-dist "$RUNNER_TEMP/kollab-frontend" --out dist/bin ${VERSION:+--expect-version "$VERSION"}
 
       # A runtime that cannot start an agent must not ship in an installer that
-      # looks like it works. Until the native port lands this fails with the
-      # runtime's own error; the packaging steps below still run, so the Tauri
-      # Windows build is checked meanwhile.
+      # looks like it works. A failure shows the runtime's own error; the
+      # packaging steps below still run, so the Tauri Windows build is checked
+      # either way, and the gate step at the end fails the release.
       - name: Check that the binary can run agents
         id: agents
         continue-on-error: true
@@ -398,7 +395,7 @@ jobs:
       - name: Refuse to release an installer whose runtime cannot run agents
         if: steps.agents.outcome != 'success'
         run: |
-          echo "::error::The Windows runtime cannot start an agent yet (docs/specs/windows-desktop.md, 'Port work'); the installer is not released."
+          echo "::error::The Windows runtime failed the agent check (docs/specs/windows-desktop.md, 'The gate'); the installer is not released."
           exit 1
 
       - uses: actions/upload-artifact@v7
@@ -409,7 +406,7 @@ jobs:
 
   release-manifest:
     name: release/manifest
-    needs: [build, desktop, desktop-linux]
+    needs: [build, desktop, desktop-linux, desktop-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -424,10 +421,7 @@ jobs:
           path: dist/bin
           merge-multiple: true
 
-      # The Windows installer pair is optional (desktop-windows is not part of a
-      # release yet) but never half there. Add `--windows required` once the
-      # Windows job is promoted.
-      - name: Verify all CLI, macOS and Linux release assets, and Windows if built
+      - name: Verify all CLI, macOS, Linux and Windows release assets
         env:
           VERSION: ${{ inputs.version }}
-        run: python scripts/desktop_release.py --version "$VERSION" verify dist/bin
+        run: python scripts/desktop_release.py --version "$VERSION" verify dist/bin --windows required

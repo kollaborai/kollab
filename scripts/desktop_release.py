@@ -6,9 +6,9 @@ The CLI's existing macOS/Linux assets and names remain unchanged.
 
 Windows keeps the verified scie opaque, as Linux does (nothing rewrites or signs
 it): `stage` maps it to runtime\\kollab.exe beside kollab-desktop.exe in the NSIS
-installer. That one installer pair is optional in `verify` until the Windows
-job has passed on a real runner (docs/specs/windows-desktop.md); once there,
-`verify --windows required` makes it as mandatory as the Linux packages.
+installer. Releases run `verify --windows required`, which makes that one
+installer pair as mandatory as the Linux packages; without the flag the pair
+is optional, but never half there.
 
 macOS gets no scie: codesign cannot sign one (its jump keeps 15 bytes after
 LC_CODE_SIGNATURE), and notarization rejects any unsigned Mach-O. So `stage`

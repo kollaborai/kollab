@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Windows: every release ships the desktop installer
+  (`kollab-desktop-windows-x86_64-X.Y.Z-setup.exe` and its `.sha256`), and a
+  release fails if the Windows runtime cannot start an agent. It is unsigned,
+  so SmartScreen asks once: More info, then Run anyway (#268).
 - Windows: the desktop app quits gracefully. Quit closes the runtime's stdin,
   and `kollab --web-ui` stops its UI server and engine with Ctrl+Break, so the
   engine shuts down cleanly; `taskkill` is only the fallback after 10 s. A
