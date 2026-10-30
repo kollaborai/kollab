@@ -9,6 +9,12 @@ on:
       - plugins/hub/file_lock.py
       - plugins/hub/halt_runtime.py
       - tests/unit/test_hub_file_lock.py
+      - packages/kollabor-config/src/kollabor_config/private_fs.py
+      - packages/kollabor-config/src/kollabor_config/proc_ctl.py
+      - packages/kollabor-config/src/kollabor_config/local_ipc.py
+      - tests/unit/test_private_fs.py
+      - tests/unit/test_proc_ctl.py
+      - tests/unit/test_local_ipc.py
   workflow_dispatch:
 
 jobs:
@@ -23,5 +29,7 @@ jobs:
         run: python -m pip install pytest
       - name: Run lock tests
         run: python -m pytest -q -p no:cacheprovider --noconftest tests/unit/test_file_lock.py tests/unit/test_hub_file_lock.py
+      - name: Run platform helper tests
+        run: python -m pytest -q -p no:cacheprovider --noconftest tests/unit/test_private_fs.py tests/unit/test_proc_ctl.py tests/unit/test_local_ipc.py
       - name: Kill switch module loads
         run: python -c "import plugins.hub.halt_runtime"
