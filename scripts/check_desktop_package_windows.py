@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.request
 from pathlib import Path
 
 from check_desktop_package import SmokeUI, wait_log
@@ -90,6 +92,26 @@ def quit_app(app: Path, env: dict[str, str], process: subprocess.Popen, log: Pat
     wait_log(process, log, "second launch asked to quit")
 
 
+def report_webui(port: str, table: dict[int, tuple[int, str]], waited: float) -> None:
+    """Why the app reported no web UI: every kollab process alive, then whether the UI answers in the next 60 s."""
+    print(f"no web UI reported {waited:.0f} s after the app started; kollab processes alive:")
+    for pid, (ppid, command) in sorted(table.items()):
+        if "kollab" in command.lower():
+            print(f"  {pid} (parent {ppid}) {command[:220]}")
+    start = time.monotonic()
+    while True:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/openapi.json", timeout=10) as reply:
+                body = reply.read(160)
+                print(f"the web UI answered {time.monotonic() - start:.0f} s later: HTTP {reply.status} {body!r}")
+                return
+        except OSError as exc:
+            if time.monotonic() > start + 60:
+                print(f"the web UI on port {port} never answered: {exc}")
+                return
+        time.sleep(3)
+
+
 def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path) -> None:
     """The app starts its bundled runtime; --quit stops it through stdin and leaves no runtime process."""
     env = {k: v for k, v in env.items() if k != "KOLLAB_DESKTOP_SELFTEST_CLOSE"}
@@ -105,6 +127,7 @@ def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path
     owned: dict[int, str] = {}
     with log.open("wb") as stream:
         process = subprocess.Popen([str(app)], env=env, stdout=stream, stderr=stream)
+        started = time.monotonic()
         try:
             wait_log(process, log, "web UI is up at")
             owned = {
@@ -124,6 +147,11 @@ def quit_owned_runtime(app: Path, runtime: Path, env: dict[str, str], root: Path
             assert logs, f"the engine never logged {shutdown!r}: it was ended, not shut down"
             print(f"engine shutdown logged in {logs[0].relative_to(root)}")
         except Exception:
+            if not owned:  # the app never reported its web UI; the report must not hide that failure
+                try:
+                    report_webui(env["KOLLAB_WEBUI_PORT"], process_table(), time.monotonic() - started)
+                except Exception as exc:
+                    print(f"(could not report on the web UI: {exc})")
             runtime_log = Path(os.environ.get("LOCALAPPDATA", "")) / "ai.kollabor.kollab" / "logs" / "webui.log"
             try:  # the app's runtime log, then the engine's and the agents' logs in this home; never hide the failure
                 for path in [runtime_log, *sorted(root.rglob("*.log"))]:
