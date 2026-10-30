@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Windows groundwork: `kollabor_config` gains `private_fs`, `proc_ctl` and
+  `local_ipc`, cross-platform helpers for owner-only files, process control and
+  local sockets. On Windows they use DACL checks, Job Objects and loopback TCP with
+  an HMAC handshake. Nothing uses them yet; call sites move in later changes (#268).
 - Phone app link screen: the Kollab phone app (iOS and Android) opens on a link
   screen, where Scan QR Code reads the code from Settings → PhoneLink on
   your computer and Paste Link Instead takes the copied link. It opens only a

@@ -1622,3 +1622,16 @@ Images: `ks14-img:dev` (ff9c63af3c41). Network `ks14-net` (10.231.80.0/24); `ks-
 (pre-dates this work). Containers `ks14-*` are `--rm`, stopped at teardown. Certs scratch
 `.../scratchpad/h14/certs`. The Bash hook refuses image removal, so Marco removes `ks14-img:dev` when
 done with it.
+
+## Windows (issue #268)
+
+- `kollabor_config.proc_ctl` (PR #425) holds the Windows stop primitives the kill switch will use:
+  - `pid_alive`: OpenProcess plus WaitForSingleObject. `os.kill(pid, 0)` sends Ctrl+C on Windows, so it is never used.
+  - `kill_tree`: the POSIX `group_kill` rule, verbatim. On Windows it takes a Toolhelp tree snapshot before the soft
+    wait, then re-checks each victim's creation time (GetProcessTimes) before TerminateProcess, so a reused pid is
+    skipped.
+  - `ChildJob`: a Job Object with kill-on-close.
+  - `local_ipc.peer_pid` reads the caller's pid from the kernel's TCP table.
+- The kill switch does not call any of them yet. Wave 3 group G1 moves `halt_runtime.py` and `network_halt.py` onto
+  them, designs the Windows caller chain, and reruns the Docker harness on POSIX. The design is in
+  `docs/specs/windows-platform-helpers.md`.

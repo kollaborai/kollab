@@ -12,6 +12,7 @@ import secrets
 import socket
 import struct
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -288,7 +289,15 @@ def _write_endpoint(path: Path, record: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(record, f)
-        os.replace(tmp, path)
+        # A reader can hold the file open for a moment on Windows, so retry the replace a few times.
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -326,7 +335,7 @@ def _tcp_owner_pid(sock: Any) -> int:
 
 
 def _tcp_connections() -> list[tuple[int, int, int]]:
-    """Windows: (local port, remote port, owning pid) for every IPv4 TCP connection."""
+    """Windows: (local port, remote port, owning pid) for every IPv4 loopback TCP connection."""
     size = wintypes.DWORD(0)
     _iphlpapi.GetExtendedTcpTable(
         None, ctypes.byref(size), False, AF_INET_, TCP_TABLE_OWNER_PID_CONNECTIONS, 0
@@ -349,4 +358,6 @@ def _tcp_connections() -> list[tuple[int, int, int]]:
             row.dwOwningPid,
         )
         for row in rows
+        if row.dwLocalAddr == 0x0100007F
+        and row.dwRemoteAddr == 0x0100007F  # 127.0.0.1, network order
     ]

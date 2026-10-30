@@ -137,6 +137,12 @@ def test_owned_private_rejects_other_masks(workdir: Path) -> None:
 
 
 @windows_only
+def test_owned_private_missing_path_raises(workdir: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        private_fs.owned_private(workdir / "missing")
+
+
+@windows_only
 def test_junction_is_refused(workdir: Path) -> None:
     private_dir = workdir / "private"
     private_fs.ensure_private_dir(private_dir)
@@ -149,10 +155,11 @@ def test_junction_is_refused(workdir: Path) -> None:
         check=True,
         capture_output=True,
     )
-    with pytest.raises(PermissionError):
+    with pytest.raises(PermissionError, match="reparse"):
         private_fs.check_private_dir(junction)
-    with pytest.raises(OSError):
-        private_fs.open_nofollow(str(junction / "f"), os.O_RDONLY)
+    with pytest.raises(OSError) as err:
+        private_fs.open_nofollow(str(junction), os.O_RDONLY)
+    assert err.value.errno == errno.ELOOP
 
 
 @windows_only

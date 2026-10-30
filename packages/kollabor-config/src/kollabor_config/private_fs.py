@@ -276,7 +276,7 @@ def _windows_owned_private(path: str, mask: int) -> bool:
         ctypes.byref(sd),
     )
     if rc:
-        raise OSError(rc)
+        raise ctypes.WinError(rc)
     try:
         if (
             owner.value is None or dacl.value is None
@@ -291,15 +291,14 @@ def _windows_owned_private(path: str, mask: int) -> bool:
             if not _advapi32.GetAce(dacl, i, ctypes.byref(ace_ptr)):
                 raise ctypes.WinError(ctypes.get_last_error())
             header = ctypes.cast(ace_ptr, P(_ACE_HEADER)).contents
-            if (
-                header.AceFlags & INHERIT_ONLY_ACE
-                or header.AceType == ACCESS_DENIED_ACE_TYPE
-            ):
+            if header.AceType == ACCESS_DENIED_ACE_TYPE:
                 continue
             if (
                 header.AceType != ACCESS_ALLOWED_ACE_TYPE
             ):  # fail closed on any other ACE type
                 return False
+            if header.AceFlags & INHERIT_ONLY_ACE:
+                continue
             ace = ctypes.cast(ace_ptr, P(_ACCESS_ALLOWED_ACE)).contents
             if (
                 _sid_to_string(ace_ptr.value + _ACCESS_ALLOWED_ACE.SidStart.offset)

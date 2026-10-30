@@ -47,6 +47,12 @@ TREE = textwrap.dedent("""
     print(grandchild.pid, flush=True)
     time.sleep(30)
     """)
+EXITING_TREE = textwrap.dedent("""
+    import subprocess, sys, time
+    grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    print(grandchild.pid, flush=True)
+    time.sleep(1)
+    """)
 STOP_CHILD = textwrap.dedent("""
     import asyncio, importlib.util, os
     spec = importlib.util.spec_from_file_location("proc_ctl_child", os.environ["PROC_CTL_FILE"])
@@ -81,7 +87,7 @@ def _spawn_tree() -> tuple[subprocess.Popen, int]:
 
 
 def _cleanup(child: subprocess.Popen, grandchild: int) -> None:
-    with contextlib.suppress(ProcessLookupError):
+    with contextlib.suppress(OSError):  # a dead pid is WinError 87 on Windows
         os.kill(grandchild, HARD)
     if child.poll() is None:
         child.kill()
@@ -192,6 +198,42 @@ def test_hard_kill_tree_ends_grandchild() -> None:
         assert process_table()[grandchild][0] == child.pid
         kill_tree(child.pid, HARD)
         assert _wait_dead(grandchild)
+    finally:
+        _cleanup(child, grandchild)
+
+
+@windows_only
+def test_pid_alive_open_failure_uses_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proc_ctl, "_open_process", lambda pid, access: None)
+    monkeypatch.setattr(proc_ctl.ctypes, "get_last_error", lambda: 5)
+    assert pid_alive(123456) is True
+    monkeypatch.setattr(proc_ctl.ctypes, "get_last_error", lambda: 87)
+    assert pid_alive(123456) is False
+
+
+@windows_only
+def test_kill_tree_with_wrong_created_leaves_child_alive() -> None:
+    child = start_child(SLEEP)
+    try:
+        kill_tree(child.pid, HARD, created=1)
+        assert pid_alive(child.pid) is True
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+@windows_only
+def test_soft_kill_tree_ends_grandchild_when_root_exits_during_wait() -> None:
+    child = start_child(
+        [sys.executable, "-c", EXITING_TREE], stdout=subprocess.PIPE, text=True
+    )
+    grandchild = int(child.stdout.readline())
+    try:
+        kill_tree(child.pid, proc_ctl.SOFT)
+        assert _wait_dead(grandchild, timeout=5)
     finally:
         _cleanup(child, grandchild)
 

@@ -191,7 +191,7 @@ file inside a checked private folder.
        not `pid_alive` raises ConnectionRefusedError, as a stale socket does today.
     4. `asyncio.open_connection("127.0.0.1", port, **kw)`, then the client side of the handshake within 5 s.
 - `connect_blocking(endpoint, timeout) -> socket.socket`: the same, for blocking clients.
-- `peer_pid(writer_or_sock) -> int | None`
+- `peer_pid(writer_or_sock) -> int` (0 when it cannot be read, as today)
   - POSIX: today's SO_PEERCRED (Linux) and LOCAL_PEERPID (macOS) reads, from `halt_runtime.py:219-228`.
   - Windows: the kernel's owner of the client's TCP connection. `GetExtendedTcpTable(AF_INET,
     TCP_TABLE_OWNER_PID_CONNECTIONS)` gives the row whose local port is the client's port and whose remote port is

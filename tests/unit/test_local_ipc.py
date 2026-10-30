@@ -1,6 +1,8 @@
 """Tests for kollabor_config.local_ipc (kollab #268): unix sockets on POSIX, handshaked loopback TCP on Windows."""
 
 import asyncio
+import hashlib
+import hmac
 import importlib
 import json
 import os
@@ -161,6 +163,35 @@ def test_raw_client_gets_eof_and_no_server_proof(work_dir):
         try:
             port = json.loads(path.read_text(encoding="utf-8"))["port"]
             return await asyncio.to_thread(_raw_client, port)
+        finally:
+            endpoint.close()
+
+    assert asyncio.run(main()) == b""
+
+
+def _reflect_client(port: int, key: bytes) -> bytes:
+    # Sends N_s back as N_c, with the server-labelled proof offered as the client's. No proof must come back.
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        f = sock.makefile("rb")
+        n_s = f.read(32)
+        proof = hmac.new(key, b"kollab-ipc/server" + n_s + n_s, hashlib.sha256).digest()
+        sock.sendall(n_s + proof)
+        try:
+            return f.read()  # reads until EOF
+        except ConnectionError:
+            return b""
+
+
+@windows_only
+def test_reflected_server_label_is_refused(work_dir):
+    path = work_dir / "ep.json"
+
+    async def main():
+        endpoint = await local_ipc.serve(_echo, path)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            key = bytes.fromhex(record["key"])
+            return await asyncio.to_thread(_reflect_client, record["port"], key)
         finally:
             endpoint.close()
 

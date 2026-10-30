@@ -30,6 +30,6 @@ jobs:
       - name: Run lock tests
         run: python -m pytest -q -p no:cacheprovider --noconftest tests/unit/test_file_lock.py tests/unit/test_hub_file_lock.py
       - name: Run platform helper tests
-        run: python -m pytest -q -p no:cacheprovider --noconftest tests/unit/test_private_fs.py tests/unit/test_proc_ctl.py tests/unit/test_local_ipc.py
+        run: python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_private_fs.py tests/unit/test_proc_ctl.py tests/unit/test_local_ipc.py
       - name: Kill switch module loads
         run: python -c "import plugins.hub.halt_runtime"

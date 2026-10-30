@@ -143,32 +143,29 @@ if os.name == "nt":
         finally:
             _kernel32.CloseHandle(h)
 
-    def _win_kill_tree(pid: int, protect: set[int]) -> None:
+    def _win_tree_members(
+        pid: int, protect: set[int], root_created: int | None
+    ) -> list[tuple[int, int | None]]:
+        """``pid`` and its descendants as (pid, created): leaves first, root last."""
         if pid == os.getpid() or pid in protect:
-            return
+            return []
         table = process_table()
-        if pid not in table:
-            return
         kids: dict[int, list[int]] = {}
         for child, (ppid, _, _) in table.items():
             kids.setdefault(ppid, []).append(child)
+        created_of: dict[int, int | None] = {pid: root_created}
         order = [pid]
-        seen = {pid}
         for parent in order:  # breadth-first; the list grows while we walk it
             for child in kids.get(parent, []):
-                if child in seen or child in protect or child == os.getpid():
+                if child in created_of or child in protect or child == os.getpid():
                     continue
-                if (
-                    table[child][1] < table[parent][1]
-                ):  # an earlier child means the parent pid was reused
+                child_created = table[child][1]
+                # a child created before its parent means the parent pid was reused
+                if not child_created or child_created < (created_of[parent] or 0):
                     continue
-                seen.add(child)
+                created_of[child] = child_created
                 order.append(child)
-        for victim in reversed(order):  # leaves first
-            try:
-                _win_terminate(victim)
-            except ProcessLookupError:
-                continue
+        return [(member, created_of[member]) for member in reversed(order)]
 
     def _win_stop_signal(
         loop: asyncio.AbstractEventLoop, callback: Callable[[], None]
@@ -327,7 +324,10 @@ def start_child(
         flags &= ~subprocess.CREATE_BREAKAWAY_FROM_JOB
         child = subprocess.Popen(argv, creationflags=flags, **popen_kwargs)
     if not detached:
-        ChildJob.instance().adopt(child)
+        try:
+            ChildJob.instance().adopt(child)
+        except OSError as exc:
+            logger.warning("could not put child %s in the job: %s", child.pid, exc)
     return child
 
 
@@ -380,15 +380,25 @@ def kill_tree(
         else:
             os.kill(pid, sig)
         return
-    if created is not None and process_created(pid) != created:
-        return
+    born = process_created(pid)
+    if created is not None and born != created:
+        return  # the pid was reused
+    members = _win_tree_members(pid, protect, born)  # snapshot before any waiting
     if sig != HARD:
         deadline = time.monotonic() + 5
         while pid_alive(pid) and time.monotonic() < deadline:
             time.sleep(0.1)
-        if not pid_alive(pid):
-            return
-    _win_kill_tree(pid, protect)
+    for member, member_created in members:
+        if not member_created or process_created(member) != member_created:
+            logger.warning(
+                "kill_tree: skipping pid %s (exited, reused or unreadable)", member
+            )
+            continue
+        # access denied or already gone: keep going with the rest of the tree
+        try:
+            _win_terminate(member)
+        except OSError as exc:
+            logger.warning("kill_tree: could not end pid %s: %s", member, exc)
 
 
 def on_stop_signal(
