@@ -181,12 +181,13 @@ then an installed `kollab.exe` (`where.exe`, then `~\.local\bin`), and starts
 with `taskkill /T /F`; that is forceful, unlike the other platforms, because a
 GUI app has no console to send Ctrl+C through.
 
-## Phone (iOS)
+## Phone (iOS and Android)
 
 The same crate builds the phone app (#369). `src/lib.rs` is the entry point for
 both; the tray, single-instance, window-state and autostart plugins are
 desktop-only. The phone app opens the PhoneLink loader
-(`https://kollabor.ai/relay/v1/phone/`, set in `src-tauri/tauri.ios.conf.json`),
+(`https://kollabor.ai/relay/v1/phone/`, set in `src-tauri/tauri.ios.conf.json`
+and `src-tauri/tauri.android.conf.json`),
 so it links to a computer the same way the QR code does in Safari. Scanning the
 QR code inside the app is not built yet, and there are no store builds.
 
@@ -206,6 +207,30 @@ xcrun simctl launch booted ai.kollabor.kollab
 move it away and run `cargo tauri ios init --ci`: the iOS minimum (15.0) comes
 from `bundle.iOS.minimumSystemVersion` in `tauri.conf.json`, the microphone
 text from `src-tauri/Info.ios.plist`.
+
+Build and run it in the Android emulator (JDK 17; the Android SDK with
+`platform-tools`, `ndk;29.0.14206865`, `emulator` and
+`system-images;android-36;google_apis;arm64-v8a`, its license accepted so
+Gradle can fetch the SDK platform and build tools it needs; and
+`rustup target add aarch64-linux-android`, with rustup's `cargo` first in
+`PATH`, since Homebrew's `rust` has no Android targets):
+
+```bash
+export ANDROID_HOME=<sdk> NDK_HOME="<sdk>/ndk/29.0.14206865" JAVA_HOME=<jdk 17>
+cd desktop/src-tauri
+cargo tauri android build --apk --target aarch64 --debug
+avdmanager create avd -n kollab-phone -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_7
+emulator -avd kollab-phone &
+adb install gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+adb shell am start -n ai.kollabor.kollab/.MainActivity
+```
+
+`gen/android/` is the generated Gradle project and is committed. To regenerate
+it, move it away, run `cargo tauri android init --ci`, and put the microphone
+permissions (`RECORD_AUDIO`, `MODIFY_AUDIO_SETTINGS`) back in
+`gen/android/app/src/main/AndroidManifest.xml` and the light status bar icons
+(`enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT))`)
+back in `MainActivity.kt`. Voice inside the phone apps is not verified yet.
 
 ## Startup
 
@@ -308,9 +333,11 @@ updated in place: the prompt offers the release page instead.
 | `src-tauri/tauri.release.json` | Generated release version, formats and opaque sidecar file mappings (Linux packages, Windows `runtime/kollab.exe`) |
 | `../scripts/check_desktop_package_windows.py` | Installs the NSIS installer silently and checks launch, render, close and relaunch |
 | `src-tauri/Info.plist` | Microphone usage text; local networking allowed |
-| `src-tauri/tauri.ios.conf.json` | Phone app start page: the PhoneLink loader |
+| `src-tauri/tauri.ios.conf.json` | iOS phone app start page: the PhoneLink loader |
+| `src-tauri/tauri.android.conf.json` | Android phone app start page: the PhoneLink loader |
 | `src-tauri/Info.ios.plist` | Phone app microphone usage text |
-| `src-tauri/gen/apple/` | Generated Xcode project for the phone app |
+| `src-tauri/gen/apple/` | Generated Xcode project for the iOS phone app |
+| `src-tauri/gen/android/` | Generated Gradle project for the Android phone app; microphone permissions in `app/src/main/AndroidManifest.xml` |
 | `ui/index.html` | Bundled loading, install and error page |
 | `app-icon.png` | 1024 px icon source (the Kollab mark) |
 | `src-tauri/icons/` | App icons from `cargo tauri icon`, plus `tray.png` (template image) |
