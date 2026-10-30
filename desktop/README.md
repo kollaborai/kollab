@@ -177,9 +177,10 @@ Apple signing did.
 
 On Windows the app resolves `runtime\kollab.exe` beside `kollab-desktop.exe`,
 then an installed `kollab.exe` (`where.exe`, then `~\.local\bin`), and starts
-`kollab.exe --web-ui` without a console window. Quit ends the tree it started
-with `taskkill /T /F`; that is forceful, unlike the other platforms, because a
-GUI app has no console to send Ctrl+C through.
+`kollab.exe --web-ui` without a console window. Quit closes the runtime's
+stdin, and the runtime stops its UI server and engine and exits; if it still
+runs after 10 s, the app ends the tree it started with `taskkill /T /F`.
+`kollab-desktop.exe --quit` quits a running app.
 
 ## Phone (iOS and Android)
 

@@ -93,6 +93,8 @@ class WorkspaceRelayOwner:
     """
 
     def __init__(self, workspace: Path, state_dir: Path | None = None):
+        if os.name == "nt":  # its folder, lock and socket checks are POSIX-only (#268): no network runs there yet
+            raise RelayOwnerError("relay ownership is not available on Windows yet")
         from .relay_state import default_workspace_state_dir
 
         self.state_dir = state_dir or default_workspace_state_dir(workspace)
@@ -312,6 +314,8 @@ async def local_relay_rpc(
     Authentication is strict; missing credentials never downgrade the server.
     Exceptions are fixed strings and never include request data or remote errors.
     """
+    if os.name == "nt":  # a Unix socket with POSIX owner checks (#268)
+        raise RelayOwnerError("relay local RPC is not available on Windows yet")
     from kollabor_rpc.models import RpcRequest, new_request_id
 
     from .messenger import AgentSocketServer

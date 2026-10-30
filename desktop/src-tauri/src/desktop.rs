@@ -209,19 +209,32 @@ fn home_dir() -> String {
 }
 
 /// The version `kollab --version` prints ("<name> X.Y.Z"), or None if it doesn't run.
+/// A runtime that fails is logged, so "no kollab found" beside a bundled runtime says why.
 fn kollab_version(bin: &Path) -> Option<Vec<u32>> {
-    let out = hidden(Command::new(bin))
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    text.split_whitespace()
-        .last()?
-        .split('.')
-        .map(|part| part.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok())
-        .collect()
+    let out = match hidden(Command::new(bin)).arg("--version").stdin(Stdio::null()).output() {
+        Ok(out) => out,
+        Err(error) => {
+            eprintln!("kollab-desktop: {} --version did not start: {error}", bin.display());
+            return None;
+        }
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let version = text.split_whitespace().last().and_then(|word| {
+        word.split('.')
+            .map(|part| part.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok())
+            .collect()
+    });
+    if version.is_none() {
+        let errors = String::from_utf8_lossy(&out.stderr);
+        let errors = errors.trim();
+        let tail = &errors[errors.char_indices().rev().nth(2000).map_or(0, |(at, _)| at)..];
+        eprintln!(
+            "kollab-desktop: {} --version printed no version ({}): {text:?} {tail}",
+            bin.display(),
+            out.status
+        );
+    }
+    version
 }
 
 /// macOS bundles a launcher beside an unpacked, signed Python runtime
@@ -343,6 +356,9 @@ fn spawn_webui(kollab: &Path, log: &Path) -> std::io::Result<Child> {
     }
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
+    // Windows: stdin stays open until stop_child closes it, which asks the runtime to stop.
+    #[cfg(windows)]
+    command.stdin(Stdio::piped()).env("KOLLAB_STOP_ON_STDIN_EOF", "1");
     command.spawn()
 }
 
@@ -570,13 +586,25 @@ fn child_exited(child: &mut Child) -> std::io::Result<bool> {
 }
 
 /// Windows has no process groups to signal, and a GUI parent has no console to
-/// send Ctrl+C through, so the owned tree (the CLI, its engine and its UI server)
-/// ends with `taskkill /T /F` on the child this app still holds. That is forceful,
-/// unlike the SIGINT-then-SIGTERM stop on macOS and Linux; a graceful stop is a
-/// follow-up (docs/specs/windows-desktop.md).
+/// send Ctrl+C through. The runtime is first asked to stop by closing its stdin
+/// (KOLLAB_STOP_ON_STDIN_EOF=1); if it has not exited within 10 s, the owned tree
+/// (the CLI, its engine and its UI server) ends with `taskkill /T /F` on the child
+/// this app still holds. That fallback is forceful, unlike the SIGINT-then-SIGTERM
+/// stop on macOS and Linux (docs/specs/windows-desktop.md).
 #[cfg(windows)]
 fn stop_child(child: &mut Child) -> std::io::Result<bool> {
     if child_exited(child)? { return Ok(true); }
+    drop(child.stdin.take());
+    eprintln!("kollab-desktop: asked the runtime to stop (stdin closed)");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if child_exited(child)? {
+            eprintln!("kollab-desktop: runtime stopped after stdin closed");
+            return Ok(true);
+        }
+        if Instant::now() >= deadline { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     eprintln!("kollab-desktop: stopping owned process tree {}", child.id());
     let killed = hidden(Command::new("taskkill.exe"))
         .args(["/PID", &child.id().to_string(), "/T", "/F"])
@@ -936,7 +964,11 @@ fn retry(app: AppHandle) {
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|arg| arg == "--quit") {
+                eprintln!("kollab-desktop: second launch asked to quit");
+                return exit_now(app);
+            }
             eprintln!("kollab-desktop: second launch, focusing the existing window");
             show_window(app);
         }))

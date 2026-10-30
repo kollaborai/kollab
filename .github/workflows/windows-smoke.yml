@@ -43,7 +43,11 @@ jobs:
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_presence_local_ipc.py tests/unit/test_hub_ipc_clients.py tests/unit/test_attach_local_ipc.py tests/unit/test_deep_thought_local_ipc.py
 
       - name: Process stop, locks and launch
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_attach_local_ipc.py tests/unit/test_process_manager_windows_stop.py tests/unit/test_shell_executor_windows_alive.py tests/unit/test_token_storage_lock.py tests/unit/test_cli_windows_no_fork.py tests/unit/test_desktop_release_checksum_lf.py
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_cli_webui_windows_stop.py tests/unit/test_network_attach_local_ipc.py tests/unit/test_process_manager_windows_stop.py tests/unit/test_shell_executor_windows_alive.py tests/unit/test_token_storage_lock.py tests/unit/test_cli_windows_no_fork.py tests/unit/test_desktop_release_checksum_lf.py
+
+      # The kill switch's Windows process readers, private files and local IPC (kollab #268).
+      - name: Kill switch
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_halt_windows.py tests/unit/test_halt_runtime_windows.py tests/unit/test_hub_bridge_waiter_line.py tests/unit/test_relay_state_windows.py tests/unit/test_halt_listener_windows.py
 
       # Every module imports on Windows, so a Unix-only import never ships unseen (kollab #268).
       - name: Every module imports
@@ -55,6 +59,10 @@ jobs:
       # The #268 gate: a detached agent starts, shows online in `kollab --hub status`, and stops.
       - name: Agent smoke
         run: uv run python scripts/build_binary.py --agent-smoke .venv/Scripts/kollab.exe
+
+      # A real halt on the runner: the agent stops, a launch waits, resume restarts it (kollab #268).
+      - name: Kill switch smoke
+        run: uv run python scripts/windows_halt_smoke.py --kollab .venv/Scripts/kollab.exe
 
       - name: Engine smoke
         run: uv run python scripts/engine_smoke.py

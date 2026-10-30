@@ -1342,10 +1342,17 @@ async def _handle_cli_attach(identity: str) -> None:
                 data = json.load(fh)
             if data.get("identity") == identity:
                 pid = data.get("pid", 0)
-                try:
-                    os.kill(pid, 0)
-                except (OSError, ProcessLookupError):
-                    continue
+                if os.name == "nt":
+                    # os.kill(pid, 0) sends Ctrl+C on Windows
+                    from kollabor_config import proc_ctl
+
+                    if not proc_ctl.pid_alive(pid):
+                        continue
+                else:
+                    try:
+                        os.kill(pid, 0)
+                    except (OSError, ProcessLookupError):
+                        continue
                 target_socket = data.get("socket_path", "")
                 target_identity = data.get("identity", identity)
                 break
@@ -1361,10 +1368,17 @@ async def _handle_cli_attach(identity: str) -> None:
                 with open(f) as fh:
                     data = json.load(fh)
                 pid = data.get("pid", 0)
-                try:
-                    os.kill(pid, 0)
-                except (OSError, ProcessLookupError):
-                    continue
+                if os.name == "nt":
+                    # os.kill(pid, 0) sends Ctrl+C on Windows
+                    from kollabor_config import proc_ctl
+
+                    if not proc_ctl.pid_alive(pid):
+                        continue
+                else:
+                    try:
+                        os.kill(pid, 0)
+                    except (OSError, ProcessLookupError):
+                        continue
                 available.append(data.get("identity", "?"))
             except Exception:
                 continue
@@ -1521,10 +1535,17 @@ async def stop_agent_record(
     def signal_guard() -> str:
         """F15b: "" when the selected process may still be signalled, else the refusal line."""
         if pid and ident is None:
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return ""  # already gone: the signal path reports it stopped
+            if os.name == "nt":
+                # os.kill(pid, 0) sends Ctrl+C on Windows
+                from kollabor_config import proc_ctl
+
+                if not proc_ctl.pid_alive(pid):
+                    return ""  # already gone: the signal path reports it stopped
+            else:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    return ""  # already gone: the signal path reports it stopped
             return f"not killed: {desig} (pid {pid} identity could not be read)"
         if ident is not None and not same_identity(identity(pid), ident):
             return f"not killed: {desig} (pid {pid} identity changed)"
@@ -2220,6 +2241,17 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
     """SIGTERM a child Popen, escalating to SIGKILL if it won't die."""
     if proc is None or proc.poll() is not None:
         return
+    if os.name == "nt":
+        # CTRL_BREAK asks the child to shut down gracefully (SIGBREAK) before we force it.
+        import signal
+        import subprocess
+
+        try:
+            os.kill(proc.pid, signal.CTRL_BREAK_EVENT)
+            proc.wait(timeout=10)
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     proc.terminate()
     try:
         proc.wait(timeout=timeout)
@@ -2229,6 +2261,44 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
             proc.wait(timeout=timeout)
         except Exception:
             pass
+
+
+def _stop_children_nt(children: dict, timeout: float = 8.0) -> None:
+    """Windows: CTRL_BREAK each child's group once, then wait for all on one deadline (inside the
+    desktop app's 10 s); end what is left. A second CTRL_BREAK would make uvicorn skip its shutdown.
+    Every step prints a line: the desktop app keeps this output in its webui.log."""
+    import signal
+    import subprocess
+    import time
+
+    from kollabor_config import proc_ctl
+
+    running = {name: p for name, p in children.items() if p is not None and p.poll() is None}
+    started = time.monotonic()
+    for name, proc in running.items():
+        try:
+            os.kill(proc.pid, signal.CTRL_BREAK_EVENT)
+        except OSError as error:
+            print(f"  {name}: CTRL_BREAK to {proc.pid} failed: {error}", flush=True)
+    for name, proc in running.items():
+        try:
+            code = proc.wait(timeout=max(0.0, started + timeout - time.monotonic()))
+            print(f"  {name}: exited {code} after {time.monotonic() - started:.1f} s", flush=True)
+        except subprocess.TimeoutExpired:
+            print(f"  {name}: still running after {timeout:.0f} s, ending its tree", flush=True)
+            try:
+                # A venv's python.exe is a launcher that runs the interpreter as its child: end both.
+                proc_ctl.kill_tree(proc.pid, proc_ctl.HARD)
+                print(f"  {name}: ended, exit {proc.wait(timeout=2)}", flush=True)
+            except (OSError, subprocess.TimeoutExpired) as error:  # the next child is still stopped
+                print(f"  {name}: could not end it: {error!r}", flush=True)
+
+
+def _stop_on_stdin_eof(stop) -> None:
+    """Set ``stop`` once stdin reaches end-of-file (the desktop app closing it)."""
+    sys.stdin.buffer.read()
+    print("  stdin closed: stopping the engine and web ui", flush=True)
+    stop.set()
 
 
 def _webui_engine_port(webui_port: int) -> Optional[int]:
@@ -2415,6 +2485,7 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     import json
     import socket
     import subprocess
+    import threading
     import time
     import urllib.error
     import urllib.request
@@ -2492,12 +2563,25 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     py = [sys.executable]
     if sys.flags.isolated:
         py += ["-I", "-B", *(["-u"] if os.environ.get("PYTHONUNBUFFERED") else [])]
+    # Windows: a process group of their own, so CTRL_BREAK reaches only these children,
+    # and no stdin. The desktop app's stdin pipe is read by _stop_on_stdin_eof below, and a
+    # child that inherits a pipe another thread is reading stalls in its C runtime startup
+    # until that read ends: Windows serializes synchronous I/O on one file object.
+    group_flags = (
+        {
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+            "stdin": subprocess.DEVNULL,
+        }
+        if os.name == "nt"
+        else {}
+    )
     engine_proc = None
     if reuse:
         print(f"  (reusing engine already running on {engine_port})")
     else:
         engine_proc = subprocess.Popen(
-            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)]
+            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
+            **group_flags,
         )
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not engine_healthy():
@@ -2506,7 +2590,9 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
             time.sleep(0.2)
 
         if not engine_healthy():
-            print("Error: engine failed to start, see ~/.kollab logs", file=sys.stderr)
+            code = engine_proc.poll()
+            why = "did not answer within 30 s" if code is None else f"exited with code {code}"
+            print(f"Error: engine failed to start ({why}), see ~/.kollab logs", file=sys.stderr)
             _terminate_child(engine_proc)
             sys.exit(1)
 
@@ -2514,7 +2600,7 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     env["KOLLAB_ENGINE_URL"] = engine_url
     env["KOLLAB_WEBUI_PORT"] = str(webui_port)
     webui_proc = subprocess.Popen(
-        [*py, "-c", "from kollabor_webui import main; main()"], env=env
+        [*py, "-c", "from kollabor_webui import main; main()"], env=env, **group_flags
     )
 
     import signal as signal_module
@@ -2527,14 +2613,26 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     # kills the process without running `finally` -- orphaning both children.
     # Route it through the same path so cleanup always runs.
     previous_sigterm = signal_module.signal(signal_module.SIGTERM, _on_sigterm)
+    # The desktop app closes our stdin to quit: EOF sets `stop`, and the loop below ends.
+    stop = threading.Event()
+    if os.name == "nt" and os.environ.get("KOLLAB_STOP_ON_STDIN_EOF") == "1":
+        threading.Thread(target=_stop_on_stdin_eof, args=(stop,), daemon=True).start()
     try:
-        webui_proc.wait()
+        if os.name == "nt":
+            # Windows: Popen.wait() ignores Ctrl+C; poll instead.
+            while webui_proc.poll() is None and not stop.wait(0.5):
+                pass
+        else:
+            webui_proc.wait()
     except KeyboardInterrupt:
         pass
     finally:
         signal_module.signal(signal_module.SIGTERM, previous_sigterm)
-        _terminate_child(webui_proc)
-        _terminate_child(engine_proc)
+        if os.name == "nt":
+            _stop_children_nt({"web ui": webui_proc, "engine": engine_proc})
+        else:
+            _terminate_child(webui_proc)
+            _terminate_child(engine_proc)
 
 
 def _kill_owned_daemon() -> None:
