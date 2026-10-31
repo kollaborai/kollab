@@ -275,8 +275,10 @@ class DaemonHandle:
         except asyncio.CancelledError:
             self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
             raise
-        except (ConnectionError, OSError) as e:
+        except Exception as e:  # any read failure takes the reattach path below
             logger.info("daemon %s stream closed: %s", self.identity, e)
+        else:
+            logger.info("daemon %s closed the stream", self.identity)
         # A live local daemon that dropped us (its hub socket was re-created) takes
         # us back on the same path; without this every later call is a
         # BrokenPipeError until the engine restarts.
@@ -286,8 +288,17 @@ class DaemonHandle:
         # Wake every SSE consumer so requests don't hang on a dead daemon.
         self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
 
-    async def _reattach(self, attempts: int = 20, delay: float = 0.5) -> bool:
-        """Attach again to the same socket. True once a new read loop runs."""
+    async def _reattach(
+        self, attempts: int = 20, delay: float = 0.5, slow_delay: float = 5.0
+    ) -> bool:
+        """Attach again to the same socket. True once a new read loop runs.
+
+        A daemon that stays alive is retried for as long as it lives: ``attempts``
+        quick tries, then one every ``slow_delay`` seconds. Giving up while it
+        lived left a handle whose every call failed "client closed" until the
+        engine restarted (#541). False only once the handle closes or the
+        daemon dies.
+        """
         if self.rpc is not None:
             self.rpc.close()  # pending calls fail now instead of hanging
         if self._writer is not None:
@@ -295,18 +306,29 @@ class DaemonHandle:
                 self._writer.close()
             except Exception:
                 pass
-        for _ in range(attempts):
-            await asyncio.sleep(delay)
+        tries = 0
+        while True:
+            await asyncio.sleep(delay if tries < attempts else slow_delay)
+            tries += 1
             if self._closed or not self.alive:
                 return False
             try:
                 await self.connect(self.socket_path)
-            except (OSError, RuntimeError, ValueError, asyncio.TimeoutError) as e:
-                logger.debug("daemon %s reattach failed: %s", self.identity, e)
+            except Exception as e:
+                if tries == attempts:
+                    logger.warning(
+                        "daemon %s (pid %s) is alive but not taking the engine back; "
+                        "retrying every %ss: %s",
+                        self.identity,
+                        self.pid,
+                        slow_delay,
+                        e,
+                    )
+                else:
+                    logger.debug("daemon %s reattach failed: %s", self.identity, e)
                 continue
             logger.info("engine session %s reattached to daemon %s", self.session_id, self.identity)
             return True
-        return False
 
     def _fan_out(self, event: Dict[str, Any]) -> None:
         event.setdefault("session_id", self.session_id)
