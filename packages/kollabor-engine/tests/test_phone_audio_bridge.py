@@ -600,3 +600,20 @@ async def test_outbound_dropped_bytes_reach_ipc_from_pump(monkeypatch):
     assert len(session.out.drain()) == 3
 
     await session._teardown()
+
+
+@pytest.mark.asyncio
+async def test_bad_pcm_error_reaches_the_engine():
+    """A bad-PCM frame reports the error to the engine: the bridge_pcm _emit
+    call is async, so it must be awaited or the error never leaves the bridge."""
+    session = pab._BridgeSession(FakeReader([]), FakeWriter())
+
+    handled = await session._mic({"pcm": "!!!not base64!!!"})
+
+    assert handled is False
+    errors = [
+        json.loads(line)
+        for line in session._writer.lines
+        if json.loads(line).get("type") == "error"
+    ]
+    assert {"type": "error", "code": "bridge_pcm"} in errors

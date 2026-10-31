@@ -304,7 +304,7 @@ class _BridgeSession:
         try:
             pcm = base64.b64decode(str(message.get("pcm", "")), validate=True)
         except (binascii.Error, ValueError):
-            self._emit({"type": "error", "code": "bridge_pcm"})
+            await self._emit({"type": "error", "code": "bridge_pcm"})
             return False
         samples_per_frame = self._rate_in * FRAME_MS // 1000
         width = 2  # PCM16 mono
