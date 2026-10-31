@@ -11,6 +11,8 @@ on:
       - pyproject.toml
       - uv.lock
       - scripts/windows_import_smoke.py
+      - scripts/windows_relay_halt_smoke.py
+      - tests/unit/test_windows_relay_halt_smoke.py
       - .github/workflows/windows-smoke.yml
   workflow_dispatch:
 
@@ -65,6 +67,9 @@ jobs:
         run: uv run python scripts/windows_halt_smoke.py --kollab .venv/Scripts/kollab.exe
 
       # The #439 gate: a halt on this Windows machine stops the other machine of its network too.
+      - name: Relay smoke DNS setup
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_relay_halt_smoke.py
+
       - name: Relay halt smoke
         run: uv run python scripts/windows_relay_halt_smoke.py --kollab .venv/Scripts/kollab.exe
 
