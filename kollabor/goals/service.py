@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from kollabor.state.goal_store import (
     GoalAttempt,
+    GoalAttachmentRequestNotFound,
     GoalEvidence,
     GoalRecord,
     GoalStore,
@@ -106,7 +107,6 @@ class GoalService:
         # single in-flight goal dispatch for this daemon (spec 8.3: no other
         # goal continuation may be in flight for the conversation)
         self._in_flight: Dict[str, GoalAttempt] = {}  # goal_id -> attempt
-        self._staged_attachments: Dict[str, List[Dict[str, Any]]] = {}
         # §10.2: attached clients receive goal.* state events; they never
         # poll provider sessions or infer state from Hub roster messages
         self._publisher: Optional[Callable[..., None]] = None
@@ -188,31 +188,20 @@ class GoalService:
     # attachment staging (daemon RPC path promotes, command create consumes)
     # ------------------------------------------------------------------
 
-    def stage_attachments(
-        self, conversation_uid: str, refs: List[Dict[str, Any]]
-    ) -> None:
-        self._staged_attachments[conversation_uid] = list(refs)
+    def stage_attachment_request(self, conversation_uid: str, command_text: str, refs: List[Dict[str, Any]]) -> str:
+        return self.store.stage_attachment_request(conversation_uid, command_text, refs)
 
-    def has_staged_attachments(self, conversation_uid: str) -> bool:
-        return bool(self._staged_attachments.get(conversation_uid))
+    def pending_attachment_requests(self, conversation_uid: str) -> List[Dict[str, str]]:
+        return self.store.pending_attachment_requests(conversation_uid)
 
-    def snapshot_staged_attachments(
-        self, conversation_uid: str
-    ) -> tuple[List[Dict[str, Any]], Optional[object]]:
-        staged = self._staged_attachments.get(conversation_uid)
-        return list(staged or []), staged
+    def attachment_requests(self, conversation_uid: str) -> List[Dict[str, Any]]:
+        return self.store.attachment_requests(conversation_uid)
 
-    def consume_staged_attachments(
-        self, conversation_uid: str, token: Optional[object]
-    ) -> List[Dict[str, Any]]:
-        # A synchronous goal-created subscriber may stage another image.
-        # Identity distinguishes a newer entry even if its refs are identical.
-        if token is not None and self._staged_attachments.get(conversation_uid) is token:
-            return self._staged_attachments.pop(conversation_uid)
-        return []
+    def attachment_request(self, conversation_uid: str, request_id: str) -> Optional[Dict[str, Any]]:
+        return self.store.attachment_request(conversation_uid, request_id)
 
-    def take_staged_attachments(self, conversation_uid: str) -> List[Dict[str, Any]]:
-        return self._staged_attachments.pop(conversation_uid, [])
+    def discard_attachment_request(self, conversation_uid: str, request_id: str) -> bool:
+        return self.store.discard_attachment_request(conversation_uid, request_id)
 
     # ------------------------------------------------------------------
     # lifecycle commands
@@ -226,6 +215,7 @@ class GoalService:
         session_id: Optional[str] = None,
         token_budget: Optional[float] = None,
         attachment_refs: Optional[List[Dict[str, Any]]] = None,
+        attachment_request_id: Optional[str] = None,
         task_ids: Optional[List[str]] = None,
         scope_snapshot: Optional[Dict[str, Any]] = None,
         auto_turn_limit: int = 40,
@@ -235,10 +225,7 @@ class GoalService:
             raise GoalError("objective is empty")
         objective = objective.strip()
         if len(objective) > MAX_OBJECTIVE_CHARS:
-            raise GoalError(
-                f"objective exceeds {MAX_OBJECTIVE_CHARS} characters "
-                f"(got {len(objective)})"
-            )
+            raise GoalError(f"objective exceeds {MAX_OBJECTIVE_CHARS} characters (got {len(objective)})")
         if token_budget is not None and token_budget <= 0:
             raise GoalError("token budget must be positive")
         try:
@@ -249,16 +236,18 @@ class GoalService:
                 session_id=session_id,
                 token_budget=token_budget,
                 attachment_refs=attachment_refs,
+                attachment_request_id=attachment_request_id,
                 task_ids=task_ids,
                 scope_snapshot=scope_snapshot,
                 auto_turn_limit=auto_turn_limit,
                 auto_time_limit_s=auto_time_limit_s,
             )
+        except GoalAttachmentRequestNotFound as exc:
+            raise GoalError("attachment request not found in this conversation") from exc
         except UnfinishedGoalExists as exc:
             other = self.store.get(exc.goal_id)
             raise GoalError(
-                f"goal {other.short_id} is still unfinished; "
-                "use /goal show, /goal clear, or /goal resume"
+                f"goal {other.short_id} is still unfinished; use /goal show, /goal clear, or /goal resume"
             ) from exc
         self._turn_started_at[record.goal_id] = self._monotonic()
         self._notify(record, "created")
@@ -935,29 +924,49 @@ class GoalService:
         import base64
         import binascii
         import hashlib
+        import os
+        import re
+        import tempfile
 
-        if not isinstance(data_url, str) or not data_url.lower().startswith(
-            "data:image/"
-        ):
+        from kollabor_ai.message_content import DEFAULT_MAX_IMAGE_BYTES
+
+        if not isinstance(data_url, str) or not data_url.lower().startswith("data:image/"):
             raise GoalError("attachment is not an image data URL")
         try:
             header, encoded = data_url.split(",", 1)
         except ValueError as exc:
             raise GoalError("malformed image data URL") from exc
         media_type = header[5:].split(";")[0].lower() or "image/png"
+        if not re.fullmatch(r"image/[a-z0-9][a-z0-9.+-]*", media_type):
+            raise GoalError("invalid image media type")
+        if len(encoded) > 4 * ((DEFAULT_MAX_IMAGE_BYTES + 2) // 3):
+            raise GoalError("goal image exceeds the image size limit")
         try:
             payload = base64.b64decode(encoded, validate=True)
         except (binascii.Error, ValueError) as exc:
             raise GoalError("invalid image base64") from exc
         if not payload:
             raise GoalError("empty image payload")
+        if len(payload) > DEFAULT_MAX_IMAGE_BYTES:
+            raise GoalError("goal image exceeds the image size limit")
         checksum = hashlib.sha256(payload).hexdigest()
         ext = media_type.split("/")[-1] or "png"
         artifacts = self.store.db_path.parent / "artifacts"
         artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = artifacts / f"{checksum}.{ext}"
-        if not path.exists():
-            path.write_bytes(payload)
+        # Readers must never see a partially written shared artifact when
+        # overlapping requests promote the same content. Replace even an
+        # existing name so a retry repairs an earlier interrupted write.
+        fd, temp_name = tempfile.mkstemp(prefix=".goal-image-", dir=artifacts)
+        try:
+            with os.fdopen(fd, "wb") as artifact:
+                artifact.write(payload)
+                artifact.flush()
+                os.fsync(artifact.fileno())
+            os.replace(temp_name, path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
         return {
             "kind": "image",
             "ref": path.name,

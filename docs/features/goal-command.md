@@ -19,12 +19,22 @@ native provider profile to run the goal. Existing goals remain inspectable
 and can be paused or cleared.
 The missing ACP integration is tracked in [issue #496](https://github.com/kollaborai/kollab/issues/496).
 
-If an ACP goal with images is refused, its staged attachment references stay
-in the daemon for that conversation until replaced or the daemon stops. They
-are added to the next successfully created goal, even a text-only one.
-`/goal clear` removes them from staging and clears any active goal.
-Request-scoped staging is
-tracked in [issue #512](https://github.com/kollaborai/kollab/issues/512).
+Each submitted image set belongs to its specific goal request and conversation.
+If creation is refused or interrupted, `/goal pending` lists the retained image
+requests, including after a daemon restart. Retry one explicitly with
+`/goal retry <id> <objective>` (the objective may include `--budget`), or remove
+it with `/goal discard <id>`. A later text-only goal never inherits those images.
+If a response is lost, `/goal requests` also lists requests that already
+created a goal. Retrying a committed request reports that goal instead of
+creating another; a different objective or budget is rejected.
+`/goal clear` clears the active goal without discarding other requests. Images
+submitted with a control command are retained as a pending request; the
+control does not run. Resubmit the control without images to execute it.
+Discard removes the pending request, not the content-addressed artifact file:
+other goals or requests may reference the same file. Those files remain in the
+project's goal artifact directory until separately cleaned up. If the server
+reports that images could not be saved, no pending request was created; reattach
+the original images before resubmitting.
 Native goal turns send their attached images to image-capable models.
 
 ## Commands
@@ -35,8 +45,12 @@ Native goal turns send their attached images to image-capable models.
 /goal show                     show the active goal in full
 /goal pause                    stop continuation at the next safe boundary
 /goal resume [--budget N] [--turns N]  resume after a stop
-/goal clear                    clear the goal, keep history, remove staged attachments
+/goal clear                    clear the goal, keep history
 /goal history [N]              list recent finished goals (default 10)
+/goal pending                  list this conversation's pending image requests
+/goal requests                 list pending requests and creation receipts
+/goal retry <id> <objective>   create a goal with one pending image request
+/goal discard <id>             remove one pending image request
 ```
 
 Control subcommands are daemon-side state operations: they work while a turn
@@ -108,7 +122,9 @@ permissions apply. Prose claiming "done" is never completion.
 
 `~/.kollab/projects/<encoded>/goals/goals.db` (SQLite, WAL) + `artifacts/`.
 Tables: `goals`, `goal_events` (append-only), `goal_attempts`,
-`goal_evidence`. A partial unique index enforces one unfinished goal per
+`goal_evidence`, `goal_attachment_requests`. Pending request references are
+consumed and a creation receipt is recorded in the same transaction that
+creates their goal. A partial unique index enforces one unfinished goal per
 conversation at the storage layer.
 
 ## Configuration
