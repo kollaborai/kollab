@@ -94,7 +94,18 @@ _REPLY_HEAD = re.compile(rb'\{"action":\s*"rpc_reply",\s*"request_id":\s*"([^"\\
 _TYPE_HEAD = re.compile(rb'\{"type":\s*"([^"\\]+)"')
 # DisplayTap adds seq last, so an oversized frame's seq is in its tail.
 _SEQ_FIELD = re.compile(rb'"seq":\s*(\d+)')
-_REQUEST_ID_FIELD = re.compile(rb'"request_id":\s*"([^"\\]+)"')
+
+
+def _frame_field(head: bytes, tail: bytes, key: str) -> Any:
+    """A field of an oversized frame from its head or tail; None when neither holds it whole."""
+    for chunk in (head, tail):
+        text = chunk.decode(errors="replace")
+        for found in re.finditer(f'"{key}":\\s*', text):
+            try:  # the JSON value as written: an escaped 'old\"id' stays whole
+                return json.JSONDecoder().raw_decode(text, found.end())[0]
+            except ValueError:
+                continue  # cut off at the 4 KB edge
+    return None
 
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -350,9 +361,9 @@ class DaemonHandle:
                     if etype == "turn_complete":
                         # The turn did end: without a completion its chat waits for good.
                         completion = {"type": "turn_complete", "stop_reason": "error"}
-                        named = [*_REQUEST_ID_FIELD.finditer(head), *_REQUEST_ID_FIELD.finditer(tail)]
-                        if named:
-                            completion["request_id"] = named[0].group(1).decode(errors="replace")
+                        request_id = _frame_field(head, tail, "request_id")
+                        if isinstance(request_id, str) and request_id:
+                            completion["request_id"] = request_id
                         self._fan_out(completion)
                     continue
                 logger.warning(
