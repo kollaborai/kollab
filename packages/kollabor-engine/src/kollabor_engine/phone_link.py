@@ -42,7 +42,12 @@ from plugins.hub.relay_state import ID, KEY, RelayError, canonical_origin, stric
 
 from .auth import get_token, read_token_from_disk
 from .hub_bridge import network_daemons
-from .phone_audio import MIC_BYTES, PhoneAudioManager, PhoneCallError
+from .phone_audio import (
+    MAX_CALL_MESSAGE_BYTES,
+    MIC_BYTES,
+    PhoneAudioManager,
+    PhoneCallError,
+)
 from .phonelink_events import (
     PhoneLinkEventLog,
     normalize_phone_diagnostic,
@@ -297,6 +302,11 @@ class HttpExchange:
 
 
 CALL_OPS = frozenset({"call_open", "call_tick", "call_close"})
+CALL_FIELDS = {
+    "call_open": frozenset({"op", "id", "voice_session_id", "generation"}),
+    "call_tick": frozenset({"op", "id", "n", "mic"}),
+    "call_close": frozenset({"op", "id"}),
+}
 
 # The only voice routes a phone may reach (sprint plan section 2): create, status,
 # events and stop. Join tickets, settings, turns and worker events stay computer-only.
@@ -1125,6 +1135,11 @@ class PhoneLink:
         """Route one call op to the broker, bound to this phone's session object."""
         op = request.get("op")
         try:
+            if (
+                set(request) - CALL_FIELDS.get(op, frozenset())
+                or len(json.dumps(request, separators=(",", ":"))) > MAX_CALL_MESSAGE_BYTES
+            ):
+                raise PhoneCallError("call_invalid")  # unknown field or over the cap
             if op == "call_open":
                 return await self.audio.open(
                     identifier,
@@ -1147,6 +1162,9 @@ class PhoneLink:
             await self.audio.close(identifier, session, request.get("id"))
             return {"ok": True}
         except PhoneCallError as exc:
+            if exc.code == "call_invalid" and op == "call_tick":
+                # An invalid tick ends the call (sprint plan section 2: fail closed).
+                await self.audio.invalidate(identifier, cause="invalid_tick")
             return {"error": exc.code}
 
     def _touch(self, identifier: str, row: dict) -> None:
