@@ -1265,6 +1265,25 @@ class LocalStateService(StateService):
 
     # === Writes (phase 4) ===
 
+    @staticmethod
+    async def _apply_acp_effort(orchestrator: Any, effort: str) -> None:
+        """Send an effort the harness advertises; otherwise raise with the choices."""
+        from kollabor.llm.acp_orchestrator import option_values
+
+        option = next((o for o in orchestrator.advertised_config_options()
+                       if o.get("id") == "effort"
+                       or str(o.get("category") or "").lower() == "thought_level"), None)
+        offered = option_values(option)
+        if option is None or effort not in offered:
+            raise ValueError(
+                f"ACP harness does not offer effort {effort!r}; "
+                f"available: {', '.join(offered) or 'none'}"
+            )
+        try:
+            await orchestrator.set_config_option(str(option["id"]), effort)
+        except Exception as exc:
+            raise ValueError(f"ACP harness rejected effort {effort!r}: {exc}") from None
+
     async def set_active_profile(
         self,
         name: str,
@@ -1346,40 +1365,48 @@ class LocalStateService(StateService):
                 raise ValueError("ACP profile owns model settings")
             if orchestrator is None:
                 raise ValueError("ACP profile unavailable: orchestrator is not running")
-            try:
-                await orchestrator.close()
-                await orchestrator.start(target_profile)
-                ok = bool(self._profile_manager.set_active_profile(name))
-            except Exception as exc:
-                logger.error(
-                    "ACP profile activation failed for %r (%s)",
-                    name,
-                    type(exc).__name__,
+            running_same = (
+                str(current_provider).lower() == "acp"
+                and current_profile is not None
+                and getattr(current_profile, "name", None) == name
+                and getattr(orchestrator, "active", False) is True
+            )
+            if running_same and effort:
+                # Effort only, on the running harness: no restart.
+                await self._apply_acp_effort(orchestrator, effort)
+                ok = True
+            else:
+                previous = (
+                    current_profile
+                    if str(current_provider).lower() == "acp" and getattr(orchestrator, "active", False) is True
+                    else None
                 )
-                raise ValueError(
-                    f"ACP profile {name!r} could not be activated; verify its "
-                    "adapter command and profile settings."
-                ) from None
-            if effort:
-                # The harness owns effort: send it through its advertised option.
-                option = next(
-                    (
-                        o for o in orchestrator.advertised_config_options()
-                        if o.get("id") == "effort"
-                        or str(o.get("category") or "").lower() == "thought_level"
-                    ),
-                    None,
-                )
-                values = [
-                    str(c["value"]) for c in (option or {}).get("options") or []
-                    if isinstance(c, dict) and "value" in c
-                ]
-                if option is None or effort not in values:
-                    raise ValueError(
-                        f"ACP harness does not offer effort {effort!r}; "
-                        f"available: {', '.join(values) or 'none'}"
+                try:
+                    await orchestrator.close()
+                    await orchestrator.start(target_profile)
+                except Exception as exc:
+                    logger.error(
+                        "ACP profile activation failed for %r (%s)",
+                        name,
+                        type(exc).__name__,
                     )
-                await orchestrator.set_config_option(str(option["id"]), effort)
+                    raise ValueError(
+                        f"ACP profile {name!r} could not be activated; verify its "
+                        "adapter command and profile settings."
+                    ) from None
+                if effort:
+                    try:
+                        await self._apply_acp_effort(orchestrator, effort)
+                    except ValueError:
+                        # A rejected effort changes nothing: restore the previous harness.
+                        await orchestrator.close()
+                        if previous is not None:
+                            try:
+                                await orchestrator.start(previous)
+                            except Exception:
+                                logger.error("previous ACP profile did not restart after a rejected effort")
+                        raise
+                ok = bool(self._profile_manager.set_active_profile(name))
         else:
             if str(current_provider).lower() == "acp" and orchestrator is not None:
                 await orchestrator.close()

@@ -44,6 +44,20 @@ class _ObservedTurn:
     finished: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+def option_values(option: dict[str, Any] | None) -> list[str]:
+    """Advertised values of an ACP config option, nested option groups included."""
+    values: list[str] = []
+    for candidate in (option or {}).get("options") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if "value" in candidate:
+            values.append(str(candidate["value"]))
+        for nested in candidate.get("options") or []:
+            if isinstance(nested, dict) and "value" in nested:
+                values.append(str(nested["value"]))
+    return values
+
+
 class ACPOrchestrator:
     """Own one ACP runner for one daemon identity/profile."""
 
@@ -137,26 +151,70 @@ class ACPOrchestrator:
             return {}
         return saved if isinstance(saved, dict) else {}
 
-    async def _restore_options(self, profile: LLMProfile) -> None:
-        """Re-apply the profile's model and the options last picked for it."""
-        wanted: dict[str, Any] = {}
-        if profile.model:
-            model = next((o for o in self.advertised_config_options()
-                          if o.get("category") == "model" or o.get("id") == "model"), None)
-            if model is not None:
-                wanted[str(model["id"])] = profile.model
-        wanted.update(self._saved_options().get(profile.name) or {})
-        if profile.effort:
-            # A loadout's effort wins over the last value picked for the profile.
-            wanted["effort"] = profile.effort
-        for config_id, value in wanted.items():
+    def _effort_option(self) -> dict[str, Any] | None:
+        """The advertised reasoning-effort option, found by ID or category."""
+        return next((o for o in self.advertised_config_options()
+                     if o.get("id") == "effort"
+                     or str(o.get("category") or "").lower() == "thought_level"), None)
+
+    async def _restore_options(self, profile: LLMProfile) -> list[str]:
+        """Re-apply the loadout's model and effort, then the other saved picks.
+
+        Order: model first (a model change alters which efforts exist), then
+        effort, then saved picks. The loadout wins over saved values. Returns
+        one line per requested value the harness did not take.
+        """
+        notices: list[str] = []
+        runner = self._runner
+        if runner is None:
+            return notices
+        saved = dict(self._saved_options().get(profile.name) or {})
+        loadout_model = str(getattr(profile, "model", "") or "")
+        loadout_effort = str(getattr(profile, "effort", "") or "")
+        if not (saved or loadout_model or loadout_effort):
+            return notices  # nothing to re-apply: stay lazy, as before
+        model = next((o for o in self.advertised_config_options()
+                      if o.get("category") == "model" or o.get("id") == "model"), None)
+        if model is not None:
+            model_id = str(model["id"])
+            model_value = loadout_model or saved.pop(model_id, None)
+            if model_value and model_value != model.get("currentValue"):
+                try:
+                    await runner.set_config_option(model_id, model_value)
+                except Exception as exc:
+                    notices.append(f"model {model_value} was not applied: {exc}")
+        effort = self._effort_option()
+        if effort is not None:
+            effort_id = str(effort["id"])
+            effort_value = loadout_effort or saved.pop(effort_id, None)
+            if effort_value and str(effort_value) != effort.get("currentValue"):
+                value = str(effort_value)
+                offered = option_values(effort)
+                if value not in offered:
+                    notices.append(
+                        f"effort {value} is not offered by this model "
+                        f"(available: {', '.join(offered) or 'none'})"
+                    )
+                else:
+                    try:
+                        await runner.set_config_option(effort_id, value)
+                    except Exception as exc:
+                        notices.append(f"effort {value} was not applied: {exc}")
+        elif loadout_effort:
+            notices.append(
+                f"this harness advertises no effort option, so effort {loadout_effort} was not applied"
+            )
+        for config_id, value in saved.items():
             option = next((o for o in self.advertised_config_options() if o.get("id") == config_id), None)
             if option is None or option.get("currentValue") == value:
                 continue
             try:
-                await self._runner.set_config_option(config_id, value)
+                await runner.set_config_option(config_id, value)
             except Exception as exc:  # an option the harness no longer offers
                 logger.info("ACP option %s=%s not restored: %s", config_id, value, exc)
+        for notice in notices:
+            logger.warning("ACP restore: %s", notice)
+        return notices
 
     async def start(self, profile: LLMProfile, *, resume_conversation: str | None = None) -> None:
         if profile.provider != "acp":
@@ -217,7 +275,7 @@ class ACPOrchestrator:
             )
             self._binding_conversation_id = self._conversation_id()
             await self._runner.start(binding=binding)
-            await self._restore_options(profile)
+            self.restore_notices = await self._restore_options(profile)
             self.event_bus.register_service("acp_orchestrator", self)
             self._save_binding()
         except BaseException as exc:

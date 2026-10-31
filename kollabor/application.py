@@ -331,7 +331,14 @@ class TerminalLLMChat:
                     if loadout and getattr(loadout_profile, "provider", "") == "acp":
                         # ACP owns model/effort/temperature inside its harness;
                         # do not synthesize native model settings at startup.
-                        applied = self.profile_manager.set_active_profile(
+                        # The loadout's model and effort stay on the profile in memory;
+                        # the harness receives them at start (ACPOrchestrator._restore_options).
+                        applied = self.profile_manager.update_profile(
+                            loadout.provider_profile,
+                            model=loadout.model,
+                            effort=loadout.effort or None,
+                            save_to_config=False,
+                        ) and self.profile_manager.set_active_profile(
                             loadout.provider_profile, persist=False
                         )
                     elif loadout:

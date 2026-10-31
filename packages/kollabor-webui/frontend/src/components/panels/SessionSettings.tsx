@@ -192,7 +192,7 @@ export function SessionSettings({
             value={editEffort}
             onChange={(event) => setEditEffort(event.target.value)}
             placeholder={session.effort || "profile default"}
-            disabled={applyBusy || selectedACP}
+            disabled={applyBusy}
             className="font-mono text-xs"
           />
         </div>
