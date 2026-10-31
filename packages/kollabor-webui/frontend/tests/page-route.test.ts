@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pagePath, readMainPageRoute } from "../src/utils/page-route.ts";
+import { inPhoneApp, pagePath, readMainPageRoute } from "../src/utils/page-route.ts";
+
+test("the phone app path is matched exactly, not by string prefix", () => {
+  assert.equal(inPhoneApp("/relay/v1/phone"), true);
+  assert.equal(inPhoneApp("/relay/v1/phone/chat"), true);
+  assert.equal(inPhoneApp("/relay/v1/phonex"), false);
+  assert.equal(inPhoneApp("/"), false);
+});
 
 test("release updates have a separate route from Learn", () => {
   assert.deepEqual(readMainPageRoute({ pathname: "/whats-new", search: "" }), { kind: "whats-new" });

@@ -27,6 +27,7 @@ import {
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
+import { inPhoneApp } from "@/utils/page-route";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -442,7 +443,8 @@ const Composer: FC<{
   // The mic starts the LiveKit room in this browser; /voice (the computer
   // running the agent listens) stays a typed command, and its status line shows.
   const terminalVoice = useVoiceMode();
-  const voice = useRoomVoiceMode() ?? terminalVoice;
+  // The phone app has no room voice yet; /voice would turn on the computer's mic (#440).
+  const voice = useRoomVoiceMode() ?? (inPhoneApp(window.location.pathname) ? null : terminalVoice);
   const placeholder = useContext(ComposerPlaceholderContext);
   // Text typed into a chat that is about to be swapped out would be lost, or
   // sent to the chat being left.
