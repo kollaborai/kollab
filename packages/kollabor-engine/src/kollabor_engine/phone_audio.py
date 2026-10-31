@@ -226,6 +226,17 @@ class PhoneAudioManager:
             raise failure from None
         finally:
             call.busy = False
+        if getattr(call.bridge, "bridge_errors", 0):
+            # The bridge child reported a failure mid-call. End the call with a visible
+            # error: answering with silence would make a dead call look live.
+            logger.warning(
+                "phone call bridge reported an error: %s",
+                getattr(call.bridge, "bridge_last_error", None),
+            )
+            failure = PhoneCallError("call_unavailable")
+            await self._end(call, cause="bridge_error")
+            _settle(call.inflight, error=failure)
+            raise failure
         if self._calls.get(phone) is not call:
             # Closed or revoked while this tick was in flight: never answer with audio.
             failure = PhoneCallError("call_unavailable")

@@ -987,3 +987,81 @@ async def test_restarted_link_opens_calls_after_close(tmp_path):
     assert opened["ok"] is True
     await link.close()
     assert bridges[0].closed
+
+
+_BRIDGE_ERROR_CHILD = """import sys,json
+sys.stdin.readline()
+print(json.dumps({'type':'ready'}),flush=True)
+print(json.dumps({'type':'error','code':'bridge_audio'}),flush=True)
+for line in sys.stdin:
+    if json.loads(line).get('type')=='close': break
+"""
+
+_BRIDGE_AUDIO_CHILD = """import sys,json,base64
+sys.stdin.readline()
+print(json.dumps({'type':'ready'}),flush=True)
+print(json.dumps({'type':'audio','pcm':base64.b64encode(bytes(960)).decode()}),flush=True)
+for line in sys.stdin:
+    if json.loads(line).get('type')=='close': break
+"""
+
+
+async def _real_bridge_manager(monkeypatch, child):
+    """A PhoneAudioManager whose bridge is a real child process from the LiveKit runtime."""
+    import sys
+
+    from kollabor_engine import voice_livekit
+
+    ports = iter((12345, 12346))  # two distinct ports: the runtime loops until they differ
+    monkeypatch.setattr(voice_livekit, "_free_port", lambda: next(ports))
+    runtime = voice_livekit.LiveKitRuntime(
+        engine_url=lambda: "http://127.0.0.1:0",
+        engine_token=lambda: "test",
+        worker_argv=[sys.executable, "-c", child],
+    )
+    binding = type("Binding", (), {"voice_session_id": VOICE, "generation": 0})()
+
+    async def opener(*args):
+        return await runtime.start_phone_bridge(binding)
+
+    return PhoneAudioManager(opener)
+
+
+@pytest.mark.asyncio
+async def test_bridge_error_ends_the_call_visibly(monkeypatch):
+    """A bridge child error mid-call makes the tick fail; it never answers with silence."""
+    manager = await _real_bridge_manager(monkeypatch, _BRIDGE_ERROR_CHILD)
+    session = object()
+    await manager.open("phone-a", session, CALL, VOICE, 0)
+    bridge = manager._calls["phone-a"].bridge
+    try:
+        await asyncio.wait_for(_until(lambda: bridge.bridge_errors > 0), 2)
+        with pytest.raises(PhoneCallError) as failed:
+            await manager.tick("phone-a", session, CALL, 0, MIC)
+        assert failed.value.code == "call_unavailable"
+        assert manager._calls == {}  # the call is gone, not answering with silence
+        assert manager._voice_owner == {}
+    finally:
+        await manager.shutdown()
+    assert bridge.process.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_bridge_audio_reaches_the_tick(monkeypatch):
+    """Audio the bridge child sends is handed to the phone on the next tick."""
+    manager = await _real_bridge_manager(monkeypatch, _BRIDGE_AUDIO_CHILD)
+    session = object()
+    await manager.open("phone-a", session, CALL, VOICE, 0)
+    bridge = manager._calls["phone-a"].bridge
+    try:
+        await asyncio.wait_for(_until(lambda: len(bridge._out) > 0), 2)
+        ticked = await manager.tick("phone-a", session, CALL, 0, MIC)
+        assert ticked["ok"] is True
+        assert len(base64.b64decode(ticked["audio"])) == 960
+    finally:
+        await manager.shutdown()
+
+
+async def _until(predicate):
+    while not predicate():
+        await asyncio.sleep(0.01)
