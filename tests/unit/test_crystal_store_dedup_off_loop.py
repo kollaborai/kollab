@@ -1,6 +1,7 @@
 """Dreaming's dedup pass keeps the full pass's merges and runs off the event loop (#546)."""
 
 import asyncio
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -47,12 +48,15 @@ async def test_the_dreaming_pass_runs_in_a_worker_thread_with_the_same_result():
     merge_pass = store._merge_pass
 
     def recorded(*args):
-        threads.append(threading.get_ident())
+        threads.append((threading.get_ident(), sys.getswitchinterval()))
         return merge_pass(*args)
 
+    interval = sys.getswitchinterval()
     store._merge_pass = recorded
     assert await store.deduplicate_off_loop() == 1
-    assert threads and threads[0] != threading.get_ident()
+    assert threads and threads[0][0] != threading.get_ident()
+    # The pass gives the GIL back often, so the loop's syscalls never wait on it.
+    assert threads[0][1] <= 0.0002 and sys.getswitchinterval() == interval
     assert [e.id for e in store.get_all()] == ["crys-001", "crys-003"]
     assert [e.id for e in CrystalStore(store._path.parent).get_all()] == ["crys-001", "crys-003"]
 

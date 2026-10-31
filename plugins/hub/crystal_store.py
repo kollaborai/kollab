@@ -19,6 +19,7 @@ Entries are separated by blank lines between the body and the next ---.
 import asyncio
 import logging
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -61,6 +62,12 @@ DEDUP_THRESHOLD = 0.45
 # 0.40 catches semantic duplicates while avoiding false merges on
 # short summaries that share common words like "insight" or "about".
 SUMMARY_DEDUP_THRESHOLD = 0.40
+
+# The GIL switch interval while the dedup pass runs in its worker thread. At
+# CPython's default 5 ms, each syscall the agent's event loop makes waits for
+# the pass to give the GIL back: a handler that takes 1 ms alone took 1.4 s,
+# and the koordinator's command catalog RPC timed out at 10 s (#546).
+_PASS_SWITCH_INTERVAL = 0.0002
 
 # Minimum relevance score for nudge results
 NUDGE_MIN_SCORE = 1.0
@@ -462,7 +469,13 @@ class CrystalStore:
         before = {sig[0]: sig for sig in snapshot}
         copies = [replace(e, keywords=list(e.keywords)) for e in self._entries]
         merges: List[Tuple[str, str]] = []
-        if not await asyncio.to_thread(self._merge_pass, copies, merges):
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(min(interval, _PASS_SWITCH_INTERVAL))
+        try:
+            found = await asyncio.to_thread(self._merge_pass, copies, merges)
+        finally:
+            sys.setswitchinterval(interval)
+        if not found:
             return 0
         waiting: set = set()
         if len(before) < len(snapshot):  # repeated ids: merges cannot be matched to entries
