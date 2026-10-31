@@ -231,9 +231,17 @@ const scenario = async (name, buildState, run) => {
     return url.origin === base ? route.continue() : route.abort();
   });
   await page.goto(base);
-  try {
-    await run(page, requests);
+  // Round-4 screenshot race fix: a run may take its own screenshot mid-flow
+  // (capture) while harness-level state is still held; the wrapper then skips
+  // its post-run shot so the pixels on disk are the asserted ones.
+  let captured = false;
+  const capture = async () => {
+    captured = true;
     await page.screenshot({ path: path.join(out, `${name}.png`), fullPage: false });
+  };
+  try {
+    await run(page, requests, capture);
+    if (!captured) await page.screenshot({ path: path.join(out, `${name}.png`), fullPage: false });
   } catch (error) {
     fail(name, `harness error: ${error.message}`);
     console.log(`    ${name} requests:`, JSON.stringify(requests));
@@ -316,6 +324,8 @@ try {
   // failure, so nothing can replace the status block between the 500 landing
   // and the style read. Round 2 lost this race twice on a slower machine:
   // the ~2s poll unmounted the banner in under one 100 ms polling interval.
+  // Round 4: the hold spans the screenshot itself, so the captured pixels
+  // show the banner (round 3 released before the wrapper captured).
   const b = {
     mode: "passthrough", // passthrough -> armed (before held) -> failing
     held: [],
@@ -345,7 +355,7 @@ try {
         return { status: 200, body: mkPage(10, 60) };
       },
     }),
-    async (page) => {
+    async (page, requests, capture) => {
       await openThread(page, "message-59");
       await page.waitForTimeout(2000); // let the quiet prefetch settle
       // User-driven trigger (click + Home, wheel backup inside scrollToTop)
@@ -387,7 +397,6 @@ try {
         .then((handle) => handle.jsonValue())
         .then((value) => String(value))
         .catch(() => null);
-      b.release({ status: 200, body: mkPage(60, 110) });
       if (!className) {
         fail("B-banner-style", "error banner never appeared after paging failure");
         return;
@@ -402,6 +411,39 @@ try {
       } else {
         fail("B-banner-style", `banner missing bg-destructive/10: ${className}`);
       }
+      // Round-4 fix: the frozen refresh stays held through the capture, so
+      // nothing can unmount the banner between the style read and the pixels
+      // on disk. Round 3 released the hold here, and the applied refresh
+      // window could unmount the banner before the wrapper's screenshot.
+      // The screenshot is viewport-sized, so "captured" means the banner
+      // intersects the viewport, not merely laid out somewhere in the DOM.
+      const inViewport = () => {
+        const el = document.querySelector('[data-slot="history-status"][role="alert"]');
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && r.top < window.innerHeight && r.bottom > 0;
+      };
+      const laidOut = await page
+        .waitForFunction(inViewport, undefined, { timeout: 2000, polling: 50 })
+        .then(() => true)
+        .catch(() => false);
+      if (!laidOut) {
+        fail("B-banner-style", "banner unmounted before capture");
+        return;
+      }
+      await capture();
+      const stillThere = await page.evaluate(inViewport).catch(() => false);
+      if (!stillThere) {
+        fail("B-banner-style", "banner unmounted during capture");
+        return;
+      }
+      ok("B-banner-style", "banner captured on screen with the refresh held");
+      // Only now release the held refreshes so the app settles before the
+      // context closes; the screenshot is already on disk. No assertion on
+      // the post-release banner: the refresh payload (older pages) can be
+      // legitimately dropped by the merge gap guard, so the banner staying
+      // mounted is valid product behavior.
+      b.release({ status: 200, body: mkPage(60, 110) });
     },
   );
 
@@ -457,6 +499,9 @@ try {
     freeze() {
       this.frozen = true;
     },
+    unfreeze() {
+      this.frozen = false;
+    },
     release(response) {
       this.held.splice(0).forEach((pending) => pending.resolve(response));
     },
@@ -469,6 +514,9 @@ try {
       },
       freeze() {
         d.freeze();
+      },
+      unfreeze() {
+        d.unfreeze();
       },
       resolve(options) {
         if (d.frozen && options.after && !options.before) {
@@ -490,8 +538,22 @@ try {
     async (page, requests) => {
       await openThread(page, "message-120");
       await page.waitForTimeout(1500); // let the quiet prefetch settle
+      // Round-4: freeze the polls through the online paging wait as well.
+      // Under load the ~2 s refresh kept re-delivering the 71-121 window
+      // over the merged prefix (63 polls in one failing run) and message-0
+      // never rendered. Same hold medicine as the offline freeze below.
+      history.freeze();
       await scrollToTop(page, "message-120");
       const onlineTop = await waitForTextWithRetry(page, "message-0", "message-120");
+      d.release({
+        status: 200,
+        body: mkPage(71, 121, { older_cursor: "before-71", has_more_older: true }),
+      });
+      // Unfreeze before the offline reload: boot-time refresh polls must get
+      // their 503s so the app falls back to the cache. Left frozen, the
+      // polls hang at the route layer and the session restore stalls forever
+      // ("Restoring session..." never resolves).
+      history.unfreeze();
       if (!onlineTop) throw new Error("message-0 never appeared while online");
       ok("D-offline-narrowed-prefix", "full window paged down to message-0 online");
       history.setOffline(true);
