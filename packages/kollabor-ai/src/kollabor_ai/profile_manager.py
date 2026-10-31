@@ -717,6 +717,13 @@ class LLMProfile:
                 f"Profile '{self.name}': effort '{value}' is not one of {'/'.join(EFFORT_LEVELS)} — ignoring"
             )
             return ""
+        from kollabor_ai.model_registry import effort_levels
+
+        levels = effort_levels(self.get_model())
+        if levels is not None and value not in levels:
+            # A level the model does not take (any level, if it does not reason)
+            # is a 400 or a dropped field: it runs at its own default instead.
+            return ""
         return value
 
     def get_streaming(self) -> bool:

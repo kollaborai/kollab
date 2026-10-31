@@ -46,11 +46,6 @@ _LOCAL_ENDPOINT_PROVIDERS = {"custom", "local"}
 # alias, an OAuth-only setup synthesizes zero implicit loadouts.
 _REGISTRY_PROVIDER_ALIASES = {"openai_responses": "openai"}
 
-# The effort levels a provider's API takes when its live catalog names none for a
-# model: Anthropic's output_config.effort, else the reasoning effort every
-# OpenAI-style API accepts. The picker offers no level a request would 400 on.
-_PROVIDER_EFFORTS = {"anthropic": ("low", "medium", "high", "max")}
-_DEFAULT_EFFORTS = ("low", "medium", "high")
 _NOTE_EFFORTS = re.compile(r"effort: ([a-z/]+)")
 
 
@@ -288,35 +283,45 @@ class LoadoutManager:
 
         Each configured profile's models, each at every effort it takes, so a
         row says what runs: a blank effort is offered only for a model that
-        takes none (a blank sends nothing, so an earlier pick would stay). A
-        native model takes the levels its live catalog names, else its
-        provider's; an ACP harness offers what its sessions last reported
-        (``acp_options[profile name]``), per model once that model has run.
-        Saved loadouts are not rows: one saves to its provider profile, which
-        every session on it shares, and a pick changes one session.
+        takes none (a blank sends nothing, so an earlier pick would stay).
+
+        A model's levels are its own: what a live catalog lists for it (Codex
+        publishes them per model, and Codex CLI serves the same models), else
+        the registry's, else (native only) what every effort API takes. An ACP
+        harness offers the models its sessions last reported
+        (``acp_options[profile name]``), each at the levels it reported for
+        that model; another model's levels say nothing about it. Saved loadouts
+        are not rows: one saves to its provider profile, which every session on
+        it shares, and a pick changes one session.
         """
-        from kollabor_ai.model_registry import supports_thinking
+        from kollabor_ai.model_registry import DEFAULT_EFFORT_LEVELS, effort_levels
         from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
+        profiles = self.provider_profiles()
+        catalog: Dict[str, List[str]] = {}
+        for profile in profiles:
+            # A model's levels barely change: an old catalog still names them.
+            for entry in self._cached_catalog(profile, max_age=float("inf")):
+                if entry.get("id") and _catalog_efforts(entry):
+                    catalog.setdefault(str(entry["id"]), _catalog_efforts(entry))
+
+        def known(model: str, fallback: List[str]) -> List[str]:
+            levels = catalog[model] if model in catalog else effort_levels(model)
+            return fallback if levels is None else levels
+
         rows: List[Dict[str, str]] = []
-        for profile in self.provider_profiles():
+        for profile in profiles:
             provider = (profile.get_provider() or "").lower()
             if provider == "acp":
                 reported = (acp_options or {}).get(profile.name) or {}
-                by_model = reported.get("efforts_by_model") or {}
+                seen = reported.get("efforts_by_model") or {}
                 models = [str(m) for m in reported.get("models") or []] or [""]
-                levels = {m: [str(e) for e in by_model.get(m) or reported.get("efforts") or []] for m in models}
+                levels = {m: [str(e) for e in seen[m]] if m in seen else known(m, []) for m in models}
             else:
                 own = [profile.get_model()] if profile.get_model() else []
                 models = list(dict.fromkeys(own + self.models_for_profile(profile)))
-                # A model's levels barely change: an old catalog still names them.
-                stale_ok = self._cached_catalog(profile, max_age=float("inf"))
-                catalog = {str(e.get("id")): _catalog_efforts(e) for e in stale_ok}
-                levels = {
-                    m: catalog.get(m) or list(_PROVIDER_EFFORTS.get(provider, _DEFAULT_EFFORTS))
-                    if provider in EFFORT_SUPPORTED_PROVIDERS and supports_thinking(m) else []
-                    for m in models
-                }
+                takes_effort = provider in EFFORT_SUPPORTED_PROVIDERS
+                levels = {m: known(m, list(DEFAULT_EFFORT_LEVELS)) if takes_effort else [] for m in models}
             for model in models:
                 for effort in levels[model] or [""]:
                     rows.append({"profile": profile.name, "provider": provider, "model": model, "effort": effort})

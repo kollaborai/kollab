@@ -788,11 +788,9 @@ class ModelCommandHandler(BaseCommandHandler):
     async def _model_effort_levels(self, profile) -> list:
         """Effort levels the active model accepts, best-effort.
 
-        The codex backend publishes them per model; everything else gets the
-        canonical list, since no other provider exposes a capability endpoint.
+        The codex backend publishes them per model; any other model gets the
+        registry's levels for it, else what every effort API takes.
         """
-        from kollabor_ai.profile_manager import EFFORT_LEVELS
-
         if (profile.get_provider() or "").lower() == "openai_responses":
             try:
                 from kollabor_ai.oauth import OAuthTokenStorage
@@ -816,10 +814,13 @@ class ModelCommandHandler(BaseCommandHandler):
                         ]
                         if levels:
                             return levels
-            except Exception as e:  # noqa: BLE001 - fall back to the canonical set
+            except Exception as e:  # noqa: BLE001 - fall back to the registry
                 self.logger.debug("codex effort levels unavailable: %s", e)
 
-        return list(EFFORT_LEVELS)
+        from kollabor_ai.model_registry import DEFAULT_EFFORT_LEVELS, effort_levels
+
+        levels = effort_levels(profile.get_model())
+        return list(DEFAULT_EFFORT_LEVELS) if levels is None else levels
 
     async def _handle_effort(self, level: str) -> CommandResult:
         """Show or set the active profile's reasoning effort.
@@ -887,6 +888,7 @@ class ModelCommandHandler(BaseCommandHandler):
             )
 
         levels = await self._model_effort_levels(profile)
+        available = ", ".join(levels) or "none, this model takes no effort level"
         current = profile.get_effort() or "(model default)"
 
         if not level:
@@ -895,7 +897,7 @@ class ModelCommandHandler(BaseCommandHandler):
                 message=(
                     f"Reasoning effort: {current}\n"
                     f"  Model: {profile.get_model()}\n"
-                    f"  Available: {', '.join(levels)}\n"
+                    f"  Available: {available}\n"
                     f"  Set with: /model effort <level>  (or 'default' to clear)"
                 ),
                 display_type="info",
@@ -909,7 +911,7 @@ class ModelCommandHandler(BaseCommandHandler):
                 success=False,
                 message=(
                     f"Unknown effort level: {level}\n"
-                    f"  Available: {', '.join(levels)}"
+                    f"  Available: {available}"
                 ),
                 display_type="error",
             )

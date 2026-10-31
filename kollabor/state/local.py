@@ -653,9 +653,10 @@ class LocalStateService(StateService):
         snapshot = self._profile_to_snapshot(active, is_active=True)
         harness_model = self._acp_harness_model()
         if harness_model:
-            # A harness picks its own model (/model sets it there): report that
-            # one, not the profile's, which the harness does not read.
+            # A harness picks its own model and effort (/model sets them there):
+            # report those, not the profile's, which the harness does not read.
             snapshot.model = harness_model
+            snapshot.effort = self._acp_harness_effort()
         return snapshot
 
     def _acp_harness_model(self) -> str:
@@ -669,6 +670,19 @@ class LocalStateService(StateService):
                     return str(option.get("currentValue") or "")
         except Exception:
             logger.debug("ACP harness model unavailable", exc_info=True)
+        return ""
+
+    def _acp_harness_effort(self) -> str:
+        """The active ACP harness's current effort option, or "" when it has none."""
+        try:
+            from kollabor_ai.acp_options import find_option
+
+            acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
+            options = acp.advertised_config_options() if acp is not None else []
+            option = find_option(options, "thought_level") or find_option(options, "effort")
+            return str((option or {}).get("currentValue") or "")
+        except Exception:
+            logger.debug("ACP harness effort unavailable", exc_info=True)
         return ""
 
     async def list_profiles(self) -> ProfileListSnapshot:

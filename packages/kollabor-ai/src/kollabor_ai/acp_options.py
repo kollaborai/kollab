@@ -78,7 +78,7 @@ def remember(harness: str, options: List[Dict[str, Any]]) -> None:
             data = load()
             old = data.get(harness) or {}
             by_model = dict(old.get("efforts_by_model") or {})
-            if current and efforts:
+            if current:  # [] too: a model with no effort option takes none
                 by_model[current] = efforts
             entry = {"models": models, "efforts": efforts, "efforts_by_model": by_model}
             if old == entry:

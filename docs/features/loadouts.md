@@ -88,14 +88,23 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   CLI, Claude Code) owns its model and effort, so they go to its own options,
   as the Model tab sets them. New Session starts on the profile, then applies
   the pick.
-- Each row names the effort it runs at. A model gets the levels its live
-  catalog lists (gpt-6-luna stops at max), otherwise its provider's: Anthropic
-  low, medium, high and max; any other provider low, medium and high. A model
-  that doesn't reason (or a provider that sends no effort) gets one row with
-  none.
-- An ACP harness offers the models and efforts its sessions last reported
-  (`~/.kollab/acp/options.json`), with each model's own levels once it has run.
-  One never started offers only its default until its first session.
+- Each row names the effort it runs at, and only levels that model takes:
+  - its live catalog's (gpt-6-luna stops at max);
+  - else the registry's (`effort_levels` in `bundles/data/models.json`: Claude
+    Opus 4.6 has no xhigh, Claude Haiku 4.5 takes none);
+  - else low, medium and high.
+
+  A model that doesn't reason, or a provider that sends no effort, gets one
+  row with none. Whichever screen set a level, a level the model doesn't take
+  is never sent.
+- An ACP harness offers the models its sessions last reported
+  (`~/.kollab/acp/options.json`). Each model gets the levels the harness
+  reported for it, else the levels known for that model id (Codex CLI serves
+  the ChatGPT login's models), never another model's. A model with nothing
+  known gets one row that keeps the harness's effort; its levels appear once a
+  session runs it. A harness never started offers only its default.
+- Opening the list fetches any provider catalog older than an hour (up to
+  8 s), so an endpoint's models show without opening Settings → Loadouts first.
 - An environment variable outranks a pick (`KOLLAB_<PROFILE>_MODEL`,
   `KOLLAB_<PROFILE>_EFFORT`, `KOLLAB_MODEL`, `KOLLAB_EFFORT`): the picker says
   which model kept running instead of showing the pick as applied.
