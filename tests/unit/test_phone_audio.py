@@ -1065,3 +1065,27 @@ async def test_bridge_audio_reaches_the_tick(monkeypatch):
 async def _until(predicate):
     while not predicate():
         await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_upstream_drops_count_in_the_phone_total():
+    """Bytes the bridge dropped before the broker saw them count as dropped samples."""
+
+    class LossyBridge(FakeBridge):
+        out_dropped_bytes = 0
+
+        async def send_mic(self, n, pcm):
+            await super().send_mic(n, pcm)
+            self.out_dropped_bytes += 2000  # the bridge lost 2000 bytes this tick
+
+    async def opener(voice_session_id, generation):
+        return LossyBridge()
+
+    manager = PhoneAudioManager(opener)
+    session = object()
+    await manager.open("phone-a", session, CALL, VOICE, 0)
+    first = await manager.tick("phone-a", session, CALL, 0, MIC)
+    assert first["dropped"] == 1000  # 2000 bytes // 2
+    second = await manager.tick("phone-a", session, CALL, 1, MIC)
+    assert second["dropped"] == 2000  # cumulative: only the 2000 new bytes are added
+    await manager.shutdown()

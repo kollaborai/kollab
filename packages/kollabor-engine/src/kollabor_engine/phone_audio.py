@@ -91,6 +91,7 @@ class _Call:
     last_response: dict | None = None
     out: bytearray = field(default_factory=bytearray)
     dropped: int = 0
+    bridge_drops_seen: int = 0  # the bridge's out_dropped_bytes already counted into dropped
     busy: bool = False
     inflight_n: int = -1
     inflight: asyncio.Future | None = None
@@ -202,6 +203,11 @@ class PhoneAudioManager:
         try:
             await call.bridge.send_mic(n, mic)
             call.out.extend(call.bridge.take_output())
+            # Bytes the bridge dropped before this tick are dropped samples too; count the
+            # new ones so a burst is never reported as cheaper than it was.
+            upstream = getattr(call.bridge, "out_dropped_bytes", 0)
+            call.dropped += (upstream - call.bridge_drops_seen) // 2
+            call.bridge_drops_seen = upstream
             overflow = max(0, len(call.out) - QUEUE_BYTES)
             if overflow:
                 del call.out[:overflow]
