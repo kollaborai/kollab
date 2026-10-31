@@ -434,7 +434,8 @@ async def test_llm_fallback_dropdown_offers_connections_and_saved_loadouts(llm_c
     (control,) = (await LLM.describe(llm_ctx, {}))["controls"]
     assert control["path"] == "fallback" and control["value"] == "off"
     assert control["options"] == ["off", "anthropic", "openai", "openrouter", "mine"]
-    assert control["option_labels"] == {"off": "None"}
+    assert control["label"] == "Fallback Model"
+    assert control["option_labels"]["off"] == "None" and control["option_labels"]["mine"] == "mine · anthropic"
 
     done = await LLM.act(llm_ctx, "fallback", {"fallback": "openai"})
     assert done["ok"] and plugin.saved == ["openai"]

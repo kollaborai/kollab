@@ -317,16 +317,21 @@ def _fallback_controls(ctx: Any, manager: Any) -> list:
     plugin = _fallback_plugin(ctx)
     if plugin is None:
         return []
-    names = [p.name for p in manager.provider_profiles()]
-    names += [lo.name for lo in manager.list_loadouts() if not lo.implicit and lo.name not in names]
+    labels = {"off": "None"}
+    for profile in manager.provider_profiles():
+        model = profile.get_model() if hasattr(profile, "get_model") else ""
+        labels[profile.name] = f"{model} · {profile.name}" if model and model != profile.name else profile.name
+    for loadout in manager.list_loadouts():
+        if not loadout.implicit and loadout.name not in labels:
+            labels[loadout.name] = f"{loadout.name} · {loadout.provider_profile}"
     choice = plugin.choice()
-    if choice and choice not in names:
-        names.append(choice)
+    if choice and choice not in labels:
+        labels[choice] = choice
     return [make_field(
-        "fallback", "dropdown", "Fallback", action="fallback",
-        value=choice or "off", options=["off", *names], option_labels={"off": "None"},
-        help="When this agent's model can't serve a turn (a usage limit, quota, rate limit or"
-        " expired login), it switches to this once and runs the turn again. Saved for this agent.",
+        "fallback", "dropdown", "Fallback Model", action="fallback",
+        value=choice or "off", options=list(labels), option_labels=labels,
+        help="If this agent hits a usage limit or its login expires, it runs the turn once more"
+        " on this model. Saved for this agent.",
     )]
 
 

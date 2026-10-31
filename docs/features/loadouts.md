@@ -112,7 +112,7 @@ send the message again. It stays on the fallback until you switch back with
 `/llm`.
 
 - `/llm fallback` shows the choice; `/llm fallback off` turns it off.
-- In the web UI: Settings → Loadouts → Fallback, a dropdown of every
+- In the web UI: Settings → Loadouts → Fallback Model, a dropdown of every
   connection (with its own model) and every saved loadout; None turns it off.
 - The choice is per agent (`plugins.model_fallback.agents.<agent>`), saved in
   the folder's `.kollab/config.json`. `plugins.model_fallback.loadout` is the
