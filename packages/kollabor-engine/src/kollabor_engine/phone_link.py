@@ -42,6 +42,7 @@ from plugins.hub.relay_state import ID, KEY, RelayError, canonical_origin, stric
 
 from .auth import get_token, read_token_from_disk
 from .hub_bridge import network_daemons
+from .phone_audio import PhoneAudioManager, PhoneCallError
 from .phonelink_events import (
     PhoneLinkEventLog,
     normalize_phone_diagnostic,
@@ -294,8 +295,21 @@ class HttpExchange:
     sequence: int = 0
 
 
+CALL_OPS = frozenset({"call_open", "call_tick", "call_close"})
+
+
+async def _no_phone_bridge(voice_session_id: str, generation: int):
+    raise PhoneCallError("call_unavailable")
+
+
 class PhoneLink:
-    def __init__(self, app, directory: Path | None = None, port: int | None = None):
+    def __init__(
+        self,
+        app,
+        directory: Path | None = None,
+        port: int | None = None,
+        open_phone_bridge=None,
+    ):
         self.port = port
         self.app = app
         self.directory = directory or get_config_directory() / "phonelink"
@@ -304,6 +318,9 @@ class PhoneLink:
         self.sessions: dict[str, PhoneSession] = {}
         self._idle_announced: set[str] = set()
         self.exchanges: dict[tuple[str, str], HttpExchange] = {}
+        # Calls stay unavailable until the voice bridge is injected (lane B).
+        self.audio = PhoneAudioManager(open_phone_bridge or _no_phone_bridge)
+        self._call_stops: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._loaded = False
@@ -618,6 +635,13 @@ class PhoneLink:
                 if exchange.task:
                     exchange.task.cancel()
                 self.exchanges.pop(key, None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop: nothing could have opened a call yet
+        stop = loop.create_task(self.audio.invalidate(identifier, cause=cause))
+        self._call_stops.add(stop)
+        stop.add_done_callback(self._call_stops.discard)
 
     def _announce_idle_sessions(self) -> None:
         """Log a linked phone once when it stops sending requests (the 45 s status() window)."""
@@ -1051,16 +1075,19 @@ class PhoneLink:
         session.last_request_at = time.time()
         self._idle_announced.discard(identifier)
         self._touch(identifier, row)
-        try:
-            result = await self._http(
-                identifier,
-                request,
-                chunk_size=session.chunk_size,
-                coalesce_headers=session.coalesce_reads,
-                zero_body_autorun=session.zero_body_autorun,
-            )
-        except PhoneLinkError as exc:
-            result = {"error": str(exc)}
+        if request.get("op") in CALL_OPS:
+            result = await self._call(identifier, session, request)
+        else:
+            try:
+                result = await self._http(
+                    identifier,
+                    request,
+                    chunk_size=session.chunk_size,
+                    coalesce_headers=session.coalesce_reads,
+                    zero_body_autorun=session.zero_body_autorun,
+                )
+            except PhoneLinkError as exc:
+                result = {"error": str(exc)}
         if self.sessions.get(identifier) is not session:
             raise RelayError("phone session changed")
         result["seq"] = session.sent
@@ -1073,6 +1100,31 @@ class PhoneLink:
         return {
             "packet": base64.b64encode(session.outgoing.encrypt(response_packet)).decode()
         }
+
+    async def _call(self, identifier: str, session: PhoneSession, request: dict) -> dict:
+        """Route one call op to the broker, bound to this phone's session object."""
+        op = request.get("op")
+        try:
+            if op == "call_open":
+                return await self.audio.open(
+                    identifier,
+                    session,
+                    request.get("id"),
+                    request.get("voice_session_id"),
+                    request.get("generation"),
+                )
+            if op == "call_tick":
+                try:
+                    mic = base64.b64decode(request.get("mic"), validate=True)
+                except (TypeError, ValueError):
+                    raise PhoneCallError("call_invalid") from None
+                return await self.audio.tick(
+                    identifier, session, request.get("id"), request.get("n"), mic
+                )
+            await self.audio.close(identifier, session, request.get("id"))
+            return {"ok": True}
+        except PhoneCallError as exc:
+            return {"error": exc.code}
 
     def _touch(self, identifier: str, row: dict) -> None:
         """Remember when this phone last spoke; saved at most once a minute."""
