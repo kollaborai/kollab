@@ -446,3 +446,33 @@ async def test_an_old_turns_dropped_frame_fails_no_other_request(monkeypatch):
 
     sent = "".join(await asyncio.wait_for(drain(), 5))
     assert "frame_too_large" not in sent and '"fine"' in sent and '"new"' in sent
+
+
+@pytest.mark.asyncio
+async def test_a_request_id_inside_a_tool_frame_names_no_request(monkeypatch):
+    # Tourmaline on #543 round 6: an oversized tool frame's input held a
+    # request_id of its own, read before the turn's, so another request got the error.
+    from kollabor_tui.display_tap import DisplayTap, publish_semantic
+    from kollabor_tui.turn_context import current_turn
+
+    import kollabor_rpc.transport
+
+    monkeypatch.setattr(kollabor_rpc.transport, "LARGE_BUFFER_LIMIT", 1024)
+    tap = DisplayTap()
+    events = tap.subscribe("probe")
+    token = current_turn.set({"request_id": "old"})
+    try:  # the tap stamps the turn after the event's own fields, so after the input
+        publish_semantic(
+            tap, "tool_start", tool_id="t", tool_name="mcp", tool_type="mcp",
+            input={"request_id": "new", "body": "x" * 10000},
+        )
+    finally:
+        current_turn.reset(token)
+    error, = await _pool_events([events.get_nowait()], 1)
+    assert error["code"] == "frame_too_large" and error["request_id"] == "old"
+
+    # Untagged, with the nested key in the head and in the tail: it names none.
+    nested = {"type": "tool_result", "output": {"request_id": "a"}, "pad": "x" * 10000,
+              "more": {"request_id": "b"}}
+    error, = await _pool_events([nested], 1)
+    assert error["code"] == "frame_too_large" and "request_id" not in error
