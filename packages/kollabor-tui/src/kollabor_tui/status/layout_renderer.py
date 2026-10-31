@@ -238,6 +238,14 @@ class StatusLayoutRenderer:
         self._context = context
         self._widget_registry.set_context(context)
 
+    @property
+    def runtime_mode(self) -> str:
+        """Runtime mode of the widget context: local, attach, or daemon.
+
+        Empty string before a context is set (tests, early startup).
+        """
+        return str(getattr(self._context, "runtime_mode", "") or "")
+
     def set_navigation_manager(self, navigation_manager: Any) -> None:
         """Set the navigation manager for interactive mode.
 

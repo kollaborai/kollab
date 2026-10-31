@@ -124,6 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Detached agents no longer idle after a first turn that ends without work:
+  if the reply stops on an unfinished tool tag or announces the next step but
+  makes no tool call, one automatic continue is queued telling the agent what
+  to finish. The nudge applies only to unattended daemon runs and never
+  re-arms itself (#453).
 - PhoneLink: the phone link no longer falls into a reconnect loop on every
   relay blip. The engine now rejects malformed peers and error frames without
   dropping its relay socket (only the requests they concern fail), the phone

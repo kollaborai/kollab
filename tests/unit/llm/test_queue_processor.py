@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from kollabor.llm.streaming_handler import StreamingHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import (
+    QueuedInput,
     QueueProcessor,
     _tool_results_requiring_followup,
 )
@@ -2189,6 +2190,114 @@ class TestQueueProcessor(unittest.TestCase):
         # reported: not the two prompts added together (#396)
         self.assertEqual(self.session_stats["input_tokens"], 11)
         self.assertFalse(self.session_stats["input_tokens_estimated"])
+
+
+    # --- First-turn stall revival (#453) ---
+
+    def _layout_bus(self, mode: str) -> None:
+        """Bus whose layout_manager reports `mode`; other services absent."""
+        layout = SimpleNamespace(runtime_mode=mode)
+        self.event_bus.get_service = MagicMock(
+            side_effect=lambda name: layout if name == "layout_manager" else None
+        )
+
+    def _queued_nudges(self):
+        return [
+            m
+            for m in self.processor.processing_queue._queue
+            if isinstance(m, QueuedInput)
+        ]
+
+    def test_first_turn_stall_signature_shapes(self):
+        """The two stall shapes match; closed tags and finished replies don't."""
+        from kollabor_agent.queue_processor import first_turn_stall_signature
+
+        self.assertEqual(
+            first_turn_stall_signature("checking the hub now\n<hub_capture>"),
+            ("unfinished_tool_tag", "<hub_capture>"),
+        )
+        self.assertEqual(
+            first_turn_stall_signature("running it:\n<termi"),
+            ("unfinished_tool_tag", "<termi>"),
+        )
+        self.assertEqual(
+            first_turn_stall_signature("todo:\n  [ ] read brief\n\nstarting with the brief:"),
+            ("announced_no_action", ""),
+        )
+        self.assertIsNone(first_turn_stall_signature("<terminal>ls</terminal>\ndone"))
+        self.assertIsNone(first_turn_stall_signature("all finished, report attached."))
+        self.assertIsNone(first_turn_stall_signature(""))
+
+    def test_daemon_plan_only_reply_queues_one_corrective_nudge(self):
+        """A daemon zero-tool reply ending on an announced step gets one nudge."""
+        self._layout_bus("daemon")
+        self._reply_with("plan:\n  [ ] read brief\n\nstarting with the brief:")
+        self.processor._first_turn_nudge_budget = 1
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        [nudge] = self._queued_nudges()
+        self.assertTrue(nudge.is_system_nudge)
+        self.assertIn("no tool call", nudge.content)
+        self.assertEqual(self.processor._first_turn_nudge_budget, 0)
+
+    def test_daemon_unclosed_tag_reply_also_nudges(self):
+        """A daemon reply ending in a bare unclosed tool tag gets one nudge."""
+        self._layout_bus("daemon")
+        self._reply_with("checking the agent:\n<hub_capture>")
+        self.processor._first_turn_nudge_budget = 1
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        [nudge] = self._queued_nudges()
+        self.assertTrue(nudge.is_system_nudge)
+        self.assertIn("<hub_capture>", nudge.content)
+
+    def test_interactive_session_never_nudges(self):
+        """A watched session gets no nudge: a human can push the agent onward."""
+        self._layout_bus("local")
+        self._reply_with("plan:\n\nstarting now:")
+        self.processor._first_turn_nudge_budget = 1
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        self.assertEqual(self._queued_nudges(), [])
+
+    def test_a_nudge_batch_never_rearms_but_real_input_does(self):
+        """One nudge per real inbound batch: a nudge batch stays disarmed."""
+        from kollabor_agent.queue_processor import QueuedInput as QI
+
+        self._layout_bus("daemon")
+        self._reply_with("plan:\n\nstarting now:")
+
+        async def drive(messages):
+            self.processor.processing_queue._queue.clear()
+            self.processor._first_turn_nudge_budget = 0
+            await self.processor.process_message_batch(messages, "t")
+
+        self.loop.run_until_complete(
+            drive([QI("take that step now", {}, is_system_nudge=True)])
+        )
+        self.assertEqual(self._queued_nudges(), [])
+        self.assertEqual(self.processor._first_turn_nudge_budget, 0)
+
+        self.loop.run_until_complete(drive([QI("real work", {})]))
+        [nudge] = self._queued_nudges()
+        self.assertTrue(nudge.is_system_nudge)
+        self.assertEqual(self.processor._first_turn_nudge_budget, 0)
+
 
 
 class TestQueueProcessorToolContinuation(unittest.TestCase):
