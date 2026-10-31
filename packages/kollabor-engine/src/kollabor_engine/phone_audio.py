@@ -104,6 +104,7 @@ class PhoneAudioManager:
         self._calls: dict[str, _Call] = {}
         self._pending: set[_Opening] = set()
         self._voice_owner: dict[str, str] = {}  # voice_session_id -> phone
+        self._closing: set[asyncio.Task] = set()  # bridge closes still running
 
     async def open(
         self,
@@ -155,13 +156,13 @@ class PhoneAudioManager:
             self._pending.discard(pending)
         if pending.cancelled:
             # Revoked, closed or shut down while the bridge was opening.
-            await bridge.close()
+            await asyncio.shield(self._close_bridge(bridge))
             self._release_voice(phone, voice_session_id)
             raise PhoneCallError("call_unavailable")
         if phone in self._calls:
             # A racing open registered while this bridge was opening: drop ours,
             # and give back our voice session unless the winner holds it.
-            await bridge.close()
+            await asyncio.shield(self._close_bridge(bridge))
             self._release_voice(phone, voice_session_id)
             return await self.open(phone, session, call_id, voice_session_id, generation)
         call = _Call(
@@ -264,6 +265,8 @@ class PhoneAudioManager:
             pending.cancelled = True
         for call in list(self._calls.values()):
             await self._end(call, cause="shutdown")
+        while self._closing:  # every bridge close, including ones a cancel left running
+            await asyncio.gather(*list(self._closing), return_exceptions=True)
 
     def _open_result(self, call: _Call) -> dict:
         return {
@@ -309,8 +312,19 @@ class PhoneAudioManager:
         call.out.clear()
         if call.watchdog and not from_watchdog:
             call.watchdog.cancel()
-        try:
-            await call.bridge.close()
-        except Exception:
-            logger.warning("phone call bridge close failed", exc_info=True)
+        await asyncio.shield(self._close_bridge(call.bridge))
         logger.info("phone call %s ended: %s", call.id[:8], cause)
+
+    def _close_bridge(self, bridge: PhoneBridge) -> asyncio.Task:
+        """Start a bridge close that outlives a cancelled caller; shutdown awaits it."""
+        task = asyncio.get_running_loop().create_task(_close_quietly(bridge))
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+        return task
+
+
+async def _close_quietly(bridge: PhoneBridge) -> None:
+    try:
+        await bridge.close()
+    except Exception:
+        logger.warning("phone call bridge close failed", exc_info=True)

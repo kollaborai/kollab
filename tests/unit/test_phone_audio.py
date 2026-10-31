@@ -620,3 +620,40 @@ async def test_losing_racing_open_releases_its_voice_session():
     result = await manager.open("phone-b", object(), "e" * 32, other_voice, 0)
     assert result["ok"] is True
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_loser_teardown_finishes_before_shutdown_returns():
+    """A cancelled loser keeps closing its bridge; shutdown waits for that close."""
+    gate = asyncio.Event()
+    bridges = []
+
+    class SlowCloseBridge(FakeBridge):
+        async def close(self):
+            await gate.wait()
+            self.closed = True
+
+    async def opener(voice_session_id, generation):
+        await asyncio.sleep(0.01)  # both opens are pending before either registers
+        bridge = SlowCloseBridge()
+        bridges.append(bridge)
+        return bridge
+
+    manager = PhoneAudioManager(opener)
+    session = object()
+    racing = [
+        asyncio.create_task(manager.open("phone-a", session, CALL, VOICE, 0))
+        for _ in range(2)
+    ]
+    await asyncio.sleep(0.01)  # both opens are pending; one wins, one loses
+    _, still_running = await asyncio.wait(racing, timeout=0.05)
+    (loser,) = still_running  # the loser is stuck inside its slow close
+    loser.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await loser
+    shutdown = asyncio.create_task(manager.shutdown())
+    await asyncio.sleep(0.01)
+    assert not shutdown.done()  # waiting on the loser's close
+    gate.set()
+    await shutdown
+    assert len(bridges) == 2 and all(b.closed for b in bridges)
