@@ -72,9 +72,9 @@ import { VoiceRoomProvider } from "./voice/voice-room";
 import {
   historyPageCache,
   loadLatestHistoryPage,
-
   loadOlderHistoryPage,
   mergeOlderHistoryPage,
+  UnusableHistoryCursorError,
 } from "./history-cache";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
@@ -661,6 +661,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     },
     [],
   );
+  const loadStateRef = useRef(loadState);
+  loadStateRef.current = loadState;
 
   const loadOlderHistory = useCallback(async (sessionId: string, prefetch = false) => {
     if (olderLoadRef.current.has(sessionId)) {
@@ -680,6 +682,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         api,
         historyPageCache,
       );
+      // A refresh replaced this window while the page-down was in flight;
+      // applying the merge now would resurrect stale pages.
+      if (historyPagesRef.current.get(sessionId) !== current) {
+        return;
+      }
       if (!older) {
         throw new Error("History paging cursor is missing. Retry loading the conversation.");
       }
@@ -696,7 +703,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         throw new Error("The engine returned no older history messages.");
       }
       historyPagesRef.current.set(sessionId, updated);
-      await historyPageCache.store(sessionId, updated);
+      try {
+        await historyPageCache.store(sessionId, updated);
+      } catch (reason) {
+        // A deeply merged window can exceed the page cache byte cap. The
+        // in-memory window is already updated, so the UI stays correct and
+        // only persistence is skipped.
+        console.warn("Skipping history page cache for oversized window", reason);
+      }
       const context = historyContextRef.current.get(sessionId);
       if (context && activeIdRef.current === sessionId) {
         const nextState = buildInitialState(
@@ -712,7 +726,22 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         );
       }
       if (activeIdRef.current === sessionId) setHistoryStatus(null);
-    } catch {
+    } catch (error) {
+      if (error instanceof UnusableHistoryCursorError) {
+        // The engine rejected the cursor (409 stale / 400 invalid): the
+        // history this window paged against changed underneath it, and no
+        // retry from the same cursor can ever succeed. Drop the cached
+        // pages and rebuild the window from a fresh fetch instead of a
+        // dead-end banner.
+        console.warn("Rebuilding history window after cursor rejection", error);
+        historyPageCache.clear(sessionId).catch(() => undefined);
+        const context = historyContextRef.current.get(sessionId);
+        if (context) {
+          loadStateRef.current(sessionId, context.sessions).catch(() => undefined);
+        }
+        return;
+      }
+      console.warn("Failed to load older history", error);
       if (!prefetch && activeIdRef.current === sessionId) {
         setHistoryStatus({
           sessionId,
