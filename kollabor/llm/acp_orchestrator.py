@@ -186,6 +186,8 @@ class ACPOrchestrator:
         model = next((o for o in self.advertised_config_options()
                       if o.get("category") == "model" or o.get("id") == "model"), None)
         saved_model = saved.pop("model", None)
+        if saved_model is None and model is not None:
+            saved_model = saved.pop(str(model["id"]), None)  # an older save under the raw ID
         model_value = loadout_model or saved_model
         model_ok = True
         if model is None and model_value:
@@ -208,6 +210,8 @@ class ACPOrchestrator:
         effort = self._effort_option()
         effort_id = str(effort["id"]) if effort is not None else None
         saved_effort = saved.pop("effort", None)
+        if saved_effort is None and effort is not None:
+            saved_effort = saved.pop(effort_id, None)  # an older save under the raw ID
         if not model_ok:
             if loadout_effort or saved_effort:
                 notices.append(
@@ -250,12 +254,15 @@ class ACPOrchestrator:
             if effort_id is not None and config_id == effort_id and not model_ok:
                 continue
             option = next((o for o in self.advertised_config_options() if o.get("id") == config_id), None)
-            if option is None or option.get("currentValue") == value:
+            if option is None:
+                notices.append(f"saved pick {config_id}={value} is not offered by this harness, so it was not applied")
+                continue
+            if option.get("currentValue") == value:
                 continue
             try:
                 await runner.set_config_option(config_id, value)
-            except Exception as exc:  # an option the harness no longer offers
-                logger.info("ACP option %s=%s not restored: %s", config_id, value, exc)
+            except Exception as exc:
+                notices.append(f"saved pick {config_id}={value} was not applied: {exc}")
         for notice in notices:
             logger.warning("ACP restore: %s", notice)
         return notices

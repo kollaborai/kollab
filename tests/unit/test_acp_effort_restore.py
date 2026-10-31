@@ -191,6 +191,27 @@ async def test_raw_model_id_saved_pick_cannot_undo_the_loadout_model(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_saved_custom_model_id_is_applied_before_the_loadout_effort(tmp_path):
+    """An older save keeps the model under its raw ID. It must be set before effort, or the switch resets effort."""
+    options = _options()
+    options[0]["id"] = "model_choice"
+    orch = _orchestrator(tmp_path, options, saved={"model_choice": "haiku"})
+    loadout = SimpleNamespace(name="claude-code", model="", effort="max")
+    notices = await orch._restore_options(loadout)
+    assert orch._runner.calls == [("model_choice", "haiku"), ("effort", "max")]
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_unadvertised_saved_pick_is_reported_not_dropped(tmp_path):
+    options = _options()
+    orch = _orchestrator(tmp_path, options, saved={"reasoning_budget": "max"})
+    notices = await orch._restore_options(SimpleNamespace(name="claude-code", model="", effort=""))
+    assert orch._runner.calls == []
+    assert any("saved pick reasoning_budget=max is not offered by this harness" in n for n in notices)
+
+
+@pytest.mark.asyncio
 async def test_saved_effort_survives_a_custom_option_id(tmp_path):
     """A thought_level option with its own ID: the saved pick is reported when the option disappears,
     and applied to that ID when it is present."""
