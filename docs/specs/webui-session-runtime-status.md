@@ -1,8 +1,9 @@
 # Web UI session runtime/status sidebar
 
 Issue: #473
-Status: R2 follow-up revision for two remaining findings; fresh verdict requested; not passed
+Status: Revised owner and PhoneLink policy; remote relay behavior unchanged; focused R2 contract re-check pending
 Last updated: 2026-10-31
+Decision: decided by koordinator 2026-10-31
 
 ## Goal
 
@@ -66,7 +67,7 @@ for current consumers, but the new sidebar reads only `runtime_status`.
 | Engine session identity | The engine session registry and route path. |
 | Conversation identity/display name | The selected daemon's current conversation id. `session_display_name` follows the TUI `render_session` rule: when the id begins with exactly ten digits and a hyphen, remove that timestamp prefix; then remove a final hyphen plus four alphanumeric characters only when the first of those four characters is a digit. Otherwise preserve the id. Responsive truncation is a UI concern, not an API value. |
 | Session attachment identity and ordering | The engine session-status assembler owns a monotonically increasing `attachment_epoch` scoped to `engine_session_id`, incremented under one session-state lock whenever the selected daemon generation or conversation changes. `daemon_generation` is a unique opaque id, not a PID. `revision` orders payload changes only within `(engine_session_id, attachment_epoch)` and is not identity. A higher epoch is authoritative only when delivered in a complete snapshot/resync or an explicit identity-transition event. |
-| Session access | The server creates a trusted `SessionReadContext` after authenticating the browser, PhoneLink peer, or remote peer; client-supplied principal/access-path fields are never trusted. An engine-owned session ownership/share policy issues an opaque `SessionReadGrant` for an exact engine session and attachment. A requested session ID selects a target but grants no access; authorize GET, SSE subscription, and every event against the context and grant, including revocation. |
+| Session access | A session without a session-owner record belongs to the local engine/device owner. The local Web UI's process-wide engine bearer maps to that owner and may read every local engine session, regardless of the session's owner record. An approved, active PhoneLink pairing represents the owner's own phone and maps to the same owner after the host verifies the paired key and exact active PhoneSession; it may read every local session. Remote attachment remains governed by existing `RelayAgentBridge.attach_target` trust modes and `network_attach` trust-cache/recheck behavior (`open`=members, `agents`=allowed agents, `manual`=none); it creates no new principal or session-read grant. Route IDs select targets but do not define identity. Do not add per-session owner/share records; scope ceiling: “add share records when a second principal exists.” |
 | Profile/effective model | Native mode: selected daemon's active profile/state. ACP mode: the model reported by the active ACP harness when present, not the saved profile default. Preserve the source and report unknown if the active model is not reported. |
 | Native context/compaction | The selected daemon's `ContextCompactionPlugin` runtime snapshot. The assembler preserves the separate measurements and policy source defined below. If the plugin is disabled or unavailable, expose that explicitly. |
 | Native usage | The selected daemon's session statistics, with the measurement scope, provenance, and completeness defined below. The stats producer must preserve missing data rather than coercing it to zero. |
@@ -430,62 +431,60 @@ interface SessionRuntimeStatusSnapshot {
 
 ## Privacy, authorization, and device scope
 
-- The current engine auth middleware validates a process-wide bearer token,
-  and the state route then looks up the registry. Neither step establishes
-  per-session read authority. Construct a server-side `SessionReadContext` only
-  after authenticating the caller; it carries a server-derived principal,
-  `access_path`, and, when applicable, trusted peer/device and trust-generation
-  identifiers. Attach this context to trusted request/connection scope. Never
-  derive it from a client-supplied principal/access-path header, query value,
-  body field, requested `engine_session_id`, `agent@device` display name, or
-  PhoneSession relay ID. If current Web UI authentication cannot distinguish a
-  caller, add a server-minted authenticated UI-session context; the shared bearer
-  alone is insufficient.
-- The engine-owned session ownership/share policy is the sole source of
-  `SessionReadGrant` records. Issue an opaque, unforgeable, server-validated
-  grant only for sessions that the principal may read. Bind each grant to the
-  principal, `access_path`, exact `engine_session_id`, target device for remote
-  access, `attachment_epoch`, expiry, and revocation/version state. A session ID
-  in a route is only a target selector, never authority. A client may present a
-  grant but cannot mint it, choose its scope, or widen it. Authenticated session
-  list/create/attach flows return grants only for sessions the caller may
-  select; registry visibility or a successful attach is not an ACL.
-- Web UI switching from A to B first obtains or validates B's grant under the
-  same authenticated principal; it must not install B as `activeId` or request
-  B's state until that grant is confirmed. A's grant cannot read B, and C with
-  no grant is denied. An `attachment_epoch` change invalidates the old grant;
-  the server may issue a replacement only after rechecking the ownership/share
-  policy, and the client must resync from a complete authorized snapshot rather
-  than merge data across epochs.
-- PhoneLink derives its principal from the authenticated paired peer key plus
-  the active, verified `PhoneSession`; the host injects this server-owned context
-  into the ASGI scope after verification, not from forwarded client headers.
-  `PhoneSession.host_session` and `phone_session` are transport correlation IDs,
-  not engine ACLs. Issue grants bound to that phone principal and the exact
-  engine session. Phone pairing revocation invalidates affected grants.
-- Remote access derives its principal from the authenticated peer identity and
-  current trust state. The `agent@device` name and destination `network_attach`
-  admission are routing/admission checks, not read authorization. A local UI
-  reading a remote session retains its local caller principal and also requires
-  target-device trust plus a grant bound to that remote engine session.
-- Before returning a GET, opening SSE, and enqueuing/delivering each event,
-  revalidate the context and grant against current ownership, attachment epoch,
-  expiry, and phone/remote trust. Grant revocation, expiry, attachment change,
-  phone revoke, or remote trust revoke denies subsequent reads, purges queued
-  status events, and closes the active stream before any post-revocation event
-  can be delivered. A previous list or attach does not confer lasting authority.
-- Required security tests: authorized A then B navigation succeeds only after
-  B's grant arrives; A's grant cannot read B; unauthorized C and spoofed
-  principal/access-path headers are denied; a shared bearer alone cannot read
-  an unauthorized session; expiry/revocation and attachment-epoch changes
-  invalidate grants; PhoneLink wrong-binding/revoked-pair reads fail; remote
-  trust revocation denies GET and terminates SSE with queued events.
+- Local access is single-owner. A session without a session-owner record belongs
+  to the local engine/device owner. The process-wide engine bearer used by the
+  local Web UI maps to a server-created context for that owner and may read every
+  local engine session, regardless of the session's owner record. The bearer is a
+  shared device credential, not a browser-account identity.
+- Create a trusted `SessionReadContext` only after validating the engine bearer
+  or, for PhoneLink, after the host verifies the approved paired key and exact
+  active `PhoneSession` host/phone tuple. An approved PhoneLink pairing is the
+  owner's own phone and maps to the same owner context for every host session.
+  Inject this context through trusted server/ASGI scope. Never derive identity
+  or access path from client-supplied headers, query/body fields, the requested
+  `engine_session_id`, an `agent@device` display name, or a PhoneSession relay
+  ID. Forwarded PhoneLink headers are not identity.
+- Do not issue or validate `SessionReadGrant`, create a grant store, or add
+  per-session owner/share ACL records for this single-principal model. A route
+  session ID selects a target but does not define identity. Existing `user_token`,
+  `webui_owned`, handover metadata, and registry membership are not additional
+  ACLs. Known scope ceiling: “add share records when a second principal exists.”
+- Web UI selection from session A to B uses the same owner context and needs no
+  per-session grant handshake. Authenticate before returning either session's
+  snapshot or opening its SSE stream, then preserve the attachment-epoch and
+  resync rules elsewhere in this contract.
+- PhoneLink uses the same owner read scope only while its approved pairing and
+  exact active session tuple remain valid. Pairing revocation immediately denies
+  further PhoneLink requests, closes every open SSE stream for that phone, and
+  purges those stream subscribers from the active fan-out registry before any
+  later event can be delivered. This lifecycle does not use per-session grants.
+- Remote attachment remains governed by existing
+  `RelayAgentBridge.attach_target` trust modes and existing `network_attach`
+  trust-cache/recheck behavior while a channel is open (`open`=members,
+  `agents`=allowed agents, `manual`=none). An attached remote session is
+  visible to the local owner only after that existing attach path succeeds.
+  Do not create remote-principal read grants or persist remote peer identity.
+  #473 does not alter remote revocation timing, add remote SSE fencing, or
+  promise that no remote event can arrive after trust revocation.
+- Required security tests: a valid local Web UI bearer maps to the local owner
+  and reads sessions with and without session-owner records; a missing/invalid
+  bearer is denied; spoofed principal/access-path headers cannot change the
+  server-derived context; A-to-B selection succeeds using the same bearer and
+  owner context, with no per-session grant. A verified active PhoneLink key and
+  exact host/phone tuple map to the same owner and can read local sessions; a
+  wrong tuple is denied. Revoking a PhoneLink pairing immediately closes and
+  purges every open SSE stream for that phone from the fan-out registry, and no
+  subsequent event reaches those PhoneLink streams. Remote attach preserves
+  existing `open`/`agents`/`manual` trust and trust-cache/recheck behavior;
+  #473 adds no remote SSE work or post-revocation event-cutoff guarantee.
+  Verify no per-session owner/share ACL, grant store, or persisted remote peer
+  identity is introduced.
 - The privacy allowlist in this section applies specifically to the new
   `runtime_status` object and its `session_runtime_status` SSE events; it does
   not claim that the entire legacy `/state` response is transcript-free. Today
   `system.voice_activity.heard` is returned by `get_system_info()` and consumed
   by `voice-mode.tsx`. Preserve that existing field/consumer in #473, subject to
-  the same per-session authorization check, but never copy it into
+  the same authenticated owner-context check, but never copy it into
   `runtime_status` or its SSE event. Treat the legacy field as sensitive and
   outside the new sidebar contract. Any later whole-response redaction must
   first migrate the existing consumer to a separately authorized source.
@@ -520,6 +519,27 @@ interface SessionRuntimeStatusSnapshot {
 - The sidebar is read-only in #473; no Model/Effort selector or reset action.
 - Validate responsive behavior at 390, 820, and 1280 CSS pixels, keyboard
   disclosure/focus, session switching, reconnect, stale-source and error states.
+
+## Authorized implementation scope for the next slice
+
+This is the only build scope authorized by the decision above. Do not begin code
+implementation until a fresh R2 contract-only review passes this exact spec
+revision:
+
+1. After validating an approved PhoneLink paired key and the exact active
+   `PhoneSession` host/phone tuple, inject the verified identity into trusted,
+   server-owned request scope.
+2. When that phone's pairing is revoked, immediately close and purge all of its
+   open SSE streams from the active fan-out/subscriber registry before any later
+   event can be delivered.
+
+Do not expand this slice into `runtime_status` aggregation or endpoint refactoring,
+a grant/share store, per-session ACL records, remote-principal/session identity
+or remote SSE work, or sidebar/UI changes. Preserve existing
+`RelayAgentBridge.attach_target` trust behavior. The broader runtime-status and
+sidebar requirements in this document remain the overall feature contract, not
+additional authorization for this implementation slice. Further implementation
+scope requires separate explicit approval and review gates.
 
 ## Acceptance and review gates
 
@@ -559,15 +579,20 @@ Contract review tests and implementation must cover:
    dropped final update/queue overflow, reconnect/resync, session switching, and
    individual source failures. Verify epoch is identity and revision is ordering
    metadata only.
-6. Security/device and degraded sources: authorized A then B navigation
-   succeeds only after B's grant arrives; A's grant cannot read B; unauthorized
-   C and spoofed principal/access-path headers are denied; a shared bearer alone
-   cannot read an unauthorized session; grant expiry/revocation and attachment-
-   epoch changes invalidate access. PhoneLink wrong-session/revoked-pair reads
-   fail, and an already-attached remote session is denied after trust revocation.
-   GET and SSE authorization must include revocation during an active stream with
-   queued events. Also cover two selected daemons with different workspaces;
-   daemon-vs-browser microphone scope; normalized voice
+6. Security/device and degraded sources: a valid local engine bearer maps to the
+   local owner and can read sessions with or without session-owner records;
+   missing/invalid bearer is denied; spoofed principal/access-path headers do not
+   alter the server-derived owner context; A-to-B selection uses the same owner
+   context without grants. A verified PhoneLink pairing and exact active
+   host/phone tuple map to the same owner and can read host sessions; a wrong
+   tuple or revoked pair is denied and terminates its active PhoneLink stream.
+   Remote attachment preserves existing `RelayAgentBridge.attach_target`
+   `open`/`agents`/`manual` trust and trust-cache/recheck behavior. #473 does
+   not change remote revocation timing or add a post-revocation event-cutoff
+   guarantee or remote SSE fencing. Verify no per-session
+   owner/share ACL or persisted remote peer identity was added. Also cover two
+   selected daemons with different workspaces; daemon-vs-browser microphone
+   scope; normalized voice
    starting/listening/hearing/transcribing/speaking/enrolling/voiceprint-saved/
    error states; voice and processing read failures remain error/unknown rather
    than false/off/Ready; actual `/state` test proves legacy
@@ -579,18 +604,17 @@ Contract review tests and implementation must cover:
    CI green.
 
 Review gates: Sapphire's Round 1 widget inventory passed with corrections now
-incorporated. Earlier six Round 2 findings (issuecomment-6541025886) are
-incorporated. Nephrite's latest Round 2 re-review is BLOCK with two remaining
-contract findings (issuecomment-6541217258). This revision addresses both and
-requests a fresh verdict; Round 2 remains blocked until Nephrite explicitly
-passes it. Rounds 1 and 2 gate Web UI work and the full runtime-status
-snapshot/live-event integration. In particular, the required server-created
-principal and per-session grant authorization are not present in the current
-session-state route and must be implemented and tested before exposing the new
-snapshot or stream. The already authorized typed context-compaction snapshot
-DTO/RPC/initial-state plumbing may be completed and verified as the narrow
-backend-only slice while re-review runs; it is not the full `runtime_status`
-contract and must not be consumed by the UI. Do not implement the remaining
-source aggregation or status UI until Round 2 passes. Rounds 3 and 4 review
-implementation and acceptance/browser evidence before opening the draft PR.
-Merge only after all four rounds and all required gates pass.
+incorporated. The earlier six Round 2 findings (issuecomment-6541025886) are
+incorporated. Nephrite's R2 contract PASS (issuecomment-6541411271) reviewed the
+prior spec SHA `fc2d08652bb5523061a985f93e798ade4b949bb4cb88a45f5d6f76eacca4644c`;
+that verdict is superseded. The intervening Policy-A revision (SHA
+`51111aad19f3acbadd6e564ed73d8ece3020ad4dab1e27fd36657d22a166f1c3`) and its R2
+request comment (issuecomment-6541797232) are also superseded by the dated
+Koordinator decision above. Nephrite's R2 review of the issue body at SHA `6f3d34a4a51a0660be0f27bc66c59797042d04a9ed0cefc7b4ea05054dc9289b` (issuecomment-6542210586) BLOCKed because the shared-checkout spec was stale and the remote immediate-cutoff promise exceeded scope. This revision retains the reviewed single-owner and PhoneLink rules, limits immediate close-and-purge to a revoked PhoneLink pairing, and preserves existing remote trust-cache/recheck behavior. Issue #524 tracks the separate relay probe. A focused R2 re-check of the issue body and this exact spec is pending; no code implementation starts before explicit PASS. The only currently authorized
+implementation is the PhoneLink request-scope identity and pairing-revocation
+stream close-and-purge slice above; no aggregator, grant-store, remote-SSE, or
+sidebar/UI work is authorized here. PR #507 remains a separate previously
+approved backend slice; this decision does not expand it. After the fresh R2
+PASS, R3 implementation/security review and R4 acceptance evidence remain
+required for the scoped behavior. Merge only after all applicable review gates
+and all required checks pass.
