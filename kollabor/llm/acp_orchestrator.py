@@ -164,6 +164,7 @@ class ACPOrchestrator:
                 logger.warning("ACP option save failed: %s", exc)
         if category == "model" or config_id == "model":
             await self._reapply_effort_after_model()
+            options = runner.advertised_config_options()  # the effort may have changed after the model reply
         return options
 
     async def _reapply_effort_after_model(self) -> None:
@@ -180,16 +181,20 @@ class ACPOrchestrator:
             self._show_notice(f"effort {wanted} was not kept: the new model advertises no effort option")
             return
         notice = None
-        offered = [str(o.get("value")) for o in effort.get("options") or [] if isinstance(o, dict)]
+        offered = option_values(effort)
         target = wanted
         if offered and wanted not in offered:
             target = max(offered, key=_effort_rank)
             notice = f"effort {wanted} is not offered by the new model; using {target}, the highest it offers"
         if effort.get("currentValue") != target:
-            options = await runner.set_config_option(str(effort["id"]), target)
-            reported = next((o.get("currentValue") for o in options or [] if o.get("id") == effort["id"]), None)
-            if reported != target:
-                notice = f"effort {wanted} did not survive the model change (the harness reports {reported})"
+            try:
+                options = await runner.set_config_option(str(effort["id"]), target)
+            except Exception as exc:
+                notice = f"effort {wanted} was refused by the new model: {exc}"
+            else:
+                reported = next((o.get("currentValue") for o in options or [] if o.get("id") == effort["id"]), None)
+                if reported != target:
+                    notice = f"effort {wanted} did not survive the model change (the harness reports {reported})"
         if notice:
             self._show_notice(notice)
 
@@ -201,9 +206,11 @@ class ACPOrchestrator:
         return saved if isinstance(saved, dict) else {}
 
     def _effort_option(self) -> dict[str, Any] | None:
-        """The advertised reasoning-effort option, found by its category (never a fixed ID)."""
-        return next((o for o in self.advertised_config_options()
-                     if str(o.get("category") or "").lower() == "thought_level"), None)
+        """The advertised reasoning-effort option, found by category. The ID "effort" is only the
+        fallback for a harness that advertises it with no category."""
+        options = self.advertised_config_options()
+        return (next((o for o in options if str(o.get("category") or "").lower() == "thought_level"), None)
+                or next((o for o in options if o.get("id") == "effort" and not o.get("category")), None))
 
     async def _restore_options(self, profile: LLMProfile) -> list[str]:
         """Re-apply the loadout's model and effort, then the other saved picks.
@@ -258,6 +265,8 @@ class ACPOrchestrator:
                 )
         elif effort is not None:
             effort_value = loadout_effort or saved_effort
+            if effort_value and str(effort_value) == effort.get("currentValue"):
+                self._effort_pick = str(effort_value)  # already set: still the pick a model change must keep
             if effort_value and str(effort_value) != effort.get("currentValue"):
                 value = str(effort_value)
                 offered = option_values(effort)
@@ -276,6 +285,8 @@ class ACPOrchestrator:
                                          if o.get("id") == effort_id), None)
                         if reported != value:
                             notices.append(f"effort {value} was accepted but the harness reports {reported}")
+                        else:
+                            self._effort_pick = value  # the loadout's effort is kept across a model change
         elif loadout_effort or saved_effort:
             notices.append(
                 f"this harness advertises no effort option, so effort {loadout_effort or saved_effort} was not applied"
