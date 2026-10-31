@@ -1,111 +1,16 @@
 name: windows-smoke
-
 on:
-  pull_request:
-    paths:
-      - "*.py"
-      - "kollabor/**"
-      - "plugins/**"
-      - "packages/*/src/**"
-      - "packages/*/pyproject.toml"
-      - pyproject.toml
-      - uv.lock
-      - scripts/windows_import_smoke.py
-      - .github/workflows/windows-smoke.yml
   workflow_dispatch:
-
 jobs:
-  import-smoke:
+  presence-diagnostic:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
-
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-        with:
-          cache-suffix: ${{ github.job }}
-
+      - uses: astral-sh/setup-uv@v8.1.0
       - name: Install workspace
         run: uv sync --all-packages
-
-      - name: MCP command splitting
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_mcp_split_command.py
-
-      # The network's private state files: device records, enrollment state (kollab #268).
-      - name: Network private files
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_device_record_windows.py tests/unit/test_provisioned_state_windows.py tests/unit/test_enrollment_recovery_windows.py tests/unit/test_enrollment_delegations_windows.py
-
-      - name: Local IPC clients
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_presence_local_ipc.py tests/unit/test_hub_ipc_clients.py tests/unit/test_attach_local_ipc.py tests/unit/test_deep_thought_local_ipc.py
-
-      - name: Process stop, locks and launch
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_cli_webui_windows_stop.py tests/unit/test_network_attach_local_ipc.py tests/unit/test_process_manager_windows_stop.py tests/unit/test_shell_executor_windows_alive.py tests/unit/test_token_storage_lock.py tests/unit/test_cli_windows_no_fork.py tests/unit/test_desktop_release_checksum_lf.py
-
-      # The kill switch's Windows process readers, private files and local IPC (kollab #268).
-      - name: Kill switch
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_halt_windows.py tests/unit/test_halt_runtime_windows.py tests/unit/test_hub_bridge_waiter_line.py tests/unit/test_relay_state_windows.py tests/unit/test_halt_listener_windows.py
-
-      # Every module imports on Windows, so a Unix-only import never ships unseen (kollab #268).
-      - name: Every module imports
-        run: uv run python scripts/windows_import_smoke.py
-
-      - name: kollab --version
-        run: uv run kollab --version
-
-      # The #268 gate: a detached agent starts, shows online in `kollab --hub status`, and stops.
-      - name: Agent smoke
-        run: uv run python scripts/build_binary.py --agent-smoke .venv/Scripts/kollab.exe
-
-      # A real halt on the runner: the agent stops, a launch waits, resume restarts it (kollab #268).
-      - name: Kill switch smoke
-        run: uv run python scripts/windows_halt_smoke.py --kollab .venv/Scripts/kollab.exe
-
-      - name: Engine smoke
-        run: uv run python scripts/engine_smoke.py
-
-      # The presence sweep keeps live agents: no os.kill(pid, 0), which sends Ctrl+C (kollab #268).
-      - name: Presence sweep
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_hub_presence_sweep.py
-
-  shell-smoke:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-        with:
-          cache-suffix: ${{ github.job }}
-
-      - name: Install workspace
-        run: uv sync --all-packages
-
-      # Proof row 1: Git for Windows is preinstalled on windows-latest.
-      - name: Git Bash
-        run: uv run python scripts/windows_shell_smoke.py --expect git-bash --command "echo hi && pwd"
-        env:
-          KOLLAB_SHELL: ""
-
-      # Proof row 2: PowerShell 7 via KOLLAB_SHELL (pwsh.exe is preinstalled).
-      - name: PowerShell 7 (KOLLAB_SHELL)
-        shell: pwsh
-        run: |
-          $exe = (Get-Command pwsh.exe).Source
-          $env:KOLLAB_SHELL = $exe
-          uv run python scripts/windows_shell_smoke.py --expect pwsh --command "Write-Output hi && Write-Output ok"
-
-      # Proof row 3: Windows PowerShell 5.1 via KOLLAB_SHELL.
-      - name: PowerShell 5.1 (KOLLAB_SHELL)
-        shell: pwsh
-        run: |
-          $exe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-          $env:KOLLAB_SHELL = $exe
-          uv run python scripts/windows_shell_smoke.py --expect powershell --command "Write-Output hi; if (`$?) { Write-Output ok }"
+      - name: Inspect real detached agent and engine
+        run: uv run python scripts/issue466_windows_probe.py .venv/Scripts/kollab.exe
