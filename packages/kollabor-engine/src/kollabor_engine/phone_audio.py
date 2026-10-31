@@ -277,9 +277,11 @@ class PhoneAudioManager:
         await wait_capped(openers)
         for call in list(self._calls.values()):
             await self._end(call, cause="shutdown")
-        while self._closing:  # every bridge close, including ones a cancel left running
-            if not await wait_capped(list(self._closing)):
-                break
+        # Every bridge close still running, including ones a cancel left behind. One capped
+        # wait, no loop: a finished task never yields, so it would spin here, and its
+        # discard callback may not have run yet, so prune done tasks ourselves.
+        await wait_capped({t for t in self._closing if not t.done()})
+        self._closing -= {t for t in self._closing if t.done()}
 
     def _open_result(self, call: _Call) -> dict:
         return {

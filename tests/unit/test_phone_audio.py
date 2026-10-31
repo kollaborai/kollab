@@ -923,3 +923,42 @@ async def test_shutdown_is_capped_when_an_opener_ignores_cancel(monkeypatch):
     release.set()
     with pytest.raises(PhoneCallError):
         await asyncio.wait_for(opening, timeout=2)
+
+
+def test_shutdown_returns_when_a_tracked_close_is_already_done():
+    """A finished close left in the tracking set must not spin shutdown forever.
+
+    Runs in a child process so a regression hangs the child, not the test run:
+    a spin never yields to the loop, so an in-process timeout could not fire.
+    """
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import asyncio
+        from kollabor_engine.phone_audio import PhoneAudioManager
+
+        async def main():
+            manager = PhoneAudioManager(lambda *args: None)
+            finished = asyncio.create_task(asyncio.sleep(0))
+            await finished
+            manager._closing.add(finished)  # done, but its discard callback has not run
+            await manager.shutdown()
+            print("shutdown returned", len(manager._closing), flush=True)
+
+        asyncio.run(main())
+        """
+    )
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,  # hard timeout: a spinning shutdown raises TimeoutExpired here
+    )
+    assert result.returncode == 0, result.stderr
+    assert "shutdown returned 0" in result.stdout
