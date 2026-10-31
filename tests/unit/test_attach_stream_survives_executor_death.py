@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import secrets
+import threading
 from pathlib import Path
 
 import pytest
@@ -167,6 +168,78 @@ async def test_attach_stream_ends_cleanly_on_client_disconnect(socket_dir):
         while server._display_tap.subscriber_count:
             await asyncio.sleep(0.1)
     assert server._display_tap.subscriber_count == 0
+
+
+@pytest.mark.asyncio
+async def test_disconnect_wakes_the_blocked_display_queue_reader(socket_dir):
+    """Ending an attach must release its thread without waiting for the heartbeat."""
+    entered, exited = threading.Event(), threading.Event()
+    tap = DisplayTap(history_size=10)
+    subscribe = tap.subscribe
+
+    def tracked_subscribe(client_id):
+        sub_queue = subscribe(client_id)
+        read = sub_queue.get
+
+        def tracked_read(*args, **kwargs):
+            entered.set()
+            try:
+                return read(*args, **kwargs)
+            finally:
+                exited.set()
+
+        sub_queue.get = tracked_read
+        return sub_queue
+
+    tap.subscribe = tracked_subscribe
+    server = _server(tap)
+    path = await server.start()
+    reader, writer = await asyncio.open_unix_connection(path)
+    try:
+        writer.write(b'{"action":"attach","mode":"interactive","client_id":"wake-test"}\n')
+        await writer.drain()
+        assert (await _read_ack(reader))["type"] == "attach_ack"
+        assert await asyncio.to_thread(entered.wait, 2)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+
+    assert await asyncio.to_thread(exited.wait, 3)
+
+
+@pytest.mark.asyncio
+async def test_disconnecting_one_attacher_keeps_the_other_stream_live(socket_dir):
+    tap = DisplayTap(history_size=10)
+    server = _server(tap)
+    path = await server.start()
+    first_reader, first_writer = await asyncio.open_unix_connection(path)
+    second_reader, second_writer = await asyncio.open_unix_connection(path)
+    try:
+        for client_id, reader, writer in (
+            ("first", first_reader, first_writer),
+            ("second", second_reader, second_writer),
+        ):
+            request = json.dumps({"action": "attach", "client_id": client_id}) + "\n"
+            writer.write(request.encode())
+            await writer.drain()
+            assert (await _read_ack(reader))["type"] == "attach_ack"
+
+        first_writer.close()
+        await first_writer.wait_closed()
+        async with asyncio.timeout(5):
+            while tap.subscriber_count != 1:
+                await asyncio.sleep(0.01)
+        tap.publish({"type": "message", "text": "still connected"})
+        event = json.loads(await asyncio.wait_for(second_reader.readline(), 5))
+        assert event["type"] == "message"
+        assert event["text"] == "still connected"
+    finally:
+        first_writer.close()
+        second_writer.close()
+        await first_writer.wait_closed()
+        await second_writer.wait_closed()
+        await server.stop()
 
 
 @pytest.mark.asyncio

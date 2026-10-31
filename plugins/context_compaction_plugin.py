@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from kollabor_ai.conversation_logger import utc_stamp
 from kollabor_ai.fast_model import resolve_fast_model
 from kollabor_config.config_utils import resolve_global_path
 from kollabor_events import EventType, Hook, HookPriority
@@ -3878,7 +3879,7 @@ class ContextCompactionPlugin(BasePlugin):
             "type": "context_compaction",
             "sessionId": session_id,
             "uuid": str(uuid4()),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": utc_stamp(),
             "compaction_round": self._compaction_round,
             "messages_summarized": messages_summarized,
             "messages_kept": messages_kept,
