@@ -124,6 +124,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- ACP Session tab: effort set with Apply now sticks. Apply max, then switch
+  model, and the effort stays max (before, it could drop back to xhigh). A
+  model that does not offer the effort uses the highest level it offers and
+  shows a notice saying so.
 - ACP: a model change keeps the effort you picked, falls back to the highest
   effort the new model offers, or shows a notice saying why it could not.
   Behavior change: a restart into another ACP profile no longer keeps the
