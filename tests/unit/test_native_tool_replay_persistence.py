@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -132,7 +132,7 @@ async def test_compaction_cannot_restore_a_superseded_calls_late_result(tmp_path
     ])
     await writer._append_to_jsonl({
         "type": "context_compaction", "uuid": "summary", "content": "Compacted",
-        "timestamp": datetime.now().isoformat() + "Z", "compaction_round": 1,
+        "timestamp": datetime.now(timezone.utc).isoformat(), "compaction_round": 1,
     })
     await writer.log_system_message("Old late output", parent_uuid=old, subtype="tool_result", tool_use_id="reused")
     await writer.log_user_message("New task")

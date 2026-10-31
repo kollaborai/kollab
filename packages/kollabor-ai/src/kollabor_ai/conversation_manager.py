@@ -9,7 +9,7 @@ import logging
 import os
 from collections import Counter, defaultdict
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -18,6 +18,28 @@ from kollabor_ai.session_naming import generate_branch_name, generate_session_na
 from kollabor_ai.conversation_logger import _acp_display_metadata
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_record_stamp(value: Any) -> Optional[datetime]:
+    """Parse a persisted record timestamp into an aware UTC datetime.
+
+    Aware stamps (``Z`` or a numeric offset) are taken as written; naive
+    stamps are read as LOCAL wall-clock time, matching the convention
+    documented on kollabor_ai.conversation_logger.utc_stamp for sessions
+    recorded before stamps became true UTC. Returns None for missing or
+    unparseable values so callers fail open: a record is never dropped
+    just because its stamp cannot be understood.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        stamp = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.astimezone()
+    return stamp.astimezone(timezone.utc)
+
 
 SESSION_STAT_KEYS = (
     "messages",
@@ -868,7 +890,7 @@ class ConversationManager:
         tool_calls_by_message: Dict[str, set[str]] = {}
         result_batches: Dict[str, Dict[str, Any]] = {}
         pending_compaction: Dict[str, Any] = {}  # last-round-wins
-        last_compaction_timestamp: Optional[str] = None
+        last_compaction_at: Optional[datetime] = None
         current_parent_uuid: Optional[str] = None
         session_stats: Optional[Dict[str, Any]] = None
         has_saved_base = False
@@ -939,7 +961,7 @@ class ConversationManager:
                         has_saved_base = True
                         has_streaming_tail = False
                         pending_compaction = {}
-                        last_compaction_timestamp = None
+                        last_compaction_at = None
                         tool_calls_by_message.clear()
                         result_batches.clear()
                         recognized_record = True
@@ -969,9 +991,12 @@ class ConversationManager:
                         has_streaming_tail = has_saved_base
                         tool_calls_by_message.clear()
                         content = data.get("content", "")
-                        compaction_timestamp = data.get("timestamp")
-                        if compaction_timestamp:
-                            last_compaction_timestamp = str(compaction_timestamp)
+                        # Parsed once for ordering; an unparseable stamp
+                        # leaves last_compaction_at None, which suppresses
+                        # nothing (fail open) rather than comparing garbage.
+                        last_compaction_at = _parse_record_stamp(
+                            data.get("timestamp")
+                        )
                         if content:
                             pending_compaction = {
                                 "uuid": data.get("uuid") or str(uuid4()),
@@ -997,9 +1022,10 @@ class ConversationManager:
                         ):
                             continue
                         record_timestamp = data.get("timestamp")
+                        record_at = _parse_record_stamp(record_timestamp)
                         if (
-                            last_compaction_timestamp is not None and record_timestamp is not None
-                            and str(record_timestamp) <= last_compaction_timestamp
+                            last_compaction_at is not None and record_at is not None
+                            and record_at <= last_compaction_at
                         ):
                             continue
                         structured = data.get("tool_result")
@@ -1021,10 +1047,11 @@ class ConversationManager:
                     elif msg_type in ("user", "assistant"):
                         recognized_record = True
                         record_timestamp = data.get("timestamp")
+                        record_at = _parse_record_stamp(record_timestamp)
                         if (
-                            last_compaction_timestamp is not None
-                            and record_timestamp is not None
-                            and str(record_timestamp) <= last_compaction_timestamp
+                            last_compaction_at is not None
+                            and record_at is not None
+                            and record_at <= last_compaction_at
                         ):
                             # The compaction summary supersedes all records at
                             # or before its timestamp; replay only the live tail.
@@ -1085,14 +1112,14 @@ class ConversationManager:
             # arrived after compaction ran (they are newer, the loop kept
             # them in order).
             if pending_compaction:
-                if last_compaction_timestamp is not None:
+                if last_compaction_at is not None:
                     messages = [
                         message
                         for message in messages
                         if (
-                            message.get("timestamp") is None
-                            or str(message.get("timestamp"))
-                            > last_compaction_timestamp
+                            (stamp := _parse_record_stamp(message.get("timestamp")))
+                            is None
+                            or stamp > last_compaction_at
                         )
                     ]
                 messages = [pending_compaction] + messages

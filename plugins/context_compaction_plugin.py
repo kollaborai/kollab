@@ -28,6 +28,38 @@ from kollabor_tui.display_tap import publish_semantic
 logger = logging.getLogger(__name__)
 
 
+def _append_jsonl_durable(target: str, record: Dict[str, Any]) -> Optional[str]:
+    """Append one JSON line with one retry, then spill to a sidecar file.
+
+    A compaction summary lost to a transient append failure makes resume
+    replay the un-compacted tail, so the record must never die silently:
+    retry once, then write the line to a recovery sidecar next to the
+    session file. Returns None when the primary file received the record,
+    otherwise the sidecar path that now holds it. Raises only if even the
+    sidecar write fails, so a broken disk still fails loudly.
+    """
+    line = json.dumps(record) + "\n"
+    for attempt in range(2):
+        try:
+            with open(target, "a") as f:
+                f.write(line)
+            return None
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning(
+                    f"Compaction record append to {target} failed, retrying: {exc}"
+                )
+    sidecar = str(target) + ".compaction-recovery.jsonl"
+    with open(sidecar, "a") as f:
+        f.write(line)
+    logger.error(
+        f"Compaction record could not be appended to {target} after retry; "
+        f"recovered to {sidecar}; merge it before the live tail on resume"
+    )
+    return sidecar
+
+
+
 # Keep verbatim hub context bounded by both count and payload size.
 MAX_PRESERVED_HUB_TASK_MESSAGES = 24
 MAX_PRESERVED_HUB_TASK_CHARS = 4000
@@ -3871,12 +3903,8 @@ class ContextCompactionPlugin(BasePlugin):
             record["role"] = "user"
             record["subtype"] = "compaction_summary"
 
-        try:
-            with open(session_file, "a") as f:
-                f.write(json.dumps(record) + "\n")
+        if _append_jsonl_durable(session_file, record) is None:
             logger.debug(f"Logged compaction event for round {self._compaction_round}")
-        except Exception as e:
-            logger.warning(f"Failed to log compaction event: {e}")
 
     # ------------------------------------------------------------------
     # Status line
