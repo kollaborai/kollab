@@ -96,15 +96,40 @@ _TYPE_HEAD = re.compile(rb'\{"type":\s*"([^"\\]+)"')
 _SEQ_FIELD = re.compile(rb'"seq":\s*(\d+)')
 
 
+def _open_brackets(text: str) -> int:
+    """Brackets opened minus closed in JSON text, outside its strings."""
+    level, i = 0, 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif c in "{[":
+            level += 1
+        elif c in "}]":
+            level -= 1
+        i += 1
+    return level
+
+
 def _frame_field(head: bytes, tail: bytes, key: str) -> Any:
-    """A field of an oversized frame from its head or tail; None when neither holds it whole."""
-    for chunk in (head, tail):
+    """A top-level field of an oversized frame from its head or tail; None when neither holds it whole.
+
+    A tool's input or output can hold a key of the same name (#543). The head
+    starts the frame and the tail ends it, so a top-level field has one bracket
+    open before it in the head, or one more closed than opened after it in the tail.
+    """
+    for chunk, at_start in ((head, True), (tail, False)):
         text = chunk.decode(errors="replace")
         for found in re.finditer(f'"{key}":\\s*', text):
             try:  # the JSON value as written: an escaped 'old\"id' stays whole
-                return json.JSONDecoder().raw_decode(text, found.end())[0]
+                value, end = json.JSONDecoder().raw_decode(text, found.end())
             except ValueError:
                 continue  # cut off at the 4 KB edge
+            if (_open_brackets(text[:found.start()]) == 1 if at_start
+                    else _open_brackets(text[end:]) == -1):
+                return value
     return None
 
 
