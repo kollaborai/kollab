@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 from typing import Any, Optional, Set
 
@@ -26,7 +27,7 @@ from ..base import BaseCommandHandler
 
 logger = logging.getLogger(__name__)
 
-CONTROL_SUBCOMMANDS = ("show", "pause", "resume", "clear", "history")
+CONTROL_SUBCOMMANDS = ("show", "pause", "resume", "clear", "history", "pending", "requests", "discard")
 
 
 class GoalCommandHandler(BaseCommandHandler):
@@ -122,11 +123,13 @@ class GoalCommandHandler(BaseCommandHandler):
                 SubcommandInfo("", "<objective>", "Create a goal and start"),
                 SubcommandInfo("show", "", "Show the active goal in full"),
                 SubcommandInfo("pause", "", "Pause at the next safe boundary"),
-                SubcommandInfo(
-                    "resume", "[--budget N] [--turns N]", "Resume after a stop"
-                ),
+                SubcommandInfo("resume", "[--budget N] [--turns N]", "Resume after a stop"),
                 SubcommandInfo("clear", "", "Stop and keep as history"),
                 SubcommandInfo("history", "[N]", "Recent finished goals"),
+                SubcommandInfo("pending", "", "List image requests awaiting retry"),
+                SubcommandInfo("requests", "", "List image requests and created goals"),
+                SubcommandInfo("retry", "<id> <objective>", "Retry one image request"),
+                SubcommandInfo("discard", "<id>", "Discard one image request"),
             ],
         )
         self.command_registry.register_command(goal_command)
@@ -142,15 +145,8 @@ class GoalCommandHandler(BaseCommandHandler):
         raw = (command.raw_input or "").strip()
         if raw.startswith("/"):
             raw = raw[1:]
-        lowered = raw.lower()
-        for token in ("goal ", "goal\n", "goals ", "goals\n"):
-            if lowered.startswith(token):
-                raw = raw[len(token) - 1 :]
-                break
-        else:
-            if lowered in ("goal", "goals"):
-                raw = ""
-        return raw.strip()
+        match = re.match(r"(?is)^(?:goal|goals)(?:\s+|$)(.*)$", raw)
+        return match.group(1).strip() if match else raw.strip()
 
     @staticmethod
     def _parse_objective(
@@ -237,12 +233,46 @@ class GoalCommandHandler(BaseCommandHandler):
 
     async def _dispatch(self, command: SlashCommand) -> CommandResult:
         remainder = self._raw_remainder(command)
-        first = remainder.split(" ", 1)[0].lower() if remainder else ""
+        first = remainder.split(None, 1)[0].lower() if remainder else ""
+        staged = getattr(command, "_goal_attachment_request", None)
+        uid = self._conversation_uid()
+        if hasattr(command, "_goal_origin_uid") and uid != command._goal_origin_uid:
+            return CommandResult(
+                success=False,
+                message="conversation changed; the goal command was not executed",
+                display_type="error",
+            )
+        if staged is not None:
+            staged_uid, request_id = staged
+            if uid != staged_uid:
+                return CommandResult(
+                    success=False,
+                    message="conversation changed; return to the original conversation and use /goal pending",
+                    display_type="error",
+                )
+            staged_request = self.service.attachment_request(uid, request_id) if self.service else None
+            if staged_request is None:
+                return CommandResult(
+                    success=False,
+                    message="attachment request not found in this conversation",
+                    display_type="error",
+                )
+            if staged_request["goal_id"]:
+                return self._committed_request_result(staged_request["goal_id"], remainder)
+            if not remainder or first in (*CONTROL_SUBCOMMANDS, "retry"):
+                return CommandResult(
+                    success=False,
+                    message="Images require a goal objective; the command was not executed."
+                    + self._staged_attachment_notice(request_id),
+                    display_type="error",
+                )
+        else:
+            request_id = None
 
         if not remainder or first == "show":
             return self._render_status(full=True)
-        if first in ("pause", "clear", "history", "resume"):
-            args = remainder.split(" ", 1)
+        if first in ("pause", "clear", "history", "resume", "pending", "requests", "discard", "retry"):
+            args = remainder.split(None, 1)
             sub = args[0].lower()
             rest = args[1].strip() if len(args) > 1 else ""
             if sub == "pause":
@@ -251,13 +281,41 @@ class GoalCommandHandler(BaseCommandHandler):
                 return self._do_clear()
             if sub == "history":
                 return self._do_history(rest)
+            if sub == "pending":
+                return self._do_pending()
+            if sub == "requests":
+                return self._do_pending(include_committed=True)
+            if sub == "discard":
+                return self._do_discard(rest)
+            if sub == "retry":
+                parts = rest.split(" ", 1)
+                retry_id = parts[0] if parts else ""
+                if not re.fullmatch(r"[0-9a-f]{32}", retry_id):
+                    return CommandResult(
+                        success=False, message="use /goal retry <id> <objective>", display_type="error"
+                    )
+                staged_request = self.service.attachment_request(uid, retry_id) if uid and self.service else None
+                if staged_request is None:
+                    return CommandResult(
+                        success=False, message="attachment request not found in this conversation", display_type="error"
+                    )
+                objective = parts[1].strip() if len(parts) > 1 else ""
+                if staged_request["goal_id"]:
+                    return self._committed_request_result(staged_request["goal_id"], objective)
+                if not objective:
+                    return CommandResult(
+                        success=False,
+                        message="retry requires an objective" + self._staged_attachment_notice(retry_id),
+                        display_type="error",
+                    )
+                return self._do_create(objective, retry_id)
             return self._do_resume(rest)
 
-        return self._do_create(remainder)
+        return self._do_create(remainder, request_id)
 
     # -- create --------------------------------------------------------
 
-    def _do_create(self, remainder: str) -> CommandResult:
+    def _do_create(self, remainder: str, request_id: Optional[str] = None) -> CommandResult:
         svc = self.service
         if svc is None:
             return CommandResult(
@@ -267,10 +325,9 @@ class GoalCommandHandler(BaseCommandHandler):
             )
         budget, objective, error = self._parse_objective(remainder)
         if error:
-            uid = self._conversation_uid()
             return CommandResult(
                 success=False,
-                message=error + self._staged_attachment_notice(svc, uid),
+                message=error + self._staged_attachment_notice(request_id),
                 display_type="error",
             )
         uid = self._conversation_uid()
@@ -281,15 +338,15 @@ class GoalCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
         from kollabor.goals.service import GoalError
+        from kollabor.state.goal_store import GoalAttachmentRequestCommitted, GoalAttachmentRequestConflict
 
         capability_error = self._execution_unavailable_reason()
         if capability_error:
             return CommandResult(
                 success=False,
-                message=capability_error + self._staged_attachment_notice(svc, uid),
+                message=capability_error + self._staged_attachment_notice(request_id),
                 display_type="error",
             )
-        attachments, staged_token = svc.snapshot_staged_attachments(uid)
         try:
             record = svc.create_goal(
                 conversation_uid=uid,
@@ -297,47 +354,93 @@ class GoalCommandHandler(BaseCommandHandler):
                 project_root=self._project_root(),
                 session_id=self._session_id(),
                 token_budget=budget,
-                attachment_refs=attachments or None,
+                attachment_request_id=request_id,
+            )
+        except GoalAttachmentRequestCommitted as exc:
+            return self._committed_request_result(exc.goal_id, remainder)
+        except GoalAttachmentRequestConflict:
+            return CommandResult(
+                success=False, message="attachment request already created a different goal", display_type="error"
             )
         except GoalError as exc:
             return CommandResult(
                 success=False,
-                message=str(exc) + self._staged_attachment_notice(svc, uid),
+                message=str(exc) + self._staged_attachment_notice(request_id),
                 display_type="error",
             )
         except Exception as exc:
-            self.logger.error("goal command error: %s", exc, exc_info=True)
+            self.logger.error("goal creation failed (%s)", type(exc).__name__)
             return CommandResult(
                 success=False,
-                message=f"goal command error: {exc}" + self._staged_attachment_notice(svc, uid),
+                message="goal storage failed" + self._staged_attachment_notice(request_id),
                 display_type="error",
             )
-        svc.consume_staged_attachments(uid, staged_token)
         self._schedule_goal_turn(record)
-        budget_txt = (
-            f"  budget: {int(record.token_budget)} tokens"
-            if record.token_budget
-            else ""
-        )
+        budget_txt = f"  budget: {int(record.token_budget)} tokens" if record.token_budget else ""
         return CommandResult(
             success=True,
-            message=(
-                f"goal {record.short_id} created — turn 1 scheduled{budget_txt}\n"
-                f"objective: {record.objective}"
-            ),
+            message=(f"goal {record.short_id} created — turn 1 scheduled{budget_txt}\nobjective: {record.objective}"),
             display_type="success",
             data={"goal_id": record.goal_id},
         )
 
     @staticmethod
-    def _staged_attachment_notice(service, uid: Optional[str]) -> str:
-        if not uid or not service.has_staged_attachments(uid):
+    def _staged_attachment_notice(request_id: Optional[str]) -> str:
+        if not request_id:
             return ""
         return (
-            " Staged attachments remain for the next goal creation until replaced"
-            " or the daemon stops; /goal clear removes them and clears any active goal."
-            " Native goal turns do not yet send images to the model."
+            f" For pending images {request_id}, use /goal retry {request_id} <objective> or /goal discard {request_id}."
         )
+
+    def _committed_request_result(self, goal_id: str, remainder: str) -> CommandResult:
+        record = self.service.store.get(goal_id)
+        if remainder:
+            budget, objective, error = self._parse_objective(remainder)
+            if error or objective != record.objective or budget != record.token_budget:
+                return CommandResult(
+                    success=False, message="attachment request already created a different goal", display_type="error"
+                )
+        return CommandResult(
+            success=True,
+            message=f"goal {record.short_id} was already created from this image request",
+            display_type="success",
+            data={"goal_id": record.goal_id},
+        )
+
+    def _do_pending(self, include_committed: bool = False) -> CommandResult:
+        svc = self.service
+        uid = self._conversation_uid()
+        if not svc or not uid:
+            return CommandResult(
+                success=False, message="goal storage or conversation unavailable", display_type="error"
+            )
+        requests = svc.attachment_requests(uid) if include_committed else svc.pending_attachment_requests(uid)
+        if not requests:
+            return CommandResult(success=True, message="no pending goal image requests", display_type="info")
+        lines = [
+            f"  {r['request_id']}  "
+            + (f"created {r['goal_id'][:8]}  " if r.get("goal_id") else "pending  ")
+            + r["command_preview"]
+            for r in requests
+        ]
+        return CommandResult(
+            success=True,
+            message="goal image requests:\n"
+            + "\n".join(lines)
+            + "\nUse /goal retry <id> <objective> or /goal discard <id>.",
+            display_type="info",
+        )
+
+    def _do_discard(self, request_id: str) -> CommandResult:
+        svc = self.service
+        uid = self._conversation_uid()
+        if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+            return CommandResult(success=False, message="use /goal discard <id>", display_type="error")
+        if not svc or not uid or not svc.discard_attachment_request(uid, request_id):
+            return CommandResult(
+                success=False, message="attachment request not found in this conversation", display_type="error"
+            )
+        return CommandResult(success=True, message="pending goal image request discarded", display_type="success")
 
     def _session_id(self) -> Optional[str]:
         try:
@@ -409,19 +512,8 @@ class GoalCommandHandler(BaseCommandHandler):
         )
 
     def _do_clear(self) -> CommandResult:
-        service = self.service
-        uid = self._conversation_uid()
-        _, staged_token = (
-            service.snapshot_staged_attachments(uid) if service and uid else ([], None)
-        )
         record, err = self._require_active()
         if err is not None or record is None:
-            if service and uid and service.consume_staged_attachments(uid, staged_token):
-                return CommandResult(
-                    success=True,
-                    message="staged goal attachments removed",
-                    display_type="success",
-                )
             assert err is not None
             return err
         from kollabor.goals.service import GoalError
@@ -430,20 +522,15 @@ class GoalCommandHandler(BaseCommandHandler):
             updated = self.service.clear(record.goal_id)
         except GoalError as exc:
             return CommandResult(success=False, message=str(exc), display_type="error")
-        staged_suffix = (
-            "; staged goal attachments removed"
-            if service and uid and service.consume_staged_attachments(uid, staged_token)
-            else ""
-        )
         if updated.clear_requested:
             return CommandResult(
                 success=True,
-                message=f"clear requested — applies at the next safe boundary ({record.short_id}); history retained{staged_suffix}",
+                message=f"clear requested — applies at the next safe boundary ({record.short_id}); history retained",
                 display_type="info",
             )
         return CommandResult(
             success=True,
-            message=f"goal {record.short_id} cleared (kept in /goal history){staged_suffix}",
+            message=f"goal {record.short_id} cleared (kept in /goal history)",
             display_type="success",
         )
 
