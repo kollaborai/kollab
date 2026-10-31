@@ -355,7 +355,12 @@ PRINTABLE = {"nginx": nginx_config, "caddy": caddy_config, "systemd": systemd_un
 
 def _lock(state_dir: Path) -> int:
     """One process per state directory; the descriptor is held until exit."""
-    fd = os.open(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    if os.name == "nt":  # no O_NOFOLLOW on Windows: private_fs.open_nofollow opens the lock file instead
+        from kollabor_config import private_fs
+
+        fd = private_fs.open_nofollow(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    else:
+        fd = os.open(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     if not file_lock.try_lock(fd):
         os.close(fd)
         raise RuntimeConfigError(f"{state_dir} is already served by another kollab relay serve")
