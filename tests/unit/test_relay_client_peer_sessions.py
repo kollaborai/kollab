@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from nacl.signing import SigningKey
 
-from plugins.hub.relay_client import PeerSessionEvent, RelayClient
+from plugins.hub.relay_client import (
+    _ApplicationPending,
+    PeerSessionEvent,
+    RelayClient,
+    RelayError,
+)
 
 
 def _peer_key(seed: int) -> str:
@@ -180,3 +186,79 @@ def test_close_emits_disconnect_once(tmp_path):
     asyncio.run(client.close())
 
     assert events == [PeerSessionEvent("local_disconnected", None, "1" * 32, None)]
+
+
+@pytest.mark.asyncio
+async def test_rejected_peer_snapshot_keeps_connection_alive(tmp_path):
+    # A malformed peers frame must fail nothing and never tear the socket
+    # down: before the per-request failure fix this RelayError escaped
+    # _handle_frame, the receive loop read it as a transport failure, and
+    # the client reconnected (fresh session) on every bad snapshot.
+    client = RelayClient(tmp_path / "workspace", state_dir=tmp_path / "state")
+    peer = _peer_key(1)
+    client.approve(peer)
+    client._set_peers(_snapshot((peer, "b" * 32)))
+    client._state = "online"
+    client._session_id = "a" * 32
+
+    await client._handle_frame(
+        {"type": "peers", "peers": [{"key": "not-hex", "session": "b" * 32}]}
+    )
+
+    assert client._counts["peer_state_frame_errors"] == 1
+    assert client._state == "online"
+    assert client._session_id == "a" * 32
+    assert client._peers == {peer: "b" * 32}
+
+
+@pytest.mark.asyncio
+async def test_rejected_error_frame_keeps_connection_alive(tmp_path):
+    # Same regression class from the error-frame path: an invalid relay
+    # error frame used to raise out of the receive loop and force a
+    # reconnect; it is now counted and dropped on the floor.
+    client = RelayClient(tmp_path / "workspace", state_dir=tmp_path / "state")
+    client._state = "online"
+    client._session_id = "a" * 32
+
+    await client._handle_frame({"type": "error", "code": "nöt_ascii"})
+
+    assert client._counts["peer_state_frame_errors"] == 1
+    assert client._state == "online"
+    assert client._session_id == "a" * 32
+
+
+@pytest.mark.asyncio
+async def test_peer_vanishing_mid_request_fails_requests_not_connection(tmp_path):
+    # The phone-link reconnect loop: a host that vanishes from the peers
+    # snapshot mid-request must fail only the requests bound to it. The
+    # relay connection, its session id and every other pending request
+    # survive; only a genuine transport failure may reconnect.
+    client = RelayClient(tmp_path / "workspace", state_dir=tmp_path / "state")
+    host = _peer_key(1)
+    other = _peer_key(2)
+    client.approve(host)
+    client.approve(other)
+    client._set_peers(_snapshot((host, "b" * 32), (other, "c" * 32)))
+    client._state = "online"
+    client._session_id = "a" * 32
+    loop = asyncio.get_running_loop()
+    ping_future = loop.create_future()
+    app_future = loop.create_future()
+    untouched_future = loop.create_future()
+    client._pending["gone"] = (host, ping_future)
+    client._application_pending["gone"] = _ApplicationPending(
+        host, "a" * 32, "b" * 32, "status", app_future
+    )
+    client._pending["kept"] = (other, untouched_future)
+
+    await client._handle_frame(_snapshot((other, "c" * 32)))
+
+    assert ping_future.done() and isinstance(ping_future.exception(), RelayError)
+    assert app_future.done() and isinstance(app_future.exception(), RelayError)
+    assert not untouched_future.done()
+    assert "gone" not in client._pending
+    assert "gone" not in client._application_pending
+    assert client._peers == {other: "c" * 32}
+    assert client._state == "online"
+    assert client._session_id == "a" * 32
+    assert client._counts["peer_state_frame_errors"] == 0
