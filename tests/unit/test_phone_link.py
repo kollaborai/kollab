@@ -14,6 +14,7 @@ import pytest_asyncio
 import segno
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
+from kollabor_engine import phone_link as phone_link_module
 from kollabor_engine.phone_link import (
     CHUNK,
     LEGACY_CHUNK,
@@ -368,6 +369,9 @@ async def test_persisted_approval_is_private_and_corruption_preserves_data(setup
     await restored.start()
     try:
         assert restored.records[offer["id"]]["key"] == phone.public_key
+
+        assert restored._read_contexts[offer["id"]].owner_id == "local"
+        assert restored._read_contexts[offer["id"]].phone_id == offer["id"]
         assert restored.records[offer["id"]]["network"] == "relay.example"
         history = await restored.event_history()
         restored_event = next(
@@ -513,6 +517,51 @@ asyncio.run(main())
         assert response["protocol"] == "kollab-phonelink/1"
     finally:
         await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_context_is_available_before_transport_approval(setup_link):
+    manager, offer, host, phone, *_ = setup_link
+    original_approve = host.approve
+    seen_contexts = []
+
+    def approve_with_observation(public_key):
+        seen_contexts.append(manager._read_contexts.get(offer["id"]))
+        return original_approve(public_key)
+
+    host.approve = approve_with_observation
+    await manager.approve(offer["id"], phone.public_key)
+
+    assert len(seen_contexts) == 1
+    assert seen_contexts[0] is not None
+    assert seen_contexts[0].owner_id == "local"
+    assert seen_contexts[0].phone_id == offer["id"]
+
+
+@pytest.mark.asyncio
+async def test_revoke_marks_context_and_purges_after_persisted_removal(setup_link, monkeypatch):
+    manager, offer, *_ = setup_link
+    await secure_phone(setup_link)
+    context = manager._read_contexts[offer["id"]]
+    observations = []
+
+    def close_streams(received_context):
+        observations.append(
+            (received_context, received_context.revoked, offer["id"] not in manager.records)
+        )
+        return 0
+
+    monkeypatch.setattr(
+        phone_link_module,
+        "get_daemon_pool",
+        lambda: types.SimpleNamespace(close_streams_for_context=close_streams),
+        raising=False,
+    )
+
+    await manager.revoke(offer["id"])
+
+    assert observations == [(context, True, True)]
+    assert offer["id"] not in manager._read_contexts
 
 
 @pytest.mark.asyncio

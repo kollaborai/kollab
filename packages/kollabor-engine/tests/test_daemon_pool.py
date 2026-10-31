@@ -302,3 +302,43 @@ async def test_failed_spawn_never_signals_another_folders_agent(tmp_path):
 
     assert handle.pid == 0
     kill.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_phone_context_revoke_purges_all_matching_subscribers_and_rejects_late_ones():
+    pool = daemon_pool.DaemonPool()
+    first = daemon_pool.DaemonHandle("first", "agent-a", None)
+    second = daemon_pool.DaemonHandle("second", "agent-b", None)
+    pool._daemons.update({"first": first, "second": second})
+    context = SimpleNamespace(owner_id="local", phone_id="phone-a", revoked=False)
+    other_context = SimpleNamespace(owner_id="local", phone_id="phone-b", revoked=False)
+
+    first_phone_queue = first.subscribe(context=context)
+    second_phone_queue = second.subscribe(context=context)
+    unrelated_queue = first.subscribe(context=other_context)
+    context_free_queue = second.subscribe()
+    first_phone_queue.put_nowait({"type": "stale"})
+
+    context.revoked = True
+    assert pool.close_streams_for_context(context) == 2
+    assert first_phone_queue not in first._subscribers
+    assert second_phone_queue not in second._subscribers
+    assert unrelated_queue in first._subscribers
+    assert context_free_queue in second._subscribers
+    assert not isinstance(first_phone_queue.get_nowait(), dict)
+    assert not isinstance(second_phone_queue.get_nowait(), dict)
+
+    late_queue = first.subscribe(context=context)
+    assert late_queue not in first._subscribers
+    assert not isinstance(late_queue.get_nowait(), dict)
+
+    first._fan_out({"type": "still-live"})
+    second._fan_out({"type": "still-live"})
+    assert unrelated_queue.get_nowait() == {
+        "type": "still-live",
+        "session_id": "first",
+    }
+    assert context_free_queue.get_nowait() == {
+        "type": "still-live",
+        "session_id": "second",
+    }
