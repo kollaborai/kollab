@@ -726,13 +726,18 @@ class LocalStateService(StateService):
         except Exception:
             effort = getattr(profile, "effort", "")
 
+        image_capability = bool(supports_vision(model or "", provider or ""))
+        if is_active and str(provider or "").lower() == "acp":
+            supports_images = getattr(self._llm_service, "supports_image_input", None)
+            image_capability = bool(callable(supports_images) and supports_images())
+
         return ProfileSnapshot(
             name=getattr(profile, "name", "") or "",
             model=(model or "") if model is not None else "",
             provider=(provider or "") if provider is not None else "",
             endpoint=(endpoint or "") if endpoint is not None else "",
             supports_tools=bool(supports_tools),
-            supports_vision=bool(supports_vision(model or "", provider or "")),
+            supports_vision=image_capability,
             temperature=temperature,
             description=getattr(profile, "description", "") or "",
             is_active=is_active,
@@ -2874,9 +2879,10 @@ class LocalStateService(StateService):
         if contains_image_content(message):
             supports_images = getattr(llm, "supports_image_input", None)
             if not callable(supports_images) or not supports_images():
+                reason = getattr(llm, "image_input_rejection_reason", None)
                 return {
                     "accepted": False,
-                    "reason": "active model does not accept image input",
+                    "reason": reason() if callable(reason) else "active model does not accept image input",
                 }
 
         # Hub mentions are an explicit transport command, not LLM prose. Keep

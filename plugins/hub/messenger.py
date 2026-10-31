@@ -2112,6 +2112,13 @@ class AgentSocketServer:
             for task in (send_task, recv_task):
                 if not task.done():
                     task.cancel()
+            # Cancelling to_thread does not stop the queue.get already running
+            # in the executor. Wake it so detach/shutdown need not wait for the
+            # five-second heartbeat timeout when the event loop closes.
+            try:
+                sub_queue.put_nowait(None)
+            except queue_mod.Full:
+                pass  # A full queue already has something to wake the reader.
             await asyncio.gather(send_task, recv_task, return_exceptions=True)
             if self._display_tap is not None:
                 self._display_tap.unsubscribe(client_id)
