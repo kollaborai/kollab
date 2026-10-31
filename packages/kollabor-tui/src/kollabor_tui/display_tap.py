@@ -117,7 +117,8 @@ class DisplayTap:
             self._next_seq += 1
             self._history.append(event)
 
-        with self._lock:
+            # Deliver under the same lock: each subscriber gets events in seq
+            # order, and an attached engine drops what it has seen by seq (#543).
             dead = []
             for client_id, q in self._subscribers.items():
                 try:

@@ -33,6 +33,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import subprocess
 import time
@@ -41,6 +42,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import psutil
 
+from . import sse
 from .folders import agents_in_folder
 from .hub_bridge import HubBridge
 
@@ -85,6 +87,11 @@ SPAWN_TIMEOUT_SECONDS = 45.0
 # data. Web clients cannot use them, and forwarding them would double every
 # message, so the pool drops them at the boundary.
 _RENDERED_EVENT_TYPES = frozenset({"output", "active_area", "heartbeat", "clear"})
+
+# The start of an ``rpc_reply`` frame as the daemon writes it (RpcResponse.to_wire).
+_REPLY_HEAD = re.compile(rb'\{"action":\s*"rpc_reply",\s*"request_id":\s*"([^"\\]+)"')
+# The start of a display event: the tap publishes "type" as its first key.
+_TYPE_HEAD = re.compile(rb'\{"type":\s*"([^"\\]+)"')
 
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,6 +178,11 @@ class DaemonHandle:
         self._subscribers: Set[asyncio.Queue] = set()
         self._closed = False
         self.startup_error: str = ""
+        # The daemon replays its recent events on every attach. After a reattach
+        # the ones already passed on are dropped by their seq, or the last turn's
+        # turn_complete would end the stream of the turn now running (#541). A
+        # daemon process has one tap, so seq only grows while its pid lives.
+        self._last_seq: Optional[int] = None
         # A cancelled turn's tool may ignore the stop signal and report
         # afterwards. Its late result still flows (the transcript mirror
         # follows it) but carries `cancelled: true`, so no gem reads it as a
@@ -253,7 +265,7 @@ class DaemonHandle:
         assert self._reader is not None
         try:
             while True:
-                line = await self._reader.readline()
+                line = await self._read_line()
                 if not line:
                     break
                 try:
@@ -266,6 +278,12 @@ class DaemonHandle:
                         self.rpc.on_reply(message)
                     continue
 
+                seq = message.get("seq")
+                if isinstance(seq, int):
+                    if self._last_seq is not None and seq <= self._last_seq:
+                        continue  # replayed on a reattach, already passed on
+                    self._last_seq = seq
+
                 if message.get("type") in _RENDERED_EVENT_TYPES:
                     continue
 
@@ -275,8 +293,10 @@ class DaemonHandle:
         except asyncio.CancelledError:
             self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
             raise
-        except (ConnectionError, OSError) as e:
+        except Exception as e:  # any read failure takes the reattach path below
             logger.info("daemon %s stream closed: %s", self.identity, e)
+        else:
+            logger.info("daemon %s closed the stream", self.identity)
         # A live local daemon that dropped us (its hub socket was re-created) takes
         # us back on the same path; without this every later call is a
         # BrokenPipeError until the engine restarts.
@@ -286,8 +306,73 @@ class DaemonHandle:
         # Wake every SSE consumer so requests don't hang on a dead daemon.
         self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
 
-    async def _reattach(self, attempts: int = 20, delay: float = 0.5) -> bool:
-        """Attach again to the same socket. True once a new read loop runs."""
+    async def _read_line(self) -> bytes:
+        """The next line from the daemon; ``b""`` once the stream ends.
+
+        A line over the reader's limit (the daemon allows larger ones) is
+        skipped and the session stays: reattaching would only meet it again.
+        An ``rpc_reply`` among them fails its call now with that reason,
+        rather than a timeout with no cause (#541, #544).
+        """
+        assert self._reader is not None
+        while True:
+            try:
+                return await self._reader.readuntil(b"\n")
+            except asyncio.IncompleteReadError as e:
+                return e.partial
+            except asyncio.LimitOverrunError as e:
+                head = await self._reader.readexactly(min(e.consumed, 4096))
+                size = len(head) + await self._skip_rest_of_line()
+                reply = _REPLY_HEAD.match(head)
+                if reply is None or self.rpc is None:
+                    kind = _TYPE_HEAD.match(head)
+                    etype = kind.group(1).decode(errors="replace") if kind else "unknown"
+                    logger.warning(
+                        "dropped an oversized %s frame (%d bytes) from daemon %s",
+                        etype, size, self.identity,
+                    )
+                    if etype in _RENDERED_EVENT_TYPES:
+                        continue  # terminal-only; the engine never passes these on
+                    # Say so in the chat: a silently missing tool result reads
+                    # as a complete reply.
+                    self._fan_out(sse.error(
+                        self.session_id,
+                        "frame_too_large",
+                        "An update from the agent was over the engine's frame limit and was"
+                        " dropped; this reply is incomplete.",
+                    ))
+                    continue
+                logger.warning("dropped an oversized rpc reply from daemon %s", self.identity)
+                self.rpc.on_reply({
+                    "action": "rpc_reply",
+                    "request_id": reply.group(1).decode(errors="replace"),
+                    "error": "reply over the engine's frame limit",
+                })
+
+    async def _skip_rest_of_line(self) -> int:
+        """Read past the rest of an oversized line; returns the bytes skipped."""
+        assert self._reader is not None
+        skipped = 0
+        while True:
+            try:
+                return skipped + len(await self._reader.readuntil(b"\n"))
+            except asyncio.LimitOverrunError as e:
+                skipped += len(await self._reader.readexactly(e.consumed))
+            except asyncio.IncompleteReadError as e:
+                # The stream ended inside the frame; the next read sees it.
+                return skipped + len(e.partial)
+
+    async def _reattach(
+        self, attempts: int = 20, delay: float = 0.5, slow_delay: float = 5.0
+    ) -> bool:
+        """Attach again to the same socket. True once a new read loop runs.
+
+        A daemon that stays alive is retried for as long as it lives: ``attempts``
+        quick tries, then one every ``slow_delay`` seconds. Giving up while it
+        lived left a handle whose every call failed "client closed" until the
+        engine restarted (#541). False only once the handle closes or the
+        daemon dies.
+        """
         if self.rpc is not None:
             self.rpc.close()  # pending calls fail now instead of hanging
         if self._writer is not None:
@@ -295,18 +380,29 @@ class DaemonHandle:
                 self._writer.close()
             except Exception:
                 pass
-        for _ in range(attempts):
-            await asyncio.sleep(delay)
+        tries = 0
+        while True:
+            await asyncio.sleep(delay if tries < attempts else slow_delay)
+            tries += 1
             if self._closed or not self.alive:
                 return False
             try:
                 await self.connect(self.socket_path)
-            except (OSError, RuntimeError, ValueError, asyncio.TimeoutError) as e:
-                logger.debug("daemon %s reattach failed: %s", self.identity, e)
+            except Exception as e:
+                if tries == attempts:
+                    logger.warning(
+                        "daemon %s (pid %s) is alive but not taking the engine back; "
+                        "retrying every %ss: %s",
+                        self.identity,
+                        self.pid,
+                        slow_delay,
+                        e,
+                    )
+                else:
+                    logger.debug("daemon %s reattach failed: %s", self.identity, e)
                 continue
             logger.info("engine session %s reattached to daemon %s", self.session_id, self.identity)
             return True
-        return False
 
     def _fan_out(self, event: Dict[str, Any]) -> None:
         event.setdefault("session_id", self.session_id)

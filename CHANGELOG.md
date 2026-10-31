@@ -124,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- An agent whose socket directory in /tmp was deleted makes it again on its next heartbeat; before, it stayed unreachable until another agent started (#542).
+- A chat with a live agent no longer stays stuck on "daemon unreachable: client closed" after the agent drops the engine: the engine keeps trying to attach again for as long as the agent runs (quick tries, then every 5 s) instead of giving up after 10 s (#541).
+- After it attaches again, a chat gets each update once and in order, a reply ends only on its own turn's completion, and an update too big for the engine shows as an error instead of vanishing (#541).
 - ACP: an oversized agent reply no longer breaks history paging with a
   413 error. A page that is too large slims its message metadata so the
   older messages still load, and the original message is preserved
