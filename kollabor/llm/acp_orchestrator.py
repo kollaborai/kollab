@@ -150,8 +150,9 @@ class ACPOrchestrator:
         if reported == value:
             # A pick the user confirmed this session: a replay of saved options must not undo it.
             self._user_picks = {**getattr(self, "_user_picks", {}), config_id: value}
-            if category == "thought_level":
-                self._effort_pick = value  # kept by category, so a renamed effort ID still restores
+            effort = self._effort_option()
+            if effort is not None and effort.get("id") == config_id:
+                self._effort_pick = value  # the effort option, found by category or by its ID if uncategorized
         if self._profile_name and reported == value:
             # Persist only a value the harness confirmed; a refused pick must not replay at the next start.
             saved = self._saved_options()
