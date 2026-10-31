@@ -124,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- History: expanding an old slimmed history entry loads its full metadata
+  again, so tool runs and agent replies from earlier pages show their
+  output instead of rendering empty (#522).
 - ACP: an oversized agent reply no longer breaks history paging with a
   413 error. A page that is too large slims its message metadata so the
   older messages still load, and the original message is preserved

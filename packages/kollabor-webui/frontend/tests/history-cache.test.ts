@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { HistoryMessage, HistoryPage } from "../src/api";
 import { buildInitialState } from "../src/runtime";
 import {
@@ -9,6 +9,7 @@ import {
   loadOlderHistoryPage,
   mergeOlderHistoryPage,
   mergeRecentHistoryPage,
+  restoreSlimmedHistoryMetadata,
 } from "../src/history-cache";
 
 function page(start: number, end: number, errorIndex?: number): HistoryPage {
@@ -281,5 +282,66 @@ describe("bounded history cache and paging", () => {
 
     expect((await cache.load("session-0")).length).toBe(0);
     expect((await cache.load(`session-${HISTORY_CACHE_MAX_SESSIONS + 2}`)).length).toBe(1);
+  });
+});
+
+
+function markedSlimmed(reference: string, kept: Record<string, unknown> = {}): HistoryMessage {
+  return {
+    role: "assistant",
+    content: "done",
+    metadata: { ...kept, acp_updates_dropped: 3, history_output_ref: reference },
+  };
+}
+
+describe("restoreSlimmedHistoryMetadata", () => {
+  it("returns the page untouched when nothing is slimmed", async () => {
+    const api = { getHistoryMetadata: vi.fn() };
+    const history: HistoryMessage[] = [
+      { role: "user", content: "hi", metadata: {} },
+      { role: "assistant", content: "ok", metadata: { acp_updates: [] } },
+    ];
+
+    const result = await restoreSlimmedHistoryMetadata("session-1", api, history);
+
+    expect(result).toBe(history);
+    expect(api.getHistoryMetadata).not.toHaveBeenCalled();
+  });
+
+  it("merges missing keys and clears the marker for a slimmed entry", async () => {
+    const api = {
+      getHistoryMetadata: vi.fn().mockResolvedValue({
+        session_id: "session-1",
+        metadata: {
+          acp_updates: [{ kind: "text", text: "a" }],
+          provider: "acp",
+          extra: 1,
+        },
+      }),
+    };
+    const history: HistoryMessage[] = [
+      { role: "user", content: "hi", metadata: {} },
+      markedSlimmed("ref-1", { provider: "acp" }),
+    ];
+
+    const result = await restoreSlimmedHistoryMetadata("session-1", api, history);
+
+    expect(api.getHistoryMetadata).toHaveBeenCalledWith("session-1", "ref-1");
+    const metadata = result[1].metadata as Record<string, unknown>;
+    expect(metadata.acp_updates).toEqual([{ kind: "text", text: "a" }]);
+    expect(metadata.extra).toBe(1);
+    expect(metadata.provider).toBe("acp");
+    expect("acp_updates_dropped" in metadata).toBe(false);
+  });
+
+  it("keeps the slimmed entry when the metadata fetch fails", async () => {
+    const api = { getHistoryMetadata: vi.fn().mockRejectedValue(new Error("gone")) };
+    const history: HistoryMessage[] = [markedSlimmed("ref-1")];
+
+    const result = await restoreSlimmedHistoryMetadata("session-1", api, history);
+
+    const metadata = result[0].metadata as Record<string, unknown>;
+    expect(metadata.acp_updates_dropped).toBe(3);
+    expect("acp_updates" in metadata).toBe(false);
   });
 });
