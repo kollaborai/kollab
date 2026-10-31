@@ -16,7 +16,6 @@ import asyncio
 import base64
 import binascii
 import contextlib
-import grp
 import hashlib
 import hmac
 import ipaddress
@@ -24,7 +23,6 @@ import json
 import logging
 import os
 import re
-import resource
 import secrets
 import signal
 import socket
@@ -34,6 +32,12 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import urlsplit
+
+# POSIX-only stdlib. Windows has no RLIMIT_NOFILE (the per-process descriptor
+# budget is effectively unbounded) and no setrlimit to call, so raise_fd_limit
+# takes an nt branch and this import never runs there.
+if os.name != "nt":
+    import resource
 
 from aiohttp import WSCloseCode, WSMsgType, hdrs, web
 from nacl.exceptions import BadSignatureError
@@ -1684,6 +1688,10 @@ def raise_fd_limit(max_connections: int) -> int:
     A hard limit below the need lowers the cap to fit, as Redis does with
     maxclients; the caller says so, so a small host still starts.
     """
+    if os.name == "nt":
+        # Windows has no RLIMIT_NOFILE: the per-process descriptor budget is
+        # effectively unbounded, and there is no setrlimit to call.
+        return max_connections
     need = max_connections + FD_HEADROOM
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft >= need:
@@ -1721,6 +1729,7 @@ def bind_unix_socket(path: str, group: str | None = None) -> socket.socket:
         )
     gid = None
     if group is not None:
+        import grp  # POSIX-only stdlib; unix sockets have no Windows meaning
         try:
             gid = grp.getgrnam(group).gr_gid
         except KeyError as exc:

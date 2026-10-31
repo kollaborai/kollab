@@ -19,7 +19,7 @@ from plugins.hub.dns.discovery import (
     parse_txt,
     verify_manifest,
 )
-from plugins.hub.dns.discovery_publish import publish
+from plugins.hub.dns.discovery_publish import _ensure_key_private, publish
 from plugins.hub.dns.discovery_store import DiscoveryStore
 
 
@@ -329,3 +329,34 @@ async def test_private_discovery_scope_rejects_bad_wildcard_values(monkeypatch):
 
     with pytest.raises(ValueError, match="list of CIDRs"):
         await commands._discover("https://example.com")
+
+
+def test_windows_key_check_uses_acl_not_posix_mode(monkeypatch, tmp_path):
+    """On nt the st_mode bits (0o666, or 0o444 read-only) can never pass a
+    0o077 mask, so the privacy check must consult private_fs.owned_private
+    instead: a key with 'bad' POSIX bits passes, a failed ACL check raises."""
+    from kollabor_config import private_fs
+
+    import plugins.hub.dns.discovery_publish as dp
+
+    key = tmp_path / "service.key"
+    key.write_bytes(SigningKey.generate().encode())
+    key.chmod(0o666)  # fails the POSIX 0o077 mask check
+
+    calls = []
+    monkeypatch.setattr(private_fs, "owned_private", lambda path, *a, **k: calls.append(str(path)) or True)
+    monkeypatch.setattr(dp.os, "name", "nt")
+    dp._ensure_key_private(key)  # must not raise despite the group bits
+    assert calls == [str(key)]
+
+    monkeypatch.setattr(private_fs, "owned_private", lambda path, *a, **k: False)
+    with pytest.raises(DiscoveryError, match="key_permissions"):
+        dp._ensure_key_private(key)
+
+
+def test_posix_key_check_still_rejects_group_readable_key(tmp_path):
+    key = tmp_path / "service.key"
+    key.write_bytes(SigningKey.generate().encode())
+    key.chmod(0o640)
+    with pytest.raises(DiscoveryError, match="key_permissions"):
+        _ensure_key_private(key)
