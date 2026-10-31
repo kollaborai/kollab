@@ -777,6 +777,16 @@ an existing active goal is paused before its next dispatch. Inspection and
 stop controls remain available. This is a capability guard, not ACP goal
 execution support.
 
+Current implementation limitation: staged image references are scoped to
+the conversation rather than the originating request. The ACP capability
+guard retains rejected references until replaced or the daemon stops, and
+tells the user they will be added to the next successfully created goal,
+including a text-only goal. `/goal clear` removes pending references and
+clears any active goal. Request-scoped attachment ownership is tracked in
+[issue #512](https://github.com/kollaborai/kollab/issues/512). Native goal
+turns do not yet send goal images to the provider; that separate gap is
+tracked in [issue #510](https://github.com/kollaborai/kollab/issues/510).
+
 ### 9.2 text, image, and mixed inputs
 
 Goal command recognition follows the same structured-content invariant already

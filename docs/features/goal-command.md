@@ -19,6 +19,15 @@ native provider profile to run the goal. Existing goals remain inspectable
 and can be paused or cleared.
 The missing ACP integration is tracked in [issue #496](https://github.com/kollaborai/kollab/issues/496).
 
+If an ACP goal with images is refused, its staged attachment references stay
+in the daemon for that conversation until replaced or the daemon stops. They
+are added to the next successfully created goal, even a text-only one.
+`/goal clear` removes them from staging and clears any active goal.
+Request-scoped staging is
+tracked in [issue #512](https://github.com/kollaborai/kollab/issues/512).
+Native goal turns do not yet send those images to the model; see
+[issue #510](https://github.com/kollaborai/kollab/issues/510).
+
 ## Commands
 
 ```text
@@ -27,7 +36,7 @@ The missing ACP integration is tracked in [issue #496](https://github.com/kollab
 /goal show                     show the active goal in full
 /goal pause                    stop continuation at the next safe boundary
 /goal resume [--budget N] [--turns N]  resume after a stop
-/goal clear                    stop and preserve the goal as cleared history
+/goal clear                    clear the goal, keep history, remove staged attachments
 /goal history [N]              list recent finished goals (default 10)
 ```
 

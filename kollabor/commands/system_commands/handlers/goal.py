@@ -267,7 +267,12 @@ class GoalCommandHandler(BaseCommandHandler):
             )
         budget, objective, error = self._parse_objective(remainder)
         if error:
-            return CommandResult(success=False, message=error, display_type="error")
+            uid = self._conversation_uid()
+            return CommandResult(
+                success=False,
+                message=error + self._staged_attachment_notice(svc, uid),
+                display_type="error",
+            )
         uid = self._conversation_uid()
         if not uid:
             return CommandResult(
@@ -277,12 +282,14 @@ class GoalCommandHandler(BaseCommandHandler):
             )
         from kollabor.goals.service import GoalError
 
-        attachments = svc.take_staged_attachments(uid)
         capability_error = self._execution_unavailable_reason()
         if capability_error:
             return CommandResult(
-                success=False, message=capability_error, display_type="error"
+                success=False,
+                message=capability_error + self._staged_attachment_notice(svc, uid),
+                display_type="error",
             )
+        attachments, staged_token = svc.snapshot_staged_attachments(uid)
         try:
             record = svc.create_goal(
                 conversation_uid=uid,
@@ -293,7 +300,19 @@ class GoalCommandHandler(BaseCommandHandler):
                 attachment_refs=attachments or None,
             )
         except GoalError as exc:
-            return CommandResult(success=False, message=str(exc), display_type="error")
+            return CommandResult(
+                success=False,
+                message=str(exc) + self._staged_attachment_notice(svc, uid),
+                display_type="error",
+            )
+        except Exception as exc:
+            self.logger.error("goal command error: %s", exc, exc_info=True)
+            return CommandResult(
+                success=False,
+                message=f"goal command error: {exc}" + self._staged_attachment_notice(svc, uid),
+                display_type="error",
+            )
+        svc.consume_staged_attachments(uid, staged_token)
         self._schedule_goal_turn(record)
         budget_txt = (
             f"  budget: {int(record.token_budget)} tokens"
@@ -308,6 +327,16 @@ class GoalCommandHandler(BaseCommandHandler):
             ),
             display_type="success",
             data={"goal_id": record.goal_id},
+        )
+
+    @staticmethod
+    def _staged_attachment_notice(service, uid: Optional[str]) -> str:
+        if not uid or not service.has_staged_attachments(uid):
+            return ""
+        return (
+            " Staged attachments remain for the next goal creation until replaced"
+            " or the daemon stops; /goal clear removes them and clears any active goal."
+            " Native goal turns do not yet send images to the model."
         )
 
     def _session_id(self) -> Optional[str]:
@@ -380,8 +409,19 @@ class GoalCommandHandler(BaseCommandHandler):
         )
 
     def _do_clear(self) -> CommandResult:
+        service = self.service
+        uid = self._conversation_uid()
+        _, staged_token = (
+            service.snapshot_staged_attachments(uid) if service and uid else ([], None)
+        )
         record, err = self._require_active()
         if err is not None or record is None:
+            if service and uid and service.consume_staged_attachments(uid, staged_token):
+                return CommandResult(
+                    success=True,
+                    message="staged goal attachments removed",
+                    display_type="success",
+                )
             assert err is not None
             return err
         from kollabor.goals.service import GoalError
@@ -390,15 +430,20 @@ class GoalCommandHandler(BaseCommandHandler):
             updated = self.service.clear(record.goal_id)
         except GoalError as exc:
             return CommandResult(success=False, message=str(exc), display_type="error")
+        staged_suffix = (
+            "; staged goal attachments removed"
+            if service and uid and service.consume_staged_attachments(uid, staged_token)
+            else ""
+        )
         if updated.clear_requested:
             return CommandResult(
                 success=True,
-                message=f"clear requested — applies at the next safe boundary ({record.short_id}); history retained",
+                message=f"clear requested — applies at the next safe boundary ({record.short_id}); history retained{staged_suffix}",
                 display_type="info",
             )
         return CommandResult(
             success=True,
-            message=f"goal {record.short_id} cleared (kept in /goal history)",
+            message=f"goal {record.short_id} cleared (kept in /goal history){staged_suffix}",
             display_type="success",
         )
 
