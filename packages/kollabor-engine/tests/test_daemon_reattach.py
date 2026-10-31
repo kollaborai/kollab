@@ -386,6 +386,10 @@ async def test_an_oversized_turn_complete_still_ends_its_turn(monkeypatch):
     assert "turn ended" in error["message"]
     assert done == {"type": "turn_complete", "stop_reason": "error", "request_id": "new", "session_id": "s9"}
     assert nxt["type"] == "tool_start"
+    # An id JSON escapes is read whole. Kyanite on #543 round 5: 'old"id' was lost,
+    # so the completion named no request and ended whichever stream was open.
+    odd = {**big, "request_id": 'old"id-\u00e9', "seq": 1}
+    assert (await _pool_events([odd], 2))[1]["request_id"] == 'old"id-\u00e9'
 
     # The message route ends its stream on it instead of idling 600 s.
     monkeypatch.setattr(messages, "get_session_registry", lambda: types.SimpleNamespace(
