@@ -89,6 +89,9 @@ class ACPOrchestrator:
         self._observation_rows: list[str] = []
         self._unwritten_observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_count = 0
+        # (request_id, turn_id) pairs whose authoritative usage already
+        # settled; replays of terminal events must not double count (#495).
+        self._settled_usage_turns: set[tuple[str, int]] = set()
 
     @property
     def is_processing(self) -> bool:
@@ -174,6 +177,7 @@ class ACPOrchestrator:
         self._terminal_session_id = None
         self._observations.clear()
         self._observation_count = 0
+        self._settled_usage_turns.clear()
         self._observation_rows.clear()
         self._unwritten_observations.clear()
         self._selected_profile = profile
@@ -481,6 +485,40 @@ class ACPOrchestrator:
         except Exception:
             logger.exception("ACP Hub completion callback failed")
 
+    def _settle_turn_usage(self, result: ACPResult) -> dict[str, Any] | None:
+        """Fold one turn's authoritative token totals into session stats.
+
+        Harnesses that report usage on the prompt response (codex-acp
+        >= 2.3.0) describe the whole turn; older ones leave it unset and the
+        last-request context sample stays the only signal. Each (request,
+        turn) settles at most once, so replayed terminal events never double
+        count. Cost is never invented: adapters send no price data (#495).
+        """
+        usage = getattr(result, "usage", None) or (result.end_frame or {}).get("acp_turn_usage")
+        if not isinstance(usage, dict) or not usage:
+            return None
+        key = (result.request_id, result.turn_id)
+        if key in self._settled_usage_turns:
+            return None
+        self._settled_usage_turns.add(key)
+        input_total = (
+            int(usage.get("input_tokens", 0) or 0)
+            + int(usage.get("cached_read_tokens", 0) or 0)
+            + int(usage.get("cached_write_tokens", 0) or 0)
+        )
+        output_total = int(usage.get("output_tokens", 0) or 0) + int(usage.get("thought_tokens", 0) or 0)
+        llm = self.event_bus.get_service("llm_service")
+        stats = getattr(llm, "session_stats", None)
+        if isinstance(stats, dict):
+            stats["total_input_tokens"] = int(stats.get("total_input_tokens", 0)) + input_total
+            stats["total_output_tokens"] = int(stats.get("total_output_tokens", 0)) + output_total
+            if usage.get("cached_read_tokens"):
+                stats["total_cache_read_tokens"] = (
+                    int(stats.get("total_cache_read_tokens", 0)) + int(usage["cached_read_tokens"])
+                )
+            stats["acp_turn_usage"] = dict(usage)
+        return {"usage": dict(usage), "input_total": input_total, "output_total": output_total}
+
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
         result: ACPResult | None = None
         try:
@@ -583,11 +621,15 @@ class ACPOrchestrator:
             self._parents.pop(admission.request_id, None)
             self._user_history_tasks.pop(admission.request_id, None)
             self._observed_turns.pop((admission.request_id, admission.turn_id), None)
+        settled_usage = self._settle_turn_usage(result)
         publish_semantic(
             self.event_bus, "turn_complete", request_id=result.request_id,
             session_id=result.session_id, generation=result.generation,
             turn_id=result.turn_id, stop_reason=result.stop_reason,
             input_source=result.source, thread_id=result.thread_id,
+            input_tokens=(settled_usage or {}).get("input_total", 0),
+            output_tokens=(settled_usage or {}).get("output_total", 0),
+            turn_usage=(settled_usage or {}).get("usage"),
         )
         end_frame = dict(result.end_frame)
         end_frame.setdefault(
