@@ -112,7 +112,7 @@ def _make_llm_service(*, with_inject: bool = True) -> MagicMock:
     return llm
 
 
-class TestSessionStatsCacheCounters(unittest.IsolatedAsyncioTestCase):
+class TestSessionStatsProducer(unittest.IsolatedAsyncioTestCase):
     async def test_get_session_stats_preserves_cache_counters(self) -> None:
         llm = _make_llm_service()
         llm.session_stats = {
@@ -131,6 +131,39 @@ class TestSessionStatsCacheCounters(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.cache_creation_tokens, 7)
         self.assertEqual(stats.total_cache_read_tokens, 111)
         self.assertEqual(stats.total_cache_creation_tokens, 77)
+
+    async def test_get_session_stats_maps_each_metric_from_llm_service_producer(
+        self,
+    ) -> None:
+        producer_stats = {
+            "messages": 17,
+            "input_tokens": 21_007,
+            "input_tokens_estimated": True,
+            "output_tokens": 703,
+            "total_input_tokens": 77_777,
+            "total_output_tokens": 888,
+            "cache_read_tokens": 32_000,
+            "cache_creation_tokens": 3_301,
+            "total_cache_read_tokens": 123_456,
+            "total_cache_creation_tokens": 4_321,
+            "thinking_duration": 2.5,
+            "cost_usd": 0.0042,
+            "total_cost_usd": 0.042,
+            "acp_usage": {"input_tokens": 31, "output_tokens": 41},
+        }
+        llm = _make_llm_service()
+        llm.session_stats = producer_stats
+        llm.conversation_manager = SimpleNamespace(
+            current_session_id="producer-session-17"
+        )
+        svc = LocalStateService(llm_service=llm, profile_manager=MagicMock())
+
+        snapshot = await svc.get_session_stats()
+
+        for field, expected in producer_stats.items():
+            with self.subTest(field=field):
+                self.assertEqual(getattr(snapshot, field), expected)
+        self.assertEqual(snapshot.session_id, "producer-session-17")
 
 
 class TestListCommands(unittest.IsolatedAsyncioTestCase):
