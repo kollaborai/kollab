@@ -35,6 +35,7 @@ const PHONE_DIAGNOSTIC_EVENTS = new Set([
   "relay_socket_opened",
   "relay_socket_closed",
   "relay_reconnecting",
+  "relay_host_session_changed",
   "relay_error",
 ]);
 type PhoneCloseReason =
@@ -135,6 +136,53 @@ const lost = () =>
   new Error(
     "Connection to your computer was lost. An action already sent may still finish there.",
   );
+
+/**
+ * How long a connected phone keeps its relay socket open while its host is
+ * absent from the roster. The engine legitimately restarts and re-registers,
+ * so a briefly missing roster entry must not terminate the link.
+ */
+export const HOST_MISSING_GRACE_MS = 15_000;
+
+/** What a relay peers frame means for the tracked host session. Pure so the
+ * tolerance rules stay unit-testable; the transport applies it. */
+export type HostSnapshotDecision =
+  | { action: "lost"; why: "invalid" | "missing" }
+  | { action: "present"; session: string }
+  | { action: "changed"; session: string }
+  | { action: "absent"; missingSinceMs: number };
+
+export function hostSnapshotDecision(
+  peers: Json,
+  hostKey: string,
+  knownSession: string,
+  missingSinceMs: number,
+  nowMs: number,
+): HostSnapshotDecision {
+  if (!Array.isArray(peers) || peers.length > 256)
+    return { action: "lost", why: "invalid" };
+  const host = peers.find((p: Json) => p.key === hostKey);
+  if (host === undefined) {
+    // Before the first settle the handshake requires the host to be listed;
+    // afterwards a missing host is only fatal once the grace window lapses.
+    if (!knownSession) return { action: "lost", why: "missing" };
+    // A missingSinceMs of 0 means no clock is running yet: the first absent
+    // snapshot starts it at nowMs, so the grace window can actually elapse
+    // instead of comparing against the epoch and failing closed at once.
+    const since = missingSinceMs || nowMs;
+    return nowMs - since >= HOST_MISSING_GRACE_MS
+      ? { action: "lost", why: "missing" }
+      : { action: "absent", missingSinceMs: since };
+  }
+  if (typeof host.session !== "string" || !ID.test(host.session))
+    return { action: "lost", why: "invalid" };
+  // The engine's relay session changes on its own restarts and reconnects.
+  // The roster row is still signed by the same host key, so the new session
+  // is adopted instead of dropping the whole phone link.
+  return knownSession && knownSession !== host.session
+    ? { action: "changed", session: host.session }
+    : { action: "present", session: host.session };
+}
 
 /** 12 characters in groups of four; the computer shows the same code. */
 export function pairingCode(key: string) {
@@ -379,6 +427,8 @@ export class PhoneTransport {
   private socket: WebSocket | null = null;
   private session = "";
   private hostSession = "";
+  private hostMissingSince = 0;
+  private hostMissingTimer: ReturnType<typeof setTimeout> | null = null;
   private key = "";
   private signer: CryptoKey | Uint8Array | null = null;
   private hostBox: Uint8Array | null = null;
@@ -512,6 +562,24 @@ export class PhoneTransport {
     return this.flushingDiagnostics;
   }
 
+  private armHostMissingTimer(sinceMs: number) {
+    const remaining = Math.max(HOST_MISSING_GRACE_MS - (Date.now() - sinceMs), 0);
+    this.clearHostMissingTimer();
+    this.hostMissingTimer = setTimeout(() => {
+      this.hostMissingTimer = null;
+      // Still missing after the grace window: run the normal socket-close
+      // path so the phone reports offline and reconnects on its own.
+      if (this.hostMissingSince) this.socket?.close();
+    }, remaining);
+  }
+
+  private clearHostMissingTimer() {
+    if (this.hostMissingTimer) {
+      clearTimeout(this.hostMissingTimer);
+      this.hostMissingTimer = null;
+    }
+  }
+
   connect(): Promise<void> {
     if (this.outgoing && this.socket?.readyState === WebSocket.OPEN)
       return Promise.resolve();
@@ -567,6 +635,8 @@ export class PhoneTransport {
     this.roomHash = hex(await sha256(sodium.from_hex(this.identity.room)));
     this.session = randomId();
     this.hostSession = "";
+    this.clearHostMissingTimer();
+    this.hostMissingSince = 0;
     this.onState("connecting", this.pairingCode);
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     if (
@@ -631,15 +701,27 @@ export class PhoneTransport {
             )
               throw lost();
           } else if (frame.type === "peers") {
-            if (!Array.isArray(frame.peers) || frame.peers.length > 256)
-              throw lost();
-            const host = frame.peers.find(
-              (p: Json) => p.key === this.identity.host,
+            const decision = hostSnapshotDecision(
+              frame.peers,
+              this.identity.host,
+              this.hostSession,
+              this.hostMissingSince,
+              Date.now(),
             );
-            if (!host || !ID.test(host.session)) throw lost();
-            if (this.hostSession && this.hostSession !== host.session)
-              throw lost();
-            this.hostSession = host.session;
+            if (decision.action === "lost") throw lost();
+            this.clearHostMissingTimer();
+            if (decision.action === "absent") {
+              // Host gone from the roster: hold the link for the grace
+              // window, then let the timer's close run the normal
+              // reconnect path if the host never came back.
+              this.hostMissingSince = decision.missingSinceMs;
+              this.armHostMissingTimer(decision.missingSinceMs);
+            } else {
+              this.hostMissingSince = 0;
+              if (decision.action === "changed")
+                this.reportDiagnostic("relay_host_session_changed");
+              this.hostSession = decision.session;
+            }
             if (!settled) {
               settled = true;
               clearTimeout(timer);
@@ -685,6 +767,8 @@ export class PhoneTransport {
           close_code: event.code,
           close_reason: closeReasonForCode(event.code),
         });
+        this.clearHostMissingTimer();
+        this.hostMissingSince = 0;
         this.incoming = this.outgoing = null;
 
         this.frameCompression = false;
@@ -1107,6 +1191,8 @@ export class PhoneTransport {
     this.closed = true;
     this.diagnosticQueue = [];
     if (this.retry) clearTimeout(this.retry);
+    this.clearHostMissingTimer();
+    this.hostMissingSince = 0;
     this.socket?.close();
     for (const key of [
       this.hostBox,
