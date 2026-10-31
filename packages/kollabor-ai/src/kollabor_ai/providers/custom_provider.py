@@ -8,6 +8,8 @@ import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 
+from ..goal_image_scope import safe_goal_error_cause
+
 import aiohttp
 from pydantic import field_validator
 
@@ -190,7 +192,7 @@ class CustomProvider(LLMProvider):
                             self.provider_name,
                             response.status,
                             response.headers,
-                        ) from error
+                        ) from safe_goal_error_cause(error)
 
                     return dict(await response.json())
         except asyncio.TimeoutError as e:
@@ -199,14 +201,14 @@ class CustomProvider(LLMProvider):
                 self.provider_name,
                 error_code="timeout",
                 original_error=e,
-            ) from e
+            ) from safe_goal_error_cause(e)
         except aiohttp.ClientError as e:
             raise APIConnectionError(
                 str(e),
                 self.provider_name,
                 error_code="connection_error",
                 original_error=e,
-            ) from e
+            ) from safe_goal_error_cause(e)
 
     async def call(
         self,
@@ -307,14 +309,14 @@ class CustomProvider(LLMProvider):
                 self.provider_name,
                 error_code="timeout",
                 original_error=e,
-            ) from e
+            ) from safe_goal_error_cause(e)
         except aiohttp.ClientError as e:
             raise APIConnectionError(
                 str(e),
                 self.provider_name,
                 error_code="connection_error",
                 original_error=e,
-            ) from e
+            ) from safe_goal_error_cause(e)
 
     async def _stream_impl(
         self,
@@ -361,7 +363,7 @@ class CustomProvider(LLMProvider):
                         self.provider_name,
                         response.status,
                         response.headers,
-                    ) from error
+                    ) from safe_goal_error_cause(error)
 
                 # Parse SSE stream
                 usage_info = None

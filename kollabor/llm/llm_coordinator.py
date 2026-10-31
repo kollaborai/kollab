@@ -37,6 +37,7 @@ from kollabor_ai import (
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.context_injection import ContextService as ContextInjectionService
 from kollabor_ai.context_service import ContextService
+from kollabor_ai.goal_image_scope import current_goal_image_scope
 from kollabor_ai.message_content import (
     EphemeralImageStore,
     MessageContent,
@@ -1759,16 +1760,24 @@ class LLMService:
             if hud_content:
                 from kollabor_events.data_models import ConversationMessage
 
+                hud_message = ConversationMessage(
+                    role="user",
+                    content=hud_content,
+                    metadata={
+                        "agent_hud": True,
+                        "agent_hud_sources": ["pending"],
+                    },
+                )
+                image_scope = current_goal_image_scope()
+                if (
+                    image_scope is not None
+                    and image_scope.owner_queue is self._queue_processor
+                    and image_scope.carrier is None
+                ):
+                    hud_message._goal_image_marker = image_scope.marker
+                    image_scope.carrier = hud_message
                 self.current_parent_uuid = self._add_conversation_message(
-                    ConversationMessage(
-                        role="user",
-                        content=hud_content,
-                        metadata={
-                            "agent_hud": True,
-                            "agent_hud_sources": ["pending"],
-                        },
-                    ),
-                    parent_uuid=self.current_parent_uuid,
+                    hud_message, parent_uuid=self.current_parent_uuid
                 )
         self.current_parent_uuid = await self._queue_processor.continue_conversation(
             current_parent_uuid=self.current_parent_uuid,
