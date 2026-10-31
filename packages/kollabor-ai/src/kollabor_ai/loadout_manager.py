@@ -27,6 +27,7 @@ input; ``get()`` is the strict exact-name lookup for programmatic use.
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from difflib import get_close_matches
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,6 +45,22 @@ _LOCAL_ENDPOINT_PROVIDERS = {"custom", "local"}
 # "openai_responses", but the registry tags those models "openai". Without the
 # alias, an OAuth-only setup synthesizes zero implicit loadouts.
 _REGISTRY_PROVIDER_ALIASES = {"openai_responses": "openai"}
+
+# The effort levels a provider's API takes when its live catalog names none for a
+# model: Anthropic's output_config.effort, else the reasoning effort every
+# OpenAI-style API accepts. The picker offers no level a request would 400 on.
+_PROVIDER_EFFORTS = {"anthropic": ("low", "medium", "high", "max")}
+_DEFAULT_EFFORTS = ("low", "medium", "high")
+_NOTE_EFFORTS = re.compile(r"effort: ([a-z/]+)")
+
+
+def _catalog_efforts(entry: Dict[str, Any]) -> List[str]:
+    """The levels a catalog entry names (older caches keep them only in its note)."""
+    efforts = entry.get("efforts")
+    if isinstance(efforts, list):
+        return [str(e) for e in efforts]
+    match = _NOTE_EFFORTS.search(str(entry.get("note") or ""))
+    return match.group(1).split("/") if match else []
 
 
 @dataclass
@@ -269,46 +286,49 @@ class LoadoutManager:
         """Every provider profile x model x effort a session can start on, for
         the web UI's searchable model picker.
 
-        Each saved loadout as it is, then each configured profile's models at
-        its own default effort ("") and at every level its provider takes. An
-        ACP harness offers the models and efforts it last reported
-        (``acp_options[profile name]``), else only its own default.
+        Each configured profile's models, each at every effort it takes, so a
+        row says what runs: a blank effort is offered only for a model that
+        takes none (a blank sends nothing, so an earlier pick would stay). A
+        native model takes the levels its live catalog names, else its
+        provider's; an ACP harness offers what its sessions last reported
+        (``acp_options[profile name]``), per model once that model has run.
+        Saved loadouts are not rows: one saves to its provider profile, which
+        every session on it shares, and a pick changes one session.
         """
-        from kollabor_ai.profile_manager import EFFORT_LEVELS
+        from kollabor_ai.model_registry import supports_thinking
         from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
-        profiles = self.provider_profiles()
-        providers = {p.name: (p.get_provider() or "").lower() for p in profiles}
-        rows: List[Dict[str, str]] = [
-            {"profile": lo.provider_profile, "provider": providers.get(lo.provider_profile, ""),
-             "model": lo.model, "effort": lo.effort, "loadout": lo.name}
-            for lo in sorted(self._explicit_loadouts().values(), key=lambda lo: lo.name)
-        ]
-        for profile in profiles:
-            provider = providers[profile.name]
+        rows: List[Dict[str, str]] = []
+        for profile in self.provider_profiles():
+            provider = (profile.get_provider() or "").lower()
             if provider == "acp":
                 reported = (acp_options or {}).get(profile.name) or {}
+                by_model = reported.get("efforts_by_model") or {}
                 models = [str(m) for m in reported.get("models") or []] or [""]
-                # "" keeps the harness's current effort: offered only when it reported none.
-                levels = [str(e) for e in reported.get("efforts") or []] or [""]
+                levels = {m: [str(e) for e in by_model.get(m) or reported.get("efforts") or []] for m in models}
             else:
                 own = [profile.get_model()] if profile.get_model() else []
                 models = list(dict.fromkeys(own + self.models_for_profile(profile)))
-                efforts = list(EFFORT_LEVELS) if provider in EFFORT_SUPPORTED_PROVIDERS else []
-                # "" sends no effort, so the profile's saved one applies: offered only when it has none.
-                levels = efforts if efforts and getattr(profile, "effort", "") else ["", *efforts]
+                # A model's levels barely change: an old catalog still names them.
+                stale_ok = self._cached_catalog(profile, max_age=float("inf"))
+                catalog = {str(e.get("id")): _catalog_efforts(e) for e in stale_ok}
+                levels = {
+                    m: catalog.get(m) or list(_PROVIDER_EFFORTS.get(provider, _DEFAULT_EFFORTS))
+                    if provider in EFFORT_SUPPORTED_PROVIDERS and supports_thinking(m) else []
+                    for m in models
+                }
             for model in models:
-                for effort in levels:
+                for effort in levels[model] or [""]:
                     rows.append({"profile": profile.name, "provider": provider, "model": model, "effort": effort})
         return rows
 
     @staticmethod
-    def _cached_catalog(profile: Any) -> List[Dict[str, Any]]:
+    def _cached_catalog(profile: Any, max_age: float = 3600) -> List[Dict[str, Any]]:
         """This profile's cached live catalog. Empty when cold or unavailable."""
         try:
             from kollabor_ai.model_catalog import cached_provider_models
 
-            return list(cached_provider_models(profile))
+            return list(cached_provider_models(profile, max_age=max_age))
         except Exception as exc:  # noqa: BLE001 -- catalog must never break listing
             logger.debug("cached catalog unavailable for %s: %s", profile, exc)
             return []

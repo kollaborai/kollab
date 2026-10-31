@@ -11,8 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from kollabor_config.file_lock import locked_file
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +49,10 @@ def option_values(option: Dict[str, Any]) -> List[str]:
     return values
 
 
-def load() -> Dict[str, Dict[str, List[str]]]:
-    """``{harness profile name: {"models": [...], "efforts": [...]}}``; empty when unknown."""
+def load() -> Dict[str, Dict[str, Any]]:
+    """``{harness profile name: {"models": [...], "efforts": [...], "efforts_by_model":
+    {model: [...]}}}``; empty when unknown. ``efforts`` is what the last session's
+    model offered; a harness can offer other levels for another model."""
     try:
         data = json.loads(_path().read_text())
     except (OSError, ValueError):
@@ -59,21 +64,29 @@ def remember(harness: str, options: List[Dict[str, Any]]) -> None:
     """Keep what a harness's session offered. Never raises: listing is a convenience."""
     model = find_option(options, "model")
     effort = find_option(options, "thought_level") or find_option(options, "effort")
-    entry = {
-        "models": option_values(model) if model else [],
-        "efforts": option_values(effort) if effort else [],
-    }
-    if not harness or not (entry["models"] or entry["efforts"]):
+    models = option_values(model) if model else []
+    efforts = option_values(effort) if effort else []
+    if not harness or not (models or efforts):
         return
-    data = load()
-    if data.get(harness) == entry:
-        return
-    data[harness] = entry
+    current = str((model or {}).get("currentValue") or "")
     path = _path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        scratch = path.with_suffix(".tmp")
-        scratch.write_text(json.dumps(data, indent=1))
-        os.replace(scratch, path)
+        # Every daemon writes here: two harnesses that start together must not
+        # drop each other's entry or share a scratch file.
+        with locked_file(path.with_suffix(".lock")):
+            data = load()
+            old = data.get(harness) or {}
+            by_model = dict(old.get("efforts_by_model") or {})
+            if current and efforts:
+                by_model[current] = efforts
+            entry = {"models": models, "efforts": efforts, "efforts_by_model": by_model}
+            if old == entry:
+                return
+            data[harness] = entry
+            fd, scratch = tempfile.mkstemp(dir=path.parent, prefix="options.", suffix=".tmp")
+            with os.fdopen(fd, "w") as handle:
+                json.dump(data, handle, indent=1)
+            os.replace(scratch, path)
     except OSError as exc:
         logger.debug("acp options for %s not saved: %s", harness, exc)

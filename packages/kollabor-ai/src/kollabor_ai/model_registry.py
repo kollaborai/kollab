@@ -147,6 +147,11 @@ def supports_sampling(model: str) -> bool:
     return _best_match(model, "supports_sampling") is not False
 
 
+def supports_thinking(model: str) -> bool:
+    """Whether a model reasons, so it takes an effort level. Unmarked models are assumed to."""
+    return _best_match(model, "supports_thinking") is not False
+
+
 def thinking_default(model: str) -> Optional[str]:
     """What a model does with no ``thinking`` field: ``"adaptive"`` or None.
 

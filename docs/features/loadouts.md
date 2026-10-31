@@ -79,8 +79,8 @@ A miss lists suggestions instead of guessing.
 ## Picking a model in the web UI
 
 New Session's Model field and the session panel's Model and Profile field are
-one searchable list of every set-up profile × model × effort, saved loadouts
-first. Type words in any order: `codex luna max` finds Codex CLI's gpt-6-luna
+one searchable list of every set-up profile × model × effort. Type words in
+any order: `codex luna max` finds Codex CLI's gpt-6-luna
 at max, `claude code opus max` finds Claude Code's opus at max.
 
 - A pick changes only that session. A native profile takes the model and
@@ -88,11 +88,20 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   CLI, Claude Code) owns its model and effort, so they go to its own options,
   as the Model tab sets them. New Session starts on the profile, then applies
   the pick.
-- A row with no effort sends none. A profile with a saved effort lists only
-  rows that name one, so a row never runs at an effort it doesn't show.
+- Each row names the effort it runs at. A model gets the levels its live
+  catalog lists (gpt-6-luna stops at max), otherwise its provider's: Anthropic
+  low, medium, high and max; any other provider low, medium and high. A model
+  that doesn't reason (or a provider that sends no effort) gets one row with
+  none.
 - An ACP harness offers the models and efforts its sessions last reported
-  (`~/.kollab/acp/options.json`); one never started offers only its default
-  until its first session.
+  (`~/.kollab/acp/options.json`), with each model's own levels once it has run.
+  One never started offers only its default until its first session.
+- An environment variable outranks a pick (`KOLLAB_<PROFILE>_MODEL`,
+  `KOLLAB_<PROFILE>_EFFORT`, `KOLLAB_MODEL`, `KOLLAB_EFFORT`): the picker says
+  which model kept running instead of showing the pick as applied.
+- Saved loadouts are not in the list: using one saves it to its provider
+  profile, which every session on that profile shares. Use it from Settings →
+  Loadouts.
 - The list is `GET /profiles/choices` on the engine
   (`LoadoutManager.list_choices`).
 - Settings → Loadouts → Manage Profiles opens the profile editor.

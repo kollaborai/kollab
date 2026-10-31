@@ -234,8 +234,6 @@ export type ModelChoice = {
   model: string;
   /** Empty: none sent, so the model's (or harness's current) effort applies. */
   effort: string;
-  /** Set on a saved loadout's row. */
-  loadout?: string;
 };
 
 export type ProfileWrite = {

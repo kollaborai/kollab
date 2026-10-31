@@ -20,7 +20,7 @@ function ChoiceLabel({ parts }: { parts: string[] }) {
 /**
  * Pick a provider profile, model and effort in one searchable list: "codex luna max" finds Codex
  * CLI's gpt-6-luna at max. Lists every model of every set-up profile at each effort its provider
- * takes, saved loadouts first; an ACP harness offers what its sessions last reported.
+ * takes; an ACP harness offers what its sessions last reported.
  */
 export function ModelPicker({
   id,
@@ -73,7 +73,7 @@ export function ModelPicker({
   const groups = useMemo(() => {
     const byGroup = new Map<string, { choice: ModelChoice; index: number }[]>();
     shown.forEach((choice, index) => {
-      const label = choice.loadout ? "Saved Loadouts" : choice.profile;
+      const label = choice.profile;
       byGroup.set(label, [...(byGroup.get(label) ?? []), { choice, index }]);
     });
     return [...byGroup];
@@ -150,7 +150,7 @@ export function ModelPicker({
                 <p className="text-muted-foreground px-2 py-1.5 text-xs">{label}</p>
                 {rows.map(({ choice, index }) => (
                   <button
-                    key={`${choice.loadout ?? ""}\u0000${choice.profile}\u0000${choice.model}\u0000${choice.effort}`}
+                    key={`${choice.profile}\u0000${choice.model}\u0000${choice.effort}`}
                     type="button"
                     role="option"
                     data-index={index}
@@ -162,13 +162,7 @@ export function ModelPicker({
                       index === active && "bg-accent text-accent-foreground",
                     )}
                   >
-                    <ChoiceLabel
-                      parts={
-                        choice.loadout
-                          ? [choice.loadout, choice.model, choice.effort, choice.profile]
-                          : [choice.model || "Default Model", choice.effort]
-                      }
-                    />
+                    <ChoiceLabel parts={[choice.model || "Default Model", choice.effort]} />
                     {sameChoice(choice, value) ? <CheckIcon className="absolute right-2 size-4" /> : null}
                   </button>
                 ))}

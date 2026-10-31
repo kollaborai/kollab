@@ -266,6 +266,8 @@ async def _openai_oauth_models() -> List[Dict[str, Any]]:
         }
         if has_context_window:
             catalog_entry["context_window"] = window
+        if efforts:
+            catalog_entry["efforts"] = efforts
         result.append(catalog_entry)
     return result
 
