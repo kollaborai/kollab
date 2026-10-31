@@ -962,3 +962,28 @@ def test_shutdown_returns_when_a_tracked_close_is_already_done():
     )
     assert result.returncode == 0, result.stderr
     assert "shutdown returned 0" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_restarted_link_opens_calls_after_close(tmp_path):
+    """start, close, start on the same PhoneLink: calls open again, not call_unavailable."""
+    from kollabor_engine.phone_link import PhoneLink
+
+    bridges = []
+
+    async def opener(voice_session_id, generation):
+        bridges.append(FakeBridge())
+        return bridges[-1]
+
+    link = PhoneLink(app=None, directory=tmp_path, port=0, open_phone_bridge=opener)
+    await link.start()
+    await link.close()
+    await link.start()
+    opened = await link._call(
+        "phone-a",
+        object(),
+        {"op": "call_open", "id": CALL, "voice_session_id": VOICE, "generation": 0},
+    )
+    assert opened["ok"] is True
+    await link.close()
+    assert bridges[0].closed

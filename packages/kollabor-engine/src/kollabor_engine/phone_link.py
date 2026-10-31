@@ -507,6 +507,7 @@ class PhoneLink:
         async with self._lock:
             if self._loaded:
                 return
+            self.audio.reopen()  # a restart after close() may open calls again
             try:
                 owner_fd = self._claim_owner()
             except OSError:

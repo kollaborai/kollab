@@ -283,6 +283,10 @@ class PhoneAudioManager:
         await wait_capped({t for t in self._closing if not t.done()})
         self._closing -= {t for t in self._closing if t.done()}
 
+    def reopen(self) -> None:
+        """Lift the shutdown fence so a restarted link on this manager can open calls."""
+        self._shutting_down = False
+
     def _open_result(self, call: _Call) -> dict:
         return {
             "ok": True,
