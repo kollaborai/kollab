@@ -370,6 +370,7 @@ async def test_handle_close_kill_path_no_attributeerror(monkeypatch):
     await handle.close()  # must not raise AttributeError
     assert process.returncode is not None  # kill path actually reaped it
 
+@pytest.mark.asyncio
 async def test_never_ready_close_kills_child_at_once():
     """aquamarine's shutdown-cap constraint (#440): a child that never
     reported ready must die IMMEDIATELY on close(), not after the graceful
@@ -394,6 +395,7 @@ async def test_never_ready_close_kills_child_at_once():
     assert process.returncode is not None
 
 
+@pytest.mark.asyncio
 async def test_ready_close_uses_short_grace_then_kills(monkeypatch):
     """koordinator's order (#440): a ready-but-unresponsive child gets the
     short graceful window (constant under lane A's 5 s cap), then the
