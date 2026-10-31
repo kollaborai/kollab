@@ -24,6 +24,15 @@ _LOGIN_HINTS = (
     "requires login", "token expired",
 )
 _CONTEXT = re.compile(r"context (window|length)|prompt is too long|too many tokens")
+# A provider names itself mid-sentence: "Invalid openai API key".
+_BAD_KEY = re.compile(r"invalid ([\w.-]+ )?api key")
+# What a native turn's exception type or provider error code says, ahead of its text.
+_KINDS = {
+    "AuthenticationError": "login",
+    "authentication_error": "login",
+    "invalid_api_key": "login",
+    "insufficient_quota": "usage",
+}
 
 # What the fallback notice says happened, per kind.
 REASONS = {
@@ -33,19 +42,26 @@ REASONS = {
 }
 
 
-def failure_kind(message: str) -> Optional[str]:
+def failure_kind(
+    message: str, error_type: Optional[str] = None, error_code: Optional[str] = None
+) -> Optional[str]:
     """``"usage"``, ``"rate"`` or ``"login"`` when the model can't serve; else None.
 
-    A context-window overflow is not one: the conversation is too big for any
-    model of that size, and the compaction plugin owns that case.
+    A native turn's error also has its exception type and provider error code;
+    an ACP harness's has only its text. A context-window overflow is not one:
+    the conversation is too big for any model of that size, and the compaction
+    plugin owns that case.
     """
     text = (message or "").lower()
-    if not text or _CONTEXT.search(text):
+    if _CONTEXT.search(text):
         return None
+    kind = _KINDS.get(str(error_code or "")) or _KINDS.get(str(error_type or ""))
+    if kind or not text:
+        return kind
     if any(hint in text for hint in _USAGE_HINTS):
         return "usage"
     if any(hint in text for hint in _RATE_HINTS):
         return "rate"
-    if any(hint in text for hint in _LOGIN_HINTS):
+    if any(hint in text for hint in _LOGIN_HINTS) or _BAD_KEY.search(text):
         return "login"
     return None

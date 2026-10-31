@@ -778,6 +778,35 @@ class TestQueueProcessor(unittest.TestCase):
             [call.args[0]["type"] for call in tap.publish.call_args_list],
         )
 
+    def test_a_hook_that_switched_the_model_has_the_failed_turn_ask_once_more(self):
+        # The model fallback (#548) switches inside the failed turn, so the
+        # turn's loop asks the new model and its request's stream gets that.
+        self.streaming_handler.call_llm.side_effect = RuntimeError("Usage limit reached for 5 hour.")
+        self.event_bus.emit_with_hooks.return_value = {"main": {"final_data": {"retry": True}}}
+        tap = self.renderer.get_service.return_value
+
+        def fail():
+            self.loop.run_until_complete(
+                self.processor._execute_llm_turn_inner(
+                    user_message_provided=False, current_parent_uuid="limit",
+                )
+            )
+            return [call.args[0]["type"] for call in tap.publish.call_args_list]
+
+        published = fail()
+        self.assertFalse(self.processor.turn_completed)
+        self.assertNotIn("error", published)
+        error_data = next(
+            call.args[1]
+            for call in self.event_bus.emit_with_hooks.await_args_list
+            if call.args[0] is EventType.LLM_REQUEST_ERROR
+        )
+        self.assertEqual(error_data["message"], "Usage limit reached for 5 hour.")
+        # A second ask in the same turn is refused: the error ends it.
+        published = fail()
+        self.assertTrue(self.processor.turn_completed)
+        self.assertIn("error", published)
+
 
     def test_pre_request_hook_can_withhold_tools_for_one_request(self):
         self.native_tools_handler.tools = [{"name": "terminal"}]

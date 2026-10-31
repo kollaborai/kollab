@@ -2,15 +2,17 @@
 
 When a turn fails because the model itself can't serve (usage limit, quota,
 rate limit after retries, expired login: ``kollabor.llm.usage_limits``), the
-agent switches to its fallback loadout once, says so in the chat, and runs
-the turn again on the new model. One hop: a turn that fails on the fallback
-never switches again, and the agent stays on the fallback until someone
-switches it back.
+agent switches to its fallback loadout once and says so in the chat. A native
+turn switches inside itself (the ``LLM_REQUEST_ERROR`` hook) and asks the new
+model, so the request that failed gets the new model's answer. One hop: a turn
+that fails on the fallback never switches again, and the agent stays on the
+fallback until someone switches it back.
 
 Settings: ``plugins.model_fallback.loadout`` (every agent; "" = none) and
 ``plugins.model_fallback.agents.<agent>`` (one agent; "off" = none), set with
 ``/llm fallback``. A turn moved to an ACP harness is not run again: the
 harness has its own conversation, so the notice asks for the message again.
+Nor is a turn an ACP harness ran: it has ended before the switch.
 """
 
 import asyncio
@@ -37,7 +39,6 @@ class ModelFallbackPlugin(BasePlugin):
         self.config = config
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tap: Any = None
-        self._native_failed = False
         self._failed_message: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
 
@@ -72,6 +73,7 @@ class ModelFallbackPlugin(BasePlugin):
             event_type=EventType.LLM_REQUEST_ERROR,
             priority=HookPriority.POSTPROCESSING.value,
             callback=self._on_request_error,
+            retry_attempts=0,  # a switch never runs twice
         ))
         # Plugin files start before plugin packages, so the hub creates its
         # display tap after this plugin's initialize: attach once all started.
@@ -147,21 +149,29 @@ class ModelFallbackPlugin(BasePlugin):
         return data
 
     async def _on_request_error(self, data: Dict[str, Any], event) -> Dict[str, Any]:
-        # A native turn failed; its error event (with the text) follows at once.
+        """A native turn failed: switch inside it, so it asks the new model.
+
+        The request's stream then gets the notice and the new model's answer; a
+        switch after the turn's completion reached no one who asked (#548).
+        """
         self._attach()
-        self._native_failed = True
+        message = str(data.get("message") or "")
+        kind = None if data.get("context_window_exceeded") else failure_kind(
+            message, error_type=data.get("error_type"), error_code=data.get("error_code")
+        )
+        if kind and await self.fall_back(message, kind=kind, retry=True) == "retry":
+            data["retry"] = True  # the turn sends the request again, to the new model
         return data
 
     def _on_tap_event(self, event: Dict[str, Any]) -> None:
-        """Runs inside DisplayTap.publish: note a turn's failure, act after it ends."""
+        """Runs inside DisplayTap.publish: an ACP turn's failure, acted on once it ends."""
         kind = event.get("type")
         if kind == "error":
-            # Only a failed turn: a native one (flagged just before) or an ACP
-            # one (its error carries the harness generation). Slash commands and
-            # hub mentions publish errors too.
-            if self._native_failed or "generation" in event:
+            # Only an ACP turn's error carries the harness generation. Slash
+            # commands and hub mentions publish errors too, and a native turn
+            # falls back inside itself (_on_request_error).
+            if "generation" in event:
                 self._failed_message = str(event.get("message") or "")
-            self._native_failed = False
         elif kind == "turn_complete" and self._failed_message is not None:
             message, self._failed_message = self._failed_message, None
             if self._loop is not None and failure_kind(message) and self.choice():
@@ -173,21 +183,26 @@ class ModelFallbackPlugin(BasePlugin):
 
     # -- switching ------------------------------------------------------------
 
-    async def fall_back(self, message: str) -> bool:
-        """Switch to the fallback for this failure; True if the agent switched."""
-        kind = failure_kind(message)
+    async def fall_back(self, message: str, kind: Optional[str] = None, retry: bool = False) -> str:
+        """Switch to the fallback for this failure: "" if the agent stayed.
+
+        "retry": the failed native turn (``retry``) asks the new model. "resend":
+        the notice asks for the message again, since the turn has ended or the
+        fallback is an ACP harness with its own conversation.
+        """
+        kind = kind or failure_kind(message)
         target = self.choice()
         if kind is None or not target:
-            return False
+            return ""
         from kollabor_ai.loadout_manager import LoadoutManager
 
         profile_manager = self.event_bus.get_service("profile_manager")
         if profile_manager is None:
-            return False
+            return ""
         loadout = self.resolve(target)
         if loadout is None:
             self._say(f"Fallback loadout '{target}' not found; staying on this model.")
-            return False
+            return ""
         manager = LoadoutManager(profile_manager, config=self.config)
         active = profile_manager.get_active_profile()
         failing = active.get_model() if active is not None else "This model"
@@ -195,7 +210,7 @@ class ModelFallbackPlugin(BasePlugin):
             not loadout.model or failing == loadout.model
         ):
             logger.info("model fallback: already on %s, not switching again", loadout.name)
-            return False
+            return ""
         try:
             activated = await manager.activate(loadout, self.event_bus)
         except Exception as exc:
@@ -203,19 +218,16 @@ class ModelFallbackPlugin(BasePlugin):
             activated = None
         if not activated:
             self._say(f"{failing} {REASONS[kind]}, and switching to {loadout.name} failed.")
-            return False
+            return ""
         harness = profile_manager.get_profile(loadout.provider_profile)
         to_acp = str(getattr(harness, "get_provider", lambda: "")() or "").lower() == "acp"
+        outcome = "retry" if retry and not to_acp else "resend"
         self._say(
             f"{failing} {REASONS[kind]}. Switched to {loadout.name}"
-            + (". Send your message again." if to_acp else " and resent your message."),
+            + (" and resent your message." if outcome == "retry" else ". Send your message again."),
             reason=kind, failed_model=failing, loadout=loadout.name,
         )
-        if not to_acp:
-            await self.event_bus.emit_with_hooks(
-                EventType.TRIGGER_LLM_CONTINUE, {"source": "model_fallback"}, "model_fallback"
-            )
-        return True
+        return outcome
 
     def _say(self, text: str, **fields: Any) -> None:
         logger.info("model fallback: %s", text)

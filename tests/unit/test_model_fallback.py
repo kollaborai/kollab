@@ -22,6 +22,7 @@ from plugins.model_fallback_plugin import ModelFallbackPlugin
         ("You exceeded your current quota, please check your plan", "usage"),
         ("Rate limit exceeded. Please try again later.", "rate"),
         ("claude-code: Authentication required. Log in using this harness's CLI.", "login"),
+        ("Invalid openai API key. Please check your API key.", "login"),
         ("prompt is too long: 250000 tokens > 200000 maximum", None),
         ("Request exceeds the model's context window", None),
         ("Connection reset by peer", None),
@@ -31,6 +32,13 @@ from plugins.model_fallback_plugin import ModelFallbackPlugin
 )
 def test_failure_kind(message, kind):
     assert failure_kind(message) == kind
+
+
+def test_a_native_errors_type_and_code_decide_where_its_text_cannot():
+    assert failure_kind("Request failed", error_type="AuthenticationError") == "login"
+    assert failure_kind("Request failed", error_code="insufficient_quota") == "usage"
+    assert failure_kind("prompt is too long", error_type="AuthenticationError") is None
+    assert failure_kind("Connection reset by peer", error_type="APIConnectionError") is None
 
 
 class _Profile:
@@ -133,9 +141,16 @@ async def _agent(monkeypatch, config, fallback_provider="openai", tap_at_init=Tr
     return plugin, bus, tap, profiles
 
 
-async def _native_turn_fails(plugin, tap, message):
-    await plugin._on_request_error({}, None)
-    tap.publish({"type": "error", "message": message})
+async def _native_turn_fails(plugin, message, **fields):
+    """What the queue processor's LLM_REQUEST_ERROR hook gets; True if the turn asks again."""
+    data = {"message": message, "error_type": "ProviderError", "error_code": None,
+            "context_window_exceeded": False, **fields}
+    await plugin._on_request_error(data, None)
+    return data.get("retry") is True
+
+
+async def _acp_turn_fails(plugin, tap, message):
+    tap.publish({"type": "error", "message": message, "generation": 1})
     tap.publish({"type": "turn_complete"})
     for _ in range(5):
         await asyncio.sleep(0)
@@ -151,23 +166,25 @@ def _continues(bus):
 async def test_a_usage_limit_switches_once_and_runs_the_turn_again(monkeypatch):
     plugin, bus, tap, profiles = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
 
-    await _native_turn_fails(plugin, tap, "Usage limit reached for 5 hour.")
+    # Inside the failed turn, so its request's stream gets the new model's answer.
+    assert await _native_turn_fails(plugin, "Usage limit reached for 5 hour.")
     assert _Loadouts.activated == ["codex"] and profiles.active == "codex"
-    assert len(_continues(bus)) == 1
+    assert _continues(bus) == []  # no second turn: this one asks again
     notice = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
     assert notice[0]["message"] == (
         "glm-5.3-flash hit its usage limit. Switched to codex and resent your message."
     )
 
     # The fallback fails too: no second hop, no loop.
-    await _native_turn_fails(plugin, tap, "You've hit your usage limit.")
-    assert _Loadouts.activated == ["codex"] and len(_continues(bus)) == 1
+    assert not await _native_turn_fails(plugin, "You've hit your usage limit.")
+    assert _Loadouts.activated == ["codex"]
 
 
 @pytest.mark.asyncio
 async def test_other_errors_and_unset_fallbacks_never_switch(monkeypatch):
     plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    await _native_turn_fails(plugin, tap, "Connection reset by peer")
+    assert not await _native_turn_fails(plugin, "Connection reset by peer")
+    assert not await _native_turn_fails(plugin, "Usage limit reached.", context_window_exceeded=True)
     # A slash command's error is no failed turn, whatever it says.
     tap.publish({"type": "error", "message": "Rate limit exceeded."})
     tap.publish({"type": "turn_complete"})
@@ -178,8 +195,36 @@ async def test_other_errors_and_unset_fallbacks_never_switch(monkeypatch):
         "plugins.model_fallback.loadout": "codex",
         "plugins.model_fallback.agents.lapis": "off",
     })
-    await _native_turn_fails(plugin, tap, "Usage limit reached for 5 hour.")
+    assert not await _native_turn_fails(plugin, "Usage limit reached for 5 hour.")
     assert _Loadouts.activated == [] and plugin.choice() == ""
+
+
+@pytest.mark.asyncio
+async def test_a_native_turn_moved_to_an_acp_harness_asks_for_the_message(monkeypatch):
+    # The review of 01b359ed: the provider's own text, "Invalid openai API
+    # key", never matched "invalid api key", so no fallback ran.
+    plugin, bus, tap, _ = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}, fallback_provider="acp"
+    )
+    assert not await _native_turn_fails(
+        plugin, "Invalid openai API key. Please check your API key.", error_type="AuthenticationError"
+    )
+    assert _Loadouts.activated == ["codex"] and _continues(bus) == []
+    notice = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
+    assert notice[0]["message"] == (
+        "glm-5.3-flash needs a new login. Switched to codex. Send your message again."
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_acp_turn_is_never_run_again_on_its_fallback(monkeypatch):
+    # The review of 01b359ed: the switch came after the turn's completion, so
+    # the turn it ran again answered no stream that was still listening.
+    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
+    assert _Loadouts.activated == ["codex"] and _continues(bus) == []
+    notice = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
+    assert notice[0]["message"].endswith("Switched to codex. Send your message again.")
 
 
 @pytest.mark.asyncio
@@ -229,10 +274,24 @@ async def test_a_tap_the_hub_replaces_is_followed(monkeypatch):
     second = DisplayTap()
     bus.register_service("display_tap", second)
     await bus.fire(EventType.SYSTEM_STARTUP)
-    await _native_turn_fails(plugin, second, "Usage limit reached for 5 hour.")
+    await _acp_turn_fails(plugin, second, "Usage limit reached for 5 hour.")
     assert _Loadouts.activated == ["codex"]
-    first.publish({"type": "error", "message": "Usage limit reached."})
-    assert plugin._failed_message is None  # no longer listening to the old tap
+
+
+@pytest.mark.asyncio
+async def test_a_replaced_tap_and_a_shut_down_plugin_switch_nothing(monkeypatch):
+    # The review of 01b359ed: each read of self._on_tap_event is a new bound
+    # method, so remove_listener matched none. The old tap, and the current
+    # one after shutdown, still switched the agent.
+    plugin, bus, first, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    second = DisplayTap()
+    bus.register_service("display_tap", second)
+    await bus.fire(EventType.SYSTEM_STARTUP)
+    await _acp_turn_fails(plugin, first, "Usage limit reached for 5 hour.")
+    assert _Loadouts.activated == []
+    await plugin.shutdown()
+    await _acp_turn_fails(plugin, second, "Usage limit reached for 5 hour.")
+    assert _Loadouts.activated == []
 
 
 
@@ -241,7 +300,7 @@ async def test_a_fallback_names_a_loadout_or_a_profile(monkeypatch):
     # `openai-oauth` is a provider profile, not a loadout: it failed live with
     # "not found" until profiles resolved the way `kollab --llm` reads them.
     plugin, bus, tap, profiles = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex-loadout"})
-    await _native_turn_fails(plugin, tap, "Usage limit reached for 5 hour.")
+    assert await _native_turn_fails(plugin, "Usage limit reached for 5 hour.")
     assert _Loadouts.activated == ["codex-loadout"] and profiles.active == "codex"
     assert plugin.resolve("codex").provider_profile == "codex"  # a bare profile name
     assert plugin.resolve("nonesuch") is None

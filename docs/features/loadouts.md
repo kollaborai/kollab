@@ -107,9 +107,12 @@ Precedence is explicit flag → loadout field → provider profile value.
 `/llm fallback <name>` picks the loadout this agent switches to when a turn
 fails because its model can't serve it: a usage limit, a quota, a rate limit
 that outlasted the retries, or an expired login. The agent says so in one line
-in the chat, switches once and runs the turn again; an ACP fallback asks you to
-send the message again. It stays on the fallback until you switch back with
-`/llm`.
+in the chat, switches once and runs the turn again, in the same reply. It stays
+on the fallback until you switch back with `/llm`. Two cases are not run again,
+and the notice asks you to send the message again:
+
+- the fallback is an ACP harness, which has its own conversation;
+- the failed turn was an ACP harness's, which has ended before the switch.
 
 - `/llm fallback` shows the choice; `/llm fallback off` turns it off.
 - In the web UI: Settings → Loadouts → Fallback Model, a dropdown of every

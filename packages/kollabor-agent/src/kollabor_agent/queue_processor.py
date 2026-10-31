@@ -2285,8 +2285,9 @@ class QueueProcessor:
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
 
             # Publish a typed failure separately from the generic UI error.
-            # Compaction hooks can react to context overflow, but the failed
-            # request is never resubmitted automatically.
+            # Compaction hooks can react to context overflow, but that request
+            # is never resubmitted automatically; a hook that moved the agent to
+            # another model (the model fallback, #548) can ask for it again.
             error_code = getattr(e, "error_code", None) or getattr(e, "code", None)
             nested_error = getattr(e, "error", None)
             if not error_code and isinstance(nested_error, dict):
@@ -2312,27 +2313,37 @@ class QueueProcessor:
                     )
                 )
             )
+            retry = False
             event_bus = getattr(self, "event_bus", None)
             if event_bus is not None:
                 try:
-                    await event_bus.emit_with_hooks(
+                    hooked = await event_bus.emit_with_hooks(
                         EventType.LLM_REQUEST_ERROR,
                         {
                             "error_type": type(e).__name__,
                             "error_code": error_code,
                             "context_window_exceeded": context_window_exceeded,
+                            "message": error_msg,
                         },
                         "llm_service",
                     )
+                    final = (hooked or {}).get("main", {}).get("final_data") or {}
+                    retry = final.get("retry") is True
                 except Exception:
                     logger.exception("Failed to dispatch LLM request error hooks")
 
-            self.message_display_service.display_error_message(error_msg)
-            # Web clients follow the turn through semantic events, not the
-            # terminal's red line; without this a failed turn ends silently.
-            publish_semantic(self.renderer, "error", message=error_msg)
-            self.last_turn_error = error_msg
-            self.turn_completed = True
+            if retry and not getattr(self, "_error_retried", False):
+                # Asked inside this turn, so its request's stream gets the new
+                # model's answer. Once per turn, whatever a hook asks.
+                self._error_retried = True
+                self.turn_completed = False  # the turn's loop sends the request again
+            else:
+                self.message_display_service.display_error_message(error_msg)
+                # Web clients follow the turn through semantic events, not the
+                # terminal's red line; without this a failed turn ends silently.
+                publish_semantic(self.renderer, "error", message=error_msg)
+                self.last_turn_error = error_msg
+                self.turn_completed = True
 
         # A turn is only done once no tool results need to go back to the model.
         # Publishing earlier would tell remote clients the turn ended while its
@@ -2341,6 +2352,7 @@ class QueueProcessor:
             self.active_voice = None
             revoke_voice_admission_context(self.active_origin_context)
             self.active_origin_context = None
+            self._error_retried = False
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
             if context_size > 0 and not self.last_turn_error:

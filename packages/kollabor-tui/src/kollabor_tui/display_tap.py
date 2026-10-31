@@ -157,7 +157,8 @@ class DisplayTap:
 
     def remove_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         with self._lock:
-            self._listeners = tuple(c for c in self._listeners if c is not callback)
+            # ==, not is: each read of a bound method makes a new object (#548).
+            self._listeners = tuple(c for c in self._listeners if c != callback)
 
     def subscribe(self, client_id: str) -> queue.Queue:
         """Add a subscriber. Returns thread-safe queue to consume from."""
