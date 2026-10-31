@@ -141,7 +141,9 @@ class ACPOrchestrator:
         category = next((str(o.get("category") or "") for o in runner.advertised_config_options()
                          if o.get("id") == config_id), "")
         options = await runner.set_config_option(config_id, value)
-        if self._profile_name:
+        reported = next((o.get("currentValue") for o in options or [] if o.get("id") == config_id), None)
+        if self._profile_name and reported == value:
+            # Persist only a value the harness confirmed; a refused pick must not replay at the next start.
             saved = self._saved_options()
             key = _CANONICAL_PICK_KEYS.get(category, config_id)
             saved.setdefault(self._profile_name, {})[key] = value

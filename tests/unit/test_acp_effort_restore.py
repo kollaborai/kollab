@@ -181,3 +181,32 @@ async def test_saved_effort_survives_a_custom_option_id(tmp_path):
     notices = await orch._restore_options(no_loadout)
     assert notices == []
     assert orch._runner.calls == [("reasoning_budget", "max")]
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_pick_is_not_saved(tmp_path):
+    """A pick the harness reports differently must not be persisted for the next start."""
+    options = _options()
+    orch = _orchestrator(tmp_path, options)
+
+    async def quiet(config_id, value):
+        return [dict(o) for o in options]  # accepted, but the value did not change
+
+    orch._runner.set_config_option = quiet
+    await orch.set_config_option("effort", "max")
+    assert not orch._options_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_custom_id_pick_is_not_saved(tmp_path):
+    """Custom option ID: a refused max must not be persisted, so a later start cannot replay it."""
+    options = _options()
+    options[1]["id"] = "reasoning_budget"
+    orch = _orchestrator(tmp_path, options)
+
+    async def quiet(config_id, value):
+        return [dict(o) for o in options]  # accepted, but still xhigh
+
+    orch._runner.set_config_option = quiet
+    await orch.set_config_option("reasoning_budget", "max")
+    assert not orch._options_path.exists()
