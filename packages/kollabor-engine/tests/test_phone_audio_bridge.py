@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -15,6 +16,7 @@ import kollabor_voice.phone_audio_bridge as pab
 from kollabor_engine.voice_livekit import (
     LiveKitRuntime,
     PhoneBridgeHandle,
+    _kill_process_group,
     mint_livekit_jwt,
     room_name_for,
 )
@@ -208,6 +210,89 @@ async def test_bridge_eof_and_crash_cleanup(monkeypatch):
         await handle.start("{}\n")
     await handle.close()
     assert process.returncode is not None
+
+@pytest.mark.asyncio
+async def test_pump_replacement_does_not_rereport_drops(monkeypatch):
+    """Drops reported by an earlier pump are not re-reported after the pump
+    is replaced (track re-subscription): the drop baseline lives on the
+    session, not on the pump worker."""
+    session = pab._BridgeSession(FakeReader([]), FakeWriter())
+    session.out.dropped_bytes = 4800  # one 20 ms frame at 24 kHz
+
+    class _Frame:
+        data = b"\x00\x00" * 10
+
+    class _Event:
+        frame = _Frame()
+
+    class _Stream:
+        def __init__(self, events):
+            self._events = list(events)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._events:
+                raise StopAsyncIteration
+            return self._events.pop(0)
+
+    track = object()
+    monkeypatch.setattr(pab, "_track_stream", lambda t, sr, cap: _Stream([_Event()]))
+
+    def reported():
+        return [
+            json.loads(line)["bytes"]
+            for line in session._writer.lines
+            if json.loads(line).get("type") == "audio_dropped"
+        ]
+
+    pump1 = asyncio.create_task(session._pump_worker(track))
+    await pump1
+    assert reported() == [4800]
+
+    # Pump replacement: total unchanged, second worker must stay silent.
+    session.out.dropped_bytes = 4800
+    pump2 = asyncio.create_task(session._pump_worker(track))
+    await pump2
+    assert reported() == [4800]
+
+
+@pytest.mark.asyncio
+async def test_kill_process_group_reaps_already_exited_child(monkeypatch):
+    """When the kill path finds the group already gone the helper must still
+    reap the child: under load close() can reach the kill before the
+    transport reaps an exited child, and returncode stays None until the
+    event loop reaps it."""
+    # The child is alive (so the entry returncode check passes), it is NOT
+    # a process-group leader (like a plain asyncio spawn without
+    # start_new_session), and the group kill is forced to fail with
+    # ProcessLookupError - the deterministic version of the load race where
+    # close() reaches the kill path before the transport reaps an exited
+    # child. The helper must still reap it instead of returning bare.
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import time; time.sleep(0.2); raise SystemExit(3)",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+
+        def _no_such_group(pid, sig):
+            raise ProcessLookupError(f"no process group: {pid}")
+
+        monkeypatch.setattr(os, "killpg", _no_such_group)
+        await _kill_process_group(process)
+        assert process.returncode == 3
+    finally:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await asyncio.wait_for(process.wait(), 5.0)
 
 
 @pytest.mark.asyncio

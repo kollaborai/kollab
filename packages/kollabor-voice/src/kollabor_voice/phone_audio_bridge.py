@@ -114,6 +114,7 @@ class _BridgeSession:
         self._source: Any = None
         self._pump: asyncio.Task[None] | None = None
         self.out = _Outbound(OUT_QUEUE_FRAMES)
+        self._drops_reported = 0
         self._mic_leftover = b""
         self._rate_in = 0
         self._started = False
@@ -267,31 +268,37 @@ class _BridgeSession:
         await self._emit({"type": "ready"})
         return False
 
-    async def _report_dropped_audio(self, seen_bytes: int) -> int:
-        """Emit the delta of the outbound queue's dropped bytes over IPC."""
+    async def _report_dropped_audio(self) -> None:
+        """Emit the delta of the outbound queue's dropped bytes over IPC.
+
+        The baseline lives on the session, not the pump worker: the pump can
+        be replaced mid-session (track re-subscription) and a fresh worker
+        must not re-report drops an earlier pump already sent.
+        """
         total = self.out.dropped_bytes
-        if total > seen_bytes:
-            await self._emit({"type": "audio_dropped", "bytes": total - seen_bytes})
-        return total
+        if total > self._drops_reported:
+            await self._emit(
+                {"type": "audio_dropped", "bytes": total - self._drops_reported}
+            )
+            self._drops_reported = total
 
     async def _pump_worker(self, track: Any) -> None:
         stream = _track_stream(track, 24000, OUT_QUEUE_FRAMES)
         buffer = b""
-        drops_seen = 0
         try:
             async for event in stream:
                 buffer += bytes(event.frame.data)
                 while len(buffer) >= MAX_AUDIO_CHUNK_BYTES:
                     self.out.put(buffer[:MAX_AUDIO_CHUNK_BYTES])
                     buffer = buffer[MAX_AUDIO_CHUNK_BYTES:]
-                drops_seen = await self._report_dropped_audio(drops_seen)
+                await self._report_dropped_audio()
         except Exception as exc:
             print(f"phone-audio-bridge: pump failed: {exc!r}", file=sys.stderr)
             await self._emit_error("bridge_audio")
             return
         if buffer:
             self.out.put(buffer)
-            await self._report_dropped_audio(drops_seen)
+            await self._report_dropped_audio()
 
     async def _mic(self, message: dict[str, Any]) -> bool:
         try:

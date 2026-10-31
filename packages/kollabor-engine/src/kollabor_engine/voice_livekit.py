@@ -135,6 +135,14 @@ async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
         try:
             os.killpg(process.pid, sig)
         except (ProcessLookupError, PermissionError):
+            # The group is gone (or not signalable) but the child may still
+            # be waiting to be reaped: returncode stays None until the event
+            # loop reaps it, and close() must not hand back an unreaped
+            # handle. Wait briefly instead of returning bare.
+            try:
+                await asyncio.wait_for(process.wait(), 3.0)
+            except asyncio.TimeoutError:
+                pass
             return
         try:
             await asyncio.wait_for(process.wait(), 3.0)
