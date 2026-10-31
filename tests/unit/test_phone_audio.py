@@ -171,14 +171,49 @@ async def test_call_revocation_disconnect_and_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_call_routes_are_narrow():
-    """The broker only exposes its three operations; no other method exists."""
-    public = {
-        name
-        for name in dir(PhoneAudioManager)
-        if not name.startswith("_") and callable(getattr(PhoneAudioManager, name))
-    }
-    assert public == {"open", "tick", "close", "invalidate", "shutdown"}
+async def test_call_routes_are_narrow(tmp_path):
+    """The real HTTP gate lets a phone reach only create, status, events and stop."""
+    import secrets
+
+    from kollabor_engine.phone_link import PhoneLink, PhoneLinkError
+
+    link = PhoneLink(app=None, directory=tmp_path, port=0)
+    allowed = [
+        ("POST", "/sessions/s1/voice"),
+        ("GET", "/voice/sessions/abc"),
+        ("GET", "/voice/sessions/abc/events"),
+        ("DELETE", "/voice/sessions/abc"),
+    ]
+    denied = [
+        ("GET", "/voice/settings"),
+        ("PUT", "/voice/settings"),
+        ("GET", "/voice/settings/prompt"),
+        ("POST", "/voice/sessions/abc/join"),
+        ("POST", "/voice/sessions/abc/turns"),
+        ("POST", "/voice/sessions/abc/turns/t1/interrupted"),
+        ("POST", "/voice/sessions/abc/events"),
+        ("POST", "/voice/sessions/abc"),
+        ("GET", "/sessions/s1/voice"),
+        ("DELETE", "/sessions/s1/voice"),
+        ("POST", "/sessions/s1/voice/extra"),
+    ]
+
+    async def start(index, method, path):
+        request = {
+            "op": "start",
+            "id": secrets.token_hex(16),
+            "method": method,
+            "path": path,
+            "headers": [],
+            "size": 0,
+        }
+        return await link._http(f"phone-{index}", request)
+
+    for index, (method, path) in enumerate(allowed):
+        assert await start(index, method, path) == {"ok": True}, (method, path)
+    for index, (method, path) in enumerate(denied, start=len(allowed)):
+        with pytest.raises(PhoneLinkError):
+            await start(index, method, path)
 
 
 @pytest.mark.asyncio

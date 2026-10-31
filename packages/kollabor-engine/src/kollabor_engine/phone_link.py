@@ -64,7 +64,7 @@ MAX_BODY = 8 * 1024 * 1024
 API_ROOTS = frozenset(
     {
         "sessions", "agents", "profiles", "workspaces", "mcp", "hub", "sidebar", "rosters", "teams",
-        "prompts", "phone-app",
+        "prompts", "voice", "phone-app",
     }
 )
 APP_PROTOCOL = "kollab-phonelink-app/1"
@@ -296,6 +296,25 @@ class HttpExchange:
 
 
 CALL_OPS = frozenset({"call_open", "call_tick", "call_close"})
+
+# The only voice routes a phone may reach (sprint plan section 2): create, status,
+# events and stop. Join tickets, settings, turns and worker events stay computer-only.
+_PHONE_VOICE_ROUTES = (
+    ("POST", re.compile(r"/sessions/[^/]+/voice")),
+    ("GET", re.compile(r"/voice/sessions/[^/]+")),
+    ("GET", re.compile(r"/voice/sessions/[^/]+/events")),
+    ("DELETE", re.compile(r"/voice/sessions/[^/]+")),
+)
+
+
+def voice_route_allowed(method: str, path: str) -> bool:
+    """True unless the path is a voice route a phone may not reach."""
+    if "voice" not in path.split("/"):
+        return True
+    return any(
+        method == route_method and pattern.fullmatch(path)
+        for route_method, pattern in _PHONE_VOICE_ROUTES
+    )
 
 
 async def _no_phone_bridge(voice_session_id: str, generation: int):
@@ -1190,6 +1209,7 @@ class PhoneLink:
                 or any(part in {".", ".."} for part in decoded.split("/"))
                 or parsed.fragment
                 or decoded.split("/")[1] not in API_ROOTS
+                or not voice_route_allowed(method, decoded)
             ):
                 raise PhoneLinkError("This action is available only on the computer.")
             if type(size) is not int or not 0 <= size <= MAX_BODY or not isinstance(headers, list):
