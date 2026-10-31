@@ -139,12 +139,18 @@ class PhoneAudioManager:
         try:
             bridge = await self._open_bridge(voice_session_id, generation)
         except PhoneCallError:
+            self._pending.discard(pending)  # this open no longer holds the voice
             self._release_voice(phone, voice_session_id)
             raise
         except Exception:
+            self._pending.discard(pending)
             self._release_voice(phone, voice_session_id)
             logger.warning("phone call bridge failed to open", exc_info=True)
             raise PhoneCallError("call_unavailable") from None
+        except BaseException:  # cancelled while the bridge was opening
+            self._pending.discard(pending)
+            self._release_voice(phone, voice_session_id)
+            raise
         finally:
             self._pending.discard(pending)
         if pending.cancelled:
@@ -200,7 +206,10 @@ class PhoneAudioManager:
             _settle(call.inflight, error=exc)
             raise
         except asyncio.CancelledError:
+            # The mic may already be published and the reply lost: fail closed, so a
+            # retry can never publish the same frame twice.
             _settle(call.inflight, error=PhoneCallError("call_unavailable"))
+            await self._end(call, cause="cancelled")
             raise
         except Exception:
             logger.warning("phone call tick failed", exc_info=True)
@@ -274,10 +283,14 @@ class PhoneAudioManager:
         return call
 
     def _release_voice(self, phone: str, voice_session_id: str) -> None:
-        if self._voice_owner.get(voice_session_id) == phone and not any(
-            c.voice_session_id == voice_session_id for c in self._calls.values()
-        ):
-            del self._voice_owner[voice_session_id]
+        """Drop the voice reservation once no call or pending open still holds it."""
+        if self._voice_owner.get(voice_session_id) != phone:
+            return
+        if any(c.voice_session_id == voice_session_id for c in self._calls.values()):
+            return
+        if any(p.voice_session_id == voice_session_id for p in self._pending):
+            return
+        del self._voice_owner[voice_session_id]
 
     async def _watch(self, call: _Call) -> None:
         while self._calls.get(call.phone) is call:

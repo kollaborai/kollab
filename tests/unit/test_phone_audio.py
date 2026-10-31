@@ -509,3 +509,83 @@ async def test_oversized_call_message_is_refused(tmp_path):
     link = PhoneLink(app=None, directory=tmp_path, port=0)
     big = {"op": "call_close", "id": CALL, "pad": "x" * 40_000}
     assert await link._call("phone-a", object(), big) == {"error": "call_invalid"}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_open_releases_the_voice_session():
+    """A cancelled open must not reserve the voice session for its phone forever."""
+    never = asyncio.Event()
+    calls = []
+
+    async def opener(voice_session_id, generation):
+        calls.append(voice_session_id)
+        if len(calls) == 1:
+            await never.wait()
+        return FakeBridge()
+
+    manager = PhoneAudioManager(opener)
+    opening = asyncio.create_task(manager.open("phone-a", object(), CALL, VOICE, 0))
+    await asyncio.sleep(0)
+    opening.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    result = await manager.open("phone-b", object(), OTHER_CALL, VOICE, 0)
+    assert result["ok"] is True
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_first_open_keeps_the_second_reservation():
+    """While a second same-phone open is pending, another phone is still refused."""
+    gate_first = asyncio.Event()
+    gate_second = asyncio.Event()
+    calls = []
+
+    async def opener(voice_session_id, generation):
+        calls.append(voice_session_id)
+        if len(calls) == 1:
+            await gate_first.wait()
+            raise RuntimeError("bridge failed")
+        await gate_second.wait()
+        return FakeBridge()
+
+    manager = PhoneAudioManager(opener)
+    first = asyncio.create_task(manager.open("phone-a", object(), CALL, VOICE, 0))
+    second = asyncio.create_task(manager.open("phone-a", object(), CALL, VOICE, 0))
+    await asyncio.sleep(0)
+    gate_first.set()
+    with pytest.raises(PhoneCallError):
+        await first
+    with pytest.raises(PhoneCallError) as other:
+        await manager.open("phone-b", object(), OTHER_CALL, VOICE, 0)
+    assert other.value.code == "call_busy"
+    gate_second.set()
+    assert (await second)["ok"] is True
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tick_after_mic_send_never_republishes():
+    """Cancel mid-send, then retry the same n: the mic is published once, then fails."""
+    gate = asyncio.Event()
+    published = []
+
+    class SlowBridge(FakeBridge):
+        async def send_mic(self, n, pcm):
+            published.append(n)
+            await gate.wait()
+
+    async def opener(voice_session_id, generation):
+        return SlowBridge()
+
+    manager = PhoneAudioManager(opener)
+    session, _ = await open_call(manager)
+    tick = asyncio.create_task(manager.tick("phone-a", session, CALL, 0, MIC))
+    await asyncio.sleep(0)
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    with pytest.raises(PhoneCallError) as retry:
+        await manager.tick("phone-a", session, CALL, 0, MIC)
+    assert retry.value.code == "call_not_ready"
+    assert published == [0]
