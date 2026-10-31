@@ -16,11 +16,13 @@ Entry format in crystallized.md:
 Entries are separated by blank lines between the body and the next ---.
 """
 
+import asyncio
 import logging
 import re
+import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -28,7 +30,8 @@ from .text_utils import (
     extract_keywords,
     keyword_overlap,
     score_relevance,
-    summary_similarity,
+    summary_tokens,
+    token_overlap,
     tokenize,
 )
 
@@ -60,10 +63,27 @@ DEDUP_THRESHOLD = 0.45
 # short summaries that share common words like "insight" or "about".
 SUMMARY_DEDUP_THRESHOLD = 0.40
 
+# The GIL switch interval while the dedup pass runs in its worker thread. At
+# CPython's default 5 ms, each syscall the agent's event loop makes waits for
+# the pass to give the GIL back: a handler that takes 1 ms alone took 1.4 s,
+# and the koordinator's command catalog RPC timed out at 10 s (#546).
+_PASS_SWITCH_INTERVAL = 0.0002
+
 # Minimum relevance score for nudge results
 NUDGE_MIN_SCORE = 1.0
 
 # Regex for parsing structured entries (header + body)
+def _signature(entry: "CrystalEntry") -> tuple:
+    return entry.id, entry.date, entry.summary, entry.body, tuple(entry.keywords)
+
+
+def _jaccard(a: frozenset, b: frozenset) -> float:
+    """text_utils.keyword_overlap on prebuilt keyword sets."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
 _ENTRY_RE = re.compile(
     r"---\n"
     r"id:\s*(\S+)\n"
@@ -117,6 +137,9 @@ class CrystalStore:
         self._entries: List[CrystalEntry] = []
         self._next_id: int = 1
         self._loaded = False
+        # Stemmed summary words, by summary text: stemming every pair again
+        # made a pass over thousands of entries take minutes (#546).
+        self._summary_words: dict = {}
 
     def _ensure_loaded(self) -> None:
         """Lazy-load entries from disk on first access."""
@@ -291,12 +314,17 @@ class CrystalStore:
     def _summary_similarity(self, summary_a: str, summary_b: str) -> float:
         """Compute word-level overlap ratio between two summaries.
 
-        Delegates to text_utils.summary_similarity which tokenizes,
-        removes stopwords, and stems both summaries before computing
-        Jaccard overlap. This catches semantic duplicates that keyword
-        Jaccard misses because summaries distill the same concept.
+        The score of text_utils.summary_similarity (stemmed words, stopwords
+        removed), from cached words. This catches semantic duplicates that
+        keyword Jaccard misses because summaries distill the same concept.
         """
-        return summary_similarity(summary_a, summary_b)
+        return token_overlap(self._words(summary_a), self._words(summary_b))
+
+    def _words(self, summary: str) -> frozenset:
+        words = self._summary_words.get(summary)
+        if words is None:
+            words = self._summary_words[summary] = summary_tokens(summary)
+        return words
 
     def _find_merge_target(
         self, new_keywords: List[str], new_summary: str = ""
@@ -419,65 +447,116 @@ class CrystalStore:
         Returns number of entries merged.
         """
         self._ensure_loaded()
-        if len(self._entries) < 2:
-            return 0
+        merged_count = self._merge_pass(self._entries)
+        if merged_count > 0:
+            self._save_to_disk()
+            logger.info("crystal_store: deduplicated %d entries", merged_count)
+        return merged_count
 
+    async def deduplicate_off_loop(self) -> int:
+        """deduplicate() in a worker thread, for the dreaming cycle.
+
+        A pass compares every pair: 105 s for the koordinator's 2,608 entries
+        when it ran on the agent's event loop, which then answered nothing and
+        peers deleted its socket as dead (#546). The worker merges copies and
+        records each merge; back on the loop the merges replay on the live
+        entries. A merge touching an entry that changed meanwhile waits for the
+        next pass, and so does every later merge into the same entry; a write
+        during the pass never holds back the others.
+        """
+        self._ensure_loaded()
+        snapshot = [_signature(e) for e in self._entries]
+        before = {sig[0]: sig for sig in snapshot}
+        copies = [replace(e, keywords=list(e.keywords)) for e in self._entries]
+        merges: List[Tuple[str, str]] = []
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(min(interval, _PASS_SWITCH_INTERVAL))
+        try:
+            found = await asyncio.to_thread(self._merge_pass, copies, merges)
+        finally:
+            sys.setswitchinterval(interval)
+        if not found:
+            return 0
+        waiting: set = set()
+        if len(before) < len(snapshot):  # repeated ids: merges cannot be matched to entries
+            if [_signature(e) for e in self._entries] != snapshot:
+                return 0
+            self._entries = copies
+        else:
+            live = {e.id: e for e in self._entries}
+            done = []
+            for keep_id, drop_id in merges:
+                keep, drop = live.get(keep_id), live.get(drop_id)
+                if (keep is None or drop is None or keep_id in waiting
+                        or _signature(keep) != before[keep_id]
+                        or _signature(drop) != before[drop_id]):
+                    waiting.add(keep_id)
+                    continue
+                self._merge_into(keep, drop)
+                before[keep_id] = _signature(keep)
+                del live[drop_id]
+                done.append(drop_id)
+            self._entries = [e for e in self._entries if e.id in live]
+            merges = done
+        if waiting:
+            logger.info("crystal_store: %d entries changed during dedup, merging them on the next pass",
+                        len(waiting))
+        if merges:
+            self._save_to_disk()
+            logger.info("crystal_store: deduplicated %d entries", len(merges))
+        return len(merges)
+
+    def _merge_pass(
+        self, entries: List[CrystalEntry], merges: Optional[List[Tuple[str, str]]] = None
+    ) -> int:
+        """Merge duplicates in ``entries`` in place, each into the earliest match.
+
+        The words and keyword sets are built once per entry, not once per pair.
+        Each merge is appended to ``merges`` as ``(kept id, merged id)``.
+        """
+        # ponytail: every pair, about 11 s for 2,608 entries in the worker
+        # thread; index entries by word if vaults grow to tens of thousands.
+        words = [self._words(e.summary) if e.summary else frozenset() for e in entries]
+        keyword_sets = [frozenset(e.keywords) for e in entries]
         merged_count = 0
         i = 0
-        while i < len(self._entries):
+        while i < len(entries):
             j = i + 1
-            while j < len(self._entries):
-                # Layer 1: summary similarity
-                should_merge = False
-                if self._entries[i].summary and self._entries[j].summary:
-                    sim = self._summary_similarity(
-                        self._entries[i].summary,
-                        self._entries[j].summary,
-                    )
-                    if sim > SUMMARY_DEDUP_THRESHOLD:
-                        should_merge = True
-
-                # Layer 2: keyword overlap
-                if not should_merge:
-                    overlap = keyword_overlap(
-                        self._entries[i].keywords,
-                        self._entries[j].keywords,
-                    )
-                    if overlap > DEDUP_THRESHOLD:
-                        should_merge = True
-
-                if should_merge:
-                    # Merge j into i
-                    target = self._entries[i]
-                    source = self._entries[j]
-
-                    # Keep newer date
-                    if source.date > target.date:
-                        target.date = source.date
-
-                    # Union keywords
-                    target_kw_set = {k.lower() for k in target.keywords}
-                    for kw in source.keywords:
-                        if kw.lower() not in target_kw_set:
-                            target.keywords.append(kw)
-                            target_kw_set.add(kw.lower())
-
-                    # Keep longer body
-                    if len(source.body) > len(target.body):
-                        target.body = source.body
-                        target.summary = source.summary
-
-                    self._entries.pop(j)
+            while j < len(entries):
+                if token_overlap(words[i], words[j]) > SUMMARY_DEDUP_THRESHOLD or (
+                    _jaccard(keyword_sets[i], keyword_sets[j]) > DEDUP_THRESHOLD
+                ):
+                    target, source = entries[i], entries.pop(j)
+                    self._merge_into(target, source)
+                    if merges is not None:
+                        merges.append((target.id, source.id))
+                    words.pop(j)
+                    keyword_sets.pop(j)
+                    words[i] = self._words(target.summary) if target.summary else frozenset()
+                    keyword_sets[i] = frozenset(target.keywords)
                     merged_count += 1
                 else:
                     j += 1
             i += 1
-
-        if merged_count > 0:
-            self._save_to_disk()
-            logger.info("crystal_store: deduplicated %d entries", merged_count)
-
         return merged_count
+
+    @staticmethod
+    def _merge_into(target: CrystalEntry, source: CrystalEntry) -> None:
+        # Keep newer date
+        if source.date > target.date:
+            target.date = source.date
+
+        # Union keywords
+        target_kw_set = {k.lower() for k in target.keywords}
+        for kw in source.keywords:
+            if kw.lower() not in target_kw_set:
+                target.keywords.append(kw)
+                target_kw_set.add(kw.lower())
+
+        # Keep longer body
+        if len(source.body) > len(target.body):
+            target.body = source.body
+            target.summary = source.summary
 
     def delete_entry(self, entry_id: str) -> Optional[CrystalEntry]:
         """Remove an entry by ID. Returns the removed entry or None."""

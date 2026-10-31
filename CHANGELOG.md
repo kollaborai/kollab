@@ -124,6 +124,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- A hub agent no longer freezes for about two minutes after each dreaming
+  cycle. Its memory dedup compared every pair of entries on the agent's event
+  loop (105 s for 2,608 entries), so it answered nothing and peers deleted its
+  socket as dead; the pass now runs in a worker thread (#546).
 - ACP: an oversized agent reply no longer breaks history paging with a
   413 error. A page that is too large slims its message metadata so the
   older messages still load, and the original message is preserved

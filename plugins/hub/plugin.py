@@ -6242,9 +6242,10 @@ class HubPlugin(BasePlugin):
 
                 # Deduplicate vault entries after writing new insights.
                 # Merges entries with >55% keyword overlap, keeping the
-                # longer body and union of keywords.
+                # longer body and union of keywords. Off the event loop: a
+                # pass over thousands of entries takes seconds (#546).
                 if self._crystal_store:
-                    merged = self._crystal_store.deduplicate()
+                    merged = await self._crystal_store.deduplicate_off_loop()
                     if merged:
                         logger.info(
                             "dreaming: deduplicated %d vault entries",
