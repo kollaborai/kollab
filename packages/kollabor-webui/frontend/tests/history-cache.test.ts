@@ -5,6 +5,7 @@ import {
   HISTORY_CACHE_MAX_PAGES,
   HISTORY_CACHE_MAX_SESSIONS,
   MemoryHistoryPageCache,
+  UnusableHistoryCursorError,
   loadLatestHistoryPage,
   loadOlderHistoryPage,
   mergeOlderHistoryPage,
@@ -281,5 +282,80 @@ describe("bounded history cache and paging", () => {
 
     expect((await cache.load("session-0")).length).toBe(0);
     expect((await cache.load(`session-${HISTORY_CACHE_MAX_SESSIONS + 2}`)).length).toBe(1);
+  });
+
+  it("throws a typed cursor error when the engine rejects the older cursor", async () => {
+    const cache = new MemoryHistoryPageCache();
+    const staleApi = {
+      async getHistoryPage() {
+        throw Object.assign(new Error("stale cursor"), { status: 409 });
+      },
+    };
+
+    const outcome = loadOlderHistoryPage("session-a", page(100, 150), staleApi, cache);
+    await expect(outcome).rejects.toBeInstanceOf(UnusableHistoryCursorError);
+    await expect(outcome).rejects.toMatchObject({ status: 409 });
+
+    const offlineApi = {
+      async getHistoryPage() {
+        throw Object.assign(new Error("server error"), { status: 500 });
+      },
+    };
+    await expect(
+      loadOlderHistoryPage("session-a", page(100, 150), offlineApi, cache),
+    ).rejects.not.toBeInstanceOf(UnusableHistoryCursorError);
+  });
+
+  it("never trims a cursor-synced refresh window past its older cursor", () => {
+    const bigPage = (start: number, end: number): HistoryPage => ({
+      ...page(start, end),
+      history: Array.from({ length: end - start }, () => ({
+        role: "user" as const,
+        content: "x".repeat(4096),
+      })),
+    });
+    const cached = bigPage(50, 100);
+    const updates = bigPage(100, 150);
+
+    const merged = mergeRecentHistoryPage(cached, updates);
+
+    // The window is over the per-page byte cap, but the older cursor was
+    // minted at index 100: trimming the leading edge past it would strand
+    // page-down paging with an empty merge forever after.
+    expect(merged.older_cursor).toBe("before-100");
+    expect(merged.start_index).toBe(100);
+    expect(merged.history).toHaveLength(50);
+    expect(
+      new TextEncoder().encode(JSON.stringify(merged)).byteLength,
+    ).toBeGreaterThan(150_000);
+
+    // Page-down still merges: the fetched page ends exactly at the floor.
+    const widened = mergeOlderHistoryPage(merged, bigPage(50, 100));
+    expect(widened.start_index).toBe(50);
+    expect(widened.history).toHaveLength(100);
+  });
+
+  it("reaches the beginning of history cleanly", async () => {
+    const cache = new MemoryHistoryPageCache();
+    await cache.store("session-a", page(0, 30));
+    const requests: unknown[] = [];
+    const api = {
+      async getHistoryPage() {
+        requests.push("called");
+        return page(0, 30);
+      },
+    };
+
+    const current = page(30, 80);
+    const older = await loadOlderHistoryPage("session-a", current, api, cache);
+    expect(requests).toEqual([]);
+    const merged = mergeOlderHistoryPage(current, older!);
+    expect(merged.start_index).toBe(0);
+    expect(merged.has_more_older).toBe(false);
+    expect(merged.older_cursor).toBeNull();
+
+    const next = await loadOlderHistoryPage("session-a", merged, api, cache);
+    expect(next).toBeNull();
+    expect(requests).toEqual([]);
   });
 });

@@ -54,6 +54,29 @@ function validPage(value: unknown): value is HistoryPage {
     (page.newer_cursor === null || typeof page.newer_cursor === "string");
 }
 
+/**
+ * The engine rejected the page-down cursor (409 stale, 400 invalid): the
+ * history the window paged against changed underneath it (compaction,
+ * engine restart, cursor-key rotation). Paging can never succeed from the
+ * current cursor; the caller must drop the cached pages and reload a fresh
+ * window instead of showing a dead-end retry error.
+ */
+export class UnusableHistoryCursorError extends Error {
+  readonly status: number;
+
+  constructor(detail: string, status: number) {
+    super(detail);
+    this.name = "UnusableHistoryCursorError";
+    this.status = status;
+  }
+}
+
+function cursorRejectionStatus(reason: unknown): number | null {
+  if (typeof reason !== "object" || reason === null) return null;
+  const status = (reason as { status?: unknown }).status;
+  return status === 409 || status === 400 ? status : null;
+}
+
 export function mergeRecentHistoryPage(
   cached: HistoryPage,
   updates: HistoryPage,
@@ -98,7 +121,24 @@ export function mergeRecentHistoryPage(
     last_turn_error: null,
   };
 
-  while (history.length > 1 && encodedSize(merged) > HISTORY_MAX_PAGE_BYTES) {
+  // Cursor floor: the byte-trim below may drop leading messages, but it must
+  // never push start_index above the position an older_cursor was minted at
+  // (cursor position == issuing page's start_index, verified server-side by
+  // an HMAC). Keeping the cursor while trimming past that floor would
+  // desynchronize the window: the next page-down would land entirely above
+  // the cursor position and return an empty merge forever after. When no
+  // cursor is in play the trim may run freely.
+  const cursorFloor = updates.older_cursor
+    ? updates.start_index
+    : cached.older_cursor
+      ? cached.start_index
+      : Number.POSITIVE_INFINITY;
+
+  while (
+    history.length > 1 &&
+    startIndex < cursorFloor &&
+    encodedSize(merged) > HISTORY_MAX_PAGE_BYTES
+  ) {
     history = history.slice(1);
     startIndex += 1;
     merged.history = history;
@@ -231,10 +271,22 @@ export async function loadOlderHistoryPage(
   const cached = await cache.findOlder(sessionId, current.start_index);
   if (cached) return cached;
   if (!current.older_cursor) return null;
-  const older = await api.getHistoryPage(sessionId, {
-    limit: HISTORY_PAGE_SIZE,
-    before: current.older_cursor,
-  });
+  let older: HistoryPage;
+  try {
+    older = await api.getHistoryPage(sessionId, {
+      limit: HISTORY_PAGE_SIZE,
+      before: current.older_cursor,
+    });
+  } catch (error) {
+    const status = cursorRejectionStatus(error);
+    if (status !== null) {
+      throw new UnusableHistoryCursorError(
+        `The engine rejected the history cursor (HTTP ${status}); cached pages may be stale.`,
+        status,
+      );
+    }
+    throw error;
+  }
   if (older.history.length) await cache.store(sessionId, older);
   return older;
 }
