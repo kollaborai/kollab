@@ -41,6 +41,7 @@ from .snapshots import (
     ActiveOperationSnapshot,
     AgentListSnapshot,
     AgentSnapshot,
+    ContextCompactionSnapshot,
     ConversationSnapshot,
     HubPeer,
     HubSnapshot,
@@ -606,6 +607,39 @@ class LocalStateService(StateService):
         )
 
     # === Profile ===
+
+    async def get_context_compaction_snapshot(
+        self,
+    ) -> ContextCompactionSnapshot:
+        """Return context and compaction status from the registered plugin."""
+        try:
+            plugin = (
+                self._event_bus.get_service("context_compaction_plugin")
+                if self._event_bus is not None
+                else None
+            )
+            if plugin is None:
+                return ContextCompactionSnapshot(
+                    available=False,
+                    error="Context compaction status unavailable",
+                )
+
+            raw_snapshot = plugin.get_runtime_status_snapshot()
+            if not isinstance(raw_snapshot, dict):
+                raise TypeError("plugin runtime snapshot must be a dictionary")
+            snapshot = ContextCompactionSnapshot.from_dict(raw_snapshot)
+            snapshot.available = True
+            snapshot.error = None
+            return snapshot
+        except Exception as exc:
+            logger.warning(
+                "Context compaction status unavailable (%s)",
+                type(exc).__name__,
+            )
+            return ContextCompactionSnapshot(
+                available=False,
+                error="Context compaction status unavailable",
+            )
 
     async def get_active_profile(self) -> ProfileSnapshot:
         """Return the currently active profile as a snapshot."""
@@ -2989,9 +3023,12 @@ class LocalStateService(StateService):
         for part in parts:
             if not isinstance(part, dict):
                 continue
-            if part.get("type") != "image_url":
+            if part.get("type") == "image":
+                url = part.get("image", "")
+            elif part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+            else:
                 continue
-            url = (part.get("image_url") or {}).get("url", "")
             if not isinstance(url, str) or not url.startswith("data:image/"):
                 continue
             try:

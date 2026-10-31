@@ -90,6 +90,7 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx tsc --noEmit
+          node scripts/check-test-discovery.mjs
           npx vitest run
           node --test $(grep -L 'from "vitest"' tests/*.test.ts)
 
