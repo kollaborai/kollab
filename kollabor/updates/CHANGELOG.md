@@ -124,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Web UI: Trajectory's detail title no longer repeats the tool output, and the
+  active tab in Trajectory, the Agent Library and Gem Studio is underlined in
+  the accent color like every other tab bar (#459).
 - Web UI: below 1024px wide (tablets) both sidebars open as drawers, so the chat
   and Trajectory get the full width (#458).
 - Agents: a detached agent no longer stops when different commands fail the same

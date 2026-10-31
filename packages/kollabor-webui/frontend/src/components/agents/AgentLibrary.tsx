@@ -31,7 +31,7 @@ function Tab({ active, onClick, children }: { active: boolean; onClick: () => vo
       onClick={onClick}
       className={cn(
         "border-b-2 px-1 pb-1.5 text-sm transition-colors",
-        active ? "border-foreground text-foreground font-medium" : "text-muted-foreground hover:text-foreground border-transparent",
+        active ? "border-highlight text-foreground font-medium" : "text-muted-foreground hover:text-foreground border-transparent",
       )}
     >
       {children}
