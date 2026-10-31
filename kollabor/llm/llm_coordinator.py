@@ -44,6 +44,7 @@ from kollabor_ai.message_content import (
     contains_image_content,
     content_to_text,
     normalize_message_content,
+    serialize_gemini_parts,
 )
 from kollabor_ai.providers.registry import ProviderRegistry, create_config_from_profile
 from kollabor_ai.providers.transformers import ToolCallAccumulator
@@ -830,6 +831,10 @@ class LLMService:
 
     def supports_image_input(self) -> bool:
         """Return whether the active provider model accepts image input."""
+        acp = self._active_acp()
+        selected_acp, _ = self._profile_selects_acp()
+        if selected_acp or acp is not None:
+            return bool(acp and getattr(acp, "supports_image_input", False))
         return bool(
             getattr(
                 getattr(self, "api_service", None),
@@ -837,6 +842,12 @@ class LLMService:
                 lambda: False,
             )()
         )
+
+    def image_input_rejection_reason(self) -> str:
+        selected_acp, _ = self._profile_selects_acp()
+        if selected_acp or self._active_acp() is not None:
+            return "This harness can't take images."
+        return f"model '{self.api_service.model}' does not accept image input"
 
     def _init_components(self):
         """Initialize all extracted components (NativeToolsHandler, SystemPromptBuilder, QueueProcessor, etc)."""
@@ -1938,7 +1949,7 @@ class LLMService:
         if contains_image_content(message) and not self.supports_image_input():
             return {
                 "status": "rejected",
-                "reason": f"model '{self.api_service.model}' does not accept image input",
+                "reason": self.image_input_rejection_reason(),
             }
         try:
             normalized_message = normalize_message_content(message, image_store)
@@ -1955,7 +1966,7 @@ class LLMService:
         ):
             return {
                 "status": "rejected",
-                "reason": f"model '{self.api_service.model}' does not accept image input",
+                "reason": self.image_input_rejection_reason(),
             }
 
         # A LiveKit room's turn, or a /voice turn VoicePlugin.admit let in.
@@ -1971,11 +1982,9 @@ class LLMService:
                 return {"status": "rejected", "reason": "native_provider_required"}
             if acp is None:
                 return _acp_unavailable_result(self._acp_service())
-            if not isinstance(message, str):
-                return {"status": "rejected", "reason": "acp_text_only"}
             return await self._admit_acp(
                 acp,
-                {"message": message, "voice": voice, "origin_context": origin_context},
+                {"message": normalized_message, "voice": voice, "origin_context": origin_context},
                 UserInputSource.TUI.value,
             )
 
@@ -2101,9 +2110,6 @@ class LLMService:
         selected_acp, profile_unknown = self._profile_selects_acp()
         if (selected_acp or (is_agent and profile_unknown)) and not acp_dispatch:
             return _acp_unavailable_result(acp)
-        if acp_dispatch and not isinstance(message, str):
-            return {"status": "rejected", "reason": "acp_text_only"}
-
         emit = getattr(self.event_bus, "emit_with_hooks", None)
         if not callable(emit):
             return {"status": "rejected", "reason": "input_pipeline_unavailable"}
@@ -2203,7 +2209,28 @@ class LLMService:
         request_id = data.get("request_id") or uuid.uuid4().hex
         origin = dict(data.get("origin_context") or {})
         origin.setdefault("operator", source != "agent")
-        message = str(data["message"])
+        content = data["message"]
+        images: tuple[dict[str, str], ...] = ()
+        if not isinstance(content, str):
+            if contains_image_content(content) and not getattr(acp, "supports_image_input", False):
+                return {"status": "rejected", "reason": "This harness can't take images."}
+            image_store = getattr(self, "_image_store", None)
+            if image_store is None:
+                image_store = EphemeralImageStore()
+                self._image_store = image_store
+            try:
+                content = normalize_message_content(content, image_store)
+                parts = serialize_gemini_parts(content, self.resolve_media)
+                images = tuple(
+                    {"mime_type": part["inline_data"]["mime_type"],
+                     "data": part["inline_data"]["data"]}
+                    for part in parts if "inline_data" in part
+                )
+            except MessageContentError:
+                return {"status": "rejected", "reason": "Image unavailable or unsupported; upload it and retry."}
+        message = content_to_text(content)
+        if not message.strip():
+            return {"status": "rejected", "reason": "empty message"}
         voice = data.get("voice")
         if voice:
             # A mic turn carries the voice rules, as on the native path, and
@@ -2213,17 +2240,30 @@ class LLMService:
             epoch = voice.get("epoch")
             message = voice_preamble(voice, epoch in acp.voice_rules_epochs) + message
             acp.voice_rules_epochs.add(epoch)
-        elif await acp.steer(message, origin=origin, thread_id=data.get("thread_id")):
-            return {"status": "injected", "request_id": request_id}
+        else:
+            try:
+                steered = await acp.steer(
+                    message, origin=origin, thread_id=data.get("thread_id"),
+                    **({"images": images} if images else {}),
+                )
+            except RuntimeError as exc:
+                if images and "can't take images" in str(exc):
+                    return {"status": "rejected", "reason": "This harness can't take images."}
+                raise
+            if steered:
+                return {"status": "injected", "request_id": request_id}
         try:
             admission = acp.admit(
                 message, request_id=request_id, source=source,
                 thread_id=data.get("thread_id"),
                 origin=origin,
+                **({"images": images} if images else {}),
             )
         except (RuntimeError, ValueError) as exc:
             if "full" in str(exc).lower():
                 return {"status": "rejected", "reason": "acp_queue_full"}
+            if images and "can't take images" in str(exc):
+                return {"status": "rejected", "reason": "This harness can't take images."}
             return _acp_unavailable_result(acp)
         except Exception as exc:
             if "full" in str(exc).lower():

@@ -150,7 +150,9 @@ def test_no_service_manager_is_a_clear_error(monkeypatch):
         service._Manager(ROOT)
 
 
-def test_env_takes_key_value_only():
+def test_env_takes_key_value_only(monkeypatch):
+    # Argument validation must not depend on the host's service manager.
+    monkeypatch.setattr(service, "has_systemd", lambda: True)
     with pytest.raises(SystemExit) as exc:
         service.main(["install", "--env", "not-an-assignment"])
     assert exc.value.code == 2
