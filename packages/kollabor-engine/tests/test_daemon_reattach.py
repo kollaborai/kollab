@@ -390,6 +390,12 @@ async def test_an_oversized_turn_complete_still_ends_its_turn(monkeypatch):
     # so the completion named no request and ended whichever stream was open.
     odd = {**big, "request_id": 'old"id-\u00e9', "seq": 1}
     assert (await _pool_events([odd], 2))[1]["request_id"] == 'old"id-\u00e9'
+    # A chat turn names its requests in request_ids (#551); the stream that sent
+    # one is waiting on exactly that completion.
+    chat = {"type": "turn_complete", "stop_reason": "error", "error": "x" * 4096, "request_ids": ["r1"], "seq": 1}
+    answered = (await _pool_events([chat], 2))[1]
+    assert answered["request_ids"] == ["r1"]
+    assert not messages._foreign_completion(answered, {"r1"}, tagged=True)
 
     # The message route ends its stream on it instead of idling 600 s.
     monkeypatch.setattr(messages, "get_session_registry", lambda: types.SimpleNamespace(

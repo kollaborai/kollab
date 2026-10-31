@@ -364,6 +364,9 @@ class DaemonHandle:
                         request_id = _frame_field(head, tail, "request_id")
                         if isinstance(request_id, str) and request_id:
                             completion["request_id"] = request_id
+                        request_ids = _frame_field(head, tail, "request_ids")  # what it answers (#551)
+                        if isinstance(request_ids, list) and request_ids:
+                            completion["request_ids"] = request_ids
                         self._fan_out(completion)
                     continue
                 logger.warning(
