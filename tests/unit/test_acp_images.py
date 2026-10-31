@@ -140,3 +140,114 @@ def test_active_acp_profile_snapshot_uses_negotiated_vision():
     state = LocalStateService(llm_service=llm, profile_manager=None)
     assert state._profile_to_snapshot(profile, is_active=True).supports_vision is True
     assert state._profile_to_snapshot(profile, is_active=False).supports_vision is False
+
+
+@pytest.mark.asyncio
+async def test_image_only_input_reaches_acp_as_an_image_block():
+    runner = runner_with_capability(True)
+    acp = SimpleNamespace(
+        supports_image_input=True,
+        steer=AsyncMock(return_value=False),
+        admit=runner.admit,
+    )
+    service = object.__new__(LLMService)
+    result = await service._admit_acp(acp, {
+        "message": [{"type": "image", "image": "data:image/png;base64,YWJj"}],
+    }, "state_rpc")
+
+    assert result["status"] == "queued"
+    admission = runner._queue.get_nowait()
+    assert admission.text == "[image1]"  # display marker; the user supplied no text
+    await runner._run_prompt(admission, runner.generation)
+    blocks = runner._connection.prompt.await_args.kwargs["prompt"]
+    wire = [block.model_dump(by_alias=True, exclude_none=True) for block in blocks]
+    assert wire[-1] == {"type": "image", "data": "YWJj", "mimeType": "image/png"}
+
+
+@pytest.mark.asyncio
+async def test_oversized_image_reports_the_store_limit_and_is_not_admitted():
+    import base64
+
+    runner = runner_with_capability(True)
+    acp = SimpleNamespace(
+        supports_image_input=True,
+        steer=AsyncMock(return_value=False),
+        admit=runner.admit,
+    )
+    service = object.__new__(LLMService)
+    payload = base64.b64encode(b"x" * (10 * 1024 * 1024 + 1)).decode("ascii")
+    result = await service._admit_acp(acp, {
+        "message": [{"type": "image", "image": f"data:image/png;base64,{payload}"}],
+    }, "state_rpc")
+
+    assert result == {"status": "rejected", "reason": "image exceeds the 10 MB limit"}
+    assert runner._queue.empty()
+    assert service._image_store.count == 0
+    acp.steer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_file_image_is_rejected_instead_of_silently_dropped():
+    runner = runner_with_capability(True)
+    acp = SimpleNamespace(
+        supports_image_input=True,
+        steer=AsyncMock(return_value=False),
+        admit=runner.admit,
+    )
+    service = object.__new__(LLMService)
+    result = await service._admit_acp(acp, {
+        "message": [{"type": "image", "source": {"kind": "provider_file", "file_id": "file-1"}}],
+    }, "state_rpc")
+
+    assert result == {
+        "status": "rejected",
+        "reason": "Image unavailable or unsupported; upload it and retry.",
+    }
+    assert runner._queue.empty()
+    acp.steer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_text_only_parts_remain_valid_acp_input():
+    runner = runner_with_capability(True)
+    acp = SimpleNamespace(
+        supports_image_input=True,
+        steer=AsyncMock(return_value=False),
+        admit=runner.admit,
+    )
+    service = object.__new__(LLMService)
+    result = await service._admit_acp(acp, {
+        "message": [{"type": "text", "text": "hello"}],
+    }, "state_rpc")
+
+    assert result["status"] == "queued"
+    admission = runner._queue.get_nowait()
+    assert admission.text == "hello"
+    assert admission.images == ()
+
+
+@pytest.mark.asyncio
+async def test_rejected_mixed_images_release_new_uploads_but_preserve_existing_ones():
+    from kollabor_ai.message_content import EphemeralImageStore
+
+    runner = runner_with_capability(True)
+    acp = SimpleNamespace(
+        supports_image_input=True,
+        steer=AsyncMock(return_value=False),
+        admit=runner.admit,
+    )
+    service = object.__new__(LLMService)
+    service._image_store = EphemeralImageStore()
+    existing = service._image_store.add_data_url("data:image/png;base64,ZGVm")
+    result = await service._admit_acp(acp, {
+        "message": [
+            {"type": "image", "source": {"kind": "managed_upload", "media_id": existing}},
+            {"type": "image", "image": "data:image/png;base64,YWJj"},
+            {"type": "image", "source": {"kind": "provider_file", "file_id": "file-1"}},
+        ],
+    }, "state_rpc")
+
+    assert result["status"] == "rejected"
+    assert service._image_store.count == 1
+    assert service.resolve_media(existing) == "data:image/png;base64,ZGVm"
+    assert runner._queue.empty()
