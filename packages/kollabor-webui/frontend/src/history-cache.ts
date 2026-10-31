@@ -237,10 +237,6 @@ export async function loadLatestHistoryPage(
           : null,
       }
     : newestCached;
-  const isStaleCursor = (reason: unknown) =>
-    typeof reason === "object" && reason !== null &&
-    "status" in reason && (reason as { status?: unknown }).status === 409;
-
   if (cached?.newer_cursor) {
     try {
       const updates = await api.getHistoryPage(sessionId, {
@@ -252,7 +248,8 @@ export async function loadLatestHistoryPage(
       await cache.store(sessionId, page);
       return { page, fromCache: false };
     } catch (error) {
-      if (!isStaleCursor(error)) return { page: cached, fromCache: true, error };
+      // 409 = stale cursor, 400 = invalid cursor: both are unusable, drop and refetch.
+      if (cursorRejectionStatus(error) === null) return { page: cached, fromCache: true, error };
       await cache.clear(sessionId);
       try {
         const page = await api.getHistoryPage(sessionId, { limit: HISTORY_PAGE_SIZE });

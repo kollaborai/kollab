@@ -189,6 +189,34 @@ describe("bounded history cache and paging", () => {
     expect((await cache.load("session-a")).map((entry) => entry.end_index)).toContain(120);
   });
 
+  it("restarts from a fresh page when the engine invalidates the cached cursor", async () => {
+    const cache = new MemoryHistoryPageCache();
+    await cache.store("session-a", page(50, 100));
+    const requests: Array<{ limit?: number; before?: string; after?: string }> = [];
+    const api = {
+      async getHistoryPage(
+        _sessionId: string,
+        options: { limit?: number; before?: string; after?: string } = {},
+      ) {
+        requests.push(options);
+        if (options.after) {
+          throw Object.assign(new Error("400: Invalid history cursor."), { status: 400 });
+        }
+        return page(70, 120);
+      },
+    };
+
+    const result = await loadLatestHistoryPage("session-a", api, cache);
+
+    expect(requests).toEqual([
+      { limit: 50, after: "after-100" },
+      { limit: 50 },
+    ]);
+    expect(result.error).toBeUndefined();
+    expect(result.page.start_index).toBe(70);
+    expect((await cache.load("session-a")).map((entry) => entry.end_index)).toContain(120);
+  });
+
   it("keeps cached history visible with a retryable refresh failure", async () => {
     const cache = new MemoryHistoryPageCache();
     const cached = page(50, 100);
@@ -337,6 +365,19 @@ describe("bounded history cache and paging", () => {
     await expect(
       loadOlderHistoryPage("session-a", page(100, 150), offlineApi, cache),
     ).rejects.not.toBeInstanceOf(UnusableHistoryCursorError);
+  });
+
+  it("throws a typed cursor error when the engine invalidates the older cursor", async () => {
+    const cache = new MemoryHistoryPageCache();
+    const invalidApi = {
+      async getHistoryPage() {
+        throw Object.assign(new Error("Invalid history cursor."), { status: 400 });
+      },
+    };
+
+    const outcome = loadOlderHistoryPage("session-a", page(100, 150), invalidApi, cache);
+    await expect(outcome).rejects.toBeInstanceOf(UnusableHistoryCursorError);
+    await expect(outcome).rejects.toMatchObject({ status: 400 });
   });
 
   it("never trims a cursor-synced refresh window past its older cursor", () => {

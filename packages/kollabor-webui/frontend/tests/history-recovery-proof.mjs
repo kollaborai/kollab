@@ -1,4 +1,4 @@
-// Live proof for the older-history recovery fixes (#471 / PR #472 round 2).
+// Live proof for the older-history recovery fixes (#471 / PR #472 round 3).
 // The engine is a fixture; the UI is the built app (dist).
 //   node tests/history-recovery-proof.mjs [outDir]
 // Scenarios:
@@ -207,11 +207,20 @@ const scenario = async (name, buildState, run) => {
         };
         requests.push(options);
         const response = history.resolve(options);
-        return route.fulfill({
-          status: response.status,
-          contentType: "application/json",
-          body: JSON.stringify(response.body ?? {}),
-        });
+        const fulfill = (value) =>
+          route.fulfill({
+            status: value.status,
+            contentType: "application/json",
+            body: JSON.stringify(value.body ?? {}),
+          });
+        // A resolve() may return a pending promise to hold this request at
+        // the route layer until the scenario releases it (deterministic
+        // sequencing; scenario B depends on it).
+        if (response && typeof response.then === "function") {
+          response.then(fulfill, () => route.abort());
+          return;
+        }
+        return fulfill(response);
       }
       return route.fulfill({
         status: 200,
@@ -301,27 +310,48 @@ try {
   );
 
   // B: non-cursor paging failure -> banner without border, standard tint.
+  // Deterministic hold-and-release (round-3 flake fix): the first load-older
+  // request is held at the route layer. Once it has arrived, the scenario
+  // freezes every after-cursor poll refresh (held too) BEFORE releasing the
+  // failure, so nothing can replace the status block between the 500 landing
+  // and the style read. Round 2 lost this race twice on a slower machine:
+  // the ~2s poll unmounted the banner in under one 100 ms polling interval.
+  const b = {
+    mode: "passthrough", // passthrough -> armed (before held) -> failing
+    held: [],
+    beforeSeen: 0,
+    release(response) {
+      this.held.splice(0).forEach((pending) => pending.resolve(response));
+    },
+  };
   await scenario(
     "B-banner-style",
     () => ({
       resolve(options) {
-        if (options.before) return { status: 500, body: { error: "engine hiccup" } };
+        if (options.before) {
+          b.beforeSeen += 1;
+          if (b.mode === "passthrough") b.mode = "armed";
+          if (b.mode === "failing") return { status: 500, body: { error: "engine hiccup" } };
+          return new Promise((resolve) => {
+            b.held.push({ resolve });
+          });
+        }
+        if (b.mode === "failing") {
+          // Poll refreshes stay frozen until the banner is captured.
+          return new Promise((resolve) => {
+            b.held.push({ resolve });
+          });
+        }
         return { status: 200, body: mkPage(10, 60) };
       },
     }),
     async (page) => {
       await openThread(page, "message-59");
       await page.waitForTimeout(2000); // let the quiet prefetch settle
-      // Grab the className the instant the banner mounts: the ~2s after-cursor
-      // poll refresh replaces the status block and would otherwise race the
-      // read (waitForFunction options are the THIRD argument; passing them as
-      // the arg silently falls back to the 30s default).
-      let className = null;
-      for (let attempt = 0; attempt < 5 && !className; attempt++) {
+      // User-driven trigger (click + Home, wheel backup inside scrollToTop)
+      // repeated until the held route sees the load-older request arrive.
+      for (let attempt = 0; attempt < 5 && b.beforeSeen === 0; attempt++) {
         await scrollToTop(page, "message-59");
-        // A raw wheel over the viewport center as an alternate trigger: the
-        // load-older gate can miss a single synthetic scroll if a background
-        // refresh marks the status loading at that instant.
         const box = await page
           .locator('[data-slot="aui_thread-viewport"]')
           .boundingBox();
@@ -329,19 +359,35 @@ try {
           await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
           await page.mouse.wheel(0, -40);
         }
-        className = await page
-          .waitForFunction(
-            () => {
-              const el = document.querySelector('[data-slot="history-status"][role="alert"]');
-              return el ? el.className : false;
-            },
-            undefined,
-            { timeout: 2500, polling: 100 },
-          )
-          .then((handle) => handle.jsonValue())
-          .then((value) => String(value))
-          .catch(() => null);
+        await page.waitForTimeout(400);
       }
+      if (b.beforeSeen === 0) {
+        b.release({ status: 200, body: mkPage(10, 60) });
+        fail("B-banner-style", "load-older request never reached the route");
+        return;
+      }
+      // From here on, poll refreshes are held and before requests fail fast.
+      b.mode = "failing";
+      b.release({ status: 500, body: { error: "engine hiccup" } });
+      // If the held request was the background prefetch, the user-visible
+      // paged window still needs its own failure to mount the banner.
+      await scrollToTop(page, "message-59");
+      // waitForFunction options are the THIRD argument; passing them as the
+      // arg silently falls back to the 30 s default. Only accept a banner
+      // that is actually laid out on screen (getClientRects), not detached.
+      const className = await page
+        .waitForFunction(
+          () => {
+            const el = document.querySelector('[data-slot="history-status"][role="alert"]');
+            return el && el.getClientRects().length > 0 ? el.className : false;
+          },
+          undefined,
+          { timeout: 4000, polling: 50 },
+        )
+        .then((handle) => handle.jsonValue())
+        .then((value) => String(value))
+        .catch(() => null);
+      b.release({ status: 200, body: mkPage(60, 110) });
       if (!className) {
         fail("B-banner-style", "error banner never appeared after paging failure");
         return;
@@ -399,27 +445,48 @@ try {
   );
 
   // D: offline reload narrows the cached page; the prefix pages from cache.
+  // The offline poll failures (503 every ~2 s) re-apply the narrowed cached
+  // window over the prefix pages the cache is serving and can race the
+  // cache-paging scroll exactly like scenario B's poll raced the banner:
+  // freeze the polls from the moment the narrowed window is confirmed until
+  // message-0 is visible.
+  const d = {
+    offline: false,
+    frozen: false,
+    held: [],
+    freeze() {
+      this.frozen = true;
+    },
+    release(response) {
+      this.held.splice(0).forEach((pending) => pending.resolve(response));
+    },
+  };
   await scenario(
     "D-offline-narrowed-prefix",
-    () => {
-      let offline = false;
-      return {
-        setOffline(value) {
-          offline = value;
-        },
-        resolve(options) {
-          if (offline) return { status: 503, body: { error: "offline" } };
-          if (options.before) return { status: 200, body: mkPage(0, 71) };
-          return {
-            status: 200,
-            body: mkPage(71, 121, {
-              older_cursor: "before-71",
-              has_more_older: true,
-            }),
-          };
-        },
-      };
-    },
+    () => ({
+      setOffline(value) {
+        d.offline = value;
+      },
+      freeze() {
+        d.freeze();
+      },
+      resolve(options) {
+        if (d.frozen && options.after && !options.before) {
+          return new Promise((resolve) => {
+            d.held.push({ resolve });
+          });
+        }
+        if (d.offline) return { status: 503, body: { error: "offline" } };
+        if (options.before) return { status: 200, body: mkPage(0, 71) };
+        return {
+          status: 200,
+          body: mkPage(71, 121, {
+            older_cursor: "before-71",
+            has_more_older: true,
+          }),
+        };
+      },
+    }),
     async (page, requests) => {
       await openThread(page, "message-120");
       await page.waitForTimeout(1500); // let the quiet prefetch settle
@@ -433,8 +500,12 @@ try {
       ok("D-offline-narrowed-prefix", "narrowed cached window restored offline");
       await page.waitForTimeout(800);
       const servedOfflineStart = requests.length;
+      // Freeze poll refreshes so the narrowed cached page cannot be re-applied
+      // over the prefix pages the cache is about to serve.
+      history.freeze();
       await scrollToTop(page, "message-120");
       const offlineTop = await waitForTextWithRetry(page, "message-0", "message-120");
+      d.release({ status: 503, body: { error: "offline" } });
       if (!offlineTop) throw new Error("message-0 never appeared from the cached prefix");
       ok("D-offline-narrowed-prefix", "message-0 reachable from the cached prefix offline");
       const extra = requests.slice(servedOfflineStart);
