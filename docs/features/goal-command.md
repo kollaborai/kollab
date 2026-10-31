@@ -27,6 +27,11 @@ it with `/goal discard <id>`. A later text-only goal never inherits those images
 If a response is lost, `/goal requests` also lists requests that already
 created a goal. Retrying a committed request reports that goal instead of
 creating another; a different objective or budget is rejected.
+Image submissions carrying a client request ID can also be replayed with the
+same ID and input: they return the original pending request or creation
+receipt. Reusing the ID for different input or another conversation is refused.
+The saved binding survives restart; after a pending request is discarded, a
+replay cannot recreate it, so use a new submission to send those images again.
 `/goal clear` clears the active goal without discarding other requests. Images
 submitted with a control command are retained as a pending request; the
 control does not run. Resubmit the control without images to execute it.
@@ -122,7 +127,9 @@ permissions apply. Prose claiming "done" is never completion.
 
 `~/.kollab/projects/<encoded>/goals/goals.db` (SQLite, WAL) + `artifacts/`.
 Tables: `goals`, `goal_events` (append-only), `goal_attempts`,
-`goal_evidence`, `goal_attachment_requests`. Pending request references are
+`goal_evidence`, `goal_attachment_requests`, `goal_attachment_submissions`.
+Submission keys and input fingerprints are hashed; no image bytes or artifact
+paths enter the submission table. Pending request references are
 consumed and a creation receipt is recorded in the same transaction that
 creates their goal. A partial unique index enforces one unfinished goal per
 conversation at the storage layer.

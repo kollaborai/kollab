@@ -1288,3 +1288,46 @@ def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
         "warning": "Saved by [harness]; Kollab cannot undo it.",
     }
     assert native == {"decision": "approve", "scope": "once"}
+
+
+@pytest.mark.asyncio
+async def test_goal_image_replay_legacy_stream_returns_only_its_receipt(monkeypatch):
+    session = _FakeSession([{'type': 'token', 'text': 'unrelated reply'}, {'type': 'turn_complete'}])
+    session.send_message = AsyncMock(return_value={
+        'accepted': True, 'completed': True, 'replayed': True,
+        'request_id': 'saved-request', 'goal_id': 'saved-goal',
+        'message': 'This submission already created goal saved-goal.',
+    })
+    monkeypatch.setattr(messages, 'get_session_registry', lambda: _FakeRegistry(session))
+    response = await messages.send_message(session.session_id, messages.MessageRequest(
+        content=[{'type': 'text', 'text': '/goal inspect'}, {'type': 'image', 'image': 'data:image/png;base64,aA=='}],
+        request_id='stable-client-id'))
+    events = [item async for item in response.body_iterator]
+    assert len(events) == 2 and 'saved-goal' in repr(events)
+    assert 'unrelated reply' not in repr(events) and not session.subscriptions
+    assert session.send_message.await_args.kwargs['request_id'] == 'stable-client-id'
+
+
+@pytest.mark.asyncio
+async def test_goal_image_replay_assistant_stream_preserves_message_id_and_owns_reply(monkeypatch):
+    session = _FakeSession([{'type': 'token', 'text': 'unrelated reply'}, {'type': 'turn_complete'}])
+    session.send_message = AsyncMock(return_value={
+        'accepted': True, 'completed': True, 'replayed': True,
+        'request_id': 'saved-request', 'goal_request_id': 'saved-request',
+        'goal_id': None, 'message': 'Images remain saved as saved-request.',
+    })
+    monkeypatch.setattr(messages, 'get_session_registry', lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    command = {'type': 'add-message', 'message': {'id': 'stable-client-id', 'parts': [
+        {'type': 'text', 'text': '/goal inspect'}, {'type': 'image', 'image': 'data:image/png;base64,aA=='},
+    ]}}
+    response = await messages.assistant_transport(session.session_id, messages.AssistantRequest(
+        commands=[command], state={'messages': []}))
+    async for _chunk in response.stream:
+        pass
+    assert captured['controller'].text == ['Images remain saved as saved-request.']
+    assert 'unrelated reply' not in repr(captured['controller'].state) and not session.subscriptions
+    assert captured['controller'].state['goalSubmission'] == {
+        'requestId': 'saved-request', 'clientRequestId': 'stable-client-id',
+    }
+    assert session.send_message.await_args.kwargs['request_id'] == 'stable-client-id'

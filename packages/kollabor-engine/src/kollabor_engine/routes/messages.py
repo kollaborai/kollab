@@ -10,6 +10,7 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import time
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
@@ -48,6 +49,15 @@ def _foreign_queued_client_completion(event: Dict[str, Any], request_ids: set[st
             and event.get("input_source") == "acp_client"
             and event.get("queued") is True
             and str(event.get("request_id") or "") not in request_ids)
+
+
+def _is_image_goal(content: Any) -> bool:
+    if not isinstance(content, list) or not contains_image_content(content):
+        return False
+    text = "\n".join(part["text"] for part in content
+                     if isinstance(part, dict) and str(part.get("type") or "").strip().lower() == "text"
+                     and isinstance(part.get("text"), str))
+    return re.match(r"^\s*/(?:goal|goals)(?:\s+|$)", text, re.IGNORECASE) is not None
 
 
 def _contains_reserved_voice_origin(value: Any) -> bool:
@@ -109,12 +119,22 @@ async def send_message(session_id: str, body: MessageRequest):
     request_id = accepted.get("request_id") or body.request_id
     request_ids = {str(request_id)} if request_id else set()
 
+    # A replay already has a durable pending request or creation receipt. Its
+    # acknowledgement belongs only to this response, never the shared tap.
+    replay_queue = None
+    if accepted.get("completed") is True:
+        replay_queue = asyncio.Queue()
+        replay_queue.put_nowait({
+            "type": "token", "text": str(accepted.get("message") or "Goal request already processed."),
+        })
+        replay_queue.put_nowait({"type": "turn_complete", "stop_reason": "end_turn"})
+
     async def event_generator():
         try:
             while True:
                 try:
                     event = await asyncio.wait_for(
-                        queue.get(), timeout=EVENT_IDLE_TIMEOUT_SECONDS
+                        (replay_queue if replay_queue is not None else queue).get(), timeout=EVENT_IDLE_TIMEOUT_SECONDS
                     )
                 except asyncio.TimeoutError:
                     yield {
@@ -147,7 +167,8 @@ async def send_message(session_id: str, body: MessageRequest):
         finally:
             session.unsubscribe(queue)
 
-    return EventSourceResponse(event_generator())
+    headers = {"X-Kollab-Goal-Request": str(accepted["goal_request_id"])} if accepted.get("goal_request_id") else None
+    return EventSourceResponse(event_generator(), headers=headers)
 
 
 @router.get("/{session_id}/events")
@@ -787,6 +808,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
 
     async def run_callback(controller: RunController):
         queue = session.subscribe()
+        shared_queue = queue
         tool_controllers: Dict[str, Any] = {}
         permission_controllers: Dict[str, Any] = {}
         permission_tool_ids: Dict[str, str] = {}
@@ -862,6 +884,13 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             return max(0.0, last_publish + STREAM_PUBLISH_INTERVAL - time.monotonic())
 
         try:
+            if len(body.commands) > 1 and any(
+                _assistant_command_type(command) == "add-message"
+                and _is_image_goal(_assistant_message_content(command))
+                for command in body.commands
+            ):
+                controller.add_error("Send a goal with images on its own.")
+                return
             for command in body.commands:
                 command_type = _assistant_command_type(command)
                 if command_type == "add-message":
@@ -869,13 +898,29 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     if not content_to_text(message_content).strip():
                         controller.add_error("add-message command has no text")
                         return
-                    accepted = await session.send_message(message_content)
+                    message = command.get("message")
+                    client_id = message.get("id") if isinstance(message, dict) else None
+                    if _is_image_goal(message_content) and isinstance(client_id, str) and client_id:
+                        accepted = await session.send_message(message_content, request_id=client_id)
+                    else:
+                        accepted = await session.send_message(message_content)
                     saw_action = True
                     if not accepted.get("accepted"):
                         controller.add_error(
                             str(accepted.get("message") or accepted.get("reason", "message rejected"))
                         )
                         return
+                    if accepted.get("completed") is True:
+                        queue = asyncio.Queue()
+                        queue.put_nowait({
+                            "type": "token", "text": str(accepted.get("message") or "Goal request already processed."),
+                        })
+                        queue.put_nowait({"type": "turn_complete", "stop_reason": "end_turn"})
+                    if accepted.get("goal_request_id") and isinstance(body.state, dict):
+                        controller.state["goalSubmission"] = {
+                            "requestId": str(accepted["goal_request_id"]),
+                            "clientRequestId": client_id,
+                        }
                     if isinstance(body.state, dict) and body.state.get("error"):
                         # Cancellation belongs to its previous turn. A new
                         # admitted input must not keep that error as its status.
@@ -1186,7 +1231,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             logger.exception("assistant transport failed for %s", session_id)
             controller.add_error(str(exc))
         finally:
-            session.unsubscribe(queue)
+            session.unsubscribe(shared_queue)
 
     stream = create_run(run_callback, state=body.state)
     protocol_stream = _assistant_protocol_stream(stream, completion)

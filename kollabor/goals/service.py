@@ -191,6 +191,13 @@ class GoalService:
     def stage_attachment_request(self, conversation_uid: str, command_text: str, refs: List[Dict[str, Any]]) -> str:
         return self.store.stage_attachment_request(conversation_uid, command_text, refs)
 
+    def attachment_submission(self, key: str, uid: str, fingerprint: str) -> Optional[Dict[str, Any]]:
+        return self.store.attachment_submission(key, uid, fingerprint)
+
+    def stage_attachment_submission(self, key: str, uid: str, fingerprint: str,
+                                    text: str, refs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return self.store.stage_attachment_submission(key, uid, fingerprint, text, refs)
+
     def pending_attachment_requests(self, conversation_uid: str) -> List[Dict[str, str]]:
         return self.store.pending_attachment_requests(conversation_uid)
 
