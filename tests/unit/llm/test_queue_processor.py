@@ -363,7 +363,6 @@ class TestQueueProcessor(unittest.TestCase):
             if e["type"] in ("error", "turn_complete")
         ]
         self.assertEqual(ids, [("error", "turn-9"), ("turn_complete", "turn-9")])
-        self.assertEqual(ids, [("error", "turn-9"), ("turn_complete", "turn-9")])
 
     def test_a_provider_timeout_is_retried_once_and_the_turn_completes(self):
         """One timeout on the main call is retried once; the turn lands (#452)."""
