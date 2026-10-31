@@ -124,8 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
-- Web UI: Trajectory's detail title no longer repeats the tool output, and its
-  active tab is underlined in the accent color (#459).
+- Web UI: Trajectory's detail title no longer repeats the tool output, and the
+  active tab in Trajectory, the Agent Library and Gem Studio is underlined in
+  the accent color like every other tab bar (#459).
 - Web UI: chat history and Trajectory load again for chats with a very large
   file edit, where they failed with 413. In the chat a tool's full output
   loads when you expand the tool, so long chats open fast (#456).
