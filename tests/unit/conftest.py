@@ -59,6 +59,15 @@ def _private_hub_socket_folder(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _private_acp_options(monkeypatch, tmp_path_factory):
+    """ACP runners remember their harness options in a throwaway file, never ~/.kollab's."""
+    from kollabor_ai import acp_options
+
+    path = tmp_path_factory.mktemp("acp") / "options.json"
+    monkeypatch.setattr(acp_options, "_path", lambda: path)
+
+
+@pytest.fixture(autouse=True)
 def _private_prompt_compositions(monkeypatch, tmp_path_factory):
     """Prompt renders read a throwaway library and role folder, never ~/.kollab's."""
     folder = tmp_path_factory.mktemp("prompt-compositions")

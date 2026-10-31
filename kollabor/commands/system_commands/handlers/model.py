@@ -177,26 +177,15 @@ class ModelCommandHandler(BaseCommandHandler):
 
     @staticmethod
     def _acp_option(options: list[dict[str, Any]], category: str) -> dict[str, Any] | None:
-        category = category.lower()
-        for option in options:
-            if str(option.get("category") or "").lower() == category:
-                return option
-            if str(option.get("id") or "").lower() in {category, f"{category}_level"}:
-                return option
-        return None
+        from kollabor_ai.acp_options import find_option
+
+        return find_option(options, category)
 
     @staticmethod
     def _acp_option_values(option: dict[str, Any]) -> list[str]:
-        values: list[str] = []
-        for candidate in option.get("options") or []:
-            if not isinstance(candidate, dict):
-                continue
-            if "value" in candidate:
-                values.append(str(candidate["value"]))
-            for nested in candidate.get("options") or []:
-                if isinstance(nested, dict) and "value" in nested:
-                    values.append(str(nested["value"]))
-        return values
+        from kollabor_ai.acp_options import option_values
+
+        return option_values(option)
 
     async def _set_acp_option(self, category: str, value: str | bool) -> CommandResult:
         options = self._acp_options()

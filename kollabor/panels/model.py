@@ -14,6 +14,8 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
+from kollabor_ai import acp_options
+
 from .base import PanelError, error_result, make_field, ok_result, unknown_action
 from .llm import provider_display
 
@@ -105,27 +107,8 @@ def _one_line(text: str) -> str:
     return " ".join(str(text or "").split())
 
 
-def _acp_option_values(option: dict) -> list[str]:
-    values: list[str] = []
-    for candidate in option.get("options") or []:
-        if not isinstance(candidate, dict):
-            continue
-        if "value" in candidate:
-            values.append(str(candidate["value"]))
-        for nested in candidate.get("options") or []:
-            if isinstance(nested, dict) and "value" in nested:
-                values.append(str(nested["value"]))
-    return values
-
-
-def _acp_option(options: list[dict], category: str) -> dict | None:
-    category = category.lower()
-    for option in options:
-        if str(option.get("category") or "").lower() == category:
-            return option
-        if str(option.get("id") or "").lower() in {category, f"{category}_level"}:
-            return option
-    return None
+_acp_option_values = acp_options.option_values
+_acp_option = acp_options.find_option
 
 
 class ModelPanel:

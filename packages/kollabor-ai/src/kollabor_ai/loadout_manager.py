@@ -225,27 +225,7 @@ class LoadoutManager:
                 )
                 seen.add(profile.name)
                 continue
-            registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
-            # Registry "custom"/"local" entries are generic placeholders that
-            # match no real endpoint (#447): grok-4.7 & co. appeared for any
-            # custom base_url no matter what its live /models catalog said,
-            # because the registry fallback ran unconditionally and the
-            # cached catalog was only ever appended after it. Only the live
-            # catalog describes such an endpoint; cold or failed fetches
-            # leave the section empty, which renders the panel's existing
-            # "no models" note with its retry hint.
-            if provider in _LOCAL_ENDPOINT_PROVIDERS:
-                model_names = []
-            else:
-                model_names = [
-                    name for name, _info in list_models_for_provider(registry_provider)
-                ]
-            model_names.extend(
-                str(entry.get("id") or "")
-                for entry in self._cached_catalog(profile)
-                if entry.get("id")
-            )
-            for model_name in model_names:
+            for model_name in self.models_for_profile(profile):
                 if model_name in seen:
                     continue
                 seen.add(model_name)
@@ -258,6 +238,69 @@ class LoadoutManager:
                     )
                 )
         return result
+
+    def models_for_profile(self, profile: Any) -> List[str]:
+        """The models a native provider profile serves: its registry models,
+        then its cached live catalog."""
+        provider = (profile.get_provider() or "").lower()
+        registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
+        # Registry "custom"/"local" entries are generic placeholders that
+        # match no real endpoint (#447): grok-4.7 & co. appeared for any
+        # custom base_url no matter what its live /models catalog said,
+        # because the registry fallback ran unconditionally and the
+        # cached catalog was only ever appended after it. Only the live
+        # catalog describes such an endpoint; cold or failed fetches
+        # leave the section empty, which renders the panel's existing
+        # "no models" note with its retry hint.
+        if provider in _LOCAL_ENDPOINT_PROVIDERS:
+            model_names = []
+        else:
+            model_names = [name for name, _info in list_models_for_provider(registry_provider)]
+        model_names.extend(
+            str(entry.get("id") or "")
+            for entry in self._cached_catalog(profile)
+            if entry.get("id")
+        )
+        return model_names
+
+    def list_choices(
+        self, acp_options: Optional[Dict[str, Dict[str, List[str]]]] = None
+    ) -> List[Dict[str, str]]:
+        """Every provider profile x model x effort a session can start on, for
+        the web UI's searchable model picker.
+
+        Each saved loadout as it is, then each configured profile's models at
+        its own default effort ("") and at every level its provider takes. An
+        ACP harness offers the models and efforts it last reported
+        (``acp_options[profile name]``), else only its own default.
+        """
+        from kollabor_ai.profile_manager import EFFORT_LEVELS
+        from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
+
+        profiles = self.provider_profiles()
+        providers = {p.name: (p.get_provider() or "").lower() for p in profiles}
+        rows: List[Dict[str, str]] = [
+            {"profile": lo.provider_profile, "provider": providers.get(lo.provider_profile, ""),
+             "model": lo.model, "effort": lo.effort, "loadout": lo.name}
+            for lo in sorted(self._explicit_loadouts().values(), key=lambda lo: lo.name)
+        ]
+        for profile in profiles:
+            provider = providers[profile.name]
+            if provider == "acp":
+                reported = (acp_options or {}).get(profile.name) or {}
+                models = [str(m) for m in reported.get("models") or []] or [""]
+                # "" keeps the harness's current effort: offered only when it reported none.
+                levels = [str(e) for e in reported.get("efforts") or []] or [""]
+            else:
+                own = [profile.get_model()] if profile.get_model() else []
+                models = list(dict.fromkeys(own + self.models_for_profile(profile)))
+                efforts = list(EFFORT_LEVELS) if provider in EFFORT_SUPPORTED_PROVIDERS else []
+                # "" sends no effort, so the profile's saved one applies: offered only when it has none.
+                levels = efforts if efforts and getattr(profile, "effort", "") else ["", *efforts]
+            for model in models:
+                for effort in levels:
+                    rows.append({"profile": profile.name, "provider": provider, "model": model, "effort": effort})
+        return rows
 
     @staticmethod
     def _cached_catalog(profile: Any) -> List[Dict[str, Any]]:

@@ -76,6 +76,27 @@ Direct activation, no UI:
 
 A miss lists suggestions instead of guessing.
 
+## Picking a model in the web UI
+
+New Session's Model field and the session panel's Model and Profile field are
+one searchable list of every set-up profile × model × effort, saved loadouts
+first. Type words in any order: `codex luna max` finds Codex CLI's gpt-6-luna
+at max, `claude code opus max` finds Claude Code's opus at max.
+
+- A pick changes only that session. A native profile takes the model and
+  effort as the session's own override (never saved); an ACP harness (Codex
+  CLI, Claude Code) owns its model and effort, so they go to its own options,
+  as the Model tab sets them. New Session starts on the profile, then applies
+  the pick.
+- A row with no effort sends none. A profile with a saved effort lists only
+  rows that name one, so a row never runs at an effort it doesn't show.
+- An ACP harness offers the models and efforts its sessions last reported
+  (`~/.kollab/acp/options.json`); one never started offers only its default
+  until its first session.
+- The list is `GET /profiles/choices` on the engine
+  (`LoadoutManager.list_choices`).
+- Settings → Loadouts → Manage Profiles opens the profile editor.
+
 ## Launching with a loadout
 
 ```bash

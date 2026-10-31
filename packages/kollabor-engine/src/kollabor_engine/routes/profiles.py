@@ -216,6 +216,21 @@ async def list_profiles():
     }
 
 
+@router.get("/choices")
+async def list_choices():
+    """Every provider profile x model x effort to start or switch a session
+    on, for the web UI's searchable model picker. An ACP harness offers the
+    models and efforts its sessions last reported (``kollabor_ai.acp_options``)."""
+    from kollabor_ai import acp_options
+    from kollabor_ai.loadout_manager import LoadoutManager
+    from kollabor_config import ConfigService
+    from kollabor_config.config_utils import get_global_config_path
+
+    config = ConfigService(get_global_config_path(), fast_mode=True)  # saved loadouts live here
+    manager = LoadoutManager(_get_profile_manager(), config=config)
+    return {"choices": manager.list_choices(acp_options.load())}
+
+
 @router.get("/{name}")
 async def get_profile(name: str):
     """Get detailed info for a specific profile."""

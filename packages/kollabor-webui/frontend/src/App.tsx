@@ -57,10 +57,12 @@ import {
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
   errorText,
+  type ModelChoice,
   type Profile,
   type SlashCommand,
   type Session,
 } from "./api";
+import { applyModelChoice } from "@/components/shell/model-choice";
 import {
   EngineRuntimeProvider,
   buildInitialState,
@@ -365,6 +367,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const sidebarOrder = useSidebarOrder(api);
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
+  // New Session's model and effort, picked with the profile; empty is the profile's own.
+  const [selectedPick, setSelectedPick] = useState<Pick<ModelChoice, "provider" | "model" | "effort">>({
+    provider: "",
+    model: "",
+    effort: "",
+  });
   const [selectedIdentity, setSelectedIdentity] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
   const workspacePathRef = useRef(workspacePath);
@@ -435,9 +443,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // What New Session will use, for the empty state's greeting.
   const nextGem = pickedAgent;
   const selectedModelLabel =
-    profiles.find((profile) => profile.name === selectedProfile)?.model ||
-    selectedProfile ||
-    "default";
+    [
+      selectedPick.model || profiles.find((profile) => profile.name === selectedProfile)?.model || selectedProfile,
+      selectedPick.effort,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "default";
   const [activeId, setActiveId] = useState<string | null>(null);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
@@ -994,6 +1005,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         approval_mode: "trust_all",
         workspace: pick.workspace || workspacePath.trim() || undefined,
       });
+      if (selectedPick.model || selectedPick.effort) {
+        // A session starts on a profile; the picked model and effort go on next.
+        await applyModelChoice(api, session, { ...selectedPick, profile: selectedProfile }).catch((reason) =>
+          setError(`Started on ${selectedProfile} without the picked model: ${errorText(reason)}`),
+        );
+      }
       const result = await loadSessions();
       await refreshAgentPool();
       if (operation !== operationRef.current) return false;
@@ -1231,7 +1248,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           opening={opening}
           busy={busy}
           creationError={creationError}
-          onProfileChange={setSelectedProfile}
+          selectedModel={selectedPick.model}
+          selectedEffort={selectedPick.effort}
+          onModelPick={(choice) => {
+            setSelectedProfile(choice.profile);
+            setSelectedPick(choice);
+          }}
           onIdentityChange={(ref) => {
             // A new pick brings its own Type along.
             setSelectedIdentity(ref);
@@ -1320,6 +1342,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             intent={settingsIntent}
             onChanged={() => void loadSessions()}
             onSessionUpdated={handleSessionUpdated}
+            onManageProfiles={() => setProfilesOpen(true)}
           />
         ) : null}
         {learnRoute ? <LearnDialog route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} /> : null}
