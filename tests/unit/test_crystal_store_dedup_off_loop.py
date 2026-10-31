@@ -106,8 +106,70 @@ async def test_a_merge_whose_entry_changed_during_the_pass_waits_for_the_next():
     store = CrystalStore(_vault(pairs))
     edit = lambda: store.update_entry("crys-002", "A new body, edited meanwhile.", keywords=["a", "b", "d"])  # noqa: E731
     merged, _ = await _hold_pass(store, edit)
-    assert merged == 1  # 005 into 004; 002 changed, so it stays as written
-    assert [e.id for e in store.get_all()] == ["crys-001", "crys-002", "crys-004"]
+    assert merged == 0  # 002 changed: its merge and every one after it wait, 005 into 004 too
+    assert [e.id for e in store.get_all()] == ["crys-001", "crys-002", "crys-004", "crys-005"]
     assert store.get_by_id("crys-002").body == "A new body, edited meanwhile."
-    assert await store.deduplicate_off_loop() == 1
+    assert await store.deduplicate_off_loop() == 2
     assert [e.id for e in store.get_all()] == ["crys-001", "crys-004"]
+
+
+@pytest.mark.asyncio
+async def test_merges_after_a_skipped_one_wait_since_they_may_depend_on_it():
+    # Kyanite on #547 round 3: the pass plans 001<-002 and 003<-004. With 001
+    # edited, 002 stays, and a fresh pass merges 003 and 004 into 002 instead.
+    entries = _CHAIN + [("crys-004", "a, d, e, x, y", "mike november oscar papa")]
+    store = CrystalStore(_vault(entries))
+    edit = lambda: store.update_entry("crys-001", "Quebec romeo sierra.", keywords=["m", "n", "o"])  # noqa: E731
+    merged, _ = await _hold_pass(store, edit)
+    assert merged == 0
+    assert [e.id for e in store.get_all()] == ["crys-001", "crys-002", "crys-003", "crys-004"]
+    assert await store.deduplicate_off_loop() == 2
+    assert [e.id for e in store.get_all()] == ["crys-001", "crys-002"]
+
+
+def _held(store):
+    """A pass whose worker waits for ``release``; returns (task, started, release)."""
+    started, release = threading.Event(), threading.Event()
+    merge_pass = store._merge_pass
+
+    def held(*args):
+        started.set()
+        release.wait(5)
+        return merge_pass(*args)
+
+    store._merge_pass = held
+    return asyncio.ensure_future(store.deduplicate_off_loop()), started, release
+
+
+@pytest.mark.asyncio
+async def test_overlapping_passes_keep_the_interval_low_until_the_last_ends():
+    # Kyanite on #547 round 3: per-pass save/restore put it back while B ran,
+    # then left it at B's saved 0.2 ms for good.
+    interval = sys.getswitchinterval()
+    a, a_started, a_release = _held(CrystalStore(_vault(_CHAIN)))
+    b, b_started, b_release = _held(CrystalStore(_vault(_CHAIN)))
+    await asyncio.to_thread(a_started.wait, 5)
+    await asyncio.to_thread(b_started.wait, 5)
+    a_release.set()
+    assert await a == 1
+    assert sys.getswitchinterval() <= 0.0002  # B still runs
+    b_release.set()
+    assert await b == 1
+    assert sys.getswitchinterval() == interval
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_pass_keeps_the_interval_low_while_its_worker_runs():
+    interval = sys.getswitchinterval()
+    task, started, release = _held(CrystalStore(_vault(_CHAIN)))
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert sys.getswitchinterval() <= 0.0002  # the worker thread still runs
+    release.set()
+    for _ in range(500):
+        if sys.getswitchinterval() == interval:
+            break
+        await asyncio.sleep(0.01)
+    assert sys.getswitchinterval() == interval

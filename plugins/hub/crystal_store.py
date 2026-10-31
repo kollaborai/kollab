@@ -68,6 +68,31 @@ SUMMARY_DEDUP_THRESHOLD = 0.40
 # the pass to give the GIL back: a handler that takes 1 ms alone took 1.4 s,
 # and the koordinator's command catalog RPC timed out at 10 s (#546).
 _PASS_SWITCH_INTERVAL = 0.0002
+_switch_lock = threading.Lock()
+_switch_passes = 0  # passes running in worker threads
+_switch_before = 0.0  # the interval before the first of them
+
+
+def _run_pass(merge_pass, *args) -> int:
+    """Run a dedup pass in this worker thread at ``_PASS_SWITCH_INTERVAL``.
+
+    The interval is process-wide: the first of overlapping passes lowers it and
+    the last puts it back. The worker thread does both, so a cancelled dreaming
+    task never restores it while its pass still runs.
+    """
+    global _switch_passes, _switch_before
+    with _switch_lock:
+        if _switch_passes == 0:
+            _switch_before = sys.getswitchinterval()
+            sys.setswitchinterval(min(_switch_before, _PASS_SWITCH_INTERVAL))
+        _switch_passes += 1
+    try:
+        return merge_pass(*args)
+    finally:
+        with _switch_lock:
+            _switch_passes -= 1
+            if _switch_passes == 0:
+                sys.setswitchinterval(_switch_before)
 
 # Minimum relevance score for nudge results
 NUDGE_MIN_SCORE = 1.0
@@ -460,24 +485,19 @@ class CrystalStore:
         when it ran on the agent's event loop, which then answered nothing and
         peers deleted its socket as dead (#546). The worker merges copies and
         records each merge; back on the loop the merges replay on the live
-        entries. A merge touching an entry that changed meanwhile waits for the
-        next pass, and so does every later merge into the same entry; a write
-        during the pass never holds back the others.
+        entries, in order. The first merge touching an entry that changed
+        meanwhile waits for the next pass with every merge after it, since each
+        merge depends on the ones before it; new entries hold back nothing.
         """
         self._ensure_loaded()
         snapshot = [_signature(e) for e in self._entries]
         before = {sig[0]: sig for sig in snapshot}
         copies = [replace(e, keywords=list(e.keywords)) for e in self._entries]
         merges: List[Tuple[str, str]] = []
-        interval = sys.getswitchinterval()
-        sys.setswitchinterval(min(interval, _PASS_SWITCH_INTERVAL))
-        try:
-            found = await asyncio.to_thread(self._merge_pass, copies, merges)
-        finally:
-            sys.setswitchinterval(interval)
+        found = await asyncio.to_thread(_run_pass, self._merge_pass, copies, merges)
         if not found:
             return 0
-        waiting: set = set()
+        waiting = 0
         if len(before) < len(snapshot):  # repeated ids: merges cannot be matched to entries
             if [_signature(e) for e in self._entries] != snapshot:
                 return 0
@@ -487,11 +507,11 @@ class CrystalStore:
             done = []
             for keep_id, drop_id in merges:
                 keep, drop = live.get(keep_id), live.get(drop_id)
-                if (keep is None or drop is None or keep_id in waiting
+                if (keep is None or drop is None
                         or _signature(keep) != before[keep_id]
                         or _signature(drop) != before[drop_id]):
-                    waiting.add(keep_id)
-                    continue
+                    waiting = len(merges) - len(done)
+                    break
                 self._merge_into(keep, drop)
                 before[keep_id] = _signature(keep)
                 del live[drop_id]
@@ -499,8 +519,8 @@ class CrystalStore:
             self._entries = [e for e in self._entries if e.id in live]
             merges = done
         if waiting:
-            logger.info("crystal_store: %d entries changed during dedup, merging them on the next pass",
-                        len(waiting))
+            logger.info("crystal_store: an entry changed during dedup, %d merges wait for the next pass",
+                        waiting)
         if merges:
             self._save_to_disk()
             logger.info("crystal_store: deduplicated %d entries", len(merges))
