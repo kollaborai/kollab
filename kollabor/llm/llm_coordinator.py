@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 import uuid
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, cast
 
 from kollabor.user_input_source import UserInputSource
@@ -2218,15 +2219,41 @@ class LLMService:
             if image_store is None:
                 image_store = EphemeralImageStore()
                 self._image_store = image_store
+            existing_media_ids = {
+                source.get("media_id")
+                for part in content if isinstance(part, Mapping)
+                for source in [part.get("source")]
+                if isinstance(source, Mapping)
+                and source.get("kind") == "managed_upload"
+                and isinstance(source.get("media_id"), str)
+            } if isinstance(content, list) else set()
             try:
                 content = normalize_message_content(content, image_store)
+            except MessageContentError as exc:
+                return {"status": "rejected", "reason": str(exc)}
+            try:
                 parts = serialize_gemini_parts(content, self.resolve_media)
                 images = tuple(
                     {"mime_type": part["inline_data"]["mime_type"],
                      "data": part["inline_data"]["data"]}
                     for part in parts if "inline_data" in part
                 )
+                image_count = (
+                    sum(part.get("type") == "image" for part in content)
+                    if isinstance(content, list) else 0
+                )
+                if len(images) != image_count:
+                    raise MessageContentError("ACP image data is unavailable")
             except MessageContentError:
+                # Drop only images created by this normalization; existing
+                # managed references may still be used by an earlier turn.
+                if isinstance(content, list):
+                    for part in content:
+                        source = part.get("source")
+                        if isinstance(source, Mapping) and source.get("kind") == "managed_upload":
+                            media_id = source.get("media_id")
+                            if isinstance(media_id, str) and media_id not in existing_media_ids:
+                                image_store.remove(media_id)
                 return {"status": "rejected", "reason": "Image unavailable or unsupported; upload it and retry."}
         message = content_to_text(content)
         if not message.strip():
