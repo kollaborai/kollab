@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import time
+import uuid
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -42,19 +43,24 @@ EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 STREAM_PUBLISH_INTERVAL = 0.15
 
 
-def _foreign_completion(event: Dict[str, Any], request_ids: set[str]) -> bool:
+def _foreign_completion(event: Dict[str, Any], request_ids: set[str], tagged: bool = False) -> bool:
     """Another request's turn_complete never finishes this stream.
 
     A cancelled pre-start client request is one. So is an earlier turn's
     completion the daemon published while the engine was reattaching: it
-    arrives after this request was accepted (#543).
+    arrives after this request was accepted (#543). With ``tagged`` the daemon
+    echoed this request's id, so its turn carries it: a completion naming
+    none belongs to a turn that was running when this request came (#551).
     """
     if event.get("type") != "turn_complete":
         return False
     request_id = str(event.get("request_id") or "")
     if event.get("input_source") == "acp_client" and event.get("queued") is True:
         return request_id not in request_ids
-    return bool(request_id and request_ids) and request_id not in request_ids
+    named = {request_id} - {""} | {str(i) for i in event.get("request_ids") or ()}
+    if not named:
+        return tagged
+    return bool(request_ids) and not named & request_ids
 
 
 def _contains_reserved_voice_origin(value: Any) -> bool:
@@ -95,11 +101,13 @@ async def send_message(session_id: str, body: MessageRequest):
 
     # Subscribe before submitting so no event can land in the gap.
     queue = session.subscribe()
+    # Always an id: a daemon that echoes it stamps this turn with it (#551).
+    request_id = body.request_id or uuid.uuid4().hex
 
     try:
         accepted = await session.send_message(
             body.content,
-            request_id=body.request_id,
+            request_id=request_id,
             thread_id=body.thread_id,
             origin_context=body.origin_context,
         )
@@ -113,8 +121,8 @@ async def send_message(session_id: str, body: MessageRequest):
         reason = accepted.get("reason", "rejected")
         status = 409 if "in flight" in reason else 400
         raise HTTPException(status_code=status, detail=accepted.get("message") or reason)
-    request_id = accepted.get("request_id") or body.request_id
-    request_ids = {str(request_id)} if request_id else set()
+    tagged = bool(accepted.get("request_id"))
+    request_ids = {str(accepted.get("request_id") or request_id)}
 
     async def event_generator():
         try:
@@ -136,7 +144,7 @@ async def send_message(session_id: str, body: MessageRequest):
                     return
 
                 event.setdefault("session_id", session_id)
-                if _foreign_completion(event, request_ids):
+                if _foreign_completion(event, request_ids, tagged):
                     continue
 
                 if event.get("type") == "daemon_closed":
@@ -803,6 +811,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         )
         submitted_contents: List[MessageContent] = []
         request_ids: set[str] = set()
+        untagged = False  # an admission that echoed no id: its turn carries none (#551)
         answered_prompts: set[str] = set()  # daemon tool ids this request answered
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
@@ -876,7 +885,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     if not content_to_text(message_content).strip():
                         controller.add_error("add-message command has no text")
                         return
-                    accepted = await session.send_message(message_content)
+                    accepted = await session.send_message(message_content, request_id=uuid.uuid4().hex)
                     saw_action = True
                     if not accepted.get("accepted"):
                         controller.add_error(
@@ -889,6 +898,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         controller.state["error"] = ""
                     if accepted.get("request_id"):
                         request_ids.add(str(accepted["request_id"]))
+                    else:
+                        untagged = True
                     submitted_contents.append(message_content)
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
@@ -959,7 +970,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     publish_progress()
                     continue
                 event_type = str(event.get("type") or "")
-                if _foreign_completion(event, request_ids):
+                if _foreign_completion(event, request_ids, bool(request_ids) and not untagged):
                     continue
 
                 if event_type == "token":

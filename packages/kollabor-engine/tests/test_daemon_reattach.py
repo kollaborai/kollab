@@ -5,8 +5,8 @@ import functools
 import json
 import os
 import tempfile
-import types
 import time
+import types
 
 import pytest
 from kollabor_engine.daemon_pool import DaemonHandle
@@ -350,10 +350,12 @@ class _StreamSession:
     session_id = "s9"
     alive = True
 
-    def __init__(self, events):
+    def __init__(self, events, admission=None):
         self.queue = asyncio.Queue()
         for event in events:
             self.queue.put_nowait(event)
+        self.admission = admission or {"accepted": True, "request_id": "new"}
+        self.sent = []
 
     def subscribe(self):
         return self.queue
@@ -362,7 +364,8 @@ class _StreamSession:
         pass
 
     async def send_message(self, *args, **kwargs):
-        return {"accepted": True, "request_id": "new"}
+        self.sent.append(kwargs)
+        return self.admission
 
 
 @pytest.mark.asyncio
@@ -370,8 +373,9 @@ async def test_an_oversized_turn_complete_still_ends_its_turn(monkeypatch):
     # Kyanite on #543 round 4: a >16 MiB turn_complete (a harness error with
     # its whole output) was dropped like any update, so the message stream
     # waited out its 600 s idle timeout and the reply never ended.
-    import kollabor_rpc.transport
     from kollabor_engine.routes import messages
+
+    import kollabor_rpc.transport
 
     monkeypatch.setattr(kollabor_rpc.transport, "LARGE_BUFFER_LIMIT", 1024)
     big = {"type": "turn_complete", "request_id": "new", "stop_reason": "error", "error": "x" * 4096, "seq": 3}
@@ -393,6 +397,62 @@ async def test_an_oversized_turn_complete_still_ends_its_turn(monkeypatch):
 
     sent = await asyncio.wait_for(drain(), 5)
     assert '"turn_complete"' in str(sent[-1])
+
+
+async def _route_stream(monkeypatch, session, request_id=None):
+    """What POST /sessions/{id}/message streams for ``session``'s events."""
+    from kollabor_engine.routes import messages
+
+    monkeypatch.setattr(messages, "get_session_registry", lambda: types.SimpleNamespace(get=lambda sid: session))
+    response = await messages.send_message("s9", messages.MessageRequest(content="hi", request_id=request_id))
+
+    async def drain():
+        return [str(item) async for item in response.body_iterator]
+
+    return await asyncio.wait_for(drain(), 5)
+
+
+@pytest.mark.asyncio
+async def test_a_message_sent_while_a_turn_runs_streams_its_own_reply(monkeypatch):
+    # #551: B's stream ended on the untagged completion of turn A, still
+    # running when B was sent, and B's reply never streamed.
+    session = _StreamSession([
+        {"type": "turn_complete", "stop_reason": "end_turn"},
+        {"type": "token", "text": "B-OK", "request_ids": ["new"]},
+        {"type": "turn_complete", "stop_reason": "end_turn", "request_ids": ["new"]},
+    ])
+    sent = await _route_stream(monkeypatch, session)
+    assert "B-OK" in sent[-2] and '"turn_complete"' in sent[-1]
+    # The client sent no id, so the engine made one for the daemon to stamp.
+    assert len(session.sent[0]["request_id"]) == 32
+
+
+@pytest.mark.asyncio
+async def test_an_admission_that_echoes_no_id_ends_on_any_completion(monkeypatch):
+    # A slash command or hub mention publishes an untagged completion of its
+    # own; its stream must still end on it.
+    session = _StreamSession(
+        [{"type": "token", "text": "done"}, {"type": "turn_complete", "stop_reason": "end_turn"}],
+        admission={"accepted": True, "reason": "slash command"},
+    )
+    sent = await _route_stream(monkeypatch, session, request_id="client-1")
+    assert '"turn_complete"' in sent[-1]
+    assert session.sent[0]["request_id"] == "client-1"
+
+
+def test_a_tagged_request_ends_only_on_a_completion_naming_it():
+    from kollabor_engine.routes.messages import _foreign_completion
+
+    mine = {"new"}
+    untagged = {"type": "turn_complete"}
+    assert _foreign_completion(untagged, mine, tagged=True)  # a turn running when this was sent
+    assert not _foreign_completion(untagged, mine)  # nothing is tagged: as before
+    # One batch can answer two requests; a voice turn keeps its own id as well.
+    assert not _foreign_completion({"type": "turn_complete", "request_ids": ["old", "new"]}, mine, tagged=True)
+    assert _foreign_completion({"type": "turn_complete", "request_ids": ["old"]}, mine, tagged=True)
+    assert not _foreign_completion(
+        {"type": "turn_complete", "request_id": "voice-1", "request_ids": ["new"]}, mine, tagged=True
+    )
 
 
 def test_only_this_requests_completion_ends_its_stream():

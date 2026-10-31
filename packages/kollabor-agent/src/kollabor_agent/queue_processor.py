@@ -52,6 +52,24 @@ CancellationOrigin = Literal["human", "remote_task", "external"]
 
 
 @dataclass
+class TaggedInput:
+    """Typed input a client follows by request id (#551).
+
+    Not a QueuedInput: overflow may drop it like any typed message. Its turn's
+    events carry ``request_ids``, so the client's stream ends on this turn's
+    completion, not on one that was already running when the input arrived.
+    """
+
+    content: MessageContent
+    request_ids: tuple[str, ...]
+
+
+def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
+    """The request ids a batch answers (#551)."""
+    return tuple(i for m in messages if isinstance(m, TaggedInput) for i in m.request_ids)
+
+
+@dataclass
 class QueuedInput:
     """A user message with routing metadata preserved through queue batching."""
 
@@ -561,7 +579,8 @@ class QueueProcessor:
         self._stop_hook_active = False
         self._stop_hook_continuations = 0
         self.active_origin_context: dict[str, Any] | None = None
-        self._voice_turn_token: Any = None  # current_turn stamp (_stamp_voice_turn)
+        self._turn_token: Any = None  # current_turn stamp (_stamp_turn)
+        self.active_request_ids: tuple[str, ...] = ()  # what the running batch answers (#551)
         self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
         self._after_turn: list[tuple[str, Callable[[], Awaitable[Any]]]] = []  # see after_turn
         self._after_turn_flush: asyncio.Task | None = None
@@ -1131,12 +1150,15 @@ class QueueProcessor:
         self,
         messages: List[MessageContent],
         current_parent_uuid: str,
+        request_ids: tuple[str, ...] | None = None,
     ) -> str:
         """Process a batch of messages.
 
         Args:
             messages: List of user messages to process
             current_parent_uuid: Current parent UUID for message threading
+            request_ids: What the batch answers, when the caller merged its
+                TaggedInputs away; else read from ``messages``
 
         Returns:
             Updated parent UUID
@@ -1172,8 +1194,9 @@ class QueueProcessor:
             )
         self.active_origin_context = merged_origin_context
         self._open_voice_turn = _voice_turn_id(merged_origin_context)
+        self.active_request_ids = batch_request_ids(messages) if request_ids is None else request_ids
         combined_message = combine_message_contents(
-            [m.content if isinstance(m, QueuedInput) else m for m in messages]
+            [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
         )
         if self.active_voice:
             from kollabor_voice.voice_context import voice_preamble
@@ -1305,7 +1328,7 @@ class QueueProcessor:
             self.last_turn_error = None
             # Stamped under the lock: a turn still running when this one was
             # queued clears its own stamp as it ends, never this one's.
-            self._stamp_voice_turn(_voice_turn_id(execution_context))
+            self._stamp_turn(_voice_turn_id(execution_context), self.active_request_ids)
             try:
                 if execution_context is not None:
                     parent_uuid = await self._execute_llm_turn_inner(
@@ -2341,6 +2364,7 @@ class QueueProcessor:
             self.active_voice = None
             revoke_voice_admission_context(self.active_origin_context)
             self.active_origin_context = None
+            self.active_request_ids = ()  # stamped already; a later chain answers none
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
             if context_size > 0 and not self.last_turn_error:
@@ -2361,26 +2385,31 @@ class QueueProcessor:
                 stop_reason=getattr(self.api_service, "last_stop_reason", "")
                 or ("error" if self.last_turn_error else "end_turn"),
             )
-            self._stamp_voice_turn(None)
+            self._stamp_turn(None)
 
         return parent_uuid
 
-    def _stamp_voice_turn(self, turn_id: str | None) -> None:
-        """Every event of a voice turn carries its id, its turn_complete last.
+    def _stamp_turn(self, turn_id: str | None, request_ids: tuple[str, ...] = ()) -> None:
+        """Every event of a turn carries the ids it answers, its turn_complete last.
 
-        The Engine streams a voice turn's reply by that id (request_id): the
+        The Engine streams a voice turn's reply by its id (request_id): the
         next turn's stream starts before a talked-over turn's late events are
-        out, and its turn_complete would end that stream before the reply.
+        out, and its turn_complete would end that stream before the reply. A
+        chat message sent while another turn runs is followed the same way by
+        its request id (request_ids, #551).
         """
-        token, self._voice_turn_token = self._voice_turn_token, None
+        token, self._turn_token = self._turn_token, None
         if token is not None:
             try:
                 current_turn.reset(token)
             except ValueError:  # set in another task: nothing of it is here
                 pass
-        if turn_id:
-            fields = {**current_turn.get(), "request_id": turn_id}
-            self._voice_turn_token = current_turn.set(fields)
+        fields = {
+            **({"request_id": turn_id} if turn_id else {}),
+            **({"request_ids": list(request_ids)} if request_ids else {}),
+        }
+        if fields:
+            self._turn_token = current_turn.set({**current_turn.get(), **fields})
 
     def _voice_turn_metadata(self) -> dict[str, Any]:
         """Which voice turn a reply belongs to: a talk-over after it finished cuts

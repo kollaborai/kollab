@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import types
 from collections.abc import Iterable, Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from kollabor_engine.routes import messages
@@ -202,7 +203,9 @@ async def test_assistant_transport_submits_add_message(monkeypatch):
     assert isinstance(response, response_type)
     async for _chunk in response.stream:
         pass
-    session.send_message.assert_awaited_once_with("hello")
+    session.send_message.assert_awaited_once_with("hello", request_id=ANY)
+    # Always an id, so a daemon that echoes it can stamp the turn (#551).
+    assert re.fullmatch(r"[0-9a-f]{32}", session.send_message.await_args.kwargs["request_id"])
     assert captured["controller"].errors == []
     assert captured["controller"].state["usage"]["inputTokens"] == 2
 
@@ -244,7 +247,8 @@ async def test_assistant_transport_preserves_image_part_in_submitted_message(
         [
             {"type": "text", "text": "inspect this"},
             {"type": "image", "image": "data:image/png;base64,iVBORw0KGgo="},
-        ]
+        ],
+        request_id=ANY,
     )
     assert captured["controller"].state["messages"][0]["content"] == (
         "inspect this\n[image1]"
@@ -1152,6 +1156,41 @@ async def test_assistant_transport_ends_a_failed_turn_with_its_error(monkeypatch
         "error": "LLM provider not available",
     }
     assert controller.state["usage"]["stopReason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_streams_its_own_reply_behind_a_running_turn(monkeypatch):
+    """#551: a message sent while another turn ran ended on that turn's
+    untagged completion, and its own reply never streamed."""
+    session = _FakeSession([])
+
+    def admit(content, request_id=None):
+        for event in (
+            {"type": "turn_complete", "stop_reason": "end_turn"},  # the turn already running
+            {"type": "token", "text": "B-OK", "request_ids": [request_id]},
+            {"type": "turn_complete", "stop_reason": "end_turn", "request_ids": [request_id]},
+        ):
+            session._events.put_nowait(event)
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=admit)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "hello"}],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    _user, reply = captured["controller"].state["messages"]
+    assert "B-OK" in json.dumps(reply)
 
 
 @pytest.mark.asyncio
