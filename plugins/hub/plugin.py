@@ -9949,7 +9949,10 @@ class HubPlugin(BasePlugin):
             # turn_complete and its turn_end follow-up tap the same turn;
             # one real boundary must age the parked list once, not twice,
             # or the retry budget halves.
-            boundary = str(event.get("turn_id") or event.get("request_id") or "")
+            # turn_complete carries snake `turn_id`, turn_end's frame carries
+            # camel `turnId` and never `turn_id`; `request_id` is the one key
+            # both taps share, so the dedupe keys on it (#497).
+            boundary = str(event.get("request_id") or event.get("turn_id") or event.get("turnId") or "")
             if boundary and boundary != getattr(self, "_last_busy_kick_boundary", None):
                 self._last_busy_kick_boundary = boundary
                 self._kick_parked_busy_retries()

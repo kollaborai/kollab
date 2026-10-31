@@ -418,18 +418,25 @@ async def test_one_boundary_kicks_once_when_both_taps_fire():
     message = _agent_request()
     _held_turn(plugin, message)
 
-    for kind in ("turn_complete", "turn_end"):
-        plugin._follow_tool(
-            {"type": kind, "turn_id": "t-1", "request_id": "r-1"}
-        )
+    # Real wire shapes (#497): turn_complete carries snake `turn_id`, while
+    # turn_end's frame carries camel `turnId` and no `turn_id` at all. The
+    # shared key is `request_id`; feeding the same dict to both taps would
+    # hide the very mismatch the boundary dedupe has to survive.
+    plugin._follow_tool(
+        {"type": "turn_complete", "turn_id": "7", "request_id": "r-1"}
+    )
     first_pass = plugin._busy_retry_task
     assert first_pass is not None
-    await first_pass
+    await first_pass  # the retry pass settles before the follow-up tap lands
 
+    plugin._follow_tool(
+        {"type": "turn_end", "turnId": "7", "request_id": "r-1"}
+    )
+    assert plugin._busy_retry_task is first_pass  # same boundary: no second kick
     assert llm.submit_human_input.await_count == 1  # one pass, one aging
     assert plugin._acp_busy_parked[0]["attempts"] == 2  # not 3
 
-    plugin._follow_tool({"type": "turn_end", "turn_id": "t-2"})  # next turn
+    plugin._follow_tool({"type": "turn_end", "turnId": "8", "request_id": "r-2"})  # next turn
     assert plugin._busy_retry_task is not first_pass  # a fresh boundary kicks
     await plugin._busy_retry_task
     assert llm.submit_human_input.await_count == 2
