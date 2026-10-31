@@ -350,3 +350,22 @@ async def test_handle_counts_midcall_bridge_errors():
     assert handle.bridge_errors == 2
     assert handle.bridge_last_error == "bridge_pcm"
     assert handle._out == bytearray(base64.b64decode(base64.b64encode(b"\x01\x02")))
+@pytest.mark.asyncio
+async def test_handle_close_kill_path_no_attributeerror(monkeypatch):
+    """aquamarine's live bug (#440): a child that ignores stdin made close()
+    hit the exit timeout and call self._kill_group, which only exists on
+    LiveKitRuntime -> AttributeError mid-cleanup. The timeout path must
+    terminate the group without raising."""
+    import kollabor_engine.voice_livekit as vlk
+
+    monkeypatch.setattr(vlk, "PHONE_BRIDGE_EXIT_TIMEOUT_S", 0.1)
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(30)",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    handle = PhoneBridgeHandle(process)
+    await handle.close()  # must not raise AttributeError
+    assert process.returncode is not None  # kill path actually reaped it

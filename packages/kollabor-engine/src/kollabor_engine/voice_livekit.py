@@ -120,6 +120,26 @@ PHONE_BRIDGE_OUT_CAP_BYTES = 1_048_576
 PHONE_BRIDGE_EXIT_TIMEOUT_S = 5.0
 
 
+async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
+    """Terminate a spawned child's process group (SIGTERM, then SIGKILL).
+
+    Module-level so both PhoneBridgeHandle.close and LiveKitRuntime share it;
+    PhoneBridgeHandle has no _kill_group of its own (aquamarine's live run).
+    """
+    if process.returncode is not None:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            await asyncio.wait_for(process.wait(), 3.0)
+            return
+        except asyncio.TimeoutError:
+            continue
+
+
 class PhoneBridgeHandle:
     """Engine-side handle for one bridge child (satisfies PhoneBridge)."""
 
@@ -221,7 +241,7 @@ class PhoneBridgeHandle:
                 self.process.wait(), PHONE_BRIDGE_EXIT_TIMEOUT_S
             )
         except asyncio.TimeoutError:
-            await self._kill_group(self.process)
+            await _kill_process_group(self.process)
         stdin = self.process.stdin
         if stdin is not None:
             stdin.close()
@@ -675,18 +695,7 @@ class LiveKitRuntime:
 
     @staticmethod
     async def _kill_group(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(process.pid, sig)
-            except ProcessLookupError, PermissionError:
-                return
-            try:
-                await asyncio.wait_for(process.wait(), 3.0)
-                return
-            except asyncio.TimeoutError:
-                continue
+        await _kill_process_group(process)
 
     async def shutdown(self) -> None:
         for handle in list(self._workers.values()):
