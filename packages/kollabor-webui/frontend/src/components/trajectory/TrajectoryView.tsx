@@ -250,7 +250,7 @@ export function TrajectoryView({
                   className={cn(
                     "border-b-2 px-1.5 pt-1 pb-0.5 text-xs font-medium transition-colors",
                     layout === option
-                      ? "border-foreground text-foreground"
+                      ? "border-highlight text-foreground"
                       : "text-muted-foreground hover:text-foreground border-transparent",
                   )}
                 >

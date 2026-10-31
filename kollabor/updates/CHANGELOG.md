@@ -125,6 +125,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Web UI: Trajectory's detail title no longer repeats the tool output, and the
+  active tab in Trajectory, the Agent Library and Gem Studio is underlined in
+  the accent color like every other tab bar (#459).
+- Web UI: below 1024px wide (tablets) both sidebars open as drawers, so the chat
+  and Trajectory get the full width (#458).
+- Agents: a detached agent no longer stops when different commands fail the same
+  way (for example several searches that find nothing); only the same failing
+  call three turns in a row counts as stuck (#452).
+- Windows: voice setup and the voice service restart check whether a process
+  is still running without sending it a signal (#460).
+- Web UI: chat history and Trajectory load again for chats with a very large
+  file edit, where they failed with 413. In the chat a tool's full output
+  loads when you expand the tool, so long chats open fast (#456).
 - Conversation and raw API logs stamp times in UTC: a stamp marked Z held
   local time before, hours off from real UTC (#454).
 - /llm: a custom or local endpoint's section lists only what that endpoint

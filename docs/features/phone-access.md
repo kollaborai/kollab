@@ -92,7 +92,7 @@ only messages newer than the cached
 cursor. If the history changed in a way that invalidates that cursor, the app
 clears the stale cache and reloads the latest page. Loading, empty, and retryable
 error states are shown in the thread. Large historical tool output is previewed
-(up to 4 KiB); **Show more** fetches the full result only when requested.
+(up to 4 KiB); expanding the tool fetches the full result, once per session.
 
 PhoneLink negotiates gzip frames and larger 160 KiB chunks when both peers
 support them. Decompression is bounded to 256 KiB per packet; legacy phones keep

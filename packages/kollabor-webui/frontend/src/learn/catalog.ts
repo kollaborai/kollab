@@ -174,7 +174,7 @@ export const LEARN_TOPICS = [
       "Check that the pairing code and the computer fingerprint match on both screens, then approve the phone on your computer. The invitation expires after five minutes and links one phone.",
       "Your phone loads Kollab from your computer, and only after it checks your computer's signature on it. Bookmark it, or add it to your Home Screen where your phone allows. PhoneLink shows when each phone was last seen; Revoke withdraws its access.",
       "PhoneLink opens at the newest messages first. Scroll to the top to load older history on demand; progress is shown, with a retry action if a load fails.",
-      "Large tool outputs start with a preview. Choose Show more to load the full output when you need it.",
+      "Tool details load when you expand a tool, so long chats open fast.",
     ],
     example:
       "Start a task at your desk, then open your Kollab bookmark on your phone to check the same agents, read their work, and answer an approval request.",
