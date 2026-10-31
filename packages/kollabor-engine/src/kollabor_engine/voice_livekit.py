@@ -113,10 +113,11 @@ class WorkerHandle:
 
 
 PHONE_BRIDGE_READY_TIMEOUT_S = 10.0
-# Downstream PCM buffer cap (~21s of 24kHz/16-bit mono). Ticks normally
-# drain it every interval; a stalled caller must not grow memory without
-# bound (drop-oldest, like the bridge's own outbound queue).
-PHONE_BRIDGE_OUT_CAP_BYTES = 1_048_576
+# Downstream PCM buffer cap: 600 ms of 24 kHz PCM16LE mono, matching the
+# broker's QUEUE_BYTES contract. Ticks normally drain it every interval; a
+# stalled caller must not build seconds of lag, so overflow drops the
+# OLDEST audio first and every dropped byte is counted (out_dropped_bytes).
+PHONE_BRIDGE_OUT_CAP_BYTES = 28_800
 # Graceful exit window for a bridge child that DID report ready. Kept
 # under lane A's 5 s shutdown cap so close() always finishes inside it.
 PHONE_BRIDGE_CLOSE_GRACE_S = 3.0
@@ -210,6 +211,14 @@ class PhoneBridgeHandle:
                     excess = len(self._out) - PHONE_BRIDGE_OUT_CAP_BYTES
                     del self._out[:excess]
                     self._out_dropped += excess
+            elif message.get("type") == "audio_dropped":
+                # The child's own outbound-queue drops, reported over IPC so
+                # the phone's dropped count covers every loss point. Never a
+                # bridge error: it is an audio accounting line, not a fault.
+                try:
+                    self._out_dropped += max(0, int(message.get("bytes", 0)))
+                except (TypeError, ValueError):
+                    continue
             else:
                 # A mid-call bridge error must not vanish: the engine would
                 # keep ticking into silence with no failure signal.
@@ -231,6 +240,18 @@ class PhoneBridgeHandle:
         data = bytes(self._out)
         self._out.clear()
         return data
+
+    @property
+    def out_dropped_bytes(self) -> int:
+        """Total downstream audio dropped, in bytes: this handle's buffer-cap
+        drops plus the child's own outbound-queue drops (reported over IPC).
+        The broker converts to samples (PCM16: bytes // 2) for the phone."""
+        return self._out_dropped
+
+    @property
+    def out_dropped(self) -> int:
+        """Alias of out_dropped_bytes (bytes, not samples)."""
+        return self._out_dropped
 
     async def close(self) -> None:
         if self._reader_task is not None:

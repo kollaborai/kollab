@@ -6,9 +6,11 @@ with pipes; argv never carries a token. stdin lines are JSON:
 "rate_out": 24000}`` exactly once, then ``{"type": "mic", "n": int,
 "pcm": base64}`` and ``{"type": "close"}``. stdout lines are
 ``{"type": "ready"}``, ``{"type": "audio", "pcm": base64}`` (chunks of at
-most 9600 bytes), or ``{"type": "error", "code": str}``. stderr carries
-diagnostics only. Every line is bounded at 32 KiB. Outbound audio queues at
-3 frames: a slow reader drops the oldest frame and logs a diagnostic.
+most 9600 bytes), ``{"type": "audio_dropped", "bytes": int}`` (cumulative
+deltas for frames this child dropped from its outbound queue), or
+``{"type": "error", "code": str}``. stderr carries diagnostics only. Every
+line is bounded at 32 KiB. Outbound audio queues at 3 frames: a slow reader
+drops the oldest frame, logs a diagnostic, and reports the dropped bytes.
 
 The bridge joins one room with the supplied token, publishes a 16 kHz mono
 ``AudioSource`` for mic audio, subscribes ONLY to the voice worker's track
@@ -84,11 +86,15 @@ class _Outbound:
         self._items: list[bytes] = []
         self._limit = limit
         self.dropped = 0
+        # Bytes of dropped-oldest items, reported to the engine over IPC so
+        # the phone shows EVERY dropped sample, not only the handle's own.
+        self.dropped_bytes = 0
 
     def put(self, item: bytes) -> None:
         if len(self._items) >= self._limit:
-            self._items.pop(0)
+            oldest = self._items.pop(0)
             self.dropped += 1
+            self.dropped_bytes += len(oldest)
             print(
                 f"phone-audio-bridge: dropped {self.dropped} queued audio frames",
                 file=sys.stderr,
@@ -261,21 +267,31 @@ class _BridgeSession:
         await self._emit({"type": "ready"})
         return False
 
+    async def _report_dropped_audio(self, seen_bytes: int) -> int:
+        """Emit the delta of the outbound queue's dropped bytes over IPC."""
+        total = self.out.dropped_bytes
+        if total > seen_bytes:
+            await self._emit({"type": "audio_dropped", "bytes": total - seen_bytes})
+        return total
+
     async def _pump_worker(self, track: Any) -> None:
         stream = _track_stream(track, 24000, OUT_QUEUE_FRAMES)
         buffer = b""
+        drops_seen = 0
         try:
             async for event in stream:
                 buffer += bytes(event.frame.data)
                 while len(buffer) >= MAX_AUDIO_CHUNK_BYTES:
                     self.out.put(buffer[:MAX_AUDIO_CHUNK_BYTES])
                     buffer = buffer[MAX_AUDIO_CHUNK_BYTES:]
+                drops_seen = await self._report_dropped_audio(drops_seen)
         except Exception as exc:
             print(f"phone-audio-bridge: pump failed: {exc!r}", file=sys.stderr)
             await self._emit_error("bridge_audio")
             return
         if buffer:
             self.out.put(buffer)
+            await self._report_dropped_audio(drops_seen)
 
     async def _mic(self, message: dict[str, Any]) -> bool:
         try:

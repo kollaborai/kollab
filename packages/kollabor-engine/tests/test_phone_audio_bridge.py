@@ -427,3 +427,91 @@ async def test_ready_close_uses_short_grace_then_kills(monkeypatch):
     elapsed = _time.monotonic() - t0
     assert elapsed < 2.0, f"ready close took {elapsed:.2f}s"
     assert process.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_handle_output_cap_is_contract_28800():
+    """jasper burst repro (review_bridge_overflow.py): the handle's received-
+    audio buffer must cap at the broker's 28,800-byte contract (600 ms), not
+    1 MiB of lag, and every dropped byte must be publicly countable."""
+    import kollabor_engine.voice_livekit as vlk
+
+    assert vlk.PHONE_BRIDGE_OUT_CAP_BYTES == 28_800
+    payloads = [bytes([1, 2]) * 4800 for _ in range(5)]  # 5 * 9600 = 48000
+    lines = [
+        json.dumps(
+            {"type": "audio", "pcm": base64.b64encode(payload).decode()}
+        ).encode()
+        for payload in payloads
+    ]
+    handle = PhoneBridgeHandle(
+        __import__("types").SimpleNamespace(stdout=FakeReader(lines))
+    )
+    await handle._read_loop()
+
+    assert len(handle._out) == 28_800  # never more than the contract
+    assert handle.out_dropped_bytes == 48_000 - 28_800  # oldest bytes dropped
+    assert handle.out_dropped == handle.out_dropped_bytes  # alias, same bytes
+    assert bytes(handle._out).endswith(payloads[-1])  # newest kept
+    assert handle.bridge_errors == 0  # cap drops are accounting, not faults
+
+
+@pytest.mark.asyncio
+async def test_handle_counts_child_queue_drops_over_ipc():
+    """jasper child-queue repro (review_child_queue_overflow.py): drops the
+    child makes in its own outbound queue must arrive over IPC and be added
+    to the handle's total -- and must NOT be counted as bridge errors."""
+    lines = [
+        json.dumps({"type": "audio_dropped", "bytes": 9600}).encode(),
+        json.dumps(
+            {"type": "audio", "pcm": base64.b64encode(b"\x01\x02").decode()}
+        ).encode(),
+        json.dumps({"type": "audio_dropped", "bytes": 4800}).encode(),
+        json.dumps({"type": "audio_dropped", "bytes": "bogus"}).encode(),
+    ]
+    handle = PhoneBridgeHandle(
+        __import__("types").SimpleNamespace(stdout=FakeReader(lines))
+    )
+    await handle._read_loop()
+
+    assert handle.out_dropped_bytes == 14_400  # 9600 + 4800, bad value skipped
+    assert handle.bridge_errors == 0  # audio accounting is not a fault
+
+
+@pytest.mark.asyncio
+async def test_outbound_dropped_bytes_reach_ipc_from_pump(monkeypatch):
+    """The child's pump must report its _Outbound drops over IPC as
+    audio_dropped deltas, so the engine total covers every loss point."""
+    room, _source, _streams = fake_seams(
+        monkeypatch, stream_chunks=[bytes([1, 2]) * 4800] * 4  # 4 into a 3-queue
+    )
+    writer = FakeWriter()
+    session = pab._BridgeSession(
+        FakeReader([json.dumps(start_message()).encode()]), writer
+    )
+    assert await session._start(start_message()) is False
+
+    handler = room.handlers["track_subscribed"]
+    handler(object(), object(), type("P", (), {"identity": "worker-xyz"})())
+    assert session._pump is not None
+    await session._pump
+
+    # Unit half: the counter itself counts bytes of dropped-oldest items.
+    queue = pab._Outbound(3)
+    for _ in range(4):
+        queue.put(bytes([1, 2]) * 4800)
+    assert queue.dropped == 1
+    assert queue.dropped_bytes == 9600
+
+    # IPC half: the pump reported one audio_dropped delta for the dropped
+    # frame and left exactly the 3 kept frames queued (audio lines themselves
+    # are emitted by run_bridge's flusher, covered by the protocol tests).
+    messages = [
+        json.loads(line) for line in "".join(writer.lines).splitlines() if line.strip()
+    ]
+    drops = [m for m in messages if m.get("type") == "audio_dropped"]
+    assert len(drops) == 1
+    assert drops[0]["bytes"] == 9600
+    assert len(session.out.drain()) == 3
+
+    await session._teardown()
