@@ -793,11 +793,14 @@ try {
     held: [],
     release() {
       this.issuedCursors.add("before-21");
-      this.held
-        .splice(0)
-        .forEach((pending) =>
-          pending.resolve({ status: 200, body: mkPage(21, 71) }),
-        );
+      // Answer ONLY the held before-71 continuation. The after-cursor
+      // syncs must stay wedged: an after-sync answered with an older
+      // before-window would read as an authoritative deletion verdict.
+      for (const pending of this.held.splice(0)) {
+        if (pending.before === "before-71") {
+          pending.resolve({ status: 200, body: mkPage(21, 71) });
+        }
+      }
     },
   };
   await scenario(
@@ -808,7 +811,9 @@ try {
         // engine, so the latest-window sync never completes.
         if (options.after && !options.before) {
           return new Promise((resolve) => {
-            g.held.push({ resolve });
+            // Tagged as a non-before request: the newest edge never syncs
+            // in this engine, so release() must leave these wedged forever.
+            g.held.push({ resolve, before: null });
           });
         }
         if (options.before) {
@@ -832,7 +837,7 @@ try {
           }
           if (g.beforeSeen === 2 && options.before === "before-71") {
             return new Promise((resolve) => {
-              g.held.push({ resolve });
+              g.held.push({ resolve, before: options.before });
             });
           }
           const page = mkPage(Math.max(0, from - 50), from);
@@ -909,11 +914,13 @@ try {
       } else {
         ok("G-queued-behind-prefetch", `before-cursor loads made after the release (${olderLoads})`);
       }
-      const banner = page.locator('[data-slot="history-status"][role="alert"]');
+      // Any lingering banner (error OR the reset loop's loading banner)
+      // means the queued intent wedged the thread behind a stuck load.
+      const banner = page.locator('[data-slot="history-status"]');
       if (await banner.isVisible().catch(() => false)) {
-        fail("G-queued-behind-prefetch", "an error banner is showing after the queued-behind-prefetch paging");
+        fail("G-queued-behind-prefetch", "a history banner is still showing after the queued-behind-prefetch paging");
       } else {
-        ok("G-queued-behind-prefetch", "no error banner after the queued-behind-prefetch paging");
+        ok("G-queued-behind-prefetch", "no history banner after the queued-behind-prefetch paging");
       }
     },
   );
