@@ -1048,7 +1048,7 @@ class TerminalLLMChat:
             self.event_bus.register_service("voice_plugin", voice_plugin)
 
         context_compaction_plugin = self.plugin_instances.get(
-            "context_compaction"
+            "contextcompaction"
         ) or self.plugin_instances.get("ContextCompactionPlugin")
         if context_compaction_plugin is not None:
             self.event_bus.register_service(
