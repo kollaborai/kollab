@@ -136,6 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a retry banner that can never recover, the byte-cap trim no longer strands
   paging past the older cursor, and a merged window too large for the history
   cache is skipped from the cache, not the screen (#471).
+- Web UI: Gem Studio's activity preview stays on one scrollable row of tabs
+  at phone width instead of wrapping into a stack of pills, and the Save
+  button is accented with the highlight color like other primary actions
+  (#465).
 - Web UI: Trajectory's detail title no longer repeats the tool output, and the
   active tab in Trajectory, the Agent Library and Gem Studio is underlined in
   the accent color like every other tab bar (#459).
