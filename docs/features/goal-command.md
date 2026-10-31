@@ -35,8 +35,7 @@ other goals or requests may reference the same file. Those files remain in the
 project's goal artifact directory until separately cleaned up. If the server
 reports that images could not be saved, no pending request was created; reattach
 the original images before resubmitting.
-Native goal turns do not yet send those images to the model; see
-[issue #510](https://github.com/kollaborai/kollab/issues/510).
+Native goal turns send their attached images to image-capable models.
 
 ## Commands
 

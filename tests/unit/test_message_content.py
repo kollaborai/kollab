@@ -140,3 +140,21 @@ def test_failed_normalization_rolls_back_new_images():
         )
 
     assert (store.count, store.total_bytes) == before
+
+
+def test_redaction_removes_provider_inline_image_bytes_without_mutation():
+    value = [
+        {"image_url": PNG_DATA_URL},
+        {"source": {"type": "base64", "media_type": "image/png", "data": "secret-a"}},
+        {"inline_data": {"mime_type": "image/jpeg", "data": "secret-b"}},
+        {"inlineData": {"mimeType": "image/webp", "data": "secret-c"}},
+        {"media_type": "text/plain", "data": "keep"},
+        {"data": "keep-too"},
+    ]
+    redacted = redact_media_data(value)
+    assert redacted[0]["image_url"] == "[image data redacted]"
+    assert redacted[1]["source"]["data"] == "[image data redacted]"
+    assert redacted[2]["inline_data"]["data"] == "[image data redacted]"
+    assert redacted[3]["inlineData"]["data"] == "[image data redacted]"
+    assert redacted[4:] == value[4:]
+    assert value[1]["source"]["data"] == "secret-a"

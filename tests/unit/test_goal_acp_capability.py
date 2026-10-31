@@ -77,6 +77,7 @@ def test_acp_goal_creation_is_rejected_before_state_or_turn(goal_runtime, name):
     assert "evidence" in result.message and "token" in result.message
     assert "native provider" in result.message and "\n" not in result.message
     assert request_id in result.message and "/goal retry" in result.message
+    assert "do not yet send images to the model" not in result.message
     assert goal_runtime.store.get_active("conversation-1") is None
     assert goal_runtime.service.pending_attachment_requests("conversation-1")[0]["request_id"] == request_id
     goal_runtime.driver.schedule.assert_not_called()
