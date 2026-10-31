@@ -41,6 +41,7 @@ from .snapshots import (
     ActiveOperationSnapshot,
     AgentListSnapshot,
     AgentSnapshot,
+    ContextCompactionSnapshot,
     ConversationSnapshot,
     HubPeer,
     HubSnapshot,
@@ -607,6 +608,39 @@ class LocalStateService(StateService):
 
     # === Profile ===
 
+    async def get_context_compaction_snapshot(
+        self,
+    ) -> ContextCompactionSnapshot:
+        """Return context and compaction status from the registered plugin."""
+        try:
+            plugin = (
+                self._event_bus.get_service("context_compaction_plugin")
+                if self._event_bus is not None
+                else None
+            )
+            if plugin is None:
+                return ContextCompactionSnapshot(
+                    available=False,
+                    error="Context compaction status unavailable",
+                )
+
+            raw_snapshot = plugin.get_runtime_status_snapshot()
+            if not isinstance(raw_snapshot, dict):
+                raise TypeError("plugin runtime snapshot must be a dictionary")
+            snapshot = ContextCompactionSnapshot.from_dict(raw_snapshot)
+            snapshot.available = True
+            snapshot.error = None
+            return snapshot
+        except Exception as exc:
+            logger.warning(
+                "Context compaction status unavailable (%s)",
+                type(exc).__name__,
+            )
+            return ContextCompactionSnapshot(
+                available=False,
+                error="Context compaction status unavailable",
+            )
+
     async def get_active_profile(self) -> ProfileSnapshot:
         """Return the currently active profile as a snapshot."""
         try:
@@ -726,13 +760,18 @@ class LocalStateService(StateService):
         except Exception:
             effort = getattr(profile, "effort", "")
 
+        image_capability = bool(supports_vision(model or "", provider or ""))
+        if is_active and str(provider or "").lower() == "acp":
+            supports_images = getattr(self._llm_service, "supports_image_input", None)
+            image_capability = bool(callable(supports_images) and supports_images())
+
         return ProfileSnapshot(
             name=getattr(profile, "name", "") or "",
             model=(model or "") if model is not None else "",
             provider=(provider or "") if provider is not None else "",
             endpoint=(endpoint or "") if endpoint is not None else "",
             supports_tools=bool(supports_tools),
-            supports_vision=bool(supports_vision(model or "", provider or "")),
+            supports_vision=image_capability,
             temperature=temperature,
             description=getattr(profile, "description", "") or "",
             is_active=is_active,
@@ -2931,9 +2970,10 @@ class LocalStateService(StateService):
         if contains_image_content(message):
             supports_images = getattr(llm, "supports_image_input", None)
             if not callable(supports_images) or not supports_images():
+                reason = getattr(llm, "image_input_rejection_reason", None)
                 return {
                     "accepted": False,
-                    "reason": "active model does not accept image input",
+                    "reason": reason() if callable(reason) else "active model does not accept image input",
                 }
 
         # Hub mentions are an explicit transport command, not LLM prose. Keep
@@ -3040,9 +3080,12 @@ class LocalStateService(StateService):
         for part in parts:
             if not isinstance(part, dict):
                 continue
-            if part.get("type") != "image_url":
+            if part.get("type") == "image":
+                url = part.get("image", "")
+            elif part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+            else:
                 continue
-            url = (part.get("image_url") or {}).get("url", "")
             if not isinstance(url, str) or not url.startswith("data:image/"):
                 continue
             try:

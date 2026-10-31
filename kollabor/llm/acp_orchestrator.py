@@ -131,6 +131,10 @@ class ACPOrchestrator:
     def runner(self) -> ACPRunner | None:
         return self._runner
 
+    @property
+    def supports_image_input(self) -> bool:
+        return bool(self._runner and getattr(self._runner, "supports_image_input", False))
+
     def advertised_config_options(self) -> list[dict[str, Any]]:
         """Return config options advertised by the active ACP session."""
         runner = self._runner
@@ -421,7 +425,8 @@ class ACPOrchestrator:
             profile = self._selected_profile
             publish_semantic(self.event_bus, "acp_session",
                              harness=profile.description or profile.name if profile else self._profile_name,
-                             profile=self._profile_name, state=runner.state, context=runner.resume_mode)
+                             profile=self._profile_name, state=runner.state, context=runner.resume_mode,
+                             supports_vision=getattr(runner, "supports_image_input", False) is True)
             llm = self.event_bus.get_service("llm_service")
             display = getattr(llm, "message_display_service", None)
             if display is not None:
@@ -433,13 +438,16 @@ class ACPOrchestrator:
         self, text: str, *, request_id: str, source: str, thread_id: str | None = None,
         origin: dict[str, Any] | None = None,
         record: bool = True,
+        images: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
         if self._runner is None or self._closed:
             raise ACPError(self.startup_error or "ACP runner is not active")
         if source == "agent" and (origin or {}).get("sender"):
             text = f"Message from {origin['sender']} [thread:{thread_id or ''}]\n{text}"
+        kwargs = {"images": images} if images else {}
         admission = self._runner.admit(
-            text, request_id=request_id, source=source, thread_id=thread_id, origin=origin
+            text, request_id=request_id, source=source, thread_id=thread_id, origin=origin,
+            **kwargs,
         )
         task = asyncio.create_task(self._complete(admission), name=f"acp-turn-{request_id}")
         self._completion_tasks.add(task)
@@ -614,8 +622,12 @@ class ACPOrchestrator:
             # A mic turn shows what was said, never the voice rules sent with it.
             display.display_user_message(strip_voice_preamble(text))
 
-    async def steer(self, text: str, *, origin: dict[str, Any], thread_id: str | None = None) -> bool:
-        if not self._runner or not await self._runner.steer(text, origin=origin, thread_id=thread_id):
+    async def steer(
+        self, text: str, *, origin: dict[str, Any], thread_id: str | None = None,
+        images: tuple[dict[str, str], ...] = (),
+    ) -> bool:
+        kwargs = {"images": images} if images else {}
+        if not self._runner or not await self._runner.steer(text, origin=origin, thread_id=thread_id, **kwargs):
             return False
         request_id = f"steering-{uuid.uuid4().hex}"
         self._record_user(request_id, text, "steering", thread_id)
