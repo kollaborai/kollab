@@ -152,6 +152,19 @@ export type CallPacket = {
 } & Record<string, Json>;
 export type CallResult = Record<string, Json>;
 
+// Hands out seq numbers in call order. Each job waits for the previous one, so
+// seq stays in step with the order packets reach the wire.
+export class WireSequence {
+  private next = 0;
+  private chain: Promise<unknown> = Promise.resolve();
+
+  run<T>(make: (seq: number) => Promise<T>): Promise<T> {
+    const job = this.chain.then(() => make(this.next++));
+    this.chain = job.catch(() => undefined);
+    return job;
+  }
+}
+
 // Three request slots. Normal requests stop at two, so one slot is always free
 // for a call op. Waiters wake in arrival order within their own lane.
 export class RequestSlots {
@@ -489,10 +502,9 @@ export class PhoneTransport {
   private frameCompression = false;
   private chunkSize = LEGACY_CHUNK;
   private zeroBodyAutorun = false;
-  private sent = 0;
+  private wire = new WireSequence();
   private received = -1;
   private slots = new RequestSlots();
-  private encoding: Promise<unknown> = Promise.resolve();
   private sending: Promise<void> = Promise.resolve();
   private lastSend = 0;
   private closed = false;
@@ -901,7 +913,7 @@ export class PhoneTransport {
     );
     sodium.memzero(shared);
     sodium.memzero(ephemeral.privateKey);
-    this.sent = 0;
+    this.wire = new WireSequence();
     this.received = -1;
     this.identity.approved = true;
     this.reconnectCount = 0;
@@ -1076,11 +1088,11 @@ export class PhoneTransport {
     if (!this.outgoing || !this.incoming) throw lost();
     const outgoing = this.outgoing;
     // seq is assigned and encoded in one chain, so it matches wire order.
-    const build = () => {
-      const job = this.encoding.then(async () => {
+    const build = () =>
+      this.wire.run(async (seq) => {
         const nonce = sodium.randombytes_buf(24);
         const encoded = await encodePhoneFrame(
-          sodium.from_string(JSON.stringify({ ...data, seq: this.sent++ })),
+          sodium.from_string(JSON.stringify({ ...data, seq })),
           this.frameCompression,
         );
         return {
@@ -1089,9 +1101,6 @@ export class PhoneTransport {
           ),
         } as Json;
       });
-      this.encoding = job.catch(() => undefined);
-      return job;
-    };
     const response = await this.request(
       "phone_http",
       build,

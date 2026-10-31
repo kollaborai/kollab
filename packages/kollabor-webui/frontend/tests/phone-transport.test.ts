@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   hostSnapshotDecision,
   HOST_MISSING_GRACE_MS,
+  RequestSlots,
+  WireSequence,
 } from "../src/phonelink/phone-transport";
 
 const HOST = "a".repeat(64);
@@ -97,5 +99,105 @@ describe("phone transport host snapshot tolerance", () => {
         NOW,
       ),
     ).toEqual({ action: "present", session: OLD_SESSION });
+  });
+});
+
+// Let queued microtasks and timers run, so a waiter either wakes or stays put.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function track(promise: Promise<void>) {
+  let done = false;
+  void promise.then(() => {
+    done = true;
+  });
+  return () => done;
+}
+
+describe("request slot lanes", () => {
+  it("never lets normal traffic take more than two slots", async () => {
+    const slots = new RequestSlots();
+    await slots.acquire("normal");
+    await slots.acquire("normal");
+    expect(slots.inUse).toBe(2);
+    const third = track(slots.acquire("normal"));
+    await settle();
+    expect(third()).toBe(false);
+    expect(slots.inUse).toBe(2);
+  });
+
+  it("gives a call op the third slot while two long polls hold the others", async () => {
+    const slots = new RequestSlots();
+    await slots.acquire("normal"); // event long poll
+    await slots.acquire("normal"); // event long poll
+    const call = track(slots.acquire("call"));
+    await settle();
+    expect(call()).toBe(true);
+    expect(slots.inUse).toBe(3);
+  });
+
+  it("does not let a queued normal request take the slot a call frees", async () => {
+    const slots = new RequestSlots();
+    await slots.acquire("normal");
+    await slots.acquire("normal");
+    await slots.acquire("call");
+    const queuedNormal = track(slots.acquire("normal"));
+    slots.release(); // a long poll ends; a call still needs its slot
+    await settle();
+    expect(queuedNormal()).toBe(false);
+    expect(slots.inUse).toBe(2);
+  });
+
+  it("starts a call without waiting behind a chat backlog", async () => {
+    const slots = new RequestSlots();
+    await slots.acquire("normal");
+    await slots.acquire("normal");
+    const backlog = [1, 2, 3, 4, 5].map(() => track(slots.acquire("normal")));
+    const tick = track(slots.acquire("call"));
+    await settle();
+    expect(tick()).toBe(true);
+    expect(backlog.map((done) => done())).toEqual([false, false, false, false, false]);
+  });
+
+  it("wakes queued normal requests in arrival order", async () => {
+    const slots = new RequestSlots();
+    await slots.acquire("normal");
+    await slots.acquire("normal");
+    const order: string[] = [];
+    void slots.acquire("normal").then(() => order.push("first"));
+    void slots.acquire("normal").then(() => order.push("second"));
+    slots.release();
+    await settle();
+    expect(order).toEqual(["first"]);
+    slots.release();
+    await settle();
+    expect(order).toEqual(["first", "second"]);
+  });
+});
+
+describe("wire sequence", () => {
+  it("assigns seq in call order even when encodes finish out of order", async () => {
+    const wire = new WireSequence();
+    const delays = [30, 0, 10, 0];
+    const wireOrder: number[] = [];
+    const jobs = delays.map((delay) =>
+      wire.run(async (seq) => {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        wireOrder.push(seq);
+        return seq;
+      }),
+    );
+    const seqs = await Promise.all(jobs);
+    expect(seqs).toEqual([0, 1, 2, 3]);
+    expect(wireOrder).toEqual([0, 1, 2, 3]);
+  });
+
+  it("keeps going after a failed encode without reusing its seq", async () => {
+    const wire = new WireSequence();
+    const failed = wire.run(async () => {
+      throw new Error("encode failed");
+    });
+    await expect(failed).rejects.toThrow("encode failed");
+    const next = await wire.run(async (seq) => seq);
+    expect(next).toBe(1);
   });
 });
