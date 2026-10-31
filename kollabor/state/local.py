@@ -239,14 +239,6 @@ def _set_reply_text(message: Any, text: str) -> None:
         message.content = text
 
 
-def acp_rollback_message(name: str, previous: str, effort: str, error: str) -> str:
-    """Explain a rejected effort switch that restarted the previous ACP harness."""
-    return (
-        f"ACP profile {name!r} could not take effort {effort!r} ({error}); the previous "
-        f"harness {previous!r} was restarted, and its session may not have been resumed."
-    )
-
-
 class LocalStateService(StateService):
     """In-process StateService backed by the existing kollabor services.
 
@@ -1410,8 +1402,8 @@ class LocalStateService(StateService):
                 if effort:
                     try:
                         await self._apply_acp_effort(orchestrator, effort)
-                    except ValueError as exc:
-                        # A rejected effort is undone: restart the previous harness, then say so.
+                    except ValueError:
+                        # A rejected effort changes nothing: restore the previous harness.
                         await orchestrator.close()
                         if previous is not None:
                             if prior_binding is not None and prior_conversation:
@@ -1423,9 +1415,7 @@ class LocalStateService(StateService):
                                 )
                             except Exception:
                                 logger.error("previous ACP profile did not restart after a rejected effort")
-                        if previous is None:
-                            raise
-                        raise ValueError(acp_rollback_message(name, previous.name, effort, str(exc))) from None
+                        raise
                 ok = bool(self._profile_manager.set_active_profile(name))
         else:
             if str(current_provider).lower() == "acp" and orchestrator is not None:

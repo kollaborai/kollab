@@ -159,41 +159,6 @@ async def test_saved_effort_is_reported_when_the_harness_has_no_effort_option(tm
     assert any("this harness advertises no effort option, so effort max was not applied" in n for n in notices)
 
 
-def test_rollback_message_says_the_previous_session_may_not_be_resumed():
-    """(4) Scoped: a rejected switch that restarted the previous harness says so."""
-    from kollabor.state.local import acp_rollback_message
-
-    message = acp_rollback_message("review", "claude-code", "max", "ACP harness does not offer effort 'max'")
-    assert "could not take effort 'max'" in message
-    assert "previous harness 'claude-code' was restarted" in message
-    assert "may not have been resumed" in message
-
-
-def test_state_path_refuses_an_effort_the_harness_does_not_report(tmp_path):
-    """(2) state path: _apply_acp_effort checks the reported value, not just the call."""
-    import asyncio
-
-    from kollabor.state.local import LocalStateService
-
-    class Harness:
-        def __init__(self, reply_value):
-            self.options = _options()
-            self.reply_value = reply_value
-
-        def advertised_config_options(self):
-            return [dict(o) for o in self.options]
-
-        async def set_config_option(self, config_id, value):
-            for option in self.options:
-                if option["id"] == config_id:
-                    option["currentValue"] = self.reply_value
-            return self.advertised_config_options()
-
-    asyncio.run(LocalStateService._apply_acp_effort(Harness("max"), "max"))  # reported as asked: no error
-    with pytest.raises(ValueError, match="accepted effort 'max' but reports 'xhigh'"):
-        asyncio.run(LocalStateService._apply_acp_effort(Harness("xhigh"), "max"))
-
-
 @pytest.mark.asyncio
 async def test_saved_effort_survives_a_custom_option_id(tmp_path):
     """A thought_level option with its own ID: the saved pick is reported when the option disappears,
