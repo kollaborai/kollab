@@ -152,6 +152,43 @@ export type CallPacket = {
 } & Record<string, Json>;
 export type CallResult = Record<string, Json>;
 
+// Three request slots. Normal requests stop at two, so one slot is always free
+// for a call op. Waiters wake in arrival order within their own lane.
+export class RequestSlots {
+  private active = 0;
+  private waiters: Array<{ lane: RequestLane; wake: () => void }> = [];
+
+  limitFor(lane: RequestLane) {
+    return lane === "call" ? 3 : 2;
+  }
+
+  get inUse() {
+    return this.active;
+  }
+
+  async acquire(lane: RequestLane) {
+    if (
+      this.active < this.limitFor(lane) &&
+      !this.waiters.some((waiter) => waiter.lane === lane)
+    ) {
+      this.active += 1;
+      return;
+    }
+    await new Promise<void>((wake) => this.waiters.push({ lane, wake }));
+  }
+
+  release() {
+    this.active -= 1;
+    const index = this.waiters.findIndex(
+      (waiter) => this.active < this.limitFor(waiter.lane),
+    );
+    if (index < 0) return;
+    const [waiter] = this.waiters.splice(index, 1);
+    this.active += 1;
+    waiter.wake();
+  }
+}
+
 export const HOST_MISSING_GRACE_MS = 15_000;
 
 /** What a relay peers frame means for the tracked host session. Pure so the
@@ -454,8 +491,7 @@ export class PhoneTransport {
   private zeroBodyAutorun = false;
   private sent = 0;
   private received = -1;
-  private active = 0;
-  private waiters: Array<{ lane: RequestLane; wake: () => void }> = [];
+  private slots = new RequestSlots();
   private encoding: Promise<unknown> = Promise.resolve();
   private sending: Promise<void> = Promise.resolve();
   private lastSend = 0;
@@ -982,32 +1018,6 @@ export class PhoneTransport {
     return job;
   }
 
-  private limitFor(lane: RequestLane) {
-    return lane === "call" ? 3 : 2;
-  }
-
-  private async acquire(lane: RequestLane) {
-    if (
-      this.active < this.limitFor(lane) &&
-      !this.waiters.some((waiter) => waiter.lane === lane)
-    ) {
-      this.active += 1;
-      return;
-    }
-    await new Promise<void>((wake) => this.waiters.push({ lane, wake }));
-  }
-
-  private release() {
-    this.active -= 1;
-    const index = this.waiters.findIndex(
-      (waiter) => this.active < this.limitFor(waiter.lane),
-    );
-    if (index < 0) return;
-    const [waiter] = this.waiters.splice(index, 1);
-    this.active += 1;
-    waiter.wake();
-  }
-
   private async request(
     method: string,
     arguments_: Json | (() => Promise<Json>),
@@ -1015,7 +1025,7 @@ export class PhoneTransport {
     timeout = 30000,
     lane: RequestLane = "normal",
   ): Promise<Json> {
-    await this.acquire(lane);
+    await this.slots.acquire(lane);
     const id = randomId();
     let timer: ReturnType<typeof setTimeout>;
     let abort: () => void = () => {};
@@ -1053,7 +1063,7 @@ export class PhoneTransport {
       clearTimeout(timer!);
       signal?.removeEventListener("abort", abort);
       this.pending.delete(id);
-      this.release();
+      this.slots.release();
     }
   }
 
