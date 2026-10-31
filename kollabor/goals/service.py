@@ -193,6 +193,24 @@ class GoalService:
     ) -> None:
         self._staged_attachments[conversation_uid] = list(refs)
 
+    def has_staged_attachments(self, conversation_uid: str) -> bool:
+        return bool(self._staged_attachments.get(conversation_uid))
+
+    def snapshot_staged_attachments(
+        self, conversation_uid: str
+    ) -> tuple[List[Dict[str, Any]], Optional[object]]:
+        staged = self._staged_attachments.get(conversation_uid)
+        return list(staged or []), staged
+
+    def consume_staged_attachments(
+        self, conversation_uid: str, token: Optional[object]
+    ) -> List[Dict[str, Any]]:
+        # A synchronous goal-created subscriber may stage another image.
+        # Identity distinguishes a newer entry even if its refs are identical.
+        if token is not None and self._staged_attachments.get(conversation_uid) is token:
+            return self._staged_attachments.pop(conversation_uid)
+        return []
+
     def take_staged_attachments(self, conversation_uid: str) -> List[Dict[str, Any]]:
         return self._staged_attachments.pop(conversation_uid, [])
 
