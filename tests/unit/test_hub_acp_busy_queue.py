@@ -19,8 +19,10 @@ from plugins.hub.models import AgentState, HubMessage
 from plugins.hub.plugin import (
     _ACP_BUSY_PARK_LIMIT,
     _ACP_BUSY_RETRY_LIMIT,
+    _NetworkTurn,
     HubPlugin,
 )
+from plugins.hub import plugin as hub_plugin_module
 
 ASKER = "lapis@laptop-kollab"
 
@@ -49,12 +51,14 @@ def _acp_plugin(*, llm=None):
     return plugin, llm
 
 
-def _agent_request(content: str = "check the tunnel") -> HubMessage:
+def _agent_request(
+    content: str = "check the tunnel", from_identity: str = ASKER
+) -> HubMessage:
     return HubMessage(
         id="w" * 32,
         action="message",
         from_agent="relay:peer",
-        from_identity=ASKER,
+        from_identity=from_identity,
         to="infra",
         content=content,
         thread_id="1" * 32,
@@ -244,3 +248,161 @@ async def test_tap_turn_end_admits_a_parked_message_at_the_boundary():
     assert plugin._acp_busy_parked == []
     assert message.id in plugin._acp_network_turns
     llm.submit_human_input.assert_awaited_once()
+
+
+def _held_turn(plugin, message: HubMessage, attempts: int = 1) -> None:
+    """Register a real open network turn and park it, fixture-style."""
+    if not hasattr(plugin, "_acp_busy_parked"):
+        plugin._acp_busy_parked = []
+    turn = _NetworkTurn(
+        handle=message.from_identity,
+        thread_id=message.thread_id,
+        message_id=message.id,
+        opened_at=0.0,
+    )
+    plugin._acp_network_turns[message.id] = turn
+    plugin._acp_busy_parked.append(
+        {"message": message, "turn": turn, "attempts": attempts, "ts": 0.0}
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_end_settles_idle_once_the_completion_retires(monkeypatch):
+    """The boundary tap fires while the completing ACP task still counts as
+    processing; a bounded re-check settles presence once it retires (#483)."""
+    monkeypatch.setattr(hub_plugin_module, "_ACP_SETTLE_RECHECK_INTERVAL", 0.01)
+    plugin, llm = _acp_plugin()
+    plugin._identity.state = "working"
+    qp = SimpleNamespace(processing_queue=asyncio.Queue(), _turn_lock=asyncio.Lock())
+    llm._queue_processor = qp
+    llm.is_processing = True  # the completing task is still in _completion_tasks
+
+    plugin._follow_tool({"type": "turn_end"})
+    assert plugin._identity.state == AgentState.WORKING.value  # not yet idle
+
+    llm.is_processing = False  # its done-callback retires it a beat later
+    await asyncio.sleep(0.05)  # well inside the re-check deadline
+
+    assert plugin._identity.state == AgentState.IDLE.value
+    plugin._presence.publish.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_ends_parked_turns_busy_instead_of_dropping_them():
+    plugin, _ = _acp_plugin()
+    messages = [_agent_request(f"held {i}") for i in range(2)]
+    for message in messages:
+        _held_turn(plugin, message)
+    # Inert stubs for the rest of the shutdown path.
+    plugin._relay_agent = None
+    plugin._vault = None
+    plugin._change_feed = None
+    plugin._startup_task = None
+    plugin._heartbeat_task = None
+    plugin._mailbox_task = None
+    plugin._dreaming_task = None
+    plugin._notify_task = None
+    plugin._cron_task = None
+    plugin._autosave_task = None
+    plugin._supervisor_task = None
+    plugin._presence_sweep_task = None
+    plugin._bridge_task = None
+    plugin._email_task = None
+    plugin._started = False
+    plugin._socket_server = None
+    plugin._election = None
+
+    await plugin.shutdown(exit_process=False)
+
+    assert plugin._acp_busy_parked == []
+    assert not plugin._acp_network_turns
+    assert plugin._end_network_turn.await_count == 2
+    for call in plugin._end_network_turn.await_args_list:
+        assert call.kwargs["failed"] is True
+        assert call.kwargs["outcome"] == "busy"
+
+
+@pytest.mark.asyncio
+async def test_a_new_message_parks_behind_earlier_ones():
+    plugin, llm = _acp_plugin()
+    llm.submit_human_input = AsyncMock(return_value=_busy_reject())
+    first = _agent_request("first in line")
+    await plugin._submit_authenticated_agent_message(first, llm)
+    assert len(plugin._acp_busy_parked) == 1
+
+    second = _agent_request("arrives while the first is parked")
+    result = await plugin._submit_authenticated_agent_message(second, llm)
+
+    assert result["reason"] == "acp_queue_full"
+    assert [e["message"] for e in plugin._acp_busy_parked] == [first, second]
+    assert llm.submit_human_input.await_count == 1  # the second never submitted
+    plugin._end_network_turn.assert_not_awaited()  # its turn stays open
+    assert second.id in plugin._acp_network_turns
+
+    # The next boundaries admit both, in arrival order.
+    llm.submit_human_input = AsyncMock(return_value={"status": "queued"})
+    while plugin._acp_busy_parked:
+        plugin._kick_parked_busy_retries()
+        await plugin._busy_retry_task
+    assert [c.args[0] for c in llm.submit_human_input.await_args_list] == [
+        first.content,
+        second.content,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_busy_boundary_ages_every_parked_message():
+    plugin, llm = _acp_plugin()
+    llm.submit_human_input = AsyncMock(return_value=_busy_reject())
+    messages = [_agent_request(f"held {i}") for i in range(2)]
+    for message in messages:
+        _held_turn(plugin, message)
+
+    for _ in range(_ACP_BUSY_RETRY_LIMIT):  # boundaries drain the budget
+        plugin._kick_parked_busy_retries()
+        await plugin._busy_retry_task
+
+    assert plugin._acp_busy_parked == []
+    assert not plugin._acp_network_turns
+    assert plugin._end_network_turn.await_count == 2  # both aged out, not just the head
+    for call in plugin._end_network_turn.await_args_list:
+        assert call.kwargs["failed"] is True
+        assert call.kwargs["outcome"] == "busy"
+
+
+@pytest.mark.asyncio
+async def test_parked_messages_expire_busy_after_the_ttl(monkeypatch):
+    monkeypatch.setattr(hub_plugin_module, "_ACP_BUSY_PARK_TTL_SECONDS", 0.05)
+    plugin, llm = _acp_plugin()
+    llm.submit_human_input = AsyncMock(return_value=_busy_reject())
+    message = _agent_request()
+    await plugin._submit_authenticated_agent_message(message, llm)
+    assert plugin._acp_busy_parked
+
+    await asyncio.sleep(0.2)  # past the TTL; the timer sweeps the entry
+
+    assert plugin._acp_busy_parked == []
+    plugin._end_network_turn.assert_awaited_once()
+    kwargs = plugin._end_network_turn.await_args.kwargs
+    assert kwargs["failed"] is True
+    assert kwargs["outcome"] == "busy"
+
+
+@pytest.mark.asyncio
+async def test_a_departing_peers_parked_messages_end_unavailable():
+    plugin, _ = _acp_plugin()
+    gone = _agent_request("held for a leaving peer", from_identity=ASKER)
+    staying = _agent_request("held for a staying peer", from_identity="onyx@other")
+    staying.id = "s" * 32  # distinct from gone's fixture id
+    _held_turn(plugin, gone)
+    _held_turn(plugin, staying)
+
+    await plugin._sweep_parked_for_departure(ASKER)
+
+    assert [e["message"] for e in plugin._acp_busy_parked] == [staying]
+    assert gone.id not in plugin._acp_network_turns
+    assert staying.id in plugin._acp_network_turns
+    plugin._end_network_turn.assert_awaited_once()
+    kwargs = plugin._end_network_turn.await_args.kwargs
+    assert kwargs["failed"] is True
+    assert kwargs["outcome"] == "unavailable"
