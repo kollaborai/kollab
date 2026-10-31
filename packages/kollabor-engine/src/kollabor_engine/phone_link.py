@@ -1454,6 +1454,10 @@ class PhoneLink:
                     await asyncio.gather(self._task, return_exceptions=True)
                 for identifier in tuple(self.clients):
                     self._invalidate(identifier, cause="shutdown")
+                # Each invalidation's call stop (and the bridge close it runs) must finish
+                # before close returns, or a phone call's voice bridge outlives the app.
+                await asyncio.gather(*tuple(self._call_stops), return_exceptions=True)
+                await self.audio.shutdown()
                 await asyncio.gather(*(client.close() for client in self.clients.values()), return_exceptions=True)
             finally:
                 self.clients.clear()

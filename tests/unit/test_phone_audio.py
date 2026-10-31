@@ -800,3 +800,38 @@ async def test_cancelled_different_voice_loser_releases_its_voice_after_shutdown
     await manager.shutdown()
     assert manager._voice_owner == {}
     assert bridges[1].closed
+
+
+@pytest.mark.asyncio
+async def test_app_close_waits_for_the_call_bridge_to_close(tmp_path):
+    """Closing PhoneLink mid-call finishes the call's bridge close before close returns."""
+    from kollabor_engine.phone_link import PhoneLink
+
+    class SlowCloseBridge(FakeBridge):
+        async def close(self):
+            await asyncio.sleep(0.05)
+            self.closed = True
+
+    bridges = []
+
+    async def opener(voice_session_id, generation):
+        bridges.append(SlowCloseBridge())
+        return bridges[-1]
+
+    class Client:
+        async def close(self):
+            return None
+
+    link = PhoneLink(app=None, directory=tmp_path, port=0, open_phone_bridge=opener)
+    link.clients["phone-a"] = Client()
+    opened = await link._call(
+        "phone-a",
+        object(),
+        {"op": "call_open", "id": CALL, "voice_session_id": VOICE, "generation": 0},
+    )
+    assert opened["ok"] is True
+    await link.close()
+    assert bridges[0].closed  # close() returned only after the bridge finished closing
+    assert not link._call_stops  # no call-stop task is still pending
+    assert link.audio._closing == set()
+    assert link.audio._calls == {}
