@@ -199,6 +199,12 @@ class ACPOrchestrator:
         if notice:
             self._show_notice(notice)
 
+    def _forget_session_picks(self) -> None:
+        """Picks belong to one harness session: a restart into another profile must not replay them.
+        Confirmed picks are already in the saved file, so a restart of the same profile still restores them."""
+        self._effort_pick = None
+        self._user_picks = {}
+
     def _saved_options(self) -> dict[str, dict[str, Any]]:
         try:
             saved = json.loads(self._options_path.read_text())
@@ -330,6 +336,7 @@ class ACPOrchestrator:
             # acquiring a replacement, without creating a second owner.
             await self.close()
         self._closed = False
+        self._forget_session_picks()
         self.startup_error = None
         self._terminal_session_id = None
         self._observations.clear()
