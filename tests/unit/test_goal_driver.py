@@ -41,6 +41,9 @@ class FakeCoordinator:
     """Just enough coordinator surface for the driver."""
 
     def __init__(self, turn_script=None, pipe_mode=False):
+        self.profile_manager = SimpleNamespace(
+            get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "openai")
+        )
         self.response_parser = SimpleNamespace(register_plugin_tag=lambda *a, **k: None)
         self.tool_executor = SimpleNamespace(
             register_plugin_handler=lambda *a, **k: None

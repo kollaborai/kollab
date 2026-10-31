@@ -767,6 +767,16 @@ creation with a clear capability message or run in an explicitly non-running
 manual-inspection mode. It must not pretend that arbitrary prose is completion
 evidence.
 
+Current implementation boundary: ACP harness profiles are not yet integrated
+with this reporting/evidence contract or authoritative per-request goal usage.
+The installed Codex ACP adapter exposes a separate goal extension, but Kollab
+does not yet own or project its goal lifecycle.
+Until [issue #496](https://github.com/kollaborai/kollab/issues/496) is
+implemented, goal creation and resume are refused for an ACP-selected profile;
+an existing active goal is paused before its next dispatch. Inspection and
+stop controls remain available. This is a capability guard, not ACP goal
+execution support.
+
 ### 9.2 text, image, and mixed inputs
 
 Goal command recognition follows the same structured-content invariant already

@@ -92,6 +92,18 @@ class GoalCommandHandler(BaseCommandHandler):
         except Exception:
             return os.getcwd()
 
+    def _execution_unavailable_reason(self) -> Optional[str]:
+        from kollabor.goals.driver import goal_execution_unavailable_reason
+
+        try:
+            coordinator = self.event_bus.get_service("llm_service")
+            if coordinator is None:
+                driver = self.event_bus.get_service("goal_driver")
+                coordinator = getattr(driver, "coord", None)
+        except Exception:
+            coordinator = None
+        return goal_execution_unavailable_reason(coordinator)
+
     # ------------------------------------------------------------------
     # registration
     # ------------------------------------------------------------------
@@ -266,6 +278,11 @@ class GoalCommandHandler(BaseCommandHandler):
         from kollabor.goals.service import GoalError
 
         attachments = svc.take_staged_attachments(uid)
+        capability_error = self._execution_unavailable_reason()
+        if capability_error:
+            return CommandResult(
+                success=False, message=capability_error, display_type="error"
+            )
         try:
             record = svc.create_goal(
                 conversation_uid=uid,
@@ -426,6 +443,11 @@ class GoalCommandHandler(BaseCommandHandler):
                 )
             else:
                 rest = ""
+        capability_error = self._execution_unavailable_reason()
+        if capability_error:
+            return CommandResult(
+                success=False, message=capability_error, display_type="error"
+            )
         try:
             updated = self.service.resume(
                 record.goal_id, token_budget=budget, auto_turn_limit=turn_limit
