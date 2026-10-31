@@ -473,3 +473,39 @@ class TestUserMessageEvent:
         service._add_conversation_message("assistant", "pong")
 
         assert _drain(q) == []
+
+
+def test_concurrent_publishers_reach_a_subscriber_in_seq_order():
+    # Kyanite on #543 round 2: seq was assigned under one lock and delivered
+    # under another, so a second thread could deliver seq 2 before seq 1, and
+    # an engine that drops what it has seen by seq then dropped seq 1.
+    import threading
+
+    from kollabor_tui.display_tap import DisplayTap
+
+    tap = DisplayTap()
+    received = tap.subscribe("engine")
+    lock, paused, release = tap._lock, threading.Event(), threading.Event()
+
+    class PauseAfterFirstRelease:
+        done = False
+
+        def __enter__(self):
+            lock.acquire()
+
+        def __exit__(self, *exc):
+            lock.release()
+            if threading.current_thread().name == "first" and not self.done:
+                self.done = True
+                paused.set()
+                release.wait(5)
+
+    tap._lock = PauseAfterFirstRelease()
+    first = threading.Thread(target=tap.publish, args=({"type": "turn_complete"},), name="first")
+    first.start()
+    assert paused.wait(5)
+    tap.publish({"type": "output", "text": "from the render thread"})
+    release.set()
+    first.join(5)
+    seqs = [received.get_nowait()["seq"] for _ in range(2)]
+    assert seqs == sorted(seqs)

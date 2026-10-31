@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import psutil
 
+from . import sse
 from .folders import agents_in_folder
 from .hub_bridge import HubBridge
 
@@ -323,6 +324,14 @@ class DaemonHandle:
                 reply = _REPLY_HEAD.match(head)
                 if reply is None or self.rpc is None:
                     logger.warning("dropped an oversized frame from daemon %s", self.identity)
+                    # Say so in the chat: a silently missing tool result reads
+                    # as a complete reply.
+                    self._fan_out(sse.error(
+                        self.session_id,
+                        "frame_too_large",
+                        "An update from the agent was over the engine's frame limit and was"
+                        " dropped; this reply is incomplete.",
+                    ))
                     continue
                 logger.warning("dropped an oversized rpc reply from daemon %s", self.identity)
                 self.rpc.on_reply({

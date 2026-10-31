@@ -42,12 +42,19 @@ EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 STREAM_PUBLISH_INTERVAL = 0.15
 
 
-def _foreign_queued_client_completion(event: Dict[str, Any], request_ids: set[str]) -> bool:
-    """A cancelled pre-start client request cannot finish another active stream."""
-    return (event.get("type") == "turn_complete"
-            and event.get("input_source") == "acp_client"
-            and event.get("queued") is True
-            and str(event.get("request_id") or "") not in request_ids)
+def _foreign_completion(event: Dict[str, Any], request_ids: set[str]) -> bool:
+    """Another request's turn_complete never finishes this stream.
+
+    A cancelled pre-start client request is one. So is an earlier turn's
+    completion the daemon published while the engine was reattaching: it
+    arrives after this request was accepted (#543).
+    """
+    if event.get("type") != "turn_complete":
+        return False
+    request_id = str(event.get("request_id") or "")
+    if event.get("input_source") == "acp_client" and event.get("queued") is True:
+        return request_id not in request_ids
+    return bool(request_id and request_ids) and request_id not in request_ids
 
 
 def _contains_reserved_voice_origin(value: Any) -> bool:
@@ -129,7 +136,7 @@ async def send_message(session_id: str, body: MessageRequest):
                     return
 
                 event.setdefault("session_id", session_id)
-                if _foreign_queued_client_completion(event, request_ids):
+                if _foreign_completion(event, request_ids):
                     continue
 
                 if event.get("type") == "daemon_closed":
@@ -952,7 +959,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     publish_progress()
                     continue
                 event_type = str(event.get("type") or "")
-                if _foreign_queued_client_completion(event, request_ids):
+                if _foreign_completion(event, request_ids):
                     continue
 
                 if event_type == "token":
