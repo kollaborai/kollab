@@ -1376,7 +1376,7 @@ class RelayClient:
             {"type": "send", "to": key, "id": message_id, "ciphertext": ciphertext}
         )
 
-    async def _handle_frame(self, frame):
+    async def _apply_frame(self, frame):
         if frame.get("type") == "peers":
             self._set_peers(frame)
         elif frame.get("type") == "error":
@@ -1443,6 +1443,19 @@ class RelayClient:
             # A frame from a newer directory: ignored, never a reason to drop
             # the connection.
             self._counts["ignored_frames"] += 1
+
+    async def _handle_frame(self, frame):
+        # Linked devices come and go constantly (phone screen lock, engine
+        # restarts, lease pruning). A received frame whose content cannot be
+        # applied fails at most the pending requests it concerns; it must
+        # never tear down the whole relay connection, because a reconnect
+        # mints a fresh session and re-keys every peer. Genuine transport
+        # failures (send/receive errors, invalid wire JSON) still reconnect.
+        try:
+            await self._apply_frame(frame)
+        except RelayError as exc:
+            self._counts["peer_state_frame_errors"] += 1
+            _LOGGER.warning("relay frame rejected without reconnect: %s", exc)
 
     def set_knock_handler(
         self, handler: Callable[[dict], Awaitable[None]] | None

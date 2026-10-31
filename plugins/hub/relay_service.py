@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import resource
@@ -56,6 +57,26 @@ from .relay_backend import (
     RelayLimits,
     validate_backend_url,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _debug_member_event(
+    action: str, key: str | None, room_hash: str | None, reason: str
+) -> None:
+    """Trace every room-member row deletion and peer disconnect.
+
+    Set KOLLAB_RELAY_DEBUG=1 to enable. The 2026-10-30 phone-link reconnect
+    loop was driven by a server-side member-row deletion ~0.5s after the
+    phone registered whose trigger was never pinned from logs alone; this
+    makes the next live occurrence attributable by key, room and reason.
+    """
+    if os.environ.get("KOLLAB_RELAY_DEBUG") != "1":
+        return
+    _LOGGER.debug(
+        "relay member %s key=%s room=%s reason=%s", action, key, room_hash, reason
+    )
+
 
 PROTOCOL = "kollab-relay/1"
 # The relay protocol versions this relay serves, newest first. A client names
@@ -646,6 +667,9 @@ class RelayState:
                 )
                 removed, records = await self.backend.remove_peer(room_hash, member)
                 if removed:
+                    _debug_member_event(
+                        "row_removed", key, room_hash, "connection released"
+                    )
                     await self.backend.notify_room_change(
                         room_hash,
                         {record.node_id for record in records} - {self.config.node_id},
@@ -653,7 +677,9 @@ class RelayState:
                     await self.room_changed(room_hash)
                     await self.notify_linked(key)
             except RelayBackendError:
-                pass
+                _debug_member_event(
+                    "row_remove_failed", key, room_hash, "backend error"
+                )
         try:
             await self.backend.release_connection(
                 client.connection_id, client.source_ip, client.reservation
@@ -667,6 +693,9 @@ class RelayState:
     async def destination(self, room_hash: str, key: str) -> PeerRecord | None:
         records, pruned = await self.backend.list_room(room_hash)
         if pruned:
+            _debug_member_event(
+                "rows_pruned", None, room_hash, f"{len(pruned)} expired leases"
+            )
             await self.backend.notify_room_change(
                 room_hash, {record.node_id for record in records}
             )
@@ -752,6 +781,9 @@ class RelayState:
             payload["ticket"] = json.loads(route["ticket"])
         delivered = await _send_json(client, payload)
         if not delivered:
+            _debug_member_event(
+                "disconnect", client.key, client.room_hash, "delivery failed"
+            )
             await _disconnect_peer(self, client)
         return delivered
 
@@ -803,6 +835,9 @@ class RelayState:
             return
         self.room_snapshots[room_hash] = signature
         if pruned:
+            _debug_member_event(
+                "rows_pruned", None, room_hash, f"{len(pruned)} expired leases"
+            )
             nodes = {record.node_id for record in records} - {self.config.node_id}
             if nodes:
                 await self.backend.notify_room_change(room_hash, nodes)
@@ -820,11 +855,17 @@ class RelayState:
             ]
             snapshot += linked.get(peer.key, [])[: max(0, MAX_SNAPSHOT_PEERS - len(snapshot))]
             if not await _send_json(peer, {"type": "peers", "peers": snapshot}):
+                _debug_member_event(
+                    "disconnect", peer.key, peer.room_hash, "peers push failed"
+                )
                 await _disconnect_peer(self, peer)
 
     async def backend_failed(self) -> None:
         self.ready = False
         self.shutting_down = True
+        _debug_member_event(
+            "backend_failed", None, None, f"{len(self.connections)} clients dropped"
+        )
         await _close_websockets(
             list(self.connections),
             code=WSCloseCode.SERVICE_RESTART,
@@ -864,6 +905,13 @@ class RelayState:
 
                 await asyncio.gather(*(renew_client(client) for client in clients))
                 if invalid:
+                    for client in invalid:
+                        _debug_member_event(
+                            "lease_renewal_invalid",
+                            client.key,
+                            client.room_hash,
+                            "lease renewal rejected",
+                        )
                     await _close_websockets(
                         invalid,
                         code=WSCloseCode.GOING_AWAY,
