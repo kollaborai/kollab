@@ -688,3 +688,36 @@ async def test_cancelled_active_close_keeps_its_bridge_tracked():
     gate.set()
     await shutdown
     assert bridges[0].closed and "phone-a" not in manager._calls
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_fenced_bridge_close_still_releases_voice():
+    """A cancel that lands mid bridge-close still gives the voice session back."""
+    gate = asyncio.Event()
+    bridges = []
+
+    class StuckCloseBridge(FakeBridge):
+        async def close(self):
+            await gate.wait()
+            self.closed = True
+
+    async def opener(voice_session_id, generation):
+        bridge = StuckCloseBridge()
+        bridges.append(bridge)
+        await asyncio.sleep(0.05)  # the open is still pending when the close fences it
+        return bridge
+
+    manager = PhoneAudioManager(opener)
+    session = object()
+    opening = asyncio.create_task(manager.open("phone-a", session, CALL, VOICE, 0))
+    await asyncio.sleep(0.01)
+    await manager.close("phone-a", session, CALL)  # fences the pending open
+    await asyncio.sleep(0.1)  # the fenced open is now waiting inside its bridge close
+    opening.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    result = await manager.open("phone-b", object(), "b" * 32, VOICE, 0)
+    assert result["ok"] is True  # not call_busy: phone-a's reservation was released
+    gate.set()
+    await manager.shutdown()
+    assert len(bridges) == 2 and all(b.closed for b in bridges)

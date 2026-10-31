@@ -137,45 +137,43 @@ class PhoneAudioManager:
         self._voice_owner[voice_session_id] = phone
         pending = _Opening(phone, call_id, session, voice_session_id)
         self._pending.add(pending)
+        bridge: PhoneBridge | None = None
         try:
-            bridge = await self._open_bridge(voice_session_id, generation)
-        except PhoneCallError:
-            self._pending.discard(pending)  # this open no longer holds the voice
-            self._release_voice(phone, voice_session_id)
-            raise
-        except Exception:
-            self._pending.discard(pending)
-            self._release_voice(phone, voice_session_id)
-            logger.warning("phone call bridge failed to open", exc_info=True)
-            raise PhoneCallError("call_unavailable") from None
-        except BaseException:  # cancelled while the bridge was opening
-            self._pending.discard(pending)
-            self._release_voice(phone, voice_session_id)
-            raise
+            try:
+                bridge = await self._open_bridge(voice_session_id, generation)
+            except PhoneCallError:
+                raise
+            except Exception:
+                logger.warning("phone call bridge failed to open", exc_info=True)
+                raise PhoneCallError("call_unavailable") from None
+            if pending.cancelled:
+                # Revoked, closed or shut down while the bridge was opening.
+                raise PhoneCallError("call_unavailable")
+            if phone not in self._calls:
+                call = _Call(
+                    id=call_id,
+                    phone=phone,
+                    session=session,
+                    voice_session_id=voice_session_id,
+                    generation=generation,
+                    bridge=bridge,
+                )
+                call.watchdog = asyncio.create_task(self._watch(call))
+                self._calls[phone] = call
+                bridge = None  # the call owns it now
+                return self._open_result(call)
         finally:
+            # Runs on success, failure and cancellation alike. The voice is released
+            # synchronously, before any await, so a cancel can never skip it. A bridge
+            # this open did not register is closed in a tracked task (shutdown waits
+            # on it), and the await only waits for that close.
             self._pending.discard(pending)
-        if pending.cancelled:
-            # Revoked, closed or shut down while the bridge was opening.
-            await asyncio.shield(self._close_bridge(bridge))
             self._release_voice(phone, voice_session_id)
-            raise PhoneCallError("call_unavailable")
-        if phone in self._calls:
-            # A racing open registered while this bridge was opening: drop ours,
-            # and give back our voice session unless the winner holds it.
-            await asyncio.shield(self._close_bridge(bridge))
-            self._release_voice(phone, voice_session_id)
-            return await self.open(phone, session, call_id, voice_session_id, generation)
-        call = _Call(
-            id=call_id,
-            phone=phone,
-            session=session,
-            voice_session_id=voice_session_id,
-            generation=generation,
-            bridge=bridge,
-        )
-        call.watchdog = asyncio.create_task(self._watch(call))
-        self._calls[phone] = call
-        return self._open_result(call)
+            if bridge is not None:
+                await asyncio.shield(self._close_bridge(bridge))
+        # A racing open registered while our bridge was opening. Ours is closed and
+        # our voice is released above, so the retry starts from a clean slate.
+        return await self.open(phone, session, call_id, voice_session_id, generation)
 
     async def tick(
         self, phone: str, session: object, call_id: str, n: int, mic: bytes
