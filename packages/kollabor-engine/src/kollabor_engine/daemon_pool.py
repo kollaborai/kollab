@@ -43,6 +43,7 @@ import psutil
 
 from .folders import agents_in_folder
 from .hub_bridge import HubBridge
+from .session_context import PHONE_STREAM_REVOKED, SessionReadContext
 
 
 def _pid_start_time(pid: int) -> Optional[float]:
@@ -169,6 +170,8 @@ class DaemonHandle:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._read_task: Optional[asyncio.Task] = None
         self._subscribers: Set[asyncio.Queue] = set()
+
+        self._subscriber_contexts: Dict[asyncio.Queue, SessionReadContext] = {}
         self._closed = False
         self.startup_error: str = ""
         # A cancelled turn's tool may ignore the stop signal and report
@@ -336,13 +339,33 @@ class DaemonHandle:
         """Engine-generated event to every SSE subscriber of this session."""
         self._fan_out(event)
 
-    def subscribe(self) -> asyncio.Queue:
+    def subscribe(self, context: SessionReadContext | None = None) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        if context is not None and context.revoked:
+            queue.put_nowait(PHONE_STREAM_REVOKED)
+            return queue
         self._subscribers.add(queue)
+        if context is not None:
+            self._subscriber_contexts[queue] = context
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
         self._subscribers.discard(queue)
+        self._subscriber_contexts.pop(queue, None)
+
+    def close_streams_for_context(self, context: SessionReadContext) -> int:
+        """Synchronously close and remove every SSE queue owned by a revoked pairing."""
+        closed = 0
+        for queue, subscribed_context in tuple(self._subscriber_contexts.items()):
+            if subscribed_context is not context:
+                continue
+            self._subscriber_contexts.pop(queue, None)
+            self._subscribers.discard(queue)
+            while not queue.empty():
+                queue.get_nowait()
+            queue.put_nowait(PHONE_STREAM_REVOKED)
+            closed += 1
+        return closed
 
     @property
     def alive(self) -> bool:
@@ -590,6 +613,13 @@ class DaemonPool:
 
     def all(self) -> List[DaemonHandle]:
         return list(self._daemons.values())
+
+
+    def close_streams_for_context(self, context: SessionReadContext) -> int:
+        """Close a revoked PhoneLink pairing's queues across active session daemons."""
+        return sum(
+            handle.close_streams_for_context(context) for handle in self.all()
+        )
 
     def starting_folders(self) -> List[str]:
         """Folders with an agent being launched by this engine."""
