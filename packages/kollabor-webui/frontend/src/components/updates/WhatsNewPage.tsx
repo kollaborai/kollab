@@ -20,7 +20,7 @@ export function WhatsNewPage({ onExit }: { onExit: () => void }) {
   return (
     <main aria-label="What’s New" className="flex h-full min-h-0 min-w-0 flex-col bg-background text-sm">
       <header className="flex shrink-0 items-center gap-3 px-4 py-3 sm:px-6">
-        <SidebarTrigger className="-ml-1 md:hidden" />
+        <SidebarTrigger className="-ml-1 lg:hidden" />
         <h1 ref={titleRef} tabIndex={-1} className="min-w-0 flex-1 text-lg font-semibold outline-none">What’s New</h1>
         <TooltipIconButton tooltip="Close What’s New" className="size-8" onClick={onExit}><X className="size-4" aria-hidden="true" /></TooltipIconButton>
       </header>

@@ -187,6 +187,7 @@ const mainConfig = defineConfig({
       "src/components/assistant-ui/tool-fallback.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",
+      "tests/sidebar-breakpoint.test.ts",
     ],
     environment: "node",
   },
