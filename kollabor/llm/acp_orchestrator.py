@@ -185,14 +185,14 @@ class ACPOrchestrator:
             return notices  # nothing to re-apply: stay lazy, as before
         model = next((o for o in self.advertised_config_options()
                       if o.get("category") == "model" or o.get("id") == "model"), None)
+        saved_model = saved.pop("model", None)
+        model_value = loadout_model or saved_model
         model_ok = True
-        if model is None and loadout_model:
+        if model is None and model_value:
             model_ok = False
-            notices.append(f"model {loadout_model} was not applied: the harness advertises no model option")
+            notices.append(f"model {model_value} was not applied: the harness advertises no model option")
         if model is not None:
             model_id = str(model["id"])
-            saved_model = saved.pop("model", None)
-            model_value = loadout_model or saved_model
             if model_value and model_value != model.get("currentValue"):
                 try:
                     await runner.set_config_option(model_id, model_value)

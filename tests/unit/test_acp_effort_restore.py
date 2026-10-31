@@ -160,6 +160,17 @@ async def test_saved_effort_is_reported_when_the_harness_has_no_effort_option(tm
 
 
 @pytest.mark.asyncio
+async def test_saved_model_is_reported_when_the_harness_has_no_model_option(tmp_path):
+    """A saved model the harness no longer advertises gets the same notice as a rejected loadout model."""
+    options = [_options()[1]]  # effort only
+    orch = _orchestrator(tmp_path, options, saved={"model": "sonnet"})
+    no_loadout = SimpleNamespace(name="claude-code", model="", effort="")
+    notices = await orch._restore_options(no_loadout)
+    assert orch._runner.calls == []
+    assert any("model sonnet was not applied: the harness advertises no model option" in n for n in notices)
+
+
+@pytest.mark.asyncio
 async def test_saved_effort_survives_a_custom_option_id(tmp_path):
     """A thought_level option with its own ID: the saved pick is reported when the option disappears,
     and applied to that ID when it is present."""
