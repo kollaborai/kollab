@@ -33,6 +33,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import subprocess
 import time
@@ -85,6 +86,9 @@ SPAWN_TIMEOUT_SECONDS = 45.0
 # data. Web clients cannot use them, and forwarding them would double every
 # message, so the pool drops them at the boundary.
 _RENDERED_EVENT_TYPES = frozenset({"output", "active_area", "heartbeat", "clear"})
+
+# The start of an ``rpc_reply`` frame as the daemon writes it (RpcResponse.to_wire).
+_REPLY_HEAD = re.compile(rb'\{"action":\s*"rpc_reply",\s*"request_id":\s*"([^"\\]+)"')
 
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,6 +175,11 @@ class DaemonHandle:
         self._subscribers: Set[asyncio.Queue] = set()
         self._closed = False
         self.startup_error: str = ""
+        # The daemon replays its recent events on every attach. After a reattach
+        # the ones already passed on are dropped by their seq, or the last turn's
+        # turn_complete would end the stream of the turn now running (#541). A
+        # daemon process has one tap, so seq only grows while its pid lives.
+        self._last_seq: Optional[int] = None
         # A cancelled turn's tool may ignore the stop signal and report
         # afterwards. Its late result still flows (the transcript mirror
         # follows it) but carries `cancelled: true`, so no gem reads it as a
@@ -253,15 +262,7 @@ class DaemonHandle:
         assert self._reader is not None
         try:
             while True:
-                try:
-                    line = await self._reader.readline()
-                except ValueError:
-                    # One frame over the reader's limit (the daemon allows larger
-                    # lines): drop it and keep the session, as the daemon does with
-                    # ours. A reply inside it times out; reattaching would only
-                    # meet the same frame again (#541).
-                    logger.warning("dropped an oversized frame from daemon %s", self.identity)
-                    continue
+                line = await self._read_line()
                 if not line:
                     break
                 try:
@@ -273,6 +274,12 @@ class DaemonHandle:
                     if self.rpc is not None:
                         self.rpc.on_reply(message)
                     continue
+
+                seq = message.get("seq")
+                if isinstance(seq, int):
+                    if self._last_seq is not None and seq <= self._last_seq:
+                        continue  # replayed on a reattach, already passed on
+                    self._last_seq = seq
 
                 if message.get("type") in _RENDERED_EVENT_TYPES:
                     continue
@@ -295,6 +302,45 @@ class DaemonHandle:
                 return
         # Wake every SSE consumer so requests don't hang on a dead daemon.
         self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
+
+    async def _read_line(self) -> bytes:
+        """The next line from the daemon; ``b""`` once the stream ends.
+
+        A line over the reader's limit (the daemon allows larger ones) is
+        skipped and the session stays: reattaching would only meet it again.
+        An ``rpc_reply`` among them fails its call now with that reason,
+        rather than a timeout with no cause (#541, #544).
+        """
+        assert self._reader is not None
+        while True:
+            try:
+                return await self._reader.readuntil(b"\n")
+            except asyncio.IncompleteReadError as e:
+                return e.partial
+            except asyncio.LimitOverrunError as e:
+                head = await self._reader.readexactly(min(e.consumed, 4096))
+                await self._skip_rest_of_line()
+                reply = _REPLY_HEAD.match(head)
+                if reply is None or self.rpc is None:
+                    logger.warning("dropped an oversized frame from daemon %s", self.identity)
+                    continue
+                logger.warning("dropped an oversized rpc reply from daemon %s", self.identity)
+                self.rpc.on_reply({
+                    "action": "rpc_reply",
+                    "request_id": reply.group(1).decode(errors="replace"),
+                    "error": "reply over the engine's frame limit",
+                })
+
+    async def _skip_rest_of_line(self) -> None:
+        assert self._reader is not None
+        while True:
+            try:
+                await self._reader.readuntil(b"\n")
+                return
+            except asyncio.LimitOverrunError as e:
+                await self._reader.readexactly(e.consumed)
+            except asyncio.IncompleteReadError:
+                return  # the stream ended inside the frame; the next read sees it
 
     async def _reattach(
         self, attempts: int = 20, delay: float = 0.5, slow_delay: float = 5.0

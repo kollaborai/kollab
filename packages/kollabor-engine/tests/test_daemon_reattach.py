@@ -5,9 +5,12 @@ import functools
 import json
 import os
 import tempfile
+import time
 
 import pytest
 from kollabor_engine.daemon_pool import DaemonHandle
+
+from kollabor_rpc import RpcError
 
 
 @pytest.mark.asyncio
@@ -158,6 +161,90 @@ async def test_an_oversized_frame_is_dropped_and_the_session_stays(monkeypatch):
         await handle.connect(path)
         assert await handle.rpc.call("state.ping", {}, timeout=5) == {"ok": True}
         assert attaches == ["attach"]  # never dropped and reattached
+    finally:
+        handle._closed = True
+        handle._read_task.cancel()
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_reply_fails_its_call_at_once(monkeypatch):
+    # Kyanite on #543: dropping a too-big reply left its call to time out with
+    # no cause, and refresh_history quietly kept stale history.
+    import kollabor_rpc.transport
+
+    monkeypatch.setattr(kollabor_rpc.transport, "LARGE_BUFFER_LIMIT", 1024)
+
+    async def daemon(reader, writer):
+        await reader.readline()
+        writer.write(b'{"type": "attach_ack"}\n')
+        await writer.drain()
+        for result in ({"messages": "x" * 4096}, {"ok": True}):
+            request = json.loads(await reader.readline())
+            reply = {"action": "rpc_reply", "request_id": request["request_id"], "result": result}
+            writer.write((json.dumps(reply) + "\n").encode())
+            await writer.drain()
+        await reader.read()
+
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp"), "nephrite.sock")
+    server = await asyncio.start_unix_server(daemon, path)
+    handle = DaemonHandle("s6", "nephrite", launcher=None)
+    handle.pid = os.getpid()
+    try:
+        await handle.connect(path)
+        started = time.monotonic()
+        with pytest.raises(RpcError, match="frame limit"):
+            await handle.rpc.call("state.get_conversation", {}, timeout=5)
+        assert time.monotonic() - started < 2  # failed, not timed out
+        assert await handle.rpc.call("state.ping", {}, timeout=5) == {"ok": True}
+    finally:
+        handle._closed = True
+        handle._read_task.cancel()
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_in_flight_across_the_slow_retries_ends_on_its_own_completion():
+    # Kyanite on #543: the daemon replays its recent events on every attach, so
+    # after a long reattach the last turn's turn_complete reached the running
+    # turn's stream first and ended it early.
+    old_done = {"type": "turn_complete", "request_id": "old", "seq": 1}
+    started = {"type": "tool_start", "request_id": "new", "seq": 2}
+    new_done = {"type": "turn_complete", "request_id": "new", "seq": 3}
+    attaches = []
+
+    async def daemon(reader, writer):
+        await reader.readline()
+        attaches.append("attach")
+        if 1 < len(attaches) <= 4:  # refused past the quick tries
+            writer.close()
+            return
+        writer.write(b'{"type": "attach_ack"}\n')
+        for event in [old_done, started] + ([new_done] if len(attaches) > 1 else []):
+            writer.write((json.dumps(event) + "\n").encode())
+        await writer.drain()
+        if len(attaches) == 1:  # the socket restart, mid-turn
+            writer.close()
+            return
+        await reader.read()
+
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp"), "koordinator.sock")
+    server = await asyncio.start_unix_server(daemon, path)
+    handle = DaemonHandle("s7", "koordinator", launcher=None)
+    handle.pid = os.getpid()
+    _fast_reattach(handle)
+    queue = handle.subscribe()
+    try:
+        await handle.connect(path)
+        seen = [await asyncio.wait_for(queue.get(), timeout=5) for _ in range(3)]
+        assert [(e["type"], e["request_id"]) for e in seen] == [
+            ("turn_complete", "old"),
+            ("tool_start", "new"),
+            ("turn_complete", "new"),
+        ]
+        assert len(attaches) == 5
+        await asyncio.sleep(0.05)
+        assert queue.empty()
     finally:
         handle._closed = True
         handle._read_task.cancel()
