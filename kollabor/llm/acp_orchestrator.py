@@ -177,6 +177,9 @@ class ACPOrchestrator:
         model = next((o for o in self.advertised_config_options()
                       if o.get("category") == "model" or o.get("id") == "model"), None)
         model_ok = True
+        if model is None and loadout_model:
+            model_ok = False
+            notices.append(f"model {loadout_model} was not applied: the harness advertises no model option")
         if model is not None:
             model_id = str(model["id"])
             saved_model = saved.pop(model_id, None)
@@ -195,7 +198,7 @@ class ACPOrchestrator:
                     notices.append(f"model {model_value} did not become active (harness reports {active})")
         effort = self._effort_option()
         effort_id = str(effort["id"]) if effort is not None else None
-        saved_effort = saved.pop(effort_id, None) if effort_id else None
+        saved_effort = saved.pop(effort_id or "effort", None)
         if not model_ok:
             if loadout_effort or saved_effort:
                 notices.append(
@@ -213,9 +216,14 @@ class ACPOrchestrator:
                     )
                 else:
                     try:
-                        await runner.set_config_option(effort_id, value)
+                        options = await runner.set_config_option(effort_id, value)
                     except Exception as exc:
                         notices.append(f"effort {value} was not applied: {exc}")
+                    else:
+                        reported = next((o.get("currentValue") for o in options or []
+                                         if o.get("id") == effort_id), None)
+                        if reported != value:
+                            notices.append(f"effort {value} was accepted but the harness reports {reported}")
         elif loadout_effort or saved_effort:
             notices.append(
                 f"this harness advertises no effort option, so effort {loadout_effort or saved_effort} was not applied"

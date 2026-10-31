@@ -120,3 +120,50 @@ def test_binding_can_be_put_back_for_a_rollback(tmp_path):
     assert orch.binding_conversation_id == "conv-1"
     orch.save_binding_for("conv-1", {"session": "prior"})
     assert saved == [("conv-1", {"session": "prior"})]
+
+
+@pytest.mark.asyncio
+async def test_no_advertised_model_option_refuses_model_and_effort(tmp_path):
+    """(1) A harness that offers no model selector must not get the loadout effort."""
+    options = [_options()[1]]  # effort only
+    orch = _orchestrator(tmp_path, options)
+    notices = await orch._restore_options(LOADOUT)
+    assert orch._runner.calls == []
+    assert any("model haiku was not applied: the harness advertises no model option" in n for n in notices)
+    assert any("effort max was not applied because the model is not active" in n for n in notices)
+
+
+@pytest.mark.asyncio
+async def test_effort_reply_that_keeps_the_old_value_is_noticed(tmp_path):
+    """(2) A success reply that still reports the old effort must not pass silently."""
+    options = _options()
+    orch = _orchestrator(tmp_path, options)
+    effort_only = SimpleNamespace(name="claude-code", model="", effort="max")
+
+    async def quiet(config_id, value):
+        return [dict(o) for o in options]  # accepted, but nothing changed
+
+    orch._runner.set_config_option = quiet
+    notices = await orch._restore_options(effort_only)
+    assert any("effort max was accepted but the harness reports xhigh" in n for n in notices)
+
+
+@pytest.mark.asyncio
+async def test_saved_effort_is_reported_when_the_harness_has_no_effort_option(tmp_path):
+    """(3) A saved effort that cannot be applied is reported, not dropped."""
+    options = [_options()[0]]  # model only
+    orch = _orchestrator(tmp_path, options, saved={"effort": "max"})
+    no_loadout = SimpleNamespace(name="claude-code", model="", effort="")
+    notices = await orch._restore_options(no_loadout)
+    assert orch._runner.calls == []
+    assert any("this harness advertises no effort option, so effort max was not applied" in n for n in notices)
+
+
+def test_rollback_message_says_the_previous_session_may_not_be_resumed():
+    """(4) Scoped: a rejected switch that restarted the previous harness says so."""
+    from kollabor.state.local import acp_rollback_message
+
+    message = acp_rollback_message("review", "claude-code", "max", "ACP harness does not offer effort 'max'")
+    assert "could not take effort 'max'" in message
+    assert "previous harness 'claude-code' was restarted" in message
+    assert "may not have been resumed" in message
