@@ -895,6 +895,7 @@ class QueueProcessor:
                         f"Block timeout after {elapsed:.2f}s, dropping message"
                     )
                 self.dropped_messages += 1
+                self._end_dropped(message)
                 return
 
             await asyncio.sleep(poll_interval)

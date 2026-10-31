@@ -119,6 +119,15 @@ async def test_a_tagged_chat_message_overflows_like_any_typed_message():
     assert (error["type"], error["request_ids"]) == ("error", ["r1"]) and "dropped" in error["message"]
     assert (done["type"], done["request_ids"], done["stop_reason"]) == ("turn_complete", ["r1"], "error")
 
+    # Tourmaline on #554 round 2: the block strategy's timeout dropped one silently.
+    processor.processing_queue.put_nowait(TaggedInput("b", ("r2",)))
+    processor.task_config.queue = SimpleNamespace(overflow_strategy="block", block_timeout=0.01, log_queue_events=False)
+    processor._queue_metrics.update(block_count=0, block_timeout_count=0)
+    await processor.enqueue(TaggedInput("c", ("r3",)))
+    assert processor.processing_queue.get_nowait() == TaggedInput("b", ("r2",))
+    error, done = _drain(events)
+    assert (error["type"], error["request_ids"], done["request_ids"]) == ("error", ["r3"], ["r3"])
+
 
 def _turn_processor():
     """Turns through the real lock and stamping, with the model call replaced."""
