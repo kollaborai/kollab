@@ -90,6 +90,8 @@ _RENDERED_EVENT_TYPES = frozenset({"output", "active_area", "heartbeat", "clear"
 
 # The start of an ``rpc_reply`` frame as the daemon writes it (RpcResponse.to_wire).
 _REPLY_HEAD = re.compile(rb'\{"action":\s*"rpc_reply",\s*"request_id":\s*"([^"\\]+)"')
+# The start of a display event: the tap publishes "type" as its first key.
+_TYPE_HEAD = re.compile(rb'\{"type":\s*"([^"\\]+)"')
 
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -320,10 +322,17 @@ class DaemonHandle:
                 return e.partial
             except asyncio.LimitOverrunError as e:
                 head = await self._reader.readexactly(min(e.consumed, 4096))
-                await self._skip_rest_of_line()
+                size = len(head) + await self._skip_rest_of_line()
                 reply = _REPLY_HEAD.match(head)
                 if reply is None or self.rpc is None:
-                    logger.warning("dropped an oversized frame from daemon %s", self.identity)
+                    kind = _TYPE_HEAD.match(head)
+                    etype = kind.group(1).decode(errors="replace") if kind else "unknown"
+                    logger.warning(
+                        "dropped an oversized %s frame (%d bytes) from daemon %s",
+                        etype, size, self.identity,
+                    )
+                    if etype in _RENDERED_EVENT_TYPES:
+                        continue  # terminal-only; the engine never passes these on
                     # Say so in the chat: a silently missing tool result reads
                     # as a complete reply.
                     self._fan_out(sse.error(
@@ -340,16 +349,18 @@ class DaemonHandle:
                     "error": "reply over the engine's frame limit",
                 })
 
-    async def _skip_rest_of_line(self) -> None:
+    async def _skip_rest_of_line(self) -> int:
+        """Read past the rest of an oversized line; returns the bytes skipped."""
         assert self._reader is not None
+        skipped = 0
         while True:
             try:
-                await self._reader.readuntil(b"\n")
-                return
+                return skipped + len(await self._reader.readuntil(b"\n"))
             except asyncio.LimitOverrunError as e:
-                await self._reader.readexactly(e.consumed)
-            except asyncio.IncompleteReadError:
-                return  # the stream ended inside the frame; the next read sees it
+                skipped += len(await self._reader.readexactly(e.consumed))
+            except asyncio.IncompleteReadError as e:
+                # The stream ended inside the frame; the next read sees it.
+                return skipped + len(e.partial)
 
     async def _reattach(
         self, attempts: int = 20, delay: float = 0.5, slow_delay: float = 5.0

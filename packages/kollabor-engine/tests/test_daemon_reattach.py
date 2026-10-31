@@ -285,6 +285,41 @@ async def test_an_oversized_display_event_is_dropped_out_loud(monkeypatch):
         server.close()
 
 
+@pytest.mark.asyncio
+async def test_an_oversized_terminal_frame_is_dropped_quietly(monkeypatch, caplog):
+    # A terminal-only frame never reaches the chat, so dropping one must not
+    # tell the chat its reply is incomplete (#544: such frames came every few s).
+    import kollabor_rpc.transport
+
+    monkeypatch.setattr(kollabor_rpc.transport, "LARGE_BUFFER_LIMIT", 1024)
+    big = {"type": "active_area", "lines": ["x" * 4096], "seq": 1}
+    done = {"type": "turn_complete", "request_id": "r1", "seq": 2}
+
+    async def daemon(reader, writer):
+        await reader.readline()
+        writer.write(b'{"type": "attach_ack"}\n')
+        writer.write((json.dumps(big) + "\n" + json.dumps(done) + "\n").encode())
+        await writer.drain()
+        await reader.read()
+
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp"), "jasper.sock")
+    server = await asyncio.start_unix_server(daemon, path)
+    handle = DaemonHandle("s8", "jasper", launcher=None)
+    handle.pid = os.getpid()
+    queue = handle.subscribe()
+    try:
+        with caplog.at_level("WARNING"):
+            await handle.connect(path)
+            first = await asyncio.wait_for(queue.get(), 5)
+        assert first["type"] == "turn_complete"
+        size = len(json.dumps(big)) + 1
+        assert f"dropped an oversized active_area frame ({size} bytes)" in caplog.text
+    finally:
+        handle._closed = True
+        handle._read_task.cancel()
+        server.close()
+
+
 def test_only_this_requests_completion_ends_its_stream():
     # Kyanite on #543 round 2: an earlier turn's turn_complete, missed during
     # the outage, arrived after the reattach with a higher seq and ended the
