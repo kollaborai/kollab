@@ -2332,9 +2332,10 @@ class QueueProcessor:
                 except Exception:
                     logger.exception("Failed to dispatch LLM request error hooks")
 
-            if retry and not getattr(self, "_error_retried", False):
+            if retry and not self.cancel_processing and not getattr(self, "_error_retried", False):
                 # Asked inside this turn, so its request's stream gets the new
-                # model's answer. Once per turn, whatever a hook asks.
+                # model's answer. Once per turn, whatever a hook asks, and never
+                # after a Stop: no loop runs the retry then, so the turn ends here.
                 self._error_retried = True
                 self.turn_completed = False  # the turn's loop sends the request again
             else:

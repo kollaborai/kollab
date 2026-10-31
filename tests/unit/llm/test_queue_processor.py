@@ -807,6 +807,28 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertTrue(self.processor.turn_completed)
         self.assertIn("error", published)
 
+    def test_a_stop_while_the_hook_switches_models_ends_the_turn(self):
+        # No loop runs a retry after a Stop, so the turn must end here, or its
+        # request's stream waits out the idle timeout.
+        self.streaming_handler.call_llm.side_effect = RuntimeError("Usage limit reached for 5 hour.")
+
+        async def hooks(event_type, data, source):
+            if event_type is EventType.LLM_REQUEST_ERROR:
+                self.processor.cancel_processing = True  # the Stop lands mid-switch
+            return {"main": {"final_data": {"retry": True}}}
+
+        self.event_bus.emit_with_hooks.side_effect = hooks
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=False, current_parent_uuid="stop",
+            )
+        )
+        tap = self.renderer.get_service.return_value
+        published = [call.args[0]["type"] for call in tap.publish.call_args_list]
+        self.assertTrue(self.processor.turn_completed)
+        self.assertIn("error", published)
+        self.assertIn("turn_complete", published)
+
 
     def test_pre_request_hook_can_withhold_tools_for_one_request(self):
         self.native_tools_handler.tools = [{"name": "terminal"}]
