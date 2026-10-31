@@ -1288,3 +1288,100 @@ def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
         "warning": "Saved by [harness]; Kollab cannot undo it.",
     }
     assert native == {"decision": "approve", "scope": "once"}
+
+
+@pytest.mark.asyncio
+async def test_private_goal_assistant_stream_ignores_foreign_turn(monkeypatch):
+    session = _FakeSession([{"type": "token", "text": "foreign turn"}, {"type": "turn_complete"}])
+    session.send_message = AsyncMock(return_value={"accepted": True, "goal_reply_id": "a" * 32})
+    session.poll_goal_reply = AsyncMock(side_effect=[{"status": "pending"}, {"status": "complete", "success": True, "conversation_uid": "a", "message": "own goal result"}])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=[{"type": "add-message", "content": "/goal show"}], state={"messages": [], "conversationUid": "a"}),
+    )
+    async for _chunk in response.stream:
+        pass
+    controller = captured["controller"]
+    assert controller.text == ["own goal result"]
+    assert "foreign turn" not in repr(controller.state)
+    assert not session.subscriptions
+    session.send_message.assert_awaited_once_with("/goal show", private_goal_reply=True, goal_conversation_uid="a")
+
+
+@pytest.mark.asyncio
+async def test_goal_stream_does_not_claim_concurrent_history_as_rendered(monkeypatch):
+    session = _FakeSession([])
+    session.send_message = AsyncMock(return_value={"accepted": True, "goal_reply_id": "a" * 32})
+    session.poll_goal_reply = AsyncMock(return_value={
+        "status": "complete", "success": True, "conversation_uid": "a",
+        "message": "own goal result", "history_recorded": True,
+    })
+    session.refresh_history = AsyncMock(return_value=[{}, {}, {}, {}])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=[{"type": "add-message", "content": "/goal show"}],
+                                  state={"messages": [], "conversationUid": "a", "synced": {"history": 0, "messages": 0}}),
+    )
+    async for _chunk in response.stream:
+        pass
+    assert captured["controller"].state["synced"] is None
+    assert captured["controller"].state["goalHistoryReloadRequired"] is True
+    session.refresh_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_goal_history_reload_signal_is_sent_through_real_state_proxy(monkeypatch):
+    session = _FakeSession([])
+    session.send_message = AsyncMock(return_value={"accepted": True, "goal_reply_id": "a" * 32})
+    session.poll_goal_reply = AsyncMock(return_value={
+        "status": "complete", "success": True, "conversation_uid": "a",
+        "message": "own goal result", "history_recorded": True,
+    })
+    session.refresh_history = AsyncMock(return_value=[{}, {}, {}, {}])
+    ops = await _state_ops(monkeypatch, session,
+        [{"type": "add-message", "content": "/goal show"}],
+        {"messages": [], "conversationUid": "a", "synced": {"history": 0, "messages": 0}})
+    assert (["synced"], None) in ops
+    assert (["goalHistoryReloadRequired"], True) in ops
+    session.refresh_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_private_goal_legacy_stream_ignores_foreign_turn(monkeypatch):
+    session = _FakeSession([{"type": "token", "text": "foreign turn"}, {"type": "turn_complete"}])
+    session.send_message = AsyncMock(return_value={"accepted": True, "goal_reply_id": "b" * 32})
+    session.poll_goal_reply = AsyncMock(return_value={"status": "complete", "success": True, "conversation_uid": "a", "message": "own goal result"})
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    response = await messages.send_message(session.session_id, messages.MessageRequest(content="/goal show", conversation_uid="a"))
+    events = [item async for item in response.body_iterator]
+    assert "own goal result" in repr(events) and "foreign turn" not in repr(events)
+    assert len(events) == 2 and not session.subscriptions
+
+
+@pytest.mark.asyncio
+async def test_private_goal_rejects_unupgraded_daemon_before_submission():
+    from kollabor_engine.session import EngineSession
+
+    session = EngineSession.__new__(EngineSession)
+    state = types.SimpleNamespace(send_message=AsyncMock())
+    session.daemon = types.SimpleNamespace(state=state, rpc=types.SimpleNamespace(call=AsyncMock(side_effect=RuntimeError("not found"))))
+    result = await session.send_message("/goal show", private_goal_reply=True)
+    assert not result["accepted"] and "does not support" in result["reason"]
+    state.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owned_goal_cancel_never_falls_back_to_current_model_turn():
+    from kollabor_engine.session import EngineSession
+
+    session = EngineSession.__new__(EngineSession)
+    rpc = types.SimpleNamespace(call=AsyncMock(return_value={"cancelled": True, "queued": True}))
+    session.daemon = types.SimpleNamespace(rpc=rpc)
+    reply_id = "goal-" + "c" * 32
+    result = await session.cancel_owned_turn(reply_id)
+    assert result["cancelled"] and result["queued"]
+    rpc.call.assert_awaited_once_with("state.cancel_goal_reply", {"reply_id": reply_id})

@@ -21,6 +21,43 @@ export interface HistoryPageCache {
   clear(sessionId: string): Promise<void>;
 }
 
+// IndexedDB writes can finish after a newer history request. Serialize each
+// session's mutations and check the requesting operation immediately before
+// its write so an obsolete conversation cannot replace the current cache.
+const pendingMutations = new WeakMap<HistoryPageCache, Map<string, Promise<void>>>();
+
+async function mutateIfCurrent(
+  cache: HistoryPageCache,
+  sessionId: string,
+  stillCurrent: () => boolean,
+  mutate: () => Promise<void>,
+): Promise<void> {
+  let sessions = pendingMutations.get(cache);
+  if (!sessions) {
+    sessions = new Map();
+    pendingMutations.set(cache, sessions);
+  }
+  const previous = sessions.get(sessionId) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(async () => {
+    if (stillCurrent()) await mutate();
+  });
+  sessions.set(sessionId, current);
+  try {
+    await current;
+  } finally {
+    if (sessions.get(sessionId) === current) sessions.delete(sessionId);
+  }
+}
+
+export async function storeHistoryPageIfCurrent(
+  sessionId: string,
+  page: HistoryPage,
+  cache: HistoryPageCache,
+  stillCurrent: () => boolean,
+): Promise<void> {
+  await mutateIfCurrent(cache, sessionId, stillCurrent, () => cache.store(sessionId, page));
+}
+
 
 export interface HistoryPageClient {
   getHistoryPage(sessionId: string, options?: { limit?: number; before?: string; after?: string }): Promise<HistoryPage>;
@@ -34,6 +71,10 @@ export type LoadedHistoryPage = {
 
 function pageKey(page: HistoryPage) {
   return `${page.start_index}:${page.end_index}`;
+}
+
+function sameConversation(left: HistoryPage, right: HistoryPage): boolean {
+  return (left.conversation_uid ?? null) === (right.conversation_uid ?? null);
 }
 
 function encodedSize(page: HistoryPage) {
@@ -58,6 +99,7 @@ export function mergeRecentHistoryPage(
   cached: HistoryPage,
   updates: HistoryPage,
 ): HistoryPage {
+  if (!sameConversation(cached, updates)) return updates;
   if (!updates.history.length) {
     return {
       ...cached,
@@ -122,6 +164,7 @@ export function mergeOlderHistoryPage(
   current: HistoryPage,
   older: HistoryPage,
 ): HistoryPage {
+  if (!sameConversation(current, older)) return current;
   if (older.end_index < current.start_index) return current;
   const byIndex = new Map<number, HistoryMessage>();
   older.history.forEach((message, offset) => {
@@ -156,9 +199,20 @@ export async function loadLatestHistoryPage(
   sessionId: string,
   api: HistoryPageClient,
   cache: HistoryPageCache,
+  stillCurrent: () => boolean = () => true,
+  expectedConversationUid: string | null = null,
 ): Promise<LoadedHistoryPage> {
+  // Cache failures must not replace an authoritative network response with
+  // an older conversation's cached history.
+  const store = (page: HistoryPage) =>
+    storeHistoryPageIfCurrent(sessionId, page, cache, stillCurrent).catch(() => {});
+  const clear = () =>
+    mutateIfCurrent(cache, sessionId, stillCurrent, () => cache.clear(sessionId)).catch(() => {});
   const cachedPages = (await cache.load(sessionId))
     .filter((page) => page.history.length > 0)
+    // If a switch was already observed, an unavailable or broken cache must
+    // not revive the prior conversation while the network is offline.
+    .filter((page) => !expectedConversationUid || page.conversation_uid === expectedConversationUid)
     .sort((left, right) =>
       right.end_index - left.end_index ||
       Math.abs(left.history.length - HISTORY_PAGE_SIZE) -
@@ -192,19 +246,31 @@ export async function loadLatestHistoryPage(
         limit: HISTORY_PAGE_SIZE,
         after: cached.newer_cursor,
       });
+      if (!sameConversation(cached, updates)) {
+        // A cursor can still match an identical prefix after /resume. Never
+        // join pages across conversations, even when their contents match.
+        await clear();
+        try {
+          const page = await api.getHistoryPage(sessionId, { limit: HISTORY_PAGE_SIZE });
+          await store(page);
+          return { page, fromCache: false };
+        } catch (error) {
+          return { page: updates, fromCache: false, error };
+        }
+      }
       const page = mergeRecentHistoryPage(cached, updates);
-      if (updates.history.length) await cache.store(sessionId, updates);
-      await cache.store(sessionId, page);
+      if (updates.history.length) await store(updates);
+      await store(page);
       return { page, fromCache: false };
     } catch (error) {
       if (!isStaleCursor(error)) return { page: cached, fromCache: true, error };
-      await cache.clear(sessionId);
+      await clear();
       try {
         const page = await api.getHistoryPage(sessionId, { limit: HISTORY_PAGE_SIZE });
-        await cache.store(sessionId, page);
+        await store(page);
         return { page, fromCache: false };
       } catch (refreshError) {
-        await cache.store(sessionId, cached);
+        await store(cached);
         return { page: cached, fromCache: true, error: refreshError };
       }
     }
@@ -212,7 +278,8 @@ export async function loadLatestHistoryPage(
 
   try {
     const page = await api.getHistoryPage(sessionId, { limit: HISTORY_PAGE_SIZE });
-    await cache.store(sessionId, page);
+    if (cached && !sameConversation(cached, page)) await clear();
+    await store(page);
     return { page, fromCache: false };
   } catch (error) {
     if (!cached) throw error;
@@ -226,16 +293,18 @@ export async function loadOlderHistoryPage(
   current: HistoryPage,
   api: HistoryPageClient,
   cache: HistoryPageCache,
+  stillCurrent: () => boolean = () => true,
 ): Promise<HistoryPage | null> {
   if (!current.has_more_older) return null;
   const cached = await cache.findOlder(sessionId, current.start_index);
-  if (cached) return cached;
+  if (cached && sameConversation(current, cached)) return cached;
   if (!current.older_cursor) return null;
   const older = await api.getHistoryPage(sessionId, {
     limit: HISTORY_PAGE_SIZE,
     before: current.older_cursor,
   });
-  if (older.history.length) await cache.store(sessionId, older);
+  if (!sameConversation(current, older)) throw new Error("Conversation changed while loading history.");
+  if (older.history.length) await storeHistoryPageIfCurrent(sessionId, older, cache, stillCurrent);
   return older;
 }
 
@@ -244,7 +313,7 @@ function boundedPages(existing: HistoryPage[], incoming: HistoryPage) {
   if (!validPage(incoming) || encodedSize(incoming) > HISTORY_CACHE_MAX_BYTES) {
     throw new Error("Cannot cache an invalid or oversized history page.");
   }
-  const byKey = new Map(existing.filter(validPage).map((page) => [pageKey(page), page]));
+  const byKey = new Map(existing.filter((page) => validPage(page) && sameConversation(page, incoming)).map((page) => [pageKey(page), page]));
   byKey.set(pageKey(incoming), incoming);
   const newestFirst = [...byKey.values()].sort(
     (left, right) =>

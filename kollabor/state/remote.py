@@ -93,7 +93,8 @@ class RemoteStateService(StateService):
     # === Conversation ===
 
     async def get_conversation(
-        self, since: int | None = None, anchor: str | None = None
+        self, since: int | None = None, anchor: str | None = None,
+        expected_conversation_uid: str | None = None,
     ) -> ConversationSnapshot:
         """Fetch the daemon's conversation via RPC and reconstruct the snapshot.
 
@@ -102,6 +103,8 @@ class RemoteStateService(StateService):
         """
         logger.debug("state rpc: get_conversation since=%s", since)
         params = {} if since is None else {"since": since, "anchor": anchor or ""}
+        if expected_conversation_uid is not None:
+            params["expected_conversation_uid"] = expected_conversation_uid
         result = await self._rpc.call(
             "state.get_conversation", params, timeout=self._timeout
         )
@@ -1056,6 +1059,9 @@ class RemoteStateService(StateService):
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: dict[str, Any] | None = None,
+        private_goal_reply: bool = False,
+        private_goal_reply_id: str | None = None,
+        goal_conversation_uid: str | None = None,
     ) -> dict[str, Any]:
         """Submit a user turn to the daemon. Returns once accepted, not done."""
         logger.debug(
@@ -1069,6 +1075,8 @@ class RemoteStateService(StateService):
                 "request_id": request_id,
                 "thread_id": thread_id,
                 "origin_context": origin_context,
+                **({"private_goal_reply": True, "private_goal_reply_id": private_goal_reply_id,
+                    "goal_conversation_uid": goal_conversation_uid} if private_goal_reply else {}),
             },
             timeout=self._timeout,
         )

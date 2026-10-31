@@ -90,9 +90,10 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
     """
 
     async def _get_conversation(params: dict[str, Any]) -> dict[str, Any]:
-        snapshot = await state_service.get_conversation(
-            since=params.get("since"), anchor=params.get("anchor")
-        )
+        kwargs = {"since": params.get("since"), "anchor": params.get("anchor")}
+        if params.get("expected_conversation_uid") is not None:
+            kwargs["expected_conversation_uid"] = params["expected_conversation_uid"]
+        snapshot = await state_service.get_conversation(**kwargs)
         return snapshot.to_dict()
 
     async def _save_conversation(params: dict[str, Any]) -> dict[str, Any]:
@@ -639,14 +640,45 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
 
     async def _send_message(params: dict[str, Any]) -> dict[str, Any]:
         try:
-            return await state_service.send_message(
-                params.get("message", ""),
-                request_id=params.get("request_id"),
-                thread_id=params.get("thread_id"),
-                origin_context=params.get("origin_context"),
-            )
+            from .goal_replies import is_goal_input
+
+            origin = params.get("origin_context")
+            voice = isinstance(origin, dict) and origin.get("source") == "livekit_voice"
+            if not voice and params.get("private_goal_reply") is not True and is_goal_input(params.get("message", "")):
+                # Old RPC clients would receive the reply through the shared
+                # display stream, where it can complete a different request.
+                return {
+                    "accepted": False,
+                    "reason": "This client does not support private goal replies; update it and retry.",
+                }
+            kwargs = {
+                "request_id": params.get("request_id"),
+                "thread_id": params.get("thread_id"),
+                "origin_context": params.get("origin_context"),
+            }
+            if params.get("private_goal_reply") is True:
+                kwargs["private_goal_reply"] = True
+                kwargs["private_goal_reply_id"] = params.get("private_goal_reply_id")
+                kwargs["goal_conversation_uid"] = params.get("goal_conversation_uid")
+            return await state_service.send_message(params.get("message", ""), **kwargs)
         except Exception as e:
             return {"error": str(e)}
+
+    async def _poll_goal_reply(params: dict[str, Any]) -> dict[str, Any]:
+        reply_id = params.get("reply_id")
+        mailbox = getattr(state_service, "_goal_reply_mailbox", None)
+        if not isinstance(reply_id, str) or not re.fullmatch(r"goal-[0-9a-f]{32}", reply_id) or mailbox is None:
+            return {"status": "missing", "message": "goal reply expired or is unavailable"}
+        return mailbox.poll(reply_id, state_service.get_conversation_uid())
+
+    async def _cancel_goal_reply(params: dict[str, Any]) -> dict[str, Any]:
+        from .goal_replies import GoalReplyMailbox
+
+        reply_id = params.get("reply_id")
+        mailbox = getattr(state_service, "_goal_reply_mailbox", None)
+        if mailbox is None:
+            mailbox = state_service._goal_reply_mailbox = GoalReplyMailbox()
+        return mailbox.cancel(reply_id)
 
     def _panel_error(exc: Exception) -> dict[str, Any]:
         from kollabor.panels import PanelError
@@ -713,6 +745,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         # Goal layer: attach clients execute /goal daemon-side where the
         # conversation identity, store, and driver live
         "state.goal_command": _goal_command,
+        "state.poll_goal_reply": _poll_goal_reply,
+        "state.cancel_goal_reply": _cancel_goal_reply,
+        "state.goal_reply_capabilities": lambda _params: {"private_goal_reply": True},
         "state.compact_command": _compact_command,
         "state.list_commands": _list_commands,
         "state.open_generated_artifact": _open_generated_artifact,

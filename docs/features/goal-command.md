@@ -59,6 +59,12 @@ record a durable stop intent immediately, applied at the next safe boundary.
 Attach clients execute `/goal` daemon-side through the `state.goal_command`
 RPC — the daemon owns the conversation identity, store, and driver, and
 `goal.state_changed` events stream back over the attach socket.
+Web goal replies are private to the submitting request. The legacy
+`POST /sessions/{session_id}/message` API must include the `conversation_uid`
+returned by that session's `/history`; the daemon refuses a goal if the
+conversation changed before admission. The assistant transport carries the
+same identity in its state. Clients connected to a daemon without private
+goal replies must update before submitting a goal.
 `--` is the end-of-options delimiter for objectives beginning with `--`.
 
 ## How it works

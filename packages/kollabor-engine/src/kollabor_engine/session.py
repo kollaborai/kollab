@@ -202,6 +202,8 @@ class EngineSession:
         # would otherwise send its whole history over the network every turn).
         self._raw_history: List[Dict[str, Any]] = []
         self._history_anchor = ""
+        self._history_conversation_uid: str | None = None
+        self._history_authoritative = False
         self._history_lock = asyncio.Lock()
         # The mirror holds a disk seed the daemon has not replaced yet. A seed
         # is no prefix of the daemon's history (hub messages are logged apart),
@@ -613,13 +615,32 @@ class EngineSession:
         async with self._history_lock:
             held = self._raw_history
             before = anchor_digest(held)
+            previous_uid = getattr(self, "_history_conversation_uid", None)
             try:
+                kwargs = {"since": len(held) or None, "anchor": self._history_anchor or None}
+                if previous_uid:
+                    kwargs["expected_conversation_uid"] = previous_uid
                 snapshot = await asyncio.wait_for(
-                    self.state.get_conversation(
-                        since=len(held) or None, anchor=self._history_anchor or None
-                    ),
+                    self.state.get_conversation(**kwargs),
                     timeout=HISTORY_REFRESH_TIMEOUT_SECONDS,
                 )
+                metadata = (
+                    snapshot.get("metadata", {}) if isinstance(snapshot, dict)
+                    else getattr(snapshot, "metadata", {})
+                )
+                current_uid = metadata.get("conversation_uid") if isinstance(metadata, dict) else None
+                # An older daemon may ignore the expected uid and send a tail
+                # from a different conversation. Ask again for a full snapshot.
+                since = snapshot.get("since") if isinstance(snapshot, dict) else getattr(snapshot, "since", None)
+                if previous_uid and current_uid and previous_uid != current_uid and since is not None:
+                    snapshot = await asyncio.wait_for(
+                        self.state.get_conversation(), timeout=HISTORY_REFRESH_TIMEOUT_SECONDS,
+                    )
+                    metadata = (
+                        snapshot.get("metadata", {}) if isinstance(snapshot, dict)
+                        else getattr(snapshot, "metadata", {})
+                    )
+                    current_uid = metadata.get("conversation_uid") if isinstance(metadata, dict) else None
             except asyncio.TimeoutError:
                 logger.debug(
                     "session %s history refresh timed out; using cached history",
@@ -666,6 +687,9 @@ class EngineSession:
                 return self.history
             self._raw_history = (held[:since] if since else []) + received
             self._history_anchor = getattr(snapshot, "anchor", "") or ""
+            uid_changed = bool(previous_uid and current_uid and previous_uid != current_uid)
+            self._history_conversation_uid = current_uid if isinstance(current_uid, str) and current_uid else None
+            self._history_authoritative = True
             display_history = self._raw_history
             native_session_id = (
                 snapshot.get("session_id", "")
@@ -695,8 +719,11 @@ class EngineSession:
             # XML tool turns in the shape the web renders for native tools.
             self.history = web_history(display_history)
             seed_replaced, self._history_seeded = self._history_seeded, False
-            if seed_replaced or (notify and anchor_digest(self._raw_history) != before):
-                self._emit_event({"type": "history_updated"})
+            if uid_changed or seed_replaced or (notify and anchor_digest(self._raw_history) != before):
+                event = {"type": "history_updated"}
+                if self._history_conversation_uid:
+                    event["conversation_uid"] = self._history_conversation_uid
+                self._emit_event(event)
             return self.history
 
     # --- nonblocking open path -------------------------------------------
@@ -739,7 +766,7 @@ class EngineSession:
         replies to the page instead of throwing them away. Until it lands the
         answer says ``stale``: the page replaces what it built from the seed.
         """
-        if not self.history:
+        if not self.history and not getattr(self, "_history_authoritative", False):
             conversations_dir = self._disk_conversation_dir()
             if conversations_dir is not None:
                 conversation_id = self._disk_seed_id(conversations_dir)
@@ -767,6 +794,7 @@ class EngineSession:
         return {
             "session_id": self.session_id,
             "history": history,
+            "conversation_uid": getattr(self, "_history_conversation_uid", None),
             "last_turn_error": turn_error,
             "source": "disk" if self._history_seeded else "mirror",
             "stale": self._history_seeded,
@@ -825,8 +853,22 @@ class EngineSession:
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: Dict[str, Any] | None = None,
+        private_goal_reply: bool = False,
+        private_goal_reply_id: str | None = None,
+        goal_conversation_uid: str | None = None,
     ) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
+        if private_goal_reply:
+            # Check before sending: an older daemon would otherwise accept the
+            # command and publish its result on the shared event stream.
+            if self.daemon is None or self.daemon.rpc is None:
+                return {"accepted": False, "reason": "daemon does not support private goal replies"}
+            try:
+                capability = await self.daemon.rpc.call("state.goal_reply_capabilities", {})
+            except Exception:
+                return {"accepted": False, "reason": "daemon does not support private goal replies"}
+            if not isinstance(capability, dict) or capability.get("private_goal_reply") is not True:
+                return {"accepted": False, "reason": "daemon does not support private goal replies"}
         voice_turn = (
             isinstance(origin_context, dict)
             and origin_context.get("source") == "livekit_voice"
@@ -840,12 +882,12 @@ class EngineSession:
             if admitted.get("admitted") is not True:
                 return {"accepted": False, "reason": "invalid voice admission capability"}
         try:
-            result = await self.state.send_message(
-                content,
-                request_id=request_id,
-                thread_id=thread_id,
-                origin_context=origin_context,
-            )
+            kwargs = {"request_id": request_id, "thread_id": thread_id, "origin_context": origin_context}
+            if private_goal_reply:
+                kwargs["private_goal_reply"] = True
+                kwargs["private_goal_reply_id"] = private_goal_reply_id
+                kwargs["goal_conversation_uid"] = goal_conversation_uid
+            result = await self.state.send_message(content, **kwargs)
         except BaseException:
             if voice_turn:
                 await self.voice_admission("revoke", context=origin_context)
@@ -855,6 +897,13 @@ class EngineSession:
         if thread_id and isinstance(result, dict) and result.get("accepted"):
             self.__dict__.setdefault("known_thread_ids", set()).add(thread_id)
         return result
+
+    async def poll_goal_reply(self, reply_id: str) -> Dict[str, Any]:
+        """Poll one private goal reply without blocking the daemon RPC loop."""
+        if self.daemon is None or self.daemon.rpc is None:
+            return {"status": "missing", "message": "goal reply unavailable"}
+        result = await self.daemon.rpc.call("state.poll_goal_reply", {"reply_id": reply_id})
+        return result if isinstance(result, dict) else {"status": "missing", "message": "goal reply unavailable"}
 
     async def voice_admission(self, action: str, **params: Any) -> Dict[str, Any]:
         """Admit or revoke a voice capability in this session's daemon."""
@@ -920,6 +969,11 @@ class EngineSession:
         """Cancel only this admitted owner, without a current-turn fallback."""
         if self.daemon is None or self.daemon.rpc is None:
             return {"cancelled": False, "request_id": request_id}
+        if request_id.startswith("goal-"):
+            result = await self.daemon.rpc.call("state.cancel_goal_reply", {"reply_id": request_id})
+            if not isinstance(result, dict) or not isinstance(result.get("cancelled"), bool):
+                raise TypeError("state.cancel_goal_reply expected a cancelled boolean")
+            return {**result, "request_id": request_id}
         result = await self.daemon.rpc.call(
             "state.acp_cancel", {"request_id": request_id}
         )
