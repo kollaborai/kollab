@@ -13,7 +13,9 @@ import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from ..message_content import content_to_text, serialize_anthropic_content
+from ..goal_image_scope import safe_goal_error_cause
+
+from ..message_content import redact_error_media, content_to_text, serialize_anthropic_content
 from .anthropic_reasoning import (
     PrefixHasher,
     ThinkingStreamCollector,
@@ -137,10 +139,10 @@ class AnthropicProvider(LLMProvider):
         except ImportError as e:
             raise ImportError(
                 "httpx not installed. Install with: pip install httpx"
-            ) from e
+            ) from safe_goal_error_cause(e)
         except Exception as e:
-            logger.error(f"Failed to initialize Anthropic client: {e}")
-            raise map_anthropic_error(e, "anthropic") from e
+            logger.error(f"Failed to initialize Anthropic client: {redact_error_media(str(e))}")
+            raise map_anthropic_error(e, "anthropic") from safe_goal_error_cause(e)
 
     async def call(
         self,
@@ -196,7 +198,7 @@ class AnthropicProvider(LLMProvider):
                     "anthropic",
                     response.status_code,
                     response.headers,
-                ) from error
+                ) from safe_goal_error_cause(error)
 
             # Parse response
             response_dict = response.json()
@@ -226,10 +228,10 @@ class AnthropicProvider(LLMProvider):
             return unified_response
 
         except Exception as e:
-            logger.error(f"Anthropic call failed: {type(e).__name__}: {e}")
+            logger.error(f"Anthropic call failed: {type(e).__name__}: {redact_error_media(str(e))}")
             if isinstance(e, ProviderError):
                 raise
-            raise map_anthropic_error(e, "anthropic") from e
+            raise map_anthropic_error(e, "anthropic") from safe_goal_error_cause(e)
         finally:
             await self._track_request_end()
 
@@ -290,7 +292,7 @@ class AnthropicProvider(LLMProvider):
                         "anthropic",
                         response.status_code,
                         response.headers,
-                    ) from error
+                    ) from safe_goal_error_cause(error)
 
                 # Parse SSE stream
                 collector = ThinkingStreamCollector()
@@ -318,10 +320,10 @@ class AnthropicProvider(LLMProvider):
 
         except Exception as e:
             # Not an error yet: api_communication_service retries it and logs the final failure.
-            logger.warning(f"Anthropic stream failed: {e}")
+            logger.warning(f"Anthropic stream failed: {redact_error_media(str(e))}")
             if isinstance(e, ProviderError):
                 raise
-            raise map_anthropic_error(e, "anthropic") from e
+            raise map_anthropic_error(e, "anthropic") from safe_goal_error_cause(e)
         finally:
             await self._track_request_end()
 
@@ -355,7 +357,7 @@ class AnthropicProvider(LLMProvider):
                     event = json.loads(data)
                     yield event
                 except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse SSE event: {e}, data: {data}")
+                    logger.warning(f"Failed to parse SSE event: {redact_error_media(str(e))}, data: {redact_error_media(data)}")
                     continue
 
     def _get_headers(self) -> Dict[str, str]:
