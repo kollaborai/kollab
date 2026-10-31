@@ -377,9 +377,13 @@ async def test_cancel_during_open_never_registers_the_late_bridge(cancel):
     await asyncio.sleep(0)
     if cancel == "invalidate":
         await manager.invalidate("phone-a", cause="revoked")
+        gate.set()
     else:
-        await manager.shutdown()
-    gate.set()
+        # shutdown waits for the pending open, so the gate opens while it runs
+        shutdown = asyncio.create_task(manager.shutdown())
+        await asyncio.sleep(0)
+        gate.set()
+        await shutdown
     with pytest.raises(PhoneCallError) as late:
         await opening
     assert late.value.code == "call_unavailable"
@@ -835,3 +839,36 @@ async def test_app_close_waits_for_the_call_bridge_to_close(tmp_path):
     assert not link._call_stops  # no call-stop task is still pending
     assert link.audio._closing == set()
     assert link.audio._calls == {}
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_a_pending_open_and_closes_its_bridge():
+    """Shutdown during a pending open waits for it and closes the bridge it returns."""
+    gate = asyncio.Event()
+    bridges = []
+
+    class SlowCloseBridge(FakeBridge):
+        async def close(self):
+            await asyncio.sleep(0.05)
+            self.closed = True
+
+    async def opener(voice_session_id, generation):
+        await gate.wait()
+        bridges.append(SlowCloseBridge())
+        return bridges[-1]
+
+    manager = PhoneAudioManager(opener)
+    opening = asyncio.create_task(manager.open("phone-a", object(), CALL, VOICE, 0))
+    await asyncio.sleep(0.01)
+    shutdown = asyncio.create_task(manager.shutdown())
+    await asyncio.sleep(0.01)
+    assert not shutdown.done()  # still waiting on the pending open
+    gate.set()
+    await shutdown
+    assert bridges[0].closed  # the returned bridge was closed before shutdown returned
+    assert manager._closing == set()
+    with pytest.raises(PhoneCallError) as refused:
+        await opening
+    assert refused.value.code == "call_unavailable"
+    with pytest.raises(PhoneCallError):
+        await manager.open("phone-b", object(), OTHER_CALL, VOICE, 0)

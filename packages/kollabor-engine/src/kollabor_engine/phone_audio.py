@@ -75,6 +75,7 @@ class _Opening:
     session: object
     voice_session_id: str
     cancelled: bool = False
+    task: asyncio.Task | None = None  # the open() running this; shutdown waits on it
 
 
 @dataclass
@@ -105,6 +106,7 @@ class PhoneAudioManager:
         self._pending: set[_Opening] = set()
         self._voice_owner: dict[str, str] = {}  # voice_session_id -> phone
         self._closing: set[asyncio.Task] = set()  # bridge closes still running
+        self._shutting_down = False  # set by shutdown(): refuse every new open
 
     async def open(
         self,
@@ -122,6 +124,8 @@ class PhoneAudioManager:
             raise PhoneCallError("call_invalid")
         if not _is_safe_uint(generation) or session is None:
             raise PhoneCallError("call_invalid")
+        if self._shutting_down:
+            raise PhoneCallError("call_unavailable")
         existing = self._calls.get(phone)
         if existing:
             if existing.id != call_id:
@@ -136,6 +140,7 @@ class PhoneAudioManager:
             raise PhoneCallError("call_busy")  # one phone per voice session
         self._voice_owner[voice_session_id] = phone
         pending = _Opening(phone, call_id, session, voice_session_id)
+        pending.task = asyncio.current_task()
         self._pending.add(pending)
         bridge: PhoneBridge | None = None
         try:
@@ -259,8 +264,19 @@ class PhoneAudioManager:
             await self._end(call, cause=cause)
 
     async def shutdown(self) -> None:
+        self._shutting_down = True
         for pending in list(self._pending):
             pending.cancelled = True
+        # An open still waiting on its bridge must finish first: its finally closes the
+        # bridge it returns, and that bridge may already own a child process. Never cancel
+        # the opener here: start_phone_bridge does not clean up a child on cancel.
+        openers = [
+            p.task
+            for p in list(self._pending)
+            if p.task is not None and p.task is not asyncio.current_task()
+        ]
+        if openers:
+            await asyncio.gather(*openers, return_exceptions=True)
         for call in list(self._calls.values()):
             await self._end(call, cause="shutdown")
         while self._closing:  # every bridge close, including ones a cancel left running
