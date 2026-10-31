@@ -63,7 +63,6 @@ READ_BYTES = 24 * 1024
 MAX_DATA_BYTES = 256 * 1024  # decompressed bound for one request
 FLUSH_SECONDS = 0.2  # coalesce a stream of small writes into one request
 IDLE_SECONDS = 5.0  # an idle channel wakes this often: the device asks its rules again
-RECHECK_SECONDS = 1.0  # with traffic, the device asks its rules at most this often
 KEEPALIVE_SECONDS = 30.0  # an idle channel proves its peer still holds it
 CONNECT_SECONDS = 15.0  # for the caller to connect the one-shot socket
 REQUEST_SECONDS = 30.0
@@ -99,7 +98,6 @@ class _Channel:
     path: Path | None = None
     send_seq: int = 0
     recv_seq: int = 0
-    checked: float = 0.0
     pump: asyncio.Task | None = None
     closed: bool = False
     # A capture: a read, so the device running the agent posts no open/close line.
@@ -343,7 +341,6 @@ class NetworkAttach:
             agent_id=agent_id,
             reader=reader,
             writer=writer,
-            checked=time.monotonic(),
             quiet=payload.get("quiet") is True,
         )
         self._channels[(peer, channel_id)] = channel
@@ -355,11 +352,14 @@ class NetworkAttach:
         return {"open": True}
 
     async def _allowed(self, channel: _Channel) -> bool:
-        """The device side asks its rules again (trust, grants, membership change)."""
+        """Should this channel's next frame pass? The device side asks its
+        rules (trust, grants, membership) for every frame it delivers or
+        sends, so a revocation fences the channel on the very next frame in
+        either direction, without waiting for a forced recheck. There is no
+        cached allow; a frame delivered before the revocation stays."""
         if channel.requester:
             # F19 requester side: a local halt withdraws this device's
-            # outbound channels too, at the same recheck cadence the device
-            # side uses for its own.
+            # outbound channels too, checked here on every frame.
             if self._halt_active is not None and self._halt_active():
                 logger.info(
                     "network attach %s to %s withdrawn: this device's network is halted",
@@ -368,10 +368,6 @@ class NetworkAttach:
                 )
                 return False
             return True
-        now = time.monotonic()
-        if now - channel.checked < RECHECK_SECONDS:
-            return True
-        channel.checked = now
         try:
             await self._target(channel.peer, channel.agent_id, channel.name)
         except Exception as exc:  # AttachRefused, or rules that cannot be read: closed either way
@@ -493,7 +489,6 @@ class NetworkAttach:
         """Close now what this device's rules no longer allow (a /connect command changed them)."""
 
         async def one(channel: _Channel) -> None:
-            channel.checked = 0.0
             if not await self._allowed(channel):
                 await self._close(channel, tell_peer=True, why=self._withdrawn(channel))
 
