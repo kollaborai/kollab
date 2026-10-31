@@ -285,14 +285,15 @@ export async function loadOlderHistoryPage(
     // A cached page is a snapshot from an earlier window. Its exhaustion
     // flags can predate the capped refresh that made older history reachable
     // again (a byte-capped page with start_index > 0 was capped, not
-    // terminal). Re-derive the cursor from the fragment boundary so the
-    // window keeps paging; an empty next page marks it exhausted for real.
+    // terminal). Carry the current window's engine-issued cursor down so
+    // the window keeps paging; an empty next page marks it exhausted for
+    // real. Never synthesize a cursor — the engine signs its cursors and
+    // rejects unsigned ones with 400 InvalidHistoryCursor.
     if (cached.has_more_older && cached.older_cursor) return cached;
     return {
       ...cached,
-      has_more_older: cached.start_index > 0,
-      older_cursor:
-        cached.start_index > 0 ? `before-${cached.start_index}` : null,
+      has_more_older: current.has_more_older,
+      older_cursor: current.older_cursor,
     };
   }
   if (!current.older_cursor) return null;

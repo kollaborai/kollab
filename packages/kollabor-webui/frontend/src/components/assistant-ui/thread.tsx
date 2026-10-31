@@ -206,6 +206,7 @@ const ThreadRoot: FC<{
   const scrollAnchorRef = useRef<{ height: number; top: number; start: number } | null>(null);
 
   const userScrollRef = useRef(false);
+  const touchStartYRef = useRef<number | null>(null);
 
   // A voice room's turns arrive from the room, not from this composer's runs,
   // so the top anchor never moves for them: while the room is live the chat
@@ -301,8 +302,19 @@ const ThreadRoot: FC<{
           const viewport = viewportRef.current;
           if (viewport && viewport.scrollTop <= 64) requestLoadOlder(viewport);
         }}
-        onTouchMove={() => {
+        onTouchStart={(event) => {
+          touchStartYRef.current = event.touches[0]?.clientY ?? null;
+        }}
+        onTouchMove={(event) => {
           userScrollRef.current = true;
+          // Same strand as the wheel above: a finger dragged down at
+          // scrollTop 0 cannot move the viewport, so no scroll event fires
+          // and the drag itself has to count as the up-intent trigger.
+          const startY = touchStartYRef.current;
+          const y = event.touches[0]?.clientY;
+          if (startY == null || y == null || y <= startY) return;
+          const viewport = viewportRef.current;
+          if (viewport && viewport.scrollTop <= 64) requestLoadOlder(viewport);
         }}
         onKeyDown={(event) => {
           if (!["ArrowUp", "PageUp", "Home"].includes(event.key)) return;

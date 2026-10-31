@@ -496,6 +496,9 @@ try {
   const e = {
     holding: true,
     held: [],
+    // Cursors this fake engine has actually issued. The real engine signs
+    // every cursor and rejects (400) any cursor it never issued.
+    issuedCursors: new Set(),
     release(response) {
       this.held.splice(0).forEach((pending) => pending.resolve(response));
     },
@@ -504,6 +507,7 @@ try {
     "E-capped-top-uponly",
     () => ({
       releaseCapped() {
+        e.issuedCursors.add("before-156");
         e.release({
           status: 200,
           body: mkPage(156, 160, {
@@ -538,14 +542,24 @@ try {
           };
         }
         if (options.before) {
+          // Cursor gate: the engine signs every cursor it issues and
+          // rejects any cursor it never issued with 400 — so a UI that
+          // synthesizes a cursor (e.g. from a cached fragment boundary)
+          // can never page past a capped refresh.
+          if (!e.issuedCursors.has(options.before)) {
+            return { status: 400, body: { error: "unissued cursor rejected" } };
+          }
           // Serve the page immediately preceding whatever window the app is
           // paging from, exactly like the real engine: contiguous, so the
-          // merge guard can stitch the window back together.
+          // merge guard can stitch the window back together — and the
+          // served page's boundary cursor counts as issued.
           const from = Number(options.before.replace(/^before-/, ""));
           if (!Number.isFinite(from) || from <= 0) {
             return { status: 400, body: { error: "bad cursor" } };
           }
-          return { status: 200, body: mkPage(Math.max(0, from - 50), from) };
+          const page = mkPage(Math.max(0, from - 50), from);
+          if (page.older_cursor) e.issuedCursors.add(page.older_cursor);
+          return { status: 200, body: page };
         }
         // Start from an exhausted window so parking at the top pages
         // nothing: the strand needs older pages to APPEAR only when the
@@ -595,6 +609,38 @@ try {
       }
       ok("E-capped-top-uponly", `capped refresh parked the view at scrollTop ${parkedTop} with older pages available`);
       const beforeCount = () => requests.filter((r) => r.before).length;
+      // Touch phase: a finger dragged DOWN at scrollTop 0 (pull-to-load
+      // older) cannot move the viewport, so no scroll event fires — the
+      // drag itself must trigger the older load, exactly like the wheel.
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Emulation.setTouchEmulationEnabled", {
+        enabled: true,
+        maxTouchPoints: 1,
+      });
+      const box = await viewport.boundingBox();
+      const cx = box.x + box.width / 2;
+      const cy = box.y + 64;
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x: cx, y: cy }],
+      });
+      for (let i = 1; i <= 20; i++) {
+        await cdp.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [{ x: cx, y: cy + i * 8 }],
+        });
+        await page.waitForTimeout(100);
+      }
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+      const touchLoads = beforeCount();
+      if (touchLoads === 0) {
+        fail("E-capped-top-uponly", "touch drag-down at the top never paged older history");
+      } else {
+        ok("E-capped-top-uponly", `touch drag-down paged older history (${touchLoads} before-load(s))`);
+      }
       // Up-only recovery: wheel up at the top, repeatedly. No down-scroll
       // first, no synthetic scroll events — the wheel-up alone has to page.
       await viewport.hover();

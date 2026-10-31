@@ -703,6 +703,20 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
       const updated = mergeOlderHistoryPage(current, older);
       if (updated.start_index >= current.start_index) {
+        // The page overlapped what the window already holds — e.g. the
+        // carried cursor was re-requested after a capped cache fragment
+        // merged. The engine's response still carries a fresh cursor:
+        // adopt it so the window keeps paging instead of dead-ending.
+        if (older.older_cursor) {
+          const adopted = {
+            ...updated,
+            has_more_older: older.has_more_older,
+            older_cursor: older.older_cursor,
+          };
+          historyPagesRef.current.set(sessionId, adopted);
+          if (activeIdRef.current === sessionId) setHistoryStatus(null);
+          return true;
+        }
         throw new Error("The engine returned no older history messages.");
       }
       historyPagesRef.current.set(sessionId, updated);
