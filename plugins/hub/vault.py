@@ -194,17 +194,9 @@ def _get_project_fingerprint() -> str:
     Returns:
         Encoded project path string, e.g. 'Users_example_dev_kollab'
     """
-    try:
-        from kollabor_config.config_utils import encode_project_path
+    from kollabor_config.config_utils import encode_project_path
 
-        return encode_project_path(Path.cwd())
-    except ImportError:
-        # Fallback if config_utils not available (shouldn't happen in normal use)
-        path_str = str(Path.cwd().resolve())
-        encoded = path_str.replace("/", "_").replace("\\", "_")
-        while encoded.startswith("_"):
-            encoded = encoded[1:]
-        return encoded
+    return encode_project_path(Path.cwd())
 
 
 class AgentVault:

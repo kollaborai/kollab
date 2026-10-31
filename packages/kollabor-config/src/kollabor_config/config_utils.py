@@ -131,7 +131,12 @@ def encode_project_path(project_path: Path) -> str:
         >>> encode_project_path(Path("C:\\\\Users\\\\dev\\\\project"))
         'C_Users_dev_project'
     """
-    path_str = str(project_path.resolve())
+    path = project_path.resolve()
+    path_str = str(path)
+    if path.drive.endswith(":"):
+        # Windows drive prefix "C:" reads as a drive-relative prefix once the
+        # name is joined under projects/, so drop the colon: "C:\Users\x" -> "C\Users\x".
+        path_str = path.drive[:-1] + path_str[len(path.drive):]
     # Replace path separators with underscores
     encoded = path_str.replace("/", "_").replace("\\", "_")
     # Remove leading underscore if present (from root /)
