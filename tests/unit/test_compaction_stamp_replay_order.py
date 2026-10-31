@@ -10,6 +10,7 @@ TZ=America/Phoenix and TZ=UTC (the old code was red under Phoenix).
 """
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -177,6 +178,46 @@ def test_durable_append_spills_to_sidecar_after_two_failures(tmp_path, monkeypat
     sidecar = str(target) + ".compaction-recovery.jsonl"
     assert spilled == sidecar
     assert Path(sidecar).read_text() == json.dumps(record) + "\n"
+
+
+def test_durable_append_fsyncs_primary(tmp_path, monkeypatch):
+    target = tmp_path / "session_fsync.jsonl"
+    real_fsync = os.fsync
+    fsync_calls = []
+
+    def counting_fsync(fd):
+        fsync_calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", counting_fsync)
+    record = {"type": "context_compaction", "content": "summary"}
+    assert _append_jsonl_durable(str(target), record) is None
+    assert fsync_calls, "primary append must fsync before returning success"
+
+
+def test_durable_append_fsyncs_sidecar_spill(tmp_path, monkeypatch):
+    target = tmp_path / "session_spill_fsync.jsonl"
+    real_open = open
+    real_fsync = os.fsync
+    fsync_calls = []
+
+    def flaky_open(file, mode="r", *args, **kwargs):
+        if Path(file) == target:
+            raise OSError("disk hiccup")
+        return real_open(file, mode, *args, **kwargs)
+
+    def counting_fsync(fd):
+        fsync_calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr("builtins.open", flaky_open)
+    monkeypatch.setattr(os, "fsync", counting_fsync)
+    record = {"type": "context_compaction", "content": "summary"}
+    spilled = _append_jsonl_durable(str(target), record)
+    assert spilled == str(target) + ".compaction-recovery.jsonl"
+    # The only successful open in this run is the sidecar's, so any fsync
+    # call here proves the spill path flushes to disk before returning.
+    assert fsync_calls, "sidecar spill must fsync before returning success"
 
 
 def test_stampless_compaction_keeps_prior_boundary(tmp_path):
