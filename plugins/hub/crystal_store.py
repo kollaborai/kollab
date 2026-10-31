@@ -162,6 +162,8 @@ class CrystalStore:
         self._entries: List[CrystalEntry] = []
         self._next_id: int = 1
         self._loaded = False
+        # Entries that changed while the last off-loop pass ran: they sit out the next.
+        self._dedup_changed: set = set()
         # Stemmed summary words, by summary text: stemming every pair again
         # made a pass over thousands of entries take minutes (#546).
         self._summary_words: dict = {}
@@ -487,18 +489,26 @@ class CrystalStore:
         records each merge; back on the loop the merges replay on the live
         entries, in order. The first merge touching an entry that changed
         meanwhile waits for the next pass with every merge after it, since each
-        merge depends on the ones before it; new entries hold back nothing.
+        merge depends on the ones before it; new entries hold back nothing. An
+        entry that changed during a pass sits out the next one, as a new one
+        would: a memory rewritten during every pass would otherwise hold back
+        every merge after its own for good.
         """
         self._ensure_loaded()
         snapshot = [_signature(e) for e in self._entries]
         before = {sig[0]: sig for sig in snapshot}
-        copies = [replace(e, keywords=list(e.keywords)) for e in self._entries]
+        repeated = len(before) < len(snapshot)  # repeated ids: merges cannot be matched to entries
+        out = set() if repeated else self._dedup_changed
+        copies = [replace(e, keywords=list(e.keywords)) for e in self._entries if e.id not in out]
         merges: List[Tuple[str, str]] = []
         found = await asyncio.to_thread(_run_pass, self._merge_pass, copies, merges)
+        self._dedup_changed = set() if repeated else {
+            e.id for e in self._entries if e.id in before and _signature(e) != before[e.id]
+        }
         if not found:
             return 0
         waiting = 0
-        if len(before) < len(snapshot):  # repeated ids: merges cannot be matched to entries
+        if repeated:
             if [_signature(e) for e in self._entries] != snapshot:
                 return 0
             self._entries = copies

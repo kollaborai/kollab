@@ -1,6 +1,7 @@
 """Dreaming's dedup pass keeps the full pass's merges and runs off the event loop (#546)."""
 
 import asyncio
+import itertools
 import sys
 import tempfile
 import threading
@@ -109,8 +110,33 @@ async def test_a_merge_whose_entry_changed_during_the_pass_waits_for_the_next():
     assert merged == 0  # 002 changed: its merge and every one after it wait, 005 into 004 too
     assert [e.id for e in store.get_all()] == ["crys-001", "crys-002", "crys-004", "crys-005"]
     assert store.get_by_id("crys-002").body == "A new body, edited meanwhile."
-    assert await store.deduplicate_off_loop() == 2
+    assert await store.deduplicate_off_loop() == 1  # 002 changed during the last pass: it sits out
+    assert [e.id for e in store.get_all()] == ["crys-001", "crys-002", "crys-004"]
+    assert await store.deduplicate_off_loop() == 1
     assert [e.id for e in store.get_all()] == ["crys-001", "crys-004"]
+
+
+@pytest.mark.asyncio
+async def test_an_entry_edited_during_every_pass_holds_back_no_other_merge():
+    # Chrysoprase on #547 round 4: 001's body edited during every pass stopped
+    # each replay at 001's merge, the first, so 003 and 004 never merged.
+    pairs = _CHAIN[:2] + [
+        ("crys-003", "x, y, z", "mike november oscar papa"),
+        ("crys-004", "x, y, w", "quebec romeo sierra tango"),
+    ]
+    store = CrystalStore(_vault(pairs))
+    count = itertools.count()
+    edit = lambda: store.update_entry("crys-001", f"Edit {next(count)}.", keywords=["a", "b", "c"])  # noqa: E731
+    merged, _ = await _hold_pass(store, edit)
+    assert merged == 0  # 001's merge is the first: every one waits
+    merged, _ = await _hold_pass(store, edit)
+    assert merged == 1  # 001 sits out, so 004 merges into 003
+    assert [e.id for e in store.get_all()] == ["crys-001", "crys-002", "crys-003"]
+    merged, _ = await _hold_pass(store, edit)
+    assert merged == 0  # still changing, still sitting out
+    assert await store.deduplicate_off_loop() == 0  # it changed during the last pass
+    assert await store.deduplicate_off_loop() == 1  # quiet for a whole pass: it merges
+    assert [e.id for e in store.get_all()] == ["crys-001", "crys-003"]
 
 
 @pytest.mark.asyncio
