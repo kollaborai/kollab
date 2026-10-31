@@ -21,8 +21,10 @@ import logging
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ..goal_image_scope import safe_goal_error_cause
+
 from ..generated_image_artifacts import redact_generated_image_data
-from ..message_content import content_to_text, serialize_openai_responses_content
+from ..message_content import redact_error_media, content_to_text, serialize_openai_responses_content
 from .base import LLMProvider
 from .errors import ProviderError, map_http_status_error, map_openai_error
 from .message_sanitizer import strip_local_message_metadata_from_message
@@ -340,10 +342,10 @@ class OpenAIResponsesProvider(LLMProvider):
         except ImportError as e:
             raise ImportError(
                 "httpx not installed. Install with: pip install httpx"
-            ) from e
+            ) from safe_goal_error_cause(e)
         except Exception as e:
-            logger.error(f"Failed to initialize OpenAI Responses client: {e}")
-            raise map_openai_error(e, "openai_responses") from e
+            logger.error(f"Failed to initialize OpenAI Responses client: {redact_error_media(str(e))}")
+            raise map_openai_error(e, "openai_responses") from safe_goal_error_cause(e)
 
     @property
     def _requires_streaming(self) -> bool:
@@ -445,7 +447,7 @@ class OpenAIResponsesProvider(LLMProvider):
                     "openai_responses",
                     response.status_code,
                     response.headers,
-                ) from error
+                ) from safe_goal_error_cause(error)
 
             # Parse response
             response_dict = response.json()
@@ -464,10 +466,10 @@ class OpenAIResponsesProvider(LLMProvider):
             return unified_response
 
         except Exception as e:
-            logger.error(f"OpenAI Responses call failed: {type(e).__name__}: {e}")
+            logger.error(f"OpenAI Responses call failed: {type(e).__name__}: {redact_error_media(str(e))}")
             if isinstance(e, ProviderError):
                 raise
-            raise map_openai_error(e, "openai_responses") from e
+            raise map_openai_error(e, "openai_responses") from safe_goal_error_cause(e)
         finally:
             await self._track_request_end()
 
@@ -529,7 +531,7 @@ class OpenAIResponsesProvider(LLMProvider):
                         "openai_responses",
                         response.status_code,
                         response.headers,
-                    ) from error
+                    ) from safe_goal_error_cause(error)
 
                 # Consume SSE stream, capture the final response payload
                 # Also accumulate text deltas in case the final payload
@@ -625,10 +627,10 @@ class OpenAIResponsesProvider(LLMProvider):
             return unified
 
         except Exception as e:
-            logger.error(f"OpenAI Responses call-via-stream failed: {e}")
+            logger.error(f"OpenAI Responses call-via-stream failed: {redact_error_media(str(e))}")
             if isinstance(e, ProviderError):
                 raise
-            raise map_openai_error(e, "openai_responses") from e
+            raise map_openai_error(e, "openai_responses") from safe_goal_error_cause(e)
         finally:
             await self._track_request_end()
 
@@ -704,7 +706,7 @@ class OpenAIResponsesProvider(LLMProvider):
                         "openai_responses",
                         response.status_code,
                         response.headers,
-                    ) from error
+                    ) from safe_goal_error_cause(error)
 
                 # Parse SSE stream
                 async for chunk in self._parse_sse_stream(response):
@@ -713,10 +715,10 @@ class OpenAIResponsesProvider(LLMProvider):
 
         except Exception as e:
             # Not an error yet: api_communication_service retries it and logs the final failure.
-            logger.warning(f"OpenAI Responses stream failed: {e}")
+            logger.warning(f"OpenAI Responses stream failed: {redact_error_media(str(e))}")
             if isinstance(e, ProviderError):
                 raise
-            raise map_openai_error(e, "openai_responses") from e
+            raise map_openai_error(e, "openai_responses") from safe_goal_error_cause(e)
         finally:
             await self._track_request_end()
 
@@ -1142,8 +1144,8 @@ class OpenAIResponsesProvider(LLMProvider):
         except ProviderError:
             raise
         except Exception as e:
-            logger.error(f"Failed to parse SSE stream: {e}")
-            raise map_openai_error(e, "openai_responses") from e
+            logger.error(f"Failed to parse SSE stream: {redact_error_media(str(e))}")
+            raise map_openai_error(e, "openai_responses") from safe_goal_error_cause(e)
 
     def _parse_sse_event(
         self,
@@ -1244,12 +1246,12 @@ class OpenAIResponsesProvider(LLMProvider):
                 # A malformed terminal event decides the turn; dropping it would
                 # only resurface as "Stream ended without a final event".
                 raise ProviderError(
-                    f"Malformed {event} event from the Responses API: {e}",
+                    f"Malformed {event} event from the Responses API: {redact_error_media(str(e))}",
                     provider="openai_responses",
                     error_code="malformed_stream_event",
                     original_error=e,
-                ) from e
-            logger.warning(f"Failed to parse SSE event (event={event}): {e}")
+                ) from safe_goal_error_cause(e)
+            logger.warning(f"Failed to parse SSE event (event={event}): {redact_error_media(str(e))}")
             return None
 
     async def _cleanup(self) -> None:

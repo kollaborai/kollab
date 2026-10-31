@@ -336,7 +336,6 @@ class GoalCommandHandler(BaseCommandHandler):
         return (
             " Staged attachments remain for the next goal creation until replaced"
             " or the daemon stops; /goal clear removes them and clears any active goal."
-            " Native goal turns do not yet send images to the model."
         )
 
     def _session_id(self) -> Optional[str]:

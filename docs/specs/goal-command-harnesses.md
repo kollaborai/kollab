@@ -783,9 +783,7 @@ guard retains rejected references until replaced or the daemon stops, and
 tells the user they will be added to the next successfully created goal,
 including a text-only goal. `/goal clear` removes pending references and
 clears any active goal. Request-scoped attachment ownership is tracked in
-[issue #512](https://github.com/kollaborai/kollab/issues/512). Native goal
-turns do not yet send goal images to the provider; that separate gap is
-tracked in [issue #510](https://github.com/kollaborai/kollab/issues/510).
+[issue #512](https://github.com/kollaborai/kollab/issues/512).
 
 ### 9.2 text, image, and mixed inputs
 
@@ -815,10 +813,18 @@ Required cases:
    (`message_content.py:56`) into `goals/artifacts/<sha256>.<ext>`; the
    objective is the text projection and the image is represented by the
    scoped artifact checksum/media type. Goal-owned turns rehydrate the bytes
-   through the provider's existing image resolver. A missing or
-   checksum-mismatched artifact at rehydration is a hard error: the turn is
-   not dispatched, the goal pauses with `artifact_missing`, and the reference
-   is never silently dropped while the goal continues;
+   through the provider's existing image resolver. The images are attached to
+   a request-only copy of that attempt's internal goal context, including its
+   tool and truncation continuations; neither bytes nor temporary media IDs are
+   written to history. Temporary media is released before queued user turns
+   resume. A missing or checksum-mismatched artifact at rehydration is a hard
+   error: the turn is not dispatched, the goal pauses with `artifact_missing`,
+   and the reference is never silently dropped while the goal continues. A
+   model without image input or an unavailable request context also pauses the
+   attempt rather than silently omitting images. Raw provider logs redact image
+   data URLs and inline image base64. During an image-goal provider request,
+   untrusted error details and causes are withheld; recognized machine error
+   codes remain available for retry and context-overflow handling;
 4. ordinary text/image user turns during a goal: original structured content
    reaches the provider boundary unchanged, while goal matching/continuation
    uses only the safe text projection.
