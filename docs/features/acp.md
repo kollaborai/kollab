@@ -116,6 +116,19 @@ Kollab's own windows continue to show them. Prompts currently accept text.
 restores context without replay. Native file edits include diff cards for UTF-8
 text files up to 256 KiB; larger and binary files show their tool result.
 
+## Model and effort picks
+
+A model or effort pick belongs to the ACP session it was made in:
+
+- A restart of the same profile restores the picks that were confirmed and saved,
+  except where an explicit loadout model or effort sets that value. The explicit
+  loadout wins over the saved pick, and the saved file is left as it was.
+- A restart into another profile forgets the previous profile's picks. The new
+  profile starts from its own loadout and its own saved picks.
+- After a model change, the effort you picked is re-applied. If the new model
+  does not offer it, the highest effort the model offers is used, and a notice
+  says so. If the harness refuses the effort, the notice says that instead.
+
 For the implementation contract and qualification gates, see
 [`../specs/acp-bridge.md`](../specs/acp-bridge.md).
 The current evidence and open checks are recorded in

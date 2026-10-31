@@ -16,7 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from kollabor_ai.profile_manager import LLMProfile
+from kollabor_ai.profile_manager import EFFORT_LEVELS, LLMProfile
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.terminal_state import TerminalMode
@@ -42,6 +42,29 @@ class _ObservedTurn:
     text: str = ""
     updates: list[dict[str, Any]] = field(default_factory=list)
     finished: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+# Saved picks are keyed by what the option means, so a harness that renames its option still restores it.
+_CANONICAL_PICK_KEYS = {"model": "model", "thought_level": "effort"}
+
+
+def _effort_rank(level: str) -> int:
+    """Position of an effort level in EFFORT_LEVELS; a level we do not know ranks lowest."""
+    return EFFORT_LEVELS.index(level) if level in EFFORT_LEVELS else -1
+
+
+def option_values(option: dict[str, Any] | None) -> list[str]:
+    """Advertised values of an ACP config option, nested option groups included."""
+    values: list[str] = []
+    for candidate in (option or {}).get("options") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if "value" in candidate:
+            values.append(str(candidate["value"]))
+        for nested in candidate.get("options") or []:
+            if isinstance(nested, dict) and "value" in nested:
+                values.append(str(nested["value"]))
+    return values
 
 
 class ACPOrchestrator:
@@ -85,6 +108,7 @@ class ACPOrchestrator:
         # The model/effort picked for each harness profile, re-applied at start.
         self._options_path = Path(get_project_data_dir()) / "acp" / "options.json"
         self._binding_conversation_id: str | None = None
+        self.restore_notices: list[str] = []
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_rows: list[str] = []
         self._unwritten_observations: deque[AgentHudEntry] = deque(maxlen=20)
@@ -123,16 +147,67 @@ class ACPOrchestrator:
         runner = self._runner
         if runner is None or self._closed:
             raise ACPError("ACP session is not active")
+        category = next((str(o.get("category") or "") for o in runner.advertised_config_options()
+                         if o.get("id") == config_id), "")
         options = await runner.set_config_option(config_id, value)
-        if self._profile_name:
+        reported = next((o.get("currentValue") for o in options or [] if o.get("id") == config_id), None)
+        if reported == value:
+            # A pick the user confirmed this session: a replay of saved options must not undo it.
+            self._user_picks = {**getattr(self, "_user_picks", {}), config_id: value}
+            effort = self._effort_option()
+            if effort is not None and effort.get("id") == config_id:
+                self._effort_pick = value  # the effort option, found by category or by its ID if uncategorized
+        if self._profile_name and reported == value:
+            # Persist only a value the harness confirmed; a refused pick must not replay at the next start.
             saved = self._saved_options()
-            saved.setdefault(self._profile_name, {})[config_id] = value
+            key = _CANONICAL_PICK_KEYS.get(category, config_id)
+            saved.setdefault(self._profile_name, {})[key] = value
             try:
                 self._options_path.parent.mkdir(parents=True, exist_ok=True)
                 self._options_path.write_text(json.dumps(saved, indent=2))
             except OSError as exc:
                 logger.warning("ACP option save failed: %s", exc)
+        if category == "model" or config_id == "model":
+            await self._reapply_effort_after_model()
+            options = runner.advertised_config_options()  # the effort may have changed after the model reply
         return options
+
+    async def _reapply_effort_after_model(self) -> None:
+        """A model change can reset or drop effort on ACP: put the user's pick back, or say why it could not be.
+
+        Never raises. A pick the new model does not offer falls back to the highest level it offers.
+        """
+        runner = self._runner
+        wanted = getattr(self, "_effort_pick", None)
+        if runner is None or wanted is None:
+            return
+        effort = self._effort_option()
+        if effort is None:
+            self._show_notice(f"effort {wanted} was not kept: the new model advertises no effort option")
+            return
+        notice = None
+        offered = option_values(effort)
+        target = wanted
+        if offered and wanted not in offered:
+            target = max(offered, key=_effort_rank)
+            notice = f"effort {wanted} is not offered by the new model; using {target}, the highest it offers"
+        if effort.get("currentValue") != target:
+            try:
+                options = await runner.set_config_option(str(effort["id"]), target)
+            except Exception as exc:
+                notice = f"effort {wanted} was refused by the new model: {exc}"
+            else:
+                reported = next((o.get("currentValue") for o in options or [] if o.get("id") == effort["id"]), None)
+                if reported != target:
+                    notice = f"effort {wanted} did not survive the model change (the harness reports {reported})"
+        if notice:
+            self._show_notice(notice)
+
+    def _forget_session_picks(self) -> None:
+        """Picks belong to one harness session: a restart into another profile must not replay them.
+        Confirmed picks are already in the saved file, so a restart of the same profile still restores them."""
+        self._effort_pick = None
+        self._user_picks = {}
 
     def _saved_options(self) -> dict[str, dict[str, Any]]:
         try:
@@ -141,23 +216,118 @@ class ACPOrchestrator:
             return {}
         return saved if isinstance(saved, dict) else {}
 
-    async def _restore_options(self, profile: LLMProfile) -> None:
-        """Re-apply the profile's model and the options last picked for it."""
-        wanted: dict[str, Any] = {}
-        if profile.model:
-            model = next((o for o in self.advertised_config_options()
-                          if o.get("category") == "model" or o.get("id") == "model"), None)
-            if model is not None:
-                wanted[str(model["id"])] = profile.model
-        wanted.update(self._saved_options().get(profile.name) or {})
-        for config_id, value in wanted.items():
+    def _effort_option(self) -> dict[str, Any] | None:
+        """The advertised reasoning-effort option, found by category. The ID "effort" is only the
+        fallback for a harness that advertises it with no category."""
+        options = self.advertised_config_options()
+        return (next((o for o in options if str(o.get("category") or "").lower() == "thought_level"), None)
+                or next((o for o in options if o.get("id") == "effort" and not o.get("category")), None))
+
+    async def _restore_options(self, profile: LLMProfile) -> list[str]:
+        """Re-apply the loadout's model and effort, then the other saved picks.
+
+        Order: model first (a model change alters which efforts exist), then
+        effort, then saved picks. The loadout wins over saved values. Returns
+        one line per requested value the harness did not take.
+        """
+        notices: list[str] = []
+        runner = self._runner
+        if runner is None:
+            return notices
+        saved = dict(self._saved_options().get(profile.name) or {})
+        picked = getattr(self, "_user_picks", {})  # confirmed this session: a replay must not undo them
+        loadout_model = str(getattr(profile, "model", "") or "")
+        loadout_effort = str(getattr(profile, "effort", "") or "")
+        if not (saved or loadout_model or loadout_effort):
+            return notices  # nothing to re-apply: stay lazy, as before
+        model = next((o for o in self.advertised_config_options()
+                      if o.get("category") == "model" or o.get("id") == "model"), None)
+        saved_model = saved.pop("model", None)
+        if saved_model is None and model is not None and str(model["id"]) not in picked:
+            saved_model = saved.pop(str(model["id"]), None)  # an older save under the raw ID
+        model_value = loadout_model or saved_model
+        model_ok = True
+        if model is None and model_value:
+            model_ok = False
+            notices.append(f"model {model_value} was not applied: the harness advertises no model option")
+        if model is not None:
+            model_id = str(model["id"])
+            if model_value and model_value != model.get("currentValue"):
+                try:
+                    await runner.set_config_option(model_id, model_value)
+                except Exception as exc:
+                    model_ok = False
+                    notices.append(f"model {model_value} was not applied: {exc}")
+            if model_value and model_ok:
+                active = next((o.get("currentValue") for o in self.advertised_config_options()
+                               if o.get("id") == model_id), None)
+                if active != model_value:
+                    model_ok = False
+                    notices.append(f"model {model_value} did not become active (harness reports {active})")
+        effort = self._effort_option()
+        effort_id = str(effort["id"]) if effort is not None else None
+        saved_effort = saved.pop("effort", None)
+        if saved_effort is None and effort is not None and effort_id not in picked:
+            saved_effort = saved.pop(effort_id, None)  # an older save under the raw ID
+        if not model_ok:
+            if loadout_effort or saved_effort:
+                notices.append(
+                    f"effort {loadout_effort or saved_effort} was not applied because the model is not active"
+                )
+        elif effort is not None:
+            effort_value = loadout_effort or saved_effort
+            if effort_value and str(effort_value) == effort.get("currentValue"):
+                self._effort_pick = str(effort_value)  # already set: still the pick a model change must keep
+            if effort_value and str(effort_value) != effort.get("currentValue"):
+                value = str(effort_value)
+                offered = option_values(effort)
+                if value not in offered:
+                    notices.append(
+                        f"effort {value} is not offered by this model "
+                        f"(available: {', '.join(offered) or 'none'})"
+                    )
+                else:
+                    try:
+                        options = await runner.set_config_option(effort_id, value)
+                    except Exception as exc:
+                        notices.append(f"effort {value} was not applied: {exc}")
+                    else:
+                        reported = next((o.get("currentValue") for o in options or []
+                                         if o.get("id") == effort_id), None)
+                        if reported != value:
+                            notices.append(f"effort {value} was accepted but the harness reports {reported}")
+                        else:
+                            self._effort_pick = value  # the loadout's effort is kept across a model change
+        elif loadout_effort or saved_effort:
+            notices.append(
+                f"this harness advertises no effort option, so effort {loadout_effort or saved_effort} was not applied"
+            )
+        # An option the loadout or a canonical saved pick already set is not re-sent under its
+        # raw ID (an older save): the loadout wins, and a raw copy must not undo it.
+        handled = set()
+        if model is not None and model_value:
+            handled.add(str(model["id"]))
+        if effort_id is not None and (loadout_effort or saved_effort):
+            handled.add(effort_id)
+        handled |= {option_id for option_id in (effort_id, model and str(model["id"])) if option_id in picked}
+        for config_id, value in saved.items():
+            if config_id in handled:
+                continue
+            if effort_id is not None and config_id == effort_id and not model_ok:
+                continue
             option = next((o for o in self.advertised_config_options() if o.get("id") == config_id), None)
-            if option is None or option.get("currentValue") == value:
+            if option is None:
+                notices.append(f"saved pick {config_id}={value} is not offered by this harness, so it was not applied")
+                continue
+            if option.get("currentValue") == value:
                 continue
             try:
-                await self._runner.set_config_option(config_id, value)
-            except Exception as exc:  # an option the harness no longer offers
-                logger.info("ACP option %s=%s not restored: %s", config_id, value, exc)
+                await runner.set_config_option(config_id, value)
+            except Exception as exc:
+                notices.append(f"saved pick {config_id}={value} was not applied: {exc}")
+        for notice in notices:
+            logger.warning("ACP restore: %s", notice)
+        return notices
 
     async def start(self, profile: LLMProfile, *, resume_conversation: str | None = None) -> None:
         if profile.provider != "acp":
@@ -170,6 +340,7 @@ class ACPOrchestrator:
             # acquiring a replacement, without creating a second owner.
             await self.close()
         self._closed = False
+        self._forget_session_picks()
         self.startup_error = None
         self._terminal_session_id = None
         self._observations.clear()
@@ -218,7 +389,8 @@ class ACPOrchestrator:
             )
             self._binding_conversation_id = self._conversation_id()
             await self._runner.start(binding=binding)
-            await self._restore_options(profile)
+            self.restore_notices = await self._restore_options(profile)
+            self._announce_restore_notices()
             self.event_bus.register_service("acp_orchestrator", self)
             self._save_binding()
         except BaseException as exc:
@@ -381,6 +553,25 @@ class ACPOrchestrator:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
         return str(getattr(manager, "current_session_id", "") or self.identity)
+
+    @property
+    def binding_conversation_id(self) -> str | None:
+        return self._binding_conversation_id
+
+    def save_binding_for(self, conversation_id: str, binding: Any) -> None:
+        """Put back a binding a switch overwrote, so a rollback can resume it."""
+        self._bindings.save(conversation_id, binding)
+
+    def _announce_restore_notices(self) -> None:
+        """Show each requested value the harness did not take, in the chat."""
+        for notice in self.restore_notices:
+            self._show_notice(notice)
+
+    def _show_notice(self, notice: str) -> None:
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        display = getattr(llm, "message_display_service", None)
+        if display is not None:
+            display.display_system_message(f"ACP setting not applied: {notice}")
 
     def _save_binding(self) -> None:
         if self._runner is not None and self._runner.binding is not None:

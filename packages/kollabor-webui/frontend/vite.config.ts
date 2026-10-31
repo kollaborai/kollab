@@ -190,6 +190,7 @@ const mainConfig = defineConfig({
       "tests/phonelink-app-shell.test.ts",
       "tests/trajectory-detail-title.test.ts",
       "tests/sidebar-breakpoint.test.ts",
+      "tests/session-refresh-gate.test.ts",
     ],
     environment: "node",
   },
