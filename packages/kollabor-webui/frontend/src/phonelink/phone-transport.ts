@@ -142,6 +142,16 @@ const lost = () =>
  * absent from the roster. The engine legitimately restarts and re-registers,
  * so a briefly missing roster entry must not terminate the link.
  */
+// Regular requests (events, chat) may hold at most two of the three slots, so a
+// call tick always finds one free: long-poll events cannot starve audio.
+type RequestLane = "normal" | "call";
+
+export type CallPacket = {
+  op: "call_open" | "call_tick" | "call_close";
+  id: string;
+} & Record<string, Json>;
+export type CallResult = Record<string, Json>;
+
 export const HOST_MISSING_GRACE_MS = 15_000;
 
 /** What a relay peers frame means for the tracked host session. Pure so the
@@ -445,7 +455,8 @@ export class PhoneTransport {
   private sent = 0;
   private received = -1;
   private active = 0;
-  private slots: Array<() => void> = [];
+  private waiters: Array<{ lane: RequestLane; wake: () => void }> = [];
+  private encoding: Promise<unknown> = Promise.resolve();
   private sending: Promise<void> = Promise.resolve();
   private lastSend = 0;
   private closed = false;
@@ -971,20 +982,48 @@ export class PhoneTransport {
     return job;
   }
 
+  private limitFor(lane: RequestLane) {
+    return lane === "call" ? 3 : 2;
+  }
+
+  private async acquire(lane: RequestLane) {
+    if (
+      this.active < this.limitFor(lane) &&
+      !this.waiters.some((waiter) => waiter.lane === lane)
+    ) {
+      this.active += 1;
+      return;
+    }
+    await new Promise<void>((wake) => this.waiters.push({ lane, wake }));
+  }
+
+  private release() {
+    this.active -= 1;
+    const index = this.waiters.findIndex(
+      (waiter) => this.active < this.limitFor(waiter.lane),
+    );
+    if (index < 0) return;
+    const [waiter] = this.waiters.splice(index, 1);
+    this.active += 1;
+    waiter.wake();
+  }
+
   private async request(
     method: string,
-    arguments_: Json,
+    arguments_: Json | (() => Promise<Json>),
     signal?: AbortSignal,
     timeout = 30000,
+    lane: RequestLane = "normal",
   ): Promise<Json> {
-    if (this.active >= 3)
-      await new Promise<void>((resolve) => this.slots.push(resolve));
-    else this.active += 1;
+    await this.acquire(lane);
     const id = randomId();
     let timer: ReturnType<typeof setTimeout>;
     let abort: () => void = () => {};
     try {
       if (signal?.aborted || this.closed) throw signal?.reason ?? lost();
+      // A builder runs only once a slot is held, so seq follows wire order.
+      const args =
+        typeof arguments_ === "function" ? await arguments_() : arguments_;
       return await new Promise<Json>((resolve, reject) => {
         this.pending.set(id, { method, resolve, reject });
         abort = () => {
@@ -1006,7 +1045,7 @@ export class PhoneTransport {
         }, timeout);
         void this.send(
           "request",
-          { method, arguments: arguments_, timeout_ms: timeout },
+          { method, arguments: args, timeout_ms: timeout },
           id,
         ).catch(reject);
       });
@@ -1014,30 +1053,41 @@ export class PhoneTransport {
       clearTimeout(timer!);
       signal?.removeEventListener("abort", abort);
       this.pending.delete(id);
-      const next = this.slots.shift();
-      if (next) next();
-      else this.active -= 1;
+      this.release();
     }
   }
 
-  private async packet(data: Json, signal?: AbortSignal) {
+  private async packet(
+    data: Json,
+    signal?: AbortSignal,
+    lane: RequestLane = "normal",
+    timeout = 30000,
+  ) {
     if (!this.outgoing || !this.incoming) throw lost();
-    const nonce = sodium.randombytes_buf(24);
-    const encoded = await encodePhoneFrame(
-      sodium.from_string(JSON.stringify({ ...data, seq: this.sent++ })),
-      this.frameCompression,
-    );
+    const outgoing = this.outgoing;
+    // seq is assigned and encoded in one chain, so it matches wire order.
+    const build = () => {
+      const job = this.encoding.then(async () => {
+        const nonce = sodium.randombytes_buf(24);
+        const encoded = await encodePhoneFrame(
+          sodium.from_string(JSON.stringify({ ...data, seq: this.sent++ })),
+          this.frameCompression,
+        );
+        return {
+          packet: base64(
+            join(nonce, sodium.crypto_secretbox_easy(encoded, nonce, outgoing)),
+          ),
+        } as Json;
+      });
+      this.encoding = job.catch(() => undefined);
+      return job;
+    };
     const response = await this.request(
       "phone_http",
-      {
-        packet: base64(
-          join(
-            nonce,
-            sodium.crypto_secretbox_easy(encoded, nonce, this.outgoing),
-          ),
-        ),
-      },
+      build,
       signal,
+      timeout,
+      lane,
     );
     const raw = unbase64(response.packet);
     const decrypted = sodium.crypto_secretbox_open_easy(
@@ -1052,6 +1102,12 @@ export class PhoneTransport {
     this.received = result.seq;
     if (result.error) throw new Error(result.error);
     return result as Json;
+  }
+
+  // One call op (open, tick or close) over the encrypted packet, in the reserved
+  // lane. A failure rejects with the broker's stable code (call_busy, ...).
+  async callPacket(data: CallPacket, signal?: AbortSignal): Promise<CallResult> {
+    return (await this.packet(data, signal, "call", 3000)) as CallResult;
   }
 
   async fetch(path: string, init: RequestInit = {}): Promise<Response> {
