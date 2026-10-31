@@ -237,7 +237,16 @@ class ACPOrchestrator:
             notices.append(
                 f"this harness advertises no effort option, so effort {loadout_effort or saved_effort} was not applied"
             )
+        # An option the loadout or a canonical saved pick already set is not re-sent under its
+        # raw ID (an older save): the loadout wins, and a raw copy must not undo it.
+        handled = set()
+        if model is not None and model_value:
+            handled.add(str(model["id"]))
+        if effort_id is not None and (loadout_effort or saved_effort):
+            handled.add(effort_id)
         for config_id, value in saved.items():
+            if config_id in handled:
+                continue
             if effort_id is not None and config_id == effort_id and not model_ok:
                 continue
             option = next((o for o in self.advertised_config_options() if o.get("id") == config_id), None)

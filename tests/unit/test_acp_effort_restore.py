@@ -171,6 +171,26 @@ async def test_saved_model_is_reported_when_the_harness_has_no_model_option(tmp_
 
 
 @pytest.mark.asyncio
+async def test_raw_effort_id_saved_pick_cannot_undo_the_loadout_effort(tmp_path):
+    options = _options()
+    options[1]["id"] = "reasoning_budget"  # the same meaning under a custom ID
+    orch = _orchestrator(tmp_path, options, saved={"reasoning_budget": "xhigh"})
+    await orch._restore_options(LOADOUT)
+    assert orch._runner.calls == [("model", "haiku"), ("reasoning_budget", "max")]
+    assert options[1]["currentValue"] == "max"
+
+
+@pytest.mark.asyncio
+async def test_raw_model_id_saved_pick_cannot_undo_the_loadout_model(tmp_path):
+    options = _options()
+    options[0]["id"] = "llm_model"  # the same meaning under a custom ID
+    orch = _orchestrator(tmp_path, options, saved={"llm_model": "sonnet"})
+    await orch._restore_options(LOADOUT)
+    assert orch._runner.calls == [("llm_model", "haiku"), ("effort", "max")]
+    assert options[0]["currentValue"] == "haiku"
+
+
+@pytest.mark.asyncio
 async def test_saved_effort_survives_a_custom_option_id(tmp_path):
     """A thought_level option with its own ID: the saved pick is reported when the option disappears,
     and applied to that ID when it is present."""
