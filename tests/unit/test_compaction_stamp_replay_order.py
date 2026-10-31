@@ -177,3 +177,29 @@ def test_durable_append_spills_to_sidecar_after_two_failures(tmp_path, monkeypat
     sidecar = str(target) + ".compaction-recovery.jsonl"
     assert spilled == sidecar
     assert Path(sidecar).read_text() == json.dumps(record) + "\n"
+
+
+def test_stampless_compaction_keeps_prior_boundary(tmp_path):
+    # A later compaction record with a missing stamp must not reset a
+    # valid earlier boundary to None: resetting it un-suppressed the
+    # pre-boundary history on replay. The prior stamp is kept, the
+    # superseded first summary is dropped (last-round-wins), and the
+    # stampless second summary still replays. The stamp is a non-None
+    # unparseable string: parse -> None is the exact hazard, while a
+    # literal None field or any non-isoformat string trips the separate
+    # save-path parse bug (tracked in the follow-up issue) once resume
+    # persists, so this drives load_session directly like the fail-open
+    # test above. The hazard itself lives entirely in the loader.
+    compaction_at = BASE
+    sid = write_session(tmp_path, "stampless-keeps-prior", [
+        chat_record(z_stamp(compaction_at - timedelta(minutes=1)), "Before"),
+        compaction_record(z_stamp(compaction_at), "First"),
+        chat_record(z_stamp(compaction_at + timedelta(minutes=1)), "Between"),
+        compaction_record("not-a-timestamp", "Second"),
+        chat_record(z_stamp(compaction_at + timedelta(minutes=2)), "Tail"),
+    ])
+    reader = manager(tmp_path)
+    assert reader.load_session(sid)
+    # Order: final summary first, then post-boundary tail records. Under
+    # the old code the reset to None would un-suppress "Before" here.
+    assert contents(reader) == ["Second", "Between", "Tail"]

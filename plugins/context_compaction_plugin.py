@@ -3903,7 +3903,19 @@ class ContextCompactionPlugin(BasePlugin):
             record["role"] = "user"
             record["subtype"] = "compaction_summary"
 
-        if _append_jsonl_durable(session_file, record) is None:
+        try:
+            spilled = _append_jsonl_durable(session_file, record)
+        except Exception:
+            # Append and recovery sidecar both failed. Callers (:2203 hard
+            # cap, :2315 rollover, :3142 threshold) have already marked the
+            # compaction applied by now; raising here would leave status and
+            # history disagreeing. The record is lost either way - log it.
+            logger.exception(
+                f"Compaction record lost (append and sidecar both failed) "
+                f"for {session_file}"
+            )
+            spilled = None
+        if spilled is None:
             logger.debug(f"Logged compaction event for round {self._compaction_round}")
 
     # ------------------------------------------------------------------

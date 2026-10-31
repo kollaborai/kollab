@@ -994,9 +994,14 @@ class ConversationManager:
                         # Parsed once for ordering; an unparseable stamp
                         # leaves last_compaction_at None, which suppresses
                         # nothing (fail open) rather than comparing garbage.
-                        last_compaction_at = _parse_record_stamp(
+                        parsed_stamp = _parse_record_stamp(
                             data.get("timestamp")
                         )
+                        if parsed_stamp is not None:
+                            # A later record with a missing/unparseable
+                            # stamp keeps the prior boundary: resetting to
+                            # None would un-suppress pre-boundary history.
+                            last_compaction_at = parsed_stamp
                         if content:
                             pending_compaction = {
                                 "uuid": data.get("uuid") or str(uuid4()),
