@@ -305,6 +305,31 @@ def _manager(ctx: Any) -> Any:
     return LoadoutManager(pm, config=getattr(ctx._llm_service, "config", None))
 
 
+def _fallback_plugin(ctx: Any) -> Any:
+    get_service = getattr(getattr(ctx, "_event_bus", None), "get_service", None)
+    return get_service("model_fallback") if callable(get_service) else None
+
+
+def _fallback_controls(ctx: Any, manager: Any) -> list:
+    """The Fallback dropdown: what this agent switches to when its model can't
+    serve a turn (#548). Offers each connection with its own model and every
+    saved loadout; a catalog model set with /llm fallback is shown as well."""
+    plugin = _fallback_plugin(ctx)
+    if plugin is None:
+        return []
+    names = [p.name for p in manager.provider_profiles()]
+    names += [lo.name for lo in manager.list_loadouts() if not lo.implicit and lo.name not in names]
+    choice = plugin.choice()
+    if choice and choice not in names:
+        names.append(choice)
+    return [make_field(
+        "fallback", "dropdown", "Fallback", action="fallback",
+        value=choice or "off", options=["off", *names], option_labels={"off": "None"},
+        help="When this agent's model can't serve a turn (a usage limit, quota, rate limit or"
+        " expired login), it switches to this once and runs the turn again. Saved for this agent.",
+    )]
+
+
 def _find(manager: Any, name: str) -> Any:
     if not name:
         raise PanelError("name is required", errors={"name": "Name is required."})
@@ -455,7 +480,7 @@ class LlmPanel:
             "rows": rows,
             "row_actions": _ROW_ACTIONS,
             "toolbar_actions": _TOOLBAR_ACTIONS,
-            "controls": [],
+            "controls": _fallback_controls(ctx, manager),
             "empty_groups": empty,
         }
 
@@ -485,6 +510,21 @@ class LlmPanel:
             )
         if action == "save":
             return await self._save(ctx, manager, payload)
+        if action == "fallback":
+            plugin = _fallback_plugin(ctx)
+            if plugin is None:
+                raise PanelError("Model fallback is unavailable: its plugin is not loaded.", status=503)
+            value = str(payload.get("fallback", payload.get("value")) or "").strip()
+            if value.lower() in ("", "off", "none"):
+                saved, label = plugin.set_choice("off"), "None"
+            else:
+                target = plugin.resolve(value)
+                if target is None:
+                    raise PanelError(f"No loadout named '{value}'.", errors={"fallback": "Choose one from the list."})
+                saved, label = plugin.set_choice(target.name), target.name
+            if not saved:
+                return error_result("Could not save the fallback setting.")
+            return ok_result(f"Fallback: {label}.", panel=await self.describe(ctx, {}))
         if action == "delete":
             loadout = _find(manager, name)
             if loadout.implicit:
