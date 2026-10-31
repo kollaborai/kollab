@@ -86,6 +86,31 @@ def presence_dump(home: Path) -> str:
     return "\n".join(lines)
 
 
+def encoder_proof(name: str, project: Path, env: dict[str, str]) -> None:
+    """#439 proof from this runner: the exact encoder string, before and after the
+    drive-colon fix, next to the real folder names the daemon wrote under projects/."""
+    code = (
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[3])\n"
+        "from kollabor_config.config_utils import encode_project_path\n"
+        "workspace, home = Path(sys.argv[1]), Path(sys.argv[2])\n"
+        "resolved = str(workspace.resolve())\n"
+        "before_fix = resolved.replace('/', '_').replace(chr(92), '_').lstrip('_')\n"
+        "projects_dir = home / '.kollab' / 'projects'\n"
+        "folders = sorted(os.listdir(projects_dir)) if projects_dir.is_dir() else []\n"
+        "print(json.dumps({'resolved_workspace': resolved,\n"
+        " 'encode_project_path_after_fix': encode_project_path(workspace),\n"
+        " 'old_encoder_before_fix': before_fix, 'real_projects_folders': folders}))\n"
+    )
+    home = Path(env.get("USERPROFILE") or env.get("HOME"))
+    done = subprocess.run(
+        [sys.executable, "-c", code, str(project), str(home), str(ROOT)],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    print(f"encoder proof {name}: {done.stdout.strip() or done.stderr.strip()}")
+
+
 # ------------------------------------------------------------- hub sockets
 
 
@@ -343,12 +368,14 @@ def relay_halt_smoke(kollab: str, homes: dict, projects: dict, envs: dict, logs:
     print(f"step 4: win-a --detached: exit {start_agent(kollab, projects['a'], envs['a'], logs['a']).wait(timeout=60)}")
     wait_until(lambda: folder_socket(homes['a'], projects['a']) is not None, 90, "win-a's daemon socket",
                why=lambda: presence_dump(homes['a']))
+    encoder_proof("win-a", projects['a'], envs['a'])
     wait_until(lambda: online("a"), 90, "win-a's agent online in `kollab --hub status`")
 
     print("step 5: win-b --detached (its hub socket carries the enrollment)")
     start_agent(kollab, projects["b"], envs["b"], logs["b"]).wait(timeout=60)
     wait_until(lambda: folder_socket(homes["b"], projects["b"]) is not None, 90, "win-b's daemon socket",
                why=lambda: presence_dump(homes['b']))
+    encoder_proof("win-b", projects['b'], envs['b'])
     asyncio.run(join_networks(homes["a"], homes["b"], projects["a"], projects["b"]))
     wait_until(lambda: online("b"), 90, "win-b's agent online after joining")
 

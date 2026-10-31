@@ -191,7 +191,14 @@ class LocalAgentDirectory:
         if not 1 <= stale_after <= 300:
             raise ValueError("heartbeat expiry must be between 1 and 300 seconds")
         self.config_dir = Path(config_dir or get_config_directory()).absolute()
-        self.socket_dir = Path(socket_dir or "/tmp/kollabor-hub").absolute()
+        # The hub's per-platform socket root: /tmp/kollabor-hub on POSIX, but
+        # <home>/.kollab/hub-sockets on Windows (#439) — a "/tmp" default there
+        # resolves to C:\tmp\kollabor-hub, no socket is ever relative to it, and
+        # _socket_valid rejects every presence record ("local agent is no
+        # longer online"). Same constant the writer side uses.
+        from .presence import SOCKET_DIR_ROOT
+
+        self.socket_dir = Path(socket_dir or SOCKET_DIR_ROOT).absolute()
         self.max_entries = max_entries
         self.max_projects = max_projects
         self.stale_after = stale_after
