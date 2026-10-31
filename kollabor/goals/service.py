@@ -193,6 +193,24 @@ class GoalService:
     ) -> None:
         self._staged_attachments[conversation_uid] = list(refs)
 
+    def has_staged_attachments(self, conversation_uid: str) -> bool:
+        return bool(self._staged_attachments.get(conversation_uid))
+
+    def snapshot_staged_attachments(
+        self, conversation_uid: str
+    ) -> tuple[List[Dict[str, Any]], Optional[object]]:
+        staged = self._staged_attachments.get(conversation_uid)
+        return list(staged or []), staged
+
+    def consume_staged_attachments(
+        self, conversation_uid: str, token: Optional[object]
+    ) -> List[Dict[str, Any]]:
+        # A synchronous goal-created subscriber may stage another image.
+        # Identity distinguishes a newer entry even if its refs are identical.
+        if token is not None and self._staged_attachments.get(conversation_uid) is token:
+            return self._staged_attachments.pop(conversation_uid)
+        return []
+
     def take_staged_attachments(self, conversation_uid: str) -> List[Dict[str, Any]]:
         return self._staged_attachments.pop(conversation_uid, [])
 
@@ -948,7 +966,9 @@ class GoalService:
             "size": len(payload),
         }
 
-    def load_attachment(self, ref: Dict[str, Any]) -> Optional[bytes]:
+    def load_attachment(
+        self, ref: Dict[str, Any], *, max_bytes: Optional[int] = None
+    ) -> Optional[bytes]:
         """Rehydrate artifact bytes through the provider's image resolver.
 
         Missing or checksum-mismatched artifacts are a hard error signal:
@@ -961,9 +981,17 @@ class GoalService:
         if not name:
             return None
         path = self.store.db_path.parent / "artifacts" / str(name)
-        if not path.exists():
+        try:
+            with path.open("rb") as artifact:
+                payload = (
+                    artifact.read(max_bytes + 1)
+                    if max_bytes is not None
+                    else artifact.read()
+                )
+        except FileNotFoundError:
             return None
-        payload = path.read_bytes()
+        if max_bytes is not None and len(payload) > max_bytes:
+            raise GoalError("goal image exceeds the available image memory limit")
         expected = ref.get("checksum")
         if expected and hashlib.sha256(payload).hexdigest() != expected:
             return None

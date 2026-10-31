@@ -10,6 +10,23 @@ continuation; TUI clients observe it. Exactly one unfinished goal may exist
 per conversation (`conversation_uid` — durable across `/resume`, unlike the
 rotating session id).
 
+Goal execution is currently unavailable for ACP profiles, including
+`codex-cli` and `claude-code`: Kollab's goal driver is not yet connected to
+the harness-owned reporting, evidence, and usage boundary. The Codex ACP
+adapter exposes its own goal extension, which Kollab does not yet integrate.
+Create and resume commands explain this before starting a turn; switch to a
+native provider profile to run the goal. Existing goals remain inspectable
+and can be paused or cleared.
+The missing ACP integration is tracked in [issue #496](https://github.com/kollaborai/kollab/issues/496).
+
+If an ACP goal with images is refused, its staged attachment references stay
+in the daemon for that conversation until replaced or the daemon stops. They
+are added to the next successfully created goal, even a text-only one.
+`/goal clear` removes them from staging and clears any active goal.
+Request-scoped staging is
+tracked in [issue #512](https://github.com/kollaborai/kollab/issues/512).
+Native goal turns send their attached images to image-capable models.
+
 ## Commands
 
 ```text
@@ -18,7 +35,7 @@ rotating session id).
 /goal show                     show the active goal in full
 /goal pause                    stop continuation at the next safe boundary
 /goal resume [--budget N] [--turns N]  resume after a stop
-/goal clear                    stop and preserve the goal as cleared history
+/goal clear                    clear the goal, keep history, remove staged attachments
 /goal history [N]              list recent finished goals (default 10)
 ```
 

@@ -14,9 +14,11 @@ import logging
 import re
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
+from ..goal_image_scope import safe_goal_error_cause
+
 import httpx
 
-from ..message_content import content_to_text, serialize_gemini_parts
+from ..message_content import redact_error_media, content_to_text, serialize_gemini_parts
 from .base import LLMProvider
 from .errors import map_httpx_error
 from .gemini_transformer import (
@@ -139,7 +141,7 @@ class GeminiProvider(LLMProvider):
             logger.info(f"Gemini provider initialized (model={self.model})")
 
         except Exception as e:
-            logger.error(f"Failed to initialize Gemini client: {e}")
+            logger.error(f"Failed to initialize Gemini client: {redact_error_media(str(e))}")
             raise
 
     async def call(
@@ -206,9 +208,9 @@ class GeminiProvider(LLMProvider):
         ) as e:
             mapped_error = map_httpx_error(e, "gemini")
             logger.error(f"Gemini request failed: {mapped_error}")
-            raise mapped_error from e
+            raise mapped_error from safe_goal_error_cause(e)
         except Exception as e:
-            logger.error(f"Gemini call failed: {type(e).__name__}: {e}")
+            logger.error(f"Gemini call failed: {type(e).__name__}: {redact_error_media(str(e))}")
             raise
         finally:
             await self._track_request_end()
@@ -287,7 +289,7 @@ class GeminiProvider(LLMProvider):
                                 yield streaming_response
 
                         except json.JSONDecodeError as e:
-                            logger.warning(f"Failed to parse SSE chunk: {e}")
+                            logger.warning(f"Failed to parse SSE chunk: {redact_error_media(str(e))}")
                             continue
 
         except (
@@ -298,10 +300,10 @@ class GeminiProvider(LLMProvider):
             mapped_error = map_httpx_error(e, "gemini")
             # Not an error yet: api_communication_service retries it and logs the final failure.
             logger.warning(f"Gemini stream failed: {mapped_error}")
-            raise mapped_error from e
+            raise mapped_error from safe_goal_error_cause(e)
         except Exception as e:
             # Not an error yet: api_communication_service retries it and logs the final failure.
-            logger.warning(f"Gemini stream failed: {e}")
+            logger.warning(f"Gemini stream failed: {redact_error_media(str(e))}")
             raise
         finally:
             await self._track_request_end()
