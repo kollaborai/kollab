@@ -92,6 +92,18 @@ export function mergeRecentHistoryPage(
     };
   }
 
+  if (updates.start_index > cached.end_index) {
+    // The refresh page starts beyond the cached window (for example a
+    // byte-capped engine response dropped the leading span). Merging by
+    // index would leave holes, fail validation, and strand the stale
+    // cached page. Serve the contiguous refresh page and keep the missing
+    // span reachable through the signed older cursor instead.
+    return {
+      ...updates,
+      has_more_older: true,
+    };
+  }
+
   const byIndex = new Map<number, HistoryMessage>();
   for (const page of [cached, updates]) {
     page.history.forEach((message, offset) => {
@@ -210,6 +222,9 @@ export async function loadLatestHistoryPage(
         ...newestCached,
         history: newestCached.history.slice(-HISTORY_PAGE_SIZE),
         start_index: newestCached.end_index - HISTORY_PAGE_SIZE,
+        has_more_older:
+          newestCached.has_more_older ||
+          newestCached.start_index < newestCached.end_index - HISTORY_PAGE_SIZE,
         last_turn_error: newestCached.last_turn_error &&
           newestCached.start_index + newestCached.last_turn_error.history_length >=
             newestCached.end_index - HISTORY_PAGE_SIZE

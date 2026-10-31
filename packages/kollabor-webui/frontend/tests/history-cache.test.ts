@@ -102,6 +102,39 @@ describe("bounded history cache and paging", () => {
     expect(requests).toEqual([{ limit: 50, before: "before-50" }]);
   });
 
+  it("serves a contiguous byte-capped refresh page instead of a holed merge", async () => {
+    const cache = new MemoryHistoryPageCache();
+    await cache.store("session-a", page(50, 100));
+    const cappedPage: HistoryPage = {
+      ...page(156, 160),
+      history: page(156, 160).history.map((message) => ({
+        ...message,
+        content: "x".repeat(34 * 1024),
+      })),
+      older_cursor: "before-156",
+      has_more_older: true,
+    };
+    const requests: Array<{ limit?: number; before?: string; after?: string }> = [];
+    const api = {
+      async getHistoryPage(
+        _sessionId: string,
+        options: { limit?: number; before?: string; after?: string } = {},
+      ) {
+        requests.push(options);
+        return cappedPage;
+      },
+    };
+
+    const result = await loadLatestHistoryPage("session-a", api, cache);
+
+    expect(requests).toEqual([{ limit: 50, after: "after-100" }]);
+    expect(result.error).toBeUndefined();
+    expect(result.page.start_index).toBe(156);
+    expect(result.page.end_index).toBe(160);
+    expect(result.page.has_more_older).toBe(true);
+    expect(result.page.older_cursor).toBe("before-156");
+  });
+
   it("uses a latest 50-message suffix after a long offline gap", async () => {
     const cache = new MemoryHistoryPageCache();
     const cached = page(50, 100);
@@ -333,6 +366,34 @@ describe("bounded history cache and paging", () => {
     const widened = mergeOlderHistoryPage(merged, bigPage(50, 100));
     expect(widened.start_index).toBe(50);
     expect(widened.history).toHaveLength(100);
+  });
+
+  it("keeps the truncated cached prefix reachable when offline narrows the cached page", async () => {
+    const cache = new MemoryHistoryPageCache();
+    await cache.store("session-a", {
+      ...page(0, 121),
+      has_more_older: false,
+      older_cursor: null,
+      newer_cursor: null,
+    });
+    const api = {
+      async getHistoryPage() {
+        throw new Error("offline");
+      },
+    };
+
+    const result = await loadLatestHistoryPage("session-a", api, cache);
+
+    expect(result.fromCache).toBe(true);
+    expect(result.error).toBeInstanceOf(Error);
+    expect(result.page.start_index).toBe(71);
+    expect(result.page.end_index).toBe(121);
+    expect(result.page.has_more_older).toBe(true);
+
+    const older = await loadOlderHistoryPage("session-a", result.page, api, cache);
+    expect(older?.start_index).toBe(0);
+    expect(older?.end_index).toBe(71);
+    expect(older?.history.map(outputId)[0]).toBe("message-0");
   });
 
   it("reaches the beginning of history cleanly", async () => {

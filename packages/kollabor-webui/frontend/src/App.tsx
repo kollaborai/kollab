@@ -734,10 +734,29 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         // pages and rebuild the window from a fresh fetch instead of a
         // dead-end banner.
         console.warn("Rebuilding history window after cursor rejection", error);
-        historyPageCache.clear(sessionId).catch(() => undefined);
+        try {
+          // Drop the stale pages before the rebuild reads the cache, so the
+          // recovered window cannot resurrect the rejected cursor's pages.
+          await historyPageCache.clear(sessionId);
+        } catch (clearError) {
+          console.warn("Failed to drop stale history pages", clearError);
+        }
         const context = historyContextRef.current.get(sessionId);
         if (context) {
-          loadStateRef.current(sessionId, context.sessions).catch(() => undefined);
+          try {
+            const nextState = await loadStateRef.current(
+              sessionId,
+              context.sessions,
+              prefetch,
+            );
+            if (activeIdRef.current === sessionId) {
+              setInitialState((previous) =>
+                previous?.sessionId === sessionId ? nextState : previous,
+              );
+            }
+          } catch {
+            // loadState already surfaced the failure through historyStatus.
+          }
         }
         return;
       }

@@ -297,7 +297,7 @@ const ThreadRoot: FC<{
               className={cn(
                 "mx-auto mb-3 flex w-full max-w-(--thread-max-width) items-center justify-between gap-3 rounded-md px-3 py-2 text-xs",
                 historyStatus.kind === "error"
-                  ? "border border-destructive/30 bg-destructive/5 text-destructive"
+                  ? "bg-destructive/10 text-destructive"
                   : "text-muted-foreground bg-muted/50",
               )}
             >
