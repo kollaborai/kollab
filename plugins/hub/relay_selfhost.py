@@ -469,8 +469,14 @@ async def serve(settings: Settings, *, created: bool) -> None:
             raise RuntimeConfigError(f"cannot listen: {exc.strerror or exc}") from None
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, stop.set)
+        if os.name == "nt":
+            # Windows: loop.add_signal_handler raises NotImplementedError
+            # (ProactorEventLoop). The process is stopped by console events
+            # or termination instead of POSIX signal handlers.
+            pass
+        else:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, stop.set)
         say(setup_text(settings, created=created))
         payload = await publish_once(app)
         advertised = bool(payload["discovery"]["roles"])
