@@ -54,6 +54,12 @@ def _is_safe_uint(value: object) -> bool:
     return type(value) is int and 0 <= value <= MAX_SAFE_INT
 
 
+class _Opening:
+    """An open still waiting on its bridge; revoke or shutdown marks it cancelled."""
+
+    cancelled: bool = False
+
+
 @dataclass
 class _Call:
     id: str
@@ -79,6 +85,7 @@ class PhoneAudioManager:
     def __init__(self, open_bridge: BridgeOpener):
         self._open_bridge = open_bridge
         self._calls: dict[str, _Call] = {}
+        self._opening: dict[str, _Opening] = {}
 
     async def open(
         self,
@@ -105,6 +112,8 @@ class PhoneAudioManager:
             ) or existing.generation != generation:
                 raise PhoneCallError("call_stale")
             return self._open_result(existing)
+        pending = _Opening()
+        self._opening[phone] = pending
         try:
             bridge = await self._open_bridge(voice_session_id, generation)
         except PhoneCallError:
@@ -112,6 +121,13 @@ class PhoneAudioManager:
         except Exception:
             logger.warning("phone call bridge failed to open", exc_info=True)
             raise PhoneCallError("call_unavailable") from None
+        finally:
+            if self._opening.get(phone) is pending:
+                del self._opening[phone]
+        if pending.cancelled:
+            # Revoked or shut down while the bridge was opening: never register it.
+            await bridge.close()
+            raise PhoneCallError("call_unavailable")
         if phone in self._calls:
             # A racing open registered while this bridge was opening: drop ours.
             await bridge.close()
@@ -190,11 +206,16 @@ class PhoneAudioManager:
         await self._end(call, cause="closed")
 
     async def invalidate(self, phone: str, cause: str = "invalidated") -> None:
+        pending = self._opening.get(phone)
+        if pending is not None:
+            pending.cancelled = True
         call = self._calls.get(phone)
         if call is not None:
             await self._end(call, cause=cause)
 
     async def shutdown(self) -> None:
+        for pending in self._opening.values():
+            pending.cancelled = True
         for call in list(self._calls.values()):
             await self._end(call, cause="shutdown")
 

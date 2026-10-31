@@ -354,3 +354,34 @@ async def test_oversized_mic_is_refused_before_decode(tmp_path):
         {"op": "call_tick", "id": CALL, "n": 0, "mic": "A" * 8_000_000},
     )
     assert result == {"error": "call_invalid"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", ["invalidate", "shutdown"])
+async def test_cancel_during_open_never_registers_the_late_bridge(cancel):
+    """Revoke or shutdown while the bridge is opening: that bridge is closed."""
+    gate = asyncio.Event()
+    bridges = []
+
+    async def opener(voice_session_id, generation):
+        await gate.wait()
+        bridge = FakeBridge()
+        bridges.append(bridge)
+        return bridge
+
+    manager = PhoneAudioManager(opener)
+    opening = asyncio.create_task(
+        manager.open("phone-a", object(), CALL, VOICE, 0)
+    )
+    await asyncio.sleep(0)
+    if cancel == "invalidate":
+        await manager.invalidate("phone-a", cause="revoked")
+    else:
+        await manager.shutdown()
+    gate.set()
+    with pytest.raises(PhoneCallError) as late:
+        await opening
+    assert late.value.code == "call_unavailable"
+    assert len(bridges) == 1 and bridges[0].closed
+    assert "phone-a" not in manager._calls
+    assert "phone-a" not in manager._opening
