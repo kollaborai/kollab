@@ -707,6 +707,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         // carried cursor was re-requested after a capped cache fragment
         // merged. The engine's response still carries a fresh cursor:
         // adopt it so the window keeps paging instead of dead-ending.
+        // This load did not EXTEND the window (start_index unchanged), so
+        // resolve false: the thread drops its scroll anchor, which a
+        // non-extending load would otherwise strand, blocking later
+        // up-intent at the top. The next up-intent fetches the page the
+        // adopted cursor points at.
         if (older.older_cursor) {
           const adopted = {
             ...updated,
@@ -715,7 +720,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           };
           historyPagesRef.current.set(sessionId, adopted);
           if (activeIdRef.current === sessionId) setHistoryStatus(null);
-          return true;
+          return false;
         }
         throw new Error("The engine returned no older history messages.");
       }

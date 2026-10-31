@@ -289,6 +289,11 @@ export async function loadOlderHistoryPage(
     // the window keeps paging; an empty next page marks it exhausted for
     // real. Never synthesize a cursor — the engine signs its cursors and
     // rejects unsigned ones with 400 InvalidHistoryCursor.
+    if (cached.start_index === 0) {
+      // The cached fragment already reaches the beginning of history:
+      // nothing older exists, whatever the current window's flags say.
+      return { ...cached, has_more_older: false, older_cursor: null };
+    }
     if (cached.has_more_older && cached.older_cursor) return cached;
     return {
       ...cached,

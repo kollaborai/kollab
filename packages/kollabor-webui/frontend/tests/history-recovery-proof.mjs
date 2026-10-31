@@ -681,6 +681,107 @@ try {
     },
   );
 
+  // F: a capped cached fragment restored beside the newest window. The
+  // cache-hit merges the fragment under the window's engine cursor, so the
+  // next page-down re-requests a cursor whose page overlaps what the
+  // window already holds. The overlap must adopt the engine's fresh cursor
+  // and re-arm the trigger (a stranded scroll anchor here locks the view
+  // at the top), and the next up-intent pages down to the oldest message.
+  const f = {
+    issuedCursors: new Set(["before-71"]),
+    held: [],
+    beforeSeen: 0,
+  };
+  await scenario(
+    "F-cached-overlap-uponly",
+    () => ({
+      resolve(options) {
+        if (options.after && !options.before) {
+          return new Promise((resolve) => {
+            f.held.push({ resolve });
+          });
+        }
+        if (options.before) {
+          // Same cursor gate as E: only cursors this engine issued.
+          if (!f.issuedCursors.has(options.before)) {
+            return { status: 400, body: { error: "unissued cursor rejected" } };
+          }
+          const from = Number(options.before.replace(/^before-/, ""));
+          if (!Number.isFinite(from) || from <= 0) {
+            return { status: 400, body: { error: "bad cursor" } };
+          }
+          f.beforeSeen += 1;
+          // The first before-71 answer is byte-capped: [21,71) with no
+          // older cursor (the engine cut the page short). The open-time
+          // prefetch caches exactly this capped fragment beside the live
+          // [71,121) window, like a cache restored from an earlier window.
+          if (f.beforeSeen === 1 && options.before === "before-71") {
+            const capped = mkPage(21, 71);
+            return {
+              status: 200,
+              body: { ...capped, has_more_older: false, older_cursor: null },
+            };
+          }
+          const page = mkPage(Math.max(0, from - 50), from);
+          if (page.older_cursor) f.issuedCursors.add(page.older_cursor);
+          return { status: 200, body: page };
+        }
+        return { status: 200, body: mkPage(71, 121) };
+      },
+    }),
+    async (page, requests) => {
+      await openThread(page, "message-120");
+      await page.waitForTimeout(1000);
+      // The open-time prefetch fetches before-71, gets the capped
+      // [21,71) fragment, and stores it in the page cache beside the live
+      // [71,121) window. Wait for that store to settle before wheeling.
+      const beforeCount = () => requests.filter((r) => r.before).length;
+      const preseedLoads = beforeCount(); // open-time prefetch may already run
+      const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+      await viewport.hover();
+      for (let i = 0; i < 50; i++) {
+        await page.mouse.wheel(0, -1200);
+        await page.waitForTimeout(250);
+        if (
+          await page
+            .getByText("message-0", { exact: true })
+            .first()
+            .isVisible()
+            .catch(() => false)
+        )
+          break;
+      }
+      const oldestVisible = await page
+        .getByText("message-0", { exact: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (!oldestVisible) {
+        fail("F-cached-overlap-uponly", "up-only wheeling never paged past the carried cursor to the oldest message");
+      } else {
+        ok("F-cached-overlap-uponly", "up-only wheeling paged past the carried cursor to the oldest message");
+      }
+      const requested = requests.map((r) => r.before).filter(Boolean);
+      if (requested.includes("before-71") && requested.includes("before-21")) {
+        ok("F-cached-overlap-uponly", "overlap adopted the engine's fresh cursor and paged on");
+      } else {
+        fail("F-cached-overlap-uponly", `cursor chain never advanced (requested: ${requested.join(", ") || "none"})`);
+      }
+      const olderLoads = beforeCount() - preseedLoads;
+      if (olderLoads === 0) {
+        fail("F-cached-overlap-uponly", "no before-cursor load was ever made after the restore");
+      } else {
+        ok("F-cached-overlap-uponly", `before-cursor loads made after the restore (${olderLoads})`);
+      }
+      const banner = page.locator('[data-slot="history-status"][role="alert"]');
+      if (await banner.isVisible().catch(() => false)) {
+        fail("F-cached-overlap-uponly", "an error banner is showing after up-only paging");
+      } else {
+        ok("F-cached-overlap-uponly", "no error banner after up-only paging");
+      }
+    },
+  );
+
   // D: offline reload narrows the cached page; the prefix pages from cache.
   // The offline poll failures (503 every ~2 s) re-apply the narrowed cached
   // window over the prefix pages the cache is serving and can race the
