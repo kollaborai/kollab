@@ -239,6 +239,43 @@ async def test_live_user_pick_survives_replay_when_only_the_old_raw_id_is_saved(
 
 
 @pytest.mark.asyncio
+async def test_saved_custom_model_then_max_keeps_max(tmp_path):
+    """A saved custom model with no loadout model is set before the loadout's max, so max sticks."""
+    options = _options()
+    options[0]["id"] = "model_choice"
+    options[1]["id"] = "reasoning_budget"
+    orch = _orchestrator(tmp_path, options, saved={"model_choice": "haiku"})
+    loadout = SimpleNamespace(name="claude-code", model="", effort="max")
+    notices = await orch._restore_options(loadout)
+    assert orch._runner.calls == [("model_choice", "haiku"), ("reasoning_budget", "max")]
+    assert options[1]["currentValue"] == "max"
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_model_reset_after_max_reapplies_max(tmp_path):
+    """The harness resets effort when the model changes; the user's confirmed max is put back."""
+    options = _options()
+    options[0]["id"] = "model_choice"
+    options[1]["id"] = "reasoning_budget"
+    orch = _orchestrator(tmp_path, options)
+    await orch.set_config_option("reasoning_budget", "max")
+    real_set = orch._runner.set_config_option
+
+    async def reset_on_model(config_id, value):
+        result = await real_set(config_id, value)
+        if config_id == "model_choice":
+            options[1]["currentValue"] = "xhigh"  # the adapter resets effort on a model change
+        return result
+
+    orch._runner.set_config_option = reset_on_model
+    await orch.set_config_option("model_choice", "haiku")
+    assert options[0]["currentValue"] == "haiku"
+    assert options[1]["currentValue"] == "max"
+    assert orch._runner.calls[-1] == ("reasoning_budget", "max")
+
+
+@pytest.mark.asyncio
 async def test_saved_effort_survives_a_custom_option_id(tmp_path):
     """A thought_level option with its own ID: the saved pick is reported when the option disappears,
     and applied to that ID when it is present."""

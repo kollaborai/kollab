@@ -144,7 +144,7 @@ class ACPOrchestrator:
         reported = next((o.get("currentValue") for o in options or [] if o.get("id") == config_id), None)
         if reported == value:
             # A pick the user confirmed this session: a replay of saved options must not undo it.
-            self._user_picks = getattr(self, "_user_picks", set()) | {config_id}
+            self._user_picks = {**getattr(self, "_user_picks", {}), config_id: value}
         if self._profile_name and reported == value:
             # Persist only a value the harness confirmed; a refused pick must not replay at the next start.
             saved = self._saved_options()
@@ -155,7 +155,23 @@ class ACPOrchestrator:
                 self._options_path.write_text(json.dumps(saved, indent=2))
             except OSError as exc:
                 logger.warning("ACP option save failed: %s", exc)
+        if category == "model":
+            await self._reapply_effort_after_model()
         return options
+
+    async def _reapply_effort_after_model(self) -> None:
+        """A model change can reset effort on ACP: re-apply the confirmed pick; notice if it does not stick."""
+        runner = self._runner
+        effort = self._effort_option()
+        if runner is None or effort is None:
+            return
+        wanted = (getattr(self, "_user_picks", {}) or {}).get(str(effort["id"]))
+        if wanted is None or effort.get("currentValue") == wanted:
+            return
+        options = await runner.set_config_option(str(effort["id"]), wanted)
+        reported = next((o.get("currentValue") for o in options or [] if o.get("id") == effort["id"]), None)
+        if reported != wanted:
+            self._show_notice(f"effort {wanted} did not survive the model change (the harness reports {reported})")
 
     def _saved_options(self) -> dict[str, dict[str, Any]]:
         try:
@@ -182,7 +198,7 @@ class ACPOrchestrator:
         if runner is None:
             return notices
         saved = dict(self._saved_options().get(profile.name) or {})
-        picked = getattr(self, "_user_picks", set())  # confirmed this session: a replay must not undo them
+        picked = getattr(self, "_user_picks", {})  # confirmed this session: a replay must not undo them
         loadout_model = str(getattr(profile, "model", "") or "")
         loadout_effort = str(getattr(profile, "effort", "") or "")
         if not (saved or loadout_model or loadout_effort):
@@ -502,11 +518,14 @@ class ACPOrchestrator:
 
     def _announce_restore_notices(self) -> None:
         """Show each requested value the harness did not take, in the chat."""
+        for notice in self.restore_notices:
+            self._show_notice(notice)
+
+    def _show_notice(self, notice: str) -> None:
         llm = self.event_bus.get_service("llm_service") if self.event_bus else None
         display = getattr(llm, "message_display_service", None)
-        for notice in self.restore_notices:
-            if display is not None:
-                display.display_system_message(f"ACP setting not applied: {notice}")
+        if display is not None:
+            display.display_system_message(f"ACP setting not applied: {notice}")
 
     def _save_binding(self) -> None:
         if self._runner is not None and self._runner.binding is not None:
