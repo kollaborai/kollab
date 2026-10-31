@@ -9697,7 +9697,7 @@ class HubPlugin(BasePlugin):
                     outcome_text=outcome_text,
                 )
             except Exception:
-                logger.debug("failed to end a parked busy turn", exc_info=True)
+                logger.warning("failed to end a parked busy turn", exc_info=True)
 
     async def _sweep_parked_for_departure(self, from_name: str) -> None:
         """Drop parked messages whose asking peer went offline (#483).
@@ -9868,13 +9868,26 @@ class HubPlugin(BasePlugin):
                     turn.answer = reply_text
                     turn.failed = True
                     turn.ended = True
-                    await self._end_network_turn(
-                        turn,
-                        failed=True,
-                        acp=True,
-                        outcome=outcome,
-                        outcome_text=outcome_text,
-                    )
+                    try:
+                        await self._end_network_turn(
+                            turn,
+                            failed=True,
+                            acp=True,
+                            outcome=outcome,
+                            outcome_text=outcome_text,
+                        )
+                    except Exception:
+                        # The turn must not vanish with the exception: park
+                        # it at the front again so the next boundary (or the
+                        # park TTL) retries the end (#483).
+                        logger.warning(
+                            "failed to end a parked turn at a retry "
+                            "boundary; re-parked for the next boundary",
+                            exc_info=True,
+                        )
+                        turn.failed = False
+                        turn.ended = False
+                        parked.insert(0, entry)
                 return  # one boundary may only end one turn
         except Exception:
             logger.debug("parked busy message retry failed", exc_info=True)
@@ -9933,7 +9946,15 @@ class HubPlugin(BasePlugin):
             # queue slot this boundary freed.
             self._publish_idle_if_settled()
             self._schedule_settle_recheck()
-            self._kick_parked_busy_retries()
+            # turn_complete and its turn_end follow-up tap the same turn;
+            # one real boundary must age the parked list once, not twice,
+            # or the retry budget halves.
+            boundary = str(event.get("turn_id") or event.get("request_id") or "")
+            if boundary and boundary != getattr(self, "_last_busy_kick_boundary", None):
+                self._last_busy_kick_boundary = boundary
+                self._kick_parked_busy_retries()
+            elif not boundary:
+                self._kick_parked_busy_retries()
 
     def _stamp_supervisor_turn(self, kind: str, event: Dict[str, Any]) -> None:
         """Feed the supervisor's wake-efficacy tracking (issue #283).

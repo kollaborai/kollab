@@ -10,6 +10,7 @@ it, and only an exhausted retry budget ends the turn as busy.
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -406,3 +407,62 @@ async def test_a_departing_peers_parked_messages_end_unavailable():
     kwargs = plugin._end_network_turn.await_args.kwargs
     assert kwargs["failed"] is True
     assert kwargs["outcome"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_one_boundary_kicks_once_when_both_taps_fire():
+    """turn_complete and its turn_end follow-up tap the same turn, so the
+    parked list ages once per real boundary, not once per tap (#483)."""
+    plugin, llm = _acp_plugin()
+    llm.submit_human_input = AsyncMock(return_value=_busy_reject())
+    message = _agent_request()
+    _held_turn(plugin, message)
+
+    for kind in ("turn_complete", "turn_end"):
+        plugin._follow_tool(
+            {"type": kind, "turn_id": "t-1", "request_id": "r-1"}
+        )
+    first_pass = plugin._busy_retry_task
+    assert first_pass is not None
+    await first_pass
+
+    assert llm.submit_human_input.await_count == 1  # one pass, one aging
+    assert plugin._acp_busy_parked[0]["attempts"] == 2  # not 3
+
+    plugin._follow_tool({"type": "turn_end", "turn_id": "t-2"})  # next turn
+    assert plugin._busy_retry_task is not first_pass  # a fresh boundary kicks
+    await plugin._busy_retry_task
+    assert llm.submit_human_input.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_end_re_parks_the_message_instead_of_losing_it(caplog):
+    """A raise inside the terminal end must not swallow the message: the
+    entry re-parks with a warning and the next boundary ends it (#483)."""
+    plugin, llm = _acp_plugin()
+    llm.submit_human_input = AsyncMock(return_value={
+        "status": "rejected",
+        "reason": "provider down",
+        "message": "boom",
+    })
+    message = _agent_request()
+    _held_turn(plugin, message)
+    turn = plugin._acp_busy_parked[0]["turn"]
+    plugin._end_network_turn = AsyncMock(
+        side_effect=[Exception("socket died"), None]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="plugins.hub.plugin"):
+        plugin._kick_parked_busy_retries()
+        await plugin._busy_retry_task
+
+    assert [e["message"] for e in plugin._acp_busy_parked] == [message]
+    assert turn.ended is False  # a later boundary may still end it
+    assert any("re-parked" in str(record.message) for record in caplog.records)
+
+    plugin._kick_parked_busy_retries()  # the next boundary retries the end
+    await plugin._busy_retry_task
+
+    assert plugin._acp_busy_parked == []
+    assert message.id not in plugin._acp_network_turns
+    assert plugin._end_network_turn.await_count == 2  # retried, then ended

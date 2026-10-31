@@ -125,10 +125,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Hub: a peer message to a busy ACP agent is held instead of refused. A full
-  ACP prompt queue now parks the message and admits one parked message at each
-  turn boundary (up to 64 parked, 8 boundaries) before ending the turn as busy,
-  and the hub shows ACP agents as working while a harness turn runs, from the
-  same display lifecycle a native turn uses (#483).
+  ACP prompt queue now parks the message and retries the head at each turn
+  boundary, admitting parked messages while freed slots last; each still-full
+  boundary ages every parked entry (up to 64 parked, 8 boundaries), and turns
+  end busy at budget exhaustion, the five-minute park TTL, or agent shutdown,
+  or unavailable when the asking peer departs, and the hub shows ACP agents as
+  working while a harness turn runs, from the same display lifecycle a native
+  turn uses (#483).
 - PhoneLink: the phone link no longer falls into a reconnect loop on every
   relay blip. The engine now rejects malformed peers and error frames without
   dropping its relay socket (only the requests they concern fail), the phone
