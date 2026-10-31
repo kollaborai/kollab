@@ -108,6 +108,12 @@ def _frame_field(head: bytes, tail: bytes, key: str) -> Any:
     return None
 
 
+def _frame_request(head: bytes, tail: bytes) -> Dict[str, Any]:
+    """The request an oversized frame names, as the fields to tag what replaces it with."""
+    request_id = _frame_field(head, tail, "request_id")
+    return {"request_id": request_id} if isinstance(request_id, str) and request_id else {}
+
+
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
     """Reshape a daemon display event into the engine's documented SSE shape.
 
@@ -348,23 +354,21 @@ class DaemonHandle:
                     )
                     if self._replayed(tail) or etype in _RENDERED_EVENT_TYPES:
                         continue  # passed on before a reattach, or terminal-only
-                    # Say so in the chat: a silently missing tool result reads
-                    # as a complete reply.
-                    self._fan_out(sse.error(
+                    # Say so in the chat (a silently missing tool result reads as
+                    # a complete reply), to the request the frame names: an old
+                    # turn's frame replayed on reattach must fail no other (#543).
+                    named = _frame_request(head, tail)
+                    self._fan_out({**sse.error(
                         self.session_id,
                         "frame_too_large",
                         "The agent's turn ended, but its last update was over the engine's frame"
                         " limit and was dropped." if etype == "turn_complete" else
                         "An update from the agent was over the engine's frame limit and was"
                         " dropped; this reply is incomplete.",
-                    ))
+                    ), **named})
                     if etype == "turn_complete":
                         # The turn did end: without a completion its chat waits for good.
-                        completion = {"type": "turn_complete", "stop_reason": "error"}
-                        request_id = _frame_field(head, tail, "request_id")
-                        if isinstance(request_id, str) and request_id:
-                            completion["request_id"] = request_id
-                        self._fan_out(completion)
+                        self._fan_out({"type": "turn_complete", "stop_reason": "error", **named})
                     continue
                 logger.warning(
                     "dropped an oversized rpc reply (%d bytes) from daemon %s", size, self.identity,
