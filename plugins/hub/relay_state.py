@@ -42,6 +42,14 @@ class RelayError(ValueError):
             self.code = code
 
 
+class RelayFrameShapeError(RelayError):
+    """Decoded wire text that is valid JSON but not an object.
+
+    The receive loop counts and drops these without reconnecting: the
+    socket delivered a healthy text frame, so the transport is fine.
+    """
+
+
 # Errors whose message is a fixed string this transport wrote; any other type logs its name only.
 _FIXED_MESSAGE_ERRORS = frozenset({"RelayError", "PeerRouteError", "SecureSessionError"})
 
@@ -81,7 +89,7 @@ def strict_json(raw: str | bytes, *, limit: int = 65536) -> dict:
     try:
         result = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
         if not isinstance(result, dict):
-            raise RelayError("JSON object required")
+            raise RelayFrameShapeError("JSON object required")
         validate(result)
         json.dumps(result, ensure_ascii=False).encode("utf-8")
         return result
