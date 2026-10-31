@@ -794,12 +794,22 @@ async def get_session_state(session_id: str):
             logger.debug("Session %s state %s failed: %s", session_id, method_name, exc)
             return fallback
 
-    profile, agent, system, hub, processing = await asyncio.gather(
+    (
+        profile,
+        agent,
+        system,
+        hub,
+        processing,
+        session_stats,
+        context_compaction,
+    ) = await asyncio.gather(
         read("get_active_profile"),
         read("get_active_agent"),
         read("get_system_info"),
         read("get_hub_state"),
         read("get_processing_state"),
+        read("get_session_stats"),
+        read("get_context_compaction_snapshot"),
     )
     return {
         "session_id": session_id,
@@ -808,6 +818,8 @@ async def get_session_state(session_id: str):
         "system": system,
         "hub": hub,
         "processing": processing,
+        "session_stats": session_stats,
+        "context_compaction": context_compaction,
     }
 
 
