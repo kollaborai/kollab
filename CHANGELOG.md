@@ -128,7 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   effort the new model offers, or shows a notice saying why it could not.
   Behavior change: a restart into another ACP profile no longer keeps the
   previous profile's model and effort picks; a restart of the same profile
-  still restores its saved picks.
+  still restores its saved picks, except where an explicit loadout sets the
+  value, and the explicit loadout wins.
 - Web UI: Trajectory's detail title no longer repeats the tool output, and the
   active tab in Trajectory, the Agent Library and Gem Studio is underlined in
   the accent color like every other tab bar (#459).
