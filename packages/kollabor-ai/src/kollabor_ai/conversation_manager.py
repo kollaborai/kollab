@@ -891,6 +891,7 @@ class ConversationManager:
         result_batches: Dict[str, Dict[str, Any]] = {}
         pending_compaction: Dict[str, Any] = {}  # last-round-wins
         last_compaction_at: Optional[datetime] = None
+        compaction_uuids: set[str] = set()
         current_parent_uuid: Optional[str] = None
         session_stats: Optional[Dict[str, Any]] = None
         has_saved_base = False
@@ -990,6 +991,9 @@ class ConversationManager:
                         recognized_record = True
                         has_streaming_tail = has_saved_base
                         tool_calls_by_message.clear()
+                        compaction_uuid = data.get("uuid")
+                        if isinstance(compaction_uuid, str) and compaction_uuid:
+                            compaction_uuids.add(compaction_uuid)
                         content = data.get("content", "")
                         # Parsed once for ordering; an unparseable stamp
                         # leaves last_compaction_at None, which suppresses
@@ -1107,6 +1111,78 @@ class ConversationManager:
                         messages.append(message)
                         if msg_type == "user":
                             metadata["turn_count"] = metadata.get("turn_count", 0) + 1
+
+            # Durable-append recovery: compaction records that failed their
+            # primary write live in the ".compaction-recovery.jsonl" sidecar
+            # (see _append_jsonl_durable). Merge them before finalization so a
+            # session that crashed mid-spill resumes with its final compaction
+            # boundary applied. Primary records win on equal stamps (already
+            # replayed above); a spilled record supersedes only when its stamp
+            # is strictly newer than the current boundary.
+            sidecar_path = Path(str(session_file) + ".compaction-recovery.jsonl")
+            if sidecar_path.exists():
+                try:
+                    with open(sidecar_path, "r") as sidecar:
+                        for line in sidecar:
+                            try:
+                                data = json.loads(line.strip())
+                            except json.JSONDecodeError:
+                                continue
+                            if (
+                                not isinstance(data, dict)
+                                or data.get("type") != "context_compaction"
+                            ):
+                                continue
+                            sidecar_uuid = data.get("uuid")
+                            if (
+                                isinstance(sidecar_uuid, str)
+                                and sidecar_uuid
+                                and sidecar_uuid in compaction_uuids
+                            ):
+                                continue
+                            content = data.get("content", "")
+                            if not content:
+                                continue
+                            recognized_record = True
+                            parsed_stamp = _parse_record_stamp(
+                                data.get("timestamp")
+                            )
+                            if (
+                                parsed_stamp is not None
+                                and last_compaction_at is not None
+                                and parsed_stamp <= last_compaction_at
+                            ):
+                                # Older spilled round: the primary (or a newer
+                                # spill) already owns the boundary.
+                                continue
+                            if isinstance(sidecar_uuid, str) and sidecar_uuid:
+                                compaction_uuids.add(sidecar_uuid)
+                            if parsed_stamp is not None:
+                                last_compaction_at = parsed_stamp
+                            has_streaming_tail = has_saved_base
+                            tool_calls_by_message.clear()
+                            pending_compaction = {
+                                "uuid": sidecar_uuid or str(uuid4()),
+                                "role": "user",
+                                "content": content,
+                                "timestamp": data.get("timestamp"),
+                                "parent_uuid": None,
+                                "metadata": {
+                                    "context_compaction": True,
+                                    "compaction_round": data.get(
+                                        "compaction_round"
+                                    ),
+                                },
+                                "session_id": session_file.stem.replace(
+                                    "session_", ""
+                                ),
+                            }
+                except OSError as exc:
+                    logger.warning(
+                        "Could not read compaction recovery sidecar %s: %s",
+                        sidecar_path,
+                        exc,
+                    )
 
             if not recognized_record:
                 return {}

@@ -203,3 +203,63 @@ def test_stampless_compaction_keeps_prior_boundary(tmp_path):
     # Order: final summary first, then post-boundary tail records. Under
     # the old code the reset to None would un-suppress "Before" here.
     assert contents(reader) == ["Second", "Between", "Tail"]
+
+
+def spill_sidecar(directory, session_id, records):
+    """Write records the way _append_jsonl_durable's spill path would."""
+    sidecar = directory / f"{session_id}.jsonl.compaction-recovery.jsonl"
+    with open(sidecar, "a") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+    return sidecar
+
+
+@pytest.mark.asyncio
+async def test_spilled_compaction_sidecar_replays_on_resume(tmp_path):
+    # The compaction summary append failed twice and spilled to the
+    # recovery sidecar; the primary never got it. Old behavior: the
+    # loader read the primary only, so the summary was silently absent
+    # from replay and the pre-compaction chat came back in full.
+    compaction_at = BASE
+    sid = write_session(tmp_path, "sidecar-merge", [
+        chat_record(z_stamp(compaction_at - timedelta(minutes=1)), "Before"),
+        chat_record(z_stamp(compaction_at + timedelta(minutes=1)), "Tail"),
+    ])
+    spill_sidecar(tmp_path, "sidecar-merge", [
+        compaction_record(z_stamp(compaction_at), "Spilled summary"),
+    ])
+    _, reader, _, _ = await resume(tmp_path, sid)
+    assert contents(reader) == ["Spilled summary", "Tail"]
+
+
+@pytest.mark.asyncio
+async def test_sidecar_record_already_in_primary_is_not_duplicated(tmp_path):
+    # A sidecar copy of a record the primary also has (retry landed after
+    # the spill) must not replay twice.
+    compaction_at = BASE
+    dup = compaction_record(z_stamp(compaction_at), "Landed twice")
+    sid = write_session(tmp_path, "sidecar-dup", [
+        chat_record(z_stamp(compaction_at - timedelta(minutes=1)), "Before"),
+        dup,
+        chat_record(z_stamp(compaction_at + timedelta(minutes=1)), "Tail"),
+    ])
+    spill_sidecar(tmp_path, "sidecar-dup", [dup])
+    _, reader, _, _ = await resume(tmp_path, sid)
+    assert contents(reader) == ["Landed twice", "Tail"]
+
+
+@pytest.mark.asyncio
+async def test_older_sidecar_round_does_not_supersede_newer_primary_round(tmp_path):
+    # Last-round-wins is by compaction order, not by which file was read
+    # last: a stale spilled round must not replace a newer primary round.
+    compaction_at = BASE
+    sid = write_session(tmp_path, "sidecar-order", [
+        chat_record(z_stamp(compaction_at - timedelta(minutes=2)), "Before"),
+        compaction_record(z_stamp(compaction_at + timedelta(minutes=1)), "New round"),
+        chat_record(z_stamp(compaction_at + timedelta(minutes=2)), "Tail"),
+    ])
+    spill_sidecar(tmp_path, "sidecar-order", [
+        compaction_record(z_stamp(compaction_at), "Old spilled round"),
+    ])
+    _, reader, _, _ = await resume(tmp_path, sid)
+    assert contents(reader) == ["New round", "Tail"]
