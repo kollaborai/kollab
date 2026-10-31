@@ -121,7 +121,7 @@ export type ThreadProps = {
   /** Visible status while a bounded history page is being fetched. */
   historyStatus?: { kind: string; message: string } | undefined;
   /** Loads the page immediately older than the current window. */
-  onLoadOlder?: (() => Promise<void>) | undefined;
+  onLoadOlder?: (() => Promise<boolean | void>) | undefined;
   onRetryHistory?: (() => void) | undefined;
   historyStartIndex?: number | undefined;
 };
@@ -216,6 +216,44 @@ const ThreadRoot: FC<{
     if (voiceLive && viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
   }, [voiceLive]);
 
+  // Shared load-older trigger: only real user scroll intent, only at (or
+  // near) the top of the viewport, and only when no older load is already
+  // anchored or in flight.
+  const requestLoadOlder = (viewport: HTMLElement) => {
+    if (
+      viewport.scrollTop > 64 ||
+      !userScrollRef.current ||
+      !onLoadOlder ||
+      scrollAnchorRef.current ||
+      historyStatus?.kind === "loading" ||
+      historyStatus?.kind === "loading-older"
+    ) {
+      return;
+    }
+    scrollAnchorRef.current = {
+      height: viewport.scrollHeight,
+      top: viewport.scrollTop,
+      start: historyStartIndex,
+    };
+    void onLoadOlder()
+      .then((merged) => {
+        // A load that did not extend this window — a no-op because no older
+        // history exists, a merge dropped because a refresh replaced the
+        // window mid-flight, or a cursor-rejected rebuild — must not leave
+        // the anchor set. A dangling anchor would block every later trigger,
+        // stranding the view at the top of a window whose older history
+        // becomes available again (e.g. a byte-capped refresh replacing an
+        // exhausted window with one that has older pages).
+        if (!merged) scrollAnchorRef.current = null;
+      })
+      .catch(() => {
+        scrollAnchorRef.current = null;
+      })
+      .finally(() => {
+        userScrollRef.current = false;
+      });
+  };
+
   useLayoutEffect(() => {
     const anchor = scrollAnchorRef.current;
     if (!anchor) return;
@@ -252,37 +290,29 @@ const ThreadRoot: FC<{
       <ThreadPrimitive.Viewport
         ref={viewportRef}
         onWheel={(event) => {
-          if (event.deltaY < 0) userScrollRef.current = true;
+          if (event.deltaY >= 0) return;
+          userScrollRef.current = true;
+          // A wheel-up while already parked at scrollTop 0 cannot change
+          // scrollTop, so no scroll event ever fires and the trigger below
+          // would never run. That strands the view at the top of a window
+          // whose older pages still exist — e.g. after a byte-capped
+          // refresh replaced the window while the view sat at the top — so
+          // the wheel-up itself has to count as the trigger.
+          const viewport = viewportRef.current;
+          if (viewport && viewport.scrollTop <= 64) requestLoadOlder(viewport);
         }}
         onTouchMove={() => {
           userScrollRef.current = true;
         }}
         onKeyDown={(event) => {
-          if (["ArrowUp", "PageUp", "Home"].includes(event.key)) userScrollRef.current = true;
+          if (!["ArrowUp", "PageUp", "Home"].includes(event.key)) return;
+          userScrollRef.current = true;
+          // Same strand as the wheel above: at scrollTop 0 these keys
+          // cannot move the viewport, so no scroll event ever fires.
+          const viewport = viewportRef.current;
+          if (viewport && viewport.scrollTop <= 64) requestLoadOlder(viewport);
         }}
-        onScroll={(event) => {
-          const viewport = event.currentTarget;
-          if (
-            viewport.scrollTop > 64 ||
-            !userScrollRef.current ||
-            !onLoadOlder ||
-            scrollAnchorRef.current ||
-            historyStatus?.kind === "loading" ||
-            historyStatus?.kind === "loading-older"
-          ) return;
-          scrollAnchorRef.current = {
-            height: viewport.scrollHeight,
-            top: viewport.scrollTop,
-            start: historyStartIndex,
-          };
-          void onLoadOlder()
-            .catch(() => {
-              scrollAnchorRef.current = null;
-            })
-            .finally(() => {
-              userScrollRef.current = false;
-            });
-        }}
+        onScroll={(event) => requestLoadOlder(event.currentTarget)}
         turnAnchor="top"
         autoScroll={voiceLive || undefined}
         data-slot="aui_thread-viewport"

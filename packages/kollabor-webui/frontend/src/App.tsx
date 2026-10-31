@@ -186,7 +186,7 @@ function RuntimeShell({
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked: string;
   historyStatus: { kind: string; message: string } | undefined;
-  onLoadOlder: () => Promise<void>;
+  onLoadOlder: () => Promise<boolean | void>;
   onRetryHistory: () => void;
   historyStartIndex: number;
 }) {
@@ -464,7 +464,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const olderLoadRef = useRef(new Set<string>());
 
   const olderLoadQueuedRef = useRef(new Set<string>());
-  const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<void>) | null>(null);
+  const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<boolean | void>) | null>(null);
   const historyPrefetchRef = useRef(new Set<string>());
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [supervisorEvents, setSupervisorEvents] = useState<StreamEvent[]>([]);
@@ -664,13 +664,16 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const loadStateRef = useRef(loadState);
   loadStateRef.current = loadState;
 
-  const loadOlderHistory = useCallback(async (sessionId: string, prefetch = false) => {
+  // Resolves true when the call (or a queued continuation of it) actually
+  // extends the window, so the thread can drop a scroll anchor that a
+  // no-op load would otherwise leave dangling.
+  const loadOlderHistory = useCallback(async (sessionId: string, prefetch = false): Promise<boolean> => {
     if (olderLoadRef.current.has(sessionId)) {
       if (!prefetch) olderLoadQueuedRef.current.add(sessionId);
-      return;
+      return true; // an in-flight load is already extending this window
     }
     const current = historyPagesRef.current.get(sessionId);
-    if (!current || !current.has_more_older) return;
+    if (!current || !current.has_more_older) return false;
     olderLoadRef.current.add(sessionId);
     if (!prefetch && activeIdRef.current === sessionId) {
       setHistoryStatus({ sessionId, kind: "loading-older", message: "Loading older messages…" });
@@ -685,7 +688,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       // A refresh replaced this window while the page-down was in flight;
       // applying the merge now would resurrect stale pages.
       if (historyPagesRef.current.get(sessionId) !== current) {
-        return;
+        return false;
       }
       if (!older) {
         throw new Error("History paging cursor is missing. Retry loading the conversation.");
@@ -694,9 +697,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const exhausted = { ...current, has_more_older: false, older_cursor: null };
         historyPagesRef.current.set(sessionId, exhausted);
         if (!prefetch && activeIdRef.current === sessionId) setHistoryStatus(null);
-        return;
+        return false;
       }
-      if (prefetch) return;
+      if (prefetch) return false;
 
       const updated = mergeOlderHistoryPage(current, older);
       if (updated.start_index >= current.start_index) {
@@ -726,6 +729,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         );
       }
       if (activeIdRef.current === sessionId) setHistoryStatus(null);
+      return true;
     } catch (error) {
       if (error instanceof UnusableHistoryCursorError) {
         // The engine rejected the cursor (409 stale / 400 invalid): the
@@ -758,7 +762,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             // loadState already surfaced the failure through historyStatus.
           }
         }
-        return;
+        // The rebuild swaps in a fresh window; an anchored restore against
+        // the old one would misplace the view, so drop the anchor.
+        return false;
       }
       console.warn("Failed to load older history", error);
       if (!prefetch && activeIdRef.current === sessionId) {
@@ -768,6 +774,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           message: "Couldn't load older messages. Scroll up or retry to try again.",
         });
       }
+      return false;
     } finally {
       olderLoadRef.current.delete(sessionId);
       if (

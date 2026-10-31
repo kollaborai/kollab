@@ -184,7 +184,7 @@ const scenario = async (name, buildState, run) => {
   page.on("pageerror", (error) => fail(name, `page error: ${error.message}`));
   page.on("console", (message) => {
     if (["warning", "error"].includes(message.type())) {
-      consoleNotes.push(`${message.type()}: ${message.text().slice(0, 120)}`);
+    consoleNotes.push(`${message.type()}: ${message.text().slice(0, 120)}`);
     }
   });
   history = buildState();
@@ -483,6 +483,155 @@ try {
       const afterRequests = requests.filter((r) => r.after);
       if (afterRequests.length === 0) fail("C-byte-capped-refresh", "no after-cursor refresh");
       else ok("C-byte-capped-refresh", `after-cursor refresh made (${afterRequests.length})`);
+    },
+  );
+
+  // E: byte-capped refresh replaces the window while the view is parked at
+  // the top; UP-ONLY intent must still page to the oldest message. Round-3
+  // review: the load-older trigger lived only in onScroll, and a wheel-up at
+  // scrollTop 0 never changes scrollTop, so no scroll event fires and the
+  // view sat stranded with older pages available until the user scrolled
+  // down and back up. This scenario scrolls up only — never down, and fires
+  // no synthetic scroll events after the window is replaced.
+  const e = {
+    holding: true,
+    held: [],
+    release(response) {
+      this.held.splice(0).forEach((pending) => pending.resolve(response));
+    },
+  };
+  await scenario(
+    "E-capped-top-uponly",
+    () => ({
+      releaseCapped() {
+        e.release({
+          status: 200,
+          body: mkPage(156, 160, {
+            history: Array.from({ length: 4 }, (_, i) => ({
+              role: "user",
+              content: "E".repeat(34 * 1024) + ` E-CAP-${i}`,
+            })),
+            older_cursor: "before-156",
+            has_more_older: true,
+          }),
+        });
+      },
+      resolve(options) {
+        // Hold every after-cursor poll refresh at the route layer until the
+        // scenario parks the view at the top, then release one capped page.
+        if (options.after && !options.before) {
+          if (e.holding) {
+            return new Promise((resolve) => {
+              e.held.push({ resolve });
+            });
+          }
+          return {
+            status: 200,
+            body: mkPage(156, 160, {
+              history: Array.from({ length: 4 }, (_, i) => ({
+                role: "user",
+                content: "E".repeat(34 * 1024) + ` E-CAP-${i}`,
+              })),
+              older_cursor: "before-156",
+              has_more_older: true,
+            }),
+          };
+        }
+        if (options.before) {
+          // Serve the page immediately preceding whatever window the app is
+          // paging from, exactly like the real engine: contiguous, so the
+          // merge guard can stitch the window back together.
+          const from = Number(options.before.replace(/^before-/, ""));
+          if (!Number.isFinite(from) || from <= 0) {
+            return { status: 400, body: { error: "bad cursor" } };
+          }
+          return { status: 200, body: mkPage(Math.max(0, from - 50), from) };
+        }
+        // Start from an exhausted window so parking at the top pages
+        // nothing: the strand needs older pages to APPEAR only when the
+        // capped refresh replaces the window.
+        return {
+          status: 200,
+          body: mkPage(71, 121, { has_more_older: false, older_cursor: null }),
+        };
+      },
+    }),
+    async (page, requests) => {
+      await openThread(page, "message-120");
+      await page.waitForTimeout(1000); // let the held poll arrive
+      const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+      await viewport.waitFor({ timeout: 8000 });
+      // Park the view at the top with REAL wheel-ups only (the way an
+      // actual reader reaches the oldest loaded message); no synthetic
+      // scroll events, no Home key.
+      await viewport.hover();
+      const trace = [];
+      for (let i = 0; i < 14; i++) {
+        await page.mouse.wheel(0, -25000);
+        await page.waitForTimeout(120);
+        trace.push(await viewport.evaluate((node) => node.scrollTop));
+        if (trace[trace.length - 1] <= 64) break;
+      }
+      const beforePark = trace[trace.length - 1];
+      if (beforePark > 64) {
+        fail(
+          "E-capped-top-uponly",
+          `setup failed: could not park at top (scrollTop trace ${JSON.stringify(trace)})`,
+        );
+        return;
+      }
+      // Replace the window with a byte-capped page that has older history,
+      // exactly like the real engine's capped refresh landing mid-session.
+      history.releaseCapped();
+      await page.getByText("E-CAP-3", { exact: false }).first().waitFor({ timeout: 10000 });
+      await page.waitForTimeout(600);
+      const parkedTop = await viewport.evaluate((node) => node.scrollTop);
+      if (parkedTop > 64) {
+        fail(
+          "E-capped-top-uponly",
+          `view not parked at top after capped refresh (scrollTop ${parkedTop})`,
+        );
+        return;
+      }
+      ok("E-capped-top-uponly", `capped refresh parked the view at scrollTop ${parkedTop} with older pages available`);
+      const beforeCount = () => requests.filter((r) => r.before).length;
+      // Up-only recovery: wheel up at the top, repeatedly. No down-scroll
+      // first, no synthetic scroll events — the wheel-up alone has to page.
+      await viewport.hover();
+      for (let i = 0; i < 40; i++) {
+        await page.mouse.wheel(0, -1200);
+        await page.waitForTimeout(250);
+        if (
+          await page
+            .getByText("message-0", { exact: true })
+            .first()
+            .isVisible()
+            .catch(() => false)
+        )
+          break;
+      }
+      const oldestVisible = await page
+        .getByText("message-0", { exact: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (!oldestVisible) {
+        fail("E-capped-top-uponly", "up-only wheeling never paged to the oldest message");
+      } else {
+        ok("E-capped-top-uponly", "up-only wheeling paged to the oldest message");
+      }
+      const olderLoads = beforeCount();
+      if (olderLoads === 0) {
+        fail("E-capped-top-uponly", "no before-cursor load was ever made");
+      } else {
+        ok("E-capped-top-uponly", `before-cursor loads made (${olderLoads})`);
+      }
+      const banner = page.locator('[data-slot="history-status"][role="alert"]');
+      if (await banner.isVisible().catch(() => false)) {
+        fail("E-capped-top-uponly", "an error banner is showing after up-only paging");
+      } else {
+        ok("E-capped-top-uponly", "no error banner after up-only paging");
+      }
     },
   );
 

@@ -281,7 +281,20 @@ export async function loadOlderHistoryPage(
 ): Promise<HistoryPage | null> {
   if (!current.has_more_older) return null;
   const cached = await cache.findOlder(sessionId, current.start_index);
-  if (cached) return cached;
+  if (cached) {
+    // A cached page is a snapshot from an earlier window. Its exhaustion
+    // flags can predate the capped refresh that made older history reachable
+    // again (a byte-capped page with start_index > 0 was capped, not
+    // terminal). Re-derive the cursor from the fragment boundary so the
+    // window keeps paging; an empty next page marks it exhausted for real.
+    if (cached.has_more_older && cached.older_cursor) return cached;
+    return {
+      ...cached,
+      has_more_older: cached.start_index > 0,
+      older_cursor:
+        cached.start_index > 0 ? `before-${cached.start_index}` : null,
+    };
+  }
   if (!current.older_cursor) return null;
   let older: HistoryPage;
   try {
