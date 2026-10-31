@@ -23,6 +23,8 @@ from kollabor_ai.message_content import (
     combine_message_contents,
     content_to_text,
     prepend_text,
+    redact_error_media,
+    safe_provider_error_code,
 )
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
@@ -1208,6 +1210,14 @@ class QueueProcessor:
             current_parent_uuid=current_parent_uuid,
         )
 
+    async def _goal_scoped_call_llm(self, **kwargs):
+        # Only the owning queue's provider calls may use goal image parts;
+        # tool callbacks and other tasks do not inherit that request grant.
+        from kollabor_ai.goal_image_scope import goal_image_request_scope
+
+        with goal_image_request_scope(self):
+            return await self._streaming_handler.call_llm(**kwargs)
+
     async def continue_conversation(self, current_parent_uuid: str) -> str:
         """Continue an ongoing conversation (no new user message).
 
@@ -1251,7 +1261,7 @@ class QueueProcessor:
         failure is re-raised untouched, and so is a second timeout.
         """
         try:
-            return await self._streaming_handler.call_llm(**kwargs)
+            return await self._goal_scoped_call_llm(**kwargs)
         except Exception as exc:
             if not _is_timeout_exception(exc):
                 raise
@@ -1259,7 +1269,7 @@ class QueueProcessor:
                 "Provider call timed out (%s); retrying the identical request once",
                 type(exc).__name__,
             )
-        return await self._streaming_handler.call_llm(**kwargs)
+        return await self._goal_scoped_call_llm(**kwargs)
 
 
     async def _execute_llm_turn(
@@ -2268,9 +2278,9 @@ class QueueProcessor:
             await self._keep_interrupted_reply(parent_uuid, shown_reply)
 
         except Exception as e:
-            logger.error(f"Error processing message: {type(e).__name__}: {e}")
+            logger.error(f"Error processing message: {type(e).__name__}: {redact_error_media(str(e))}")
             self.renderer.update_thinking(False)
-            error_msg = str(e) or f"{type(e).__name__} (no details)"
+            error_msg = redact_error_media(str(e)) or f"{type(e).__name__} (no details)"
             if "'str' object has no attribute 'get'" in error_msg:
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
 
@@ -2281,7 +2291,8 @@ class QueueProcessor:
             nested_error = getattr(e, "error", None)
             if not error_code and isinstance(nested_error, dict):
                 error_code = nested_error.get("code")
-            error_code = str(error_code)[:120] if error_code else None
+            error_code = safe_provider_error_code(error_code)
+            error_code = error_code[:120] if error_code else None
             error_text = str(e).lower()
             context_window_exceeded = (
                 error_code

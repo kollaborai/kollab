@@ -8,6 +8,9 @@ for Azure-specific endpoint format.
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ..goal_image_scope import safe_goal_error_cause
+from ..message_content import redact_error_media
+
 from .base import LLMProvider
 from .models import (
     AzureOpenAIConfig,
@@ -99,13 +102,13 @@ class AzureOpenAIProvider(OpenAIProvider):
         except ImportError as e:
             raise ImportError(
                 "OpenAI SDK not installed. Install with: pip install openai"
-            ) from e
+            ) from safe_goal_error_cause(e)
         except Exception as e:
-            logger.error(f"Failed to initialize Azure OpenAI client: {e}")
+            logger.error(f"Failed to initialize Azure OpenAI client: {redact_error_media(str(e))}")
             # Import here to avoid circular dependency
             from .errors import map_openai_error
 
-            raise map_openai_error(e, "azure_openai") from e
+            raise map_openai_error(e, "azure_openai") from safe_goal_error_cause(e)
 
     async def call(
         self,

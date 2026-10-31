@@ -966,7 +966,9 @@ class GoalService:
             "size": len(payload),
         }
 
-    def load_attachment(self, ref: Dict[str, Any]) -> Optional[bytes]:
+    def load_attachment(
+        self, ref: Dict[str, Any], *, max_bytes: Optional[int] = None
+    ) -> Optional[bytes]:
         """Rehydrate artifact bytes through the provider's image resolver.
 
         Missing or checksum-mismatched artifacts are a hard error signal:
@@ -979,9 +981,17 @@ class GoalService:
         if not name:
             return None
         path = self.store.db_path.parent / "artifacts" / str(name)
-        if not path.exists():
+        try:
+            with path.open("rb") as artifact:
+                payload = (
+                    artifact.read(max_bytes + 1)
+                    if max_bytes is not None
+                    else artifact.read()
+                )
+        except FileNotFoundError:
             return None
-        payload = path.read_bytes()
+        if max_bytes is not None and len(payload) > max_bytes:
+            raise GoalError("goal image exceeds the available image memory limit")
         expected = ref.get("checksum")
         if expected and hashlib.sha256(payload).hexdigest() != expected:
             return None

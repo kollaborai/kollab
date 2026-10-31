@@ -23,6 +23,7 @@ from .interface import StateService, enrollment_result, offer_failure
 from .snapshots import (
     AgentListSnapshot,
     AgentSnapshot,
+    ContextCompactionSnapshot,
     ConversationSnapshot,
     HubSnapshot,
     McpSnapshot,
@@ -172,6 +173,22 @@ class RemoteStateService(StateService):
                 f"state.get_session_stats expected dict, got {type(result).__name__}"
             )
         return SessionStats.from_dict(result)
+
+    # === Context compaction ===
+
+    async def get_context_compaction_snapshot(self) -> ContextCompactionSnapshot:
+        """Fetch context usage and compaction policy from the daemon."""
+        logger.debug("state rpc: get_context_compaction_snapshot")
+        result = await self._rpc.call(
+            "state.get_context_compaction_snapshot", {}, timeout=self._timeout
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                "state.get_context_compaction_snapshot expected dict, "
+                f"got {type(result).__name__}"
+            )
+        return ContextCompactionSnapshot.from_dict(result)
+
 
     # === Profile ===
 

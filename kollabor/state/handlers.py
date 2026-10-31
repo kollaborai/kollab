@@ -43,6 +43,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.get_conversation
         state.save_conversation
         state.get_session_stats
+        state.get_context_compaction_snapshot
         state.get_active_profile
         state.list_profiles
         state.get_permission_state
@@ -110,6 +111,12 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
     async def _get_session_stats(params: dict[str, Any]) -> dict[str, Any]:
         stats = await state_service.get_session_stats()
         return stats.to_dict()
+
+    async def _get_context_compaction_snapshot(
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = await state_service.get_context_compaction_snapshot()
+        return snapshot.to_dict()
 
     async def _get_active_profile(params: dict[str, Any]) -> dict[str, Any]:
         profile = await state_service.get_active_profile()
@@ -694,6 +701,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.get_conversation": _get_conversation,
         "state.save_conversation": _save_conversation,
         "state.get_session_stats": _get_session_stats,
+        "state.get_context_compaction_snapshot": _get_context_compaction_snapshot,
         "state.get_active_profile": _get_active_profile,
         "state.list_profiles": _list_profiles,
         "state.get_permission_state": _get_permission_state,
