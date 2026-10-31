@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from kollabor_engine.phone_link import (
     CHUNK,
+    LEGACY_CHUNK,
     PhoneLink,
     PhoneLinkError,
     decode_phone_frame,
@@ -63,9 +64,9 @@ async def setup_link(tmp_path, monkeypatch):
         return StreamingResponse(chunks(), media_type="text/event-stream")
 
     @app.get("/sessions/burst")
-    async def burst(width: int = 128):
+    async def burst(width: int = 128, size: int = LEGACY_CHUNK * 4 + 1):
         async def chunks():
-            body = b"01234567" * CHUNK
+            body = (b"01234567" * ((size + 7) // 8))[:size]
             for offset in range(0, len(body), width):
                 yield body[offset : offset + width]
 
@@ -204,15 +205,28 @@ async def test_approved_phone_streams_authenticated_app_without_engine_token(set
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", [128, CHUNK // 2 + 1])
-async def test_stream_packets_are_bounded_and_coalesce_small_events(setup_link, width):
+@pytest.mark.parametrize(
+    ("chunk_size", "width", "size"),
+    [
+        (LEGACY_CHUNK, 128, LEGACY_CHUNK * 4 + 1),
+        (LEGACY_CHUNK, LEGACY_CHUNK // 2 + 1, LEGACY_CHUNK * 4 + 1),
+        (CHUNK, CHUNK // 2 + 1, CHUNK * 2 + 1),
+    ],
+    ids=["small-writes", "small-boundary", "maximum-boundary"],
+)
+async def test_stream_packets_are_bounded_and_coalesce_small_events(
+    setup_link, chunk_size, width, size
+):
     packet = await secure_phone(
         setup_link,
         frame_compression=True,
-        max_chunk=CHUNK,
+        max_chunk=chunk_size,
     )
     identifier = secrets.token_hex(16)
-    await packet(op="start", id=identifier, method="GET", path=f"/sessions/burst?width={width}", headers=[], size=0)
+    await packet(
+        op="start", id=identifier, method="GET",
+        path=f"/sessions/burst?width={width}&size={size}", headers=[], size=0,
+    )
     await packet(op="run", id=identifier)
     assert (await packet(op="read", id=identifier))["type"] == "headers"
     chunks = []
@@ -222,11 +236,12 @@ async def test_stream_packets_are_bounded_and_coalesce_small_events(setup_link, 
             break
         assert event["type"] == "data"
         chunk = base64.b64decode(event["data"])
-        assert 0 < len(chunk) <= CHUNK
+        assert 0 < len(chunk) <= chunk_size
         chunks.append(chunk)
-    assert b"".join(chunks) == b"01234567" * CHUNK
+    assert b"".join(chunks) == (b"01234567" * ((size + 7) // 8))[:size]
+    assert len(chunks) >= 2
     if width == 128:
-        assert len(chunks) < CHUNK * 8 // width
+        assert len(chunks) < (size + width - 1) // width
 
 
 @pytest.mark.asyncio
