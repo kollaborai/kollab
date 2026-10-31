@@ -124,6 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- A hub agent that is busy for a while keeps its socket: peers no longer delete a live agent's presence
+  and socket after a 15 s late heartbeat, which cut every connection to it; they wait 10 min (#545).
 - ACP: an oversized agent reply no longer breaks history paging with a
   413 error. A page that is too large slims its message metadata so the
   older messages still load, and the original message is preserved

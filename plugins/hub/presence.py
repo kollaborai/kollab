@@ -220,6 +220,11 @@ def _atomic_write(path: Path, data: dict) -> None:
 class PresenceManager:
     """Manages this agent's presence file and discovers other agents."""
 
+    # A live pid whose socket does not answer is busy, not dead, until its
+    # heartbeat is this old. Deleting its files sooner cut every connection to
+    # an agent that was only stuck for a couple of minutes (#545).
+    LIVE_PID_GRACE_SECONDS = 600
+
     def __init__(self, identity: "AgentRuntime"):
         self.identity = identity
         self._presence_dir = get_presence_dir()
@@ -297,6 +302,8 @@ class PresenceManager:
 
                 # Stale heartbeat -- verify socket is actually responding
                 if agent.socket_path and not self._socket_responds(agent.socket_path):
+                    if heartbeat_age < self.LIVE_PID_GRACE_SECONDS:
+                        continue  # busy: not a peer right now, its files stay
                     logger.info(
                         f"Cleaning stale agent: {f.stem} (pid alive but socket dead)"
                     )
@@ -342,6 +349,8 @@ class PresenceManager:
                 # Stale heartbeat -- async socket check (non-blocking)
                 if agent.socket_path:
                     alive = await self._socket_responds_async(agent.socket_path)
+                    if not alive and heartbeat_age < self.LIVE_PID_GRACE_SECONDS:
+                        continue  # busy: not a peer right now, its files stay
                     if not alive:
                         logger.info(
                             f"Cleaning stale agent: {f.stem} "
@@ -479,7 +488,7 @@ class PresenceManager:
 
                 # Also check socket for stale heartbeats
                 heartbeat_age = time.time() - (agent.last_heartbeat or 0)
-                if heartbeat_age > 15 and agent.socket_path:
+                if heartbeat_age > self.LIVE_PID_GRACE_SECONDS and agent.socket_path:
                     if not self._socket_responds(agent.socket_path):
                         logger.info(
                             f"Startup cleanup: stale agent {f.stem} "
