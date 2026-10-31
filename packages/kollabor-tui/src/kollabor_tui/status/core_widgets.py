@@ -437,6 +437,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
         cost = 0.0
         tokens_estimated = False
         acp_usage = {}
+        acp_turn_usage = {}
 
         # Prefer daemon-sourced state when available. In attach mode the
         # local llm_service is only a client-side shadow and can be partially
@@ -453,6 +454,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
         ):
             rs = ctx.remote_state
             acp_usage = rs.get("acp_usage") or {}
+            acp_turn_usage = rs.get("acp_turn_usage") or {}
             msgs = rs.get("messages", 0)
             tokens = rs.get("input_tokens", 0) + rs.get("output_tokens", 0)
             tokens_estimated = bool(rs.get("input_tokens_estimated", False))
@@ -467,6 +469,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
         elif ctx and ctx.llm_service and hasattr(ctx.llm_service, "session_stats"):
             stats = ctx.llm_service.session_stats
             acp_usage = stats.get("acp_usage") or {}
+            acp_turn_usage = stats.get("acp_turn_usage") or {}
             msgs = stats.get("messages", 0)
             tokens = stats.get("input_tokens", 0) + stats.get("output_tokens", 0)
             tokens_estimated = bool(stats.get("input_tokens_estimated", False))
@@ -512,6 +515,27 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
                 price = _fmt_cost(float(amount)) if currency == "USD" else f"{amount} {currency}".strip()
                 if len(context) + len(price) + 3 <= width:
                     context += " | " + price
+            if acp_turn_usage:
+                # Per-turn totals the adapter reported on the prompt response
+                # (codex-acp >= 2.3.0): authoritative turn spend, settled once
+                # per turn into the session token totals (#495). Context fill
+                # stays a context indicator, never turn spend.
+                turn_total = _fmt_short(int(acp_turn_usage.get("total_tokens", 0) or 0))
+                for line in (
+                    f"{turn_total} tok/turn | {context}",
+                    f"{turn_total}tok|{context}",
+                    context,
+                    f"{used} ctx",
+                ):
+                    if len(line) <= width:
+                        return _fg(line, T().text_dim)
+                return _fg(f"{used} ctx", T().text_dim)
+            # Older adapters send only the last request's context fill in
+            # usage_update samples; label it so it can never read as turn
+            # spend (#495).
+            labeled = f"{context} · last req"
+            if len(labeled) <= width:
+                return _fg(labeled, T().text_dim)
             return _fg(context if len(context) <= width else f"{used} ctx", T().text_dim)
 
         token_prefix = "~" if tokens_estimated and tokens > 0 else ""

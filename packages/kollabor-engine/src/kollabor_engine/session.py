@@ -233,6 +233,7 @@ class EngineSession:
         self.acp_waiting = False
         self.acp_plan: Dict[str, Any] = {}
         self.acp_usage: Dict[str, Any] = {}
+        self.acp_turn_usage: Dict[str, Any] = {}
 
         self._pending_permissions: Dict[str, Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
@@ -988,6 +989,10 @@ class EngineSession:
                     self.total_turns += 1
                     self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
                     self.total_output_tokens += int(event.get("output_tokens", 0) or 0)
+                    # Authoritative per-turn totals when the adapter reports
+                    # them on the prompt response; cleared each turn so a
+                    # stale total never lingers on adapters without it (#495).
+                    self.acp_turn_usage = dict(event.get("turn_usage") or {})
                     await self.refresh_history()
                     self.last_turn_error = (
                         {"message": turn_error, "history_length": len(self.history)}
@@ -1043,6 +1048,7 @@ class EngineSession:
                 elif etype == "acp_session":
                     self.acp_plan = {}
                     self.acp_usage = {}
+                    self.acp_turn_usage = {}
                     self.acp_waiting = False
                     if isinstance(self.profile, ProfileSnapshot) and self.profile.provider == "acp":
                         self.profile.supports_vision = event.get("supports_vision") is True
@@ -1056,6 +1062,7 @@ class EngineSession:
                         if self.profile.provider != "acp":
                             self.acp_plan = {}
                             self.acp_usage = {}
+                            self.acp_turn_usage = {}
                             self.acp_waiting = False
 
                 elif etype == "daemon_closed":
@@ -1084,6 +1091,7 @@ class EngineSession:
             "provider": provider,
             "acp_waiting": self.acp_waiting,
             "acp_usage": self.acp_usage,
+            "acp_turn_usage": self.acp_turn_usage,
             "acp_plan": self.acp_plan,
             "session_id": self.session_id,
             "conversation_id": self.conversation_id,

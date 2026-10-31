@@ -62,10 +62,10 @@ class ACPProfile:
         },
         "codex-cli": {
             "command": ["codex-acp"],
-            "managed_dir": "codex-2.1.1",
+            "managed_dir": "codex-2.5.0",
             "install": (
-                "npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save "
-                "@agentclientprotocol/codex-acp@2.1.1"
+                "npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.5.0 --no-save "
+                "@agentclientprotocol/codex-acp@2.5.0"
             ),
         },
     }
@@ -351,6 +351,26 @@ class ACPAdmission:
     images: tuple[dict[str, str], ...] = field(default_factory=tuple, repr=False)
 
 
+def _turn_usage_payload(usage: Any) -> dict[str, int] | None:
+    """Normalize a prompt-response Usage object into snake_case token totals.
+
+    Adapters that report per-prompt usage (codex-acp >= 2.3.0) send the whole
+    turn's totals on the prompt response; older adapters leave response.usage
+    unset and callers fall back to last-request context samples (#495).
+    """
+    if usage is None:
+        return None
+    payload: dict[str, int] = {}
+    for name in (
+        "total_tokens", "input_tokens", "output_tokens", "thought_tokens",
+        "cached_read_tokens", "cached_write_tokens",
+    ):
+        value = getattr(usage, name, None)
+        if value is not None:
+            payload[name] = int(value)
+    return payload or None
+
+
 @dataclass(frozen=True)
 class ACPResult:
     generation: int
@@ -363,6 +383,7 @@ class ACPResult:
     request_id: str = ""
     source: str = ""
     thread_id: str | None = None
+    usage: dict[str, int] | None = None
 
 
 class _Client(acp.Client):
@@ -868,6 +889,7 @@ class ACPRunner:
             )
             await asyncio.sleep(0)
             stop_reason = str(response.stopReason) if response else None
+            turn_usage = _turn_usage_payload(getattr(response, "usage", None))
             answer = self._select_answer(self._updates)
             return ACPResult(
                 generation=generation,
@@ -882,11 +904,13 @@ class ACPRunner:
                     "sessionId": self.session_id,
                     "stopReason": stop_reason,
                     "outcome": "success" if stop_reason == "end_turn" else "failed",
+                    "acp_turn_usage": turn_usage,
                 },
                 turn_id=turn_id,
                 request_id=admission.request_id,
                 source=admission.source,
                 thread_id=admission.thread_id,
+                usage=turn_usage,
             )
         except Exception as exc:
             if isinstance(exc, ACPError):

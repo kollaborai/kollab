@@ -124,6 +124,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- ACP: Codex turns now report their real per-turn token spend. Adapters that
+  report usage on the prompt response (codex-acp >= 2.3.0; the bundled pin is
+  now 2.5.0) have each turn's totals settled once into the session token
+  totals, so budgets and stats match the harness ledger on multi-tool turns,
+  and the status line shows the turn total for them. Older adapters keep their
+  last-request context sample, now labeled "· last req" so it can never read
+  as turn spend (#495).
 - PhoneLink: the phone link no longer falls into a reconnect loop on every
   relay blip. The engine now rejects malformed peers and error frames without
   dropping its relay socket (only the requests they concern fail), the phone
