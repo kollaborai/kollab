@@ -283,6 +283,23 @@ async def test_real_terminal_deferred_acp_hub_lifecycle(scenario):
                     row[key]
                     for key in ("startup_complete", "hub_socket_bound", "controller_active", "same_hub_binding")
                 ), row
+                if scenario == "lifecycle":
+                    # Exercise the daemon-side command with the real selected
+                    # ACP profile and an active SDK process. The existing
+                    # ordinary Hub turn below must still reach that process.
+                    before = owner.runner._next_turn_id
+                    goal = await app._local_state_service.goal_command(
+                        "/goal examine the isolated test workspace"
+                    )
+                    print(json.dumps({"goal_command": goal}))
+                    assert goal["success"] is False
+                    assert "ACP" in goal["message"]
+                    assert owner.runner._next_turn_id == before
+                    service = app.event_bus.get_service("goal_service")
+                    uid = app._local_state_service.get_conversation_uid()
+                    assert service.store.get_active(uid) is None
+                    shown = await app._local_state_service.goal_command("/goal show")
+                    assert shown["success"] is True
                 received = []
 
                 async def receive(message):
