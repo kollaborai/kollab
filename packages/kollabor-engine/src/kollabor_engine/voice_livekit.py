@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from kollabor_config.proc_ctl import pid_alive
+
 from .voice_runtime_host import RuntimeHostError
 from .voice_types import RuntimeStatus, StopReason, VoiceSessionBinding
 
@@ -301,9 +303,7 @@ class LiveKitRuntime:
                 return
             deadline = time.monotonic() + wait_s
             while time.monotonic() < deadline:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
+                if not pid_alive(pid):  # os.kill(pid, 0) signals the process on Windows (#460)
                     return  # gone, and its lock with it: a new service can start
                 await asyncio.sleep(0.1)
 
