@@ -220,6 +220,62 @@ def test_durable_append_fsyncs_sidecar_spill(tmp_path, monkeypatch):
     assert fsync_calls, "sidecar spill must fsync before returning success"
 
 
+def _checkpoint_plugin(tmp_path):
+    from plugins.context_compaction_plugin import ContextCompactionPlugin
+
+    plugin = ContextCompactionPlugin(
+        "compaction", SimpleNamespace(), SimpleNamespace(), SimpleNamespace()
+    )
+    session_file = tmp_path / "session_pin.jsonl"
+    session_file.write_text("")
+    plugin._conversation_logger = SimpleNamespace(
+        session_file=session_file, session_id="pin-test"
+    )
+    return plugin, session_file
+
+
+def test_checkpoint_writer_failure_is_logged_not_raised(tmp_path, monkeypatch, caplog):
+    # Pins the fix for the swallowed checkpoint write: a failed checkpoint
+    # must log a warning and return None, never raise into the compaction
+    # flow and never vanish silently.
+    plugin, session_file = _checkpoint_plugin(tmp_path)
+    real_open = open
+
+    def failing_open(file, mode="r", *args, **kwargs):
+        if Path(file) == session_file.parent / "session_pin.checkpoint.r1.jsonl":
+            raise OSError("disk full")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+    with caplog.at_level("WARNING", logger="plugins.context_compaction_plugin"):
+        result = plugin._write_compaction_checkpoint([])
+    assert result is None
+    assert any(
+        "Failed to write compaction checkpoint" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_checkpoint_event_failure_is_logged_not_raised(tmp_path, monkeypatch, caplog):
+    # Pins the sibling path: a failed checkpoint-event append to the main
+    # session file must warn, not raise.
+    plugin, session_file = _checkpoint_plugin(tmp_path)
+    real_open = open
+
+    def failing_open(file, mode="r", *args, **kwargs):
+        if Path(file) == session_file:
+            raise OSError("disk full")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+    with caplog.at_level("WARNING", logger="plugins.context_compaction_plugin"):
+        plugin._log_checkpoint_event("session_pin.checkpoint.r1.jsonl", 3)
+    assert any(
+        "Failed to log checkpoint event" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
 def test_stampless_compaction_keeps_prior_boundary(tmp_path):
     # A later compaction record with a missing stamp must not reset a
     # valid earlier boundary to None: resetting it un-suppressed the
