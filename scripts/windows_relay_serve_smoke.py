@@ -91,41 +91,49 @@ def serve_once(args: argparse.Namespace, state_dir: Path) -> int:
 
     ready = False
     fatal = None
-    deadline = time.monotonic() + args.timeout
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            break
-        if any(READY.search(line) for line in lines):
-            ready = True
-            break
-        hit = next((line for line in lines if FATAL.search(line)), None)
-        if hit:
-            fatal = hit.strip()
-            break
-        time.sleep(0.5)
-    if not ready:
-        # A relay that never became ready must not stay bound on the runner.
-        proc.kill()
-    try:
-        proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        pass
-
     problems: list[str] = []
-    if fatal:
-        problems.append(f"relay serve printed: {fatal}")
-    if not ready:
-        problems.append("the 'ready: relay up, key file published' line never appeared")
-    key = state_dir / "service.key"
-    if not key.is_file():
-        problems.append("service.key was not created in the state directory")
-    doc = state_dir / "public" / "agent-keys.json"
     try:
-        payload = json.loads(doc.read_text(encoding="utf-8"))
-        if "discovery" not in payload:
-            problems.append("the published key file carries no discovery document")
-    except (OSError, ValueError) as exc:
-        problems.append(f"the published key file is missing or unreadable: {exc}")
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            if any(READY.search(line) for line in lines):
+                ready = True
+                break
+            hit = next((line for line in lines if FATAL.search(line)), None)
+            if hit:
+                fatal = hit.strip()
+                break
+            time.sleep(0.5)
+
+        if fatal:
+            problems.append(f"relay serve printed: {fatal}")
+        if not ready:
+            problems.append("the 'ready: relay up, key file published' line never appeared")
+        key = state_dir / "service.key"
+        if not key.is_file():
+            problems.append("service.key was not created in the state directory")
+        doc = state_dir / "public" / "agent-keys.json"
+        try:
+            payload = json.loads(doc.read_text(encoding="utf-8"))
+            if "discovery" not in payload:
+                problems.append("the published key file carries no discovery document")
+        except (OSError, ValueError) as exc:
+            problems.append(f"the published key file is missing or unreadable: {exc}")
+    finally:
+        # Whatever happened above -- a pass, a failure, or a crash in this
+        # script -- the relay must not stay bound on the runner into later
+        # workflow steps: ask it to stop, then kill it if it lingers.
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    pass
 
     print("\n".join(lines))
     if problems:
