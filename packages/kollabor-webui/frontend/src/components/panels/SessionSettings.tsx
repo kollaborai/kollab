@@ -85,7 +85,7 @@ export function SessionSettings({
         session.session_id,
         editProfile,
         selectedACP ? undefined : editModel.trim() || undefined,
-        selectedACP ? undefined : editEffort.trim() || undefined,
+        editEffort.trim() || undefined,
       );
       onSessionUpdated(updated);
       setEditModel(updated.model || "");

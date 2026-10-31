@@ -1342,8 +1342,8 @@ class LocalStateService(StateService):
             if event_bus else None
         )
         if str(target_provider).lower() == "acp":
-            if model or effort:
-                raise ValueError("ACP profile owns model/effort settings")
+            if model:
+                raise ValueError("ACP profile owns model settings")
             if orchestrator is None:
                 raise ValueError("ACP profile unavailable: orchestrator is not running")
             try:
@@ -1360,6 +1360,26 @@ class LocalStateService(StateService):
                     f"ACP profile {name!r} could not be activated; verify its "
                     "adapter command and profile settings."
                 ) from None
+            if effort:
+                # The harness owns effort: send it through its advertised option.
+                option = next(
+                    (
+                        o for o in orchestrator.advertised_config_options()
+                        if o.get("id") == "effort"
+                        or str(o.get("category") or "").lower() == "thought_level"
+                    ),
+                    None,
+                )
+                values = [
+                    str(c["value"]) for c in (option or {}).get("options") or []
+                    if isinstance(c, dict) and "value" in c
+                ]
+                if option is None or effort not in values:
+                    raise ValueError(
+                        f"ACP harness does not offer effort {effort!r}; "
+                        f"available: {', '.join(values) or 'none'}"
+                    )
+                await orchestrator.set_config_option(str(option["id"]), effort)
         else:
             if str(current_provider).lower() == "acp" and orchestrator is not None:
                 await orchestrator.close()

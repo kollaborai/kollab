@@ -146,6 +146,9 @@ class ACPOrchestrator:
             if model is not None:
                 wanted[str(model["id"])] = profile.model
         wanted.update(self._saved_options().get(profile.name) or {})
+        if profile.effort:
+            # A loadout's effort wins over the last value picked for the profile.
+            wanted["effort"] = profile.effort
         for config_id, value in wanted.items():
             option = next((o for o in self.advertised_config_options() if o.get("id") == config_id), None)
             if option is None or option.get("currentValue") == value:
