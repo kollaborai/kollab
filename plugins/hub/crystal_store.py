@@ -28,7 +28,8 @@ from .text_utils import (
     extract_keywords,
     keyword_overlap,
     score_relevance,
-    summary_similarity,
+    summary_tokens,
+    token_overlap,
     tokenize,
 )
 
@@ -117,6 +118,12 @@ class CrystalStore:
         self._entries: List[CrystalEntry] = []
         self._next_id: int = 1
         self._loaded = False
+        # Entries added or changed since the last deduplicate() pass; the
+        # ones loaded from disk were compared when they were written.
+        self._unchecked: set = set()
+        # Stemmed summary words, by summary text: stemming every pair again
+        # made a pass over thousands of entries take minutes (#546).
+        self._summary_words: dict = {}
 
     def _ensure_loaded(self) -> None:
         """Lazy-load entries from disk on first access."""
@@ -267,6 +274,7 @@ class CrystalStore:
             if len(text) > len(existing.body):
                 existing.body = text
                 existing.summary = summary
+            self._unchecked.add(existing.id)
             self._save_to_disk()
             logger.debug(
                 "crystal_store: merged into %s (keyword overlap > %.0f%%)",
@@ -284,6 +292,7 @@ class CrystalStore:
             body=text,
         )
         self._entries.append(entry)
+        self._unchecked.add(entry.id)
         self._save_to_disk()
         logger.debug("crystal_store: added %s (%d keywords)", entry.id, len(entry.keywords))
         return entry
@@ -291,12 +300,17 @@ class CrystalStore:
     def _summary_similarity(self, summary_a: str, summary_b: str) -> float:
         """Compute word-level overlap ratio between two summaries.
 
-        Delegates to text_utils.summary_similarity which tokenizes,
-        removes stopwords, and stems both summaries before computing
-        Jaccard overlap. This catches semantic duplicates that keyword
-        Jaccard misses because summaries distill the same concept.
+        The score of text_utils.summary_similarity (stemmed words, stopwords
+        removed), from cached words. This catches semantic duplicates that
+        keyword Jaccard misses because summaries distill the same concept.
         """
-        return summary_similarity(summary_a, summary_b)
+        return token_overlap(self._words(summary_a), self._words(summary_b))
+
+    def _words(self, summary: str) -> frozenset:
+        words = self._summary_words.get(summary)
+        if words is None:
+            words = self._summary_words[summary] = summary_tokens(summary)
+        return words
 
     def _find_merge_target(
         self, new_keywords: List[str], new_summary: str = ""
@@ -404,6 +418,7 @@ class CrystalStore:
         for entry in self._entries:
             new_keywords = extract_keywords(entry.body)
             entry.keywords = new_keywords
+            self._unchecked.add(entry.id)
             count += 1
         if count > 0:
             self._save_to_disk()
@@ -416,68 +431,62 @@ class CrystalStore:
         Uses two-layer matching: summary word overlap (primary) and
         keyword Jaccard (secondary). Either signal triggers a merge.
 
+        Only entries added or changed since the last pass are compared, each
+        against every other entry; the rest were compared when they changed.
+        A pass over every pair of the koordinator's 2,608 entries took 124.7 s
+        on the agent's event loop after each dreaming cycle: the agent answered
+        nothing and peers deleted its socket as dead (#546).
+
         Returns number of entries merged.
         """
         self._ensure_loaded()
-        if len(self._entries) < 2:
-            return 0
-
         merged_count = 0
-        i = 0
-        while i < len(self._entries):
-            j = i + 1
-            while j < len(self._entries):
-                # Layer 1: summary similarity
-                should_merge = False
-                if self._entries[i].summary and self._entries[j].summary:
-                    sim = self._summary_similarity(
-                        self._entries[i].summary,
-                        self._entries[j].summary,
-                    )
-                    if sim > SUMMARY_DEDUP_THRESHOLD:
-                        should_merge = True
-
-                # Layer 2: keyword overlap
-                if not should_merge:
-                    overlap = keyword_overlap(
-                        self._entries[i].keywords,
-                        self._entries[j].keywords,
-                    )
-                    if overlap > DEDUP_THRESHOLD:
-                        should_merge = True
-
-                if should_merge:
-                    # Merge j into i
-                    target = self._entries[i]
-                    source = self._entries[j]
-
-                    # Keep newer date
-                    if source.date > target.date:
-                        target.date = source.date
-
-                    # Union keywords
-                    target_kw_set = {k.lower() for k in target.keywords}
-                    for kw in source.keywords:
-                        if kw.lower() not in target_kw_set:
-                            target.keywords.append(kw)
-                            target_kw_set.add(kw.lower())
-
-                    # Keep longer body
-                    if len(source.body) > len(target.body):
-                        target.body = source.body
-                        target.summary = source.summary
-
-                    self._entries.pop(j)
-                    merged_count += 1
-                else:
-                    j += 1
-            i += 1
+        while self._unchecked:
+            entry_id = self._unchecked.pop()
+            mine = next((i for i, e in enumerate(self._entries) if e.id == entry_id), None)
+            if mine is None:
+                continue
+            for other in range(len(self._entries)):
+                if other == mine or not self._duplicates(self._entries[mine], self._entries[other]):
+                    continue
+                # The earlier entry keeps the merge, as in add order.
+                target, source = sorted((mine, other))
+                self._merge_into(self._entries[target], self._entries[source])
+                self._unchecked.discard(self._entries[source].id)
+                self._unchecked.add(self._entries[target].id)  # it changed: compare again
+                self._entries.pop(source)
+                merged_count += 1
+                break
 
         if merged_count > 0:
             self._save_to_disk()
             logger.info("crystal_store: deduplicated %d entries", merged_count)
 
         return merged_count
+
+    def _duplicates(self, a: CrystalEntry, b: CrystalEntry) -> bool:
+        if a.summary and b.summary:
+            if self._summary_similarity(a.summary, b.summary) > SUMMARY_DEDUP_THRESHOLD:
+                return True
+        return keyword_overlap(a.keywords, b.keywords) > DEDUP_THRESHOLD
+
+    @staticmethod
+    def _merge_into(target: CrystalEntry, source: CrystalEntry) -> None:
+        # Keep newer date
+        if source.date > target.date:
+            target.date = source.date
+
+        # Union keywords
+        target_kw_set = {k.lower() for k in target.keywords}
+        for kw in source.keywords:
+            if kw.lower() not in target_kw_set:
+                target.keywords.append(kw)
+                target_kw_set.add(kw.lower())
+
+        # Keep longer body
+        if len(source.body) > len(target.body):
+            target.body = source.body
+            target.summary = source.summary
 
     def delete_entry(self, entry_id: str) -> Optional[CrystalEntry]:
         """Remove an entry by ID. Returns the removed entry or None."""
@@ -524,6 +533,7 @@ class CrystalStore:
             # Re-extract keywords from new body
             entry.keywords = extract_keywords(body)
 
+        self._unchecked.add(entry.id)
         self._save_to_disk()
         logger.debug("crystal_store: updated %s", entry.id)
         return entry
