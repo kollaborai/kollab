@@ -67,6 +67,8 @@ class _Call:
     out: bytearray = field(default_factory=bytearray)
     dropped: int = 0
     busy: bool = False
+    inflight_n: int = -1
+    inflight: asyncio.Future | None = None
     last_tick: float = field(default_factory=time.monotonic)
     watchdog: asyncio.Task | None = None
 
@@ -110,6 +112,10 @@ class PhoneAudioManager:
         except Exception:
             logger.warning("phone call bridge failed to open", exc_info=True)
             raise PhoneCallError("call_unavailable") from None
+        if phone in self._calls:
+            # A racing open registered while this bridge was opening: drop ours.
+            await bridge.close()
+            return await self.open(phone, session, call_id, voice_session_id, generation)
         call = _Call(
             id=call_id,
             phone=phone,
@@ -129,6 +135,8 @@ class PhoneAudioManager:
         if not _is_safe_uint(n) or type(mic) is not bytes or len(mic) != MIC_BYTES:
             raise PhoneCallError("call_invalid")
         if call.busy:
+            if n == call.inflight_n and call.inflight is not None:
+                return await asyncio.shield(call.inflight)  # retry of the tick in flight
             raise PhoneCallError("call_overloaded")
         if n == call.last_n and call.last_response is not None:
             return call.last_response  # lost response: resend without re-publishing
@@ -136,6 +144,8 @@ class PhoneAudioManager:
             await self._end(call, cause="sequence")
             raise PhoneCallError("call_sequence")
         call.busy = True
+        call.inflight_n = n
+        call.inflight = asyncio.get_running_loop().create_future()
         try:
             await call.bridge.send_mic(n, mic)
             call.out.extend(call.bridge.take_output())
@@ -146,12 +156,17 @@ class PhoneAudioManager:
             take = min(len(call.out), MAX_AUDIO_BYTES) & ~1
             audio = bytes(call.out[:take])
             del call.out[:take]
-        except PhoneCallError:
+        except PhoneCallError as exc:
+            call.inflight.set_exception(exc)
+            call.inflight.exception()  # mark retrieved when no retry is waiting
             raise
         except Exception:
             logger.warning("phone call tick failed", exc_info=True)
             await self._end(call, cause="bridge_failed")
-            raise PhoneCallError("call_unavailable") from None
+            failure = PhoneCallError("call_unavailable")
+            call.inflight.set_exception(failure)
+            call.inflight.exception()  # mark retrieved when no retry is waiting
+            raise failure from None
         finally:
             call.busy = False
         call.last_n = n
@@ -163,6 +178,7 @@ class PhoneAudioManager:
             "audio": base64.b64encode(audio).decode(),
             "dropped": call.dropped,
         }
+        call.inflight.set_result(call.last_response)
         return call.last_response
 
     async def close(self, phone: str, session: object, call_id: str) -> None:

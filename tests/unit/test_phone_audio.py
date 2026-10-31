@@ -233,7 +233,7 @@ async def test_call_and_chat_share_scheduler():
     first = asyncio.create_task(manager.tick("phone-a", session, CALL, 0, MIC))
     await asyncio.sleep(0)
     with pytest.raises(PhoneCallError) as overloaded:
-        await manager.tick("phone-a", session, CALL, 0, MIC)
+        await manager.tick("phone-a", session, CALL, 1, MIC)  # a new tick, not a retry
     assert overloaded.value.code == "call_overloaded"
     gate.set()
     assert (await first)["n"] == 0
@@ -275,6 +275,82 @@ async def test_call_ops_route_through_phone_link(tmp_path):
     again = await link._call("phone-a", session, {"op": "call_close", "id": CALL})
     assert again == {"ok": True}
     missing = await link._call(
-        "phone-a", session, {"op": "call_tick", "id": CALL, "n": 1, "mic": ""}
+        "phone-a",
+        session,
+        {
+            "op": "call_tick",
+            "id": CALL,
+            "n": 1,
+            "mic": base64.b64encode(MIC).decode(),
+        },
     )
     assert missing == {"error": "call_not_ready"}
+
+
+@pytest.mark.asyncio
+async def test_racing_open_keeps_one_bridge():
+    """Two opens racing for one phone end with one live bridge; the loser closes."""
+    gate = asyncio.Event()
+    bridges = []
+
+    async def opener(voice_session_id, generation):
+        await gate.wait()
+        bridge = FakeBridge()
+        bridges.append(bridge)
+        return bridge
+
+    manager = PhoneAudioManager(opener)
+    session = object()
+    first = asyncio.create_task(manager.open("phone-a", session, CALL, VOICE, 0))
+    second = asyncio.create_task(manager.open("phone-a", session, CALL, VOICE, 0))
+    await asyncio.sleep(0)
+    gate.set()
+    results = await asyncio.gather(first, second)
+    assert results[0] == results[1]
+    assert len(bridges) == 2
+    assert [bridge.closed for bridge in bridges] == [False, True]
+    assert manager._calls["phone-a"].bridge is bridges[0]
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_retry_of_inflight_tick_gets_its_result():
+    """A same-n retry during the in-flight tick is served that tick's result."""
+    gate = asyncio.Event()
+    bridges = []
+
+    class SlowBridge(FakeBridge):
+        async def send_mic(self, n, pcm):
+            await gate.wait()
+            await super().send_mic(n, pcm)
+
+    async def opener(voice_session_id, generation):
+        bridge = SlowBridge()
+        bridges.append(bridge)
+        return bridge
+
+    manager = PhoneAudioManager(opener)
+    session, _ = await open_call(manager)
+    bridges[0].output.extend(b"\x01\x00" * 10)
+    original = asyncio.create_task(manager.tick("phone-a", session, CALL, 0, MIC))
+    await asyncio.sleep(0)
+    retry = asyncio.create_task(manager.tick("phone-a", session, CALL, 0, MIC))
+    await asyncio.sleep(0)
+    gate.set()
+    first, second = await asyncio.gather(original, retry)
+    assert first == second
+    assert len(bridges[0].mic) == 1  # the retry never republished the mic frame
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_oversized_mic_is_refused_before_decode(tmp_path):
+    from kollabor_engine.phone_link import PhoneLink
+
+    link = PhoneLink(app=None, directory=tmp_path, port=0)
+    result = await link._call(
+        "phone-a",
+        object(),
+        {"op": "call_tick", "id": CALL, "n": 0, "mic": "A" * 8_000_000},
+    )
+    assert result == {"error": "call_invalid"}
