@@ -42,6 +42,37 @@ MUTATING_TOOL_TYPES = {
 }
 
 
+def goal_execution_unavailable_reason(coordinator: Any) -> Optional[str]:
+    """Report a known unsupported selected provider before scheduling work.
+
+    ACP harnesses own their tools; Kollab does not yet bind their controls
+    and results to its typed goal-reporting and evidence contract. Sending
+    the native continuation to them cannot satisfy that contract.
+    """
+    unknown_profile = (
+        "/goal cannot start or resume because the active profile could not "
+        "be determined. Select a working profile and try again."
+    )
+    manager = getattr(coordinator, "profile_manager", None)
+    if manager is None:
+        return unknown_profile
+    try:
+        profile = manager.get_active_profile()
+        if profile is None:
+            return unknown_profile
+        provider = profile.get_provider()
+    except Exception:
+        return unknown_profile
+    if not str(provider or "").strip():
+        return unknown_profile
+    if str(provider).strip().lower() == "acp":
+        return (
+            "/goal is unavailable for ACP: Kollab cannot verify goal evidence "
+            "or token spend yet. Switch to a native provider profile."
+        )
+    return None
+
+
 class GoalTurnDriver:
     def __init__(self, service: GoalService, coordinator):
         self.service = service
@@ -226,6 +257,23 @@ class GoalTurnDriver:
             if record.status != "active":
                 return
 
+            # An existing goal can outlive a profile change. Apply pending
+            # stop intents first, or pause without creating a turn attempt.
+            capability_error = goal_execution_unavailable_reason(self.coord)
+            if capability_error:
+                self.service.maybe_continue(
+                    goal_id,
+                    TurnOutcome(
+                        turn_id="goal-capability",
+                        origin="goal",
+                        status="error",
+                        goal_id=goal_id,
+                        error=capability_error,
+                    ),
+                    self._boundary_ctx(),
+                )
+                return
+
             # boundary eligibility: fresh queue state each iteration; user
             # input or pending work here means no dispatch this round (the
             # settle-driven wake or next user turn re-runs the check)
@@ -330,6 +378,9 @@ class GoalTurnDriver:
 
     async def _run_one_turn(self, goal_id: str, attempt) -> tuple[str, Optional[str]]:
         """Inject steering (9.3), run the continuation loop, return outcome."""
+        capability_error = goal_execution_unavailable_reason(self.coord)
+        if capability_error:
+            return "error", capability_error
         record = self.service.store.get(goal_id)
 
         # rehydrate attachments (9.2): missing artifact pauses hard
@@ -339,6 +390,8 @@ class GoalTurnDriver:
                 return "cancelled", f"artifact_missing: {ref.get('ref')}"
 
         note = self.service.render_goal_context(record)
+        previous_hud = tuple(getattr(self.coord, "_pending_agent_hud", None) or ())
+        previous_hud_ids = {id(entry) for entry in previous_hud}
         try:
             # §9.3: one internal goal context item per goal turn — never a
             # synthetic user message. The agent HUD queue is kollab's
@@ -351,6 +404,25 @@ class GoalTurnDriver:
         except Exception as exc:
             logger.error("goal steering injection failed: %s", exc)
             return "error", f"steering injection failed: {exc}"
+
+        # Profile activation can complete while the HUD logger is awaiting
+        # I/O. Do not send a native continuation after that change, or leave
+        # this goal's unsent context queued for an unrelated later turn.
+        capability_error = goal_execution_unavailable_reason(self.coord)
+        if capability_error:
+            pending = getattr(self.coord, "_pending_agent_hud", None)
+            if isinstance(pending, list):
+                for index in range(len(pending) - 1, -1, -1):
+                    entry = pending[index]
+                    if (
+                        id(entry) not in previous_hud_ids
+                        and getattr(entry, "section", None) == "system"
+                        and getattr(entry, "label", None) == "goal_context"
+                        and getattr(entry, "content", None) == note.strip()
+                    ):
+                        del pending[index]
+                        break
+            return "error", capability_error
 
         qp = self.coord._queue_processor
         self._tool_seq = 0
@@ -377,6 +449,10 @@ class GoalTurnDriver:
                 if chain_turns >= MAX_GOAL_CHAIN_TURNS:
                     logger.error("goal turn: spin backstop hit, stopping chain")
                     qp.turn_completed = True
+                    break
+                capability_error = goal_execution_unavailable_reason(self.coord)
+                if capability_error:
+                    error = capability_error
                     break
                 chain_turns += 1
                 try:

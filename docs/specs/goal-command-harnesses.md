@@ -767,6 +767,26 @@ creation with a clear capability message or run in an explicitly non-running
 manual-inspection mode. It must not pretend that arbitrary prose is completion
 evidence.
 
+Current implementation boundary: ACP harness profiles are not yet integrated
+with this reporting/evidence contract or authoritative per-request goal usage.
+The installed Codex ACP adapter exposes a separate goal extension, but Kollab
+does not yet own or project its goal lifecycle.
+Until [issue #496](https://github.com/kollaborai/kollab/issues/496) is
+implemented, goal creation and resume are refused for an ACP-selected profile;
+an existing active goal is paused before its next dispatch. Inspection and
+stop controls remain available. This is a capability guard, not ACP goal
+execution support.
+
+Current implementation limitation: staged image references are scoped to
+the conversation rather than the originating request. The ACP capability
+guard retains rejected references until replaced or the daemon stops, and
+tells the user they will be added to the next successfully created goal,
+including a text-only goal. `/goal clear` removes pending references and
+clears any active goal. Request-scoped attachment ownership is tracked in
+[issue #512](https://github.com/kollaborai/kollab/issues/512). Native goal
+turns do not yet send goal images to the provider; that separate gap is
+tracked in [issue #510](https://github.com/kollaborai/kollab/issues/510).
+
 ### 9.2 text, image, and mixed inputs
 
 Goal command recognition follows the same structured-content invariant already
