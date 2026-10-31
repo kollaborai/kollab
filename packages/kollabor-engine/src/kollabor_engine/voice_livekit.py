@@ -113,6 +113,10 @@ class WorkerHandle:
 
 
 PHONE_BRIDGE_READY_TIMEOUT_S = 10.0
+# Downstream PCM buffer cap (~21s of 24kHz/16-bit mono). Ticks normally
+# drain it every interval; a stalled caller must not grow memory without
+# bound (drop-oldest, like the bridge's own outbound queue).
+PHONE_BRIDGE_OUT_CAP_BYTES = 1_048_576
 PHONE_BRIDGE_EXIT_TIMEOUT_S = 5.0
 
 
@@ -122,6 +126,9 @@ class PhoneBridgeHandle:
     def __init__(self, process: asyncio.subprocess.Process) -> None:
         self.process = process
         self._out = bytearray()
+        self._out_dropped = 0
+        self.bridge_errors = 0
+        self.bridge_last_error: str | None = None
         self._reader_task: asyncio.Task[None] | None = None
 
     async def start(self, start_line: str) -> None:
@@ -173,6 +180,15 @@ class PhoneBridgeHandle:
                     )
                 except (ValueError, TypeError):
                     continue
+                if len(self._out) > PHONE_BRIDGE_OUT_CAP_BYTES:
+                    excess = len(self._out) - PHONE_BRIDGE_OUT_CAP_BYTES
+                    del self._out[:excess]
+                    self._out_dropped += excess
+            else:
+                # A mid-call bridge error must not vanish: the engine would
+                # keep ticking into silence with no failure signal.
+                self.bridge_errors += 1
+                self.bridge_last_error = str(message.get("code") or message.get("type"))
 
     async def send_mic(self, n: int, pcm: bytes) -> None:
         stdin = self.process.stdin
@@ -537,8 +553,6 @@ class LiveKitRuntime:
             cmd = list(cmd)
             cmd[-1] = "kollabor_voice.phone_audio_bridge"
         return cmd, env
-
-    @staticmethod
 
     @staticmethod
     async def _read_ready(process: asyncio.subprocess.Process) -> None:

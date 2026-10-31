@@ -193,7 +193,7 @@ class _BridgeSession:
         token = message.get("token")
         self._rate_in = int(message.get("rate_in", 16000))
         if not isinstance(url, str) or not isinstance(token, str):
-            self._emit({"type": "error", "code": "bridge_bad_start"})
+            await self._emit_error("bridge_bad_start")
             return True
         room = _new_room()
 
@@ -219,6 +219,12 @@ class _BridgeSession:
             _dbg("track_subscribed from %r" % identity)
             if not identity.startswith(WORKER_IDENTITY_PREFIX):
                 return
+            old_pump = self._pump
+            if old_pump is not None and not old_pump.done():
+                # A re-publish/reconnect window can subscribe a second worker
+                # track; orphaning the first pump would feed both into the
+                # same queue (duplicated audio + leaked task).
+                old_pump.cancel()
             self._pump = asyncio.ensure_future(self._pump_worker(track))
 
         def on_track_published(publication: Any, participant: Any) -> None:

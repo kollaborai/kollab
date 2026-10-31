@@ -255,3 +255,98 @@ def test_bridge_never_opens_sound_device():
             assert name not in text, f"{path.name} references {name}"
     for name in banned:
         assert name not in sys.modules, f"{name} imported by bridge tests"
+
+
+@pytest.mark.asyncio
+async def test_bridge_malformed_start_emits_error_line(monkeypatch):
+    """ruby P2: the bad-start error must reach stdout (was missing await)."""
+    fake_seams(monkeypatch)
+    lines = [
+        json.dumps({"type": "start"}).encode(),  # no url/token
+        json.dumps({"type": "close"}).encode(),
+    ]
+    writer = FakeWriter()
+    code = await pab.run_bridge(FakeReader(lines), writer)
+    assert code == 1
+    emitted = "".join(writer.lines)
+    assert "bridge_bad_start" in emitted
+
+
+@pytest.mark.asyncio
+async def test_bridge_second_worker_track_cancels_first_pump(monkeypatch):
+    """ruby P3: a re-publish window must not orphan the first pump."""
+    room, _source, streams = fake_seams(
+        monkeypatch, stream_chunks=[b"\x00" * 16] * 50
+    )
+    session = pab._BridgeSession(
+        FakeReader([json.dumps(start_message()).encode()]), FakeWriter()
+    )
+    assert await session._start(start_message()) is False
+    handler = room.handlers["track_subscribed"]
+    worker = type("P", (), {"identity": "worker-xyz"})()
+
+    # Fire both back-to-back with no intervening yield: that is exactly the
+    # re-publish window. The first pump is scheduled but must never run.
+    handler(object(), object(), worker)
+    first = session._pump
+    handler(object(), object(), worker)
+    second = session._pump
+    await asyncio.sleep(0.05)
+
+    assert first is not None and second is not first
+    assert first.cancelled()  # without the fix it runs on, feeding both pumps
+    assert session._pump is second
+    # The cancelled pump never even opened its stream: exactly one survives.
+    assert len(streams) == 1
+
+    await session._teardown()
+    with __import__("contextlib").suppress(asyncio.CancelledError):
+        await second
+
+
+@pytest.mark.asyncio
+async def test_handle_output_buffer_is_bounded_drop_oldest(monkeypatch):
+    """ruby P2: a stalled caller must not grow engine memory unbounded."""
+    import kollabor_engine.voice_livekit as vlk
+
+    monkeypatch.setattr(vlk, "PHONE_BRIDGE_OUT_CAP_BYTES", 1024)
+    payloads = [bytes([index]) * 512 for index in range(5)]  # 2560 > 1024
+    lines = [
+        json.dumps(
+            {"type": "audio", "pcm": base64.b64encode(payload).decode()}
+        ).encode()
+        for payload in payloads
+    ]
+    handle = PhoneBridgeHandle(
+        __import__("types").SimpleNamespace(stdout=FakeReader(lines))
+    )
+    await handle._read_loop()
+
+    assert len(handle._out) == 1024
+    assert handle._out_dropped == 2560 - 1024
+    assert bytes(handle._out).endswith(payloads[-1])  # newest kept
+    drained = handle.take_output()
+    assert drained == bytes(handle._out) or drained.endswith(payloads[-1])
+    assert handle._out == bytearray()  # take_output clears
+
+
+@pytest.mark.asyncio
+async def test_handle_counts_midcall_bridge_errors():
+    """ruby P3: mid-call error lines must not vanish into silence."""
+    lines = [
+        json.dumps({"type": "error", "code": "bridge_audio"}).encode(),
+        json.dumps(
+            {"type": "audio", "pcm": base64.b64encode(b"\x01\x02").decode()}
+        ).encode(),
+        b"not json at all",
+        json.dumps({"type": "error", "code": "bridge_pcm"}).encode(),
+    ]
+    handle = PhoneBridgeHandle(
+        __import__("types").SimpleNamespace(stdout=FakeReader(lines))
+    )
+    await handle._read_loop()
+
+    # 2 parsed bridge errors; the malformed line is protocol noise, not one
+    assert handle.bridge_errors == 2
+    assert handle.bridge_last_error == "bridge_pcm"
+    assert handle._out == bytearray(base64.b64decode(base64.b64encode(b"\x01\x02")))
