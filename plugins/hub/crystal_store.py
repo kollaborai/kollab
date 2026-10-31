@@ -451,27 +451,55 @@ class CrystalStore:
 
         A pass compares every pair: 105 s for the koordinator's 2,608 entries
         when it ran on the agent's event loop, which then answered nothing and
-        peers deleted its socket as dead (#546). The pass merges copies, which
-        replace the entries only if no entry changed meanwhile.
+        peers deleted its socket as dead (#546). The worker merges copies and
+        records each merge; back on the loop the merges replay on the live
+        entries. A merge touching an entry that changed meanwhile waits for the
+        next pass, and so does every later merge into the same entry; a write
+        during the pass never holds back the others.
         """
         self._ensure_loaded()
-        before = [_signature(e) for e in self._entries]
+        snapshot = [_signature(e) for e in self._entries]
+        before = {sig[0]: sig for sig in snapshot}
         copies = [replace(e, keywords=list(e.keywords)) for e in self._entries]
-        merged_count = await asyncio.to_thread(self._merge_pass, copies)
-        if merged_count == 0:
+        merges: List[Tuple[str, str]] = []
+        if not await asyncio.to_thread(self._merge_pass, copies, merges):
             return 0
-        if [_signature(e) for e in self._entries] != before:
-            logger.info("crystal_store: entries changed during dedup, merging on the next pass")
-            return 0
-        self._entries = copies
-        self._save_to_disk()
-        logger.info("crystal_store: deduplicated %d entries", merged_count)
-        return merged_count
+        waiting: set = set()
+        if len(before) < len(snapshot):  # repeated ids: merges cannot be matched to entries
+            if [_signature(e) for e in self._entries] != snapshot:
+                return 0
+            self._entries = copies
+        else:
+            live = {e.id: e for e in self._entries}
+            done = []
+            for keep_id, drop_id in merges:
+                keep, drop = live.get(keep_id), live.get(drop_id)
+                if (keep is None or drop is None or keep_id in waiting
+                        or _signature(keep) != before[keep_id]
+                        or _signature(drop) != before[drop_id]):
+                    waiting.add(keep_id)
+                    continue
+                self._merge_into(keep, drop)
+                before[keep_id] = _signature(keep)
+                del live[drop_id]
+                done.append(drop_id)
+            self._entries = [e for e in self._entries if e.id in live]
+            merges = done
+        if waiting:
+            logger.info("crystal_store: %d entries changed during dedup, merging them on the next pass",
+                        len(waiting))
+        if merges:
+            self._save_to_disk()
+            logger.info("crystal_store: deduplicated %d entries", len(merges))
+        return len(merges)
 
-    def _merge_pass(self, entries: List[CrystalEntry]) -> int:
+    def _merge_pass(
+        self, entries: List[CrystalEntry], merges: Optional[List[Tuple[str, str]]] = None
+    ) -> int:
         """Merge duplicates in ``entries`` in place, each into the earliest match.
 
         The words and keyword sets are built once per entry, not once per pair.
+        Each merge is appended to ``merges`` as ``(kept id, merged id)``.
         """
         # ponytail: every pair, about 11 s for 2,608 entries in the worker
         # thread; index entries by word if vaults grow to tens of thousands.
@@ -485,8 +513,10 @@ class CrystalStore:
                 if token_overlap(words[i], words[j]) > SUMMARY_DEDUP_THRESHOLD or (
                     _jaccard(keyword_sets[i], keyword_sets[j]) > DEDUP_THRESHOLD
                 ):
-                    target = entries[i]
-                    self._merge_into(target, entries.pop(j))
+                    target, source = entries[i], entries.pop(j)
+                    self._merge_into(target, source)
+                    if merges is not None:
+                        merges.append((target.id, source.id))
                     words.pop(j)
                     keyword_sets.pop(j)
                     words[i] = self._words(target.summary) if target.summary else frozenset()
