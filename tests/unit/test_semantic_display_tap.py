@@ -79,6 +79,20 @@ class TestEventShape:
         assert events[1]["stop_reason"] == "end_turn"
         assert all("ts" in e for e in events)
 
+    def test_a_failed_turns_text_is_capped(self):
+        # A harness error with its whole output went past the engine's 16 MB
+        # frame limit, so its turn_complete was dropped and the chat waited (#543).
+        tap = DisplayTap()
+        q = tap.subscribe("test")
+        huge = "x" * 20000
+        publish_semantic(tap, "turn_complete", stop_reason="error", error=huge)
+        publish_semantic(tap, "error", message=huge)
+        publish_semantic(tap, "tool_result", output=huge)
+        done, error, tool = _drain(q)
+        assert done["error"] == "x" * 8192 + "… (20,000 characters)"
+        assert error["message"] == done["error"]
+        assert tool["output"] == huge  # only a failure's text is capped
+
 
 class TestToolExecutorEmitsEvents:
     """Every tool path funnels through ToolExecutor.execute_tool - XML tools from

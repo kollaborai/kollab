@@ -5,6 +5,7 @@ import functools
 import json
 import os
 import tempfile
+import types
 import time
 
 import pytest
@@ -318,6 +319,80 @@ async def test_an_oversized_terminal_frame_is_dropped_quietly(monkeypatch, caplo
         handle._closed = True
         handle._read_task.cancel()
         server.close()
+
+
+async def _pool_events(frames, count):
+    """What a DaemonHandle passes on when the daemon writes ``frames``."""
+    async def daemon(reader, writer):
+        await reader.readline()
+        writer.write(b'{"type": "attach_ack"}\n')
+        writer.write("".join(json.dumps(frame) + "\n" for frame in frames).encode())
+        await writer.drain()
+        await reader.read()
+
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp"), "jasper.sock")
+    server = await asyncio.start_unix_server(daemon, path)
+    handle = DaemonHandle("s9", "jasper", launcher=None)
+    handle.pid = os.getpid()
+    queue = handle.subscribe()
+    try:
+        await handle.connect(path)
+        return [await asyncio.wait_for(queue.get(), 5) for _ in range(count)]
+    finally:
+        handle._closed = True
+        handle._read_task.cancel()
+        server.close()
+
+
+class _StreamSession:
+    """A session for the message route that replays ``events``."""
+
+    session_id = "s9"
+    alive = True
+
+    def __init__(self, events):
+        self.queue = asyncio.Queue()
+        for event in events:
+            self.queue.put_nowait(event)
+
+    def subscribe(self):
+        return self.queue
+
+    def unsubscribe(self, queue):
+        pass
+
+    async def send_message(self, *args, **kwargs):
+        return {"accepted": True, "request_id": "new"}
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_turn_complete_still_ends_its_turn(monkeypatch):
+    # Kyanite on #543 round 4: a >16 MiB turn_complete (a harness error with
+    # its whole output) was dropped like any update, so the message stream
+    # waited out its 600 s idle timeout and the reply never ended.
+    import kollabor_rpc.transport
+    from kollabor_engine.routes import messages
+
+    monkeypatch.setattr(kollabor_rpc.transport, "LARGE_BUFFER_LIMIT", 1024)
+    big = {"type": "turn_complete", "request_id": "new", "stop_reason": "error", "error": "x" * 4096, "seq": 3}
+    after = {"type": "tool_start", "tool_id": "t2", "seq": 4}
+    # The second copy is what a reattach replays: the seq fence holds it back.
+    error, done, nxt = await _pool_events([big, big, after], 3)
+    assert error["type"] == "error" and error["code"] == "frame_too_large"
+    assert "turn ended" in error["message"]
+    assert done == {"type": "turn_complete", "stop_reason": "error", "request_id": "new", "session_id": "s9"}
+    assert nxt["type"] == "tool_start"
+
+    # The message route ends its stream on it instead of idling 600 s.
+    monkeypatch.setattr(messages, "get_session_registry", lambda: types.SimpleNamespace(
+        get=lambda sid: _StreamSession([error, done])))
+    response = await messages.send_message("s9", messages.MessageRequest(content="hi", request_id="new"))
+
+    async def drain():
+        return [item async for item in response.body_iterator]
+
+    sent = await asyncio.wait_for(drain(), 5)
+    assert '"turn_complete"' in str(sent[-1])
 
 
 def test_only_this_requests_completion_ends_its_stream():

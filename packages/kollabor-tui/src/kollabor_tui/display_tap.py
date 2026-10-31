@@ -38,6 +38,12 @@ def resolve_tap(source: Any) -> Optional["DisplayTap"]:
     return getattr(coordinator, "_display_tap", None)
 
 
+# A failed turn's text as clients show it. A provider or harness can fail with
+# its whole output (an HTML page, a log of many MB); past the engine's 16 MB
+# frame limit the turn's completion was dropped and its chat waited (#543).
+_ERROR_TEXT_LIMIT = 8192
+
+
 def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
     """Publish a machine-readable turn event alongside the rendered output.
 
@@ -52,6 +58,11 @@ def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
     tap = resolve_tap(source)
     if tap is None:
         return
+    if event_type in ("turn_complete", "error"):
+        for key in ("error", "message"):
+            text = fields.get(key)
+            if isinstance(text, str) and len(text) > _ERROR_TEXT_LIMIT:
+                fields[key] = f"{text[:_ERROR_TEXT_LIMIT]}… ({len(text):,} characters)"
     try:
         tap.publish({"type": event_type, **fields})
     except Exception:

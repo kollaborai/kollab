@@ -92,6 +92,9 @@ _RENDERED_EVENT_TYPES = frozenset({"output", "active_area", "heartbeat", "clear"
 _REPLY_HEAD = re.compile(rb'\{"action":\s*"rpc_reply",\s*"request_id":\s*"([^"\\]+)"')
 # The start of a display event: the tap publishes "type" as its first key.
 _TYPE_HEAD = re.compile(rb'\{"type":\s*"([^"\\]+)"')
+# DisplayTap adds seq last, so an oversized frame's seq is in its tail.
+_SEQ_FIELD = re.compile(rb'"seq":\s*(\d+)')
+_REQUEST_ID_FIELD = re.compile(rb'"request_id":\s*"([^"\\]+)"')
 
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -322,7 +325,8 @@ class DaemonHandle:
                 return e.partial
             except asyncio.LimitOverrunError as e:
                 head = await self._reader.readexactly(min(e.consumed, 4096))
-                size = len(head) + await self._skip_rest_of_line()
+                skipped, tail = await self._skip_rest_of_line()
+                size = len(head) + skipped
                 reply = _REPLY_HEAD.match(head)
                 if reply is None or self.rpc is None:
                     kind = _TYPE_HEAD.match(head)
@@ -331,36 +335,60 @@ class DaemonHandle:
                         "dropped an oversized %s frame (%d bytes) from daemon %s",
                         etype, size, self.identity,
                     )
-                    if etype in _RENDERED_EVENT_TYPES:
-                        continue  # terminal-only; the engine never passes these on
+                    if self._replayed(tail) or etype in _RENDERED_EVENT_TYPES:
+                        continue  # passed on before a reattach, or terminal-only
                     # Say so in the chat: a silently missing tool result reads
                     # as a complete reply.
                     self._fan_out(sse.error(
                         self.session_id,
                         "frame_too_large",
+                        "The agent's turn ended, but its last update was over the engine's frame"
+                        " limit and was dropped." if etype == "turn_complete" else
                         "An update from the agent was over the engine's frame limit and was"
                         " dropped; this reply is incomplete.",
                     ))
+                    if etype == "turn_complete":
+                        # The turn did end: without a completion its chat waits for good.
+                        completion = {"type": "turn_complete", "stop_reason": "error"}
+                        named = [*_REQUEST_ID_FIELD.finditer(head), *_REQUEST_ID_FIELD.finditer(tail)]
+                        if named:
+                            completion["request_id"] = named[0].group(1).decode(errors="replace")
+                        self._fan_out(completion)
                     continue
-                logger.warning("dropped an oversized rpc reply from daemon %s", self.identity)
+                logger.warning(
+                    "dropped an oversized rpc reply (%d bytes) from daemon %s", size, self.identity,
+                )
                 self.rpc.on_reply({
                     "action": "rpc_reply",
                     "request_id": reply.group(1).decode(errors="replace"),
                     "error": "reply over the engine's frame limit",
                 })
 
-    async def _skip_rest_of_line(self) -> int:
-        """Read past the rest of an oversized line; returns the bytes skipped."""
+    async def _skip_rest_of_line(self) -> tuple[int, bytes]:
+        """Read past the rest of an oversized line: the bytes skipped and their last 4 KB."""
         assert self._reader is not None
-        skipped = 0
+        skipped, tail = 0, b""
         while True:
             try:
-                return skipped + len(await self._reader.readuntil(b"\n"))
+                chunk = await self._reader.readuntil(b"\n")
             except asyncio.LimitOverrunError as e:
-                skipped += len(await self._reader.readexactly(e.consumed))
+                chunk = await self._reader.readexactly(e.consumed)
+                skipped, tail = skipped + len(chunk), (tail + chunk)[-4096:]
+                continue
             except asyncio.IncompleteReadError as e:
-                # The stream ended inside the frame; the next read sees it.
-                return skipped + len(e.partial)
+                chunk = e.partial  # the stream ended inside the frame; the next read sees it
+            return skipped + len(chunk), (tail + chunk)[-4096:]
+
+    def _replayed(self, tail: bytes) -> bool:
+        """The seq fence for a dropped frame: True if a reattach sent it again (#543)."""
+        found = list(_SEQ_FIELD.finditer(tail))
+        if not found:
+            return False
+        seq = int(found[-1].group(1))
+        if self._last_seq is not None and seq <= self._last_seq:
+            return True
+        self._last_seq = seq
+        return False
 
     async def _reattach(
         self, attempts: int = 20, delay: float = 0.5, slow_delay: float = 5.0
