@@ -18,13 +18,21 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from kollabor_ai.conversation_logger import utc_stamp
+from kollabor_ai.goal_image_scope import (
+    current_goal_image_request_scope,
+    goal_image_diagnostics_active,
+    guard_goal_image_diagnostics,
+)
 from kollabor_ai.generated_image_artifacts import (
     GeneratedImageArtifactStore,
     redact_generated_image_data,
 )
 from kollabor_ai.message_content import (
+    MessageContentError,
+    combine_message_contents,
     contains_image_content,
     prepend_text,
+    redact_error_media,
     redact_media_data,
 )
 from kollabor_ai.model_registry import supports_vision
@@ -632,6 +640,7 @@ class APICommunicationService:
             safe_message=message,
         )
 
+    @guard_goal_image_diagnostics
     async def call_llm(
         self,
         conversation_history: List[Dict[str, Any]],
@@ -797,7 +806,8 @@ class APICommunicationService:
                 raise asyncio.CancelledError("API request cancelled by user")
             except Exception as e:
                 # Check if this is a retryable error
-                error_str = str(e)
+                classification_text = str(e)
+                error_str = redact_error_media(classification_text)
                 status_code = getattr(e, "status_code", None)
                 error_code = getattr(e, "error_code", "")
                 is_typed_provider_error = isinstance(e, ProviderError)
@@ -807,7 +817,7 @@ class APICommunicationService:
                     or status_code == 429
                     or (
                         not is_typed_provider_error
-                        and bool(re.search(r"\b429\b", error_str))
+                        and bool(re.search(r"\b429\b", classification_text))
                     )
                 )
                 is_empty_response = isinstance(e, EmptyResponseError)
@@ -825,9 +835,9 @@ class APICommunicationService:
                     or (isinstance(status_code, int) and 500 <= status_code < 600)
                     or (
                         not is_typed_provider_error
-                        and bool(re.search(r"\b5\d{2}\b", error_str))
+                        and bool(re.search(r"\b5\d{2}\b", classification_text))
                     )
-                    or (not is_typed_provider_error and "Network error" in error_str)
+                    or (not is_typed_provider_error and "Network error" in classification_text)
                 )
                 is_transport_error = isinstance(
                     e, (APIConnectionError, APITimeoutError)
@@ -954,14 +964,29 @@ class APICommunicationService:
                     request_id=operation_request_id,
                     operation_generation=operation_generation,
                 )
-                logger.error(f"Provider call failed: {type(e).__name__}: {e}")
+                logger.error(f"Provider call failed: {type(e).__name__}: {error_str}")
                 self._connection_stats["failed_requests"] += 1
                 self._log_raw_interaction(
                     messages=messages,
                     tools=tools,
-                    error=str(e),
+                    error=error_str,
                     duration=time.time() - request_start,
                 )
+                if goal_image_diagnostics_active():
+                    if any(phrase in classification_text.lower() for phrase in (
+                        "context window", "context_window", "context_length",
+                        "maximum context length", "too many tokens", "prompt is too long",
+                    )):
+                        error_code = "context_window_exceeded"
+                    if isinstance(e, ProviderError):
+                        raise e from None
+                    raise ProviderError(
+                        error_str, provider_name, error_code=error_code or None
+                    ) from None
+                if error_str != str(e):
+                    raise ProviderError(
+                        error_str, provider_name, error_code=error_code or None
+                    ) from None
                 raise
             finally:
                 self.current_request_task = None
@@ -1526,6 +1551,8 @@ class APICommunicationService:
             List of formatted messages for API
         """
         messages: list[dict[str, Any]] = []
+        image_scope = current_goal_image_request_scope(self)
+        carriers_found = 0
         for msg in conversation_history:
             # Handle both ConversationMessage objects and dicts
             if hasattr(msg, "role"):
@@ -1534,6 +1561,13 @@ class APICommunicationService:
             else:
                 role, content = msg["role"], msg["content"]
                 meta = msg.get("metadata", {}) or {}
+
+            if image_scope is not None and (
+                msg is image_scope.carrier
+                or getattr(msg, "_goal_image_marker", None) == image_scope.marker
+            ):
+                content = combine_message_contents([content, image_scope.parts])
+                carriers_found += 1
 
             # Context blocks the model was given with this message (the queue
             # processor's injection rail). They go out with it on every later
@@ -1575,6 +1609,8 @@ class APICommunicationService:
                 continue
             messages.append(formatted)
 
+        if image_scope is not None and carriers_found != 1:
+            raise MessageContentError("goal image context is no longer available")
         return self._strip_leading_orphans(messages)
 
     @staticmethod
@@ -1747,7 +1783,7 @@ class APICommunicationService:
 
         Builds a typed ``RawInteraction`` so every provider's log entry
         has the same shape: ``conversation_local`` for what Kollab held,
-        ``wire_request`` for the exact dict handed to the HTTP client.
+        ``wire_request`` for the provider-native request with image data redacted.
 
         Args:
             messages: ``_prepare_messages`` output (conversation_local view)
@@ -1772,8 +1808,8 @@ class APICommunicationService:
                 for m in messages
             ]
 
-            # Snapshot provider.last_request_payload at log time so future
-            # mutations (next call reuses the dict) can't rewrite history.
+            # Snapshot the provider's redacted request so later calls cannot
+            # rewrite history.
             wire_request: Optional[Dict[str, Any]] = None
             wire_provider = ""
             if self._provider is not None:

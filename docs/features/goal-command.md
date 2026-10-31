@@ -25,8 +25,7 @@ are added to the next successfully created goal, even a text-only one.
 `/goal clear` removes them from staging and clears any active goal.
 Request-scoped staging is
 tracked in [issue #512](https://github.com/kollaborai/kollab/issues/512).
-Native goal turns do not yet send those images to the model; see
-[issue #510](https://github.com/kollaborai/kollab/issues/510).
+Native goal turns send their attached images to image-capable models.
 
 ## Commands
 
