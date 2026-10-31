@@ -84,12 +84,13 @@ class TestEventShape:
         # frame limit, so its turn_complete was dropped and the chat waited (#543).
         tap = DisplayTap()
         q = tap.subscribe("test")
-        huge = "x" * 20000
+        huge = "a" * 10000 + "b" * 9990 + "usage limit"  # a log whose last line says why
         publish_semantic(tap, "turn_complete", stop_reason="error", error=huge)
         publish_semantic(tap, "error", message=huge)
         publish_semantic(tap, "tool_result", output=huge)
         done, error, tool = _drain(q)
-        assert done["error"] == "x" * 8192 + "… (20,000 characters)"
+        assert done["error"] == "a" * 4096 + " … (20,001 characters) … " + ("b" * 9990 + "usage limit")[-4096:]
+        assert done["error"].endswith("usage limit")
         assert error["message"] == done["error"]
         assert tool["output"] == huge  # only a failure's text is capped
 

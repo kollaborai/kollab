@@ -41,6 +41,8 @@ def resolve_tap(source: Any) -> Optional["DisplayTap"]:
 # A failed turn's text as clients show it. A provider or harness can fail with
 # its whole output (an HTML page, a log of many MB); past the engine's 16 MB
 # frame limit the turn's completion was dropped and its chat waited (#543).
+# Both ends stay: a harness log often names the cause on its last line, and
+# the model fallback reads it there ("usage limit").
 _ERROR_TEXT_LIMIT = 8192
 
 
@@ -62,7 +64,8 @@ def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
         for key in ("error", "message"):
             text = fields.get(key)
             if isinstance(text, str) and len(text) > _ERROR_TEXT_LIMIT:
-                fields[key] = f"{text[:_ERROR_TEXT_LIMIT]}… ({len(text):,} characters)"
+                half = _ERROR_TEXT_LIMIT // 2
+                fields[key] = f"{text[:half]} … ({len(text):,} characters) … {text[-half:]}"
     try:
         tap.publish({"type": event_type, **fields})
     except Exception:
