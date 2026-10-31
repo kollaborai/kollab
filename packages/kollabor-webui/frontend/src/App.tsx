@@ -77,6 +77,7 @@ import {
   mergeOlderHistoryPage,
 } from "./history-cache";
 import { agentName, sessionHeading } from "@/utils/session-display";
+import { createSessionRefreshGate } from "@/utils/session-refresh";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
@@ -520,12 +521,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   const { stamp: stampHidden, sync: syncHidden } = hiddenAgents;
   const { stamp: stampOrder, sync: syncOrder } = sidebarOrder;
+  const [sessionGate] = useState(createSessionRefreshGate);
   const loadSessions = useCallback(async () => {
     const hiddenStamp = stampHidden();
     const orderStamp = stampOrder();
+    const isCurrent = sessionGate.startList();
     const result = await api.listSessions();
     const next = result.sessions || [];
-    setSessions(next);
+    if (isCurrent()) setSessions(next);
     setNetwork(result.network ?? { device: "", remote: [] });
     setOffline(result.offline ?? []);
     syncHidden(hiddenStamp, result.hidden);
@@ -541,7 +544,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       .then((p) => setProfiles(p.profiles || []))
       .catch(() => {});
     return next;
-  }, [stampHidden, syncHidden, stampOrder, syncOrder]);
+  }, [stampHidden, syncHidden, stampOrder, syncOrder, sessionGate]);
 
   const applyLaunchPool = useCallback((next: AgentPoolEntry[]) => {
     setLaunchPool((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
@@ -836,9 +839,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       while (!controller.signal.aborted) {
         try {
           const watched = activeIdRef.current;
+          const isCurrent = sessionGate.startList();
           const next = await loadSessions();
           if (!controller.signal.aborted) {
-            setSessions(next);
+            if (isCurrent()) setSessions(next);
             // Deleted elsewhere (another tab, the CLI, a dead daemon): close it
             // instead of retrying its streams every second. Only when the open
             // session did not change mid-request, so a new one is never closed.
@@ -1194,12 +1198,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   };
 
   const handleSessionUpdated = useCallback((updated: Session) => {
+    sessionGate.recordApply();
     setSessions((current) =>
       current.map((item) =>
         item.session_id === updated.session_id ? updated : item,
       ),
     );
-  }, []);
+  }, [sessionGate]);
 
   const aliveKey = agents.filter((agent) => agent.active).map((agent) => agent.name).join(",");
 
