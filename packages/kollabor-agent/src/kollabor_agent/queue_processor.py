@@ -818,6 +818,16 @@ class QueueProcessor:
         else:
             self._unknown_strategy(message)
 
+    def _end_dropped(self, item: Any) -> None:
+        """A chat message the full queue drops never runs: its stream ends, saying so (#551)."""
+        if isinstance(item, TaggedInput):
+            ids = list(item.request_ids)
+            publish_semantic(
+                self.renderer, "error", request_ids=ids,
+                message="The agent's queue was full, so this message was dropped. Send it again.",
+            )
+            publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
+
     async def _drop_oldest_strategy(self, message: MessageContent) -> None:
         """Drop oldest task to make room."""
         if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
@@ -829,7 +839,7 @@ class QueueProcessor:
         # Note: We need access to task_manager metadata here
         # For now, we'll drop from queue directly
         try:
-            self.processing_queue.get_nowait()
+            self._end_dropped(self.processing_queue.get_nowait())
             self._queue_metrics["drop_oldest_count"] += 1
             if self.task_config.queue.log_queue_events:
                 logger.info("Dropped oldest message from queue")
@@ -843,6 +853,7 @@ class QueueProcessor:
             self._queue_metrics["total_enqueue_successes"] += 1
         except asyncio.QueueFull:
             self.dropped_messages += 1
+            self._end_dropped(message)
 
     def _drop_newest_strategy(self) -> None:
         """Raise error when queue is full."""
@@ -896,11 +907,12 @@ class QueueProcessor:
             f"Unknown overflow strategy '{self.task_config.queue.overflow_strategy}', defaulting to drop_oldest"
         )
         try:
-            self.processing_queue.get_nowait()
+            self._end_dropped(self.processing_queue.get_nowait())
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
         except asyncio.QueueEmpty:
             self.dropped_messages += 1
+            self._end_dropped(message)
 
     def note_chain_end(self) -> None:
         """Tell the hub a whole chain just ended (a remote request's turn ends here).
@@ -1194,7 +1206,9 @@ class QueueProcessor:
             )
         self.active_origin_context = merged_origin_context
         self._open_voice_turn = _voice_turn_id(merged_origin_context)
-        self.active_request_ids = batch_request_ids(messages) if request_ids is None else request_ids
+        # Taken up once this batch's turn holds the lock (#551): a turn still
+        # running clears what it answered as it ends, never these.
+        batch_ids = batch_request_ids(messages) if request_ids is None else request_ids
         combined_message = combine_message_contents(
             [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
         )
@@ -1227,10 +1241,12 @@ class QueueProcessor:
                 user_message_provided=True,
                 current_parent_uuid=current_parent_uuid,
                 execution_context=self.active_origin_context,
+                request_ids=batch_ids,
             )
         return await self._execute_llm_turn(
             user_message_provided=True,
             current_parent_uuid=current_parent_uuid,
+            request_ids=batch_ids,
         )
 
     async def _goal_scoped_call_llm(self, **kwargs):
@@ -1300,6 +1316,7 @@ class QueueProcessor:
         user_message_provided: bool,
         current_parent_uuid: str,
         execution_context: dict[str, Any] | None = None,
+        request_ids: tuple[str, ...] = (),
     ) -> str:
         """Execute a single LLM turn (deduped from process_message_batch and continue_conversation).
 
@@ -1327,7 +1344,10 @@ class QueueProcessor:
             await self._run_after_turn()  # a talk-over's cut of an earlier turn lands first
             self.last_turn_error = None
             # Stamped under the lock: a turn still running when this one was
-            # queued clears its own stamp as it ends, never this one's.
+            # queued clears its own stamp as it ends, never this one's. A chain
+            # this batch cuts into still owes its requests their completion, so
+            # this turn's names them too (#551).
+            self.active_request_ids = tuple(dict.fromkeys((*self.active_request_ids, *request_ids)))
             self._stamp_turn(_voice_turn_id(execution_context), self.active_request_ids)
             try:
                 if execution_context is not None:

@@ -51,14 +51,15 @@ class _Session:
         for queue in tuple(self.queues):
             queue.put_nowait(event.copy())
 
-    async def send_message(self, content):
+    async def send_message(self, content, **_):  # the engine also names the request (#551)
         self.inputs.append(content)
         self.emit(type="token", text="fixture-stream-token")
         return {"accepted": True, "request_id": "fixture-owner"}
 
     def cancel_turn(self):
         self.stops += 1
-        self.emit(type="turn_complete")
+        # As a daemon does: the stopped turn's completion names its request (#551).
+        self.emit(type="turn_complete", request_ids=["fixture-owner"])
 
     async def get_history_nonblocking(self):
         return {

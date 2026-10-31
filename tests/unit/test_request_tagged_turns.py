@@ -18,6 +18,7 @@ from kollabor.user_input_source import UserInputSource
 from kollabor_agent.queue_processor import QueueProcessor, TaggedInput, batch_request_ids
 from kollabor_events import EventBus, EventType, Hook, HookPriority
 from kollabor_tui.display_tap import DisplayTap, publish_semantic
+from kollabor_tui.turn_context import current_turn
 
 
 async def _native_service():
@@ -99,7 +100,10 @@ def test_a_batch_answers_every_request_in_it_and_its_events_name_them():
 async def test_a_tagged_chat_message_overflows_like_any_typed_message():
     # QueuedInput marks admitted voice, which the queue may never drop; a chat
     # message with an id is typed input and keeps the configured strategy.
+    # Tanzanite on #554: the dropped one must still end its stream, saying so.
     processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = DisplayTap()
+    events = processor.renderer.subscribe("test")
     processor.mark_progress = lambda: None
     processor.processing_queue = asyncio.Queue(maxsize=1)
     processor.max_queue_size = 1
@@ -111,3 +115,62 @@ async def test_a_tagged_chat_message_overflows_like_any_typed_message():
     await processor.enqueue(TaggedInput("a", ("r1",)))
     await processor.enqueue(TaggedInput("b", ("r2",)))
     assert processor.processing_queue.get_nowait() == TaggedInput("b", ("r2",))
+    error, done = _drain(events)
+    assert (error["type"], error["request_ids"]) == ("error", ["r1"]) and "dropped" in error["message"]
+    assert (done["type"], done["request_ids"], done["stop_reason"]) == ("turn_complete", ["r1"], "error")
+
+
+def _turn_processor():
+    """Turns through the real lock and stamping, with the model call replaced."""
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor._turn_lock = asyncio.Lock()
+    processor._turn_token = None
+    processor.active_request_ids = ()
+    processor.active_origin_context = None
+    processor.cancel_processing = False
+    processor._after_turn = []
+    processor._run_after_turn = AsyncMock()
+    processor.tool_executor = SimpleNamespace(yes_approvals=None)
+    processor._add_message_fn = lambda *args, **kwargs: None
+    return processor
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_cuts_into_a_chain_answers_the_chains_request_too():
+    # Tanzanite on #554: A's tool round was still continuing when B arrived. B's
+    # batch replaced A's id, so A's stream never saw a completion naming it.
+    processor = _turn_processor()
+    processor.active_request_ids = ("A",)  # A's chain still owes A its completion
+    seen = []
+
+    async def model_call(*args, **kwargs):
+        seen.append(current_turn.get().get("request_ids"))
+        return "parent"
+
+    processor._execute_llm_turn_inner = model_call
+    await processor.process_message_batch([TaggedInput("b", ("B",))], "p0")
+    assert seen == [["A", "B"]]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_ending_while_a_batch_waits_keeps_the_batchs_request():
+    # Tanzanite on #554: a hub turn holding the turn lock cleared the ids of a
+    # chat batch waiting for it, so the batch's completion named no request.
+    processor = _turn_processor()
+    seen, release = [], asyncio.Event()
+
+    async def model_call(*args, **kwargs):
+        seen.append(current_turn.get().get("request_ids"))
+        if len(seen) == 1:
+            await release.wait()  # the hub turn runs on while the batch waits for the lock
+        processor.active_request_ids = ()  # a completion clears what it answered
+        return "parent"
+
+    processor._execute_llm_turn_inner = model_call
+    hub = asyncio.create_task(processor.continue_conversation("p0"))
+    await asyncio.sleep(0)
+    batch = asyncio.create_task(processor.process_message_batch([TaggedInput("b", ("B",))], "p0"))
+    await asyncio.sleep(0.01)
+    release.set()
+    await asyncio.gather(hub, batch)
+    assert seen == [None, ["B"]]
