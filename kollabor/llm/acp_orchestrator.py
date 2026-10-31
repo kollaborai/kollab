@@ -16,7 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from kollabor_ai.profile_manager import LLMProfile
+from kollabor_ai.profile_manager import EFFORT_LEVELS, LLMProfile
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.terminal_state import TerminalMode
@@ -46,6 +46,11 @@ class _ObservedTurn:
 
 # Saved picks are keyed by what the option means, so a harness that renames its option still restores it.
 _CANONICAL_PICK_KEYS = {"model": "model", "thought_level": "effort"}
+
+
+def _effort_rank(level: str) -> int:
+    """Position of an effort level in EFFORT_LEVELS; a level we do not know ranks lowest."""
+    return EFFORT_LEVELS.index(level) if level in EFFORT_LEVELS else -1
 
 
 def option_values(option: dict[str, Any] | None) -> list[str]:
@@ -145,6 +150,8 @@ class ACPOrchestrator:
         if reported == value:
             # A pick the user confirmed this session: a replay of saved options must not undo it.
             self._user_picks = {**getattr(self, "_user_picks", {}), config_id: value}
+            if category == "thought_level":
+                self._effort_pick = value  # kept by category, so a renamed effort ID still restores
         if self._profile_name and reported == value:
             # Persist only a value the harness confirmed; a refused pick must not replay at the next start.
             saved = self._saved_options()
@@ -155,23 +162,36 @@ class ACPOrchestrator:
                 self._options_path.write_text(json.dumps(saved, indent=2))
             except OSError as exc:
                 logger.warning("ACP option save failed: %s", exc)
-        if category == "model":
+        if category == "model" or config_id == "model":
             await self._reapply_effort_after_model()
         return options
 
     async def _reapply_effort_after_model(self) -> None:
-        """A model change can reset effort on ACP: re-apply the confirmed pick; notice if it does not stick."""
+        """A model change can reset or drop effort on ACP: put the user's pick back, or say why it could not be.
+
+        Never raises. A pick the new model does not offer falls back to the highest level it offers.
+        """
         runner = self._runner
+        wanted = getattr(self, "_effort_pick", None)
+        if runner is None or wanted is None:
+            return
         effort = self._effort_option()
-        if runner is None or effort is None:
+        if effort is None:
+            self._show_notice(f"effort {wanted} was not kept: the new model advertises no effort option")
             return
-        wanted = (getattr(self, "_user_picks", {}) or {}).get(str(effort["id"]))
-        if wanted is None or effort.get("currentValue") == wanted:
-            return
-        options = await runner.set_config_option(str(effort["id"]), wanted)
-        reported = next((o.get("currentValue") for o in options or [] if o.get("id") == effort["id"]), None)
-        if reported != wanted:
-            self._show_notice(f"effort {wanted} did not survive the model change (the harness reports {reported})")
+        notice = None
+        offered = [str(o.get("value")) for o in effort.get("options") or [] if isinstance(o, dict)]
+        target = wanted
+        if offered and wanted not in offered:
+            target = max(offered, key=_effort_rank)
+            notice = f"effort {wanted} is not offered by the new model; using {target}, the highest it offers"
+        if effort.get("currentValue") != target:
+            options = await runner.set_config_option(str(effort["id"]), target)
+            reported = next((o.get("currentValue") for o in options or [] if o.get("id") == effort["id"]), None)
+            if reported != target:
+                notice = f"effort {wanted} did not survive the model change (the harness reports {reported})"
+        if notice:
+            self._show_notice(notice)
 
     def _saved_options(self) -> dict[str, dict[str, Any]]:
         try:
@@ -181,10 +201,9 @@ class ACPOrchestrator:
         return saved if isinstance(saved, dict) else {}
 
     def _effort_option(self) -> dict[str, Any] | None:
-        """The advertised reasoning-effort option, found by ID or category."""
+        """The advertised reasoning-effort option, found by its category (never a fixed ID)."""
         return next((o for o in self.advertised_config_options()
-                     if o.get("id") == "effort"
-                     or str(o.get("category") or "").lower() == "thought_level"), None)
+                     if str(o.get("category") or "").lower() == "thought_level"), None)
 
     async def _restore_options(self, profile: LLMProfile) -> list[str]:
         """Re-apply the loadout's model and effort, then the other saved picks.
