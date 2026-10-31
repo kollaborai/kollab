@@ -285,6 +285,14 @@ one item: your text as is, or a hub message rendered as
 `Broadcast from lapis` with its thread, followed by its text. The hub tools take
 that thread handle to post on the thread.
 
+Image uploads travel with the prompt or steering message as ACP image content
+blocks only when the harness advertises `promptCapabilities.image`. The
+attachment control uses that negotiated value; an attempted image on an
+unsupported harness is rejected with one line. Image bytes stay in the
+bounded in-memory attachment store and are not written to conversation history.
+ACP image inputs currently require uploaded image data; an HTTPS or
+provider-file reference is rejected with an instruction to upload it.
+
 Not sent: the open channel, the HUD after the preface, vault rebirth, working
 memory, crystal and scratchpad nudges, kollab's system prompt. Compaction and
 dreaming are off: the harness manages its own context.
@@ -706,5 +714,5 @@ A clean transcript is the bar on every live run.
   made so each turn answers one sender; the steering rule keeps that and lets
   the follow-ups in.
 - More profiles (goose, opencode, Cursor CLI) once their commands are checked.
-- Images and files in prompts, both ways.
+- Non-image files in prompts and image output from harnesses.
 - ACP v2, in draft since 2026-07-20: revisit when it is stable.
