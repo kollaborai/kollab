@@ -58,7 +58,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { CliBadge } from "@/components/shell/CliBadge";
-import { useIsMobile } from "@/hooks/use-mobile";
+import { SIDEBAR_BREAKPOINT, useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { cliHarness } from "@/utils/cli-harness";
 import { Separator } from "@/components/ui/separator";
@@ -147,7 +147,7 @@ export function SessionPanel({
   sheetOpen: boolean;
   onSheetOpenChange: (open: boolean) => void;
 }) {
-  const isMobile = useIsMobile();
+  const isMobile = useIsMobile(SIDEBAR_BREAKPOINT);
   const [open, setOpen] = useState(storedOpen);
   const [clearOpen, setClearOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
