@@ -436,18 +436,38 @@ class ConversationManager:
         if not self.messages:
             return "0m"
 
-        def parse_timestamp(ts: str) -> datetime:
-            """Parse timestamp, normalizing to naive UTC."""
-            # Handle Z suffix
-            ts = ts.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(ts)
+        def parse_timestamp(ts: Any) -> Optional[datetime]:
+            """Parse timestamp to naive UTC; None when missing/unparseable.
+
+            Session files can carry records with missing or corrupted
+            stamps (crashed writers, imported transcripts). Duration must
+            never make the whole save/resume-persist path fail over one
+            bad stamp, so fail open per record instead of raising.
+            """
+            if not isinstance(ts, str):
+                return None
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                return None
             # Convert to naive UTC for consistent comparison
             if dt.tzinfo is not None:
                 dt = dt.replace(tzinfo=None)
             return dt
 
-        start = parse_timestamp(self.messages[0]["timestamp"])
-        end = parse_timestamp(self.messages[-1]["timestamp"])
+        start = None
+        end = None
+        for message in self.messages:
+            stamp = parse_timestamp(message.get("timestamp"))
+            if stamp is None:
+                continue
+            if start is None:
+                start = stamp
+            end = stamp
+
+        if start is None or end is None:
+            return "0m"
+
         duration = end - start
 
         minutes = duration.total_seconds() / 60

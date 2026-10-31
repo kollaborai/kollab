@@ -276,6 +276,51 @@ def test_checkpoint_event_failure_is_logged_not_raised(tmp_path, monkeypatch, ca
     )
 
 
+def test_calculate_duration_skips_none_and_garbage_stamps(tmp_path):
+    # The resume-persist path (save_session -> get_conversation_summary)
+    # used to crash on records with missing or unparseable stamps:
+    # AttributeError on None.replace, ValueError on bad strings. Duration
+    # must span the first-to-last PARSEABLE stamps instead.
+    mgr = manager(tmp_path)
+    base = datetime(2026, 10, 31, 9, 30, tzinfo=timezone.utc)
+    mgr.messages = [
+        {"role": "user", "content": "hello", "timestamp": None},
+        {"role": "assistant", "content": "hi", "timestamp": base.isoformat()},
+        {"role": "user", "content": "ok", "timestamp": "not-a-timestamp"},
+        {
+            "role": "assistant",
+            "content": "done",
+            "timestamp": (base + timedelta(minutes=30)).isoformat(),
+        },
+    ]
+    assert mgr._calculate_duration() == "30m"
+
+
+def test_calculate_duration_all_bad_stamps_is_zero(tmp_path):
+    mgr = manager(tmp_path)
+    mgr.messages = [
+        {"role": "user", "content": "hello", "timestamp": None},
+        {"role": "assistant", "content": "hi", "timestamp": "not-a-timestamp"},
+    ]
+    assert mgr._calculate_duration() == "0m"
+
+
+def test_save_session_survives_none_and_garbage_stamps(tmp_path):
+    # A session whose records carry missing or unparseable stamps must
+    # still save; the summary's duration calculation must not make the
+    # resumed session fail to persist.
+    mgr = manager(tmp_path)
+    mgr.messages = [
+        {"role": "user", "content": "hello", "timestamp": None},
+        {"role": "assistant", "content": "hi", "timestamp": "not-a-timestamp"},
+    ]
+    assert mgr.save_session("stampless-save") is True
+    saved = tmp_path / "stampless-save.jsonl"
+    assert saved.exists()
+    payload = json.loads(saved.read_text().strip())
+    assert payload["summary"]["duration"] == "0m"
+
+
 def test_stampless_compaction_keeps_prior_boundary(tmp_path):
     # A later compaction record with a missing stamp must not reset a
     # valid earlier boundary to None: resetting it un-suppressed the
