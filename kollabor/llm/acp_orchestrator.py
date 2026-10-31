@@ -142,6 +142,9 @@ class ACPOrchestrator:
                          if o.get("id") == config_id), "")
         options = await runner.set_config_option(config_id, value)
         reported = next((o.get("currentValue") for o in options or [] if o.get("id") == config_id), None)
+        if reported == value:
+            # A pick the user confirmed this session: a replay of saved options must not undo it.
+            self._user_picks = getattr(self, "_user_picks", set()) | {config_id}
         if self._profile_name and reported == value:
             # Persist only a value the harness confirmed; a refused pick must not replay at the next start.
             saved = self._saved_options()
@@ -179,6 +182,7 @@ class ACPOrchestrator:
         if runner is None:
             return notices
         saved = dict(self._saved_options().get(profile.name) or {})
+        picked = getattr(self, "_user_picks", set())  # confirmed this session: a replay must not undo them
         loadout_model = str(getattr(profile, "model", "") or "")
         loadout_effort = str(getattr(profile, "effort", "") or "")
         if not (saved or loadout_model or loadout_effort):
@@ -186,7 +190,7 @@ class ACPOrchestrator:
         model = next((o for o in self.advertised_config_options()
                       if o.get("category") == "model" or o.get("id") == "model"), None)
         saved_model = saved.pop("model", None)
-        if saved_model is None and model is not None:
+        if saved_model is None and model is not None and str(model["id"]) not in picked:
             saved_model = saved.pop(str(model["id"]), None)  # an older save under the raw ID
         model_value = loadout_model or saved_model
         model_ok = True
@@ -210,7 +214,7 @@ class ACPOrchestrator:
         effort = self._effort_option()
         effort_id = str(effort["id"]) if effort is not None else None
         saved_effort = saved.pop("effort", None)
-        if saved_effort is None and effort is not None:
+        if saved_effort is None and effort is not None and effort_id not in picked:
             saved_effort = saved.pop(effort_id, None)  # an older save under the raw ID
         if not model_ok:
             if loadout_effort or saved_effort:
@@ -248,6 +252,7 @@ class ACPOrchestrator:
             handled.add(str(model["id"]))
         if effort_id is not None and (loadout_effort or saved_effort):
             handled.add(effort_id)
+        handled |= {option_id for option_id in (effort_id, model and str(model["id"])) if option_id in picked}
         for config_id, value in saved.items():
             if config_id in handled:
                 continue

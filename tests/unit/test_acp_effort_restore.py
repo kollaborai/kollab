@@ -212,6 +212,33 @@ async def test_unadvertised_saved_pick_is_reported_not_dropped(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_user_picked_max_survives_replay_of_saved_custom_id(tmp_path):
+    options = _options()
+    options[1]["id"] = "reasoning_budget"  # the custom ID an older save kept
+    orch = _orchestrator(tmp_path, options, saved={"reasoning_budget": "xhigh"})
+    await orch.set_config_option("reasoning_budget", "max")
+    assert options[1]["currentValue"] == "max"
+    replay = SimpleNamespace(name="claude-code", model="", effort="")
+    notices = await orch._restore_options(replay)
+    assert options[1]["currentValue"] == "max", orch._runner.calls
+    assert ("reasoning_budget", "xhigh") not in orch._runner.calls[1:], orch._runner.calls
+    print("saved file:", json.loads(orch._options_path.read_text()), "calls:", orch._runner.calls, "notices:", notices)
+
+
+@pytest.mark.asyncio
+async def test_live_user_pick_survives_replay_when_only_the_old_raw_id_is_saved(tmp_path):
+    """The user's max is live, but the file holds only the older raw-ID xhigh: the replay must not undo max."""
+    options = _options()
+    options[1]["id"] = "reasoning_budget"
+    orch = _orchestrator(tmp_path, options, saved={"reasoning_budget": "xhigh"})
+    await orch.set_config_option("reasoning_budget", "max")
+    orch._options_path.write_text(json.dumps({"claude-code": {"reasoning_budget": "xhigh"}}))
+    replay = SimpleNamespace(name="claude-code", model="", effort="")
+    await orch._restore_options(replay)
+    assert options[1]["currentValue"] == "max", orch._runner.calls
+
+
+@pytest.mark.asyncio
 async def test_saved_effort_survives_a_custom_option_id(tmp_path):
     """A thought_level option with its own ID: the saved pick is reported when the option disappears,
     and applied to that ID when it is present."""
