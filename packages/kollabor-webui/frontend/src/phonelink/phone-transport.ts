@@ -161,6 +161,19 @@ export function hostSnapshotDecision(
 ): HostSnapshotDecision {
   if (!Array.isArray(peers) || peers.length > 256)
     return { action: "lost", why: "invalid" };
+  // Fail closed on entries that are not {key, session} string pairs: a
+  // hostile roster row must not throw out of the snapshot handler and
+  // kill the phone link (mirrors the engine's _set_peers validation).
+  if (
+    peers.some(
+      (p: Json) =>
+        typeof p !== "object" ||
+        p === null ||
+        typeof p.key !== "string" ||
+        typeof p.session !== "string",
+    )
+  )
+    return { action: "lost", why: "invalid" };
   const host = peers.find((p: Json) => p.key === hostKey);
   if (host === undefined) {
     // Before the first settle the handshake requires the host to be listed;
