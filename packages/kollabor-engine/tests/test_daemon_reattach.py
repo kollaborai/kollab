@@ -481,3 +481,34 @@ def test_only_this_requests_completion_ends_its_stream():
     # A cancelled pre-start client request never ends another stream.
     queued = {"type": "turn_complete", "input_source": "acp_client", "queued": True}
     assert _foreign_completion(queued, mine) and _foreign_completion(queued, set())
+
+
+@pytest.mark.asyncio
+async def test_an_old_turns_dropped_frame_fails_no_other_request(monkeypatch):
+    # Tanzanite on #543 round 5: after a reattach, an old turn's oversized
+    # completion replayed into a new request's stream. Its frame_too_large error
+    # named no request, so the new reply was marked failed.
+    from kollabor_engine.routes import messages
+
+    import kollabor_rpc.transport
+
+    monkeypatch.setattr(kollabor_rpc.transport, "LARGE_BUFFER_LIMIT", 1024)
+    old = {"type": "turn_complete", "request_id": "old", "stop_reason": "error", "error": "x" * 4096, "seq": 3}
+    error, stale = await _pool_events([old], 2)
+    assert error["code"] == "frame_too_large" and error["request_id"] == stale["request_id"] == "old"
+    assert messages._foreign_error(error, {"new"}) and not messages._foreign_error(error, {"old"})
+    assert not messages._foreign_error({"type": "error", "message": "x"}, {"new"})  # names none: everyone's
+
+    reply = [
+        {"type": "token", "text": "fine"},
+        {"type": "turn_complete", "request_id": "new", "stop_reason": "end_turn"},
+    ]
+    monkeypatch.setattr(messages, "get_session_registry", lambda: types.SimpleNamespace(
+        get=lambda sid: _StreamSession([error, stale, *reply])))
+    response = await messages.send_message("s9", messages.MessageRequest(content="hi", request_id="new"))
+
+    async def drain():
+        return [str(item) async for item in response.body_iterator]
+
+    sent = "".join(await asyncio.wait_for(drain(), 5))
+    assert "frame_too_large" not in sent and '"fine"' in sent and '"new"' in sent

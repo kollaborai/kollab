@@ -63,6 +63,15 @@ def _foreign_completion(event: Dict[str, Any], request_ids: set[str], tagged: bo
     return bool(request_ids) and not named & request_ids
 
 
+def _foreign_error(event: Dict[str, Any], request_ids: set[str]) -> bool:
+    """An error that names only other requests is theirs: a frame dropped for an
+    old turn, replayed after a reattach, must not fail this request (#543)."""
+    if event.get("type") != "error":
+        return False
+    named = {str(event.get("request_id") or "")} - {""} | {str(i) for i in event.get("request_ids") or ()}
+    return bool(named and request_ids) and not named & request_ids
+
+
 def _contains_reserved_voice_origin(value: Any) -> bool:
     if isinstance(value, dict):
         origin_context = value.get("origin_context")
@@ -145,6 +154,8 @@ async def send_message(session_id: str, body: MessageRequest):
 
                 event.setdefault("session_id", session_id)
                 if _foreign_completion(event, request_ids, tagged):
+                    continue
+                if _foreign_error(event, request_ids):
                     continue
 
                 if event.get("type") == "daemon_closed":
@@ -971,6 +982,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     continue
                 event_type = str(event.get("type") or "")
                 if _foreign_completion(event, request_ids, bool(request_ids) and not untagged):
+                    continue
+                if _foreign_error(event, request_ids):
                     continue
 
                 if event_type == "token":
