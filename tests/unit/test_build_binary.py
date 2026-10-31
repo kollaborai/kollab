@@ -107,7 +107,13 @@ STATUS_ONLINE = "1 agent(s) online:\n\n  lapis *  pid=4242  idle\n\nnetwork: not
 STATUS_NONE = "no agents online\n\nnetwork: not connected\n"
 
 
-def fake_kollab(monkeypatch: pytest.MonkeyPatch, statuses: list[str], stop_calls: list[list[str]]) -> None:
+def fake_kollab(
+    monkeypatch: pytest.MonkeyPatch,
+    statuses: list[str],
+    stop_calls: list[list[str]],
+    *,
+    where_ok: bool = True,
+) -> None:
     """A stand-in kollab: `--detached` starts nothing, `--hub status` answers from `statuses` in order."""
     monkeypatch.setattr(build_binary.time, "sleep", lambda _: None)
 
@@ -115,6 +121,13 @@ def fake_kollab(monkeypatch: pytest.MonkeyPatch, statuses: list[str], stop_calls
         args = command[1:]
         if args[:2] == ["--hub", "stop"]:
             stop_calls.append(args)
+        if args[:2] == ["--hub", "where"]:
+            endpoint = Path(kwargs["cwd"]) / "lapis.sock"
+            if where_ok:
+                endpoint.touch()
+            return subprocess.CompletedProcess(
+                command, 0 if where_ok else 1, stdout=str(endpoint) if where_ok else "", stderr=""
+            )
         stdout = statuses.pop(0) if args[:2] == ["--hub", "status"] else ""
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
@@ -138,6 +151,16 @@ def test_agent_smoke_names_what_a_runtime_without_daemon_start_prints(
     with pytest.raises(SystemExit, match="started no agent that answers `--hub status`"):
         build_binary.agent_smoke(tmp_path / "kollab.exe", timeout=0.0)
     assert stops == []
+
+
+def test_agent_smoke_fails_when_machine_discovery_cannot_find_the_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stops: list[list[str]] = []
+    fake_kollab(monkeypatch, [STATUS_ONLINE], stops, where_ok=False)
+    with pytest.raises(SystemExit, match="did not find its live endpoint"):
+        build_binary.agent_smoke(tmp_path / "kollab.exe")
+    assert stops == [["--hub", "stop", "lapis"]]
 
 
 def test_agent_smoke_fails_when_stop_leaves_the_agent_online(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
