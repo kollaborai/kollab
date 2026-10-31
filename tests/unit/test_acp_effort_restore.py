@@ -192,3 +192,27 @@ def test_state_path_refuses_an_effort_the_harness_does_not_report(tmp_path):
     asyncio.run(LocalStateService._apply_acp_effort(Harness("max"), "max"))  # reported as asked: no error
     with pytest.raises(ValueError, match="accepted effort 'max' but reports 'xhigh'"):
         asyncio.run(LocalStateService._apply_acp_effort(Harness("xhigh"), "max"))
+
+
+@pytest.mark.asyncio
+async def test_saved_effort_survives_a_custom_option_id(tmp_path):
+    """A thought_level option with its own ID: the saved pick is reported when the option disappears,
+    and applied to that ID when it is present."""
+    options = _options()
+    options[1]["id"] = "reasoning_budget"  # the same meaning under another ID
+    orch = _orchestrator(tmp_path, options)
+    await orch.set_config_option("reasoning_budget", "max")
+    saved = json.loads(orch._options_path.read_text())["claude-code"]
+    assert saved == {"effort": "max"}
+
+    options.pop(1)  # the harness stops advertising the effort option
+    no_loadout = SimpleNamespace(name="claude-code", model="", effort="")
+    notices = await orch._restore_options(no_loadout)
+    assert any("this harness advertises no effort option, so effort max was not applied" in n for n in notices)
+
+    options.append({"id": "reasoning_budget", "category": "thought_level", "type": "select",
+                    "currentValue": "xhigh", "options": [{"value": "xhigh"}, {"value": "max"}]})
+    orch._runner.calls.clear()
+    notices = await orch._restore_options(no_loadout)
+    assert notices == []
+    assert orch._runner.calls == [("reasoning_budget", "max")]

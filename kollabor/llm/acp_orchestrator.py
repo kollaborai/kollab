@@ -44,6 +44,10 @@ class _ObservedTurn:
     finished: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+# Saved picks are keyed by what the option means, so a harness that renames its option still restores it.
+_CANONICAL_PICK_KEYS = {"model": "model", "thought_level": "effort"}
+
+
 def option_values(option: dict[str, Any] | None) -> list[str]:
     """Advertised values of an ACP config option, nested option groups included."""
     values: list[str] = []
@@ -134,10 +138,13 @@ class ACPOrchestrator:
         runner = self._runner
         if runner is None or self._closed:
             raise ACPError("ACP session is not active")
+        category = next((str(o.get("category") or "") for o in runner.advertised_config_options()
+                         if o.get("id") == config_id), "")
         options = await runner.set_config_option(config_id, value)
         if self._profile_name:
             saved = self._saved_options()
-            saved.setdefault(self._profile_name, {})[config_id] = value
+            key = _CANONICAL_PICK_KEYS.get(category, config_id)
+            saved.setdefault(self._profile_name, {})[key] = value
             try:
                 self._options_path.parent.mkdir(parents=True, exist_ok=True)
                 self._options_path.write_text(json.dumps(saved, indent=2))
@@ -182,7 +189,7 @@ class ACPOrchestrator:
             notices.append(f"model {loadout_model} was not applied: the harness advertises no model option")
         if model is not None:
             model_id = str(model["id"])
-            saved_model = saved.pop(model_id, None)
+            saved_model = saved.pop("model", None)
             model_value = loadout_model or saved_model
             if model_value and model_value != model.get("currentValue"):
                 try:
@@ -198,7 +205,7 @@ class ACPOrchestrator:
                     notices.append(f"model {model_value} did not become active (harness reports {active})")
         effort = self._effort_option()
         effort_id = str(effort["id"]) if effort is not None else None
-        saved_effort = saved.pop(effort_id or "effort", None)
+        saved_effort = saved.pop("effort", None)
         if not model_ok:
             if loadout_effort or saved_effort:
                 notices.append(
