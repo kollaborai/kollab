@@ -2208,6 +2208,37 @@ class TestQueueProcessor(unittest.TestCase):
             if isinstance(m, QueuedInput)
         ]
 
+    def test_unattended_gate_reads_runtime_mode_off_the_real_layout_manager(self):
+        """Wiring regression (#532): the daemon gate must find runtime_mode on
+        the REAL StatusLayoutManager registered as the layout_manager service.
+
+        The first cut put the attribute on StatusLayoutRenderer while the gate
+        reads the manager, so the nudge never fired in production. This test
+        goes through the real manager and a real EventBus — no SimpleNamespace
+        standing in for the service object.
+        """
+        from kollabor_events.bus import EventBus
+        from kollabor_tui.status.layout_manager import StatusLayoutManager
+
+        original_bus = self.processor.event_bus
+        try:
+            bus = EventBus()
+            manager = StatusLayoutManager(config_service=None)
+            bus.register_service("layout_manager", manager)
+            self.processor.event_bus = bus
+
+            self.assertFalse(
+                self.processor._is_unattended_runtime(),
+                "a fresh real manager defaults to local, not daemon",
+            )
+            manager.runtime_mode = "daemon"
+            self.assertTrue(
+                self.processor._is_unattended_runtime(),
+                "daemon mode set on the real manager must reach the gate",
+            )
+        finally:
+            self.processor.event_bus = original_bus
+
     def test_first_turn_stall_signature_shapes(self):
         """The two stall shapes match; closed tags and finished replies don't."""
         from kollabor_agent.queue_processor import first_turn_stall_signature
