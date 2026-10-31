@@ -81,6 +81,7 @@ class DisplayTap:
         # The owner's own view of every event. Not a subscriber: the count of
         # those says whether a window is attached.
         self._on_event = on_event
+        self._listeners: tuple = ()
 
     def publish(self, event: Dict[str, Any]) -> None:
         """Publish a display event to all subscribers.
@@ -139,6 +140,24 @@ class DisplayTap:
                 self._on_event(event)
             except Exception:
                 logger.debug("DisplayTap on_event failed", exc_info=True)
+        for listener in self._listeners:
+            try:
+                listener(event)
+            except Exception:
+                logger.debug("DisplayTap listener failed", exc_info=True)
+
+    def add_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        """Call ``callback`` with every published event, as ``on_event`` is.
+
+        For in-process watchers (the model fallback); unlike a subscriber, a
+        listener never counts as an attached window.
+        """
+        with self._lock:
+            self._listeners = (*self._listeners, callback)
+
+    def remove_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        with self._lock:
+            self._listeners = tuple(c for c in self._listeners if c is not callback)
 
     def subscribe(self, client_id: str) -> queue.Queue:
         """Add a subscriber. Returns thread-safe queue to consume from."""

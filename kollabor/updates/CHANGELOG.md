@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Model fallback: `/llm fallback <loadout or profile>` picks what an agent switches to when its
+  model can't serve a turn (a usage limit, a quota, a rate limit after the retries, an expired
+  login). The agent says so in the chat, switches once and runs the turn again; `/llm fallback off`
+  turns it off. The web UI setting comes next (#548).
 - Windows: agent commands run in Git Bash when Git for Windows is installed,
   else in PowerShell (never cmd.exe); `KOLLAB_SHELL` picks another shell.
 - PhoneLink works from every engine on the computer: an engine that does not hold PhoneLink forwards the call to the one that does, and the "managing PhoneLink" message names that engine's port, process, start time and folder (#443).
