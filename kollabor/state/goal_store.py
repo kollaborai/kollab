@@ -103,6 +103,10 @@ class GoalAttachmentRequestNotFound(GoalStoreError):
     """The request is absent, already consumed, or belongs to another conversation."""
 
 
+class GoalSubmissionConflict(GoalStoreError):
+    """A client submission key is already bound to different input."""
+
+
 class GoalAttachmentRequestCommitted(GoalStoreError):
     """A previous attempt committed this exact request."""
 
@@ -328,6 +332,12 @@ CREATE TABLE IF NOT EXISTS goal_attachment_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_goal_attachment_requests_conversation
     ON goal_attachment_requests(conversation_uid, created_at);
+CREATE TABLE IF NOT EXISTS goal_attachment_submissions (
+    submission_key TEXT PRIMARY KEY,
+    conversation_uid TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    request_id TEXT NOT NULL UNIQUE
+);
 """
 
 # Record fields a caller may update through transition()/update_fields().
@@ -645,6 +655,47 @@ class GoalStore:
                 (request_id, conversation_uid, preview, json.dumps(refs), self._now()),
             )
         return request_id
+
+    def _attachment_submission(self, key: str, uid: str, fingerprint: str) -> Optional[Dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT s.conversation_uid, s.fingerprint, s.request_id, "
+            "r.request_id AS existing_request, r.goal_id "
+            "FROM goal_attachment_submissions s LEFT JOIN goal_attachment_requests r "
+            "ON r.request_id = s.request_id WHERE s.submission_key = ?", (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["conversation_uid"] != uid or row["fingerprint"] != fingerprint:
+            raise GoalSubmissionConflict("goal submission key conflicts with a previous request")
+        return {"request_id": row["request_id"], "goal_id": row["goal_id"],
+                "discarded": row["existing_request"] is None}
+
+    def attachment_submission(self, key: str, uid: str, fingerprint: str) -> Optional[Dict[str, Any]]:
+        """Read an existing submission without revealing another scope's receipt."""
+        with self._lock:
+            return self._attachment_submission(key, uid, fingerprint)
+
+    def stage_attachment_submission(self, key: str, uid: str, fingerprint: str,
+                                    command_text: str, refs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Bind one client key and image request in the same transaction."""
+        with self._lock:
+            self._begin()
+            try:
+                existing = self._attachment_submission(key, uid, fingerprint)
+                if existing is not None:
+                    self._commit()
+                    return {**existing, "created": False}
+                request_id = self.stage_attachment_request(uid, command_text, refs)
+                self._conn.execute(
+                    "INSERT INTO goal_attachment_submissions "
+                    "(submission_key, conversation_uid, fingerprint, request_id) VALUES (?, ?, ?, ?)",
+                    (key, uid, fingerprint, request_id),
+                )
+                self._commit()
+                return {"request_id": request_id, "goal_id": None, "discarded": False, "created": True}
+            except Exception:
+                self._rollback()
+                raise
 
     def pending_attachment_requests(self, conversation_uid: str) -> List[Dict[str, str]]:
         with self._lock:

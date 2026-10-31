@@ -2918,7 +2918,9 @@ class LocalStateService(StateService):
         # control subcommands must stay available while a turn is
         # processing, and image-bearing /goal input must still reach
         # command parsing with its attachments promoted durably.
-        goal_handled = None if is_voice_origin else self._try_goal_command(text, message)
+        goal_handled = None if is_voice_origin else self._try_goal_command(
+            text, message, client_request_id=request_id or metadata.get("request_id")
+        )
         if goal_handled is not None:
             return goal_handled
 
@@ -3053,7 +3055,7 @@ class LocalStateService(StateService):
             raise ValueError("no goal image was provided")
         return refs
 
-    def _try_goal_command(self, text: str, message) -> dict[str, Any] | None:
+    def _try_goal_command(self, text: str, message, *, client_request_id: str | None = None) -> dict[str, Any] | None:
         """Route /goal input ahead of the is_processing gate.
 
         Control subcommands (show/pause/resume/clear/history and bare
@@ -3091,12 +3093,50 @@ class LocalStateService(StateService):
             return {"accepted": False, "reason": "no conversation identity available; open a session first"}
         request_id = None
         if has_images:
+            from kollabor.state.goal_store import GoalSubmissionConflict
+
+            def replay_result(saved: dict[str, Any]) -> dict[str, Any]:
+                if saved["discarded"]:
+                    return {
+                        "accepted": False,
+                        "reason": "This submission was discarded; use a new request to submit again.",
+                    }
+                request = saved["request_id"]
+                goal = saved["goal_id"]
+                notice = (
+                    f"This submission already created goal {goal}."
+                    if goal else
+                    f"Images remain saved as {request}; use /goal retry {request} <objective> "
+                    f"or /goal discard {request}."
+                )
+                return {"accepted": True, "completed": True, "replayed": True,
+                        "request_id": request, "goal_request_id": request,
+                        "goal_id": goal, "message": notice}
+
             try:
-                refs = self._stage_goal_attachments(message)
                 svc = self._goal_service()
                 if svc is None:
                     raise RuntimeError("goal storage unavailable")
-                request_id = svc.stage_attachment_request(uid, text, refs)
+                if client_request_id is not None:
+                    from kollabor.goals.submission import submission_identity
+
+                    key, fingerprint = submission_identity(client_request_id, text, message)
+                    existing = svc.attachment_submission(key, uid, fingerprint)
+                    if existing is not None:
+                        return replay_result(existing)
+                refs = self._stage_goal_attachments(message)
+                if client_request_id is None:
+                    request_id = svc.stage_attachment_request(uid, text, refs)
+                else:
+                    saved = svc.stage_attachment_submission(key, uid, fingerprint, text, refs)
+                    if not saved["created"]:
+                        return replay_result(saved)
+                    request_id = saved["request_id"]
+            except GoalSubmissionConflict:
+                return {
+                    "accepted": False,
+                    "reason": "Goal submission conflict; use a new request for different input or conversation.",
+                }
             except Exception as exc:
                 logger.warning("goal image admission failed (%s)", type(exc).__name__)
                 return {
@@ -3151,7 +3191,10 @@ class LocalStateService(StateService):
             if owner is not None:
                 self._goal_command_in_flight = None
             return retained("Goal command could not be started.")
-        return {"accepted": True, "reason": "goal command"}
+        accepted = {"accepted": True, "reason": "goal command"}
+        if request_id:
+            accepted["goal_request_id"] = request_id
+        return accepted
 
     async def _execute_hub_message(self, text: str, target: str, content: str) -> None:
         """Send one chat mention through Hub and publish a web turn."""

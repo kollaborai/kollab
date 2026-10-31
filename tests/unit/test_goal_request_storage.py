@@ -145,3 +145,63 @@ def test_promotion_respects_single_image_limit_before_writing(tmp_path, monkeypa
         service.promote_image_attachment("data:image/png;base64,aGVsbG8=")
     assert not (tmp_path / "artifacts").exists()
     store.close()
+
+
+def test_submission_key_is_atomic_across_connections_and_survives_restart(tmp_path):
+    from kollabor.state.goal_store import GoalSubmissionConflict
+
+    db = tmp_path / 'goals.db'
+    first, second = GoalStore(db), GoalStore(db)
+    def stage(store):
+        return store.stage_attachment_submission('hashed-key', 'a', 'hashed-input', '/goal same', [{'ref': 'same'}])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(stage, (first, second)))
+    assert sum(result['created'] for result in results) == 1
+    assert results[0]['request_id'] == results[1]['request_id']
+    assert len(first.pending_attachment_requests('a')) == 1
+    with pytest.raises(GoalSubmissionConflict):
+        first.attachment_submission('hashed-key', 'b', 'hashed-input')
+    with pytest.raises(GoalSubmissionConflict):
+        first.attachment_submission('hashed-key', 'a', 'different-input')
+    first.close()
+    second.close()
+    reopened = GoalStore(db)
+    saved = reopened.attachment_submission('hashed-key', 'a', 'hashed-input')
+    assert saved['request_id'] == results[0]['request_id'] and saved['goal_id'] is None
+    goal = reopened.create('a', 'same', '/repo', attachment_request_id=saved['request_id'])
+    reopened.close()
+    reopened = GoalStore(db)
+    assert reopened.attachment_submission('hashed-key', 'a', 'hashed-input')['goal_id'] == goal.goal_id
+    reopened.close()
+
+
+def test_discarded_submission_cannot_be_reanimated_by_replay(tmp_path):
+    db = tmp_path / 'goals.db'
+    store = GoalStore(db)
+    saved = store.stage_attachment_submission('key', 'a', 'fingerprint', '/goal same', [{'ref': 'same'}])
+    assert store.discard_attachment_request('a', saved['request_id'])
+    store.close()
+    store = GoalStore(db)
+    saved_again = store.stage_attachment_submission('key', 'a', 'fingerprint', '/goal same', [{'ref': 'same'}])
+    assert not saved_again['created'] and saved_again['discarded']
+    assert store.pending_attachment_requests('a') == []
+    store.close()
+
+
+def test_competing_different_inputs_with_same_submission_key_do_not_both_stage(tmp_path):
+    from kollabor.state.goal_store import GoalSubmissionConflict
+
+    db = tmp_path / 'goals.db'
+    stores = [GoalStore(db), GoalStore(db)]
+    def attempt(index):
+        try:
+            return stores[index].stage_attachment_submission('same-key', 'a', f'fingerprint-{index}',
+                                                              f'/goal {index}', [{'ref': str(index)}])
+        except GoalSubmissionConflict:
+            return None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, (0, 1)))
+    assert sum(result is not None for result in results) == 1
+    assert len(stores[0].pending_attachment_requests('a')) == 1
+    for store in stores:
+        store.close()
