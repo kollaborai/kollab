@@ -138,8 +138,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache is skipped from the cache, not the screen (#471).
 - Web UI: Gem Studio's activity preview stays on one scrollable row of tabs
   at phone width instead of wrapping into a stack of pills, and the Save
-  button is accented with the highlight color like other primary actions
-  (#465).
+  button is accented with the highlight color like other primary actions.
+  On coarse-pointer (touch) screens every activity and Look tab keeps a 44px
+  hit box while the bar stays compact for mouse users (#465).
 - Web UI: Trajectory's detail title no longer repeats the tool output, and the
   active tab in Trajectory, the Agent Library and Gem Studio is underlined in
   the accent color like every other tab bar (#459).

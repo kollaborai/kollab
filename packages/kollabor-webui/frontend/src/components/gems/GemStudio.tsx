@@ -266,10 +266,13 @@ function StudioBody({
             </div>
             {!dressGem ? null : (
               <>
+                {/* Touch: every trigger keeps a >=44px hit box (pointer-coarse) while
+                    the visual bar stays compact for mouse users; the list scrolls
+                    horizontally when the seven activities exceed the dialog width. */}
                 <Tabs value={activity} onValueChange={(value) => setActivity(value as Activity)}>
-                  <TabsList aria-label="Preview activity" className="max-w-full overflow-x-auto">
+                  <TabsList aria-label="Preview activity" className="pointer-coarse:h-11 max-w-full overflow-x-auto">
                     {STAGE_ACTIVITIES.map((option) => (
-                      <TabsTrigger key={option} value={option} className="flex-none px-1.5 text-xs">
+                      <TabsTrigger key={option} value={option} className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5 text-xs">
                         {titleCase(option)}
                       </TabsTrigger>
                     ))}
@@ -295,15 +298,15 @@ function StudioBody({
                 defaultValue={focus?.tab ?? (focus && !dressGem ? "avatar" : "eyes")}
                 className="flex flex-col gap-0 lg:min-h-0 lg:flex-1"
               >
-                <TabsList aria-label="Look" className="mx-3 mt-3 w-auto shrink-0 justify-start overflow-x-auto">
-                  {focus ? <TabsTrigger className="flex-none px-1.5" value="avatar">Avatar</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="shape">Shape</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="eyes">Eyes</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="hair">Hair</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="hat">Hat</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="aura">Aura</TabsTrigger> : null}
-                  <TabsTrigger className="flex-none px-1.5" value="color">Color</TabsTrigger>
-                  {chat ? <TabsTrigger className="flex-none px-1.5" value="chat">Chat</TabsTrigger> : null}
+                <TabsList aria-label="Look" className="pointer-coarse:h-11 mx-3 mt-3 w-auto shrink-0 justify-start overflow-x-auto">
+                  {focus ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="avatar">Avatar</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="shape">Shape</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="eyes">Eyes</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="hair">Hair</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="hat">Hat</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="aura">Aura</TabsTrigger> : null}
+                  <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="color">Color</TabsTrigger>
+                  {chat ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="chat">Chat</TabsTrigger> : null}
                 </TabsList>
 
                 {focus && current ? (
