@@ -195,6 +195,16 @@ def _network_display_text(text: object) -> str:
     return _NET_TEXT_CONTROL.sub("", _NET_ESCAPE.sub("", text))
 
 
+# A full ACP prompt queue is backpressure, not a refusal (#483). Messages
+# bounced off it park here until an ACP turn boundary frees a slot, the way
+# a busy native agent's messages wait in its processing queue.
+_ACP_BUSY_PARK_LIMIT = 64  # parked messages held for the next turn boundary
+_ACP_BUSY_RETRY_LIMIT = 8  # turn boundaries a parked message may outlive
+_ACP_BUSY_PARK_TTL_SECONDS = 300.0  # a parked message waits at most this long
+_ACP_SETTLE_RECHECK_INTERVAL = 0.1  # idle re-check cadence after a boundary
+_ACP_SETTLE_RECHECK_DEADLINE = 2.0  # stop re-checking idle after this long
+
+
 @dataclass
 class _NetworkTurn:
     """The remote request whose turn this agent is running."""
@@ -8201,6 +8211,31 @@ class HubPlugin(BasePlugin):
             message_id=message.id,
             opened_at=time.monotonic(),
         )
+        parked_line = getattr(self, "_acp_busy_parked", None)
+        if parked_line and len(parked_line) < _ACP_BUSY_PARK_LIMIT:
+            # Fairness (#483): a message arriving while earlier ones are
+            # parked joins the back of that line instead of overtaking them
+            # into whatever slot the next boundary frees.
+            parked_line.append(
+                {
+                    "message": message,
+                    "turn": turns.get(message.id),
+                    "attempts": 1,
+                    "ts": time.monotonic(),
+                }
+            )
+            self._schedule_parked_ttl()
+            logger.info(
+                "Parked hub message %s from %s behind %d earlier busy message(s)",
+                message.id,
+                sender,
+                len(parked_line),
+            )
+            return {
+                "status": "rejected",
+                "reason": "acp_queue_full",
+                "message": "ACP prompt queue is full",
+            }
         result = await llm_service.submit_human_input(
             message.content,
             source="agent",
@@ -8220,10 +8255,33 @@ class HubPlugin(BasePlugin):
             # acquire a second completion owner.
             turns.pop(message.id, None)
         if isinstance(result, dict) and result.get("status") == "rejected":
-            turn = turns.pop(message.id, None)
+            turn = turns.get(message.id)
             reason = str(result.get("reason") or "acp_admission_failed")
             detail = str(result.get("message") or reason)
             is_busy = "queue" in reason.lower() or "full" in reason.lower()
+            parked = getattr(self, "_acp_busy_parked", None)
+            if parked is None:
+                parked = self._acp_busy_parked = []
+            if is_busy and len(parked) < _ACP_BUSY_PARK_LIMIT:
+                # A full ACP prompt queue is backpressure, not a refusal
+                # (#483): hold this message for the next turn boundary
+                # instead of failing the network turn it opened.
+                parked.append(
+                    {
+                        "message": message,
+                        "turn": turn,
+                        "attempts": 1,
+                        "ts": time.monotonic(),
+                    }
+                )
+                self._schedule_parked_ttl()
+                logger.info(
+                    "ACP prompt queue full; parked hub message %s from %s for the next turn boundary",
+                    message.id,
+                    sender,
+                )
+                return result
+            turns.pop(message.id, None)
             outcome = "busy" if is_busy else "error"
             reply_text, outcome_text = self._normalize_acp_completion(
                 outcome, "", detail
@@ -8643,6 +8701,9 @@ class HubPlugin(BasePlugin):
                     logger.debug(
                         f"Failed to release claims for departing {from_name}: {e}"
                     )
+                # That peer's parked messages (#483) can never be admitted
+                # for it again; end their turns instead of holding them.
+                await self._sweep_parked_for_departure(from_name)
             elif message.to == my_name or message.to in (
                 "*",
                 "all",
@@ -9541,6 +9602,296 @@ class HubPlugin(BasePlugin):
         self._publish_idle_if_settled()
         return context
 
+    def _mark_working_from_tap(self, event: Dict[str, Any]) -> None:
+        """Mirror the LLM request hooks for ACP turns (issue #483).
+
+        Harness turns never reach the queue processor whose hooks mark a
+        native turn working; the display tap carries the same lifecycle.
+        """
+        from .presence_states import PresenceState
+
+        try:
+            identity = getattr(self, "_identity", None)
+            if identity is None or identity.state == PresenceState.WAITING.value:
+                return
+            turn = getattr(self, "_net_turn", None)
+            if turn is not None and not turn.deferred:
+                turn.started = True  # the harness runs the open request's turn
+            identity.state = AgentState.WORKING.value
+            self._last_activity_at = time.time()
+            if self._presence:
+                self._presence.publish()
+        except Exception:
+            logger.debug("Hub ACP working presence update failed", exc_info=True)
+
+    def _schedule_parked_ttl(self) -> None:
+        """Arm the one-shot TTL sweep for the parked list (#483)."""
+        if getattr(self, "_parked_ttl_handle", None) is not None:
+            return  # already armed
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop here; the next park re-arms
+        self._parked_ttl_handle = loop.call_later(
+            _ACP_BUSY_PARK_TTL_SECONDS, self._expire_parked_busy
+        )
+
+    def _expire_parked_busy(self) -> None:
+        """call_later sweep: drop parked entries past the TTL (#483)."""
+        self._parked_ttl_handle = None
+        parked = getattr(self, "_acp_busy_parked", None)
+        if not parked:
+            return
+        now = time.monotonic()
+        expired = [
+            entry
+            for entry in parked
+            if now - entry.get("ts", 0.0) >= _ACP_BUSY_PARK_TTL_SECONDS
+        ]
+        if not expired:
+            self._schedule_parked_ttl()  # re-arm for the remaining horizon
+            return
+        for entry in expired:
+            parked.remove(entry)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(
+                self._end_parked_busy_turns(
+                    expired, detail="the busy park TTL expired"
+                )
+            )
+        if parked:
+            self._schedule_parked_ttl()
+
+    async def _end_parked_busy_turns(
+        self, entries: list[dict], *, detail: str, outcome: str = "busy"
+    ) -> None:
+        """Close parked entries' network turns (#483).
+
+        Shared by the retry-budget exhaustion, the park TTL, the departing
+        peer sweep, and shutdown: none of them free a prompt-queue slot, so
+        the held message can only end busy.
+        """
+        for entry in entries:
+            message = entry["message"]
+            turn = entry["turn"]
+            if turn is None or turn.ended:
+                continue
+            try:
+                turns = getattr(self, "_acp_network_turns", None) or {}
+                turns.pop(message.id, None)
+                reply_text, outcome_text = self._normalize_acp_completion(
+                    outcome, "", detail
+                )
+                turn.answer = reply_text
+                turn.failed = True
+                turn.ended = True
+                await self._end_network_turn(
+                    turn,
+                    failed=True,
+                    acp=True,
+                    outcome=outcome,
+                    outcome_text=outcome_text,
+                )
+            except Exception:
+                logger.warning("failed to end a parked busy turn", exc_info=True)
+
+    async def _sweep_parked_for_departure(self, from_name: str) -> None:
+        """Drop parked messages whose asking peer went offline (#483).
+
+        They can never be admitted for that peer again, so their turns end
+        unavailable instead of waiting out the busy budget.
+        """
+        try:
+            parked = getattr(self, "_acp_busy_parked", None)
+            if not parked or not from_name:
+                return
+            departed = [
+                entry
+                for entry in parked
+                if getattr(entry["message"], "from_identity", "") == from_name
+            ]
+            if not departed:
+                return
+            for entry in departed:
+                parked.remove(entry)
+            await self._end_parked_busy_turns(
+                departed,
+                outcome="unavailable",
+                detail=(
+                    f"{from_name} went offline before the prompt queue "
+                    "freed a slot"
+                ),
+            )
+        except Exception:
+            logger.debug(
+                f"Failed to sweep parked messages for departing {from_name}",
+                exc_info=True,
+            )
+
+    def _schedule_settle_recheck(self) -> None:
+        """Defer one bounded idle-settle re-check after a boundary (#483).
+
+        The boundary tap can fire while the completing ACP task still holds
+        ``is_processing`` true, so the immediate settle pass sees work that
+        is already ending; poll briefly until it retires.
+        """
+        identity = getattr(self, "_identity", None)
+        if identity is None or identity.state != AgentState.WORKING.value:
+            return  # settled (or never working): nothing to re-check
+        existing = getattr(self, "_acp_settle_recheck_task", None)
+        if existing is not None and not existing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._acp_settle_recheck_task = loop.create_task(
+            self._deferred_settle_recheck()
+        )
+
+    async def _deferred_settle_recheck(self) -> None:
+        """Poll ``is_processing`` briefly, then settle idle once clear (#483)."""
+        deadline = time.monotonic() + _ACP_SETTLE_RECHECK_DEADLINE
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(_ACP_SETTLE_RECHECK_INTERVAL)
+                identity = getattr(self, "_identity", None)
+                if identity is None or identity.state != AgentState.WORKING.value:
+                    return
+                self._publish_idle_if_settled()
+                if identity.state != AgentState.WORKING.value:
+                    return
+        except asyncio.CancelledError:
+            pass
+
+    def _kick_parked_busy_retries(self) -> None:
+        """Admit parked busy messages at an ACP turn boundary (issue #483).
+
+        Each completed turn frees a prompt-queue slot; the parked list fills
+        it from the front, the way a busy native agent drains its queue.
+        """
+        parked = getattr(self, "_acp_busy_parked", None)
+        if not parked:
+            return
+        retry_task = getattr(self, "_busy_retry_task", None)
+        if retry_task is not None and not retry_task.done():
+            return  # a retry pass is already draining the parked list
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop in this callback; the next boundary retries
+        self._busy_retry_task = loop.create_task(self._retry_parked_busy_messages())
+
+    async def _retry_parked_busy_messages(self) -> None:
+        """Re-admit parked busy messages at each ACP turn boundary (#483).
+
+        One pass submits the head once; if the freed slot takes it, the
+        pass keeps admitting entries while slots last. A still-full queue
+        ends the pass — the next boundary retries the same head, aging
+        every waiting entry.
+        """
+        parked = getattr(self, "_acp_busy_parked", None)
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        if not parked or llm is None:
+            return
+        try:
+            while parked:
+                entry = parked[0]
+                message = entry["message"]
+                result = await llm.submit_human_input(
+                    message.content,
+                    source="agent",
+                    request_id=message.id,
+                    thread_id=getattr(message, "thread_id", "") or message.id,
+                    origin_context={
+                        "sender": message.from_agent,
+                        "sender_identity": message.from_identity,
+                        "relay_turn_id": getattr(getattr(self, "_relay_agent", None), "_turn", None).get() if getattr(getattr(self, "_relay_agent", None), "_turn", None) is not None else None,
+                        "correlated_relay_event": bool((message.metadata or {}).get("relay_event")),
+                        "authenticated": True,
+                        "operator": False,
+                    },
+                )
+                status = result.get("status") if isinstance(result, dict) else None
+                if status == "queued":
+                    # The freed slot took it; the open network turn owns
+                    # delivery, exactly like the direct admission path.
+                    parked.pop(0)
+                    continue
+                if status == "injected":
+                    # Steering joins the running request and never gains a
+                    # second completion owner; drop the parked turn.
+                    turns = getattr(self, "_acp_network_turns", None) or {}
+                    turns.pop(message.id, None)
+                    parked.pop(0)
+                    continue
+                reason = str(result.get("reason") or "") if isinstance(result, dict) else ""
+                is_busy = "queue" in reason.lower() or "full" in reason.lower()
+                if is_busy:
+                    # The queue is still full: every parked message ages one
+                    # boundary, not just the head (#483).
+                    aged_out: list[dict] = []
+                    for waiting in parked:
+                        if waiting["attempts"] >= _ACP_BUSY_RETRY_LIMIT:
+                            aged_out.append(waiting)
+                        else:
+                            waiting["attempts"] += 1
+                    for waiting in aged_out:
+                        parked.remove(waiting)
+                    if aged_out:
+                        # Aged-out entries end busy front-first, the way the
+                        # direct path would have refused them.
+                        await self._end_parked_busy_turns(
+                            aged_out, detail="the prompt queue stayed full"
+                        )
+                    return  # still full; wait for the next turn boundary
+                # Out of boundaries or rejected outright: fail the turn the
+                # way the direct path would have.
+                parked.pop(0)
+                turn = entry["turn"]
+                if turn is not None and not turn.ended:
+                    turns = getattr(self, "_acp_network_turns", None) or {}
+                    turns.pop(message.id, None)
+                    outcome = "busy" if is_busy else "error"
+                    detail = (
+                        str(result.get("message") or reason)
+                        if isinstance(result, dict)
+                        else reason
+                    )
+                    reply_text, outcome_text = self._normalize_acp_completion(
+                        outcome, "", detail
+                    )
+                    turn.answer = reply_text
+                    turn.failed = True
+                    turn.ended = True
+                    try:
+                        await self._end_network_turn(
+                            turn,
+                            failed=True,
+                            acp=True,
+                            outcome=outcome,
+                            outcome_text=outcome_text,
+                        )
+                    except Exception:
+                        # The turn must not vanish with the exception: park
+                        # it at the front again so the next boundary (or the
+                        # park TTL) retries the end (#483).
+                        logger.warning(
+                            "failed to end a parked turn at a retry "
+                            "boundary; re-parked for the next boundary",
+                            exc_info=True,
+                        )
+                        turn.failed = False
+                        turn.ended = False
+                        parked.insert(0, entry)
+                return  # one boundary may only end one turn
+        except Exception:
+            logger.debug("parked busy message retry failed", exc_info=True)
+
     def _follow_tool(self, event: Dict[str, Any]) -> None:
         """Keep the running tool in presence, from the display tap's events.
 
@@ -9552,6 +9903,15 @@ class HubPlugin(BasePlugin):
         """
         kind = event.get("type")
         tool_id = str(event.get("tool_id") or "")
+        if kind == "turn_start":
+            # ACP harness turns bypass the LLM request hooks that mark a
+            # native turn working (#483); this tap is the only place their
+            # lifecycle shows up here.
+            self._mark_working_from_tap(event)
+            return
+        if kind == "acp_waiting" and event.get("waiting"):
+            self._mark_working_from_tap(event)
+            return
         if kind == "tool_start":
             name = str(event.get("tool_name") or "")
             tool_type = str(event.get("tool_type") or "")
@@ -9568,6 +9928,10 @@ class HubPlugin(BasePlugin):
         elif kind in ("turn_complete", "error"):
             self._running_tools.clear()
             self._stamp_supervisor_turn(kind, event)
+        elif kind == "turn_end":
+            # ACP completions publish turn_complete first; clear again in
+            # case the tap coalesced or reordered them.
+            self._running_tools.clear()
         else:
             return
         tool = next(reversed(self._running_tools.values()), {})
@@ -9576,6 +9940,24 @@ class HubPlugin(BasePlugin):
             identity.current_tool = tool
             if self._presence:
                 self._presence.publish()
+        if kind in ("turn_end", "turn_complete"):
+            # An ACP turn boundary (#483): settle presence to idle once no
+            # work remains, then admit a parked busy message to the prompt
+            # queue slot this boundary freed.
+            self._publish_idle_if_settled()
+            self._schedule_settle_recheck()
+            # turn_complete and its turn_end follow-up tap the same turn;
+            # one real boundary must age the parked list once, not twice,
+            # or the retry budget halves.
+            # turn_complete carries snake `turn_id`, turn_end's frame carries
+            # camel `turnId` and never `turn_id`; `request_id` is the one key
+            # both taps share, so the dedupe keys on it (#497).
+            boundary = str(event.get("request_id") or event.get("turn_id") or event.get("turnId") or "")
+            if boundary and boundary != getattr(self, "_last_busy_kick_boundary", None):
+                self._last_busy_kick_boundary = boundary
+                self._kick_parked_busy_retries()
+            elif not boundary:
+                self._kick_parked_busy_retries()
 
     def _stamp_supervisor_turn(self, kind: str, event: Dict[str, Any]) -> None:
         """Feed the supervisor's wake-efficacy tracking (issue #283).
@@ -15457,6 +15839,31 @@ class HubPlugin(BasePlugin):
         if bound_task is not None and not bound_task.done():
             bound_task.cancel()
             await asyncio.gather(bound_task, return_exceptions=True)
+
+        # Parked busy messages (#483) must not vanish with the agent: their
+        # network turns end busy so the asking agent learns immediately.
+        retry_task = getattr(self, "_busy_retry_task", None)
+        if retry_task is not None and not retry_task.done():
+            retry_task.cancel()
+            await asyncio.gather(retry_task, return_exceptions=True)
+        settle_task = getattr(self, "_acp_settle_recheck_task", None)
+        if settle_task is not None and not settle_task.done():
+            settle_task.cancel()
+            await asyncio.gather(settle_task, return_exceptions=True)
+        ttl_handle = getattr(self, "_parked_ttl_handle", None)
+        if ttl_handle is not None:
+            ttl_handle.cancel()
+            self._parked_ttl_handle = None
+        parked = list(getattr(self, "_acp_busy_parked", None) or [])
+        if parked:
+            self._acp_busy_parked = []
+            await self._end_parked_busy_turns(
+                parked,
+                detail=(
+                    "the receiving agent shut down before the prompt "
+                    "queue freed a slot"
+                ),
+            )
 
         relay_start = getattr(self, "_relay_startup_task", None)
         if relay_start:

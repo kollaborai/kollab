@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from kollabor_agent.runtime import AgentRuntime
-from plugins.hub.plugin import HubPlugin
+from plugins.hub.plugin import _ACP_BUSY_RETRY_LIMIT, HubPlugin
 from plugins.hub.relay_agent import RelayAgentBridge
 from plugins.hub.relay_state import RelayError
 
@@ -554,7 +554,21 @@ async def test_authenticated_acp_admission_rejection_settles_origin(
 
     result = await plugin._submit_authenticated_agent_message(message, llm)
 
-    assert result == admission
+    if reason == "acp_queue_full":
+        # #483: a full prompt queue is backpressure. The message parks for
+        # the next turn boundary instead of settling the origin at once.
+        assert result == admission
+        assert sent == []
+        assert message.id in plugin._acp_network_turns
+        assert len(plugin._acp_busy_parked) == 1
+        plugin.event_bus.get_service.side_effect = (
+            lambda name: llm if name == "llm_service" else None
+        )
+        for _ in range(_ACP_BUSY_RETRY_LIMIT):  # boundaries drain the budget
+            plugin._kick_parked_busy_retries()
+            await plugin._busy_retry_task
+        assert plugin._acp_busy_parked == []
+
     assert len(sent) == 2
     assert sent[0][2] == "reply" and marker in sent[0][1].lower()
     assert sent[1][2] == "turn end"
