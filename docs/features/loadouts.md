@@ -102,6 +102,22 @@ kollab --model gpt-5.6-terra                  # active profile, this model
 
 Precedence is explicit flag → loadout field → provider profile value.
 
+## Fallback when a model can't serve
+
+`/llm fallback <name>` picks the loadout this agent switches to when a turn
+fails because its model can't serve it: a usage limit, a quota, a rate limit
+that outlasted the retries, or an expired login. The agent says so in one line
+in the chat, switches once and runs the turn again; an ACP fallback asks you to
+send the message again. It stays on the fallback until you switch back with
+`/llm`.
+
+- `/llm fallback` shows the choice; `/llm fallback off` turns it off.
+- The choice is per agent (`plugins.model_fallback.agents.<agent>`), saved in
+  the folder's `.kollab/config.json`. `plugins.model_fallback.loadout` is the
+  default for every agent.
+- Other errors (a context-window overflow, a bad request) never switch.
+- Code: `plugins/model_fallback_plugin.py`, `kollabor/llm/usage_limits.py`.
+
 ## Relation to `/setup`
 
 `/setup` owns provider connections (keys, endpoints, OAuth); `/llm` owns
