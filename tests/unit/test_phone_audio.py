@@ -384,4 +384,128 @@ async def test_cancel_during_open_never_registers_the_late_bridge(cancel):
     assert late.value.code == "call_unavailable"
     assert len(bridges) == 1 and bridges[0].closed
     assert "phone-a" not in manager._calls
-    assert "phone-a" not in manager._opening
+    assert not any(p.phone == "phone-a" for p in manager._pending)
+
+
+@pytest.mark.asyncio
+async def test_two_phones_cannot_share_a_voice_session():
+    gate = asyncio.Event()
+
+    async def opener(voice_session_id, generation):
+        await gate.wait()
+        return FakeBridge()
+
+    manager = PhoneAudioManager(opener)
+    first = asyncio.create_task(manager.open("phone-a", object(), CALL, VOICE, 0))
+    await asyncio.sleep(0)
+    with pytest.raises(PhoneCallError) as second:
+        await manager.open("phone-b", object(), OTHER_CALL, VOICE, 0)
+    assert second.value.code == "call_busy"
+    gate.set()
+    await first
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_close_during_open_fences_the_late_bridge():
+    gate = asyncio.Event()
+    bridges = []
+
+    async def opener(voice_session_id, generation):
+        await gate.wait()
+        bridge = FakeBridge()
+        bridges.append(bridge)
+        return bridge
+
+    manager = PhoneAudioManager(opener)
+    session = object()
+    opening = asyncio.create_task(manager.open("phone-a", session, CALL, VOICE, 0))
+    await asyncio.sleep(0)
+    await manager.close("phone-a", session, CALL)
+    gate.set()
+    with pytest.raises(PhoneCallError) as late:
+        await opening
+    assert late.value.code == "call_unavailable"
+    assert bridges[0].closed and "phone-a" not in manager._calls
+
+
+@pytest.mark.asyncio
+async def test_close_during_slow_tick_never_answers_with_audio():
+    gate = asyncio.Event()
+
+    class SlowBridge(FakeBridge):
+        async def send_mic(self, n, pcm):
+            await gate.wait()
+
+    async def opener(voice_session_id, generation):
+        return SlowBridge()
+
+    manager = PhoneAudioManager(opener)
+    session, _ = await open_call(manager)
+    slow = asyncio.create_task(manager.tick("phone-a", session, CALL, 0, MIC))
+    await asyncio.sleep(0)
+    await manager.close("phone-a", session, CALL)
+    gate.set()
+    with pytest.raises(PhoneCallError) as after_close:
+        await slow
+    assert after_close.value.code == "call_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tick_fails_its_waiting_retry():
+    gate = asyncio.Event()
+
+    class SlowBridge(FakeBridge):
+        async def send_mic(self, n, pcm):
+            await gate.wait()
+
+    async def opener(voice_session_id, generation):
+        return SlowBridge()
+
+    manager = PhoneAudioManager(opener)
+    session, _ = await open_call(manager)
+    original = asyncio.create_task(manager.tick("phone-a", session, CALL, 0, MIC))
+    await asyncio.sleep(0)
+    retry = asyncio.create_task(manager.tick("phone-a", session, CALL, 0, MIC))
+    await asyncio.sleep(0)
+    original.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await original
+    with pytest.raises(PhoneCallError) as failed:
+        await asyncio.wait_for(retry, timeout=1)
+    assert failed.value.code == "call_unavailable"
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_call_messages_reject_unknown_fields_and_end_the_call(tmp_path):
+    from kollabor_engine.phone_link import PhoneLink
+
+    bridges = []
+    manager, bridges = make_manager(bridges)
+    link = PhoneLink(app=None, directory=tmp_path, port=0)
+    link.audio = manager
+    session = object()
+    await link._call(
+        "phone-a",
+        session,
+        {"op": "call_open", "id": CALL, "voice_session_id": VOICE, "generation": 0},
+    )
+    tick = {
+        "op": "call_tick",
+        "id": CALL,
+        "n": 0,
+        "mic": base64.b64encode(MIC).decode(),
+        "extra": 1,
+    }
+    assert await link._call("phone-a", session, tick) == {"error": "call_invalid"}
+    assert "phone-a" not in manager._calls and bridges[0].closed
+
+
+@pytest.mark.asyncio
+async def test_oversized_call_message_is_refused(tmp_path):
+    from kollabor_engine.phone_link import PhoneLink
+
+    link = PhoneLink(app=None, directory=tmp_path, port=0)
+    big = {"op": "call_close", "id": CALL, "pad": "x" * 40_000}
+    assert await link._call("phone-a", object(), big) == {"error": "call_invalid"}
