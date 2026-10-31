@@ -42,7 +42,7 @@ from plugins.hub.relay_state import ID, KEY, RelayError, canonical_origin, stric
 
 from .auth import get_token, read_token_from_disk
 from .hub_bridge import network_daemons
-from .phone_audio import PhoneAudioManager, PhoneCallError
+from .phone_audio import MIC_BYTES, PhoneAudioManager, PhoneCallError
 from .phonelink_events import (
     PhoneLinkEventLog,
     normalize_phone_diagnostic,
@@ -51,6 +51,7 @@ from .phonelink_events import (
 
 PHONE_PROTOCOL = "kollab-phonelink/1"
 MAX_PHONES = 8
+MIC_B64_CHARS = 4 * -(-MIC_BYTES // 3)  # base64 length of one mic frame
 LEGACY_CHUNK = 8192
 CHUNK = 160 * 1024
 APP_CHUNK = CHUNK
@@ -1133,8 +1134,11 @@ class PhoneLink:
                     request.get("generation"),
                 )
             if op == "call_tick":
+                mic_text = request.get("mic")
+                if not isinstance(mic_text, str) or len(mic_text) != MIC_B64_CHARS:
+                    raise PhoneCallError("call_invalid")  # refuse before decoding
                 try:
-                    mic = base64.b64decode(request.get("mic"), validate=True)
+                    mic = base64.b64decode(mic_text, validate=True)
                 except (TypeError, ValueError):
                     raise PhoneCallError("call_invalid") from None
                 return await self.audio.tick(
