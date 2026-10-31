@@ -16,6 +16,7 @@ from kollabor_engine.phone_audio import (
 CALL = "a" * 32
 OTHER_CALL = "b" * 32
 VOICE = "11111111-2222-3333-4444-555555555555"
+VOICE2 = "22222222-2222-3333-4444-555555555555"
 MIC = b"\x00\x01" * (MIC_BYTES // 2)
 
 
@@ -721,3 +722,53 @@ async def test_cancel_during_fenced_bridge_close_still_releases_voice():
     gate.set()
     await manager.shutdown()
     assert len(bridges) == 2 and all(b.closed for b in bridges)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_different_voice_loser_releases_its_voice_after_shutdown():
+    """A racing loser on another voice, cancelled while its bridge close is stuck,
+    must not keep that voice reserved after shutdown."""
+    gates = [asyncio.Event(), asyncio.Event()]
+    entered = [asyncio.Event(), asyncio.Event()]
+    bridges = []
+    count = 0
+
+    class StuckCloseBridge(FakeBridge):
+        def __init__(self, stuck):
+            super().__init__()
+            self.stuck = stuck
+            self.release = asyncio.Event()
+
+        async def close(self):
+            if self.stuck:
+                await self.release.wait()
+            self.closed = True
+
+    async def opener(voice_session_id, generation):
+        nonlocal count
+        i = count
+        count += 1
+        if i < 2:
+            entered[i].set()
+            await gates[i].wait()
+        bridge = StuckCloseBridge(stuck=i == 1)
+        bridges.append(bridge)
+        return bridge
+
+    manager = PhoneAudioManager(opener)
+    session = object()
+    winner = asyncio.create_task(manager.open("phone-a", session, CALL, VOICE, 0))
+    await entered[0].wait()
+    loser = asyncio.create_task(manager.open("phone-a", session, CALL, VOICE2, 0))
+    await entered[1].wait()
+    gates[0].set()
+    await winner
+    gates[1].set()
+    await asyncio.sleep(0.05)  # the loser is inside its stuck bridge close
+    loser.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await loser
+    bridges[1].release.set()
+    await manager.shutdown()
+    assert manager._voice_owner == {}
+    assert bridges[1].closed
