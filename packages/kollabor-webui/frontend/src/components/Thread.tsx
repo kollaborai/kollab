@@ -333,7 +333,7 @@ export const Thread: FC<{
   locked?: string;
 
   historyStatus?: { kind: string; message: string };
-  onLoadOlder?: () => Promise<void>;
+  onLoadOlder?: () => Promise<boolean | void>;
   onRetryHistory?: () => void;
   historyStartIndex?: number;
 }> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0 }) => (

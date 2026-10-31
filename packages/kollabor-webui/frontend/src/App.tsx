@@ -72,9 +72,9 @@ import { VoiceRoomProvider } from "./voice/voice-room";
 import {
   historyPageCache,
   loadLatestHistoryPage,
-
   loadOlderHistoryPage,
   mergeOlderHistoryPage,
+  UnusableHistoryCursorError,
 } from "./history-cache";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
@@ -186,7 +186,7 @@ function RuntimeShell({
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked: string;
   historyStatus: { kind: string; message: string } | undefined;
-  onLoadOlder: () => Promise<void>;
+  onLoadOlder: () => Promise<boolean | void>;
   onRetryHistory: () => void;
   historyStartIndex: number;
 }) {
@@ -463,8 +463,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   }>());
   const olderLoadRef = useRef(new Set<string>());
 
-  const olderLoadQueuedRef = useRef(new Set<string>());
-  const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<void>) | null>(null);
+  const olderLoadQueuedRef = useRef(
+    new Map<string, Array<(merged: boolean) => void>>(),
+  );
+  const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<boolean | void>) | null>(null);
   const historyPrefetchRef = useRef(new Set<string>());
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [supervisorEvents, setSupervisorEvents] = useState<StreamEvent[]>([]);
@@ -649,6 +651,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           pendingPermissions,
           page.last_turn_error ?? null,
           page.start_index,
+          // A cache-fallback page (fresh sync failed/timed out) can't prove
+          // that rows missing from it were deleted upstream.
+          !loaded.fromCache,
         );
       } catch (reason) {
         setHistoryStatus({
@@ -661,14 +666,26 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     },
     [],
   );
+  const loadStateRef = useRef(loadState);
+  loadStateRef.current = loadState;
 
-  const loadOlderHistory = useCallback(async (sessionId: string, prefetch = false) => {
+  // Resolves true when the call (or a queued continuation of it) actually
+  // extends the window, so the thread can drop a scroll anchor that a
+  // no-op load would otherwise leave dangling.
+  const loadOlderHistory = useCallback(async (sessionId: string, prefetch = false): Promise<boolean> => {
     if (olderLoadRef.current.has(sessionId)) {
-      if (!prefetch) olderLoadQueuedRef.current.add(sessionId);
-      return;
+      if (prefetch) return true; // an in-flight load is already extending this window
+      // A user-triggered load queued behind the in-flight one must carry the
+      // real continuation outcome back to the thread; resolving true up front
+      // drops the scroll anchor for a merge that never happened.
+      return new Promise<boolean>((resolve) => {
+        const queue = olderLoadQueuedRef.current.get(sessionId);
+        if (queue) queue.push(resolve);
+        else olderLoadQueuedRef.current.set(sessionId, [resolve]);
+      });
     }
     const current = historyPagesRef.current.get(sessionId);
-    if (!current || !current.has_more_older) return;
+    if (!current || !current.has_more_older) return false;
     olderLoadRef.current.add(sessionId);
     if (!prefetch && activeIdRef.current === sessionId) {
       setHistoryStatus({ sessionId, kind: "loading-older", message: "Loading older messages…" });
@@ -680,6 +697,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         api,
         historyPageCache,
       );
+      // A refresh replaced this window while the page-down was in flight;
+      // applying the merge now would resurrect stale pages.
+      if (historyPagesRef.current.get(sessionId) !== current) {
+        return false;
+      }
       if (!older) {
         throw new Error("History paging cursor is missing. Retry loading the conversation.");
       }
@@ -687,16 +709,42 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const exhausted = { ...current, has_more_older: false, older_cursor: null };
         historyPagesRef.current.set(sessionId, exhausted);
         if (!prefetch && activeIdRef.current === sessionId) setHistoryStatus(null);
-        return;
+        return false;
       }
-      if (prefetch) return;
+      if (prefetch) return false;
 
       const updated = mergeOlderHistoryPage(current, older);
       if (updated.start_index >= current.start_index) {
+        // The page overlapped what the window already holds — e.g. the
+        // carried cursor was re-requested after a capped cache fragment
+        // merged. The engine's response still carries a fresh cursor:
+        // adopt it so the window keeps paging instead of dead-ending.
+        // This load did not EXTEND the window (start_index unchanged), so
+        // resolve false: the thread drops its scroll anchor, which a
+        // non-extending load would otherwise strand, blocking later
+        // up-intent at the top. The next up-intent fetches the page the
+        // adopted cursor points at.
+        if (older.older_cursor) {
+          const adopted = {
+            ...updated,
+            has_more_older: older.has_more_older,
+            older_cursor: older.older_cursor,
+          };
+          historyPagesRef.current.set(sessionId, adopted);
+          if (activeIdRef.current === sessionId) setHistoryStatus(null);
+          return false;
+        }
         throw new Error("The engine returned no older history messages.");
       }
       historyPagesRef.current.set(sessionId, updated);
-      await historyPageCache.store(sessionId, updated);
+      try {
+        await historyPageCache.store(sessionId, updated);
+      } catch (reason) {
+        // A deeply merged window can exceed the page cache byte cap. The
+        // in-memory window is already updated, so the UI stays correct and
+        // only persistence is skipped.
+        console.warn("Skipping history page cache for oversized window", reason);
+      }
       const context = historyContextRef.current.get(sessionId);
       if (context && activeIdRef.current === sessionId) {
         const nextState = buildInitialState(
@@ -706,13 +754,53 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           context.pendingPermissions,
           updated.last_turn_error ?? null,
           updated.start_index,
+          // The extend publish is an older-focused window, not a
+          // latest-history claim: rows newer than its end still exist.
+          false,
         );
         setInitialState((previous) =>
           previous?.sessionId === sessionId ? nextState : previous,
         );
       }
       if (activeIdRef.current === sessionId) setHistoryStatus(null);
-    } catch {
+      return true;
+    } catch (error) {
+      if (error instanceof UnusableHistoryCursorError) {
+        // The engine rejected the cursor (409 stale / 400 invalid): the
+        // history this window paged against changed underneath it, and no
+        // retry from the same cursor can ever succeed. Drop the cached
+        // pages and rebuild the window from a fresh fetch instead of a
+        // dead-end banner.
+        console.warn("Rebuilding history window after cursor rejection", error);
+        try {
+          // Drop the stale pages before the rebuild reads the cache, so the
+          // recovered window cannot resurrect the rejected cursor's pages.
+          await historyPageCache.clear(sessionId);
+        } catch (clearError) {
+          console.warn("Failed to drop stale history pages", clearError);
+        }
+        const context = historyContextRef.current.get(sessionId);
+        if (context) {
+          try {
+            const nextState = await loadStateRef.current(
+              sessionId,
+              context.sessions,
+              prefetch,
+            );
+            if (activeIdRef.current === sessionId) {
+              setInitialState((previous) =>
+                previous?.sessionId === sessionId ? nextState : previous,
+              );
+            }
+          } catch {
+            // loadState already surfaced the failure through historyStatus.
+          }
+        }
+        // The rebuild swaps in a fresh window; an anchored restore against
+        // the old one would misplace the view, so drop the anchor.
+        return false;
+      }
+      console.warn("Failed to load older history", error);
       if (!prefetch && activeIdRef.current === sessionId) {
         setHistoryStatus({
           sessionId,
@@ -720,13 +808,24 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           message: "Couldn't load older messages. Scroll up or retry to try again.",
         });
       }
+      return false;
     } finally {
       olderLoadRef.current.delete(sessionId);
-      if (
-        olderLoadQueuedRef.current.delete(sessionId) &&
-        activeIdRef.current === sessionId
-      ) {
-        void loadOlderHistoryRef.current?.(sessionId, false);
+      const waiters = olderLoadQueuedRef.current.get(sessionId);
+      olderLoadQueuedRef.current.delete(sessionId);
+      if (waiters && waiters.length > 0) {
+        const settle = (merged: boolean) => {
+          for (const resolve of waiters) resolve(merged);
+        };
+        if (activeIdRef.current === sessionId) {
+          // One continuation serves the whole queued batch; waiters settle
+          // with the continuation's real outcome.
+          loadOlderHistoryRef
+            .current?.(sessionId, false)
+            .then((merged) => settle(merged === true), () => settle(false));
+        } else {
+          settle(false);
+        }
       }
     }
   }, []);
