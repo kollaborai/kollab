@@ -161,6 +161,7 @@ class ModelPanel:
             model = _acp_option(options, "model")
             effort = _acp_option(options, "thought_level") or _acp_option(options, "effort")
             base["title"] = "Harness Models"
+            base["scope_note"] = "Applies to this harness session; saved for this project and profile when possible."
             base["notice"] = "Choose values advertised by the active ACP harness."
             if model is not None:
                 values = _acp_option_values(model)
@@ -176,14 +177,11 @@ class ModelPanel:
                     for value in values
                 ]
             if effort is not None:
-                base["controls"] = [{
-                    "id": "level",
-                    "type": "dropdown",
-                    "label": effort.get("name", "Reasoning Effort"),
-                    "action": "effort",
-                    "value": effort.get("currentValue", ""),
-                    "options": _acp_option_values(effort),
-                }]
+                base["controls"] = [make_field(
+                    "level", "dropdown", effort.get("name", "Reasoning Effort"),
+                    action="effort", value=effort.get("currentValue", ""),
+                    options=_acp_option_values(effort),
+                )]
             if not base["rows"] and not base["controls"]:
                 base["notice"] = "The active ACP harness advertises no model or effort options."
             return base
@@ -226,9 +224,10 @@ class ModelPanel:
                 level = payload.get("level", payload.get("value", payload.get("effort")))
                 if not isinstance(level, str) or not level.strip():
                     raise PanelError("an effort level is required", errors={"level": "Choose a level."})
-                outcome = await handler._set_acp_option("thought_level", level.strip())
-                if not outcome.success:
-                    outcome = await handler._set_acp_option("effort", level.strip())
+                category = "thought_level"
+                if handler._acp_option(handler._acp_options(), category) is None:
+                    category = "effort"
+                outcome = await handler._set_acp_option(category, level.strip())
                 if not outcome.success:
                     return error_result(_one_line(outcome.message))
                 return ok_result(f"ACP reasoning effort set to {level.strip()}.", panel=await self.describe(ctx, {}))

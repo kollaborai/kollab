@@ -65,6 +65,111 @@ class ModelCommandHandler(BaseCommandHandler):
             return None
         return self.event_bus.get_service("acp_orchestrator")
 
+    def _remote_state(self):
+        """The daemon state proxy when this terminal is attached."""
+        if not self.event_bus or not hasattr(self.event_bus, "get_service"):
+            return None
+        state = self.event_bus.get_service("state_service")
+        if getattr(state, "_rpc", None) is not None:
+            return state
+        return None
+
+    async def _remote_effort(self, state: Any, level: str) -> CommandResult:
+        """Read or set effort on the attached daemon through its Model panel."""
+        try:
+            panel = await state.get_panel("model", {})
+            control = next(
+                (item for item in panel.get("controls", [])
+                 if isinstance(item, dict) and item.get("path") == "level"),
+                None,
+            )
+            if control is None or not control.get("editable"):
+                return CommandResult(
+                    success=False,
+                    message=(control or {}).get("help")
+                    or "The attached session does not advertise a reasoning-effort option.",
+                    display_type="error",
+                )
+            values = [value for value in control.get("options") or [] if isinstance(value, str)]
+            if not level:
+                return CommandResult(
+                    success=True,
+                    message=(
+                        f"Reasoning effort: {control.get('value') or '(default)'}\n"
+                        f"  Available: {', '.join(values)}\n"
+                        "  Set with: /model effort <level>"
+                    ),
+                    display_type="info",
+                )
+            requested = next((value for value in values if value.lower() == level.strip().lower()), None)
+            if requested is None:
+                return CommandResult(
+                    success=False,
+                    message=f"Unknown effort level: {level}\n  Available: {', '.join(values)}",
+                    display_type="error",
+                )
+            result = await state.panel_action("model", "effort", {"level": requested})
+            success = result.get("ok") is True
+            return CommandResult(
+                success=success,
+                message=str(result.get("message") or ("Effort updated." if success else "Could not update effort.")),
+                display_type="success" if success else "error",
+            )
+        except Exception as exc:
+            self.logger.warning("Attached model effort command failed (%s)", type(exc).__name__)
+            return CommandResult(
+                success=False,
+                message="Could not reach the attached session's reasoning-effort settings.",
+                display_type="error",
+            )
+
+    async def _remote_acp_model(self, state: Any, args: list[str]) -> CommandResult | None:
+        """Use the daemon's harness model choices in an attached terminal."""
+        try:
+            profile = await state.get_active_profile()
+            provider = str(getattr(profile, "provider", "") or "").lower()
+            if not provider:
+                return CommandResult(
+                    success=False,
+                    message="The attached session's active profile is unavailable.",
+                    display_type="error",
+                )
+            if provider != "acp":
+                return None
+            if not args or args[0] in ("list", "ls", "search", "find"):
+                panel = await state.get_panel("model", {})
+                query = " ".join(args[1:]).strip().lower() if args else ""
+                if query in ("all", "*"):
+                    query = ""
+                rows = [row for row in panel.get("rows", []) if isinstance(row, dict)]
+                models = [
+                    str(row["id"]) + (" (current)" if row.get("current") else "")
+                    for row in rows if row.get("id") and query in str(row["id"]).lower()
+                ]
+                return CommandResult(
+                    success=bool(models),
+                    message=("ACP models: " + ", ".join(models) + "\nSet with: /model set <model>")
+                    if models else "No advertised ACP models match.",
+                    display_type="info" if models else "error",
+                )
+            if args[0] == "set" and len(args) < 2:
+                return CommandResult(success=False, message="Usage: /model set <model>", display_type="error")
+            model = args[1] if args[0] == "set" else args[0]
+            result = await state.panel_action("model", "select", {"model": model})
+            success = result.get("ok") is True
+            return CommandResult(
+                success=success,
+                message=str(result.get("message") or ("Model updated." if success else "Could not update model.")),
+                display_type="success" if success else "error",
+            )
+        except Exception as exc:
+            self.logger.warning("Attached ACP model command failed (%s)", type(exc).__name__)
+            return CommandResult(
+                success=False,
+                message="Could not reach the attached session's model settings.",
+                display_type="error",
+            )
+
     def _acp_options(self) -> list[dict[str, Any]]:
         service = self._acp_service()
         getter = getattr(service, "advertised_config_options", None)
@@ -185,6 +290,21 @@ class ModelCommandHandler(BaseCommandHandler):
             Command execution result.
         """
         try:
+            args = command.args or []
+            remote = self._remote_state()
+            if not args or args[0] not in ("copy", "duplicate"):
+                if remote is not None and args and args[0] in ("effort", "reasoning"):
+                    return await self._remote_effort(remote, args[1] if len(args) > 1 else "")
+                if remote is not None:
+                    result = await self._remote_acp_model(remote, args)
+                    if result is not None:
+                        return result
+                elif self.event_bus and self.event_bus.get_service("attach_runtime_state"):
+                    return CommandResult(
+                        success=False,
+                        message="The attached session's state service is unavailable.",
+                        display_type="error",
+                    )
             profile_manager = self.profile_manager
             if not profile_manager:
                 return CommandResult(
@@ -192,8 +312,6 @@ class ModelCommandHandler(BaseCommandHandler):
                     message="Profile manager not available",
                     display_type="error",
                 )
-
-            args = command.args or []
 
             if not args:
                 # Open the fullscreen model picker for the active provider
@@ -733,9 +851,11 @@ class ModelCommandHandler(BaseCommandHandler):
 
         provider = (profile.get_provider() or "").lower()
         if provider == "acp":
-            option = self._acp_option(self._acp_options(), "thought_level")
+            category = "thought_level"
+            option = self._acp_option(self._acp_options(), category)
             if option is None:
-                option = self._acp_option(self._acp_options(), "effort")
+                category = "effort"
+                option = self._acp_option(self._acp_options(), category)
             if option is None:
                 return CommandResult(
                     success=False,
@@ -762,7 +882,7 @@ class ModelCommandHandler(BaseCommandHandler):
                     message=f"Unknown ACP effort level: {level}\n  Available: {', '.join(values)}",
                     display_type="error",
                 )
-            return await self._set_acp_option("thought_level", requested)
+            return await self._set_acp_option(category, requested)
 
         if provider not in EFFORT_SUPPORTED_PROVIDERS:
             # Reporting success here would be a lie: the field is dropped when
