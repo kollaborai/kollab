@@ -350,6 +350,32 @@ def _voice_turn_id(origin: Any) -> str | None:
     return None
 
 
+_TIMEOUT_EXCEPTION_NAMES = frozenset(
+    {
+        "APITimeoutError",  # openai / anthropic-style SDKs
+        "TimeoutError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "ConnectTimeoutError",
+        "ConnectionTimeoutError",
+    }
+)
+_TIMEOUT_MESSAGE_MARKERS = ("timed out", "request timeout")
+
+
+def _is_timeout_exception(exc: BaseException) -> bool:
+    """Best-effort timeout classification across provider SDKs.
+
+    The SDKs raise unrelated timeout hierarchies, so match on the type
+    name and on common message markers instead of importing them all.
+    """
+    if type(exc).__name__ in _TIMEOUT_EXCEPTION_NAMES:
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _TIMEOUT_MESSAGE_MARKERS)
+
+
+
 def _invalid_voice_context(turn_id: str | None) -> dict[str, Any]:
     """A voice batch that failed closed: every tool refused, its events still stamped."""
     context: dict[str, Any] = {"source": "livekit_voice", "voice_tool_policy": "invalid"}
@@ -1214,6 +1240,28 @@ class QueueProcessor:
             execution_context=execution_context,
         )
 
+    async def _call_llm_retry_once_on_timeout(self, **kwargs: Any) -> Any:
+        """Call the provider, retrying once on a timeout-class failure.
+
+        The streaming layer deliberately does not retry once visible output
+        was emitted (a replay would duplicate the partial content), so a
+        provider timeout ends the turn outright and a detached agent goes
+        silently quiet (#452). No partial reply is committed to history on
+        that exception, so one identical retry is safe. A non-timeout
+        failure is re-raised untouched, and so is a second timeout.
+        """
+        try:
+            return await self._streaming_handler.call_llm(**kwargs)
+        except Exception as exc:
+            if not _is_timeout_exception(exc):
+                raise
+            logger.warning(
+                "Provider call timed out (%s); retrying the identical request once",
+                type(exc).__name__,
+            )
+        return await self._streaming_handler.call_llm(**kwargs)
+
+
     async def _execute_llm_turn(
         self,
         user_message_provided: bool,
@@ -1438,7 +1486,7 @@ class QueueProcessor:
             # each continuation references it as parent.
             root_turn_id = str(uuid.uuid4())
 
-            response = await self._streaming_handler.call_llm(
+            response = await self._call_llm_retry_once_on_timeout(
                 conversation_history=self.conversation_history,
                 native_tools=None if tools_withheld else self._native_tools_handler.tools,
                 mcp_discovery_complete=self._native_tools_handler.discovery_complete,
@@ -1526,7 +1574,7 @@ class QueueProcessor:
                 self.renderer.update_thinking(
                     True, f"Continuing... ({continuation_count})"
                 )
-                response = await self._streaming_handler.call_llm(
+                response = await self._call_llm_retry_once_on_timeout(
                     conversation_history=self.conversation_history,
                     native_tools=None if tools_withheld else self._native_tools_handler.tools,
                     mcp_discovery_complete=self._native_tools_handler.discovery_complete,
@@ -2300,7 +2348,7 @@ class QueueProcessor:
                 output_tokens=self.session_stats.get("output_tokens", 0),
                 tool_calls=self.tool_executor.take_executed_count(),
                 stop_reason=getattr(self.api_service, "last_stop_reason", "")
-                or "end_turn",
+                or ("error" if self.last_turn_error else "end_turn"),
             )
             self._stamp_voice_turn(None)
 

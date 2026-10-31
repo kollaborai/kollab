@@ -139,6 +139,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agents: a detached agent no longer stops when different commands fail the same
   way (for example several searches that find nothing); only the same failing
   call three turns in a row counts as stuck (#452).
+- Agents: a provider timeout no longer ends a detached agent's turn in
+  silence. The identical request is retried once (partial output is never
+  committed on that failure), and a turn that still fails reports
+  stop_reason "error" instead of a normal end turn (#452).
 - Windows: voice setup and the voice service restart check whether a process
   is still running without sending it a signal (#460).
 - Web UI: chat history and Trajectory load again for chats with a very large

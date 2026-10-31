@@ -363,6 +363,49 @@ class TestQueueProcessor(unittest.TestCase):
             if e["type"] in ("error", "turn_complete")
         ]
         self.assertEqual(ids, [("error", "turn-9"), ("turn_complete", "turn-9")])
+        self.assertEqual(ids, [("error", "turn-9"), ("turn_complete", "turn-9")])
+
+    def test_a_provider_timeout_is_retried_once_and_the_turn_completes(self):
+        """One timeout on the main call is retried once; the turn lands (#452)."""
+        from kollabor_agent.queue_processor import QueuedInput
+        from kollabor_tui.display_tap import DisplayTap
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_stop_reason = ""
+        self.streaming_handler.call_llm = AsyncMock(
+            side_effect=[TimeoutError("Request timed out"), "recovered reply"]
+        )
+        self.loop.run_until_complete(
+            self.processor.process_message_batch([QueuedInput("hello", {})], "parent")
+        )
+        self.assertEqual(self.streaming_handler.call_llm.await_count, 2)
+        self.assertIsNone(self.processor.last_turn_error)
+        types = [e["type"] for e in tap.get_snapshot()]
+        self.assertNotIn("error", types)
+        self.assertIn("turn_complete", types)
+
+    def test_a_turn_that_dies_on_timeouts_reports_stop_reason_error(self):
+        """A twice-timed-out turn ends with stop_reason=error, not end_turn (#452)."""
+        from kollabor_agent.queue_processor import QueuedInput
+        from kollabor_tui.display_tap import DisplayTap
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_stop_reason = ""
+        self.streaming_handler.call_llm = AsyncMock(
+            side_effect=TimeoutError("Request timed out")
+        )
+        self.loop.run_until_complete(
+            self.processor.process_message_batch([QueuedInput("hello", {})], "parent")
+        )
+        self.assertEqual(self.streaming_handler.call_llm.await_count, 2)
+        self.assertTrue(self.processor.last_turn_error)
+        completes = [e for e in tap.get_snapshot() if e["type"] == "turn_complete"]
+        self.assertEqual(len(completes), 1)
+        self.assertEqual(completes[0].get("stop_reason"), "error")
 
     def test_a_turn_that_ends_while_a_voice_turn_waits_leaves_its_stamp_alone(self):
         """A hub turn still running when a voice turn queues ends by clearing its
