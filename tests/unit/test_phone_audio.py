@@ -378,16 +378,16 @@ async def test_cancel_during_open_never_registers_the_late_bridge(cancel):
     if cancel == "invalidate":
         await manager.invalidate("phone-a", cause="revoked")
         gate.set()
+        with pytest.raises(PhoneCallError) as late:
+            await opening
+        assert late.value.code == "call_unavailable"
+        assert len(bridges) == 1 and bridges[0].closed
     else:
-        # shutdown waits for the pending open, so the gate opens while it runs
-        shutdown = asyncio.create_task(manager.shutdown())
-        await asyncio.sleep(0)
-        gate.set()
-        await shutdown
-    with pytest.raises(PhoneCallError) as late:
-        await opening
-    assert late.value.code == "call_unavailable"
-    assert len(bridges) == 1 and bridges[0].closed
+        # shutdown cancels the pending open itself; its opener never returns a bridge
+        await asyncio.wait_for(manager.shutdown(), timeout=2)
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+        assert bridges == []
     assert "phone-a" not in manager._calls
     assert not any(p.phone == "phone-a" for p in manager._pending)
 
@@ -842,33 +842,84 @@ async def test_app_close_waits_for_the_call_bridge_to_close(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_shutdown_waits_for_a_pending_open_and_closes_its_bridge():
-    """Shutdown during a pending open waits for it and closes the bridge it returns."""
+async def test_shutdown_cancels_a_pending_open_without_waiting_for_it():
+    """Shutdown cancels a pending open; it does not wait for the bridge to appear."""
     gate = asyncio.Event()
     bridges = []
 
-    class SlowCloseBridge(FakeBridge):
-        async def close(self):
-            await asyncio.sleep(0.05)
-            self.closed = True
-
     async def opener(voice_session_id, generation):
-        await gate.wait()
-        bridges.append(SlowCloseBridge())
+        await gate.wait()  # never opens: shutdown must not depend on it
+        bridges.append(FakeBridge())
         return bridges[-1]
 
     manager = PhoneAudioManager(opener)
     opening = asyncio.create_task(manager.open("phone-a", object(), CALL, VOICE, 0))
     await asyncio.sleep(0.01)
-    shutdown = asyncio.create_task(manager.shutdown())
-    await asyncio.sleep(0.01)
-    assert not shutdown.done()  # still waiting on the pending open
-    gate.set()
-    await shutdown
-    assert bridges[0].closed  # the returned bridge was closed before shutdown returned
-    assert manager._closing == set()
-    with pytest.raises(PhoneCallError) as refused:
+    await asyncio.wait_for(manager.shutdown(), timeout=2)
+    assert bridges == []
+    with pytest.raises(asyncio.CancelledError):
         await opening
-    assert refused.value.code == "call_unavailable"
+    assert manager._pending == set()
     with pytest.raises(PhoneCallError):
         await manager.open("phone-b", object(), OTHER_CALL, VOICE, 0)
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_an_opening_child_and_returns_with_none_alive(tmp_path):
+    """PhoneLink.close during a pending open cancels it; the child it spawned is gone."""
+    from kollabor_engine.phone_link import PhoneLink
+
+    child = {"alive": False}
+
+    async def opener(voice_session_id, generation):
+        child["alive"] = True  # spawned before ready
+        try:
+            await asyncio.Event().wait()  # never becomes ready
+        finally:
+            child["alive"] = False  # the kill, on the cancelled-start path
+
+    class Client:
+        async def close(self):
+            return None
+
+    link = PhoneLink(app=None, directory=tmp_path, port=0, open_phone_bridge=opener)
+    link.clients["phone-a"] = Client()
+    opening = asyncio.create_task(
+        link._call(
+            "phone-a",
+            object(),
+            {"op": "call_open", "id": CALL, "voice_session_id": VOICE, "generation": 0},
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert child["alive"] is True
+    await link.close()
+    assert child["alive"] is False  # no child alive when close returns
+    assert link.audio._pending == set()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+
+
+@pytest.mark.asyncio
+async def test_shutdown_is_capped_when_an_opener_ignores_cancel(monkeypatch):
+    """A stuck open cannot hang shutdown: the wait is capped and shutdown returns."""
+    monkeypatch.setattr(phone_audio, "SHUTDOWN_CAP_S", 0.05)
+    release = asyncio.Event()
+
+    async def opener(voice_session_id, generation):
+        while True:  # swallows cancellation, like a stuck child start
+            try:
+                await release.wait()
+                return FakeBridge()
+            except asyncio.CancelledError:
+                continue
+
+    manager = PhoneAudioManager(opener)
+    opening = asyncio.create_task(manager.open("phone-a", object(), CALL, VOICE, 0))
+    await asyncio.sleep(0.01)
+    started = asyncio.get_running_loop().time()
+    await asyncio.wait_for(manager.shutdown(), timeout=2)
+    assert asyncio.get_running_loop().time() - started < 1
+    release.set()
+    with pytest.raises(PhoneCallError):
+        await asyncio.wait_for(opening, timeout=2)

@@ -22,6 +22,7 @@ MAX_AUDIO_BYTES = 9600  # 200 ms of PCM16LE mono at 24 kHz
 QUEUE_BYTES = 28800  # 600 ms of PCM16LE mono at 24 kHz
 MAX_CALL_MESSAGE_BYTES = 32 * 1024  # one call message before outer encryption
 IDLE_SECONDS = 3.0
+SHUTDOWN_CAP_S = 5.0  # engine shutdown never waits longer than this on a voice task
 MAX_SAFE_INT = 2**53 - 1
 
 CALL_ID = re.compile(r"[0-9a-f]{32}")
@@ -265,22 +266,20 @@ class PhoneAudioManager:
 
     async def shutdown(self) -> None:
         self._shutting_down = True
+        openers = []
         for pending in list(self._pending):
             pending.cancelled = True
-        # An open still waiting on its bridge must finish first: its finally closes the
-        # bridge it returns, and that bridge may already own a child process. Never cancel
-        # the opener here: start_phone_bridge does not clean up a child on cancel.
-        openers = [
-            p.task
-            for p in list(self._pending)
-            if p.task is not None and p.task is not asyncio.current_task()
-        ]
-        if openers:
-            await asyncio.gather(*openers, return_exceptions=True)
+            if pending.task is not None and pending.task is not asyncio.current_task():
+                # Cancel the open: its finally closes any bridge it already returned, and
+                # start_phone_bridge's except path closes a child spawned before ready.
+                pending.task.cancel()
+                openers.append(pending.task)
+        await wait_capped(openers)
         for call in list(self._calls.values()):
             await self._end(call, cause="shutdown")
         while self._closing:  # every bridge close, including ones a cancel left running
-            await asyncio.gather(*list(self._closing), return_exceptions=True)
+            if not await wait_capped(list(self._closing)):
+                break
 
     def _open_result(self, call: _Call) -> dict:
         return {
@@ -335,6 +334,22 @@ class PhoneAudioManager:
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
         return task
+
+
+async def wait_capped(tasks) -> bool:
+    """Wait up to SHUTDOWN_CAP_S for tasks; True when all finished, else log and False."""
+    tasks = list(tasks)
+    if not tasks:
+        return True
+    _, still_running = await asyncio.wait(tasks, timeout=SHUTDOWN_CAP_S)
+    if still_running:
+        logger.warning(
+            "%d phone call task(s) still running %.0f s into shutdown",
+            len(still_running),
+            SHUTDOWN_CAP_S,
+        )
+        return False
+    return True
 
 
 async def _close_quietly(bridge: PhoneBridge) -> None:

@@ -47,6 +47,7 @@ from .phone_audio import (
     MIC_BYTES,
     PhoneAudioManager,
     PhoneCallError,
+    wait_capped,
 )
 from .phonelink_events import (
     PhoneLinkEventLog,
@@ -1456,7 +1457,8 @@ class PhoneLink:
                     self._invalidate(identifier, cause="shutdown")
                 # Each invalidation's call stop (and the bridge close it runs) must finish
                 # before close returns, or a phone call's voice bridge outlives the app.
-                await asyncio.gather(*tuple(self._call_stops), return_exceptions=True)
+                # Capped, so a stuck child cannot hang the app's exit.
+                await wait_capped(tuple(self._call_stops))
                 await self.audio.shutdown()
                 await asyncio.gather(*(client.close() for client in self.clients.values()), return_exceptions=True)
             finally:
