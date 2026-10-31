@@ -358,7 +358,7 @@ async def test_handle_close_kill_path_no_attributeerror(monkeypatch):
     terminate the group without raising."""
     import kollabor_engine.voice_livekit as vlk
 
-    monkeypatch.setattr(vlk, "PHONE_BRIDGE_EXIT_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(vlk, "PHONE_BRIDGE_CLOSE_GRACE_S", 0.1)
     process = await asyncio.create_subprocess_exec(
         sys.executable, "-c", "import time; time.sleep(30)",
         stdin=asyncio.subprocess.PIPE,
@@ -369,3 +369,59 @@ async def test_handle_close_kill_path_no_attributeerror(monkeypatch):
     handle = PhoneBridgeHandle(process)
     await handle.close()  # must not raise AttributeError
     assert process.returncode is not None  # kill path actually reaped it
+
+async def test_never_ready_close_kills_child_at_once():
+    """aquamarine's shutdown-cap constraint (#440): a child that never
+    reported ready must die IMMEDIATELY on close(), not after the graceful
+    window. No timeout patching here: if close() still waited the full
+    grace (or the old 5 s), elapsed would blow past the 1 s bound."""
+    import time as _time
+
+    import kollabor_engine.voice_livekit as vlk
+
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(30)",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    handle = PhoneBridgeHandle(process)  # start() never called: _ready False
+    t0 = _time.monotonic()
+    await handle.close()
+    elapsed = _time.monotonic() - t0
+    assert elapsed < 1.0, f"never-ready close took {elapsed:.2f}s"
+    assert process.returncode is not None
+
+
+async def test_ready_close_uses_short_grace_then_kills(monkeypatch):
+    """koordinator's order (#440): a ready-but-unresponsive child gets the
+    short graceful window (constant under lane A's 5 s cap), then the
+    group kill. Patching the constant to 0.1 and seeing close() return
+    quickly proves the constant is the knob (a hardcoded 5 s would hang)."""
+    import time as _time
+
+    import kollabor_engine.voice_livekit as vlk
+
+    monkeypatch.setattr(vlk, "PHONE_BRIDGE_CLOSE_GRACE_S", 0.1)
+    child = (
+        "import json,sys,time;"
+        "print(json.dumps({'type':'ready'}),flush=True);"
+        "[None for _ in iter(lambda: sys.stdin.readline(), '')];"
+        "time.sleep(30)"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", child,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    handle = PhoneBridgeHandle(process)
+    await handle.start('{"type":"open"}')  # sees ready: _ready True
+    assert handle._ready is True
+    t0 = _time.monotonic()
+    await handle.close()  # child ignores the close line -> grace -> kill
+    elapsed = _time.monotonic() - t0
+    assert elapsed < 2.0, f"ready close took {elapsed:.2f}s"
+    assert process.returncode is not None

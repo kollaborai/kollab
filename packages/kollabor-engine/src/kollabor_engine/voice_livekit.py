@@ -117,7 +117,9 @@ PHONE_BRIDGE_READY_TIMEOUT_S = 10.0
 # drain it every interval; a stalled caller must not grow memory without
 # bound (drop-oldest, like the bridge's own outbound queue).
 PHONE_BRIDGE_OUT_CAP_BYTES = 1_048_576
-PHONE_BRIDGE_EXIT_TIMEOUT_S = 5.0
+# Graceful exit window for a bridge child that DID report ready. Kept
+# under lane A's 5 s shutdown cap so close() always finishes inside it.
+PHONE_BRIDGE_CLOSE_GRACE_S = 3.0
 
 
 async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
@@ -150,6 +152,9 @@ class PhoneBridgeHandle:
         self.bridge_errors = 0
         self.bridge_last_error: str | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        # True only once start() saw the child's ready handshake; close()
+        # uses it to pick graceful-exit vs immediate kill.
+        self._ready = False
 
     async def start(self, start_line: str) -> None:
         """Write the start line and wait for the child's ready handshake."""
@@ -179,6 +184,7 @@ class PhoneBridgeHandle:
                 f"Phone audio bridge failed to start: {code}",
                 retryable=True,
             )
+        self._ready = True
         self._reader_task = asyncio.ensure_future(self._read_loop())
 
     async def _read_loop(self) -> None:
@@ -236,11 +242,19 @@ class PhoneBridgeHandle:
                 await stdin.drain()
             except (ConnectionResetError, BrokenPipeError):
                 pass
-        try:
-            await asyncio.wait_for(
-                self.process.wait(), PHONE_BRIDGE_EXIT_TIMEOUT_S
-            )
-        except asyncio.TimeoutError:
+        if self._ready:
+            # Reported ready: give it a short graceful window (always inside
+            # lane A's shutdown cap), then kill the group if it overstays.
+            try:
+                await asyncio.wait_for(
+                    self.process.wait(), PHONE_BRIDGE_CLOSE_GRACE_S
+                )
+            except asyncio.TimeoutError:
+                await _kill_process_group(self.process)
+        else:
+            # Never reported ready (bad greeting, start timeout, pipes
+            # missing): no graceful window — end the child at once so the
+            # caller's except path cannot outlive any shutdown cap.
             await _kill_process_group(self.process)
         stdin = self.process.stdin
         if stdin is not None:
