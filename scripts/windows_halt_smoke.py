@@ -63,6 +63,7 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
     """Start, halt, start again while halted, then resume. Runs after HOME and USERPROFILE are set."""
     from kollabor_config import proc_ctl
     from plugins.hub import halt_runtime, network_halt
+    from plugins.hub.halt_context import HaltUnavailable
     from plugins.hub.presence import get_presence_dir
 
     def online() -> bool:
@@ -77,9 +78,11 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
     network_halt.network_control_refusal = lambda *args, **kwargs: ""  # no console on a runner
     # A network refuses a halt with fewer than two counting machines, since a resume needs a second one to confirm
     # it: logic with no OS code, tested in tests/unit/test_network_halt.py.
-    # This runner is one machine, so this process lets it halt itself: the smoke proves the Windows halt, the
-    # halted launch and the local resume, not that rule. Nothing can own a folder's network on Windows yet (the
-    # relay owner refuses there), so _via_owner always takes the halt in this process, where this applies.
+    # This runner is one machine, so it cannot halt itself under that rule; the smoke proves the Windows halt,
+    # the halted launch and the local resume, not the rule. An owner now runs on Windows too and would take
+    # the halt with the real rule, so the bypass must cover the owner path as well: an owner's single-machine
+    # refusal falls back to this folder's own record, the same copy _via_owner takes when no owner runs.
+    # Test-only, this smoke's process; the rule itself never changes.
     network_halt.halt_allowed = lambda view: True
 
     def traced(call):  # cli_control prints only the error's message; a failed run needs its line
@@ -92,7 +95,18 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
 
         return run
 
-    halt_runtime._via_owner = traced(halt_runtime._via_owner)
+    real_via_owner = halt_runtime._via_owner
+
+    async def via_owner_single_machine(folder, control, action, root, payload):
+        """Test-only: an owner's one-machine refusal takes the halt on the folder's own record."""
+        try:
+            return await real_via_owner(folder, control, action, root, payload)
+        except HaltUnavailable as error:
+            if "one machine that can confirm a resume" not in str(error):
+                raise
+            return control.halt_act(action, payload)
+
+    halt_runtime._via_owner = traced(via_owner_single_machine)
     halt_runtime._act = traced(halt_runtime._act)
     code = asyncio.run(halt_runtime.cli_control("halt", ["--here-only", "--reason", "windows smoke"]))
     if code != 0:  # the listener runs detached with no output: run one here so its error shows

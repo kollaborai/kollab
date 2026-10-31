@@ -11936,8 +11936,14 @@ class HubPlugin(BasePlugin):
             return "connect: wait for the local Hub session to finish starting"
         except ImportError:
             return "beacon dependencies missing; install the current Kollab package"
-        except (OSError, ValueError):
-            return "beacon: private connection state is unavailable or invalid"
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "connect command failed: %s: %s", type(exc).__name__, exc, exc_info=True
+            )
+            return (
+                "beacon: private connection state is unavailable or invalid "
+                f"({type(exc).__name__}: {exc})"
+            )
 
     async def _resume_relay(self) -> None:
         try:

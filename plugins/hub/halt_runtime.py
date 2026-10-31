@@ -1887,8 +1887,6 @@ def _global_config():
 
 async def open_relay_link(folder: str, state_dir: Path) -> HaltLink | None:
     """Assumption 1: a membership's link with no plugins and no model."""
-    if os.name == "nt":  # no relay owner on Windows yet (#268): the halt holds here with no relay link
-        return None
     from .relay_commands import RelayCommands
     from .relay_owner import WorkspaceRelayOwner
     from .secure_conversation import SecureConversationTransport

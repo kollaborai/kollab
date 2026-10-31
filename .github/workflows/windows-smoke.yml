@@ -11,6 +11,8 @@ on:
       - pyproject.toml
       - uv.lock
       - scripts/windows_import_smoke.py
+      - scripts/windows_relay_halt_smoke.py
+      - tests/unit/test_windows_relay_halt_smoke.py
       - .github/workflows/windows-smoke.yml
   workflow_dispatch:
 
@@ -47,7 +49,7 @@ jobs:
 
       # The kill switch's Windows process readers, private files and local IPC (kollab #268).
       - name: Kill switch
-        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_halt_windows.py tests/unit/test_halt_runtime_windows.py tests/unit/test_hub_bridge_waiter_line.py tests/unit/test_relay_state_windows.py tests/unit/test_halt_listener_windows.py
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_halt_windows.py tests/unit/test_halt_runtime_windows.py tests/unit/test_hub_bridge_waiter_line.py tests/unit/test_relay_state_windows.py tests/unit/test_halt_listener_windows.py tests/unit/test_relay_owner_windows.py tests/unit/test_relay_runtime_windows.py tests/unit/test_relay_selfhost_windows.py tests/unit/test_relay_conversations_windows.py tests/unit/test_local_directory_windows.py tests/unit/test_discovery_publish_windows.py
 
       # Every module imports on Windows, so a Unix-only import never ships unseen (kollab #268).
       - name: Every module imports
@@ -63,6 +65,13 @@ jobs:
       # A real halt on the runner: the agent stops, a launch waits, resume restarts it (kollab #268).
       - name: Kill switch smoke
         run: uv run python scripts/windows_halt_smoke.py --kollab .venv/Scripts/kollab.exe
+
+      # The #439 gate: a halt on this Windows machine stops the other machine of its network too.
+      - name: Relay smoke DNS setup
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_relay_halt_smoke.py
+
+      - name: Relay halt smoke
+        run: uv run python scripts/windows_relay_halt_smoke.py --kollab .venv/Scripts/kollab.exe
 
       - name: Engine smoke
         run: uv run python scripts/engine_smoke.py

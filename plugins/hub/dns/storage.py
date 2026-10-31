@@ -62,13 +62,14 @@ def _locked_atomic_write(path: Path, data: dict, *, compact: bool = False) -> No
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, path)
-            # Pins and publisher revision counters must survive a crash after
-            # replacement, not merely be atomically visible to other readers.
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            if os.name != "nt":  # os.replace is atomic there; directories refuse O_RDONLY opens
+                # Pins and publisher revision counters must survive a crash after
+                # replacement, not merely be atomically visible to other readers.
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         except BaseException:
             try:
                 os.unlink(tmp_path)

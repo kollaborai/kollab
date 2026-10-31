@@ -1,4 +1,4 @@
-"""The halt listener on Windows: no SIGHUP to ignore and no relay owner to hold a link with (#268)."""
+"""The halt listener on Windows: no SIGHUP to ignore; its relay link builds a relay owner (#439)."""
 
 import asyncio
 import os
@@ -28,12 +28,16 @@ def test_listener_main_ignores_no_sighup_on_windows(windows_os, monkeypatch):
     assert ignored == [2]
 
 
-def test_open_relay_link_holds_no_link_on_windows(windows_os, monkeypatch, tmp_path):
-    def no_owner(*args, **kwargs):
-        raise AssertionError("no relay owner is built on Windows")
+def test_open_relay_link_builds_the_owner_on_windows(windows_os, monkeypatch, tmp_path):
+    built = []
 
-    monkeypatch.setattr(relay_owner, "WorkspaceRelayOwner", no_owner)
+    def owner(folder, state_dir):
+        built.append(folder)
+        return types.SimpleNamespace(acquire=lambda sock, name: False)
+
+    monkeypatch.setattr(relay_owner, "WorkspaceRelayOwner", owner)
     assert asyncio.run(halt_runtime.open_relay_link(str(tmp_path), tmp_path)) is None
+    assert built == [tmp_path]
 
 
 def test_listener_says_when_no_link_holds_the_folder(tmp_path):

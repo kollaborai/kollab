@@ -248,20 +248,36 @@ class ConversationStore:
         self.workspace_id = workspace_id
         self.local_key = validate_key(local_key) if local_key is not None else None
         self.path = Path(state_dir) / "conversations.sqlite3"
+        from kollabor_config import private_fs
+
         info = self.path.parent.lstat()
-        if (
+        if os.name == "nt":  # owner and access list, where POSIX checks the uid and mode below
+            if not stat.S_ISDIR(info.st_mode) or not private_fs.owned_private(
+                self.path.parent, info
+            ):
+                raise RelayError("conversation directory must be owned and private")
+        elif (
             not stat.S_ISDIR(info.st_mode)
             or info.st_uid != os.getuid()
             or info.st_mode & 0o077
         ):
             raise RelayError("conversation directory must be owned and private")
         try:
-            fd = os.open(
-                self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600
+            fd = private_fs.open_nofollow(
+                self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
             )
         except FileExistsError:
             info = self.path.lstat()
-            if (
+            if os.name == "nt":  # owner and access list, where POSIX checks the uid and mode below
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or not private_fs.owned_private(self.path, info)
+                    or info.st_nlink != 1
+                ):
+                    raise RelayError(
+                        "conversation state must be an owned private regular file"
+                    )
+            elif (
                 not stat.S_ISREG(info.st_mode)
                 or info.st_uid != os.getuid()
                 or info.st_mode & 0o077
@@ -365,7 +381,19 @@ class ConversationStore:
     def _connect(self):
         info = self.path.lstat()
         parent = self.path.parent.lstat()
-        if (
+        if os.name == "nt":  # owner and access list, where POSIX checks the uid and mode below
+            from kollabor_config import private_fs
+
+            if (
+                not stat.S_ISDIR(parent.st_mode)
+                or not private_fs.owned_private(self.path.parent, parent)
+                or not stat.S_ISREG(info.st_mode)
+                or not private_fs.owned_private(self.path, info)
+                or info.st_nlink != 1
+                or (info.st_dev, info.st_ino) != self._inode
+            ):
+                raise RelayError("conversation state ownership or identity changed")
+        elif (
             not stat.S_ISDIR(parent.st_mode)
             or parent.st_uid != os.getuid()
             or parent.st_mode & 0o077
