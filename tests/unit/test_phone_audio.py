@@ -536,6 +536,31 @@ async def test_cancelled_open_releases_the_voice_session():
 
 
 @pytest.mark.asyncio
+async def test_raised_open_releases_its_voice_session():
+    """An open whose bridge raises gives its voice back at once; no bridge to close."""
+
+    async def opener(voice_session_id, generation):
+        raise RuntimeError("bridge failed")
+
+    manager = PhoneAudioManager(opener)
+    with pytest.raises(PhoneCallError) as failed:
+        await manager.open("phone-a", object(), CALL, VOICE, 0)
+    assert failed.value.code == "call_unavailable"
+    assert manager._voice_owner == {}
+    assert manager._pending == set()
+    healthy = []
+
+    async def healthy_opener(voice_session_id, generation):
+        healthy.append(FakeBridge())
+        return healthy[-1]
+
+    manager._open_bridge = healthy_opener
+    result = await manager.open("phone-b", object(), OTHER_CALL, VOICE, 0)
+    assert result["ok"] is True
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_failed_first_open_keeps_the_second_reservation():
     """While a second same-phone open is pending, another phone is still refused."""
     gate_first = asyncio.Event()
@@ -598,11 +623,13 @@ async def test_losing_racing_open_releases_its_voice_session():
     gate_a, gate_b = asyncio.Event(), asyncio.Event()
     other_voice = "22222222-3333-4444-5555-666666666666"
     calls = []
+    bridges = []
 
     async def opener(voice_session_id, generation):
         calls.append(voice_session_id)
         await (gate_a if len(calls) == 1 else gate_b).wait()
-        return FakeBridge()
+        bridges.append(FakeBridge())
+        return bridges[-1]
 
     manager = PhoneAudioManager(opener)
     winner = object()
@@ -617,6 +644,7 @@ async def test_losing_racing_open_releases_its_voice_session():
     with pytest.raises(PhoneCallError) as loser:
         await second
     assert loser.value.code == "call_busy"  # same phone, a different call id
+    assert bridges[1].closed  # the losing bridge was closed before the retry answered
     await manager.close("phone-a", winner, CALL)  # the winner ends first
     result = await manager.open("phone-b", object(), "e" * 32, other_voice, 0)
     assert result["ok"] is True
