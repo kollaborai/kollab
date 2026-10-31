@@ -106,7 +106,7 @@ def test_a_phone_reaches_only_the_roots_the_app_calls():
     # #368: widening this is a decision. The app calls each of these, nothing else.
     assert phone_link.API_ROOTS == {
         "sessions", "agents", "profiles", "workspaces", "mcp", "hub", "sidebar",
-        "rosters", "teams", "prompts", "phone-app",
+        "rosters", "teams", "prompts", "voice", "phone-app",
     }  # fmt: skip
 
 
