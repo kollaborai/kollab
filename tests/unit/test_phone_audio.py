@@ -604,7 +604,8 @@ async def test_losing_racing_open_releases_its_voice_session():
         return FakeBridge()
 
     manager = PhoneAudioManager(opener)
-    first = asyncio.create_task(manager.open("phone-a", object(), CALL, VOICE, 0))
+    winner = object()
+    first = asyncio.create_task(manager.open("phone-a", winner, CALL, VOICE, 0))
     second = asyncio.create_task(
         manager.open("phone-a", object(), OTHER_CALL, other_voice, 0)
     )
@@ -615,6 +616,7 @@ async def test_losing_racing_open_releases_its_voice_session():
     with pytest.raises(PhoneCallError) as loser:
         await second
     assert loser.value.code == "call_busy"  # same phone, a different call id
+    await manager.close("phone-a", winner, CALL)  # the winner ends first
     result = await manager.open("phone-b", object(), "e" * 32, other_voice, 0)
     assert result["ok"] is True
     await manager.shutdown()
