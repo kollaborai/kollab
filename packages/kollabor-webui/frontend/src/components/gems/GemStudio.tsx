@@ -266,13 +266,15 @@ function StudioBody({
             </div>
             {!dressGem ? null : (
               <>
-                <div className="flex flex-wrap justify-center gap-1.5" role="group" aria-label="Preview activity">
-                  {STAGE_ACTIVITIES.map((option) => (
-                    <Chip key={option} active={option === activity} onClick={() => setActivity(option)}>
-                      {titleCase(option)}
-                    </Chip>
-                  ))}
-                </div>
+                <Tabs value={activity} onValueChange={(value) => setActivity(value as Activity)}>
+                  <TabsList aria-label="Preview activity" className="max-w-full overflow-x-auto">
+                    {STAGE_ACTIVITIES.map((option) => (
+                      <TabsTrigger key={option} value={option} className="flex-none px-1.5 text-xs">
+                        {titleCase(option)}
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
                 <Button
                   type="button"
                   variant="outline"
@@ -572,7 +574,12 @@ function StudioBody({
         <Button type="button" variant="outline" onClick={onDone}>
           Cancel
         </Button>
-        <Button type="button" onClick={() => void save()} disabled={saving || !studio}>
+        <Button
+          type="button"
+          onClick={() => void save()}
+          disabled={saving || !studio}
+          className="bg-highlight text-highlight-foreground hover:bg-highlight/90"
+        >
           {saving ? <Loader2 className="size-4 animate-spin" /> : null}
           Save
         </Button>
