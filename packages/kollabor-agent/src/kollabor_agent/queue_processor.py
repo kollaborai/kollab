@@ -5,6 +5,7 @@ Extracted from LLMService as part of the llm_service.py decomposition.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import sys
@@ -215,6 +216,24 @@ class RepeatedToolErrorBreaker:
         self.count = (self.count + 1 if sig == self._sig else 1) if sig else 0
         self._sig = sig
         return self.count >= self.limit
+
+
+def tool_error_signature(
+    failed: List[ToolExecutionResult],
+    inputs_by_id: Dict[str, Any],
+) -> Optional[str]:
+    """Only the same call failing the same way repeats a signature (#452)."""
+    if not failed:
+        return None
+    parts = []
+    for result in failed:
+        digest = hashlib.sha1(
+            json.dumps(
+                inputs_by_id.get(result.tool_id), sort_keys=True, default=str
+            ).encode()
+        ).hexdigest()[:12]
+        parts.append(f"{result.tool_type}:{digest}:{(result.error or '')[:80]}")
+    return "|".join(parts)
 
 
 def _should_ingest(result: ToolExecutionResult) -> bool:
@@ -2157,11 +2176,14 @@ class QueueProcessor:
             # Build error signature for circuit breaker (detect stuck loops)
             all_results = native_results + xml_tool_results
             failed = [r for r in all_results if not r.success]
-            if failed:
-                sig = "|".join(f"{r.tool_type}:{(r.error or '')[:80]}" for r in failed)
-                self._last_tool_error_sig = sig
-            else:
-                self._last_tool_error_sig = None
+            inputs_by_id: Dict[str, Any] = {}
+            for tc in raw_tool_calls:
+                inputs_by_id[getattr(tc, "id", None)] = getattr(tc, "input", None)
+            for tool_data in all_tools:
+                inputs_by_id[tool_data.get("id", "unknown")] = tool_data.get(
+                    "input", tool_data
+                )
+            self._last_tool_error_sig = tool_error_signature(failed, inputs_by_id)
 
             # Goal evidence provenance hook (goal-command spec 8.5): the
             # runtime records every tool result of the batch so the model

@@ -124,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Agents: a detached agent no longer stops when different commands fail the same
+  way (for example several searches that find nothing); only the same failing
+  call three turns in a row counts as stuck (#452).
 - Windows: voice setup and the voice service restart check whether a process
   is still running without sending it a signal (#460).
 - Web UI: chat history and Trajectory load again for chats with a very large
