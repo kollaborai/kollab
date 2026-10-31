@@ -112,6 +112,108 @@ class WorkerHandle:
     process: asyncio.subprocess.Process
 
 
+PHONE_BRIDGE_READY_TIMEOUT_S = 10.0
+PHONE_BRIDGE_EXIT_TIMEOUT_S = 5.0
+
+
+class PhoneBridgeHandle:
+    """Engine-side handle for one bridge child (satisfies PhoneBridge)."""
+
+    def __init__(self, process: asyncio.subprocess.Process) -> None:
+        self.process = process
+        self._out = bytearray()
+        self._reader_task: asyncio.Task[None] | None = None
+
+    async def start(self, start_line: str) -> None:
+        """Write the start line and wait for the child's ready handshake."""
+        stdin = self.process.stdin
+        stdout = self.process.stdout
+        if stdin is None or stdout is None:
+            raise RuntimeHostError(
+                "voice_runtime_not_ready",
+                500,
+                "Phone audio bridge pipes are missing.",
+                retryable=False,
+            )
+        stdin.write((start_line + "\n").encode())
+        await stdin.drain()
+        line = await asyncio.wait_for(
+            stdout.readline(), PHONE_BRIDGE_READY_TIMEOUT_S
+        )
+        try:
+            greeting = json.loads(line.decode() or "{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            greeting = {}
+        if greeting.get("type") != "ready":
+            code = str(greeting.get("code") or "bridge_not_ready")
+            raise RuntimeHostError(
+                "voice_runtime_not_ready",
+                503,
+                f"Phone audio bridge failed to start: {code}",
+                retryable=True,
+            )
+        self._reader_task = asyncio.ensure_future(self._read_loop())
+
+    async def _read_loop(self) -> None:
+        stdout = self.process.stdout
+        if stdout is None:
+            return
+        while True:
+            line = await stdout.readline()
+            if not line:
+                return
+            try:
+                message = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if message.get("type") == "audio":
+                try:
+                    self._out.extend(
+                        base64.b64decode(str(message.get("pcm", "")))
+                    )
+                except (ValueError, TypeError):
+                    continue
+
+    async def send_mic(self, n: int, pcm: bytes) -> None:
+        stdin = self.process.stdin
+        if stdin is None or stdin.is_closing():
+            raise RuntimeError("phone bridge stdin closed")
+        line = json.dumps(
+            {"type": "mic", "n": int(n), "pcm": base64.b64encode(pcm).decode()},
+            separators=(",", ":"),
+        )
+        stdin.write((line + "\n").encode())
+        await stdin.drain()
+
+    def take_output(self) -> bytes:
+        data = bytes(self._out)
+        self._out.clear()
+        return data
+
+    async def close(self) -> None:
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+        stdin = self.process.stdin
+        if stdin is not None and not stdin.is_closing():
+            stdin.write(b'{"type":"close"}\n')
+            try:
+                await stdin.drain()
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+        try:
+            await asyncio.wait_for(
+                self.process.wait(), PHONE_BRIDGE_EXIT_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            await self._kill_group(self.process)
+        stdin = self.process.stdin
+        if stdin is not None:
+            stdin.close()
+        transport = getattr(self.process, "transport", None)
+        if transport is not None:
+            transport.close()
+
+
 class LiveKitRuntime:
     """RuntimeBackend + JoinTicketSigner over a local livekit-server."""
 
@@ -376,6 +478,67 @@ class LiveKitRuntime:
         self._workers[(binding.voice_session_id, binding.generation)] = handle
         asyncio.create_task(self._drain(process))
         return handle
+
+    async def start_phone_bridge(self, binding: VoiceSessionBinding) -> PhoneBridgeHandle:
+        """Spawn the LiveKit media bridge child for one phone call.
+
+        The child authenticates with a token scoped to this binding's room
+        and generation; the token travels on stdin, never in argv.
+        """
+        cmd, cmd_env = await self._bridge_command()
+        room = room_name_for(binding)
+        token = mint_livekit_jwt(
+            self._api_key,
+            self._api_secret,
+            identity=f"phone-{binding.voice_session_id}",
+            video={
+                "room": room,
+                "roomJoin": True,
+                "canPublish": True,
+                "canSubscribe": True,
+            },
+            expires_at_s=int(time.time()) + WORKER_TOKEN_TTL_S,
+        )
+        start = json.dumps(
+            {
+                "type": "start",
+                "url": self.livekit_url,
+                "token": token,
+                "rate_in": 16000,
+                "rate_out": 24000,
+            },
+            separators=(",", ":"),
+        )
+        env = dict(os.environ)
+        env.update(cmd_env)
+        env.update(self._worker_env)
+        with self._log("phone-audio-bridge.log") as log:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=log,
+                start_new_session=True,
+            )
+        handle = PhoneBridgeHandle(process)
+        try:
+            await handle.start(start)
+        except BaseException:
+            await handle.close()
+            raise
+        return handle
+
+    async def _bridge_command(self) -> tuple[list[str], dict[str, str]]:
+        # Same prepared interpreter and PYTHONPATH as the worker; the bridge
+        # is a different module in the same voice package.
+        cmd, env = self._worker_command()
+        if cmd[-1].endswith("kollabor_voice.livekit_worker"):
+            cmd = list(cmd)
+            cmd[-1] = "kollabor_voice.phone_audio_bridge"
+        return cmd, env
+
+    @staticmethod
 
     @staticmethod
     async def _read_ready(process: asyncio.subprocess.Process) -> None:
