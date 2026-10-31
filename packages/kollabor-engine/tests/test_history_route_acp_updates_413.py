@@ -203,3 +203,27 @@ def test_small_acp_updates_survive_the_route(registry, conversations):
     reply = page["history"][-1]
     assert reply["metadata"]["acp_updates"] == [{"kind": "text", "text": "hello"}]
     assert "acp_updates_dropped" not in reply["metadata"]
+
+
+def test_slimmed_acp_updates_fetch_back_by_reference(registry, conversations):
+    conversations_dir, workspace_root = conversations
+    updates = [{"kind": "text", "text": "x" * 118}] * 4_000
+    _seed(conversations_dir, [_acp_reply(updates)])
+    session = _session(registry, workspace_root)
+
+    page = asyncio.run(
+        asyncio.wait_for(sessions_route.get_history(session.session_id), timeout=5)
+    )
+    slimmed = page["history"][-1]
+    reference = slimmed["metadata"]["history_output_ref"]
+
+    fetched = asyncio.run(
+        asyncio.wait_for(
+            sessions_route.get_history_metadata(session.session_id, ref=reference),
+            timeout=5,
+        )
+    )
+
+    assert fetched["session_id"] == session.session_id
+    assert fetched["metadata"]["acp_updates"] == updates
+    assert "acp_updates_dropped" not in fetched["metadata"]
