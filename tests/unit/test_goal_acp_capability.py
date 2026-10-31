@@ -11,6 +11,8 @@ from kollabor.goals.driver import GoalTurnDriver
 from kollabor.goals.service import GoalService
 from kollabor.llm.agent_hud import AgentHudEntry
 from kollabor.state.goal_store import GoalStore
+from kollabor.state.local import LocalStateService
+from kollabor.commands.parser import SlashCommandParser
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_events.models import SlashCommand
@@ -169,6 +171,50 @@ def test_native_create_failure_preserves_staged_attachments(goal_runtime):
     assert not result.success
     assert "remain" in result.message and "/goal clear" in result.message
     assert service.take_staged_attachments("conversation-1") == [{"ref": "staged"}]
+
+
+@pytest.mark.asyncio
+async def test_structured_image_goal_is_staged_before_acp_refusal(goal_runtime):
+    services = {"goal_service": goal_runtime.service, "llm_service": goal_runtime.coordinator,
+                "goal_driver": goal_runtime.driver, "slash_parser": SlashCommandParser()}
+    bus = SimpleNamespace(get_service=services.get)
+    state = LocalStateService(goal_runtime.coordinator, goal_runtime.coordinator.profile_manager,
+                              event_bus=bus)
+    state.get_conversation_uid = lambda: "conversation-1"
+    services["state_service"] = state
+    handler = GoalCommandHandler(None, bus)
+
+    class Executor:
+        result = None
+
+        async def execute_command(self, command, event_bus):
+            self.result = await handler.handle_goal(command)
+            return self.result
+
+    executor = Executor()
+    services["command_executor"] = executor
+    tasks = []
+
+    def start_task(coroutine, *, name=None):
+        task = asyncio.create_task(coroutine, name=name)
+        tasks.append(task)
+        return task
+
+    goal_runtime.coordinator.create_background_task = start_task
+    result = await state.send_message([
+        {"type": "text", "text": "/goal inspect the screenshot"},
+        {"type": "image", "image": "data:image/png;base64,aGVsbG8="},
+        {"type": "image", "image": "data:image/png;base64,d29ybGQ="},
+    ])
+    assert result == {"accepted": True, "reason": "goal command"}
+    await asyncio.gather(*tasks)
+    assert not executor.result.success
+    assert "ACP" in executor.result.message and "next goal creation" in executor.result.message
+    refs = goal_runtime.service.take_staged_attachments("conversation-1")
+    assert len(refs) == 2 and all(ref["kind"] == "image" for ref in refs)
+    assert [goal_runtime.service.load_attachment(ref) for ref in refs] == [b"hello", b"world"]
+    assert goal_runtime.store.get_active("conversation-1") is None
+    goal_runtime.driver.schedule.assert_not_called()
 
 
 def test_unexpected_storage_error_preserves_staged_attachments(goal_runtime, monkeypatch):
