@@ -589,3 +589,32 @@ async def test_cancelled_tick_after_mic_send_never_republishes():
         await manager.tick("phone-a", session, CALL, 0, MIC)
     assert retry.value.code == "call_not_ready"
     assert published == [0]
+
+
+@pytest.mark.asyncio
+async def test_losing_racing_open_releases_its_voice_session():
+    """A same-phone open that loses to another voice session gives its voice back."""
+    gate_a, gate_b = asyncio.Event(), asyncio.Event()
+    other_voice = "22222222-3333-4444-5555-666666666666"
+    calls = []
+
+    async def opener(voice_session_id, generation):
+        calls.append(voice_session_id)
+        await (gate_a if len(calls) == 1 else gate_b).wait()
+        return FakeBridge()
+
+    manager = PhoneAudioManager(opener)
+    first = asyncio.create_task(manager.open("phone-a", object(), CALL, VOICE, 0))
+    second = asyncio.create_task(
+        manager.open("phone-a", object(), OTHER_CALL, other_voice, 0)
+    )
+    await asyncio.sleep(0)
+    gate_a.set()
+    await first
+    gate_b.set()
+    with pytest.raises(PhoneCallError) as loser:
+        await second
+    assert loser.value.code == "call_busy"  # same phone, a different call id
+    result = await manager.open("phone-b", object(), "e" * 32, other_voice, 0)
+    assert result["ok"] is True
+    await manager.shutdown()

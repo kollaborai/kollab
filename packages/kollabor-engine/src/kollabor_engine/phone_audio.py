@@ -159,8 +159,10 @@ class PhoneAudioManager:
             self._release_voice(phone, voice_session_id)
             raise PhoneCallError("call_unavailable")
         if phone in self._calls:
-            # A racing open registered while this bridge was opening: drop ours.
+            # A racing open registered while this bridge was opening: drop ours,
+            # and give back our voice session unless the winner holds it.
             await bridge.close()
+            self._release_voice(phone, voice_session_id)
             return await self.open(phone, session, call_id, voice_session_id, generation)
         call = _Call(
             id=call_id,
