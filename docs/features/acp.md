@@ -117,6 +117,7 @@ text files up to 256 KiB; larger and binary files show their tool result.
 A model or effort pick belongs to the ACP session it was made in:
 
 - A restart of the same profile restores the picks that were confirmed and saved.
+  An explicit loadout model or effort wins over a saved pick on that restart.
 - A restart into another profile forgets the previous profile's picks. The new
   profile starts from its own loadout and its own saved picks.
 - After a model change, the effort you picked is re-applied. If the new model
