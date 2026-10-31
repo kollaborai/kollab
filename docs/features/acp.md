@@ -76,6 +76,10 @@ requests carry an owned thread; their final answer is returned automatically.
 Replies and broadcasts do not get automatic replies. Steering is used only
 when negotiated; otherwise follow-ups wait for a new turn.
 
+You can upload images to a harness that advertises image input. If it does not,
+Kollab refuses an image-bearing message with a short notice. ACP currently
+accepts uploaded image data, not image URLs or provider-file references.
+
 Approvals use the offered opaque option IDs. Reusable grants are scoped to
 the structured operation, workspace and harness profile. A vendor's saved
 approval remains the vendor's setting and cannot be undone by Kollab.

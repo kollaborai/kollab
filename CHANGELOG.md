@@ -132,6 +132,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or unavailable when the asking peer departs, and the hub shows ACP agents as
   working while a harness turn runs, from the same display lifecycle a native
   turn uses (#483).
+
+- ACP: an oversized agent reply no longer breaks history paging with a
+  413 error. A page that is too large slims its message metadata so the
+  older messages still load, and the original message is preserved
+  unchanged outside the page view (#482).
 - PhoneLink: the phone link no longer falls into a reconnect loop on every
   relay blip. The engine now rejects malformed peers and error frames without
   dropping its relay socket (only the requests they concern fail), the phone
