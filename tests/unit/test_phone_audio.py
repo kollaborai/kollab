@@ -958,7 +958,7 @@ def test_shutdown_returns_when_a_tracked_close_is_already_done():
         capture_output=True,
         text=True,
         env=env,
-        timeout=20,  # hard timeout: a spinning shutdown raises TimeoutExpired here
+        timeout=10,  # hard timeout: a spinning shutdown raises TimeoutExpired here
     )
     assert result.returncode == 0, result.stderr
     assert "shutdown returned 0" in result.stdout
