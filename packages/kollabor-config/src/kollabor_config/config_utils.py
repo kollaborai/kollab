@@ -22,7 +22,14 @@ APP_CONFIG_DIR_NAME = ".kollab"
 
 
 def get_config_directory() -> Path:
-    """Get the global Kollab runtime/config directory."""
+    """Get the global Kollab runtime/config directory.
+
+    ``KOLLAB_CONFIG_DIR`` (when set and non-empty) moves it, so a second engine
+    can run beside the default one without overwriting its token.
+    """
+    override = os.environ.get("KOLLAB_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
     return Path.home() / APP_CONFIG_DIR_NAME
 
 
