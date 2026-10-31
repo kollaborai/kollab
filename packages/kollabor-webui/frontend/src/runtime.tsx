@@ -67,7 +67,7 @@ export type EngineState = {
    * messages. Set when the history loads, and by the engine when a turn this
    * page ran ends; a later reload appends only what lies past it.
    */
-  synced?: { history: number; messages: number; start?: number };
+  synced?: { history: number; messages: number; start?: number; authoritative?: boolean };
   error?: string;
   usage?: {
     inputTokens: number;
@@ -886,7 +886,15 @@ export function EngineRuntimeProvider({
     // stream) leaves the thread to its next full load.
     if (thread.isRunning || !shown || !from || shown.messages.length !== from.messages) return;
     if (!initialState.synced) return;
-    if (shownMessagesChanged(shown.messages, initialState.messages)) {
+    // A non-authoritative window (older-focused merge, or a cache fallback
+    // while a fresh sync was unavailable) cannot prove that rows missing
+    // from it were deleted: merging keeps the shown rows instead of
+    // resetting the thread on every such publish. Only a fresh
+    // latest-window claim may declare shown rows gone.
+    if (
+      shownMessagesChanged(shown.messages, initialState.messages) &&
+      initialState.synced.authoritative !== false
+    ) {
       onStale?.();
       return;
     }
@@ -974,6 +982,11 @@ export function buildInitialState(
   pendingPermissions: PermissionPrompt[] = [],
   lastTurnError: TurnError | null = null,
   historyStartIndex = 0,
+  // A window built from an older-focused merge or a cache fallback is not a
+  // fresh "this is the latest history" claim: rows beyond its end may still
+  // exist upstream. Publishers pass false for those so the reload-sync
+  // effect merges instead of hard-resetting the thread.
+  authoritative = true,
 ): EngineState {
   const messages = historyToMessages(
     history,
@@ -990,6 +1003,7 @@ export function buildInitialState(
       history: historyStartIndex + history.length,
       start: historyStartIndex,
       messages: messages.length,
+      ...(authoritative ? {} : { authoritative: false }),
     },
   };
 }

@@ -782,6 +782,142 @@ try {
     },
   );
 
+  // G: a user up-wheel queues behind the open-time prefetch's in-flight
+  // before-cursor load. The queued intent must survive the prefetch's capped
+  // fragment, drive a continuation past it once the engine answers, and keep
+  // wheeling up to the oldest message — without a reset loop wedging the
+  // thread behind a stuck banner.
+  const g = {
+    issuedCursors: new Set(["before-71"]),
+    beforeSeen: 0,
+    held: [],
+    release() {
+      this.issuedCursors.add("before-21");
+      this.held
+        .splice(0)
+        .forEach((pending) =>
+          pending.resolve({ status: 200, body: mkPage(21, 71) }),
+        );
+    },
+  };
+  await scenario(
+    "G-queued-behind-prefetch",
+    () => ({
+      resolve(options) {
+        // All after-cursor syncs hang: the newest edge is slow in this
+        // engine, so the latest-window sync never completes.
+        if (options.after && !options.before) {
+          return new Promise((resolve) => {
+            g.held.push({ resolve });
+          });
+        }
+        if (options.before) {
+          if (!g.issuedCursors.has(options.before)) {
+            return { status: 400, body: { error: "unissued cursor rejected" } };
+          }
+          const from = Number(options.before.replace(/^before-/, ""));
+          if (!Number.isFinite(from) || from <= 0) {
+            return { status: 400, body: { error: "bad cursor" } };
+          }
+          g.beforeSeen += 1;
+          // First before-71 answer is byte-capped: [21,71) with no older
+          // cursor, so the open-time prefetch cannot page past it. The
+          // second before-71 answer is held until release() resolves it
+          // with a normal page whose older_cursor is before-21.
+          if (g.beforeSeen === 1 && options.before === "before-71") {
+            return {
+              status: 200,
+              body: { ...mkPage(21, 71), has_more_older: false, older_cursor: null },
+            };
+          }
+          if (g.beforeSeen === 2 && options.before === "before-71") {
+            return new Promise((resolve) => {
+              g.held.push({ resolve });
+            });
+          }
+          const page = mkPage(Math.max(0, from - 50), from);
+          if (page.older_cursor) g.issuedCursors.add(page.older_cursor);
+          return { status: 200, body: page };
+        }
+        return { status: 200, body: mkPage(71, 121) };
+      },
+    }),
+    async (page, requests) => {
+      await openThread(page, "message-120");
+      await page.waitForTimeout(1000);
+      const beforeCount = () => requests.filter((r) => r.before).length;
+      const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+      await viewport.hover();
+      // Wheel up until the capped fragment has landed and the user is parked
+      // at its edge, with a second before-71 request in flight (held).
+      let parked = false;
+      for (let i = 0; i < 30; i++) {
+        await page.mouse.wheel(0, -1200);
+        await page.waitForTimeout(200);
+        if (
+          beforeCount() >= 2 &&
+          (await page
+            .getByText("message-21", { exact: true })
+            .first()
+            .isVisible()
+            .catch(() => false))
+        ) {
+          parked = true;
+          break;
+        }
+      }
+      if (!parked) {
+        fail("G-queued-behind-prefetch", "wheel-up never reached the capped fragment edge with a held request in flight");
+        return;
+      }
+      // One more user up-intent queues behind the in-flight prefetch load.
+      await page.mouse.wheel(0, -600);
+      await page.waitForTimeout(600);
+      // The engine finally answers the held request; the queued intent must
+      // continue past the released page toward the real oldest window.
+      g.release();
+      await page.waitForTimeout(800);
+      let reached = false;
+      for (let i = 0; i < 50; i++) {
+        await page.mouse.wheel(0, -1200);
+        await page.waitForTimeout(250);
+        if (
+          await page
+            .getByText("message-0", { exact: true })
+            .first()
+            .isVisible()
+            .catch(() => false)
+        ) {
+          reached = true;
+          break;
+        }
+      }
+      if (reached) {
+        ok("G-queued-behind-prefetch", "up-only wheeling after the release reached the oldest message");
+      } else {
+        fail("G-queued-behind-prefetch", "up-only wheeling after the release never reached the oldest message");
+      }
+      const requested = requests.map((r) => r.before).filter(Boolean);
+      if (requested.includes("before-71") && requested.includes("before-21")) {
+        ok("G-queued-behind-prefetch", "the cursor chain advanced past the released page to before-21");
+      } else {
+        fail("G-queued-behind-prefetch", `cursor chain never advanced (requested: ${requested.join(", ") || "none"})`);
+      }
+      const olderLoads = beforeCount() - 2;
+      if (olderLoads <= 0) {
+        fail("G-queued-behind-prefetch", "no additional before-cursor load was made after the release");
+      } else {
+        ok("G-queued-behind-prefetch", `before-cursor loads made after the release (${olderLoads})`);
+      }
+      const banner = page.locator('[data-slot="history-status"][role="alert"]');
+      if (await banner.isVisible().catch(() => false)) {
+        fail("G-queued-behind-prefetch", "an error banner is showing after the queued-behind-prefetch paging");
+      } else {
+        ok("G-queued-behind-prefetch", "no error banner after the queued-behind-prefetch paging");
+      }
+    },
+  );
+
   // D: offline reload narrows the cached page; the prefix pages from cache.
   // The offline poll failures (503 every ~2 s) re-apply the narrowed cached
   // window over the prefix pages the cache is serving and can race the

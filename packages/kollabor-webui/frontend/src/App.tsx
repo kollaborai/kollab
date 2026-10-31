@@ -463,7 +463,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   }>());
   const olderLoadRef = useRef(new Set<string>());
 
-  const olderLoadQueuedRef = useRef(new Set<string>());
+  const olderLoadQueuedRef = useRef(
+    new Map<string, Array<(merged: boolean) => void>>(),
+  );
   const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<boolean | void>) | null>(null);
   const historyPrefetchRef = useRef(new Set<string>());
   const [refreshSignal, setRefreshSignal] = useState(0);
@@ -649,6 +651,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           pendingPermissions,
           page.last_turn_error ?? null,
           page.start_index,
+          // A cache-fallback page (fresh sync failed/timed out) can't prove
+          // that rows missing from it were deleted upstream.
+          !loaded.fromCache,
         );
       } catch (reason) {
         setHistoryStatus({
@@ -669,8 +674,15 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // no-op load would otherwise leave dangling.
   const loadOlderHistory = useCallback(async (sessionId: string, prefetch = false): Promise<boolean> => {
     if (olderLoadRef.current.has(sessionId)) {
-      if (!prefetch) olderLoadQueuedRef.current.add(sessionId);
-      return true; // an in-flight load is already extending this window
+      if (prefetch) return true; // an in-flight load is already extending this window
+      // A user-triggered load queued behind the in-flight one must carry the
+      // real continuation outcome back to the thread; resolving true up front
+      // drops the scroll anchor for a merge that never happened.
+      return new Promise<boolean>((resolve) => {
+        const queue = olderLoadQueuedRef.current.get(sessionId);
+        if (queue) queue.push(resolve);
+        else olderLoadQueuedRef.current.set(sessionId, [resolve]);
+      });
     }
     const current = historyPagesRef.current.get(sessionId);
     if (!current || !current.has_more_older) return false;
@@ -742,6 +754,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           context.pendingPermissions,
           updated.last_turn_error ?? null,
           updated.start_index,
+          // The extend publish is an older-focused window, not a
+          // latest-history claim: rows newer than its end still exist.
+          false,
         );
         setInitialState((previous) =>
           previous?.sessionId === sessionId ? nextState : previous,
@@ -796,11 +811,21 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       return false;
     } finally {
       olderLoadRef.current.delete(sessionId);
-      if (
-        olderLoadQueuedRef.current.delete(sessionId) &&
-        activeIdRef.current === sessionId
-      ) {
-        void loadOlderHistoryRef.current?.(sessionId, false);
+      const waiters = olderLoadQueuedRef.current.get(sessionId);
+      olderLoadQueuedRef.current.delete(sessionId);
+      if (waiters && waiters.length > 0) {
+        const settle = (merged: boolean) => {
+          for (const resolve of waiters) resolve(merged);
+        };
+        if (activeIdRef.current === sessionId) {
+          // One continuation serves the whole queued batch; waiters settle
+          // with the continuation's real outcome.
+          loadOlderHistoryRef
+            .current?.(sessionId, false)
+            .then((merged) => settle(merged === true), () => settle(false));
+        } else {
+          settle(false);
+        }
       }
     }
   }, []);
