@@ -1773,6 +1773,8 @@ async def _handle_cli_hub(hub_args: list) -> None:
         return d
 
     if subcmd in ("status", "agents", "list"):
+        from plugins.hub.presence import stall_status
+
         agents = _get_live_agents()
         if not agents:
             print("no agents online")
@@ -1787,6 +1789,9 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 state = a.get("state", "?")
                 if tags.get("acp_waiting"):
                     state = "waiting for your OK"
+                stall = stall_status(a)
+                if stall:
+                    state = stall
                 pid = a.get("pid", "?")
                 coord = " *" if a.get("is_coordinator") else ""
                 task = a.get("current_task", "")
