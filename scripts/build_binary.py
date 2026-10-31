@@ -321,6 +321,17 @@ def agent_smoke(binary: Path, timeout: float = 120.0) -> None:
                 if online:
                     break
                 time.sleep(2)
+            if online:
+                # This machine-wide lookup uses endpoint discovery, separately
+                # from the project-local status command above.
+                where = kollab("--hub", "where", online["name"], capture_output=True)
+                endpoint = where.stdout.strip()
+                if where.returncode != 0 or not endpoint or not Path(endpoint).exists():
+                    raise SystemExit(
+                        f"{binary.name} --hub where {online['name']} did not find its live endpoint: "
+                        f"exit {where.returncode}; {where.stderr[-1000:]}"
+                    )
+                print("machine-wide hub discovery found the live agent endpoint")
         finally:
             if online:
                 kollab("--hub", "stop", online["name"], capture_output=True)
