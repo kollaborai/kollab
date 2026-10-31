@@ -1,0 +1,4 @@
+fix(agent): the stuck-loop breaker counts only the same failing call, refs #452
+
+The error signature now digests each failed call's input, so three different
+searches failing with the same error no longer look like one repeated call.

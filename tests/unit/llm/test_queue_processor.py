@@ -2309,3 +2309,62 @@ class TestQueueProcessorToolContinuation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestToolErrorSignature452(unittest.TestCase):
+    """Only the same call failing the same way repeats a signature (#452)."""
+
+    ERROR = "Command exited with code 1"
+
+    def _failed(self, tool_id: str) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="terminal",
+            success=False,
+            error=self.ERROR,
+        )
+
+    def test_different_inputs_never_trip_breaker(self):
+        """Three different failing searches are not the same failing call."""
+        from kollabor_agent.queue_processor import (
+            RepeatedToolErrorBreaker,
+            tool_error_signature,
+        )
+
+        inputs_by_id = {
+            "t1": {"command": "rg foo src/"},
+            "t2": {"command": "rg bar docs/"},
+            "t3": {"command": "rg baz tests/"},
+        }
+        sigs = [
+            tool_error_signature([self._failed(tid)], inputs_by_id)
+            for tid in ("t1", "t2", "t3")
+        ]
+        self.assertTrue(all(sigs))
+        self.assertEqual(len(set(sigs)), 3)
+
+        breaker = RepeatedToolErrorBreaker()
+        for sig in sigs:
+            self.assertFalse(breaker.observe(sig))
+
+    def test_same_input_trips_breaker_on_third(self):
+        """The same input failing the same way is a stuck loop."""
+        from kollabor_agent.queue_processor import (
+            RepeatedToolErrorBreaker,
+            tool_error_signature,
+        )
+
+        inputs_by_id = {"t1": {"command": "rg missing src/"}}
+        sig = tool_error_signature([self._failed("t1")], inputs_by_id)
+        self.assertIsNotNone(sig)
+
+        breaker = RepeatedToolErrorBreaker()
+        self.assertFalse(breaker.observe(sig))
+        self.assertFalse(breaker.observe(sig))
+        self.assertTrue(breaker.observe(sig))
+
+    def test_empty_failed_returns_none(self):
+        """No failures means no signature."""
+        from kollabor_agent.queue_processor import tool_error_signature
+
+        self.assertIsNone(tool_error_signature([], {}))
