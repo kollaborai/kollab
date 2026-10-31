@@ -99,6 +99,7 @@ class ACPOrchestrator:
         # The model/effort picked for each harness profile, re-applied at start.
         self._options_path = Path(get_project_data_dir()) / "acp" / "options.json"
         self._binding_conversation_id: str | None = None
+        self.restore_notices: list[str] = []
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_rows: list[str] = []
         self._unwritten_observations: deque[AgentHudEntry] = deque(maxlen=20)
@@ -175,18 +176,33 @@ class ACPOrchestrator:
             return notices  # nothing to re-apply: stay lazy, as before
         model = next((o for o in self.advertised_config_options()
                       if o.get("category") == "model" or o.get("id") == "model"), None)
+        model_ok = True
         if model is not None:
             model_id = str(model["id"])
-            model_value = loadout_model or saved.pop(model_id, None)
+            saved_model = saved.pop(model_id, None)
+            model_value = loadout_model or saved_model
             if model_value and model_value != model.get("currentValue"):
                 try:
                     await runner.set_config_option(model_id, model_value)
                 except Exception as exc:
+                    model_ok = False
                     notices.append(f"model {model_value} was not applied: {exc}")
+            if model_value and model_ok:
+                active = next((o.get("currentValue") for o in self.advertised_config_options()
+                               if o.get("id") == model_id), None)
+                if active != model_value:
+                    model_ok = False
+                    notices.append(f"model {model_value} did not become active (harness reports {active})")
         effort = self._effort_option()
-        if effort is not None:
-            effort_id = str(effort["id"])
-            effort_value = loadout_effort or saved.pop(effort_id, None)
+        effort_id = str(effort["id"]) if effort is not None else None
+        saved_effort = saved.pop(effort_id, None) if effort_id else None
+        if not model_ok:
+            if loadout_effort or saved_effort:
+                notices.append(
+                    f"effort {loadout_effort or saved_effort} was not applied because the model is not active"
+                )
+        elif effort is not None:
+            effort_value = loadout_effort or saved_effort
             if effort_value and str(effort_value) != effort.get("currentValue"):
                 value = str(effort_value)
                 offered = option_values(effort)
@@ -200,11 +216,13 @@ class ACPOrchestrator:
                         await runner.set_config_option(effort_id, value)
                     except Exception as exc:
                         notices.append(f"effort {value} was not applied: {exc}")
-        elif loadout_effort:
+        elif loadout_effort or saved_effort:
             notices.append(
-                f"this harness advertises no effort option, so effort {loadout_effort} was not applied"
+                f"this harness advertises no effort option, so effort {loadout_effort or saved_effort} was not applied"
             )
         for config_id, value in saved.items():
+            if effort_id is not None and config_id == effort_id and not model_ok:
+                continue
             option = next((o for o in self.advertised_config_options() if o.get("id") == config_id), None)
             if option is None or option.get("currentValue") == value:
                 continue
@@ -276,6 +294,7 @@ class ACPOrchestrator:
             self._binding_conversation_id = self._conversation_id()
             await self._runner.start(binding=binding)
             self.restore_notices = await self._restore_options(profile)
+            self._announce_restore_notices()
             self.event_bus.register_service("acp_orchestrator", self)
             self._save_binding()
         except BaseException as exc:
@@ -434,6 +453,22 @@ class ACPOrchestrator:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
         return str(getattr(manager, "current_session_id", "") or self.identity)
+
+    @property
+    def binding_conversation_id(self) -> str | None:
+        return self._binding_conversation_id
+
+    def save_binding_for(self, conversation_id: str, binding: Any) -> None:
+        """Put back a binding a switch overwrote, so a rollback can resume it."""
+        self._bindings.save(conversation_id, binding)
+
+    def _announce_restore_notices(self) -> None:
+        """Show each requested value the harness did not take, in the chat."""
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        display = getattr(llm, "message_display_service", None)
+        for notice in self.restore_notices:
+            if display is not None:
+                display.display_system_message(f"ACP setting not applied: {notice}")
 
     def _save_binding(self) -> None:
         if self._runner is not None and self._runner.binding is not None:

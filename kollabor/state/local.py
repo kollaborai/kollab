@@ -1381,6 +1381,8 @@ class LocalStateService(StateService):
                     if str(current_provider).lower() == "acp" and getattr(orchestrator, "active", False) is True
                     else None
                 )
+                prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
+                prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
                 try:
                     await orchestrator.close()
                     await orchestrator.start(target_profile)
@@ -1401,8 +1403,13 @@ class LocalStateService(StateService):
                         # A rejected effort changes nothing: restore the previous harness.
                         await orchestrator.close()
                         if previous is not None:
+                            if prior_binding is not None and prior_conversation:
+                                orchestrator.save_binding_for(prior_conversation, prior_binding)
                             try:
-                                await orchestrator.start(previous)
+                                await orchestrator.start(
+                                    previous,
+                                    resume_conversation=prior_conversation if prior_binding is not None else None,
+                                )
                             except Exception:
                                 logger.error("previous ACP profile did not restart after a rejected effort")
                         raise
