@@ -253,7 +253,15 @@ class DaemonHandle:
         assert self._reader is not None
         try:
             while True:
-                line = await self._reader.readline()
+                try:
+                    line = await self._reader.readline()
+                except ValueError:
+                    # One frame over the reader's limit (the daemon allows larger
+                    # lines): drop it and keep the session, as the daemon does with
+                    # ours. A reply inside it times out; reattaching would only
+                    # meet the same frame again (#541).
+                    logger.warning("dropped an oversized frame from daemon %s", self.identity)
+                    continue
                 if not line:
                     break
                 try:

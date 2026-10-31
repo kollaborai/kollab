@@ -113,15 +113,51 @@ async def test_a_read_failure_that_is_not_a_connection_error_reattaches():
     try:
         await handle.connect(path)
 
-        async def oversized_line():
-            raise ValueError("Separator is not found, and chunk exceed the limit")
+        async def broken_read():
+            raise RuntimeError("the reader blew up")
 
-        handle._reader.readline = oversized_line  # before the read loop's first read
+        handle._reader.readline = broken_read  # before the read loop's first read
         for _ in range(100):
             if len(attaches) == 2 and handle.rpc is not None and not handle.rpc._closed:
                 break
             await asyncio.sleep(0.02)
         assert await handle.rpc.call("state.ping", {}, timeout=5) == {"ok": True}
+    finally:
+        handle._closed = True
+        handle._read_task.cancel()
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_frame_is_dropped_and_the_session_stays(monkeypatch):
+    # A frame over the engine's read limit made every reattach meet it again
+    # (nephrite, 2026-10-31: a reconnect every ~10 s). Drop that one frame.
+    import kollabor_rpc.transport
+
+    monkeypatch.setattr(kollabor_rpc.transport, "LARGE_BUFFER_LIMIT", 1024)
+    attaches = []
+
+    async def daemon(reader, writer):
+        await reader.readline()
+        attaches.append("attach")
+        writer.write(b'{"type": "attach_ack"}\n')
+        writer.write(b'{"type": "tool_result", "output": "' + b"x" * 4096 + b'"}\n')
+        await writer.drain()
+        request = json.loads(await reader.readline())
+        reply = {"action": "rpc_reply", "request_id": request["request_id"], "result": {"ok": True}}
+        writer.write((json.dumps(reply) + "\n").encode())
+        await writer.drain()
+        await reader.read()  # stay attached
+
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp"), "nephrite.sock")
+    server = await asyncio.start_unix_server(daemon, path)
+    handle = DaemonHandle("s4", "nephrite", launcher=None)
+    handle.pid = os.getpid()
+    _fast_reattach(handle)
+    try:
+        await handle.connect(path)
+        assert await handle.rpc.call("state.ping", {}, timeout=5) == {"ok": True}
+        assert attaches == ["attach"]  # never dropped and reattached
     finally:
         handle._closed = True
         handle._read_task.cancel()
