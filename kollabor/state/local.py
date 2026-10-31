@@ -2989,9 +2989,12 @@ class LocalStateService(StateService):
         for part in parts:
             if not isinstance(part, dict):
                 continue
-            if part.get("type") != "image_url":
+            if part.get("type") == "image":
+                url = part.get("image", "")
+            elif part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+            else:
                 continue
-            url = (part.get("image_url") or {}).get("url", "")
             if not isinstance(url, str) or not url.startswith("data:image/"):
                 continue
             try:
