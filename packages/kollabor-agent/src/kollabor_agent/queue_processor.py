@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -58,6 +59,35 @@ class QueuedInput:
     content: MessageContent
     voice: dict
     origin_context: dict[str, Any] | None = None
+    # Marks a system-initiated corrective nudge (first-turn stall revival,
+    # #453): never resets the nudge budget, so it cannot loop.
+    is_system_nudge: bool = False
+
+
+_UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")
+
+
+def first_turn_stall_signature(response_text: str) -> tuple[str, str] | None:
+    """Detect a reply that stalled instead of acting (#453).
+
+    Returns (kind, detail) when the reply ends in one of the two stall
+    shapes seen in detached first turns, else None:
+    - ("unfinished_tool_tag", "<tag>") — trailing unclosed or truncated
+      tool tag with no matching closer anywhere in the reply.
+    - ("announced_no_action", "") — reply ends with ':' right after
+      announcing the next step, the todo-plan-then-idle shape.
+    """
+    text = (response_text or "").rstrip()
+    if not text:
+        return None
+    match = _UNFINISHED_TAG_RE.search(text)
+    if match:
+        tag = match.group(1)
+        if f"</{tag}>" not in text:
+            return ("unfinished_tool_tag", f"<{tag}>")
+    if text.endswith(":"):
+        return ("announced_no_action", "")
+    return None
 
 
 def merge_livekit_origin_contexts(messages: List[Any]) -> dict[str, Any] | None:
@@ -534,6 +564,10 @@ class QueueProcessor:
         # parity, hooks read it on stdin), the counter caps blocks per turn.
         self._stop_hook_active = False
         self._stop_hook_continuations = 0
+        # First-turn stall revival budget (#453): one corrective system
+        # nudge per real inbound batch. Only process_message_batch resets
+        # it, and never for a batch that is itself a nudge.
+        self._first_turn_nudge_budget = 0
         self.active_origin_context: dict[str, Any] | None = None
         self._voice_turn_token: Any = None  # current_turn stamp (_stamp_voice_turn)
         self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
@@ -734,6 +768,58 @@ class QueueProcessor:
             if key:
                 carried[key] = (target, text)
         self._carried_context = carried
+
+    def _is_unattended_runtime(self) -> bool:
+        """True when this processor runs inside a detached daemon (#453).
+
+        Interactive and attach sessions have a human watching the reply;
+        only an unattended daemon turn needs the corrective nudge.
+        """
+        if not self.event_bus:
+            return False
+        layout = self.event_bus.get_service("layout_manager")
+        return str(getattr(layout, "runtime_mode", "") or "") == "daemon"
+
+    async def _maybe_nudge_first_turn_stall(
+        self, response_text: str
+    ) -> None:
+        """Queue one corrective nudge for a stalled first turn (#453).
+
+        A zero-tool reply that ends mid-tool-tag or right after announcing
+        a next step leaves a detached agent idle with nobody watching. The
+        nudge is a plain queued message, so the existing drain loop handles
+        the revival exactly like a peer nudge. One per real inbound batch;
+        a nudge batch never re-arms the budget, so it cannot loop.
+        """
+        if self._first_turn_nudge_budget <= 0:
+            return
+        if not self._is_unattended_runtime():
+            return
+        signature = first_turn_stall_signature(response_text)
+        if signature is None:
+            return
+        kind, detail = signature
+        self._first_turn_nudge_budget = 0
+        if kind == "unfinished_tool_tag":
+            content = (
+                f"Your last reply ended with an unfinished tool tag {detail} "
+                "and no tool ran. Finish the tool call now — emit the "
+                "complete tag with its closing marker — or state plainly "
+                "that no tool is needed and complete the task."
+            )
+        else:
+            content = (
+                "Your last reply announced the next step but made no tool "
+                "call. Take that step now using your tools, or report the "
+                "task complete."
+            )
+        logger.info(
+            "First-turn stall detected (%s); queueing corrective nudge (#453)",
+            kind,
+        )
+        await self.enqueue(
+            QueuedInput(content=content, voice={}, is_system_nudge=True)
+        )
 
     async def enqueue(self, message: MessageContent) -> None:
         """Enqueue message with overflow strategy."""
@@ -1122,6 +1208,11 @@ class QueueProcessor:
         # read it as its own continuation and skip blocking.
         self._stop_hook_continuations = 0
         self._stop_hook_active = False
+        # Real (non-nudge) inbound input re-arms the one-per-batch
+        # first-turn stall nudge (#453); a nudge batch never does.
+        self._first_turn_nudge_budget = 0 if any(
+            getattr(m, "is_system_nudge", False) for m in messages
+        ) else 1
         voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
         self.active_voice = voice_inputs[-1].voice if voice_inputs else None
         merged_origin_context = merge_voice_origin_contexts(messages)
@@ -1743,6 +1834,17 @@ class QueueProcessor:
             self.turn_completed = parsed_response["turn_completed"]
             if has_native_tools:
                 self.turn_completed = False
+            # First-turn stall revival (#453): a zero-tool reply ending
+            # mid-tool-tag or on an announced-but-unstarted step leaves a
+            # detached agent idle with nobody watching. Queue one
+            # corrective nudge; no-op unless unattended with budget left.
+            if (
+                not has_native_tools
+                and not all_tools
+                and self.turn_completed
+                and not self.cancel_processing
+            ):
+                await self._maybe_nudge_first_turn_stall(response)
             self.stats["total_thinking_time"] += thinking_duration
             self.session_stats["messages"] += 1
 
