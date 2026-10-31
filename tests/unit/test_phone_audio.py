@@ -657,3 +657,34 @@ async def test_cancelled_loser_teardown_finishes_before_shutdown_returns():
     gate.set()
     await shutdown
     assert len(bridges) == 2 and all(b.closed for b in bridges)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_active_close_keeps_its_bridge_tracked():
+    """Cancel an active call's close mid bridge-close: shutdown still waits for it."""
+    gate = asyncio.Event()
+    bridges = []
+
+    class SlowCloseBridge(FakeBridge):
+        async def close(self):
+            await gate.wait()
+            self.closed = True
+
+    async def opener(voice_session_id, generation):
+        bridge = SlowCloseBridge()
+        bridges.append(bridge)
+        return bridge
+
+    manager = PhoneAudioManager(opener)
+    session, _ = await open_call(manager)
+    closing = asyncio.create_task(manager.close("phone-a", session, CALL))
+    await asyncio.sleep(0.01)  # the call's close is inside the bridge close
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    shutdown = asyncio.create_task(manager.shutdown())
+    await asyncio.sleep(0.01)
+    assert not shutdown.done()
+    gate.set()
+    await shutdown
+    assert bridges[0].closed and "phone-a" not in manager._calls
