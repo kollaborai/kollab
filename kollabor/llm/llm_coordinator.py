@@ -117,7 +117,7 @@ class LLMService:
         )
 
     def _add_conversation_message(
-        self, message_or_role, content=None, parent_uuid=None, metadata=None
+        self, message_or_role, content=None, parent_uuid=None, metadata=None, *, publish_user_event=True
     ) -> str:
         """Add a message to both conversation manager and legacy history.
 
@@ -170,7 +170,7 @@ class LLMService:
         # conversation_manager: adds persistence, UUID tracking, metadata
         # both systems stay synchronized
         self.conversation_history.append(message)
-        if role == "user" and not hidden:
+        if role == "user" and not hidden and publish_user_event:
             # What mirrors this conversation (the engine) follows it by these,
             # so a window opened mid-turn shows the message being answered.
             publish_semantic(

@@ -9,6 +9,7 @@ import {
   loadOlderHistoryPage,
   mergeOlderHistoryPage,
   mergeRecentHistoryPage,
+  storeHistoryPageIfCurrent,
 } from "../src/history-cache";
 
 function page(start: number, end: number, errorIndex?: number): HistoryPage {
@@ -281,5 +282,111 @@ describe("bounded history cache and paging", () => {
 
     expect((await cache.load("session-0")).length).toBe(0);
     expect((await cache.load(`session-${HISTORY_CACHE_MAX_SESSIONS + 2}`)).length).toBe(1);
+  });
+});
+
+describe("conversation identity", () => {
+  it("replaces a cached prefix after a conversation switch even when the cursor still matches", async () => {
+    const cache = new MemoryHistoryPageCache();
+    await cache.store("same-session", { ...page(0, 2), conversation_uid: "a" });
+    const requests: Array<{ after?: string }> = [];
+    const api = {
+      async getHistoryPage(_session: string, options: { after?: string } = {}) {
+        requests.push(options);
+        return options.after
+          ? { ...page(2, 2), conversation_uid: "b" }
+          : { ...page(0, 1), conversation_uid: "b", history: [{ role: "user", content: "new conversation" }] };
+      },
+    };
+    const result = await loadLatestHistoryPage("same-session", api, cache);
+    expect(requests).toHaveLength(2);
+    expect(result.page.conversation_uid).toBe("b");
+    expect(result.page.history.map(outputId)).toEqual(["new conversation"]);
+    expect((await cache.load("same-session")).every((entry) => entry.conversation_uid === "b")).toBe(true);
+  });
+
+  it("never merges an older page from a different conversation", () => {
+    const current = { ...page(2, 3), conversation_uid: "b" };
+    expect(mergeOlderHistoryPage(current, { ...page(0, 2), conversation_uid: "a" })).toEqual(current);
+  });
+
+  it("does not cache a delayed history response after a newer conversation loads", async () => {
+    const cache = new MemoryHistoryPageCache();
+    let current = "a";
+    let release!: (value: HistoryPage) => void;
+    let started!: () => void;
+    const requested = new Promise<void>((resolve) => { started = resolve; });
+    const delayed = new Promise<HistoryPage>((resolve) => { release = resolve; });
+    const oldLoad = loadLatestHistoryPage("same-session", {
+      getHistoryPage: async () => { started(); return delayed; },
+    }, cache, () => current === "a");
+    await requested;
+    current = "b";
+    await loadLatestHistoryPage("same-session", {
+      getHistoryPage: async () => ({ ...page(0, 1), conversation_uid: "b" }),
+    }, cache, () => current === "b");
+    release({ ...page(0, 1), conversation_uid: "a" });
+    await oldLoad;
+    expect((await cache.load("same-session")).map((entry) => entry.conversation_uid)).toEqual(["b"]);
+  });
+
+  it("orders a slow old cache write before the new conversation's write", async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const writing = new Promise<void>((resolve) => { started = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    class SlowCache extends MemoryHistoryPageCache {
+      async store(sessionId: string, value: HistoryPage) {
+        if (value.conversation_uid === "a") { started(); await blocked; }
+        return super.store(sessionId, value);
+      }
+    }
+    const cache = new SlowCache();
+    let current = "a";
+    const first = storeHistoryPageIfCurrent("same-session", { ...page(0, 1), conversation_uid: "a" }, cache, () => current === "a");
+    await writing;
+    current = "b";
+    const second = storeHistoryPageIfCurrent("same-session", { ...page(0, 1), conversation_uid: "b" }, cache, () => current === "b");
+    release();
+    await Promise.all([first, second]);
+    expect((await cache.load("same-session")).map((entry) => entry.conversation_uid)).toEqual(["b"]);
+  });
+
+  it("keeps the new conversation when cache invalidation fails", async () => {
+    class BrokenCache extends MemoryHistoryPageCache {
+      async clear(_sessionId: string) { throw new Error("cache unavailable"); }
+    }
+    const cache = new BrokenCache();
+    await cache.store("same-session", { ...page(0, 1), conversation_uid: "a" });
+    const result = await loadLatestHistoryPage("same-session", {
+      getHistoryPage: async () => ({ ...page(0, 1), conversation_uid: "b" }),
+    }, cache);
+    expect(result.page.conversation_uid).toBe("b");
+    expect(result.fromCache).toBe(false);
+  });
+
+  it("never revives an old cached conversation after a switch when offline", async () => {
+    class BrokenCache extends MemoryHistoryPageCache {
+      broken = false;
+      async clear(sessionId: string) {
+        if (this.broken) throw new Error("cache unavailable");
+        return super.clear(sessionId);
+      }
+      async store(sessionId: string, value: HistoryPage) {
+        if (this.broken) throw new Error("cache unavailable");
+        return super.store(sessionId, value);
+      }
+    }
+    const cache = new BrokenCache();
+    await cache.store("same-session", { ...page(0, 1), conversation_uid: "a" });
+    cache.broken = true;
+    const switched = await loadLatestHistoryPage("same-session", {
+      getHistoryPage: async () => ({ ...page(0, 1), conversation_uid: "b" }),
+    }, cache);
+    expect(switched.page.conversation_uid).toBe("b");
+    expect((await cache.load("same-session"))[0].conversation_uid).toBe("a");
+    await expect(loadLatestHistoryPage("same-session", {
+      getHistoryPage: async () => { throw new Error("offline"); },
+    }, cache, () => true, "b")).rejects.toThrow("offline");
   });
 });

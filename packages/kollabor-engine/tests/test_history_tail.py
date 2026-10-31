@@ -164,3 +164,45 @@ async def test_unavailable_provenance_leaves_history_visible(monkeypatch):
     monkeypatch.setattr("kollabor_engine.session.mark_system_initialization", Mock(side_effect=OSError("unavailable")))
     assert await session.refresh_history() == _full(daemon)
     assert session._raw_history[0]["metadata"] == {}
+
+
+@pytest.mark.asyncio
+async def test_conversation_uid_change_refetches_and_announces_even_identical_history():
+    class ScopedDaemon(Daemon):
+        def __init__(self):
+            super().__init__()
+            self.uid = 'conversation-a'
+        async def get_conversation(self, since=None, anchor=None, expected_conversation_uid=None):
+            snapshot = ConversationSnapshot(messages=list(self.messages), message_count=len(self.messages),
+                                            metadata={'conversation_uid': self.uid})
+            if expected_conversation_uid in (None, self.uid):
+                snapshot.tail(since, anchor)
+            self.sent.append(len(snapshot.messages))
+            return snapshot
+    daemon = ScopedDaemon()
+    session = _session(daemon)
+    events = []
+    session.daemon.fan_out = events.append
+    _say(daemon, 'same text')
+    await session.refresh_history()
+    assert session._history_conversation_uid == 'conversation-a'
+    daemon.uid = 'conversation-b'
+    await session.refresh_history(notify=False)
+    assert session._history_conversation_uid == 'conversation-b'
+    assert daemon.sent == [1, 1]
+    assert events == [{'type': 'history_updated', 'conversation_uid': 'conversation-b'}]
+    session._schedule_refresh = lambda: None
+    session.last_turn_error = None
+    assert (await session.get_history_nonblocking())['conversation_uid'] == 'conversation-b'
+
+
+@pytest.mark.asyncio
+async def test_empty_live_conversation_never_reseeds_old_disk_history():
+    daemon = Daemon()
+    session = _session(daemon)
+    await session.refresh_history()
+    session._disk_conversation_dir = lambda: (_ for _ in ()).throw(AssertionError('old disk seed used'))
+    session._schedule_refresh = lambda: None
+    session.last_turn_error = None
+    snapshot = await session.get_history_nonblocking()
+    assert snapshot['history'] == [] and snapshot['source'] == 'mirror'
