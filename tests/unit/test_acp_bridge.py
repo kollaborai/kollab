@@ -6,13 +6,14 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import pytest
 import acp
 import psutil
+import pytest
 from acp.schema import PermissionOption, ToolCallStart
 
 from kollabor.llm import acp_bridge as bridge_mod
 from kollabor.llm.acp_bridge import ACPError, ACPPermissionBridge, ACPProfile, ACPRunner
+from tests.unit._owned_processes import bounded_child_command, cleanup_pidfile
 
 
 @pytest.mark.asyncio
@@ -92,7 +93,9 @@ async def test_close_after_started_worker_releases_queue_and_is_repeatable(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("release_before_deadline", [True, False])
-async def test_close_settles_active_and_queued_owners_without_starting_more_turns(tmp_path, monkeypatch, release_before_deadline):
+async def test_close_settles_active_and_queued_owners_without_starting_more_turns(
+    tmp_path, monkeypatch, release_before_deadline
+):
     runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -160,7 +163,9 @@ async def test_close_settles_waiting_owners_when_consumer_is_held(tmp_path):
     (-32001, "Provider quota exhausted", "", "Provider quota exhausted"),
     (-32603, "Internal error", "Checking the limit of this function", "Internal error"),
 ])
-async def test_provider_refusal_preserves_message_code_without_false_crash(tmp_path, code, rpc_message, streamed, expected):
+async def test_provider_refusal_preserves_message_code_without_false_crash(
+    tmp_path, code, rpc_message, streamed, expected
+):
     runner = ACPRunner(ACPProfile.builtin("claude-code", cwd=str(tmp_path)))
     runner.session_id = "owned-session"
     runner.generation = 1
@@ -327,20 +332,40 @@ import acp
 from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
 
 def orphan():
+    # Do not let the adapter return until the detached process has recorded
+    # its identity: otherwise even a finally block can race its creation.
+    read_fd, write_fd = os.pipe()
     if os.fork():
+        os.close(write_fd)
+        try:
+            os.read(read_fd, 1)
+        finally:
+            os.close(read_fd)
         return
+    os.close(read_fd)
     os.setsid()
     if os.fork():
         os._exit(0)
+    signal.alarm(60)  # hard bound even if the test process is killed
     for fd in (0, 1, 2):
         try:
             os.close(fd)
         except OSError:
             pass
-    with open(os.environ['ACP_OWNED_CHILD_FILE'], 'w') as stream:
+    path = os.environ['ACP_OWNED_CHILD_FILE']
+    with open(path + '.tmp', 'w') as stream:
         json.dump({'pid': os.getpid(), 'birth': psutil.Process().create_time()}, stream)
-    while True:
-        time.sleep(30)
+    os.replace(path + '.tmp', path)
+    os.write(write_fd, b'1')
+    os.close(write_fd)
+    try:
+        owner = psutil.Process(int(os.environ['ACP_TEST_OWNER_PID']))
+        birth = float(os.environ['ACP_TEST_OWNER_BIRTH'])
+        while (owner.is_running() and owner.status() != psutil.STATUS_ZOMBIE
+               and owner.create_time() == birth):
+            time.sleep(0.1)
+    except psutil.Error:
+        pass
 
 class Agent:
     async def initialize(self, protocol_version, **kwargs):
@@ -364,14 +389,86 @@ if os.environ['ACP_OWNED_CHILD_MODE'] == 'close':
 """
 
 
+def _orphan_env(child_file, mode):
+    return {
+        "ACP_OWNED_CHILD_FILE": str(child_file),
+        "ACP_OWNED_CHILD_MODE": mode,
+        "ACP_TEST_OWNER_PID": str(os.getpid()),
+        "ACP_TEST_OWNER_BIRTH": str(psutil.Process().create_time()),
+    }
+
+
+def _capture_test_subprocesses(monkeypatch, *, wait_for_exit=False):
+    """Retain direct child identities independently of ACPRunner's tracking."""
+    original_spawn = asyncio.create_subprocess_exec
+    captured = []
+
+    async def spawn(*args, **kwargs):
+        process = await original_spawn(*args, **kwargs)
+        # Save the direct child handle before any identity lookup can fail.
+        captured.append((process, None))
+        try:
+            owner = psutil.Process(process.pid)
+            owner.create_time()
+        except psutil.NoSuchProcess:
+            owner = None
+        captured[-1] = (process, owner)
+        if wait_for_exit:
+            # Model a root exiting before ACPRunner can inspect its tree.
+            await asyncio.wait_for(process.wait(), timeout=3)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    return captured
+
+
+async def _cleanup_test_subprocesses(captured):
+    errors = []
+    for process, owner in reversed(captured):
+        try:
+            if process.returncode is None:
+                with contextlib.suppress(psutil.NoSuchProcess, ProcessLookupError):
+                    if owner is not None:
+                        owner.terminate()
+                    else:
+                        process.terminate()  # retained direct child handle
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(psutil.NoSuchProcess, ProcessLookupError):
+                    if owner is not None:
+                        owner.kill()
+                    else:
+                        process.kill()
+                await asyncio.wait_for(process.wait(), timeout=2)
+        except Exception as exc:
+            errors.append(exc)
+    if errors:
+        raise ExceptionGroup("test subprocess cleanup failed", errors)
+
+
+async def _cleanup_orphan_test(runner, captured, child_file):
+    try:
+        # The code under test can be broken, raise, or hang; it is not the
+        # authority for the test's own process cleanup.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(runner.close(), timeout=12)
+    finally:
+        try:
+            await _cleanup_test_subprocesses(captured)
+        finally:
+            cleanup_pidfile(child_file)
+
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["prompt", "close"])
-async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_process(tmp_path, mode):
+async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_process(tmp_path, mode, monkeypatch):
     child_file = tmp_path / "child.json"
-    runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
-        "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": mode,
-    }))
+    runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER),
+                                  cwd=str(tmp_path), env=_orphan_env(child_file, mode)))
+    captured = _capture_test_subprocesses(monkeypatch)
     outsider = None
     outsider_owner = None
 
@@ -388,7 +485,7 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_pro
     try:
         await runner.start()
         outsider = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", "import time; time.sleep(60)", cwd=str(tmp_path),
+            *bounded_child_command(), cwd=str(tmp_path),
             env={**os.environ, "KOLLAB_ACP_PROCESS_NONCE": "different-owned-run"},
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
@@ -409,18 +506,7 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_pro
         assert outsider.returncode is None and outsider_owner.is_running()
         assert not runner._owned_processes and runner._process_nonce is None
     finally:
-        with contextlib.suppress(Exception):
-            await runner.close()
-        child = child_identity()
-        if child is not None:
-            with contextlib.suppress(psutil.Error):
-                child.kill()
-                child.wait(timeout=2)
-        if outsider_owner is not None:
-            with contextlib.suppress(psutil.Error):
-                outsider_owner.terminate()
-        if outsider is not None:
-            await asyncio.wait_for(outsider.wait(), timeout=2)
+        await _cleanup_orphan_test(runner, captured, child_file)
 
 
 @pytest.mark.parametrize("older", [False, True])
@@ -462,19 +548,9 @@ def test_nonce_lookup_skips_a_process_whose_environment_psutil_cannot_read(tmp_p
 @pytest.mark.asyncio
 async def test_startup_failure_recovers_orphan_after_root_exited_before_ownership_read(tmp_path, monkeypatch):
     child_file = tmp_path / "early-child.json"
-    runner = ACPRunner(ACPProfile("owned-early-exit", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
-        "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": "startup",
-    }))
-    original_spawn = asyncio.create_subprocess_exec
-
-    async def delayed_spawn(*args, **kwargs):
-        process = await original_spawn(*args, **kwargs)
-        # Deliver the real process handle only after its root has exited;
-        # the detached child was never available through a parent-tree read.
-        await asyncio.wait_for(process.wait(), timeout=3)
-        return process
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    runner = ACPRunner(ACPProfile("owned-early-exit", (sys.executable, "-c", FAST_ORPHAN_ADAPTER),
+                                  cwd=str(tmp_path), env=_orphan_env(child_file, "startup")))
+    captured = _capture_test_subprocesses(monkeypatch, wait_for_exit=True)
     try:
         with pytest.raises(Exception):
             await runner.start()
@@ -486,15 +562,73 @@ async def test_startup_failure_recovers_orphan_after_root_exited_before_ownershi
                 assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
         assert runner._process_nonce is None and not runner._owned_processes
     finally:
-        with contextlib.suppress(Exception):
-            await runner.close()
-        if child_file.exists():
-            identity = json.loads(child_file.read_text())
-            with contextlib.suppress(psutil.Error):
-                child = psutil.Process(identity["pid"])
-                if child.create_time() == identity["birth"]:
-                    child.kill()
-                    child.wait(timeout=2)
+        await _cleanup_orphan_test(runner, captured, child_file)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
+@pytest.mark.asyncio
+async def test_orphan_fixture_cleans_up_when_runner_close_raises(tmp_path, monkeypatch):
+    """The fixture must not depend on the broken close method it is testing."""
+    instances = []
+    captured_processes = []
+    original_init = ACPRunner.__init__
+    original_close = ACPRunner.close
+    original_cleanup = _cleanup_orphan_test
+
+    def remember_runner(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        instances.append(self)
+
+    async def broken_close(self):
+        raise RuntimeError("injected close failure")
+
+    async def observe_cleanup(runner, captured, child_file):
+        try:
+            await original_cleanup(runner, captured, child_file)
+        finally:
+            captured_processes.extend(captured)
+
+    monkeypatch.setattr(ACPRunner, "__init__", remember_runner)
+    monkeypatch.setattr(ACPRunner, "close", broken_close)
+    monkeypatch.setattr(sys.modules[__name__], "_cleanup_orphan_test", observe_cleanup)
+    try:
+        with pytest.raises(RuntimeError, match="injected close failure"):
+            await test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_process(
+                tmp_path, "prompt", monkeypatch
+            )
+        assert len(captured_processes) >= 2  # adapter and independently spawned outsider
+        assert all(process.returncode is not None for process, _ in captured_processes)
+        identity = json.loads((tmp_path / "child.json").read_text())
+        with contextlib.suppress(psutil.NoSuchProcess):
+            child = psutil.Process(identity["pid"])
+            assert (
+                child.create_time() != identity["birth"]
+                or not child.is_running()
+                or child.status() == psutil.STATUS_ZOMBIE
+            )
+    finally:
+        for runner in instances:
+            await original_close(runner)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
+@pytest.mark.asyncio
+async def test_startup_orphan_fixture_cleans_up_when_product_cleanup_is_broken(tmp_path, monkeypatch):
+    async def broken_terminate(self):
+        pass
+
+    monkeypatch.setattr(ACPRunner, "_terminate_process", broken_terminate)
+    with pytest.raises(AssertionError):
+        await test_startup_failure_recovers_orphan_after_root_exited_before_ownership_read(tmp_path, monkeypatch)
+    identity = json.loads((tmp_path / "early-child.json").read_text())
+    with contextlib.suppress(psutil.NoSuchProcess):
+        child = psutil.Process(identity["pid"])
+        assert (
+            child.create_time() != identity["birth"]
+            or not child.is_running()
+            or child.status() == psutil.STATUS_ZOMBIE
+        )
+
 
 
 @pytest.mark.asyncio

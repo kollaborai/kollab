@@ -145,6 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes no tool call, one automatic continue is queued telling the agent what
   to finish. The nudge applies only to unattended daemon runs and never
   re-arms itself (#453).
+- Shell and ACP orphan tests clean up their detached helpers after failures or
+  interruption instead of leaving long-running processes (#570).
 - Web UI: a message sent while a native agent is busy streams its own reply.
   Its stream used to end on the completion of the turn already running, and
   the reply never streamed. The engine now sends a request id with every chat

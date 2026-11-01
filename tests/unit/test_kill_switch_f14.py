@@ -9,18 +9,23 @@ The real-process tests run commands through the real ShellExecutor and signal on
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import time
 
+import psutil
 import pytest
 
 from kollabor_agent import shell_executor as se
 from plugins.hub import halt_runtime as hr
 from plugins.hub import network_halt as nh
+from tests.unit._owned_processes import bounded_child_command, cleanup_group, wait_for_exit, watchdog_command
 from tests.unit.test_kill_switch_f12 import _four, _recount
 from tests.unit.test_kill_switch_f13 import KOLLAB_ARGV, P1, _book, _no_link
 
@@ -28,9 +33,12 @@ posix_only = pytest.mark.skipif(sys.platform != "darwin" and not sys.platform.st
                                 reason="needs real process groups")
 
 
-def _ps() -> dict[int, str]:
-    out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,command="], capture_output=True, text=True).stdout
-    return {int(a): b for a, b in (line.strip().split(None, 1) for line in out.splitlines() if line.strip())}
+def _group_members(groups: set[int]) -> dict[int, int]:
+    """Snapshot PIDs in our private groups, independent of the sweep under test."""
+    out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,pgid="], capture_output=True,
+                         text=True, check=True, timeout=5).stdout
+    return {int(pid): int(group) for pid, group in (line.split() for line in out.splitlines())
+            if int(group) in groups}
 
 
 # ------------------------------------------------------------------ 1. the overnight orphan, for real
@@ -38,36 +46,81 @@ def _ps() -> dict[int, str]:
 
 @posix_only
 def test_real_shell_executor_leftovers_are_swept_even_with_hidden_env(tmp_path):
-    """Round 11's dry run: every one of these survived F13 on macOS (env of /bin/* hidden, parent is pid 1)."""
-    mark = f"7{os.getpid():07d}"  # unique to this run: other runs on the machine never match
+    """The real background shapes are still selected even when system env is hidden."""
     log = tmp_path / "log"
     log.touch()
     cmds = [
-        f"nohup sleep {mark}1 >/dev/null 2>&1 &",
-        f"( sleep {mark}2 ) >/dev/null 2>&1 &",
-        f"sleep {mark}3 >/dev/null 2>&1 & disown",
-        f"sh -c 'sleep {mark}4; :' >/dev/null 2>&1 &",
-        f"nohup tail -f {log} >/dev/null 2>&1 &",
-        f"while true; do sleep {mark}6; done >/dev/null 2>&1 &",  # a runaway loop
+        "nohup sleep 45 >/dev/null 2>&1 &",
+        "( sleep 45 ) >/dev/null 2>&1 &",
+        "sleep 45 >/dev/null 2>&1 & disown",
+        "sh -c 'sleep 45; :' >/dev/null 2>&1 &",
+        f"nohup tail -f {shlex.quote(str(log))} >/dev/null 2>&1 &",
+        "while true; do sleep 45; done >/dev/null 2>&1 &",
     ]
     if shutil.which("caffeinate"):
-        cmds.append(f"nohup caffeinate -i -t {mark}7 >/dev/null 2>&1 &")
-    se.TOOL_SHELLS.clear()
+        cmds.append("nohup caffeinate -i -t 45 >/dev/null 2>&1 &")
+    # Capture the actual subprocess handles rather than trusting TOOL_SHELLS,
+    # which is part of the behavior under test and may itself be broken.
+    shells = []
+    owned_members = {}
+
+    def remember_members(pgid, ready):
+        # Record individual PID identities as a second cleanup path in case a
+        # future sweep kills the watchdog but leaves other group members alive.
+        try:
+            data = json.loads(ready.read_text())
+            guard = psutil.Process(data["pid"])
+            if (data["pgid"] != pgid or guard.create_time() != data["birth"]
+                    or str(ready) not in guard.cmdline() or os.getpgid(guard.pid) != pgid):
+                return
+            candidates = []
+            for pid in _group_members({pgid}):
+                try:
+                    member = psutil.Process(pid)
+                    candidates.append((member, member.create_time()))
+                except psutil.NoSuchProcess:
+                    pass
+            if guard.is_running() and guard.create_time() == data["birth"] and os.getpgid(guard.pid) == pgid:
+                owned_members.setdefault(pgid, []).extend(candidates)
+        except (FileNotFoundError, psutil.NoSuchProcess, ProcessLookupError):
+            pass
+
+    class CapturingExecutor(se.ShellExecutor):
+        ready = None
+
+        async def _create_unix_process(self, *args, **kwargs):
+            process = await super()._create_unix_process(*args, **kwargs)
+            # Retain the handle before attempting any fallible PID lookup.
+            shells.append([process.pid, process, None, self.ready])
+            try:
+                shells[-1][2] = psutil.Process(process.pid)
+            except psutil.NoSuchProcess:
+                pass
+            return process
 
     async def run_all():
-        ex = se.ShellExecutor()
-        for cmd in cmds:
-            await ex.run(cmd, timeout=5)
+        ex = CapturingExecutor()
+        for index, cmd in enumerate(cmds):
+            ex.ready = tmp_path / f"watchdog-{index}.json"
+            try:
+                result = await ex.run(watchdog_command(ex.ready) + cmd, timeout=5)
+                assert result.success, result
+            finally:
+                if shells and shells[-1][3] == ex.ready:
+                    remember_members(shells[-1][0], ex.ready)
 
-    asyncio.run(run_all())
-    time.sleep(0.5)
-
-    def ours() -> set[int]:
-        return {p for p, c in _ps().items() if mark in c or str(log) in c} - {os.getpid()}
-
-    left = ours()
+    se.TOOL_SHELLS.clear()
     try:
-        assert len(left) >= len(cmds)
+        asyncio.run(run_all())
+        time.sleep(0.5)
+        for pgid, _, _, ready in shells:
+            remember_members(pgid, ready)  # also capture delayed grandchildren
+        groups = {pgid for pgid, _, _, _ in shells}
+        guards = {json.loads(ready.read_text())["pid"] for _, _, _, ready in shells}
+        members = _group_members(groups)
+        left = set(members) - guards
+        assert len(groups) == len(cmds)
+        assert all(any(members[pid] == group for pid in left) for group in groups)
         tree, info = hr.process_tree(), hr.process_info()
         protect = nh.ancestors(os.getpid()) | {os.getpid()}
         known = {p.pid: p for p in (nh.read_process(x, with_cwd=False) for x in left) if p is not None}
@@ -81,12 +134,97 @@ def test_real_shell_executor_leftovers_are_swept_even_with_hidden_env(tmp_path):
             forged = [(key, info.get(key, (0.0,))[0], os.getpid())]
             assert not nh._backgrounded({os.getpid()}, tree, info, protect, forged, known) & protect
     finally:
-        for pid in ours() | left:
+        cleanup_errors = []
+        for pgid, process, leader, ready in reversed(shells):
             try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+                # Stop a shell that failed during setup before looking for its
+                # watchdog. No workload starts until the watchdog is ready.
+                try:
+                    if leader is not None:
+                        leader.kill()
+                    elif process.returncode is None:
+                        process.kill()  # retained direct child handle
+                except (psutil.NoSuchProcess, ProcessLookupError):
+                    pass
+                deadline = time.monotonic() + 1
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                cleanup_group(pgid, ready, anchors=owned_members.get(pgid, ()))
+            except Exception as exc:
+                cleanup_errors.append(exc)
+        # These identities were captured while a verified watchdog anchored
+        # the group. psutil checks creation time again before signalling a PID.
+        for members in owned_members.values():
+            for member, _ in members:
+                try:
+                    member.kill()
+                except psutil.NoSuchProcess:
+                    pass
+                except Exception as exc:
+                    cleanup_errors.append(exc)
         se.TOOL_SHELLS.clear()
+        if cleanup_errors:
+            raise ExceptionGroup("shell test cleanup failed", cleanup_errors)
+
+
+@posix_only
+@pytest.mark.parametrize("failure_stage", ["launch", "sweep", "watchdog"])
+def test_shell_fixture_cleans_up_if_launch_or_sweep_raises(tmp_path, monkeypatch, failure_stage):
+    """Failures during setup or the sweep still stop only this test's processes."""
+    original_run = se.ShellExecutor.run
+    spawned = []
+    outsider = subprocess.Popen(bounded_child_command())
+
+    def remember_processes():
+        groups = {row[0] for row in se.TOOL_SHELLS}
+        for pid in _group_members(groups):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                spawned.append(psutil.Process(pid))
+
+    async def fail_after_first_launch(executor, *args, **kwargs):
+        result = await original_run(executor, *args, **kwargs)
+        assert result.success
+        remember_processes()
+        raise RuntimeError("injected fixture failure")
+
+    def fail_sweep(*args, **kwargs):
+        remember_processes()
+        if failure_stage == "watchdog":
+            # Simulate a broken sweep killing each guard but missing workloads.
+            for ready in tmp_path.glob("watchdog-*.json"):
+                data = json.loads(ready.read_text())
+                guard = psutil.Process(data["pid"])
+                assert guard.create_time() == data["birth"]
+                assert os.getpgid(guard.pid) == data["pgid"] != os.getpgrp()
+                guard.kill()
+                wait_for_exit(guard)
+        raise RuntimeError("injected fixture failure")
+
+    try:
+        if failure_stage == "launch":
+            monkeypatch.setattr(se.ShellExecutor, "run", fail_after_first_launch)
+        else:
+            monkeypatch.setattr(nh, "_backgrounded", fail_sweep)
+        with pytest.raises(RuntimeError, match="injected fixture failure"):
+            test_real_shell_executor_leftovers_are_swept_even_with_hidden_env(tmp_path)
+        assert len(spawned) >= 2  # watchdog plus a real background workload
+
+        def alive(process):
+            try:
+                return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                return False
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(alive(p) for p in spawned):
+            time.sleep(0.02)
+        assert not any(alive(p) for p in spawned)
+        assert outsider.poll() is None
+    finally:
+        if outsider.poll() is None:
+            outsider.kill()
+        outsider.wait(timeout=5)
+
 
 
 # ------------------------------------------------------------------ 2. fallback_stop
