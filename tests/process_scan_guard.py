@@ -179,7 +179,7 @@ def _command_tokens(command: Any) -> list[str]:
 
 
 def is_process_table_enumeration_command(command: Any) -> bool:
-    """Block broad ``ps`` commands; allow only explicit PID-targeted queries."""
+    """Block broad host ``ps`` commands but allow Docker container listings."""
     tokens = _command_tokens(command)
     for index, token in enumerate(tokens):
         name = PurePath(token).name
@@ -192,6 +192,12 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                 if command_option and is_process_table_enumeration_command(shell_args[shell_index + 1]):
                     return True
         if name != "ps":
+            continue
+
+        # Docker's `ps` lists containers, not host processes. Shell command
+        # substitution may prefix the token with `$(` in rendered prompt blocks.
+        previous_token = tokens[index - 1] if index > 0 else ""
+        if PurePath(previous_token.lstrip("$(")).name == "docker":
             continue
 
         options = tokens[index + 1 :]

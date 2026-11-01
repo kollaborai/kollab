@@ -80,6 +80,12 @@ def test_process_table_detector_blocks_global_ps_but_allows_pid_targeting():
     assert not is_process_table_enumeration_command(["/usr/bin/python3", "-c", "print('not a process scan')"])
 
 
+def test_docker_container_listing_is_not_host_process_enumeration():
+    assert not is_process_table_enumeration_command(["docker", "ps", "-q"])
+    assert not is_process_table_enumeration_command(["/bin/sh", "-c", 'echo "$(docker ps -q)"'])
+    assert is_process_table_enumeration_command(["/bin/sh", "-c", "docker exec service ps -A"])
+
+
 def test_unmarked_process_enumeration_fails_before_original_call():
     calls = []
     guarded = guarded_process_enumeration("psutil.process_iter", lambda: calls.append("enumerated"), allowed=False)
