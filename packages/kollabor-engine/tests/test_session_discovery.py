@@ -58,6 +58,40 @@ def test_an_agent_that_has_not_published_its_socket_is_not_listed(tmp_path, monk
     assert bridge.discover_sessions(use_cache=False) == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by_identity", [False, True])
+async def test_a_message_reaches_a_socket_published_after_the_cached_record(tmp_path, monkeypatch, by_identity):
+    # Benitoite on #556: the cached first record, with no socket_path, hid the
+    # socket the agent published next, so a message to it found none for up to
+    # five seconds.
+    import json
+    import os
+    import time
+    from unittest.mock import AsyncMock
+
+    from kollabor_engine import hub_bridge
+
+    presence = tmp_path / "presence"
+    presence.mkdir()
+    record = presence / "c1.json"
+    first = {"agent_id": "c1", "identity": "lapis", "pid": os.getpid(), "last_heartbeat": time.time()}
+    record.write_text(json.dumps(first))
+    monkeypatch.setattr(hub_bridge, "_find_presence_dirs", lambda: [presence])
+    bridge = HubBridge()
+    assert bridge.get_agent("c1")["identity"] == "lapis"  # caches the first record
+    socket = tmp_path / "lapis.sock"
+    socket.touch()
+    record.write_text(json.dumps({**first, "socket_path": str(socket)}))
+    send = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(bridge, "_query_socket_path", send)
+
+    if by_identity:
+        assert await bridge.query_socket_by_identity("lapis", "ping") == {"ok": True}
+    else:
+        assert await bridge.query_socket("c1", "ping") == {"ok": True}
+    assert send.await_args.args[0] == str(socket)
+
+
 def test_discover_sessions_carries_what_the_agent_publishes(tmp_path, monkeypatch):
     # The row reads the same before the engine opens the agent as after:
     # EngineSession.to_dict answers profile and model, so presence must too.

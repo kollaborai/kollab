@@ -279,6 +279,10 @@ class HubBridge:
 
         sock_path = self._socket_path_for_agent(agent_data)
         if sock_path is None or not sock_path.exists():
+            # A cached record can predate the socket: an agent's first has none (#555).
+            agent_data = self.get_agent(agent_id, use_cache=False) or agent_data
+            sock_path = self._socket_path_for_agent(agent_data)
+        if sock_path is None or not sock_path.exists():
             logger.debug(f"Socket not found for {agent_id}: {sock_path}")
             return None
 
@@ -298,6 +302,10 @@ class HubBridge:
             return None
 
         sock_path = self._socket_path_for_agent(agent_data)
+        if sock_path is None or not sock_path.exists():
+            # A cached record can predate the socket: an agent's first has none (#555).
+            agent_data = self.get_agent_by_identity(identity, use_cache=False) or agent_data
+            sock_path = self._socket_path_for_agent(agent_data)
         if sock_path is None or not sock_path.exists():
             logger.debug(f"Socket not found for identity {identity}: {sock_path}")
             return None
