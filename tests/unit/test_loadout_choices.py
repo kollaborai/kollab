@@ -424,3 +424,21 @@ async def test_a_default_pick_reaches_the_daemon_as_a_reset():
     await handlers["state.set_active_profile"]({"name": "claude", "effort": ""})
     await handlers["state.set_active_profile"]({"name": "claude"})
     assert got == ["", None]
+
+
+@pytest.mark.asyncio
+async def test_a_login_that_names_no_account_lists_the_models_it_just_fetched(monkeypatch):
+    # Rutile on #553 round 9: no cache keeps such a login's list, so the one
+    # refresh_catalogs fetched never reached the picker, which main showed.
+    from kollabor_ai import model_catalog
+
+    manager = _manager(_Profile("openai-oauth", "openai_responses", "gpt-6-luna"))
+    fetch = AsyncMock(return_value=[{"id": "gpt-account-only"}])
+    monkeypatch.setattr(model_catalog, "get_provider_models", fetch)
+    monkeypatch.setattr(model_catalog, "cached_provider_models", lambda profile, max_age=3600: [])
+    await manager.refresh_catalogs()
+    assert "gpt-account-only" in {row["model"] for row in manager.list_choices()}
+    assert "gpt-account-only" in {loadout.name for loadout in manager.list_loadouts()}
+    fetch.return_value = []  # signed out since: the next listing drops it
+    await manager.refresh_catalogs()
+    assert "gpt-account-only" not in {row["model"] for row in manager.list_choices()}

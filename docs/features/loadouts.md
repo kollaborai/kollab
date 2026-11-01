@@ -111,8 +111,10 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   request that fails partway, puts its model and level back, and the picker
   says so; when that cannot work, it says what the session now runs and shows
   it, naming the harness when the pick switched to it. So does a switch whose
-  answer is lost, and a pick overtaken by a switch made elsewhere shows the
-  session as it now runs. A harness that has reported no model shows its
+  answer is lost. Each change a pick sends names its profile, and the agent
+  refuses one once another profile is active, so a switch made in another
+  window never gets the pick or its rollback. The picker shows the session as
+  the engine reads it back, so a newer pick made in another window stays. A harness that has reported no model shows its
   profile's name, never the profile's saved model. A model with no
   levels gets one row
   that keeps the harness's level. A harness never started offers only its
@@ -122,7 +124,7 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   A ChatGPT login's list is kept only when the tokens it was fetched with name
   the account signed in as it arrives, and only while that account stays
   signed in: signing in as another account fetches that account's models. A
-  login that names no account keeps no list; each opening fetches it.
+  login that names no account keeps no list; each opening fetches and shows it.
 - An environment variable outranks a pick (`KOLLAB_<PROFILE>_MODEL`,
   `KOLLAB_<PROFILE>_EFFORT`, `KOLLAB_MODEL`, `KOLLAB_EFFORT`): the picker says
   which model kept running instead of showing the pick as applied.

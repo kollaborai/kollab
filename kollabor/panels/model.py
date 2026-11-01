@@ -6,6 +6,10 @@ terminal picker calls. Not ``_switch_to_model`` (it partial-matches profile
 names and fails for catalog models off OpenRouter) and not
 ``LoadoutManager.activate`` (it also applies a loadout's temperature, effort
 and max_tokens).
+
+A payload's ``profile`` names the profile a change is for: an action that
+finds another one active is refused, so a pick from one window never lands on
+a profile another window switched to meanwhile (#553).
 """
 
 from __future__ import annotations
@@ -191,6 +195,10 @@ class ModelPanel:
     async def act(self, ctx: Any, action: str, payload: dict) -> dict:
         pm = getattr(ctx, "_profile_manager", None)
         active = pm.get_active_profile() if pm is not None else None
+        expected = payload.get("profile")
+        running = getattr(active, "name", None)
+        if expected and running != expected:
+            return error_result(f"The session now runs {running or 'no profile'}, not {expected}.")
         if active is not None and active.get_provider() == "acp":
             handler = model_handler(ctx)
             if action == "refresh":

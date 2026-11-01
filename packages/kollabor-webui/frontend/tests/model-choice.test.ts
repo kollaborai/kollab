@@ -36,7 +36,7 @@ function fakeApi(
       if (result instanceof Error) throw result; // a 502 or a dropped connection
       return result;
     },
-    // The session record lags behind the harness, unless a test says what it reports.
+    // The session as the engine reads it back; a test says what it reports.
     getSession: async (id: string) => (calls.push(["get", id]), { session_id: id, ...record }),
   };
   return { api: api as never, calls };
@@ -118,14 +118,48 @@ test("a native pick an environment variable outranks is an error, not a pick sho
 });
 
 test("an ACP pick switches the harness, then sets its own model and effort options", async () => {
-  const { api, calls } = fakeApi();
+  // The engine reads the harness's options back before each action answers.
+  const { api, calls } = fakeApi({}, undefined, { profile: "codex-cli", model: "gpt-6-luna", effort: "max" });
   const shown = await applyModelChoice(api, { session_id: "s1", profile: "openai-oauth" }, codexLunaMax);
-  assert.deepEqual([shown.model, shown.effort], ["gpt-6-luna", "max"]); // what the harness took, not the lagging record
+  assert.deepEqual([shown.model, shown.effort], ["gpt-6-luna", "max"]);
   assert.deepEqual(calls, [
     ["profile", "s1", "codex-cli"],
-    ["panel", "s1", "model", "select", { model: "gpt-6-luna" }],
-    ["panel", "s1", "model", "effort", { level: "max" }],
+    ["panel", "s1", "model", "select", { model: "gpt-6-luna", profile: "codex-cli" }],
+    ["panel", "s1", "model", "effort", { level: "max", profile: "codex-cli" }],
     ["get", "s1"],
+  ]);
+});
+
+test("a pick shows what the engine reads back, so a newer one made elsewhere on that profile stays", async () => {
+  // Rutile on #553 round 9: another window picked alpha-newer · max on the same profile before this
+  // pick's read came back, and this panel showed its own older alpha-new · high instead.
+  const newer = { profile: "codex-cli", model: "alpha-newer", effort: "max" };
+  const { api } = fakeApi({}, undefined, newer);
+  const pick = { ...codexLunaMax, model: "alpha-new", effort: "high" };
+  const shown = await applyModelChoice(api, { session_id: "s1", profile: "codex-cli" }, pick);
+  assert.deepEqual(shown, { session_id: "s1", ...newer });
+});
+
+test("every option a pick sets names its profile, its rollback included", async () => {
+  // Rutile on #553 round 9: the session moved to a native profile after the pick's model applied, and the
+  // rollback then saved the ACP pick's old model to that native profile.
+  const moved = "The session now runs openai-oauth, not codex-cli.";
+  const now = { profile: "openai-oauth", model: "gpt-6-sol", effort: "low" };
+  const { api, calls } = fakeApi(
+    { "effort:max": { ok: false, message: moved }, "select:gpt-6.1-terra": { ok: false, message: moved } },
+    undefined,
+    now,
+  );
+  const before = { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra", effort: "high" };
+  const error = await applyModelChoice(api, before, codexLunaMax).catch((e) => e);
+  assert.ok(error instanceof PickError);
+  assert.equal(error.message, `${moved} It now runs gpt-6-sol · low.`);
+  assert.deepEqual(error.session, { session_id: "s1", ...now });
+  const sent = calls.filter(([kind]) => kind === "panel").map((call) => call[4]);
+  assert.deepEqual(sent, [
+    { model: "gpt-6-luna", profile: "codex-cli" },
+    { level: "max", profile: "codex-cli" },
+    { model: "gpt-6.1-terra", profile: "codex-cli" }, // the refused rollback: nothing else is sent
   ]);
 });
 
@@ -141,13 +175,14 @@ test("an ACP pick on the harness already running skips the switch; a refused opt
 test("a level the harness refuses puts its model and level back, so a pick never half-applies", async () => {
   // Aragonite on #553 round 5: the harness took the model, refused the level, and stayed on the new model.
   // Amazonite on round 6: the model switch had moved its level too, and only the model went back.
-  const { api, calls } = fakeApi({ "effort:max": { ok: false, message: "max is not offered" } });
+  const restored = { profile: "codex-cli", model: "gpt-6.1-terra", effort: "high" }; // as the engine reads it back
+  const { api, calls } = fakeApi({ "effort:max": { ok: false, message: "max is not offered" } }, undefined, restored);
   const before = { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra", effort: "high" };
   const error = await applyModelChoice(api, before, codexLunaMax).catch((e) => e);
   assert.match(error.message, /max is not offered\. It stays on gpt-6\.1-terra · high\./);
   assert.deepEqual(calls.slice(2, 4), [
-    ["panel", "s1", "model", "select", { model: "gpt-6.1-terra" }],
-    ["panel", "s1", "model", "effort", { level: "high" }],
+    ["panel", "s1", "model", "select", { model: "gpt-6.1-terra", profile: "codex-cli" }],
+    ["panel", "s1", "model", "effort", { level: "high", profile: "codex-cli" }],
   ]);
   assert.deepEqual([error.session.model, error.session.effort], ["gpt-6.1-terra", "high"]);
 });
@@ -157,7 +192,7 @@ test("a request that fails after the model moved puts it back too", async () => 
   const { api, calls } = fakeApi({ "effort:max": new Error("502: daemon unreachable") });
   const before = { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra", effort: "" };
   await assert.rejects(applyModelChoice(api, before, codexLunaMax), /502: daemon unreachable\. It stays on gpt-6\.1-terra\./);
-  assert.deepEqual(calls[2], ["panel", "s1", "model", "select", { model: "gpt-6.1-terra" }]);
+  assert.deepEqual(calls[2], ["panel", "s1", "model", "select", { model: "gpt-6.1-terra", profile: "codex-cli" }]);
 });
 
 test("a harness that refuses its first option after the switch says the switch applied", async () => {

@@ -33,11 +33,6 @@ export function choiceLabel(
   return [model || value.profile, value.effort, model ? value.profile : ""];
 }
 
-/** The session the engine reports, with the pick laid over a record that can lag behind the harness,
- * unless its profile was switched elsewhere meanwhile: then it is the engine's as it is. */
-const ours = (state: Session, profile: string | undefined, fields: { model?: string; effort?: string }): Session =>
-  state.profile && state.profile !== profile ? state : { ...state, ...fields };
-
 /** A switch whose answer is lost (a 502, a dropped connection) may still have applied: say what runs. */
 async function switchProfile(api: EngineApi, ...args: Parameters<EngineApi["setSessionProfile"]>): Promise<Session> {
   try {
@@ -51,10 +46,15 @@ async function switchProfile(api: EngineApi, ...args: Parameters<EngineApi["setS
 }
 
 /** Put the harness back on its earlier model and level: a model switch can move the level too. */
-async function restore(api: EngineApi, id: string, before: { model: string; effort: string }): Promise<boolean> {
+async function restore(
+  api: EngineApi,
+  id: string,
+  profile: string,
+  before: { model: string; effort: string },
+): Promise<boolean> {
   try {
-    if (!(await api.panelAction(id, "model", "select", { model: before.model })).ok) return false;
-    return !before.effort || (await api.panelAction(id, "model", "effort", { level: before.effort })).ok;
+    if (!(await api.panelAction(id, "model", "select", { model: before.model, profile })).ok) return false;
+    return !before.effort || (await api.panelAction(id, "model", "effort", { level: before.effort, profile })).ok;
   } catch {
     return false;
   }
@@ -91,9 +91,10 @@ export async function applyModelChoice(
   }
   const switched = session.profile !== choice.profile;
   if (switched) await switchProfile(api, session.session_id, choice.profile);
+  // Each names its profile: the agent refuses one once a switch made elsewhere has moved the session.
   const steps: [string, Record<string, string>][] = [];
-  if (choice.model) steps.push(["select", { model: choice.model }]);
-  if (choice.effort) steps.push(["effort", { level: choice.effort }]);
+  if (choice.model) steps.push(["select", { model: choice.model, profile: choice.profile }]);
+  if (choice.effort) steps.push(["effort", { level: choice.effort, profile: choice.profile }]);
   let moved = false; // the harness took the picked model
   for (const [action, payload] of steps) {
     // A request that fails (a 502, a dropped connection) may still have applied.
@@ -109,17 +110,17 @@ export async function applyModelChoice(
     // A model it has not run is offered at the levels of its last one: one it
     // refuses puts the model and level back, so the pick never half-applies.
     const before = switched ? undefined : { model: session.model || "", effort: session.effort || "" };
-    if (before?.model && (await restore(api, session.session_id, before))) {
-      throw new PickError(`${failed} It stays on ${label(before)}.`, ours(await api.getSession(session.session_id), session.profile, before));
+    if (before?.model && (await restore(api, session.session_id, choice.profile, before))) {
+      throw new PickError(`${failed} It stays on ${label(before)}.`, await api.getSession(session.session_id));
     }
     // The switch applied even if no option did: say which harness runs now.
     const now = await api.getSession(session.session_id);
     const runs = [switched ? now.profile : "", label(now)].filter(Boolean).join(" · ");
     throw new PickError(`${failed} It now runs ${runs || "with no model named"}.`, now);
   }
-  // The harness took both; the session record can lag behind it.
-  const next = await api.getSession(session.session_id);
-  return ours(next, choice.profile, { model: choice.model || next.model, effort: choice.effort || next.effort });
+  // The harness took both. The engine reads its options back before an action answers, so the record
+  // is what runs, a newer pick made elsewhere meanwhile included.
+  return api.getSession(session.session_id);
 }
 
 export const sameChoice = (a: Partial<ModelChoice>, b: Partial<ModelChoice>) =>
