@@ -127,6 +127,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- A hub agent that is busy for a while keeps its socket: peers no longer delete a live agent's presence
+  and socket after a 15 s late heartbeat, which cut every connection to it; they wait 10 min (#545).
+- History: expanding an old slimmed history entry loads its full metadata
+  again, so tool runs and agent replies from earlier pages show their
+  output instead of rendering empty (#522).
 - Detached agents no longer idle after a first turn that ends without work:
   if the reply stops on an unfinished tool tag or announces the next step but
   makes no tool call, one automatic continue is queued telling the agent what

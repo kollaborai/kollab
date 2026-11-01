@@ -401,3 +401,23 @@ def test_472kb_acp_updates_truncates_in_default_form_too():
     assert reply["metadata"]["history_output_truncated"] is True
     assert reply["metadata"]["acp_updates_dropped"] == 4_000
     assert _wire_size(page) <= HISTORY_MAX_PAGE_BYTES
+
+
+def test_slimmed_metadata_is_fetchable_by_reference():
+    updates = [{"kind": "text", "text": "x" * 2_048}] * 400
+    history = [_message(index) for index in range(HISTORY_DEFAULT_PAGE_SIZE - 1)] + [
+        {
+            "role": "assistant",
+            "content": "done",
+            "metadata": {"provider": "acp", "acp_updates": updates},
+        }
+    ]
+
+    page = build_history_page("session-1", history)
+    slimmed = page["history"][-1]
+    assert "acp_updates_dropped" in slimmed["metadata"]
+    ref = slimmed["metadata"]["history_output_ref"]
+
+    fetched = history_paging.resolve_history_metadata("session-1", history, ref)
+    assert fetched["acp_updates"] == updates
+    assert "acp_updates_dropped" not in fetched
