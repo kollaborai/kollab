@@ -853,6 +853,44 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertTrue(self.processor.turn_completed)
         self.assertIn("error", published)
 
+    def test_a_timeout_retry_keeps_the_part_its_first_try_streamed(self):
+        # Labradorite on #549 round 3: the retry after a timeout reset the
+        # streamed flag, so a reply seen in part was asked of the new model.
+        api, calls, seen = self.processor.api_service, [], []
+
+        async def call_llm(**kwargs):
+            calls.append(kwargs)
+            api.last_call_streamed = len(calls) == 1  # each call resets it; the first streamed
+            if len(calls) == 1:
+                raise TimeoutError("Request timed out")
+            raise RuntimeError("Invalid openai API key. Please check your API key.")
+
+        async def hooks(event_type, data, source):
+            if event_type is EventType.LLM_REQUEST_ERROR:
+                seen.append(data.get("streamed"))
+            return {"main": {"final_data": {"retry": True}}}
+
+        self.streaming_handler.call_llm.side_effect = call_llm
+        self.event_bus.emit_with_hooks.side_effect = hooks
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=False, current_parent_uuid="timeout-part",
+            )
+        )
+        self.assertEqual((len(calls), seen), (2, [True]))
+        self.assertTrue(self.processor.turn_completed)
+
+        # The next turn starts clean: it showed nothing, so it is asked again.
+        api.last_call_streamed = False
+        self.streaming_handler.call_llm.side_effect = RuntimeError("Usage limit reached for 5 hour.")
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=False, current_parent_uuid="clean",
+            )
+        )
+        self.assertEqual(seen, [True, False])
+        self.assertFalse(self.processor.turn_completed)
+
 
     def test_pre_request_hook_can_withhold_tools_for_one_request(self):
         self.native_tools_handler.tools = [{"name": "terminal"}]

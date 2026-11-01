@@ -149,13 +149,17 @@ async def _native_turn_fails(plugin, message, **fields):
     return data.get("retry") is True
 
 
-async def _acp_turn_fails(plugin, tap, message):
-    tap.publish({"type": "error", "message": message, "generation": 1})
-    tap.publish({"type": "turn_complete"})
+async def _settle(plugin):
     for _ in range(5):
         await asyncio.sleep(0)
     if plugin._task is not None:
         await plugin._task
+
+
+async def _acp_turn_fails(plugin, tap, message):
+    tap.publish({"type": "error", "message": message, "generation": 1})
+    tap.publish({"type": "turn_complete"})
+    await _settle(plugin)
 
 
 def _continues(bus):
@@ -193,18 +197,89 @@ async def test_a_reply_streamed_in_part_is_switched_but_never_asked_again(monkey
     )
 
 
+class _Harness:
+    """The ACP orchestrator as a switch sees it: its fence on new prompts, over
+    a runner busy while a prompt runs or waits."""
+
+    def __init__(self, *prompts):
+        self.closing_reason, self.prompts, self.runner = "", list(prompts), self
+
+    @property
+    def busy(self):
+        return bool(self.prompts)
+
+    def admit(self, text):
+        if self.closing_reason:
+            raise RuntimeError(self.closing_reason)
+        self.prompts.append(text)
+
+
 @pytest.mark.asyncio
-async def test_a_harness_with_other_prompts_in_flight_is_not_switched_yet(monkeypatch):
-    # Morganite on #549 round 2: switching closed the harness, so a request it
-    # had already started failed with "ACP runner closed".
+async def test_a_switch_the_harness_was_busy_for_runs_once_its_last_prompt_ends(monkeypatch):
+    # Morganite on #549 round 2: switching closed the harness, so a prompt it
+    # had already taken failed with "ACP runner closed". Labradorite on round
+    # 3: the failure was then dropped, and once that prompt succeeded nothing
+    # switched.
     plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    runner = SimpleNamespace(busy=True)
-    bus.register_service("acp_orchestrator", SimpleNamespace(runner=runner))
+    harness = _Harness("running", "waiting")
+    bus.register_service("acp_orchestrator", harness)
     await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
     assert _Loadouts.activated == []
-    runner.busy = False  # that prompt ended too: the next failure switches
-    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
+    harness.prompts.pop(0)
+    tap.publish({"type": "turn_complete"})  # one ended, one still waits
+    await _settle(plugin)
+    assert _Loadouts.activated == []
+    harness.prompts.pop(0)
+    tap.publish({"type": "turn_complete"})  # the last one ended, and it succeeded
+    await _settle(plugin)
     assert _Loadouts.activated == ["codex"]
+
+
+@pytest.mark.asyncio
+async def test_no_prompt_is_taken_between_the_idle_check_and_the_switch(monkeypatch):
+    # Labradorite on #549 round 3: the idle check was a snapshot, so a prompt
+    # taken after it failed with "ACP runner closed" when the switch closed
+    # the harness.
+    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    harness, refused = _Harness(), []
+    bus.register_service("acp_orchestrator", harness)
+    activate = _Loadouts.activate
+
+    async def activating(self, loadout, event_bus=None):
+        try:  # a prompt that arrives while the harness closes and the new one starts
+            harness.admit("during the switch")
+        except RuntimeError as exc:
+            refused.append(str(exc))
+        return await activate(self, loadout, event_bus)
+
+    monkeypatch.setattr(_Loadouts, "activate", activating)
+    tap.publish({"type": "error", "message": "claude-code: Claude AI usage limit reached", "generation": 1})
+    tap.publish({"type": "turn_complete"})
+    # Already on its way: it lands after the failed turn ended, before the switch's step.
+    asyncio.get_running_loop().call_soon(harness.admit, "on its way")
+    await _settle(plugin)
+    assert _Loadouts.activated == [] and harness.prompts == ["on its way"]  # the switch waits for it
+    harness.prompts.clear()
+    tap.publish({"type": "turn_complete"})
+    await _settle(plugin)
+    assert _Loadouts.activated == ["codex"] and harness.prompts == []
+    assert refused == ["Switching to codex. Send your message again once it has switched."]
+    assert harness.closing_reason == ""  # the new harness takes prompts again
+
+
+def test_the_orchestrator_refuses_prompts_while_a_switch_closes_it():
+    from kollabor.llm.acp_orchestrator import ACPError, ACPOrchestrator
+    from kollabor.llm.llm_coordinator import _acp_unavailable_result
+
+    acp = ACPOrchestrator.__new__(ACPOrchestrator)
+    acp._runner, acp._closed, acp.startup_error = SimpleNamespace(), False, None
+    acp.closing_reason = "Switching to codex. Send your message again once it has switched."
+    with pytest.raises(ACPError, match="Switching to codex"):
+        acp.admit("hello", request_id="r1", source="rpc")
+    # What a web client or a peer that sent the prompt is told.
+    assert _acp_unavailable_result(acp)["message"] == acp.closing_reason
+    acp.closing_reason = ""
+    assert "message" not in _acp_unavailable_result(acp)
 
 
 @pytest.mark.asyncio

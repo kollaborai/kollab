@@ -69,6 +69,9 @@ class ACPOrchestrator:
         self._terminal_session_id: str | None = None
         self._selected_profile: LLMProfile | None = None
         self.startup_error: str | None = None
+        # Set while the model fallback switches away from this runner: new
+        # prompts are refused with it, since the switch closes the runner.
+        self.closing_reason = ""
         self._parents: dict[str, str] = {}
         self._history_tasks: set[asyncio.Task] = set()
         self._user_history_tasks: dict[str, asyncio.Task] = {}
@@ -268,6 +271,8 @@ class ACPOrchestrator:
         record: bool = True,
         images: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
+        if self.closing_reason:
+            raise ACPError(self.closing_reason)
         if self._runner is None or self._closed:
             raise ACPError(self.startup_error or "ACP runner is not active")
         if source == "agent" and (origin or {}).get("sender"):

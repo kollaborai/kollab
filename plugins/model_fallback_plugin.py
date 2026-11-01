@@ -27,6 +27,7 @@ from kollabor_tui.display_tap import publish_semantic
 logger = logging.getLogger(__name__)
 
 _OFF = {"", "off", "none"}
+SWITCH_NOTE = "Switching to {}. Send your message again once it has switched."
 
 
 class ModelFallbackPlugin(BasePlugin):
@@ -39,7 +40,9 @@ class ModelFallbackPlugin(BasePlugin):
         self.config = config
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tap: Any = None
-        self._failed_message: Optional[str] = None
+        self._failed_message: Optional[str] = None  # the ACP turn's, until it completes
+        # An ACP failure the harness was busy for: it switches once that work ends.
+        self._pending: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
 
     @staticmethod
@@ -175,30 +178,46 @@ class ModelFallbackPlugin(BasePlugin):
             # falls back inside itself (_on_request_error).
             if "generation" in event:
                 self._failed_message = str(event.get("message") or "")
-        elif kind == "turn_complete" and self._failed_message is not None:
+        elif kind == "turn_complete":
             message, self._failed_message = self._failed_message, None
-            if self._loop is not None and failure_kind(message) and self.choice():
-                self._loop.call_soon_threadsafe(self._start, message)
+            if message is not None and failure_kind(message) and self.choice():
+                self._pending = message
+            # Every completion checks again: a switch the harness was busy for
+            # runs once its last prompt ends, whatever that prompt's outcome.
+            if self._pending is not None and self._loop is not None:
+                self._loop.call_soon_threadsafe(self._start)
 
-    def _start(self, message: str) -> None:
-        if self._task is not None and not self._task.done():
-            return
+    def _start(self) -> None:
+        if self._pending is not None and (self._task is None or self._task.done()):
+            self._task = asyncio.ensure_future(self._switch())
+
+    async def _switch(self) -> None:
+        """Switch for the pending ACP failure once the harness has no other prompt.
+
+        Nothing awaits between the check below and fall_back's fence, so no
+        prompt is taken in between by the runner the switch closes.
+        """
         acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
         if getattr(getattr(acp, "runner", None), "busy", False) is True:
             # Another prompt runs or waits on this harness, and switching closes
-            # it ("ACP runner closed"). The next failure, on an idle harness, switches.
-            logger.info("model fallback: the harness has other prompts in flight; not switching yet")
+            # it ("ACP runner closed"): the switch waits for that prompt's end.
+            logger.info("model fallback: the harness has other prompts in flight; switching once they end")
             return
-        self._task = asyncio.ensure_future(self.fall_back(message))
+        message, self._pending = self._pending, None
+        if message is not None:
+            await self.fall_back(message, harness=acp)
 
     # -- switching ------------------------------------------------------------
 
-    async def fall_back(self, message: str, kind: Optional[str] = None, retry: bool = False) -> str:
+    async def fall_back(
+        self, message: str, kind: Optional[str] = None, retry: bool = False, harness: Any = None
+    ) -> str:
         """Switch to the fallback for this failure: "" if the agent stayed.
 
         "retry": the failed native turn (``retry``) asks the new model. "resend":
         the notice asks for the message again, since the turn has ended or the
-        fallback is an ACP harness with its own conversation.
+        fallback is an ACP harness with its own conversation. ``harness``, the
+        ACP orchestrator the switch closes, refuses new prompts until it is done.
         """
         kind = kind or failure_kind(message)
         target = self.choice()
@@ -221,11 +240,17 @@ class ModelFallbackPlugin(BasePlugin):
         ):
             logger.info("model fallback: already on %s, not switching again", loadout.name)
             return ""
+        if harness is not None:
+            # A prompt it took now would fail with "ACP runner closed".
+            harness.closing_reason = SWITCH_NOTE.format(loadout.name)
         try:
             activated = await manager.activate(loadout, self.event_bus)
         except Exception as exc:
             logger.warning("model fallback to %s failed: %s", loadout.name, exc)
             activated = None
+        finally:
+            if harness is not None:
+                harness.closing_reason = ""
         if not activated:
             self._say(f"{failing} {REASONS[kind]}, and switching to {loadout.name} failed.")
             return ""

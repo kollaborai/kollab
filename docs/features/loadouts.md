@@ -117,8 +117,9 @@ again, and the notice asks you to send the message again:
   answer would join as one.
 
 An ACP harness still running or holding other messages is not switched yet:
-switching closes it, which would fail them too. Its next failure, once it has
-none, switches.
+switching closes it, which would fail them too. It switches once the last of
+them ends, however that one ends. From then until the switch is done, a new
+message is refused with a line asking you to send it again.
 
 - `/llm fallback` shows the choice; `/llm fallback off` turns it off.
 - In the web UI: Settings → Loadouts → Fallback Model, a dropdown of every

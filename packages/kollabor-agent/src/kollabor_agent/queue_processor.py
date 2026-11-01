@@ -1216,7 +1216,13 @@ class QueueProcessor:
         from kollabor_ai.goal_image_scope import goal_image_request_scope
 
         with goal_image_request_scope(self):
-            return await self._streaming_handler.call_llm(**kwargs)
+            try:
+                return await self._streaming_handler.call_llm(**kwargs)
+            finally:
+                # Each call resets the service's flag, so a timeout retry that
+                # fails before streaming would hide what the first try showed.
+                if getattr(getattr(self, "api_service", None), "last_call_streamed", False) is True:
+                    self._reply_streamed = True
 
     async def continue_conversation(self, current_parent_uuid: str) -> str:
         """Continue an ongoing conversation (no new user message).
@@ -1338,6 +1344,9 @@ class QueueProcessor:
         """Inner implementation of _execute_llm_turn (called under _turn_lock)."""
         # Watchdog heartbeat: a turn is actually executing = forward progress.
         self.mark_progress()
+        # Whether any of this turn's provider calls showed part of its reply:
+        # the model fallback never asks a new model for a reply seen in part (#548).
+        self._reply_streamed = False
 
         # Context service: signal new turn for curator throttling
         context_svc = None
@@ -2316,7 +2325,7 @@ class QueueProcessor:
             retry = False
             # Part of a reply already streamed would read as the start of the
             # new model's answer, so such a turn is never asked again.
-            streamed = getattr(getattr(self, "api_service", None), "last_call_streamed", False) is True
+            streamed = getattr(self, "_reply_streamed", False) is True
             event_bus = getattr(self, "event_bus", None)
             if event_bus is not None:
                 try:
