@@ -130,11 +130,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - A message steered into a running ACP turn is accepted. The send no longer shows "input not accepted" for a message that was delivered (#616, #583).
+- Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
+  `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
+  internal agent message-tool syntax (#622).
 - Gem Studio keeps preview activity choices on one scrollable row with touch-sized targets and visible keyboard focus, makes Save the primary action, and keeps footer actions and save errors usable with enlarged text and long names (#465).
 - ACP: switching a session's profile or loadout now reports the resolved
   provider profile with the harness's model and effort in session state and
   the engine API, instead of a blank model/effort readout and an unresolved
   loadout name (#605).
+- Hub membership updates now send to every peer in a tick together, so one
+  slow or failing peer no longer delays the peers listed after it (#603).
+- Membership fan-out now stays inside the relay's pending budget: surplus
+  sends wait on a semaphore instead of being rejected for capacity, a relay
+  capacity reject is backpressure rather than a peer failure — the reject is
+  now typed ("capacity") and the typed signal survives the secure conversation
+  transport, so the live relay path honors backpressure too — retry backoff
+  saturates instead of overflowing after ~1024 consecutive failures (both
+  membership and config sync), and a peer's send bookkeeping is pruned when
+  it leaves the list (#603).
 - ACP: attaching with `--llm` no longer closes the running harness before the
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness
