@@ -1,0 +1,28 @@
+{
+  "name": "security",
+  "description": "Security team: security lead, application security, cloud/infra security, detection and response, and governance/risk/compliance. Reviews, scans read-only, drafts fixes and policies; never attacks systems it was not authorised to test.",
+  "roster": "security-crew",
+  "lead": "marcus",
+  "members": [
+    {
+      "persona": "marcus",
+      "reports_to": null
+    },
+    {
+      "persona": "anya",
+      "reports_to": "marcus"
+    },
+    {
+      "persona": "idris",
+      "reports_to": "marcus"
+    },
+    {
+      "persona": "keira",
+      "reports_to": "marcus"
+    },
+    {
+      "persona": "soren",
+      "reports_to": "marcus"
+    }
+  ]
+}

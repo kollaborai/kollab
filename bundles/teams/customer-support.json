@@ -1,0 +1,28 @@
+{
+  "name": "customer-support",
+  "description": "Customer support desk: support lead, tier-1 and tier-2 agents, knowledge-base writer and QA/insights. Triage, draft answers, escalate bugs, and keep the help center current; replies and refunds need approval.",
+  "roster": "support-crew",
+  "lead": "dana",
+  "members": [
+    {
+      "persona": "dana",
+      "reports_to": null
+    },
+    {
+      "persona": "kofi",
+      "reports_to": "dana"
+    },
+    {
+      "persona": "elena",
+      "reports_to": "dana"
+    },
+    {
+      "persona": "jun",
+      "reports_to": "dana"
+    },
+    {
+      "persona": "farah",
+      "reports_to": "dana"
+    }
+  ]
+}
