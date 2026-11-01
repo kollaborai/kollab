@@ -428,8 +428,14 @@ async def join_networks(
         )
     print(f"step 5: win-b submitted the code, receipt {receipt}")
 
-    snapshot = await cproxy(sock_a, "snapshot", {})
-    requests = snapshot.get("requests") or []
+    # the request reaches win-a through the relay, so it shows up a moment after the submit
+    snapshot, requests = {}, []
+    deadline = time.monotonic() + 60
+    while not requests and time.monotonic() < deadline:
+        snapshot = await cproxy(sock_a, "snapshot", {})
+        requests = snapshot.get("requests") or []
+        if not requests:
+            await asyncio.sleep(2)
     if not requests:
         raise SystemExit(
             f"win-a sees no pending enrollment: {json.dumps(snapshot)[:400]}"
