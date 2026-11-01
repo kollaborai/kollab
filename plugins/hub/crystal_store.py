@@ -159,6 +159,7 @@ class CrystalStore:
         self._summary_words: OrderedDict[str, frozenset] = OrderedDict()
         self._summary_words_lock = threading.Lock()
         self._summary_words_limit = SUMMARY_WORD_CACHE_MIN_SIZE
+        self._summary_words_high_water = SUMMARY_WORD_CACHE_MIN_SIZE
 
     def _resize_summary_cache(self) -> None:
         """Resize in place, retaining the most recently used summaries."""
@@ -167,6 +168,14 @@ class CrystalStore:
             self._summary_words_limit = size
             while len(self._summary_words) > size:
                 self._summary_words.popitem(last=False)
+            # Eviction alone can leave the OrderedDict's backing table at its
+            # historical peak. Compact after a 4x drop in capacity; tracking
+            # the last high water avoids copying on every boundary crossing.
+            if 4 * size <= self._summary_words_high_water:
+                self._summary_words = OrderedDict(self._summary_words)
+                self._summary_words_high_water = size
+            else:
+                self._summary_words_high_water = max(self._summary_words_high_water, size)
 
     def _ensure_loaded(self) -> None:
         """Lazy-load entries from disk on first access, under the lock: a load

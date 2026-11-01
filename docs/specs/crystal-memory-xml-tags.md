@@ -10,8 +10,10 @@ author: maintainers
 > **Current implementation:** Each crystal store gives its deduplication cache
 > a capacity of at least 8,192 tokenized summaries, growing with live entries
 > and shrinking when entries leave. Resizing keeps the most recently used tokens,
-> evicting only what exceeds the new limit. Eviction only recomputes tokens; it
-> does not remove persisted memories or change merge matching.
+> evicting only what exceeds the new limit. When capacity falls to one quarter of
+> its peak since the last compaction, the cache compacts its backing storage while
+> preserving that order. Eviction only recomputes tokens; it does not remove
+> persisted memories or change merge matching.
 
 # Crystal Memory XML Tags
 
