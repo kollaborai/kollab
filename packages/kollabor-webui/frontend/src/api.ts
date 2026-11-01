@@ -126,6 +126,7 @@ export const HISTORY_MAX_PAGE_BYTES = Number.isInteger(configuredHistoryPageByte
 
 export type HistoryPage = {
   history: HistoryMessage[];
+  conversation_uid?: string | null;
   start_index: number;
   end_index: number;
   has_more_older: boolean;
