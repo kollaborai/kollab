@@ -1448,6 +1448,48 @@ class LocalStateService(StateService):
                 logger.debug("OAuth profile reload before activation failed: %s", e)
 
         target_profile = self._profile_manager.get_profile(name)
+        if target_profile is None and not reloaded and hasattr(
+            self._profile_manager, "reload"
+        ):
+            # A client may have created the profile in config after the
+            # daemon's registry loaded (session-only OAuth login attaches
+            # this way). Reload once before deciding the name is absent --
+            # and before any orchestrator teardown below.
+            try:
+                self._profile_manager.reload()
+                reloaded = True
+            except Exception as e:
+                logger.debug("profile reload before activation failed: %s", e)
+            target_profile = self._profile_manager.get_profile(name)
+        loadout = None
+        if target_profile is None:
+            # ``--llm`` may name a loadout (a preset of provider profile +
+            # model + params) rather than a profile. Resolve it here, before
+            # any orchestrator teardown: an unresolvable name must fail with
+            # its own error while a running ACP harness stays untouched.
+            from kollabor_ai.loadout_manager import (
+                LoadoutManager,
+                acp_loadout_model,
+            )
+
+            loadout, _suggestions = LoadoutManager(
+                self._profile_manager
+            ).resolve(name)
+            if loadout is not None:
+                name = loadout.provider_profile
+                target_profile = self._profile_manager.get_profile(name)
+        if target_profile is None:
+            # Resolve-then-close: fail before the branches below close a
+            # running harness. Same error vocabulary as the legacy /profile
+            # handler.
+            try:
+                available = list(self._profile_manager.get_profile_names())
+            except Exception:
+                available = []
+            raise ValueError(
+                f"profile not found: {name!r}"
+                + (f" (available: {', '.join(available)})" if available else "")
+            )
         target_provider = (
             target_profile.get_provider()
             if hasattr(target_profile, "get_provider")
@@ -1464,13 +1506,45 @@ class LocalStateService(StateService):
             event_bus.get_service("acp_orchestrator")
             if event_bus else None
         )
+        if loadout is not None and str(target_provider).lower() != "acp":
+            # Layer the loadout preset onto the provider profile in memory
+            # only: an attach/launch switch must never rewrite the user's
+            # saved config fields. Explicit --model/--effort flags are
+            # applied on top further down, mirroring the fresh-start path.
+            layer: dict[str, Any] = {
+                "save_to_config": False,
+                "model": loadout.model,
+            }
+            if loadout.temperature is not None:
+                layer["temperature"] = loadout.temperature
+            if loadout.effort:
+                layer["effort"] = loadout.effort
+            if loadout.max_tokens is not None:
+                layer["max_tokens"] = loadout.max_tokens
+            try:
+                self._profile_manager.update_profile(name, **layer)
+            except Exception as e:
+                logger.warning(
+                    "Failed to apply loadout %r (%s)",
+                    loadout.name,
+                    type(e).__name__,
+                )
         if str(target_provider).lower() == "acp":
             if model:
                 raise ValueError("ACP profile owns model settings")
             if orchestrator is None:
                 raise ValueError("ACP profile unavailable: orchestrator is not running")
+            loadout_model = (
+                acp_loadout_model(loadout, target_profile)
+                if loadout is not None else None
+            )
+            loadout_effort = loadout.effort if loadout is not None else ""
+            harness_entry = bool(
+                loadout is not None and loadout.implicit and not loadout_model
+            )
             running_same = (
-                str(current_provider).lower() == "acp"
+                loadout is None
+                and str(current_provider).lower() == "acp"
                 and current_profile is not None
                 and getattr(current_profile, "name", None) == name
                 and getattr(orchestrator, "active", False) is True
@@ -1505,7 +1579,18 @@ class LocalStateService(StateService):
 
                 try:
                     await orchestrator.close()
-                    await orchestrator.start(target_profile)
+                    if harness_entry:
+                        # An implicit loadout names the harness executable
+                        # itself: start bare and drop any stale override.
+                        orchestrator._loadout_override = None
+                        await orchestrator.start(target_profile)
+                    elif loadout is not None:
+                        await orchestrator.start(
+                            target_profile,
+                            loadout=(loadout_model, loadout_effort),
+                        )
+                    else:
+                        await orchestrator.start(target_profile)
                 except BaseException as exc:
                     await restore_previous()
                     if not isinstance(exc, Exception):
@@ -1519,6 +1604,43 @@ class LocalStateService(StateService):
                         f"ACP profile {name!r} could not be activated; verify its "
                         "adapter command and profile settings."
                     ) from None
+                if loadout is not None:
+                    # Mirror LoadoutManager.activate(): confirm the harness
+                    # actually applied the loadout before the provider
+                    # profile is persisted.
+                    try:
+                        options = orchestrator.advertised_config_options()
+                        model_opt = next(
+                            (o for o in options
+                             if str(o.get("category") or "").lower() == "model"
+                             or o.get("id") == "model"),
+                            None,
+                        )
+                        effort_opt = next(
+                            (o for o in options
+                             if str(o.get("category") or "").lower()
+                             in {"thought_level", "effort"}
+                             or o.get("id") == "effort"),
+                            None,
+                        )
+                        if loadout_model and (
+                            not model_opt
+                            or model_opt.get("currentValue") != loadout_model
+                        ):
+                            raise ValueError(
+                                "ACP harness did not apply the loadout model"
+                            )
+                        if loadout_effort and (
+                            not effort_opt
+                            or effort_opt.get("currentValue") != loadout_effort
+                        ):
+                            raise ValueError(
+                                "ACP harness did not apply the loadout effort"
+                            )
+                    except BaseException:
+                        # A rejected loadout restores the previous harness.
+                        await restore_previous()
+                        raise
                 if effort:
                     try:
                         await self._apply_acp_effort(orchestrator, effort)
