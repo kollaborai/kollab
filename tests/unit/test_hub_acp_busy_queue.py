@@ -884,3 +884,139 @@ async def test_shutdown_waits_for_inflight_admission_instead_of_cancelling_it():
     assert not cancelled.is_set()
     assert message.id not in plugin._acp_network_turns
     assert plugin._end_network_turn.await_args.kwargs["outcome"] == "busy"
+
+
+@pytest.mark.asyncio
+async def test_review_authority_revoked_while_pre_admission_hook_waits():
+    """A grant revoked after the retry check must not reach ACP admission."""
+    from contextvars import ContextVar
+
+    from kollabor.llm.llm_coordinator import LLMService
+    from plugins.hub.relay_agent import RelayAgentBridge
+
+    plugin, _ = _acp_plugin()
+    message = _agent_request("revoked while hook waits", from_identity="relay:manual-peer")
+    _held_turn(plugin, message)
+    task_id = "manual-task-123"
+    entry = plugin._acp_busy_parked[0]
+    entry["origin_context"] = {
+        "sender": message.from_agent,
+        "relay_turn_id": task_id,
+        "authenticated": True,
+        "operator": False,
+    }
+    active = SimpleNamespace(record={"id": task_id}, finished=False)
+    relay = SimpleNamespace(
+        _turn=ContextVar("review_turn", default=None),
+        active=active,
+        _authorize_active=MagicMock(),
+        store=SimpleNamespace(transition=MagicMock()),
+        llm=SimpleNamespace(is_processing=False),
+    )
+    plugin._relay_agent = relay
+    entered, resume = asyncio.Event(), asyncio.Event()
+    accepted = []
+    acp = SimpleNamespace(active=True, steer=AsyncMock(return_value=False))
+    acp.admit = MagicMock(
+        side_effect=lambda text, **kwargs: (
+            accepted.append((text, kwargs))
+            or SimpleNamespace(request_id="accepted", turn_id=1)
+        )
+    )
+    service = LLMService.__new__(LLMService)
+    service._profile_selects_acp = lambda: (True, False)
+
+    class EventBus:
+        def get_service(self, name):
+            return {
+                "acp_orchestrator": acp,
+                "hub_plugin": plugin,
+            }.get(name)
+
+        async def emit_with_hooks(self, _event, data, source):
+            entered.set()
+            await resume.wait()  # USER_INPUT hook, before any ACP delivery
+            result = await service._admit_acp(acp, data, source)
+            return {
+                "main": {
+                    "hook_results": [{
+                        "hook_key": "llm_core.process_user_input",
+                        "success": True,
+                        "result": result,
+                    }]
+                }
+            }
+
+    service.event_bus = EventBus()
+    valid_admission = await service._admit_acp(
+        acp,
+        {
+            "message": "valid while relay grant is active",
+            "origin_context": entry["origin_context"],
+        },
+        "agent",
+    )
+    assert valid_admission["status"] == "queued"
+    accepted.clear()
+
+    plugin.event_bus.get_service.side_effect = lambda name: (
+        service if name == "llm_service" else None
+    )
+    plugin._kick_parked_busy_retries()
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    await RelayAgentBridge._stop_active(relay, "cancelled", "authority revoked")
+    resume.set()
+    await asyncio.wait_for(plugin._busy_retry_task, timeout=1)
+
+    assert active.finished is True
+    assert not accepted, "revoked manual prompt was admitted after the pre-admission hook"
+
+
+@pytest.mark.asyncio
+async def test_review_shutdown_with_nonresponsive_admission_is_bounded(
+    monkeypatch, caplog
+):
+    """A stalled admission must not hold plugin shutdown indefinitely."""
+    monkeypatch.setattr(
+        hub_plugin_module, "_ACP_BUSY_SHUTDOWN_WAIT_SECONDS", 0.05
+    )
+    plugin, llm = _acp_plugin()
+    message = _agent_request("stalled admission")
+    _held_turn(plugin, message)
+    entered, resume = asyncio.Event(), asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocked(*_args, **_kwargs):
+        entered.set()
+        try:
+            await resume.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {"status": "rejected", "reason": "acp_queue_full"}
+
+    llm.submit_human_input = AsyncMock(side_effect=blocked)
+    plugin._kick_parked_busy_retries()
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    for name in (
+        "_relay_agent", "_vault", "_change_feed", "_startup_task",
+        "_heartbeat_task", "_mailbox_task", "_dreaming_task", "_notify_task",
+        "_cron_task", "_autosave_task", "_supervisor_task",
+        "_presence_sweep_task", "_bridge_task", "_email_task",
+        "_socket_server", "_election",
+    ):
+        setattr(plugin, name, None)
+    plugin._started = False
+
+    caplog.set_level(logging.WARNING, logger=hub_plugin_module.__name__)
+    shutdown = asyncio.create_task(plugin.shutdown(exit_process=False))
+    await asyncio.sleep(0.2)
+    blocked_shutdown = not shutdown.done()
+    resume.set()
+    await asyncio.wait_for(shutdown, timeout=1)
+    await asyncio.wait_for(plugin._busy_retry_task, timeout=1)
+
+    assert not cancelled.is_set(), "shutdown must not cancel an admission already in flight"
+    assert not blocked_shutdown, "shutdown waited indefinitely on a nonresponsive admission"
+    assert "timed out waiting for" in caplog.text

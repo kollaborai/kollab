@@ -141,6 +141,8 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
+_ACP_BUSY_SHUTDOWN_WAIT_SECONDS = 5.0
+
 # A remote request's turn ends when the queue processor finishes the whole chain
 # that handled it (`HubPlugin.network_chain_ended`, docs/specs/agent-network-
 # simple-flow.md section 7). One request ends failed when no turn came for it
@@ -9678,9 +9680,8 @@ class HubPlugin(BasePlugin):
             immediate.append(entry)
         return immediate
 
-    def _parked_retry_authorized(self, entry: dict) -> bool:
-        """Revalidate saved manual-relay authority before retry admission."""
-        origin = entry.get("origin_context")
+    def _manual_relay_origin_authorized(self, origin: Any) -> bool:
+        """Revalidate the live authority carried by a manual relay origin."""
         turn_id = origin.get("relay_turn_id") if isinstance(origin, dict) else None
         if not turn_id:
             return True
@@ -9704,6 +9705,10 @@ class HubPlugin(BasePlugin):
         except RelayError:
             return False
         return True
+
+    def _parked_retry_authorized(self, entry: dict) -> bool:
+        """Revalidate saved manual-relay authority before retry admission."""
+        return self._manual_relay_origin_authorized(entry.get("origin_context"))
 
     def _track_detached_busy_admission(
         self, entry: dict, admission_task: asyncio.Task
@@ -16079,16 +16084,53 @@ class HubPlugin(BasePlugin):
         )
         if immediate:
             await self._end_parked_busy_turns(immediate, detail=detail)
+        current_task = asyncio.current_task()
         retry_task = getattr(self, "_busy_retry_task", None)
+        wait_tasks: set[asyncio.Task] = set()
         if (
-            retry_task is not None
-            and retry_task is not asyncio.current_task()
+            isinstance(retry_task, asyncio.Task)
+            and retry_task is not current_task
             and not retry_task.done()
         ):
-            await asyncio.gather(retry_task, return_exceptions=True)
-        detached_tasks = list(getattr(self, "_busy_detached_tasks", None) or ())
-        if detached_tasks:
-            await asyncio.gather(*detached_tasks, return_exceptions=True)
+            wait_tasks.add(retry_task)
+        wait_tasks.update(
+            task
+            for task in (getattr(self, "_busy_detached_tasks", None) or ())
+            if isinstance(task, asyncio.Task)
+            and task is not current_task
+            and not task.done()
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _ACP_BUSY_SHUTDOWN_WAIT_SECONDS
+        while wait_tasks:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            done, pending = await asyncio.wait(wait_tasks, timeout=remaining)
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+            wait_tasks = {task for task in pending if not task.done()}
+            retry_task = getattr(self, "_busy_retry_task", None)
+            if (
+                isinstance(retry_task, asyncio.Task)
+                and retry_task is not current_task
+                and not retry_task.done()
+            ):
+                wait_tasks.add(retry_task)
+            wait_tasks.update(
+                task
+                for task in (getattr(self, "_busy_detached_tasks", None) or ())
+                if isinstance(task, asyncio.Task)
+                and task is not current_task
+                and not task.done()
+            )
+        if wait_tasks:
+            logger.warning(
+                "timed out waiting for %d in-flight ACP busy admission task(s) "
+                "during hub shutdown after %.1f seconds; leaving them running",
+                len(wait_tasks),
+                _ACP_BUSY_SHUTDOWN_WAIT_SECONDS,
+            )
 
         relay_start = getattr(self, "_relay_startup_task", None)
         if relay_start:
