@@ -129,7 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
-- Gem Studio keeps preview activity choices on one scrollable row with touch-sized targets and visible keyboard focus, and makes Save the primary action (#465).
+- Gem Studio keeps preview activity choices on one scrollable row with touch-sized targets and visible keyboard focus, makes Save the primary action, and keeps footer actions usable with enlarged text (#465).
 - ACP: attaching with `--llm` no longer closes the running harness before the
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness

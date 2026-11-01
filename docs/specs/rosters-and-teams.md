@@ -224,7 +224,9 @@ Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `Agen
   focused choice visible inside its scrollable row. Look tabs retain their labelled
   content panels and use the same visible focus treatment. On devices with any coarse
   pointer, including a secondary touchscreen, these touch targets measure at least
-  44 by 44 CSS pixels; Save persists the look rather than the preview activity.
+  44 by 44 CSS pixels. Footer actions wrap in order when needed, keeping their
+  labels and controls accessible; Save persists the look rather than the preview activity.
+  When the introduction overflows, it scrolls and becomes keyboard focusable.
 - **Avatar.** One component draws every agent picture: kind `gem` (or none) is the 3D
   gem; `image`, `emoji` and `initials` are a flat tile on the persona's color. Image
   files are fetched with the bearer token into blob URLs; a file that fails keeps the

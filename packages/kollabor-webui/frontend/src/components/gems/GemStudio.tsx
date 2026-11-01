@@ -1,4 +1,4 @@
-import { Fragment, useState, type ChangeEvent, type FocusEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ChangeEvent, type FocusEvent, type ReactNode } from "react";
 import { Dices, Loader2, RotateCcw } from "lucide-react";
 import { RadioGroup } from "radix-ui";
 import type { AgentPoolEntry, AvatarSpec, GemAppearance, GemLook, LookColor, Session } from "@/api";
@@ -156,8 +156,21 @@ function StudioBody({
   const [activity, setActivity] = useState<Activity>("idle");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const headerRef = useRef<HTMLDivElement>(null);
+  const [headerScrollable, setHeaderScrollable] = useState(false);
   const chat = focus?.chat;
   const [hub, setHub] = useState(chat?.hub ?? true);
+
+  useEffect(() => {
+    const header = headerRef.current;
+    if (!header) return;
+    const measure = () => setHeaderScrollable(header.scrollHeight > header.clientHeight + 1);
+    const observer = new ResizeObserver(measure);
+    observer.observe(header);
+    for (const child of header.children) observer.observe(child);
+    measure();
+    return () => observer.disconnect();
+  }, []);
 
   const current: AgentPoolEntry | undefined =
     pinned ?? agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
@@ -199,7 +212,14 @@ function StudioBody({
 
   return (
     <>
-      <DialogHeader className="px-5 py-4 text-left">
+      {/* Keep the editor reachable when a large introduction and wrapped footer share a short dialog. */}
+      <DialogHeader
+        ref={headerRef}
+        tabIndex={headerScrollable ? 0 : -1}
+        role="region"
+        aria-label={focus ? `${name} studio introduction` : "Gem Studio introduction"}
+        className="max-h-[30vh] shrink-0 overflow-y-auto px-5 py-4 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset"
+      >
         <DialogTitle>{focus ? name : "Gem Studio"}</DialogTitle>
         <DialogDescription>
           {focus
@@ -568,10 +588,10 @@ function StudioBody({
         </div>
       </GemAppearancePreview>
 
-      <DialogFooter className="bg-muted/30 flex-row items-center gap-2 px-5 py-3 sm:justify-between">
-        <div className="min-w-0 flex-1">
+      <DialogFooter className="bg-muted/30 flex-row flex-wrap items-center gap-2 px-5 py-3 sm:justify-between">
+        <div className="min-w-0 max-w-full flex-[1_0_auto]">
           {error ? (
-            <p className="text-destructive text-xs">{error}</p>
+            <p className="text-destructive break-words text-xs">{error}</p>
           ) : current ? (
             <Button
               type="button"
@@ -585,9 +605,10 @@ function StudioBody({
                 })
               }
               disabled={!draft.gems?.[key]}
+              className="h-auto min-h-8 max-w-full whitespace-normal text-left"
             >
               <RotateCcw className="size-4" />
-              Reset {name}
+              <span className="min-w-0 break-words">Reset {name}</span>
             </Button>
           ) : null}
         </div>

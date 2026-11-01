@@ -20,6 +20,10 @@ if (!out) throw new Error("Pass an output directory for screenshots and build ev
 const only = process.argv[3];
 const onlyCase = process.argv[4];
 const textScale = Number(process.env.GEM_STUDIO_TEXT_SCALE || 1);
+const enableReset = process.env.GEM_STUDIO_ENABLE_RESET === "1";
+const simulateSaveError = process.env.GEM_STUDIO_SAVE_ERROR === "1";
+const displayName = process.env.GEM_STUDIO_TEST_NAME || "Sapphire";
+const recheckResize = process.env.GEM_STUDIO_RECHECK_RESIZE === "1";
 if (!Number.isFinite(textScale) || textScale < 1 || textScale > 3) throw new Error("Text scale must be between 1 and 3.");
 fs.mkdirSync(out, { recursive: true });
 
@@ -33,6 +37,10 @@ fs.writeFileSync(
     `built_at ${new Date().toISOString()}`,
     `git_head ${head}`,
     `text_scale ${textScale}`,
+    `enable_reset ${enableReset}`,
+    `simulate_save_error ${simulateSaveError}`,
+    `test_name ${JSON.stringify(displayName)}`,
+    `recheck_resize ${recheckResize}`,
     `git_status ${JSON.stringify(execSync("git status --porcelain --untracked-files=no", { cwd: path.resolve(here, "../..") }).toString().trim())}`,
     `GemStudio.tsx ${sha256(path.join(here, "../src/components/gems/GemStudio.tsx"))}`,
     `harness ${sha256(fileURLToPath(import.meta.url))}`,
@@ -70,7 +78,7 @@ console.log(`fixture server ${base}`);
 
 const pool = {
   agents: [
-    { name: "sapphire", display_name: "Sapphire", avatar: { kind: "gem" }, color: [48, 96, 220], caste: "specialist", available: true, active: false, pool: true },
+    { name: "sapphire", display_name: displayName, avatar: { kind: "gem" }, color: [48, 96, 220], caste: "specialist", available: true, active: false, pool: true },
     { name: "lapis", display_name: "Lapis", avatar: { kind: "gem" }, color: [38, 84, 180], caste: "specialist", available: true, active: false, pool: true },
     { name: "peridot", display_name: "Peridot", avatar: { kind: "gem" }, color: [70, 160, 80], caste: "specialist", available: true, active: false, pool: true },
   ],
@@ -156,7 +164,8 @@ const makeContext = async (browser, width, height, theme, extra = {}, simulateHy
   // Do not allow a fixture run to open a socket to any live local service.
   await page.routeWebSocket("**/*", (socket) => socket.close());
   page.on("console", (message) => {
-    if (message.type() === "error") failures.push(`${width}/${theme}: console error: ${message.text()}`);
+    if (message.type() === "error" && !(simulateSaveError && message.text().includes("status of 503")))
+      failures.push(`${width}/${theme}: console error: ${message.text()}`);
   });
   page.on("pageerror", (error) => failures.push(`${width}/${theme}: page error: ${error.message}`));
   await page.route("**/*", (route) => {
@@ -181,6 +190,10 @@ const makeContext = async (browser, width, height, theme, extra = {}, simulateHy
     }
     if ((engine || url.origin === base) && url.pathname.endsWith("/events")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+    }
+    if (simulateSaveError && request.method() === "PUT" && url.pathname.endsWith("/agents/appearance")) {
+      return route.fulfill({ status: 503, contentType: "application/json",
+        body: JSON.stringify({ detail: "TemporarySaveFailureWithoutAnySpacesToExerciseWrapping0123456789" }) });
     }
     if (engine || (url.origin === base && ["fetch", "xhr"].includes(request.resourceType()))) {
       return route.fulfill({
@@ -265,6 +278,147 @@ const openProperties = async (page, label) => {
   }
   console.log(`${label}: openProperties gave up after 3 attempts`);
   return null;
+};
+const verifyHeaderScroll = async (page, dialog, label) => {
+  const header = dialog.locator('[data-slot="dialog-header"]');
+  const before = await header.evaluate((node) => ({ client: node.clientHeight, scroll: node.scrollHeight, tabIndex: node.tabIndex }));
+  if ((before.tabIndex === 0) !== (before.scroll > before.client + 1))
+    failures.push(`${label}/header: introduction tab stop does not match its overflow ${JSON.stringify(before)}`);
+  if (before.scroll > before.client + 1) {
+    await header.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    if (!(await header.evaluate((node) => document.activeElement === node)))
+      failures.push(`${label}/header: the scrollable introduction is not in keyboard tab order`);
+    await page.keyboard.press("End");
+    await page.waitForTimeout(150);
+    const bottom = await header.evaluate((node) => ({ focused: document.activeElement === node,
+      visible: node.matches(":focus-visible"), shadow: getComputedStyle(node).boxShadow,
+      top: node.scrollTop, max: node.scrollHeight - node.clientHeight }));
+    if (!bottom.focused || !bottom.visible || !bottom.shadow.includes("inset") || bottom.top < bottom.max - 1)
+      failures.push(`${label}/header: keyboard cannot visibly focus and scroll the introduction ${JSON.stringify(bottom)}`);
+    await page.keyboard.press("Home");
+    await page.waitForTimeout(150);
+    if ((await header.evaluate((node) => node.scrollTop)) > 1)
+      failures.push(`${label}/header: keyboard cannot scroll the introduction back to the top`);
+    console.log(`${label}/header-scroll`, JSON.stringify({ before, bottom }));
+  }
+};
+const verifyHeaderResize = async (page, dialog, label) => {
+  const header = dialog.locator('[data-slot="dialog-header"]');
+  const resized = await page.addStyleTag({ content: "html { font-size: 200% !important; }" });
+  await page.waitForFunction(() => {
+    const node = document.querySelector('[role="dialog"][data-state="open"] [data-slot="dialog-header"]');
+    return node && node.scrollHeight > node.clientHeight + 1 && node.tabIndex === 0;
+  });
+  await header.focus();
+  await page.keyboard.press("End");
+  await page.waitForTimeout(150);
+  if ((await header.evaluate((node) => node.scrollTop)) <= 0)
+    failures.push(`${label}/header: introduction cannot scroll after text is enlarged`);
+  await resized.evaluate((node) => node.remove());
+  await page.waitForFunction(() => {
+    const node = document.querySelector('[role="dialog"][data-state="open"] [data-slot="dialog-header"]');
+    return node && node.scrollHeight <= node.clientHeight + 1 && node.tabIndex === -1;
+  });
+  await page.keyboard.press("Tab");
+  const after = await page.evaluate(() => ({ text: document.activeElement?.textContent?.trim().replace(/\s+/g, " "),
+    inside: Boolean(document.activeElement?.closest('[role="dialog"]')) }));
+  if (!after.inside || !after.text?.startsWith("Sapphire"))
+    failures.push(`${label}/header: Tab after shrinking text did not reach the first gem ${JSON.stringify(after)}`);
+  console.log(`${label}/header-resize`, JSON.stringify(after));
+};
+const recordInitialFocus = async (page, dialog, label) => {
+  const initial = await page.evaluateHandle(() => document.activeElement);
+  const describe = () => page.evaluate(() => {
+    const node = document.activeElement;
+    return { tag: node?.tagName, text: node?.textContent?.trim().replace(/\s+/g, " ").slice(0, 80),
+      label: node?.getAttribute("aria-label"), slot: node?.getAttribute("data-slot"), role: node?.getAttribute("role") };
+  });
+  const first = await describe();
+  const inside = await dialog.evaluate((node) => node.contains(document.activeElement));
+  if (!inside) failures.push(`${label}: opening the dialog did not put focus inside it`);
+  const order = [first];
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press("Tab");
+    order.push(await describe());
+  }
+  await initial.evaluate((node) => node.focus());
+  await initial.dispose();
+  console.log(`${label}/initial-focus-and-tabs`, JSON.stringify(order));
+};
+const verifyFooter = async (page, dialog, label, { error = false } = {}) => {
+  const footer = dialog.locator('[data-slot="dialog-footer"]');
+  const info = await footer.evaluate((node) => {
+    const rect = (element) => {
+      const r = element.getBoundingClientRect();
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+    };
+    const buttons = [...node.querySelectorAll("button")].map((button) => {
+      const r = button.getBoundingClientRect();
+      const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+      const range = document.createRange();
+      range.selectNodeContents(button);
+      return { text: button.textContent.trim().replace(/\s+/g, " "), disabled: button.disabled,
+        rect: rect(button), centerReceivesHit: button.contains(hit),
+        contentRects: [...range.getClientRects()].filter((item) => item.width && item.height)
+          .map((item) => ({ left: item.left, right: item.right, top: item.top, bottom: item.bottom })) };
+    });
+    const error = node.querySelector("p");
+    return { footer: rect(node), dialog: rect(node.closest('[role="dialog"]')), buttons,
+      error: error ? { text: error.textContent, rect: rect(error), scrollWidth: error.scrollWidth, clientWidth: error.clientWidth } : null,
+      viewport: { left: 0, top: 0, right: innerWidth, bottom: innerHeight } };
+  });
+  const inside = (item, container) => item.left >= container.left - 0.75 && item.right <= container.right + 0.75 &&
+    item.top >= container.top - 0.75 && item.bottom <= container.bottom + 0.75;
+  const expected = error ? ["Cancel", "Save"] : ["Reset ", "Cancel", "Save"];
+  if (info.buttons.length !== expected.length || info.buttons.some((button, index) =>
+    index === 0 && !error ? !button.text.startsWith(expected[index]) : button.text !== expected[index]))
+    failures.push(`${label}/footer: unexpected action order ${JSON.stringify(info.buttons.map((b) => b.text))}`);
+  if (error && (!info.error || !inside(info.error.rect, info.footer) || !inside(info.error.rect, info.dialog) ||
+      info.error.scrollWidth > info.error.clientWidth + 1))
+    failures.push(`${label}/footer: save error is clipped`);
+  for (const button of info.buttons) {
+    if (!inside(button.rect, info.footer) || !inside(button.rect, info.dialog) || !inside(button.rect, info.viewport))
+      failures.push(`${label}/footer: ${button.text} is clipped or outside the dialog`);
+    if (button.contentRects.some((content) => !inside(content, button.rect)))
+      failures.push(`${label}/footer: ${button.text} content is clipped`);
+    if (!button.disabled && !button.centerReceivesHit)
+      failures.push(`${label}/footer: ${button.text} center does not hit its button`);
+  }
+  for (let i = 0; i < info.buttons.length; i++) {
+    for (let j = i + 1; j < info.buttons.length; j++) {
+      const a = info.buttons[i].rect, b = info.buttons[j].rect;
+      if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.75 &&
+          Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.75)
+        failures.push(`${label}/footer: ${info.buttons[i].text} overlaps ${info.buttons[j].text}`);
+    }
+  }
+  console.log(`${label}/footer`, JSON.stringify(info));
+  if (enableReset && !error) {
+    const reset = footer.getByRole("button", { name: /^Reset / });
+    const cancel = footer.getByRole("button", { name: "Cancel" });
+    const save = footer.getByRole("button", { name: "Save" });
+    if (await reset.isDisabled()) failures.push(`${label}/footer: Reset was not enabled by editing the look`);
+    await reset.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    for (const [name, button] of [["Reset", reset], ["Cancel", cancel], ["Save", save]]) {
+      await page.waitForTimeout(250); // The focus ring has a short transition.
+      const focus = await button.evaluate((node) => {
+        const r = node.getBoundingClientRect();
+        const footer = node.closest('[data-slot="dialog-footer"]').getBoundingClientRect();
+        return { focused: document.activeElement === node, visible: node.matches(":focus-visible"),
+          shadow: getComputedStyle(node).boxShadow,
+          roomForRing: r.left - 3 >= footer.left && r.right + 3 <= footer.right &&
+            r.top - 3 >= footer.top && r.bottom + 3 <= footer.bottom };
+      });
+      if (!focus.focused || !focus.visible || !focus.shadow.includes("3px") || !focus.roomForRing)
+        failures.push(`${label}/footer: ${name} keyboard focus ring is missing or clipped ${JSON.stringify(focus)}`);
+      if (name !== "Save") await page.keyboard.press("Tab");
+    }
+    await page.screenshot({ path: path.join(out, `footer-focus-${label.replaceAll("/", "-")}.png`) });
+  }
 };
 const verifyTabBar = async (page, dialog, barName, expectedCount, label, touch, largeTargets = touch) => {
   const activity = barName === "Preview activity";
@@ -452,6 +606,14 @@ const capture = async (browser, name, width, height, theme, surface, pointer) =>
       dialog = result.dialog;
     }
     await page.waitForTimeout(900); // Let the dialog animation settle before measuring.
+    await recordInitialFocus(page, dialog, label);
+    await verifyHeaderScroll(page, dialog, label);
+    if (recheckResize) await verifyHeaderResize(page, dialog, label);
+    if (enableReset) {
+      const randomLook = dialog.getByRole("button", { name: "Random Look" });
+      await randomLook.scrollIntoViewIfNeeded();
+      await randomLook.click();
+    }
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
     if (overflow) failures.push(`${label}: document has horizontal overflow`);
     const save = dialog.getByRole("button", { name: /^Save$/ });
@@ -468,6 +630,7 @@ const capture = async (browser, name, width, height, theme, surface, pointer) =>
     const highlight = await highlightOf(page);
     if (saveBg !== highlight) failures.push(`${label}: Save background ${saveBg} differs from highlight ${highlight}`);
     await page.screenshot({ path: path.join(out, `gem-studio-${name}-${theme}-${pointer}-${surface}.png`) });
+    await verifyFooter(page, dialog, label);
     if (width === 390) {
       const scroll = await dialog.getByRole("radiogroup", { name: "Preview activity" }).evaluate((node) => {
         let parent = node.parentElement;
@@ -492,6 +655,23 @@ const capture = async (browser, name, width, height, theme, surface, pointer) =>
       await activity.evaluate((node) => { node.scrollLeft = 0; });
     }
     await verifyTabBar(page, dialog, "Look", surface === "properties" ? 8 : 6, label, touch, touch || hybrid);
+    if (enableReset) {
+      const reset = dialog.getByRole("button", { name: /^Reset / });
+      await reset.click();
+      if (!(await reset.isDisabled())) failures.push(`${label}/footer: Reset did not clear the edited look`);
+      const randomLook = dialog.getByRole("button", { name: "Random Look" });
+      await randomLook.scrollIntoViewIfNeeded();
+      await randomLook.click();
+      await dialog.getByRole("button", { name: "Save" }).click();
+      if (simulateSaveError) {
+        await dialog.locator('[data-slot="dialog-footer"] p').waitFor({ state: "visible", timeout: 4000 });
+        await verifyFooter(page, dialog, `${label}/save-error`, { error: true });
+        await page.screenshot({ path: path.join(out, `footer-error-${label.replaceAll("/", "-")}.png`) });
+        await dialog.getByRole("button", { name: "Cancel" }).click();
+      }
+      if (!(await dialog.waitFor({ state: "hidden", timeout: 4000 }).then(() => true).catch(() => false)))
+        failures.push(`${label}/footer: ${simulateSaveError ? "Cancel" : "Save"} did not close the dialog after editing`);
+    }
   } catch (error) {
     failures.push(`${label}: ${String(error.message).split("\n")[0]}`);
   } finally {
@@ -523,9 +703,12 @@ const captureNonGem = async (browser, pointer) => {
     const result = await openProperties(page, label);
     if (!result) throw new Error("Properties did not open");
     await page.waitForTimeout(900);
+    await recordInitialFocus(page, result.dialog, label);
+    await verifyHeaderScroll(page, result.dialog, label);
     if (await result.dialog.getByRole("radiogroup", { name: "Preview activity" }).count())
       failures.push(`${label}: a non-gem unexpectedly has an activity row`);
     await page.screenshot({ path: path.join(out, `gem-studio-390-dark-${pointer}-non-gem.png`) });
+    await verifyFooter(page, result.dialog, label);
     await verifyTabBar(page, result.dialog, "Look", 3, label, touch, touch || hybrid);
   } catch (error) {
     failures.push(`${label}: ${String(error.message).split("\n")[0]}`);
