@@ -1365,3 +1365,83 @@ def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
         "warning": "Saved by [harness]; Kollab cannot undo it.",
     }
     assert native == {"decision": "approve", "scope": "once"}
+
+
+class _PromptRpc:
+    def register(self, method, handler):
+        self.handler = handler
+
+
+@pytest.mark.asyncio
+async def test_an_answer_to_a_parked_card_reaches_the_message_that_gives_it(monkeypatch):
+    """Danburite on #554 round 6: a parked native prompt keeps the ids of the
+    turn that showed it, so its answer, given by a later message, was dropped
+    as that turn's output, and the card stayed open after the answer took
+    effect. Real stamp, permission bridge, display tap and event normalizer."""
+    from kollabor_engine.daemon_pool import _normalize_event
+
+    from kollabor.llm.permissions.attach_bridge import AttachPermissionBridge
+    from kollabor_agent.queue_processor import QueueProcessor
+    from kollabor_tui.display_tap import DisplayTap
+
+    session = _FakeSession([])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    tap = DisplayTap()
+    events = tap.subscribe("parked-answer")
+    bridge, rpc = AttachPermissionBridge(), _PromptRpc()
+    turn = QueueProcessor.__new__(QueueProcessor)
+    turn._turn_token = None
+    turn._stamp_turn(None, ("request-A",))
+    try:
+        prompt = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=tap,
+                rpc_server=rpc,
+                details={"tool_id": "shell-3", "tool_type": "shell"},
+                timeout=None,
+            )
+        )
+    finally:
+        turn._stamp_turn(None)  # turn A ends; its parked prompt keeps A's context
+    await asyncio.sleep(0)
+    assert events.get_nowait()["request_ids"] == ["request-A"]
+    bridge.park("shell-3")
+    assert events.get_nowait()["type"] == "permission_parked"
+    answers = []
+
+    async def submit(content, *, request_id=None, **kwargs):
+        # This message's "no" answers the card.
+        assert (await rpc.handler({"tool_id": "shell-3", "response": "DENY"}))["ok"]
+        await asyncio.wait_for(prompt, 1)
+        answers.append(events.get_nowait())
+        session._events.put_nowait(_normalize_event(answers[-1]))
+        session._events.put_nowait({"type": "turn_complete", "request_ids": [request_id]})
+        return {"accepted": True, "request_id": request_id}
+
+    async def drain(stream):
+        async for _ in stream:
+            pass
+
+    session.send_message = AsyncMock(side_effect=submit)
+    card = {
+        "type": "tool-call",
+        "toolCallId": "permission_shell-3",
+        "toolName": "request_permission",
+        "args": {"tool_id": "shell-3"},
+    }
+    state = {"messages": [{"id": "old-assistant", "role": "assistant", "content": [card]}]}
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=[{"type": "add-message", "content": "no"}], state=state),
+    )
+    try:
+        await asyncio.wait_for(drain(response.stream), 1)
+        assert answers[0]["type"] == "permission_denied" and answers[0]["request_ids"] == ["request-A"]
+        shown = captured["controller"].state["messages"][0]["content"][0]
+        assert shown.get("result", {}).get("decision") == "deny", shown
+    finally:
+        tap.unsubscribe("parked-answer")
+        if not prompt.done():
+            prompt.cancel()
+            await asyncio.gather(prompt, return_exceptions=True)

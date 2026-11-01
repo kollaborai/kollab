@@ -77,6 +77,7 @@ def _foreign_error(event: Dict[str, Any], request_ids: set[str]) -> bool:
 _TURN_OUTPUT = frozenset(
     {"token", "response", "thinking", "acp_update", "tool_start", "tool_result", "permission_request"}
 )
+_PERMISSION_ANSWERS = frozenset({"permission_granted", "permission_denied", "permission_cancelled"})
 
 
 def _foreign_output(event: Dict[str, Any], request_ids: set[str], tagged: bool = False) -> bool:
@@ -86,6 +87,8 @@ def _foreign_output(event: Dict[str, Any], request_ids: set[str], tagged: bool =
     reply output naming none is another turn's too. Other unnamed events
     (session-wide, older daemons) pass, and so do permission answers: they
     close a card by its tool id, whichever run showed it."""
+    if event.get("type") in _PERMISSION_ANSWERS:
+        return False  # a parked card is answered by a later message
     named = {str(i) for i in event.get("request_ids") or ()}
     if event.get("type") in _TURN_OUTPUT:
         named |= {str(event.get("request_id") or "")} - {""}

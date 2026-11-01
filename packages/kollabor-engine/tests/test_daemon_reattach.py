@@ -506,6 +506,10 @@ def test_a_stream_gets_none_of_another_requests_output():
     assert not _foreign_output({"type": "token", "request_id": "B"}, mine, tagged=True)  # an ACP turn names it so
     assert not _foreign_output({"type": "permission_granted", "tool_id": "t1"}, mine, tagged=True)  # by its tool
     assert not _foreign_output({"type": "daemon_closed"}, mine, tagged=True)  # session-wide
+    # Danburite on #554 round 6: a parked card's answer names the turn that
+    # showed it, and the later message that gives it must still close the card.
+    answer = {"type": "permission_denied", "tool_id": "t1", "request_ids": ["A"]}
+    assert not _foreign_output(answer, mine, tagged=True)
 
 
 def test_only_this_requests_completion_ends_its_stream():
