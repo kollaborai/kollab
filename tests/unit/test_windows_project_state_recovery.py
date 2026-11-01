@@ -1,7 +1,10 @@
 """Non-destructive selection of state created before Windows path encoding changed."""
 
 import os
+import subprocess
+import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +21,7 @@ def locations(tmp_path, monkeypatch):
     root = tmp_path / "config"
     monkeypatch.setattr(paths, "encode_project_path", lambda _: "new")
     monkeypatch.setattr(paths, "_legacy_encode_project_path", lambda _: "old")
+    monkeypatch.setattr(paths, "_PROJECT_OWNER_WAIT_SECONDS", 0.05)
     return project, root, root / "projects" / "old", root / "projects" / "new"
 
 
@@ -149,28 +153,117 @@ def test_competing_claims_never_share_the_same_state(locations):
     assert owner == paths._project_owner(winner, None)
 
 
-def test_incomplete_concurrent_claim_is_not_adopted(locations, monkeypatch):
+def test_concurrent_config_startups_wait_for_the_same_claim(locations, monkeypatch):
+    from kollabor_config.service import ConfigService
+
     project, root, _, new = locations
     created = threading.Event()
     finish = threading.Event()
+    observed = threading.Event()
     publish = paths._write_project_owner
+    read = paths._read_project_owner
+
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(paths, "IS_WINDOWS", True)
+    monkeypatch.setattr(paths, "get_config_directory_candidates", lambda: [root])
+    monkeypatch.setattr(paths, "_PROJECT_OWNER_WAIT_SECONDS", 2.0)
+    config = project / "config.json"
+    config.write_text("{}")
 
     def delayed_publish(directory, owner):
         created.set()
         assert finish.wait(5)
         publish(directory, owner)
 
+    def observed_read(directory):
+        value = read(directory)
+        if value is None:
+            observed.set()
+        return value
+
     monkeypatch.setattr(paths, "_write_project_owner", delayed_publish)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        first = pool.submit(paths._windows_project_state_dir, project, root)
+    monkeypatch.setattr(paths, "_read_project_owner", observed_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(ConfigService, config, None, True)
         assert created.wait(5)
         try:
-            with pytest.raises(paths.ProjectStateLocationError, match="Cannot establish ownership"):
-                paths._windows_project_state_dir(project, root)
+            second = pool.submit(ConfigService, config, None, True)
+            assert observed.wait(5)
+            assert not second.done()
         finally:
             finish.set()
-        assert first.result() == new.resolve()
+        assert isinstance(first.result(timeout=10), ConfigService)
+        assert isinstance(second.result(timeout=10), ConfigService)
     assert paths._windows_project_state_dir(project, root) == new.resolve()
+
+
+def test_concurrent_config_startups_in_separate_processes(tmp_path):
+    project, home = tmp_path / "workspace", tmp_path / "home"
+    project.mkdir()
+    home.mkdir(mode=0o700)
+    (project / "config.json").write_text("{}")
+    created, observed, release = (tmp_path / name for name in ("created", "observed", "release"))
+    script = r'''
+import os, sys, time
+from pathlib import Path
+from kollabor_config import config_utils as paths
+from kollabor_config.service import ConfigService
+project, home, created, observed, release, role = sys.argv[1:]
+project, home, created, observed, release = map(Path, (project, home, created, observed, release))
+os.chdir(project)
+paths.IS_WINDOWS = True
+paths.get_config_directory_candidates = lambda: [home / ".kollab"]
+paths.encode_project_path = lambda _: "new"
+paths._legacy_encode_project_path = lambda _: "old"
+if role == "first":
+    publish = paths._write_project_owner
+    def delayed(directory, owner):
+        created.write_text("ready")
+        deadline = time.monotonic() + 30
+        while not release.exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("release was not signalled")
+            time.sleep(0.01)
+        publish(directory, owner)
+    paths._write_project_owner = delayed
+else:
+    read = paths._read_project_owner
+    def observed_read(directory):
+        value = read(directory)
+        if value is None:
+            observed.write_text("waiting")
+        return value
+    paths._read_project_owner = observed_read
+ConfigService(project / "config.json", None, True)
+print("started")
+'''
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home), "KOLLAB_NO_KEYRING": "1"}
+    for name in ("KOLLAB_PROJECT_DATA_PROJECT", "KOLLAB_PROJECT_DATA_DIR"):
+        env.pop(name, None)
+    args = [sys.executable, "-c", script, str(project), str(home), str(created), str(observed), str(release)]
+    first = subprocess.Popen([*args, "first"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    second = None
+    try:
+        deadline = time.monotonic() + 15
+        while not created.exists() and first.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert created.exists(), first.communicate(timeout=2) if first.poll() is not None else "first did not start"
+        second = subprocess.Popen([*args, "second"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 15
+        while not observed.exists() and second.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert observed.exists(), second.communicate(timeout=2) if second.poll() is not None else "second did not wait"
+        release.write_text("continue")
+        first_out, first_err = first.communicate(timeout=15)
+        second_out, second_err = second.communicate(timeout=15)
+        assert first.returncode == second.returncode == 0, (first_err, second_err)
+        assert "started" in first_out and "started" in second_out
+        assert (home / ".kollab" / "projects" / "new" / paths._PROJECT_OWNER_FILE).exists()
+    finally:
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
 
 
 def test_interrupted_claim_cannot_be_adopted(locations, monkeypatch):
@@ -185,6 +278,64 @@ def test_interrupted_claim_cannot_be_adopted(locations, monkeypatch):
     assert new.is_dir() and list(new.iterdir()) == []
     with pytest.raises(paths.ProjectStateLocationError, match="Cannot establish ownership"):
         paths._windows_project_state_dir(project, root)
+
+
+def test_competing_project_cannot_take_a_claim_in_progress(locations, monkeypatch):
+    project, root, _, new = locations
+    other = project.parent / "another"
+    other.mkdir()
+    monkeypatch.setattr(paths, "_PROJECT_OWNER_WAIT_SECONDS", 2.0)
+    created, release = threading.Event(), threading.Event()
+    publish = paths._write_project_owner
+
+    def delayed(directory, owner):
+        created.set()
+        assert release.wait(5)
+        publish(directory, owner)
+
+    monkeypatch.setattr(paths, "_write_project_owner", delayed)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(paths._windows_project_state_dir, project, root)
+        assert created.wait(5)
+        second = pool.submit(paths._windows_project_state_dir, other, root)
+        release.set()
+        assert first.result(timeout=10) == new.resolve()
+        with pytest.raises(paths.ProjectStateLocationError, match="belongs to another project"):
+            second.result(timeout=10)
+
+
+def test_legacy_state_appearing_during_publication_stops_both_starts(locations, monkeypatch):
+    project, root, old, new = locations
+    monkeypatch.setattr(paths, "_PROJECT_OWNER_WAIT_SECONDS", 2.0)
+    created, release, observed = threading.Event(), threading.Event(), threading.Event()
+    publish, read = paths._write_project_owner, paths._read_project_owner
+
+    def delayed(directory, owner):
+        created.set()
+        assert release.wait(5)
+        publish(directory, owner)
+
+    def observed_read(directory):
+        value = read(directory)
+        if value is None:
+            observed.set()
+        return value
+
+    monkeypatch.setattr(paths, "_write_project_owner", delayed)
+    monkeypatch.setattr(paths, "_read_project_owner", observed_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(paths._windows_project_state_dir, project, root)
+        assert created.wait(5)
+        second = pool.submit(paths._windows_project_state_dir, project, root)
+        assert observed.wait(5)
+        old.mkdir()
+        (old / "saved").write_text("old")
+        release.set()
+        for result in (first, second):
+            with pytest.raises(paths.ProjectStateLocationError, match="legacy project state|Multiple project state"):
+                result.result(timeout=10)
+    assert (old / "saved").read_text() == "old"
+    assert (new / paths._PROJECT_OWNER_FILE).exists()
 
 
 def test_vault_selection_is_bound_to_identity(locations, monkeypatch):

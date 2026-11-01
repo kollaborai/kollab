@@ -983,26 +983,65 @@ class HaltSync:
         return min(HALT_RETRY_MAX, HALT_RETRY_START * 2 ** (failures - 1))
 
     @staticmethod
-    def _active_orders_acknowledged(sent: dict, reply: dict, control) -> bool:
-        """A peer must return active halts and proposals, or their effective resumes."""
+    def _resume_batch_digest(payload: dict, recipient: str) -> str:
+        """A bounded receipt for this exact batch and the receiving device."""
+        digest = b"kollab-halt-resume-ack-v1\0" + nh.canonical(
+            {"recipient": recipient, "resumes": payload["resumes"]}
+        )
+        return hashlib.sha256(digest).hexdigest()
+
+    @staticmethod
+    def _effective_resume(order: Any, control, book, view) -> bool:
+        if not nh.order_ok(order, view.network) or order.get("action") != "resume":
+            return False
+        lifts = order.get("lifts")
+        if not lifts or not all(isinstance(h, str) and KEY.fullmatch(h) for h in lifts):
+            return False
+        # A previously accepted, persisted resume remains effective after a
+        # signer leaves the current counting set. Trust only the exact record
+        # already saved here, together with its saved lifts.
+        saved = book.resumes.get(nh.order_hash(order))
+        if saved is not None and nh.canonical(saved) == nh.canonical(order) and set(lifts) <= book.lifted:
+            return True
+        return not book.issuer_refusal(order, view, control._is_member) and nh.resume_effective(order, view)
+
+    @classmethod
+    def _durable_resume_ack(cls, payload: dict, control) -> str:
+        """Acknowledge only verified resumes whose lifts survived a fresh disk read."""
+        resumes = payload.get("resumes")
+        if not isinstance(resumes, list) or not resumes:
+            return ""
+        book, view = control.halt_book(), control.view()
+        if all(
+            cls._effective_resume(order, control, book, view) and set(order["lifts"]) <= book.lifted
+            for order in resumes
+        ):
+            return cls._resume_batch_digest(payload, control.client.public_key)
+        return ""
+
+    @staticmethod
+    def _active_orders_acknowledged(sent: dict, reply: dict, control, recipient: str) -> bool:
+        """A peer must acknowledge active orders and every sent effective resume."""
+        book, view = control.halt_book(), control.view()
         received = {
             nh.order_hash(order): order
             for order in reply["proposals"]
             if isinstance(order, dict)
         }
-        accepted_resumes = control.halt_book().resumes if reply["resumes"] else {}
-        for order in reply["resumes"]:
-            if isinstance(order, dict) and nh.order_hash(order) in accepted_resumes:
-                received[nh.order_hash(order)] = accepted_resumes[nh.order_hash(order)]
+        effective = {
+            nh.order_hash(order): order
+            for order in reply["resumes"]
+            if HaltSync._effective_resume(order, control, book, view)
+        }
+        received.update(effective)
         if sent["halts"]:
             held = {nh.order_hash(order) for order in reply["halts"] if isinstance(order, dict)}
             missing = {nh.order_hash(order) for order in sent["halts"]} - held
             if missing:
                 lifted = {
                     halt
-                    for order in reply["resumes"]
-                    if isinstance(order, dict) and nh.order_hash(order) in accepted_resumes
-                    for halt in accepted_resumes[nh.order_hash(order)]["lifts"]
+                    for order in effective.values()
+                    for halt in order["lifts"]
                 }
                 if missing - lifted:
                     return False
@@ -1010,9 +1049,20 @@ class HaltSync:
             peer_order = received.get(nh.order_hash(order))
             if peer_order is None:
                 return False
+            if nh.order_hash(order) in effective:
+                continue  # a verified effective resume supersedes an open proposal
             peer_confirmations = {nh.canonical(item) for item in peer_order.get("confirmations", [])}
             if not {nh.canonical(item) for item in order.get("confirmations", [])} <= peer_confirmations:
                 return False
+        if sent["resumes"]:
+            if not all(HaltSync._effective_resume(order, control, book, view) for order in sent["resumes"]):
+                return False
+            receipt = reply.get("resume_ack")
+            if receipt != HaltSync._resume_batch_digest(sent, recipient):
+                # Older peers omit the receipt; their verified signed echo is
+                # sufficient while the resume remains in their book.
+                if any(nh.order_hash(order) not in effective for order in sent["resumes"]):
+                    return False
         return True
 
     async def tick(self) -> None:
@@ -1044,9 +1094,12 @@ class HaltSync:
                 ):
                     raise RelayError("invalid halt exchange response")
                 control.halt_merge(reply)
-                if not self._active_orders_acknowledged(payload, reply, control):
+                if not self._active_orders_acknowledged(payload, reply, control, key):
                     raise RelayError("peer did not acknowledge active halt orders")
             except Exception:
+                # An older acknowledgement must not appear current after a
+                # failed exchange for a changed halt book.
+                self._delivered.pop(key, None)
                 failures = self._failures.get(key, 0) + 1
                 self._failures[key] = failures
                 self._retry_at[key] = time.monotonic() + self.retry_delay(failures)
@@ -1062,4 +1115,8 @@ class HaltSync:
         if peer not in self._client.members():
             raise RelayError("peer is not part of this network")
         control.halt_merge(payload)
-        return control.halt_payload()
+        reply = control.halt_payload()
+        receipt = self._durable_resume_ack(payload, control)
+        if receipt:
+            reply["resume_ack"] = receipt
+        return reply

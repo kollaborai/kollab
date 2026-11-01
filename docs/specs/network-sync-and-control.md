@@ -666,8 +666,13 @@ for the same resume hash.
   A reply must include each sent active halt and open proposal with its sent
   confirmations, or a verified effective resume that covers it; an invalid
   or incomplete reply is retried. Changes made during an exchange are sent
-  in a later exchange. Older effective resumes and revocations retain their
-  existing exchange behavior.
+  in a later exchange. For effective resumes, a new peer may return a fixed-size
+  digest of the receiving device and exact sent resume batch, including
+  confirmations, only after verifying the signed orders and rereading the
+  recorded lifts. Older peers
+  may instead return the verified effective signed resumes. An older peer that
+  compacted those resumes and cannot return a receipt remains unacknowledged
+  and is retried; revocations retain their existing exchange behavior.
 - Member lists go to each member once per relay session and again when the
   list changes (`network_members.py:176`; `tick()` skips an unchanged digest).
   Active halt hashes, open proposal hashes with their confirmation count,

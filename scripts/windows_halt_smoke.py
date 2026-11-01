@@ -31,6 +31,22 @@ def smoke_env(**extra: str) -> dict[str, str]:
     return {**env, **extra}
 
 
+def enable_child_diagnostics(home: Path, env: dict[str, str]) -> Path:
+    """Capture only the throwaway detached child's early stderr, even before logging starts."""
+    hook = home / "smoke-python"
+    hook.mkdir()
+    output = home / "detached-child-stderr.log"
+    (hook / "sitecustomize.py").write_text(
+        "import os, sys\n"
+        "if os.environ.get('KOLLAB_DETACHED_CHILD') == '1':\n"
+        "    sys.stderr = open(os.environ['KOLLAB_SMOKE_CHILD_STDERR'], 'a', buffering=1, encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    env["KOLLAB_SMOKE_CHILD_STDERR"] = str(output)
+    env["PYTHONPATH"] = str(hook) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    return output
+
+
 def status_online(kollab: str, project: Path, env: dict[str, str]) -> bool:
     """Print `kollab --hub status` and say whether an agent is online in it."""
     status = subprocess.run(
@@ -169,6 +185,7 @@ def main() -> int:
     (home / ".kollab" / "config.json").write_text(json.dumps({"application": {"setup_completed": True}}))
     log = home / "detached.log"
     env = smoke_env(HOME=str(home), USERPROFILE=str(home))
+    child_stderr = enable_child_diagnostics(home, env)
     # This process runs the halt itself, so it needs the same home before any kollab import.
     os.environ.clear()
     os.environ.update(env)
@@ -178,10 +195,19 @@ def main() -> int:
     try:
         halt_smoke(args.kollab, project, env, log)
     except BaseException:
-        for path in [*sorted(home.rglob("kollab.log")), log]:
+        from kollabor_config import proc_ctl
+
+        launched = re.findall(r"\[detached\] pid (\d+)", log.read_text(errors="replace") if log.exists() else "")
+        for pid in launched:
+            print(f"detached pid {pid}: alive={proc_ctl.pid_alive(int(pid))}")
+        for path in [*sorted(home.rglob("kollab.log")), log, child_stderr]:
             if path.exists():
+                lines = path.read_text(errors="replace").splitlines()
+                if path.name == "kollab.log":
+                    print(f"--- first 60 lines of {path}")
+                    print("\n".join(lines[:60]))
                 print(f"--- last 60 lines of {path}")
-                print("\n".join(path.read_text(errors="replace").splitlines()[-60:]))
+                print("\n".join(lines[-60:]))
         raise
     finally:
         try:

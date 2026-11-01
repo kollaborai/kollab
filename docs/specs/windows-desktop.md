@@ -123,7 +123,8 @@ directory is reused only for that project. Kollab does not move or merge old
 and current directories. If an existing directory has no trustworthy ownership
 marker, if a marker is unreadable or names another project, or if both locations
 exist, Kollab stops with an error rather than guessing. This also applies to
-headless starts.
+headless starts. Simultaneous starts wait briefly for an in-progress ownership
+marker; an abandoned or unowned directory still requires an explicit choice.
 
 Close older Kollab instances before opening a project after the update. An older
 process does not honor the ownership marker and could create or write its old

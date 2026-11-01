@@ -8,6 +8,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -109,6 +110,8 @@ def _legacy_encode_project_path(project_path: Path) -> str:
 
 
 _PROJECT_OWNER_FILE = ".kollab-project-owner.json"
+_PROJECT_OWNER_WAIT_SECONDS = 2.0
+_PROJECT_OWNER_POLL_SECONDS = 0.05
 
 
 def _project_owner(project: Path, identity: str | None) -> dict:
@@ -221,7 +224,29 @@ def _windows_project_state_dir(
         )
     if existing:
         recorded = _read_project_owner(existing[0])
+        if (
+            recorded is None and identity is None
+            and os.path.normcase(str(existing[0])) == os.path.normcase(str(current.resolve()))
+        ):
+            # A second process may observe the new directory between mkdir and
+            # the atomic marker publication. Never claim it on its behalf.
+            deadline = time.monotonic() + _PROJECT_OWNER_WAIT_SECONDS
+            while recorded is None and time.monotonic() < deadline:
+                time.sleep(min(_PROJECT_OWNER_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+                recorded = _read_project_owner(existing[0])
         if recorded == _project_owner(project, identity):
+            # A legacy candidate might have appeared while we waited for the
+            # claim. Do not start using the new location if that happened.
+            for candidate in legacy_paths:
+                if os.path.normcase(str(candidate.resolve())) == os.path.normcase(str(existing[0])):
+                    continue
+                try:
+                    candidate.lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except OSError as exc:
+                    raise ProjectStateLocationError(f"Cannot inspect project state location: {candidate}") from exc
+                raise ProjectStateLocationError(f"Multiple project state locations exist: {existing[0]}, {candidate}")
             return existing[0]
         if recorded is not None:
             raise ProjectStateLocationError(f"Project state belongs to another project: {existing[0]}")
