@@ -1251,6 +1251,7 @@ class HaltListener:
         self.folders: dict[str, set[str]] = {}  # network id -> folders seen here
         self.held: dict[str, Any] = {}  # F12: network id -> scope this listener holds, kept in memory too
         self.state_lock = asyncio.Lock()  # F15b: one halt/resume state change at a time (held + halt.json)
+        self.links_lock = asyncio.Lock()  # a retry and a hand-off cannot acquire the same link twice
         self._lock_fd: int | None = None
         self._server: asyncio.AbstractServer | None = None
         self._done = asyncio.Event()
@@ -1354,9 +1355,16 @@ class HaltListener:
         for net in list((data.get("scopes") or {})):
             book = (data.get("networks") or {}).get(net)
             if book is None and net in self.held:
-                continue  # F12: the record was lost (halt.json deleted): hold until a member sends it back
-            if not _book_active(net, book):
+                active = True  # F12: hold until a member sends the missing book back
+            else:
+                active = _book_active(net, book)
+            if not active:
                 await self.hand_back(net)
+            elif net not in self.links:
+                try:
+                    await self.open_links(net)
+                except Exception as error:  # noqa: BLE001 - retry and keep other networks usable
+                    logger.warning("halt listener: retrying relay link after %s", type(error).__name__)
         if not (read_halt_held(self.root).get("scopes") or {}) and time.monotonic() >= self._hold_until:
             self._done.set()
 
@@ -1402,7 +1410,10 @@ class HaltListener:
             self.folders.setdefault(net, set()).update(
                 f for f in ((data.get("folders") or {}).get(net) or []) if isinstance(f, str)
             )
-            await self.open_links(net)
+            try:
+                await self.open_links(net)
+            except Exception as error:  # noqa: BLE001 - keep the listener alive and retry on its next tick
+                logger.warning("halt listener: retrying relay link after %s", type(error).__name__)
 
     # socket ------------------------------------------------------------
 
@@ -1644,42 +1655,44 @@ class HaltListener:
         """Take the relay-owner lock of the network's first in-scope folder (swept already)."""
         from .network_halt import in_scope
 
-        if net in self.links:
-            return
-        scopes = active_scopes(read_halt(self.root))
-        folders = sorted(f for f in self.folders.get(net, ()) if in_scope(f, scopes))
-        for folder in folders:
-            state_dir = _state_dir_for(folder, net)
-            if state_dir is None:
-                continue
-            link = await self._open_link(folder, state_dir)
-            if link is not None:
-                self.links[net] = link
+        async with self.links_lock:
+            if net in self.links:
                 return
+            scopes = active_scopes(read_halt(self.root))
+            folders = sorted(f for f in self.folders.get(net, ()) if in_scope(f, scopes))
+            for folder in folders:
+                state_dir = _state_dir_for(folder, net)
+                if state_dir is None:
+                    continue
+                link = await self._open_link(folder, state_dir)
+                if link is not None:
+                    self.links[net] = link
+                    return
 
     async def hand_back(self, net: str, *, mark: bool = True) -> None:
         """R3-F9: close the link and release the owner lock, then mark the folders lifted."""
-        link = self.links.pop(net, None)
-        if link is not None:
-            flush = getattr(link, "flush", None) if mark else None
-            if flush is not None:  # tell the members online the halt is lifted before leaving the relay
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(flush(), HAND_BACK_FLUSH_SECONDS)
-                book = (read_halt(self.root).get("networks") or {}).get(net)
-                if _book_active(net, book):
-                    # `resume --local`: a member still holds the halt and the flush brought it
-                    # back; stay halted with the link instead of lifting the scope (found in Docker)
-                    self.links[net] = link
-                    return
-            await link.close()  # releases the relay-owner lock
-        if mark:
-            async with self.state_lock:  # F15b: cannot interleave with a hand-off taking the halt again
-                self.held.pop(net, None)
+        async with self.links_lock:
+            link = self.links.pop(net, None)
+            if link is not None:
+                flush = getattr(link, "flush", None) if mark else None
+                if flush is not None:  # tell the members online the halt is lifted before leaving the relay
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(flush(), HAND_BACK_FLUSH_SECONDS)
+                    book = (read_halt(self.root).get("networks") or {}).get(net)
+                    if _book_active(net, book):
+                        # `resume --local`: a member still holds the halt and the flush brought it
+                        # back; stay halted with the link instead of lifting the scope (found in Docker)
+                        self.links[net] = link
+                        return
+                await link.close()  # releases the relay-owner lock
+            if mark:
+                async with self.state_lock:  # F15b: cannot interleave with a hand-off taking the halt again
+                    self.held.pop(net, None)
 
-                def lift(data: dict) -> None:
-                    (data.get("scopes") or {}).pop(net, None)
+                    def lift(data: dict) -> None:
+                        (data.get("scopes") or {}).pop(net, None)
 
-                update_halt(lift, self.root)
+                    update_halt(lift, self.root)
 
 
 def _peer_is_tool_shell(writer: Any) -> bool:
@@ -1787,11 +1800,13 @@ class HaltLink:
 
     def __init__(self, folder: Path, state_dir: Path, owner, commands, transport):
         from .network_control import HaltSync
+        from .network_members import MembershipSync
 
         self.folder, self.state_dir, self.owner = folder, state_dir, owner
         self.commands, self.transport = commands, transport
         self.client = commands.client
         self.sync = HaltSync(client=self.client, transport=transport, online=self.online)
+        self.membership = MembershipSync(client=self.client, transport=transport, online=self.online)
         self.resume_task: asyncio.Task | None = None
 
     def online(self) -> dict[str, str]:
@@ -1807,6 +1822,7 @@ class HaltLink:
     async def start(self) -> None:
         self.client.set_request_handler(self.receive)
         self.resume_task = asyncio.create_task(self.commands.resume(), name="kollab-halt-link")
+        self.membership.start()
         self.sync.start()
 
     async def receive(self, peer: str, method: str, payload: Any) -> Any:
@@ -1825,11 +1841,7 @@ class HaltLink:
                 raise RelayError("this machine is halted")
             if inner_method == "network_halt":
                 return await self.sync.receive(peer, inner_payload)
-            from .network_members import MembershipSync
-
-            return await MembershipSync(client=self.client, transport=self.transport, online=self.online).receive(
-                peer, inner_payload
-            )
+            return await self.membership.receive(peer, inner_payload)
 
         return await self.transport.handle_packet(peer, payload, inner)
 
@@ -1840,7 +1852,7 @@ class HaltLink:
         await self.sync.tick()
 
     def acked(self) -> list[str]:
-        return sorted(self.sync._delivered)
+        return self.sync.acked()
 
     async def hub_halt_snapshot(self) -> dict:
         return self.client.control.halt_snapshot(set(self.online()))
@@ -1863,6 +1875,7 @@ class HaltLink:
 
     async def close(self) -> None:
         await self.sync.close()
+        await self.membership.close()
         task, self.resume_task = self.resume_task, None
         if task is not None:
             task.cancel()
@@ -1887,8 +1900,6 @@ def _global_config():
 
 async def open_relay_link(folder: str, state_dir: Path) -> HaltLink | None:
     """Assumption 1: a membership's link with no plugins and no model."""
-    if os.name == "nt":  # no relay owner on Windows yet (#268): the halt holds here with no relay link
-        return None
     from .relay_commands import RelayCommands
     from .relay_owner import WorkspaceRelayOwner
     from .secure_conversation import SecureConversationTransport
