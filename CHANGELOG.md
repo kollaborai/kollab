@@ -130,6 +130,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Gem Studio keeps preview activity choices on one scrollable row with touch-sized targets and visible keyboard focus, makes Save the primary action, and keeps footer actions and save errors usable with enlarged text and long names (#465).
+- ACP: switching a session's profile or loadout now reports the resolved
+  provider profile with the harness's model and effort in session state and
+  the engine API, instead of a blank model/effort readout and an unresolved
+  loadout name (#605).
 - ACP: attaching with `--llm` no longer closes the running harness before the
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness
