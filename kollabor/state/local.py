@@ -3328,6 +3328,7 @@ class LocalStateService(StateService):
         if isinstance(submission, dict) and submission.get("status") in {
             "queued",
             "submitted",
+            "injected",
         }:
             accepted = {"accepted": True, "reason": ""}
             for key in ("request_id", "turn_id"):
