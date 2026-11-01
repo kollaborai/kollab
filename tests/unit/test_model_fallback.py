@@ -201,9 +201,9 @@ class _Harness:
     """The ACP orchestrator as a switch sees it: its fence on new prompts, over
     a runner busy while a prompt runs or waits."""
 
-    def __init__(self, *prompts):
+    def __init__(self, *prompts, kept=0):
         self.closing_reason, self.prompts, self.runner = "", list(prompts), self
-        self.held, self.released = False, []
+        self.held, self.released, self.active, self.kept, self.handed = False, [], True, kept, 0
 
     @property
     def busy(self):
@@ -212,9 +212,13 @@ class _Harness:
     def hold_observations(self):
         self.held = True
 
-    def release_observations(self):
+    def release_observations(self, flush=True):
         self.held = False
-        self.released.append(self.closing_reason)  # the fence as the release saw it
+        self.released.append((self.closing_reason, flush))  # the fence as the release saw it
+
+    def hand_over_observations(self):
+        self.held, self.handed = False, self.handed + 1
+        return self.kept
 
     def admit(self, text):
         if self.closing_reason:
@@ -248,7 +252,9 @@ async def test_a_switch_keeps_peer_messages_for_the_harness_it_starts(monkeypatc
     # Tanzanite on #549 round 5: the queued prompt's completion handed a peer
     # message to the failing harness, and the new harness's start tried to send
     # it behind the switch's fence; nothing sent it once the fence came down.
-    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    plugin, bus, tap, _ = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}, fallback_provider="acp"
+    )
     harness = _Harness("running")
     bus.register_service("acp_orchestrator", harness)
     await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
@@ -257,7 +263,39 @@ async def test_a_switch_keeps_peer_messages_for_the_harness_it_starts(monkeypatc
     tap.publish({"type": "turn_complete"})  # the queued prompt succeeded
     await _settle(plugin)
     assert _Loadouts.activated == ["codex"]
-    assert not harness.held and harness.released == [""]  # once, after the fence came down
+    assert not harness.held and harness.released == [("", True)]  # once, after the fence came down
+
+
+@pytest.mark.asyncio
+async def test_a_native_fallback_answers_the_peer_messages_kept_for_it(monkeypatch):
+    # Selenite on #549 round 6: activating a native profile closed the harness,
+    # and nothing answered the messages it had kept for the switch.
+    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    harness = _Harness(kept=2)
+    bus.register_service("acp_orchestrator", harness)
+    activate = _Loadouts.activate
+
+    async def native(self, loadout, event_bus=None):
+        harness.active = False  # a native profile closes the harness
+        return await activate(self, loadout, event_bus)
+
+    monkeypatch.setattr(_Loadouts, "activate", native)
+    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
+    assert _Loadouts.activated == ["codex"] and harness.handed == 1 and harness.released == []
+    assert len(_continues(bus)) == 1  # one native turn answers them
+
+
+@pytest.mark.asyncio
+async def test_a_switch_that_moves_nothing_sends_the_kept_messages_nowhere(monkeypatch):
+    # Selenite on #549 round 6: the fallback was out of usage too, so nothing
+    # switched, and the kept messages went straight back to the harness that
+    # had just failed them, to fail again in a loop.
+    plugin, bus, tap, profiles = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    profiles.active = "codex"  # it already runs the fallback
+    harness = _Harness(kept=1)
+    bus.register_service("acp_orchestrator", harness)
+    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
+    assert _Loadouts.activated == [] and harness.released == [("", False)] and not _continues(bus)
 
 
 @pytest.mark.asyncio
@@ -273,7 +311,7 @@ async def test_a_switch_waits_only_for_the_harness_that_failed(monkeypatch):
     tap.publish({"type": "turn_complete"})  # its turn succeeded
     await _settle(plugin)
     assert _Loadouts.activated == [] and plugin._pending is None
-    assert not failed.held and failed.released == [""]  # what it kept goes on
+    assert not failed.held and failed.released == [("", True)]  # the operator's pick takes them
 
 
 @pytest.mark.asyncio

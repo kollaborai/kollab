@@ -97,7 +97,7 @@ class ModelFallbackPlugin(BasePlugin):
             self._tap = None
         held, self._held = self._held, None
         if held is not None:
-            held.release_observations()  # no switch comes for what it kept
+            held.release_observations(flush=False)  # no switch comes for what it kept
 
     # -- the setting ----------------------------------------------------------
 
@@ -225,19 +225,37 @@ class ModelFallbackPlugin(BasePlugin):
         if pending is None:
             return
         message, failed = pending
+        moved = False  # whether another profile runs now
         try:
             if failed is not getattr(acp, "runner", None):
                 # The operator picked another profile in the meantime: that error
                 # was the old harness's, and this one is not switched for it.
                 logger.info("model fallback: the harness that failed was replaced; not switching")
+                moved = True
                 return
-            await self.fall_back(message, harness=acp)
+            moved = bool(await self.fall_back(message, harness=acp))
         finally:
-            # The fence is down: the harness that runs now gets the peer messages
-            # kept while the switch waited. Its start could not take them (#548).
+            # The fence is down: what runs now gets the peer messages kept while
+            # the switch waited. A new harness's start could not take them (#548).
             held, self._held = self._held, None
             if held is not None:
-                held.release_observations()
+                await self._hand_over(held, moved)
+
+    async def _hand_over(self, held: Any, moved: bool) -> None:
+        """Give the peer messages ``held`` kept to the profile that runs now.
+
+        A harness takes them at once, unless it is the one that failed and
+        nothing moved (the fallback is spent too, or the switch failed): sent
+        now, they would fail again, and again. They wait for its next prompt.
+        A native profile has them in its history already, and gets the turn
+        that answers them (#548).
+        """
+        if getattr(held, "active", False):
+            held.release_observations(flush=moved)
+        elif held.hand_over_observations() and self.event_bus is not None:
+            await self.event_bus.emit_with_hooks(
+                EventType.TRIGGER_LLM_CONTINUE, {"source": "model_fallback"}, "model_fallback"
+            )
 
     # -- switching ------------------------------------------------------------
 

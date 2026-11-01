@@ -140,18 +140,8 @@ async def test_a_restart_hands_the_new_harness_what_the_old_one_never_heard(tmp_
         await orchestrator.close()
 
 
-@pytest.mark.asyncio
-async def test_a_switch_hands_its_harness_the_peer_messages_the_failing_one_took(tmp_path, monkeypatch):
-    # Tanzanite on #549 round 5: a peer message flushed onto the failing harness
-    # was gone once that turn hit the limit too, and one kept while the switch
-    # waited was sent by nothing once the switch's fence came down.
-    class LimitRunner(FakeRunner):
-        def admit(self, text, *, request_id, source, thread_id=None, origin=None):
-            self._updates.append({"kind": "text", "text": text, "request_id": request_id})
-            future = asyncio.get_running_loop().create_future()
-            future.set_exception(mod.ACPError("claude-code: Claude AI usage limit reached", code=-32603))
-            return mod.ACPAdmission(request_id, source, thread_id, 1, 1, text, future, origin or {})
-
+def _observing(tmp_path):
+    """An orchestrator writing into a real conversation, and a peer's message."""
     configuration = SimpleNamespace(
         _conversations_dir=tmp_path / "conversations",
         get=lambda key, default=None: (
@@ -167,17 +157,33 @@ async def test_a_switch_hands_its_harness_the_peer_messages_the_failing_one_took
     )
     bus = Bus()
     bus.services["llm_service"] = llm
-    orchestrator = mod.ACPOrchestrator(bus)
-
-    def publish(event_bus, name, *args, **fields):
-        if name == "turn_complete" and fields.get("error"):
-            orchestrator.hold_observations()  # the fallback plugin, as its switch becomes pending
 
     def peer(content):
         return HubMessage(
             action="message", from_agent="peer-id-1", from_identity="peer-1",
             to="*", content=content, thread_id=None, reply_to="",
         )
+
+    return mod.ACPOrchestrator(bus), llm, peer
+
+
+@pytest.mark.asyncio
+async def test_a_switch_hands_its_harness_the_peer_messages_the_failing_one_took(tmp_path, monkeypatch):
+    # Tanzanite on #549 round 5: a peer message flushed onto the failing harness
+    # was gone once that turn hit the limit too, and one kept while the switch
+    # waited was sent by nothing once the switch's fence came down.
+    class LimitRunner(FakeRunner):
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None):
+            self._updates.append({"kind": "text", "text": text, "request_id": request_id})
+            future = asyncio.get_running_loop().create_future()
+            future.set_exception(mod.ACPError("claude-code: Claude AI usage limit reached", code=-32603))
+            return mod.ACPAdmission(request_id, source, thread_id, 1, 1, text, future, origin or {})
+
+    orchestrator, llm, peer = _observing(tmp_path)
+
+    def publish(event_bus, name, *args, **fields):
+        if name == "turn_complete" and fields.get("error"):
+            orchestrator.hold_observations()  # the fallback plugin, as its switch becomes pending
 
     monkeypatch.setattr(mod, "publish_semantic", publish)
     monkeypatch.setattr(mod, "ACPRunner", LimitRunner)
@@ -201,6 +207,32 @@ async def test_a_switch_hands_its_harness_the_peer_messages_the_failing_one_took
         sent = "\n".join(u["text"] for u in fallback._updates)
         assert "TAKEN_AND_FAILED" in sent and "SENT_WHILE_IT_WAITS" in sent
         assert len([m for m in llm.conversation_history if m.role == "user"]) == 2  # each written once
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_peer_messages_kept_for_a_switch_wait_or_go_to_a_native_profile(tmp_path, monkeypatch):
+    # Selenite on #549 round 6: with nothing switched they went straight back
+    # to the harness that had failed them, and a native fallback, which closes
+    # the harness, never answered them.
+    orchestrator, llm, peer = _observing(tmp_path)
+    monkeypatch.setattr(mod, "publish_semantic", lambda *args, **fields: None)
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    await orchestrator.start(LLMProfile(name="claude-code", provider="acp", command=("fake",)))
+    try:
+        runner = orchestrator.runner
+        orchestrator.hold_observations()  # a switch is pending
+        orchestrator.observe_notification(peer("KEPT"))
+        orchestrator.release_observations(flush=False)  # nothing switched
+        assert runner._updates == []  # it waits for the harness's next prompt
+        orchestrator.hold_observations()  # the next failure's switch
+        await orchestrator.close()  # it goes to a native profile
+        assert orchestrator.hand_over_observations() == 1
+        rows = [m.content for m in llm.conversation_history if m.role == "user"]
+        assert len(rows) == 1 and "KEPT" in rows[0]  # the native turn reads it there
+        await orchestrator.start(LLMProfile(name="codex", provider="acp", command=("fake",)))
+        assert orchestrator.runner._updates == []  # and no harness gets it again
     finally:
         await orchestrator.close()
 

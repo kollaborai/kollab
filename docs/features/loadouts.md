@@ -121,8 +121,10 @@ switching closes it, which would fail them too. It switches once the last of
 them ends, however that one ends. From then until the switch is done, a new
 message is refused with a line asking you to send it again. A message from
 another agent that the old harness never got, or got and failed, reaches the
-new one. If you pick another profile before the switch, the switch is
-dropped, and that profile gets those messages.
+new one; a native fallback answers them in one turn. If you pick another
+profile before the switch, the switch is dropped, and that profile gets those
+messages. If nothing switches (the fallback is out of usage too), they wait
+for the agent's next prompt.
 
 - `/llm fallback` shows the choice; `/llm fallback off` turns it off.
 - In the web UI: Settings → Loadouts → Fallback Model, a dropdown of every

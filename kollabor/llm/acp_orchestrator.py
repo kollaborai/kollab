@@ -315,11 +315,34 @@ class ACPOrchestrator:
         the failing one would take them and fail them too (#548)."""
         self.observations_held = True
 
-    def release_observations(self) -> None:
-        """The switch is over: the harness that runs now gets what was kept."""
+    def release_observations(self, flush: bool = True) -> None:
+        """The switch is over: the harness that runs now gets what was kept, or,
+        without ``flush``, the next prompt it runs does."""
         self.observations_held = False
-        if not self.is_processing:
+        if flush and not self.is_processing:
             self._flush_observations()
+
+    def hand_over_observations(self) -> int:
+        """A native profile runs now: the peer messages kept here are in the
+        conversation already, written as they came, so the native turn that
+        answers them reads them there. None is sent to a harness again.
+        Returns how many there were."""
+        self.observations_held = False
+        for entry in self._unwritten_observations:  # their arrival row failed
+            try:
+                self._record_user(
+                    f"observations-{uuid.uuid4().hex}", format_agent_hud([entry]), "observation", None
+                )
+            except Exception as error:
+                logger.warning("ACP observation history write failed again (%s)", type(error).__name__)
+        self._unwritten_observations.clear()
+        for row in self._observation_rows:
+            self._parents.pop(row, None)
+            self._user_history_tasks.pop(row, None)
+        self._observation_rows.clear()
+        count, self._observation_count = self._observation_count, 0
+        self._observations.clear()
+        return count
 
     def _requeue_observations(self, request_id: str) -> None:
         """An observation turn failed while a switch waits on that failure: the
