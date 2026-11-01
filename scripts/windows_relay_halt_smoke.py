@@ -514,7 +514,15 @@ def relay_halt_smoke(
     asyncio.run(join_networks(homes["a"], homes["b"], projects["a"], projects["b"]))
     wait_until(lambda: online("b"), 90, "win-b's agent online after joining")
 
-    members = asyncio.run(halt_members(homes["a"], projects["a"]))
+    # win-a's roster learns win-b over the relay after the join, not at the moment win-b says "joined"
+    members: list = []
+
+    def two_machines() -> bool:
+        nonlocal members
+        members = asyncio.run(halt_members(homes["a"], projects["a"]))
+        return isinstance(members, list) and len(members) >= 2
+
+    wait_until(two_machines, 90, "win-a's member list names two machines", why=lambda: json.dumps(members)[:400])
     if not isinstance(members, list) or len(members) < 2:
         raise SystemExit(
             f"the network lists fewer than two machines: {json.dumps(members)[:400]}"
