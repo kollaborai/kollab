@@ -172,12 +172,21 @@ def find_active_stream(identity_dir: Path) -> Path:
         Path to stream.jsonl (may not exist if vault is empty)
     """
     flat_stream = identity_dir / "stream.jsonl"
-    if flat_stream.exists():
+    if os.name != "nt" and flat_stream.exists():
+        return flat_stream
+    nested_stream = _nested_project_dir(identity_dir) / "stream.jsonl"
+    if (
+        os.name == "nt" and flat_stream.exists() and nested_stream.exists()
+        and flat_stream.resolve() != nested_stream.resolve() and not _vault_selection_applies(identity_dir)
+    ):
+        from kollabor_config.config_utils import ProjectStateLocationError
+
+        raise ProjectStateLocationError(f"Both flat and nested vault streams exist: {flat_stream}, {nested_stream}")
+    if flat_stream.exists() and not (
+        os.name == "nt" and nested_stream.exists() and _vault_selection_applies(identity_dir)
+    ):
         return flat_stream
 
-    # Pre-flatten fallback: check nested project path
-    fingerprint = _get_project_fingerprint()
-    nested_stream = identity_dir / "projects" / fingerprint / "stream.jsonl"
     if nested_stream.exists():
         return nested_stream
 
@@ -194,17 +203,31 @@ def _get_project_fingerprint() -> str:
     Returns:
         Encoded project path string, e.g. 'Users_example_dev_kollab'
     """
-    try:
-        from kollabor_config.config_utils import encode_project_path
+    from kollabor_config.config_utils import encode_project_path
 
-        return encode_project_path(Path.cwd())
-    except ImportError:
-        # Fallback if config_utils not available (shouldn't happen in normal use)
-        path_str = str(Path.cwd().resolve())
-        encoded = path_str.replace("/", "_").replace("\\", "_")
-        while encoded.startswith("_"):
-            encoded = encoded[1:]
-        return encoded
+    return encode_project_path(Path.cwd())
+
+
+def _nested_project_dir(identity_dir: Path) -> Path:
+    """Find an existing pre-flatten vault without moving either version."""
+    from kollabor_config.config_utils import _windows_project_state_dir
+
+    current = identity_dir / "projects" / _get_project_fingerprint()
+    if os.name != "nt":
+        return current
+    return _windows_project_state_dir(
+        Path.cwd(), identity_dir, selection_prefix="KOLLAB_VAULT_DATA", identity=identity_dir.name
+    )
+
+
+def _vault_selection_applies(identity_dir: Path) -> bool:
+    """Whether this process explicitly selected a vault for this project and identity."""
+    project = os.environ.get("KOLLAB_VAULT_DATA_PROJECT", "").strip()
+    selected = os.environ.get("KOLLAB_VAULT_DATA_DIR", "").strip()
+    return bool(
+        project and selected and os.environ.get("KOLLAB_VAULT_DATA_IDENTITY", "").strip() == identity_dir.name
+        and os.path.normcase(str(Path(project).resolve())) == os.path.normcase(str(Path.cwd().resolve()))
+    )
 
 
 class AgentVault:
@@ -239,9 +262,29 @@ class AgentVault:
         self._working_path = self._vault_dir / "working_memory.md"
 
         # Old nested paths (migration sources)
-        fingerprint = project_fingerprint or _get_project_fingerprint()
-        self._nested_stream = self._vault_dir / "projects" / fingerprint / "stream.jsonl"
-        self._nested_working = self._vault_dir / "projects" / fingerprint / "working_memory.md"
+        nested = (
+            self._vault_dir / "projects" / project_fingerprint
+            if project_fingerprint
+            else _nested_project_dir(self._vault_dir)
+        )
+        self._nested_stream = nested / "stream.jsonl"
+        self._nested_working = nested / "working_memory.md"
+        if os.name == "nt":
+            from kollabor_config.config_utils import ProjectStateLocationError
+
+            # Keep existing nested records in place; never move an upgrade source.
+            for flat, source in ((self._stream_path, self._nested_stream), (self._working_path, self._nested_working)):
+                if (flat.exists() and source.exists() and flat.resolve() != source.resolve()
+                        and not _vault_selection_applies(self._vault_dir)):
+                    raise ProjectStateLocationError(f"Both flat and nested vault records exist: {flat}, {source}")
+            if self._nested_stream.exists() and (
+                not self._stream_path.exists() or _vault_selection_applies(self._vault_dir)
+            ):
+                self._stream_path = self._nested_stream
+            if self._nested_working.exists() and (
+                not self._working_path.exists() or _vault_selection_applies(self._vault_dir)
+            ):
+                self._working_path = self._nested_working
 
         # Legacy global paths (pre-scoping, pre-flatten) — these lived in the
         # global vault dir before project-specific vault dirs existed.
@@ -306,7 +349,7 @@ class AgentVault:
         # Clean up empty nested dirs
         try:
             nested_dir = self._nested_stream.parent
-            if nested_dir.exists() and not any(nested_dir.iterdir()):
+            if os.name != "nt" and nested_dir.exists() and not any(nested_dir.iterdir()):
                 nested_dir.rmdir()
                 projects_dir = nested_dir.parent
                 if projects_dir.exists() and not any(projects_dir.iterdir()):
@@ -321,6 +364,36 @@ class AgentVault:
         global dir, move them. Global always wins if both exist.
         """
         import shutil
+
+        if os.name == "nt":
+            # CrystalStore reads the global path directly. Publish a copy
+            # atomically while retaining the original as an upgrade backup.
+            import tempfile
+
+            from kollabor_config.config_utils import ProjectStateLocationError
+
+            for source, target in (
+                (self._old_crystal_path, self._crystal_path),
+                (self._old_meta_path, self._meta_path),
+            ):
+                if not target.exists() and source.exists():
+                    temporary = None
+                    try:
+                        fd, temporary = tempfile.mkstemp(prefix=".vault-copy-", dir=target.parent)
+                        with os.fdopen(fd, "wb") as new_file, source.open("rb") as old_file:
+                            shutil.copyfileobj(old_file, new_file)
+                            new_file.flush()
+                            os.fsync(new_file.fileno())
+                        try:
+                            os.link(temporary, target)
+                        except FileExistsError:
+                            pass
+                    except OSError as exc:
+                        raise ProjectStateLocationError(f"Could not preserve legacy vault file: {source}") from exc
+                    finally:
+                        if temporary is not None:
+                            os.unlink(temporary)
+            return
 
         if not self._crystal_path.exists() and self._old_crystal_path.exists():
             try:

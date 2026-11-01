@@ -40,7 +40,7 @@ Windows.
 | # | Blocker | Where | Why it fails |
 | --- | --- | --- | --- |
 | 1 | Detached start forks | `kollabor/cli.py:cli_main` (`--detached` branch, `os.fork` about 2604, `os.setsid` 2612); `kollabor/daemon.py:fork_daemon` (58, 71, 82), `stop_daemon` (192-198, `os.WNOHANG`, `signal.SIGKILL`), `_wait_for_ready` (246). `_should_use_daemon()` (2408) sends every interactive launch down this path. | [`os.fork` and `os.setsid` are POSIX-only](https://docs.python.org/3.14/library/os.html#os.fork): `AttributeError` before the agent exists. `Popen(start_new_session=True)` in `DaemonPool.spawn` is ignored on Windows. |
-| 2 | Local IPC is AF_UNIX | Servers: `plugins/hub/messenger.py:AgentSocketServer.start` (450, `asyncio.start_unix_server`), `plugins/hub/network_attach.py` (210), `packages/kollabor-voice/.../service.py:VoiceService.start` (121), `plugins/deep_thought/socket_server.py` (70). Clients: `packages/kollabor-rpc/.../transport.py:open_unix_connection_with_large_buffer` (41, `create_unix_connection`), `plugins/hub/messenger.py:_open` (2372), `kollabor/application.py:_initialize_attach_proxy` (2150), `kollabor/attach_client.py:AttachClient.run` (105), `kollabor/mcp_hub.py` (39, 60), `plugins/hub/presence.py:_socket_responds_async` (352), `packages/kollabor-engine/.../hub_bridge.py:_query_socket_path` (307), `plugins/hub/relay_owner.py:local_relay_rpc` (363), voice `client.py` (29). | [Windows event loops do not implement `create_unix_connection` or `create_unix_server`](https://docs.python.org/3.14/library/asyncio-platforms.html#windows); `AF_UNIX` sockets are a Unix family. `presence.py:19` and `local_directory.py:173` hard-code `/tmp/kollabor-hub`, `hub_bridge.py:242` globs it. |
+| 2 | Local IPC is AF_UNIX | Servers: `plugins/hub/messenger.py:AgentSocketServer.start` (450, `asyncio.start_unix_server`), `plugins/hub/network_attach.py` (210), `packages/kollabor-voice/.../service.py:VoiceService.start` (121), `plugins/deep_thought/socket_server.py` (70). Clients: `packages/kollabor-rpc/.../transport.py:open_unix_connection_with_large_buffer` (41, `create_unix_connection`), `plugins/hub/messenger.py:_open` (2372), `kollabor/application.py:_initialize_attach_proxy` (2150), `kollabor/attach_client.py:AttachClient.run` (105), `kollabor/mcp_hub.py` (39, 60), `plugins/hub/presence.py:_socket_responds_async` (352), `packages/kollabor-engine/.../hub_bridge.py:_query_socket_path` (307), voice `client.py` (29). | [Windows event loops do not implement `create_unix_connection` or `create_unix_server`](https://docs.python.org/3.14/library/asyncio-platforms.html#windows); `AF_UNIX` sockets are a Unix family. `presence.py:19` and `local_directory.py:173` hard-code `/tmp/kollabor-hub`, `hub_bridge.py:242` globs it. |
 | 3 | `fcntl` imported at module level | Hub: `plugins/hub/coordinator.py:3`, `messaging_bridge.py:29`, `task_ledger.py:22` (all reached from `plugins/hub/plugin.py` by plain imports), `dns/discovery_publish.py`, `dns/discovery_store.py`, `dns/service_locator.py`, `dns/storage.py`, `relay_owner.py`, `relay_runtime.py`, `relay_selfhost.py`. Voice: `packages/kollabor-voice/.../bootstrap.py:6`, `service.py:11`. Call time: `kollabor_voice/classifiers.py:101`. | [`fcntl` is Unix-only](https://docs.python.org/3.14/library/fcntl.html): the hub plugin fails to import. Election (`coordinator.py`), poll ownership (`messaging_bridge.py`) and ledger serialisation (`task_ledger.py`) all rest on `flock`. Modules that already guard the import (`token_storage.py`, `provisioned_state.py`, `sidebar_order.py`, `dns/private_directory.py`, `enrollment_*.py`) run without their lock on Windows, a silent weakening to review. |
 | 4 | `os.getuid()` | 40 calls in 15 files, among them `plugins/hub/messenger.py` (3), `local_directory.py` (3), `relay_runtime.py` (6), `relay_owner.py` (4), `relay_conversations.py` (4), `secure_session.py`, `device_record.py`, `enrollment_recovery.py`, `enrollment_delegations.py`, `presence.py`, `kollabor_config/provisioned_state.py`, `kollabor_ai/conversation_logger.py`. | Missing on Windows: `AttributeError` at call time, mostly in the socket owner checks of blocker 2. |
 | 5 | Signals and process groups | `os.killpg` / `os.getpgid` / `signal.SIGKILL` in `kollabor_agent/process_manager.py:SubprocessStrategy.kill` (365-376), `shell_executor.py:_kill_unix_process_group` (375-383), `plugins/terminal_plugin.py:_kill_process` (583-594), `plugins/hub/plugin.py:_hard_kill_agent` (12804), `DaemonHandle.close` (`daemon_pool.py:446`), `plugins/hub/presence.py:pid_alive` (110, `os.WNOHANG`). `loop.add_signal_handler` in `kollabor_voice/service.py:serve` (942), `plugins/hub/relay_runtime.py` (810, 908), `relay_selfhost.py` (470). | No process groups or `SIGKILL` on Windows, and `ProactorEventLoop` has no `add_signal_handler`. |
@@ -113,6 +113,58 @@ to the release notes.
 
 ## Port work (follow-up, in order)
 
+### Project state after the Windows path encoding change
+
+The previous encoder could produce a drive-relative name such as `D:_work_demo`.
+The current encoder uses a safe directory name such as `D_work_demo`, but either
+name can describe more than one workspace. For a new project, Kollab creates
+the state directory and atomically records its exact project path. A marked
+directory is reused only for that project. Kollab does not move or merge old
+and current directories. If an existing directory has no trustworthy ownership
+marker, if a marker is unreadable or names another project, or if both locations
+exist, Kollab stops with an error rather than guessing. This also applies to
+headless starts. Simultaneous starts wait briefly for an in-progress ownership
+marker; an abandoned or unowned directory still requires an explicit choice.
+
+Close older Kollab instances before opening a project after the update. An older
+process does not honor the ownership marker and could create or write its old
+drive-relative state location after the updated process checks for it.
+
+After inspecting the directories and deciding which project state to use, set
+both environment variables for the Kollab process to the project's absolute
+path and the chosen existing state directory's absolute path:
+
+```powershell
+$env:KOLLAB_PROJECT_DATA_PROJECT = 'C:\work\demo'
+$env:KOLLAB_PROJECT_DATA_DIR = 'C:\Users\me\.kollab\projects\_work_demo'
+kollab
+```
+
+The selection applies only to that project, and must be supplied again on later
+starts that use the unmarked directory. Keep both directories until their
+contents have been reviewed and backed up; the selection does not reconcile
+them. A fresh cross-drive project with no old state uses its new directory.
+For an old cross-drive project, the old location depended on the process's
+then-current directory on that drive. Kollab checks the current drive-relative
+resolution, the project directory, and the drive root; another historical
+directory cannot be inferred or found without a search. If saved state is
+missing, locate it on that drive and select it explicitly. An existing unmarked
+directory is reported for inspection instead of being adopted automatically.
+
+Very old nested vaults used the same drive-relative encoding. On a cross-drive
+project the old name could drop the identity's parent path, so even a discovered
+nested vault is ambiguous. To use an inspected existing nested vault directory,
+set `KOLLAB_VAULT_DATA_PROJECT`, `KOLLAB_VAULT_DATA_IDENTITY`, and
+`KOLLAB_VAULT_DATA_DIR` for that process. If flat and nested vault records both
+exist, Kollab reports the conflict. Inspect and back up both, then use that
+same selection to name the directory containing the desired records: the
+identity directory for the flat record, or the nested directory for the older
+record. Unset these variables for subsequent sessions that do not need the choice.
+
+The upgrade smoke in `windows-smoke` seeds old-format state into isolated homes
+and exercises the live startup and readers. A physical Windows/macOS network
+is a separate verification.
+
 1. **Detached start without fork.** `kollab --detached` is done (`daemon.spawn_detached_child`, through
    `proc_ctl.start_child`; proven by the agent smoke). Still forking: `fork_daemon`, the attached
    window's own daemon, and its ready pipe; on Windows a bare `kollab` skips it and runs in-process
@@ -132,7 +184,7 @@ to the release notes.
    - `kollabor_voice` (`bootstrap.py`, `service.py`, `classifiers.py`, `speech_settings.py`) locks through `kollabor_voice/file_lock.py`, a second stdlib-only copy, because the voice package does not depend on `kollabor-config`: it runs in its own voice runtime. `tests/unit/test_hub_file_lock.py` keeps both copies byte-identical and `fcntl` out of these four files.
    - `kollabor_ai/oauth/token_storage.py` locks through `try_lock`, and `kollabor-ai` now declares its `kollabor-config` dependency.
    - The Docker kill-switch harness (`tests/docker/kill_switch/`) has not been rerun since the lock swap. The kill switch's other Unix-only calls (`os.O_NOFOLLOW` in `_lock_fd`, `os.pwrite` in `HaltListener.take_lock`, AF_UNIX, `/bin/ps -U`, `killpg`) move to the helpers in `docs/specs/windows-platform-helpers.md`.
-4. **`os.getuid()` and private files.** `current_user_id()` (Windows: the user SID) for the `os.getuid()` calls, and owner, DACL and no-follow checks for the owner and mode sites: `private_fs` in `docs/specs/windows-platform-helpers.md`. The kill switch is done: its private folder, `halt.lock` and `halt.json` go through `private_fs` (`ensure_private_dir`, `open_nofollow`, `owned_private`), and so does the relay state store; device records and enrollment state landed in #437, and secure sessions and the relay clients remain. No relay owner runs on Windows yet (#439), so a halt there holds no relay link and is taken on the folder's own record. Its CI smoke (`scripts/windows_halt_smoke.py`) lets the single runner halt itself, a test-only patch in the smoke's own process: a real network still needs two counting machines to halt.
+4. **`os.getuid()` and private files.** `current_user_id()` (Windows: the user SID) for the `os.getuid()` calls, and owner, DACL and no-follow checks for the owner and mode sites: `private_fs` in `docs/specs/windows-platform-helpers.md`. The kill switch uses `private_fs` (`ensure_private_dir`, `open_nofollow`, `owned_private`) for its private folder, `halt.lock` and `halt.json`, as does the relay state store; device records and enrollment state landed in #437. The #439 branch also applies these checks to the relay owner and secure-session TLS identity files. `scripts/windows_halt_smoke.py` tests a single-machine halt with a test-only rule bypass. `scripts/windows_relay_halt_smoke.py` tests two homes and a relay in separate installations and requires the second home to record the network halt. A physical mixed Windows and macOS network remains unverified.
 5. **Signals and trees.** The engine's session stop is done: it asks the daemon to shut down over local IPC, then ends it and the processes it started (`DaemonHandle._stop_windows`, proven by the engine smoke). Background processes (`process_manager`) stop as a tree through `proc_ctl.kill_tree`, and the tool-shell liveness check (`shell_executor._group_alive`) uses `proc_ctl.pid_alive`, since `os.kill(pid, 0)` ends a process on Windows. Job Objects for agent and shell trees in place of `killpg`; `SIGKILL` becomes `TerminateProcess`; replace `add_signal_handler` with `signal.signal` or console control handlers. Design: `proc_ctl` in `docs/specs/windows-platform-helpers.md` (`pid_alive` replaces every `os.kill(pid, 0)` probe, which on Windows sends Ctrl+C). The kill switch is ported: on Windows its process readers use psutil (the caller chain, argv, environment and a same-user process table whose parent links skip reused pids), `halt.sock` and the waiter's status socket use `local_ipc`, the listener starts through `proc_ctl.start_child`, a halt ends agents through `proc_ctl.kill_tree`, and a halted launch runs its restart as a child (exec there starts a new process). `scripts/windows_halt_smoke.py` halts and resumes a real agent on the runner (`windows-smoke`).
 6. **Agent shell.** Done: `kollabor_agent.shell_utils.agent_shell()` resolves the shell — `KOLLAB_SHELL` (absolute bash.exe/pwsh.exe/powershell.exe, never WSL's System32 bash.exe), Git Bash install folders, Git-on-PATH, PowerShell 7, Windows PowerShell 5.1; `shell_executor` spawns string commands through its argv with `CREATE_NO_WINDOW` and a PATH cleaned of relative entries, `/terminal` starts it and stops the tree with `proc_ctl.kill_tree`, the prompt's session block names the resolved shell and its rule line, and raw trenders run through Git Bash or render nothing under PowerShell. The permission patterns cover PowerShell and cmd syntax. `scripts/windows_shell_smoke.py` proves each row on `windows-smoke`. Design: this file's "Agent shell" issue and `docs/specs/windows-desktop.md` (#438). tmux features stay Unix-only.
 7. **No browser tab.** Done: `kollabor_webui.main()` opens no tab when `KOLLAB_WEBUI_NO_BROWSER` is set, and the desktop sets it.

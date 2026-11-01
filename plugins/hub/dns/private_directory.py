@@ -1401,14 +1401,15 @@ class PrivateDirectory:
                 os.chmod(self._path, 0o600)
             except OSError:
                 pass
-            try:
-                directory_fd = os.open(self._path.parent, os.O_RDONLY)
+            if os.name != "nt":  # os.replace is atomic there; directories refuse O_RDONLY opens
                 try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-            except OSError:
-                pass
+                    directory_fd = os.open(self._path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                except OSError:
+                    pass
         except BaseException:
             try:
                 os.close(fd)
