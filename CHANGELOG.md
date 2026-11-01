@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Hub tests now cover short AF_UNIX hub-state socket paths, so long
+  socket paths cannot silently regress the hub state client (#582).
 - Hub status flags an idle agent that still holds an open task as
   stalled after 15 minutes (#533).
 - Windows: agent commands run in Git Bash when Git for Windows is installed,
