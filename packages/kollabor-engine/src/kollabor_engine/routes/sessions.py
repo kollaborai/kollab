@@ -898,7 +898,10 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
     # its in-memory profile, so mirror what it reports, not just this request.
     apply_profile_mirror(
         session,
-        body.name,
+        # The request may name a loadout, not a profile; mirror the
+        # resolved provider profile so the response's session dict
+        # cannot clobber it with the pre-switch profile (#605).
+        getattr(snapshot, "name", None) or body.name,
         getattr(snapshot, "model", None) or body.model,
         getattr(snapshot, "effort", None),
     )

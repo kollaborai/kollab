@@ -121,15 +121,17 @@ export const LEARN_TOPICS = [
     id: "hub-messaging",
     title: "Hub messaging",
     summary:
-      "Hub messages coordinate agents across a shared channel. Messages are visible to the hub, so they are not private direct messages.",
+      "Use /hub commands to contact agents. Hub messages are visible to all hub members, so they are not private direct messages.",
     howTo: [
-      "Address a message to the agent's identity, not its general agent type.",
+      "Use /hub agents to find the agent's identity; address the identity, not the general agent type.",
+      "Use /hub status to see which agents are active on the hub.",
+      "Send an individual message with /hub msg <agent> <message>, using the identity from /hub agents.",
+      "Use /hub broadcast <message> when every hub member should see the message.",
       "State the task, relevant context, and the evidence you want back.",
-      "Use the shared channel for coordination that other hub members should see.",
       "Never send passwords, API keys, private keys, or one-time access codes in hub chat.",
     ],
     example:
-      'Send `hub_msg to="lapis"` with a short request such as “check the Learn links and report any broken routes.”',
+      "Run /hub msg lapis Check the Learn links and report any broken routes.",
     note: "Hub messages are visible to other members; do not assume a message is private.",
   },
   {

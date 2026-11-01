@@ -1214,7 +1214,9 @@ class RelayClient:
             or sum(p.peer == peer_key for p in self._application_pending.values())
             >= MAX_PEER_PENDING
         ):
-            raise RelayError("pending application request capacity reached")
+            raise RelayError(
+                "pending application request capacity reached", "capacity"
+            )
         request_id = secrets.token_hex(16)
         future = asyncio.get_running_loop().create_future()
         pending = _ApplicationPending(
