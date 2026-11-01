@@ -65,6 +65,10 @@ DEDUP_THRESHOLD = 0.45
 # short summaries that share common words like "insight" or "about".
 SUMMARY_DEDUP_THRESHOLD = 0.40
 
+# Minimum room for tokenized summaries. Larger stores grow the cache with
+# their live entries so sequential scans do not evict the whole working set.
+SUMMARY_WORD_CACHE_MIN_SIZE = 8192
+
 # Minimum relevance score for nudge results
 NUDGE_MIN_SCORE = 1.0
 
@@ -149,9 +153,15 @@ class CrystalStore:
         # The ids of entries changed since the last dedup pass: only pairs with
         # one of them can match. None: unknown, so every entry (#546).
         self._changed: Optional[set] = None
-        # Stemmed summary words, by summary text: stemming every pair again
-        # made a pass over thousands of entries take minutes (#546).
-        self._summary_words: dict = {}
+        # The cached function is thread-safe and does not retain this store.
+        # It grows with the live vault and shrinks again when entries leave.
+        self._summary_words = functools.lru_cache(maxsize=SUMMARY_WORD_CACHE_MIN_SIZE)(summary_tokens)
+
+    def _resize_summary_cache(self) -> None:
+        """Bound retained summaries while leaving room for the live vault."""
+        size = max(SUMMARY_WORD_CACHE_MIN_SIZE, 1 << (max(1, 2 * len(self._entries)) - 1).bit_length())
+        if self._summary_words.cache_info().maxsize != size:
+            self._summary_words = functools.lru_cache(maxsize=size)(summary_tokens)
 
     def _ensure_loaded(self) -> None:
         """Lazy-load entries from disk on first access, under the lock: a load
@@ -163,6 +173,7 @@ class CrystalStore:
             if self._loaded:
                 return
             self._entries = self._parse_file()
+            self._resize_summary_cache()
             if self._entries:
                 # Set next ID from highest existing
                 max_num = 0
@@ -220,6 +231,7 @@ class CrystalStore:
     def _save_to_disk(self) -> None:
         """Write all entries back to crystallized.md."""
         with self._lock:
+            self._resize_summary_cache()
             self._revision += 1
             try:
                 self._path.write_text("\n".join(e.to_block() for e in self._entries))
@@ -347,10 +359,7 @@ class CrystalStore:
         return token_overlap(self._words(summary_a), self._words(summary_b))
 
     def _words(self, summary: str) -> frozenset:
-        words = self._summary_words.get(summary)
-        if words is None:
-            words = self._summary_words[summary] = summary_tokens(summary)
-        return words
+        return self._summary_words(summary)
 
     def _find_merge_target(
         self, new_keywords: List[str], new_summary: str = ""
