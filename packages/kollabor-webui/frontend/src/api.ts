@@ -1184,6 +1184,13 @@ export class EngineApi {
     );
   }
 
+  getHistoryMetadata(sessionId: string, reference: string) {
+    const query = new URLSearchParams({ ref: reference });
+    return this.json<{ session_id: string; metadata: Record<string, unknown> }>(
+      `/sessions/${encodeURIComponent(sessionId)}/history/metadata?${query}`,
+    );
+  }
+
   /** Preserve the existing full/limited history consumer contract. */
   async getHistory(sessionId: string, limit?: number) {
     const targetCount = limit && Number.isFinite(limit) && limit > 0
