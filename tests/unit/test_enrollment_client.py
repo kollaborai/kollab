@@ -1636,15 +1636,50 @@ async def test_issuer_requires_explicit_decision_after_proof(
     # true under full-suite CPU contention and was the source of a flaky
     # "verified proof did not become a pending request" failure (issue #121).
     deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
+    while True:
+        if task.done():
+            # A dead issuer task can never create the pending request. Fail
+            # fast and report its outcome: spinning out the deadline would
+            # hide the real cause behind a generic timeout (issue #574).
+            if task.cancelled():
+                failure: BaseException = asyncio.CancelledError(
+                    "issuer task was cancelled before creating the pending request"
+                )
+            else:
+                failure = task.exception() or AssertionError(
+                    "issuer task finished without creating a pending request"
+                )
+            raise AssertionError(
+                f"issuer task stopped before creating the pending request: {failure!r}"
+            ) from failure
         requests = issuer.pending_requests()
         if requests:
             break
+        if time.monotonic() >= deadline:
+            where = ""
+            stack = task.get_stack()
+            if stack:
+                frame = stack[-1]
+                where = (
+                    f"issuer task last suspended at {frame.f_code.co_name}:"
+                    f"{frame.f_lineno}"
+                )
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if task.cancelled():
+                detail = f"{where}; issuer task was cancelled at deadline".lstrip("; ")
+            else:
+                task_failure = task.exception()
+                if task_failure is not None:
+                    detail = f"{where}; issuer task failed with: {task_failure!r}"
+                elif task.done():
+                    detail = "issuer task finished without creating a pending request"
+                else:
+                    detail = where or "issuer task still running at deadline"
+            raise AssertionError(
+                f"verified proof did not become a pending request within 5s ({detail})"
+            )
         await real_sleep(0.001)
-    else:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        raise AssertionError("verified proof did not become a pending request")
 
     pending_request = requests[0]
     assert pending_request.enrollment_id == round_id
