@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Protocol
 
-from .network_attach import ATTACH_METHODS
+from .network_attach import ATTACH_METHODS, _Withdrawn
 from .relay_client import PeerSessionEvent, RelayClient
 from .relay_state import RelayError, failure_text, strict_json, validate_key
 from .secure_session import (
@@ -52,7 +52,8 @@ _SECURE_APP_METHODS = frozenset(
 SecureDispatch = Callable[[str, str, dict], Awaitable[dict]]
 class TransportRequest(Protocol):
     async def __call__(
-        self, peer_key: str, method: str, payload: dict, *, timeout: float
+        self, peer_key: str, method: str, payload: dict, *, timeout: float,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> dict: ...
 
 
@@ -180,6 +181,7 @@ class SecureConversationTransport:
         payload: dict,
         *,
         timeout: float = 10.0,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> dict:
         """Send a framed application request only after mutual TLS completes."""
         if method not in _SECURE_APP_METHODS:
@@ -196,6 +198,7 @@ class SecureConversationTransport:
         # Only a call that held the session may discard it: one cancelled or
         # timed out while waiting for the lock leaves the holder's session alone.
         held = False
+        sent = False
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
@@ -214,13 +217,17 @@ class SecureConversationTransport:
                         for offset in range(0, len(raw), MAX_SECURE_CHUNK_BYTES)
                     ]
                     for index, chunk in enumerate(chunks):
+                        if before_send is not None:
+                            await before_send()
                         packet = state.tls.send(chunk)
+                        sent = True
                         state.last_used = time.monotonic()
                         response = await self._send_packet(
                             state,
                             packet,
                             deadline,
                             certificate="",
+                            before_send=before_send,
                         )
                         received = self._receive_packets(state, response)
                         if received is not None:
@@ -234,6 +241,12 @@ class SecureConversationTransport:
                             "peer did not return a secure application response"
                         )
                     return result
+        except _Withdrawn:
+            # Before the first data chunk, the held session is still usable.
+            # A partial application frame requires a fresh TLS session.
+            if held and sent:
+                self._discard_outbound(key)
+            raise
         except asyncio.CancelledError:
             if held:
                 self._discard_outbound(key)
@@ -501,12 +514,14 @@ class SecureConversationTransport:
         deadline: float,
         *,
         certificate: str,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> dict:
         self._assert_current(state)
         state.last_used = time.monotonic()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError
+        guard = {"before_send": before_send} if before_send is not None else {}
         return await self._transport_request(
             state.peer_key,
             "secure_packet",
@@ -518,6 +533,7 @@ class SecureConversationTransport:
                 "certificate": certificate,
             },
             timeout=min(remaining, 300),
+            **guard,
         )
 
     def _receive_packets(self, state: _SessionState, response: dict) -> dict | None:

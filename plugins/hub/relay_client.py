@@ -1112,7 +1112,7 @@ class RelayClient:
                 PeerSessionEvent(kind, key, previous_session, current_session)
             )
 
-    async def _send_frame(self, payload):
+    async def _send_frame(self, payload, *, before_send: Callable[[], Awaitable[None]] | None = None):
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(raw.encode()) > MAX_FRAME:
             raise RelayError("relay frame too large")
@@ -1130,9 +1130,11 @@ class RelayClient:
                     raise RelayError("relay send rate limit reached")
                 # One wait, sized to refill a token: a burst is smoothed out, not dropped.
                 await asyncio.sleep((1 - self._tokens) / SEND_RATE_PER_SECOND)
-            self._tokens -= 1
             if self._ws is None or self._ws.closed:
                 raise RelayError("relay is not connected")
+            if before_send is not None:
+                await before_send()
+            self._tokens -= 1
             await asyncio.wait_for(self._ws.send_str(raw), timeout=3)
 
     async def ping(self, peer_key: str) -> dict:
@@ -1183,7 +1185,8 @@ class RelayClient:
             raise RelayError("invalid or oversized application payload") from exc
 
     async def request(
-        self, peer_key: str, method: str, payload: dict, *, timeout: float = 10.0
+        self, peer_key: str, method: str, payload: dict, *, timeout: float = 10.0,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> dict:
         """Return an authenticated receiver response, never a relay receipt.
 
@@ -1232,6 +1235,7 @@ class RelayClient:
                         "timeout_ms": max(1, math.ceil(timeout * 1000)),
                     },
                     request_id,
+                    **({"before_send": before_send} if before_send is not None else {}),
                 )
                 return await future
         except TimeoutError as exc:
@@ -1356,7 +1360,10 @@ class RelayClient:
         if not task.cancelled():
             task.exception()
 
-    async def _send_encrypted(self, key, kind, payload, message_id):
+    async def _send_encrypted(
+        self, key, kind, payload, message_id, *,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ):
         if key not in self.state.approvals or key not in self._peers:
             raise RelayError("peer is unapproved or offline")
         now = int(time.time())
@@ -1383,7 +1390,8 @@ class RelayClient:
         if len(ciphertext) > MAX_CIPHERTEXT:
             raise RelayError("ciphertext size limit exceeded")
         await self._send_frame(
-            {"type": "send", "to": key, "id": message_id, "ciphertext": ciphertext}
+            {"type": "send", "to": key, "id": message_id, "ciphertext": ciphertext},
+            **({"before_send": before_send} if before_send is not None else {}),
         )
 
     async def _apply_frame(self, frame):

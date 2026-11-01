@@ -29,6 +29,7 @@ async def devices(bridges):
     for bridge in (left, right):
         bridge.network_attach = NetworkAttach(
             request=bridge.secure_transport.request,
+            guarded_request=bridge.secure_transport.request,
             target=bridge.attach_target,
             peer_name=bridge._peer_name,
             notice=notices.append,
@@ -231,6 +232,86 @@ async def test_a_connect_command_that_withdraws_an_open_agent_closes_it(devices,
     await right._rpc_command({"value": "trust manual", "agent_id": right.identity.agent_id})
     assert await asyncio.wait_for(reader.read(), 5) == b""
     assert notices[-1] == "closed sapphire for left-box: it may no longer open it"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forced_recheck", [False, True])
+async def test_withdrawal_fences_output_waiting_for_the_real_secure_session(
+    devices, monkeypatch, forced_recheck,
+):
+    """A queued transport request cannot send after trust withdrawal."""
+    monkeypatch.setattr(network_attach, "FLUSH_SECONDS", 0)
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+
+    peer = left.commands.client.public_key
+    binding = right.secure_transport._current_binding(peer)
+    lock = right.secure_transport._request_locks[binding]
+    await lock.acquire()
+    held = True
+    recheck = None
+    try:
+        writer.write(b"synthetic private output\n")
+        await writer.drain()
+        for _ in range(500):
+            if any(not waiter.done() for waiter in (lock._waiters or ())):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("output did not reach the secure session lock")
+
+        right.set_trust_level("manual")
+        if forced_recheck:
+            recheck = asyncio.create_task(right.network_attach.recheck())
+            for _ in range(500):
+                if all(channel.closed for channel in right.network_attach._channels.values()):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("withdrawal did not close the channel")
+        lock.release()
+        held = False
+        if recheck is not None:
+            await asyncio.wait_for(recheck, 8)
+        assert await asyncio.wait_for(reader.read(), 8) == b""
+    finally:
+        if held:
+            lock.release()
+        if recheck is not None and not recheck.done():
+            recheck.cancel()
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_unforced_withdrawal_fences_output_waiting_for_relay_send_lock(devices, monkeypatch):
+    """The final relay send must recheck after its own shared rate-limit wait."""
+    monkeypatch.setattr(network_attach, "FLUSH_SECONDS", 0)
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    lock = right.commands.client._send_lock
+    await lock.acquire()
+    held = True
+    try:
+        writer.write(b"synthetic private output\n")
+        await writer.drain()
+        for _ in range(500):
+            if sum(not waiter.done() for waiter in (lock._waiters or ())) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("input response and output did not reach the relay send lock")
+        right.set_trust_level("manual")
+        lock.release()
+        held = False
+        assert await asyncio.wait_for(reader.read(), 8) == b""
+    finally:
+        if held:
+            lock.release()
+        writer.close()
 
 
 def test_every_relay_method_the_bridge_calls_or_serves_is_allowlisted():
