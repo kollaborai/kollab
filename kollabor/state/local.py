@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, Callable, List
@@ -36,7 +37,13 @@ from kollabor_ai.profile_manager import redact_profile_endpoint
 
 from .context import ContextListSnapshot, ConversationContext
 from .context_registry import ContextRegistry
-from .interface import StateService, enrollment_result, offer_failure
+from .interface import (
+    ACP_CONVERSATION_BUSY,
+    ACP_HARNESS_UNAVAILABLE,
+    StateService,
+    enrollment_result,
+    offer_failure,
+)
 from .snapshots import (
     ActiveOperationSnapshot,
     AgentListSnapshot,
@@ -659,9 +666,18 @@ class LocalStateService(StateService):
         snapshot = self._profile_to_snapshot(active, is_active=True)
         harness_model = self._acp_harness_model()
         if harness_model:
-            # A harness picks its own model (/model sets it there): report that
-            # one, not the profile's, which the harness does not read.
+            # The harness is authoritative for its active options.
             snapshot.model = harness_model
+        try:
+            acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
+            if acp is not None and getattr(acp, "active", False) is True:
+                effort = next((o for o in acp.advertised_config_options()
+                               if o.get("id") == "effort"
+                               or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
+                if effort and effort.get("currentValue") is not None:
+                    snapshot.effort = str(effort["currentValue"])
+        except Exception:
+            logger.debug("ACP harness effort unavailable", exc_info=True)
         return snapshot
 
     def _acp_harness_model(self) -> str:
@@ -1310,7 +1326,69 @@ class LocalStateService(StateService):
 
     # === Writes (phase 4) ===
 
+    @staticmethod
+    async def _apply_acp_effort(orchestrator: Any, effort: str) -> None:
+        """Send an effort the harness advertises; otherwise raise with the choices."""
+        from kollabor.llm.acp_orchestrator import option_values
+
+        option = next((o for o in orchestrator.advertised_config_options()
+                       if o.get("id") == "effort"
+                       or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
+        offered = option_values(option)
+        if option is None or effort not in offered:
+            raise ValueError(
+                f"ACP harness does not offer effort {effort!r}; "
+                f"available: {', '.join(offered) or 'none'}"
+            )
+        try:
+            options = await orchestrator.set_config_option(str(option["id"]), effort, persist=False)
+        except Exception as exc:
+            raise ValueError(f"ACP harness rejected effort {effort!r}: {exc}") from None
+        reported = next((o.get("currentValue") for o in options or [] if o.get("id") == option["id"]), None)
+        if reported != effort:
+            raise ValueError(f"ACP harness accepted effort {effort!r} but reports {reported!r}")
+
     async def set_active_profile(
+        self,
+        name: str,
+        *,
+        persist: bool = False,
+        persist_local: bool = False,
+        reload_profile: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> ProfileSnapshot:
+        """Keep ACP profile activation and rollback with one lifecycle owner."""
+        bus = getattr(self, "_event_bus", None)
+        orchestrator = bus.get_service("acp_orchestrator") if bus else None
+        transition = getattr(orchestrator, "transition", None)
+        if callable(transition):
+            if getattr(orchestrator, "conversation_transitioning", False) is True:
+                raise ValueError("ACP conversation change is in progress; retry when ready")
+            if (getattr(orchestrator, "transitioning", False) is True
+                    and getattr(orchestrator, "transition_owned_by_current_task", False) is not True):
+                raise ValueError("ACP startup or profile change is in progress; retry when ready")
+            pm = self._profile_manager
+            current = pm.get_active_profile() if pm is not None else None
+            target = pm.get_profile(name) if pm is not None else None
+
+            def is_acp(profile: Any) -> bool:
+                provider = (profile.get_provider() if hasattr(profile, "get_provider")
+                            else getattr(profile, "provider", ""))
+                return str(provider).lower() == "acp"
+
+            if is_acp(current) or is_acp(target) or (target is None and reload_profile):
+                with transition():
+                    return await self._set_active_profile_owned(
+                        name, persist=persist, persist_local=persist_local,
+                        reload_profile=reload_profile, model=model, effort=effort,
+                    )
+        return await self._set_active_profile_owned(
+            name, persist=persist, persist_local=persist_local,
+            reload_profile=reload_profile, model=model, effort=effort,
+        )
+
+    async def _set_active_profile_owned(
         self,
         name: str,
         *,
@@ -1449,24 +1527,68 @@ class LocalStateService(StateService):
                     type(e).__name__,
                 )
         if str(target_provider).lower() == "acp":
-            if model or effort:
-                raise ValueError("ACP profile owns model/effort settings")
+            if model:
+                raise ValueError("ACP profile owns model settings")
             if orchestrator is None:
                 raise ValueError("ACP profile unavailable: orchestrator is not running")
-            try:
-                await orchestrator.close()
-                await orchestrator.start(target_profile)
-                ok = bool(self._profile_manager.set_active_profile(name))
-            except Exception as exc:
-                logger.error(
-                    "ACP profile activation failed for %r (%s)",
-                    name,
-                    type(exc).__name__,
+            running_same = (
+                str(current_provider).lower() == "acp"
+                and current_profile is not None
+                and getattr(current_profile, "name", None) == name
+                and getattr(orchestrator, "active", False) is True
+            )
+            if running_same and effort:
+                # Effort only, on the running harness: no restart.
+                await self._apply_acp_effort(orchestrator, effort)
+                ok = True
+            else:
+                previous = (
+                    current_profile
+                    if str(current_provider).lower() == "acp" and getattr(orchestrator, "active", False) is True
+                    else None
                 )
-                raise ValueError(
-                    f"ACP profile {name!r} could not be activated; verify its "
-                    "adapter command and profile settings."
-                ) from None
+                prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
+                prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
+                prior_loadout = getattr(orchestrator, "_loadout_override", None)
+
+                async def restore_previous() -> None:
+                    try:
+                        await orchestrator.close()
+                        if previous is not None:
+                            orchestrator._loadout_override = prior_loadout
+                            if prior_binding is not None and prior_conversation:
+                                orchestrator.save_binding_for(prior_conversation, prior_binding)
+                            await orchestrator.start(
+                                previous,
+                                resume_conversation=prior_conversation if prior_binding is not None else None,
+                            )
+                    except Exception:
+                        logger.error("previous ACP profile did not restart after a rejected activation")
+
+                try:
+                    await orchestrator.close()
+                    await orchestrator.start(target_profile)
+                except BaseException as exc:
+                    await restore_previous()
+                    if not isinstance(exc, Exception):
+                        raise
+                    logger.error(
+                        "ACP profile activation failed for %r (%s)",
+                        name,
+                        type(exc).__name__,
+                    )
+                    raise ValueError(
+                        f"ACP profile {name!r} could not be activated; verify its "
+                        "adapter command and profile settings."
+                    ) from None
+                if effort:
+                    try:
+                        await self._apply_acp_effort(orchestrator, effort)
+                    except BaseException:
+                        # A rejected or cancelled effort restores the previous harness.
+                        await restore_previous()
+                        raise
+                ok = bool(self._profile_manager.set_active_profile(name))
         else:
             if str(current_provider).lower() == "acp" and orchestrator is not None:
                 await orchestrator.close()
@@ -1499,7 +1621,7 @@ class LocalStateService(StateService):
         # before the provider reinitialize below so the next turn uses them,
         # and never written to config -- a launch flag must not rewrite the
         # user's saved profile (spec R3 / invariant I5).
-        if model or effort:
+        if (model or effort) and str(target_provider).lower() != "acp":
             overrides: dict[str, Any] = {"save_to_config": False}
             if model:
                 overrides["model"] = model
@@ -2350,7 +2472,69 @@ class LocalStateService(StateService):
 
     # === Session management (phase 4.5 step 7) ===
 
+    def _active_acp_profile(self) -> Any:
+        pm = self._profile_manager
+        current = pm.get_active_profile() if pm is not None else None
+        provider = (current.get_provider() if hasattr(current, "get_provider")
+                    else getattr(current, "provider", ""))
+        return current if str(provider).lower() == "acp" else None
+
+    def _conversation_uses_acp(self, acp: Any) -> bool:
+        return bool(acp is not None and (getattr(acp, "active", False) is True or self._active_acp_profile()))
+
+    async def _restore_conversation_acp(self, acp: Any, conversation_id: str | None = None) -> None:
+        current = self._active_acp_profile()
+        selected = getattr(acp, "_selected_profile", None)
+        if current is not None and (selected is None or selected.name != current.name):
+            await acp.start(current, resume_conversation=conversation_id)
+        elif conversation_id is None:
+            await acp.restore()
+        else:
+            await acp.restore(conversation_id)
+        if getattr(acp, "active", False) is not True:
+            raise ValueError("ACP harness did not reopen; retry the conversation change")
+
+    @asynccontextmanager
+    async def _conversation_ownership(self, action: str):
+        bus = getattr(self, "_event_bus", None)
+        acp = bus.get_service("acp_orchestrator") if bus else None
+        transition = getattr(acp, "transition", None)
+        if acp is None and self._active_acp_profile() is not None:
+            raise ValueError(ACP_HARNESS_UNAVAILABLE)
+        if callable(transition) and getattr(acp, "transitioning", False) is True:
+            raise ValueError(ACP_CONVERSATION_BUSY)
+        changed = False
+
+        def mark_changed() -> None:
+            nonlocal changed
+            changed = True
+
+        with transition() if callable(transition) else nullcontext():
+            uses_acp = self._conversation_uses_acp(acp)
+            if callable(transition):
+                acp._conversation_transition = True
+            try:
+                yield acp, uses_acp, mark_changed
+            except BaseException:
+                if changed and uses_acp:
+                    try:
+                        await acp.close()
+                    except BaseException as cleanup_exc:
+                        logger.warning("ACP conversation cleanup failed (%s)", type(cleanup_exc).__name__)
+                    if hasattr(acp, "startup_error"):
+                        acp.startup_error = f"Conversation {action} did not complete; retry."
+                raise
+            finally:
+                if callable(transition):
+                    acp._conversation_transition = False
+
     async def restart_session(self) -> ConversationSnapshot:
+        async with self._conversation_ownership("restart") as (acp, uses_acp, mark_changed):
+            return await self._restart_session_owned(acp, uses_acp, mark_changed)
+
+    async def _restart_session_owned(
+        self, acp: Any, uses_acp: bool, mark_changed: Callable[[], None]
+    ) -> ConversationSnapshot:
         """Clear the live conversation and rebuild the system prompt.
 
         Mirrors kollabor/commands/system_commands/handlers/system.py
@@ -2365,19 +2549,21 @@ class LocalStateService(StateService):
         llm = self._llm_service
         if llm is None:
             raise ValueError("llm service not available")
-        acp = self._event_bus.get_service("acp_orchestrator")
-
         # Best-effort: save current conversation before clearing.
         conv_mgr = getattr(llm, "conversation_manager", None)
         if conv_mgr is not None:
+            mark_changed()
             try:
                 conv_mgr.clear_conversation()
             except Exception as e:
+                if uses_acp:
+                    raise ValueError(f"could not clear conversation: {e}") from e
                 logger.debug(f"restart_session: clear_conversation error: {e}")
 
         # Re-initialize conversation (clears history, rebuilds system prompt).
         # The method is async in llm_coordinator.
         if hasattr(llm, "_initialize_conversation"):
+            mark_changed()
             try:
                 import asyncio as _aio
                 import inspect as _inspect
@@ -2388,11 +2574,13 @@ class LocalStateService(StateService):
                 elif _aio.isfuture(result):
                     await result
             except Exception as e:
+                if uses_acp:
+                    raise ValueError(f"could not initialize conversation: {e}") from e
                 logger.warning(f"restart_session: _initialize_conversation failed: {e}")
 
         # Return a fresh conversation snapshot.
-        if acp is not None and acp.active:
-            await acp.restore()
+        if uses_acp:
+            await self._restore_conversation_acp(acp)
         return await self.get_conversation()
 
     # === MCP writes (phase 4.5 step 7) ===
@@ -3682,6 +3870,12 @@ class LocalStateService(StateService):
     # === Resume (phase 4.5 step 7) ===
 
     async def resume_conversation(self, session_id: str) -> dict[str, Any]:
+        async with self._conversation_ownership("resume") as (acp, uses_acp, mark_changed):
+            return await self._resume_conversation_owned(session_id, acp, uses_acp, mark_changed)
+
+    async def _resume_conversation_owned(
+        self, session_id: str, acp: Any, uses_acp: bool, mark_changed: Callable[[], None]
+    ) -> dict[str, Any]:
         """Load a saved session and swap it into the live conversation.
 
         Phase 4.5 step 7: daemon-side resume. Mirrors the legacy
@@ -3714,15 +3908,22 @@ class LocalStateService(StateService):
             logger.debug(f"resume: auto-save error (non-fatal): {e}")
 
         # Load the target session.
+        previous_messages = getattr(conv_mgr, "messages", None)
         try:
             loaded = conv_mgr.load_session(session_id)
         except Exception as e:
+            if (getattr(conv_mgr, "current_session_id", "") != old_session_id
+                    or getattr(conv_mgr, "messages", None) is not previous_messages):
+                mark_changed()
             raise ValueError(f"failed to load session {session_id!r}: {e}")
         if not loaded:
+            if (getattr(conv_mgr, "current_session_id", "") != old_session_id
+                    or getattr(conv_mgr, "messages", None) is not previous_messages):
+                mark_changed()
             raise ValueError(f"failed to load session {session_id!r}")
+        mark_changed()
 
         raw_messages = getattr(conv_mgr, "messages", None) or []
-        acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
 
         # Generate a fresh session id for the resumed conversation, then move the
         # session id across all three subsystems in lockstep (#26 cause B):
@@ -3823,10 +4024,10 @@ class LocalStateService(StateService):
         if not conv_mgr.save_session(new_session_id):
             raise ValueError(f"failed to persist resumed session {new_session_id!r}")
 
-        if acp is not None and acp.active:
+        if uses_acp:
             # Read the original harness binding, but open/save the continued
             # session only after all native conversation owners have its new ID.
-            await acp.restore(session_id)
+            await self._restore_conversation_acp(acp, session_id)
 
         header = f"--- Resumed: {session_id[:20]}... as {new_session_id} ---"
         success_message = f"[ok] Resumed: {new_session_id}. Continue below."

@@ -130,6 +130,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness
   to the loadout's provider profile (#594).
+- ACP restart, resume and web history clear no longer report success while a
+  competing profile change leaves the old harness conversation active.
+- ACP profile and loadout changes no longer replace a harness while another
+  startup or rollback owns it. Competing changes can be retried after it ends.
+- ACP startup loadouts now stop with an error when the harness does not confirm
+  the requested model or effort, or when native-only temperature or max-token
+  settings are supplied.
+- ACP Session tab: effort set with Apply now sticks. Apply max, then switch
+  model, and the effort stays max (before, it could drop back to xhigh). A
+  model that does not offer the effort uses the highest level it offers and
+  shows a notice saying so.
+- ACP: a model change keeps the effort you picked, falls back to the highest
+  effort the new model offers, or shows a notice saying why it could not.
+  Behavior change: a restart into another ACP profile no longer keeps the
+  previous profile's model and effort picks; a restart of the same profile
+  still restores its saved picks, except where an explicit loadout sets the
+  value, and the explicit loadout wins.
 - ACP: Codex multi-tool turns now report prompt token usage matching the harness
   ledger. Reconciled prompt-response totals settle once into session stats and
   appear in the status line. Coverage depends on the adapter: Claude's prompt

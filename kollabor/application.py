@@ -15,6 +15,7 @@ from kollabor_agent import AgentManager
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_ai import KollaborConversationLogger, ProfileManager
+from kollabor_ai.loadout_manager import InvalidACPLoadoutError, acp_loadout_model, validate_acp_loadout
 from kollabor_config import ConfigService, local_ipc
 from kollabor_events import EventBus
 from kollabor_events.dict_utils import deep_merge
@@ -309,6 +310,7 @@ class TerminalLLMChat:
         # Pass cli_profile so auto-detection is skipped when --llm is used
         self.profile_manager = ProfileManager(self.config, cli_profile=profile_name)
         self.acp_orchestrator = None
+        self._startup_acp_loadout: tuple[str, str, str] | None = None
 
         # Apply a persisted loadout default when no explicit --llm override was given.
         if not profile_name:
@@ -329,11 +331,17 @@ class TerminalLLMChat:
                         else None
                     )
                     if loadout and getattr(loadout_profile, "provider", "") == "acp":
-                        # ACP owns model/effort/temperature inside its harness;
-                        # do not synthesize native model settings at startup.
+                        validate_acp_loadout(loadout)
+                        # Keep loadout provenance separate from the profile's
+                        # ordinary defaults and the shared ACP pick store.
                         applied = self.profile_manager.set_active_profile(
                             loadout.provider_profile, persist=False
                         )
+                        if applied:
+                            self._startup_acp_loadout = (
+                                loadout.provider_profile,
+                                acp_loadout_model(loadout, loadout_profile), loadout.effort,
+                            )
                     elif loadout:
                         update_kwargs = {
                             "model": loadout.model,
@@ -355,6 +363,8 @@ class TerminalLLMChat:
                             loadout.provider_profile, persist=False
                         )
                         logger.info("Applied default loadout '%s'", loadout.name)
+            except InvalidACPLoadoutError:
+                raise
             except Exception as exc:
                 logger.warning("Could not apply default loadout: %s", exc)
 
@@ -383,6 +393,8 @@ class TerminalLLMChat:
                         loadout.provider_profile
                     )
                     is_acp_loadout = getattr(loadout_profile, "provider", "") == "acp"
+                    if is_acp_loadout:
+                        validate_acp_loadout(loadout)
                     update_kwargs = {"model": loadout.model, "save_to_config": False}
                     if not is_acp_loadout and loadout.temperature is not None:
                         update_kwargs["temperature"] = loadout.temperature
@@ -404,6 +416,11 @@ class TerminalLLMChat:
                         )
                     )
                     if activated:
+                        if is_acp_loadout:
+                            self._startup_acp_loadout = (
+                                loadout.provider_profile,
+                                acp_loadout_model(loadout, loadout_profile), loadout.effort,
+                            )
                         activated_via_loadout = True
                         logger.info(
                             f"Resolved '{profile_name}' as loadout -> "
@@ -1450,7 +1467,11 @@ class TerminalLLMChat:
             self.acp_orchestrator = orchestrator
             return
         try:
-            await orchestrator.start(profile)
+            loadout = getattr(self, "_startup_acp_loadout", None)
+            if loadout and loadout[0] == profile.name:
+                await orchestrator.start(profile, loadout=(loadout[1], loadout[2]))
+            else:
+                await orchestrator.start(profile)
         except BaseException:
             # Startup is transactional: a partially spawned child/session must
             # be closed and its Hub binding revoked before the error escapes.
@@ -3721,7 +3742,11 @@ class TerminalLLMChat:
             await client_turn_broker.close()
         if acp_orchestrator is not None:
             try:
-                await acp_orchestrator.close()
+                shutdown = getattr(acp_orchestrator, "shutdown", None)
+                if callable(shutdown):
+                    await shutdown()
+                else:
+                    await acp_orchestrator.close()
             except BaseException as exc:
                 logger.warning("ACP runner cleanup failed: %s", exc)
             self.acp_orchestrator = None
