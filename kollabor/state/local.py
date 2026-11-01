@@ -650,11 +650,13 @@ class LocalStateService(StateService):
             return ProfileSnapshot(name="", is_active=False)
         if active is None:
             return ProfileSnapshot(name="", is_active=False)
-        snapshot = self._profile_to_snapshot(active, is_active=True)
+        return self._with_harness(self._profile_to_snapshot(active, is_active=True))
+
+    def _with_harness(self, snapshot: ProfileSnapshot) -> ProfileSnapshot:
+        """A harness picks its own model and effort (/model sets them there):
+        report those, blank when it names none, never the profile's, which the
+        harness does not read."""
         if self._acp_active():
-            # A harness picks its own model and effort (/model sets them there):
-            # report those, blank when it names none, never the profile's, which
-            # the harness does not read.
             snapshot.model = self._acp_harness_model()
             snapshot.effort = self._acp_harness_effort()
         return snapshot
@@ -1530,7 +1532,8 @@ class LocalStateService(StateService):
                 except Exception as e:
                     logger.debug(f"reload_native_tools background task error: {e}")
 
-        snapshot = self._profile_to_snapshot(profile, is_active=True)
+        # As get_active_profile reports it, or the session mirrors the saved model.
+        snapshot = self._with_harness(self._profile_to_snapshot(profile, is_active=True))
         from kollabor_tui.display_tap import publish_semantic
         publish_semantic(self._event_bus, "profile_changed", profile=snapshot.to_dict())
         return snapshot

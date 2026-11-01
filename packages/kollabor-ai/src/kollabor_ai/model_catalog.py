@@ -210,7 +210,7 @@ async def list_provider_models(
 
     try:
         if auth_type == "oauth" or provider == "openai_responses":
-            return await asyncio.wait_for(_openai_oauth_models(), timeout=timeout)
+            return await asyncio.wait_for(_openai_oauth_models(profile), timeout=timeout)
         if provider == "openrouter":
             return await asyncio.wait_for(_openrouter_models(), timeout=timeout)
         if provider == "anthropic":
@@ -227,17 +227,22 @@ async def list_provider_models(
     return []
 
 
-async def _openai_oauth_models() -> List[Dict[str, Any]]:
-    """Codex backend models for the OpenAI OAuth (ChatGPT) profile.
+async def _openai_oauth_models(profile: Any = None) -> List[Dict[str, Any]]:
+    """Codex backend models for an OpenAI OAuth (ChatGPT) profile, with its own login.
 
     The backend reports context window and supported effort levels per model,
-    so the picker can show both instead of a bare "codex" tag.
+    so the picker can show both instead of a bare "codex" tag. Two logins can
+    serve different models, so each profile asks with its own, as the provider
+    loads it at start (api_communication_service).
     """
     from kollabor_ai.oauth import OAuthTokenStorage
     from kollabor_ai.oauth.openai_oauth import query_codex_model_details
 
     storage = OAuthTokenStorage()
-    tokens = await storage.load_tokens("openai", auto_refresh=True)
+    name = str(getattr(profile, "name", "") or "")
+    tokens = await storage.load_tokens(
+        "openai", auto_refresh=True, profile_name=name if name not in ("", "openai-oauth") else None
+    )
     if not tokens:
         return []
 

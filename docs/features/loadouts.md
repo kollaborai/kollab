@@ -90,27 +90,27 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   the pick.
 - Each row names the effort it runs at. A native model also has a default
   row, which runs it at its own default and clears an earlier pick. Its levels
-  are only ones it takes and a request can carry:
-  - its profile's live catalog's (gpt-6-luna stops at max; an empty list is
-    none); another endpoint's catalog says nothing about it;
-  - else the registry's (`effort_levels` in `bundles/data/models.json`: Claude
+  are ones a request on it carries, by the request's own rule:
+  - the registry's (`effort_levels` in `bundles/data/models.json`: Claude
     Opus 4.6 has no xhigh, Claude Haiku 4.5 takes none);
-  - else low, medium and high, except on Claude: a Claude model the registry
-    doesn't list takes none (Sonnet 4.5 takes none).
+  - for a model the registry says nothing about, its own profile's live
+    catalog's (gpt-6-luna stops at max; an empty list is none); another
+    endpoint's catalog, or another login's, says nothing about it;
+  - else none: no level is guessed. A Claude model the registry doesn't list
+    takes none (Sonnet 4.5 takes none).
 
   A model that doesn't reason, or a provider that sends no effort, gets one
   row with none, and a session on such a provider shows none, whatever was
   saved. Whichever screen set a level, a level the model doesn't take is never
   sent.
 - An ACP harness offers the models its sessions last reported
-  (`~/.kollab/acp/options.json`). Each model gets the levels the harness
-  reported for it, never another model's. A model it hasn't run gets its
-  backend's levels for the two harnesses whose backend is known: Codex CLI the
-  ChatGPT login catalogs', when they all agree (its own login could be any of
-  them), Claude Code the registry's. Any other harness's untried model gets one
-  row that keeps its effort; its levels appear once a session runs it. A
-  harness never started offers only its default; its models appear after its
-  first session.
+  (`~/.kollab/acp/options.json`), each at the levels the harness reported for
+  it. A model it hasn't run yet gets the levels the harness reported for its
+  last model (Claude Code's include its own `default`), never a login's or the
+  registry's: the harness may not use either. A level the harness refuses puts
+  its model back, and the picker says so. A model with no levels gets one row
+  that keeps the harness's level. A harness never started offers only its
+  default; its models appear after its first session (#557).
 - Opening the list fetches any provider catalog older than an hour (up to
   8 s), so an endpoint's models show without opening Settings → Loadouts first.
 - An environment variable outranks a pick (`KOLLAB_<PROFILE>_MODEL`,

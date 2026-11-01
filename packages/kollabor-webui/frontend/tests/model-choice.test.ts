@@ -11,6 +11,9 @@ test("every typed word must match: 'codex luna max' finds Codex CLI's luna at ma
   assert.equal(matchesChoice(oauthLuna, "codex luna max"), false);
   assert.equal(matchesChoice(oauthLuna, "luna default"), true); // no effort reads as "default"
   assert.equal(matchesChoice(oauthLuna, ""), true);
+  // Aragonite on #553 round 5: an ACP row with no level keeps the harness's level, so it is no default.
+  assert.equal(matchesChoice({ ...codexLunaMax, effort: "" }, "codex luna"), true);
+  assert.equal(matchesChoice({ ...codexLunaMax, effort: "" }, "luna default"), false);
 });
 
 function fakeApi(
@@ -76,4 +79,20 @@ test("an ACP pick on the harness already running skips the switch; a refused opt
     /max is not offered/,
   );
   assert.equal(calls[0][0], "panel");
+});
+
+test("a level the harness refuses puts its model back, so a pick never half-applies", async () => {
+  // Aragonite on #553 round 5: the harness took the model, refused the level, and stayed on the new model.
+  const { api, calls } = fakeApi({ effort: { ok: false, message: "max is not offered" } });
+  await assert.rejects(
+    applyModelChoice(api, { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra" }, codexLunaMax),
+    /max is not offered\. It stays on gpt-6\.1-terra\./,
+  );
+  assert.deepEqual(calls[calls.length - 1], ["panel", "s1", "model", "select", { model: "gpt-6.1-terra" }]);
+  // A pick that moved to another harness has no model of its own to go back to: it says what runs.
+  const moved = fakeApi({ effort: { ok: false } });
+  await assert.rejects(
+    applyModelChoice(moved.api, { session_id: "s1", profile: "openai-oauth", model: "gpt-6.1-terra" }, codexLunaMax),
+    /codex-cli refused max\. It runs gpt-6-luna at the level it had\./,
+  );
 });
