@@ -964,17 +964,18 @@ def _rpc_reply_for_last_write(
 @pytest.mark.asyncio
 async def test_hub_state_client_eof_fails_pending_rpc_immediately(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    short_socket_dir: Path,
 ) -> None:
     """Peer EOF must fail in-flight calls instead of waiting for RPC timeout."""
     reader = asyncio.StreamReader()
     writer = _HubClientTestWriter()
-    socket_path = tmp_path / "peer.sock"
+    socket_path = short_socket_dir / "peer.sock"
     socket_path.touch()
     # A touched file stands in for the socket; skip the ownership check.
     monkeypatch.setattr("plugins.hub.messenger.require_own_socket", lambda _p: None)
 
-    async def open_connection(_socket_path: str) -> tuple[Any, Any]:
+    async def open_connection(_socket_path: str, **_kw: Any) -> tuple[Any, Any]:
+        assert _socket_path == str(socket_path)
         return reader, writer
 
     monkeypatch.setattr(
@@ -983,7 +984,7 @@ async def test_hub_state_client_eof_fails_pending_rpc_immediately(
         staticmethod(lambda _identity: socket_path),
     )
     monkeypatch.setattr(
-        "kollabor_rpc.open_unix_connection_with_large_buffer",
+        "kollabor_config.local_ipc.connect",
         open_connection,
     )
 
@@ -1004,17 +1005,18 @@ async def test_hub_state_client_eof_fails_pending_rpc_immediately(
 @pytest.mark.asyncio
 async def test_hub_state_client_read_error_fails_pending_rpc_immediately(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    short_socket_dir: Path,
 ) -> None:
     """Terminal reader errors must fail in-flight calls without timeout delay."""
     reader = _FailingHubClientReader()
     writer = _HubClientTestWriter()
-    socket_path = tmp_path / "peer.sock"
+    socket_path = short_socket_dir / "peer.sock"
     socket_path.touch()
     # A touched file stands in for the socket; skip the ownership check.
     monkeypatch.setattr("plugins.hub.messenger.require_own_socket", lambda _p: None)
 
-    async def open_connection(_socket_path: str) -> tuple[Any, Any]:
+    async def open_connection(_socket_path: str, **_kw: Any) -> tuple[Any, Any]:
+        assert _socket_path == str(socket_path)
         return reader, writer
 
     monkeypatch.setattr(
@@ -1023,7 +1025,7 @@ async def test_hub_state_client_read_error_fails_pending_rpc_immediately(
         staticmethod(lambda _identity: socket_path),
     )
     monkeypatch.setattr(
-        "kollabor_rpc.open_unix_connection_with_large_buffer",
+        "kollabor_config.local_ipc.connect",
         open_connection,
     )
 
@@ -1044,7 +1046,7 @@ async def test_hub_state_client_read_error_fails_pending_rpc_immediately(
 @pytest.mark.asyncio
 async def test_hub_state_client_reconnects_after_eof_and_ignores_stale_reply(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    short_socket_dir: Path,
 ) -> None:
     """A fresh context works after EOF and ignores an unmatched stale reply."""
     first_reader = asyncio.StreamReader()
@@ -1057,12 +1059,13 @@ async def test_hub_state_client_reconnects_after_eof_and_ignores_stale_reply(
             (second_reader, second_writer),
         ]
     )
-    socket_path = tmp_path / "peer.sock"
+    socket_path = short_socket_dir / "peer.sock"
     socket_path.touch()
     # A touched file stands in for the socket; skip the ownership check.
     monkeypatch.setattr("plugins.hub.messenger.require_own_socket", lambda _p: None)
 
-    async def open_connection(_socket_path: str) -> tuple[Any, Any]:
+    async def open_connection(_socket_path: str, **_kw: Any) -> tuple[Any, Any]:
+        assert _socket_path == str(socket_path)
         return next(connections)
 
     monkeypatch.setattr(
@@ -1071,7 +1074,7 @@ async def test_hub_state_client_reconnects_after_eof_and_ignores_stale_reply(
         staticmethod(lambda _identity: socket_path),
     )
     monkeypatch.setattr(
-        "kollabor_rpc.open_unix_connection_with_large_buffer",
+        "kollabor_config.local_ipc.connect",
         open_connection,
     )
 
