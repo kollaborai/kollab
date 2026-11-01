@@ -49,6 +49,7 @@ from .relay_state import (
     RelayError,
     RelayFrameShapeError,
     RelayStateStore,
+    SendGuardRevoked,
     canonical_origin,
     failure_text,
     is_machine_network_state_dir,
@@ -1389,9 +1390,27 @@ class RelayClient:
         ciphertext = base64.b64encode(box.encrypt(encoded.encode())).decode()
         if len(ciphertext) > MAX_CIPHERTEXT:
             raise RelayError("ciphertext size limit exceeded")
+        guard = {}
+        if before_send is not None:
+            def check_peer() -> None:
+                if (
+                    key not in self.state.approvals
+                    or self._state != "online"
+                    or self._session_id != envelope["from_session"]
+                    or self._peers.get(key) != envelope["to_session"]
+                    or self._binding(key) != envelope["room"]
+                ):
+                    raise SendGuardRevoked("peer approval or relay session changed before send")
+
+            async def guarded_send() -> None:
+                check_peer()
+                await before_send()
+                check_peer()
+
+            guard["before_send"] = guarded_send
         await self._send_frame(
             {"type": "send", "to": key, "id": message_id, "ciphertext": ciphertext},
-            **({"before_send": before_send} if before_send is not None else {}),
+            **guard,
         )
 
     async def _apply_frame(self, frame):

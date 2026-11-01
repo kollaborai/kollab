@@ -46,7 +46,7 @@ from kollabor_config import local_ipc
 
 from .device_names import NAME_RE
 from .relay_conversations import AGENT_ID
-from .relay_state import ID, RelayError
+from .relay_state import ID, RelayError, SendGuardRevoked
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class _PeerClosed(Exception):
     pass
 
 
-class _Withdrawn(Exception):
+class _Withdrawn(SendGuardRevoked):
     pass
 
 
@@ -485,7 +485,7 @@ class NetworkAttach:
                 if ended:
                     why = self._stopped(channel)
                     break
-        except _Withdrawn:
+        except SendGuardRevoked:
             why = self._withdrawn(channel)
         except _PeerClosed:
             why = None  # the peer closed it: "<peer> closed <name>"

@@ -694,6 +694,46 @@ async def test_guarded_forward_never_uses_an_unguarded_injected_direct_sender(me
 
 
 @pytest.mark.asyncio
+async def test_guarded_packet_stays_withdrawn_after_peer_is_reapproved(mesh_network, monkeypatch):
+    """A revoked secure session cannot send its queued packet after reapproval."""
+    from plugins.hub.relay_state import SendGuardRevoked
+
+    clients, states, _, _, _ = mesh_network
+    client = clients["origin"]
+    secure = states["origin"]["secure"]
+    peer = clients["destination"].public_key
+    await secure.request(peer, "directory", {}, timeout=10)
+    waiting = asyncio.Event()
+    release = asyncio.Event()
+    submitted = []
+
+    async def held_carrier(_peer, _method, _payload, *, timeout, before_send):
+        waiting.set()
+        await release.wait()
+        await before_send()
+        submitted.append(True)
+        raise AssertionError("withdrawn packet was submitted")
+
+    async def allow():
+        pass
+
+    monkeypatch.setattr(secure, "_transport_request", held_carrier)
+    task = asyncio.create_task(secure.request(peer, "directory", {}, timeout=10, before_send=allow))
+    try:
+        await asyncio.wait_for(waiting.wait(), 5)
+        client.revoke(peer)
+        client.approve(peer)
+        release.set()
+        with pytest.raises(SendGuardRevoked):
+            await asyncio.wait_for(task, 5)
+        assert submitted == []
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+
+
+@pytest.mark.asyncio
 async def test_locator_only_peer_is_reached_directly_and_refreshed(mesh_network):
     clients, states, application_calls, dispatch_calls, _wire = mesh_network
     origin_mesh = states["origin"]["mesh"]

@@ -77,21 +77,6 @@ async def test_a_member_device_opens_an_agent_under_trust_open_with_no_command(d
     right.commands.client.revoke(left.commands.client.public_key)
     await right.network_attach.recheck()
     assert not right.network_attach._channels
-@pytest.mark.asyncio
-async def test_a_member_device_opens_an_agent_under_trust_open_with_no_command(devices):
-    left, right, notices = devices
-    opened = await _open(left, right)
-    reader, writer = await asyncio.open_unix_connection(opened)
-    assert await reader.readline() == b"agent here\n"
-    writer.write(b"hello\n")
-    await writer.drain()
-    assert await reader.readline() == b"HELLO\n"
-    assert notices == ["left-box opened sapphire from the network"]
-
-    # Revoked: the rules say no, so the device closes the agent it held open.
-    right.commands.client.revoke(left.commands.client.public_key)
-    await right.network_attach.recheck()
-    assert not right.network_attach._channels
 
 
 # ------------------------------------------------------- F19: no attach under a halt
@@ -308,6 +293,61 @@ async def test_unforced_withdrawal_fences_output_waiting_for_relay_send_lock(dev
         lock.release()
         held = False
         assert await asyncio.wait_for(reader.read(), 8) == b""
+    finally:
+        if held:
+            lock.release()
+        writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reapprove", [False, True])
+async def test_requester_revoke_fences_input_waiting_for_relay_send_lock(
+    devices, monkeypatch, reapprove,
+):
+    """Locally revoking the peer stops input still waiting to leave the relay."""
+    monkeypatch.setattr(network_attach, "FLUSH_SECONDS", 0)
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    original_writer = channel.writer
+    received = asyncio.Event()
+
+    class RecordingWriter:
+        def write(self, data):
+            if data:
+                received.set()
+            original_writer.write(data)
+
+        async def drain(self):
+            await original_writer.drain()
+
+        def close(self):
+            original_writer.close()
+
+    channel.writer = RecordingWriter()
+    lock = left.commands.client._send_lock
+    await lock.acquire()
+    held = True
+    try:
+        writer.write(b"synthetic private input\n")
+        await writer.drain()
+        for _ in range(500):
+            if any(not waiter.done() for waiter in (lock._waiters or ())):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("input did not reach the relay send lock")
+        peer = right.commands.client.public_key
+        left.commands.client.revoke(peer)
+        if reapprove:
+            left.commands.client.approve(peer)
+        lock.release()
+        held = False
+        await asyncio.wait_for(reader.read(), 8)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(received.wait(), 1)
     finally:
         if held:
             lock.release()

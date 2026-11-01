@@ -21,9 +21,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Protocol
 
-from .network_attach import ATTACH_METHODS, _Withdrawn
+from .network_attach import ATTACH_METHODS
 from .relay_client import PeerSessionEvent, RelayClient
-from .relay_state import RelayError, failure_text, strict_json, validate_key
+from .relay_state import RelayError, SendGuardRevoked, failure_text, strict_json, validate_key
 from .secure_session import (
     MAX_PLAINTEXT_BYTES,
     MAX_SEQUENCE,
@@ -241,7 +241,7 @@ class SecureConversationTransport:
                             "peer did not return a secure application response"
                         )
                     return result
-        except _Withdrawn:
+        except SendGuardRevoked:
             # Before the first data chunk, the held session is still usable.
             # A partial application frame requires a fresh TLS session.
             if held and sent:
@@ -521,7 +521,27 @@ class SecureConversationTransport:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError
-        guard = {"before_send": before_send} if before_send is not None else {}
+        guard = {}
+        if before_send is not None:
+            binding = (state.peer_key, state.local_session, state.peer_session)
+
+            async def guarded_send() -> None:
+                # A revoke or reconnect can discard this session while its
+                # already-encrypted packet waits in a lower carrier. Check
+                # both the current binding and this exact session at commit.
+                def check_session() -> None:
+                    try:
+                        self._assert_current(state)
+                    except (RelayError, SecureSessionError) as exc:
+                        raise SendGuardRevoked("secure session was withdrawn") from exc
+                    if self._outbound.get(binding) is not state:
+                        raise SendGuardRevoked("secure session was withdrawn")
+
+                check_session()
+                await before_send()
+                check_session()
+
+            guard["before_send"] = guarded_send
         return await self._transport_request(
             state.peer_key,
             "secure_packet",
