@@ -7,7 +7,12 @@ removed outright, not aliased.
 Spec: docs/specs/llm-loadout-live-catalog.md (CLI surface, rules R1-R5).
 """
 
+import json
+import logging
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from kollabor.cli import parse_arguments
 from kollabor_ai.profile_manager import EFFORT_LEVELS
@@ -179,6 +184,72 @@ class TestAttachFlagPlumbing(unittest.TestCase):
         source = inspect.getsource(application.TerminalLLMChat.__init__)
         self.assertIn('"model": model_override', source)
         self.assertIn('"effort": effort_override', source)
+
+
+def test_cli_loadout_startup_resolves_without_profile_error(
+    tmp_path, monkeypatch, caplog
+):
+    """Exercise real TerminalLLMChat startup, not just source wiring."""
+    from kollabor import application as application_module
+    from kollabor_config import config_utils
+
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    global_config = tmp_path / "global"
+    project.mkdir()
+    home.mkdir()
+    global_config.mkdir()
+    (global_config / "config.json").write_text(
+        json.dumps(
+            {
+                "kollabor": {
+                    "llm": {
+                        "profiles": {
+                            "ghost": {
+                                "provider": "anthropic",
+                                "model": "claude-haiku-4.5",
+                                "api_key": "test-key",
+                            }
+                        },
+                        "loadouts": {
+                            "fast-haiku": {
+                                "provider_profile": "ghost",
+                                "model": "claude-haiku-4.5",
+                            }
+                        },
+                        "default_profile": "ghost",
+                    }
+                }
+            }
+        )
+    )
+    registry = SimpleNamespace(
+        get_merged_config=lambda: {},
+        list_plugins=lambda: [],
+        instantiate_plugins=lambda *args, **kwargs: {},
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("KOLLAB_NO_AUTO_DETECT", "1")
+    caplog.set_level(logging.INFO)
+
+    with patch.object(
+        config_utils, "get_config_directory", return_value=global_config
+    ), patch.object(Path, "home", return_value=home):
+        app = application_module.TerminalLLMChat(
+            args=SimpleNamespace(simple=True),
+            profile_name="fast-haiku",
+            plugin_registry=registry,
+        )
+
+    active = app.profile_manager.get_active_profile()
+    assert app.profile_manager.active_profile_name == "ghost"
+    assert active.model == "claude-haiku-4.5"
+    assert "Resolved 'fast-haiku' as loadout" in caplog.text
+    assert not any(
+        "Profile not found: fast-haiku" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 if __name__ == "__main__":
