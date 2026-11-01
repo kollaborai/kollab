@@ -13,6 +13,7 @@ on:
       - scripts/windows_import_smoke.py
       - scripts/windows_relay_halt_smoke.py
       - tests/unit/test_windows_relay_halt_smoke.py
+      - scripts/windows_relay_serve_smoke.py
       - .github/workflows/windows-smoke.yml
   workflow_dispatch:
 
@@ -72,6 +73,11 @@ jobs:
 
       - name: Relay halt smoke
         run: uv run python scripts/windows_relay_halt_smoke.py --kollab .venv/Scripts/kollab.exe
+
+      # The #450 gate: `kollab relay serve` gets past the service.key privacy check and
+      # publishes its signed discovery document on Windows, where ACLs rule, not stat bits.
+      - name: Relay serve smoke
+        run: uv run python scripts/windows_relay_serve_smoke.py --kollab .venv/Scripts/kollab.exe
 
       - name: Engine smoke
         run: uv run python scripts/engine_smoke.py

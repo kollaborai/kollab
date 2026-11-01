@@ -62,9 +62,13 @@ def _locked_atomic_write(path: Path, data: dict, *, compact: bool = False) -> No
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, path)
-            if os.name != "nt":  # os.replace is atomic there; directories refuse O_RDONLY opens
-                # Pins and publisher revision counters must survive a crash after
-                # replacement, not merely be atomically visible to other readers.
+            # Pins and publisher revision counters must survive a crash after
+            # replacement, not merely be atomically visible to other readers.
+            # Directory fsync is a POSIX durability concept: Windows cannot
+            # open a directory fd through the CRT (EACCES without
+            # FILE_FLAG_BACKUP_SEMANTICS) and exposes no flush for it, so
+            # only POSIX gets the crash-survival pin.
+            if os.name != "nt":
                 directory_fd = os.open(path.parent, os.O_RDONLY)
                 try:
                     os.fsync(directory_fd)

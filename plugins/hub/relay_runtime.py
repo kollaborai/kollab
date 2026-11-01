@@ -67,13 +67,15 @@ def _private_directory(path: Path, *, create: bool = False) -> Path:
     path = path.expanduser().resolve()
     if create:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if os.name == "nt":  # ACL checks under the user profile, where POSIX inspects uid and mode below
-        try:
-            private_fs.check_private_dir(path)
-        except PermissionError as exc:
-            raise RuntimeConfigError(
-                "config and state directories must be owned by this user with mode 0700"
-            ) from exc
+    if os.name == "nt":
+        # Windows has no POSIX mode bits or uids: the ACL decides, exactly as
+        # for service.key. A fresh directory under the user profile inherits
+        # user-only grants, so owned_private (user, SYSTEM, Administrators) is
+        # the same bar the POSIX mask check sets.
+        from kollabor_config import private_fs
+
+        if not private_fs.owned_private(path, mask=0o077):
+            raise RuntimeConfigError("config and state directories must be owned by this user with mode 0700")
         return path
     info = path.stat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
