@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -43,12 +44,58 @@ EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 STREAM_PUBLISH_INTERVAL = 0.15
 
 
-def _foreign_queued_client_completion(event: Dict[str, Any], request_ids: set[str]) -> bool:
-    """A cancelled pre-start client request cannot finish another active stream."""
-    return (event.get("type") == "turn_complete"
-            and event.get("input_source") == "acp_client"
-            and event.get("queued") is True
-            and str(event.get("request_id") or "") not in request_ids)
+def _foreign_completion(event: Dict[str, Any], request_ids: set[str], tagged: bool = False) -> bool:
+    """Another request's turn_complete never finishes this stream.
+
+    A cancelled pre-start client request is one. So is an earlier turn's
+    completion the daemon published while the engine was reattaching: it
+    arrives after this request was accepted (#543). With ``tagged`` the daemon
+    echoed this request's id, so its turn carries it: a completion naming
+    none belongs to a turn that was running when this request came (#551).
+    """
+    if event.get("type") != "turn_complete":
+        return False
+    request_id = str(event.get("request_id") or "")
+    if event.get("input_source") == "acp_client" and event.get("queued") is True:
+        return request_id not in request_ids
+    named = {request_id} - {""} | {str(i) for i in event.get("request_ids") or ()}
+    if not named:
+        return tagged
+    return bool(request_ids) and not named & request_ids
+
+
+def _foreign_error(event: Dict[str, Any], request_ids: set[str]) -> bool:
+    """An error that names only other requests is theirs: a frame dropped for an
+    old turn, replayed after a reattach, must not fail this request (#543)."""
+    if event.get("type") != "error":
+        return False
+    named = {str(event.get("request_id") or "")} - {""} | {str(i) for i in event.get("request_ids") or ()}
+    return bool(named and request_ids) and not named & request_ids
+
+
+# What a turn streams as its reply. A voice or ACP turn names its request by
+# request_id alone; a turn typed in the terminal names none.
+_TURN_OUTPUT = frozenset(
+    {"token", "response", "thinking", "acp_update", "tool_start", "tool_result", "permission_request"}
+)
+_PERMISSION_ANSWERS = frozenset({"permission_granted", "permission_denied", "permission_cancelled"})
+
+
+def _foreign_output(event: Dict[str, Any], request_ids: set[str], tagged: bool = False) -> bool:
+    """An event a turn names for other requests only is theirs: a message sent
+    while another turn runs gets none of that turn's text, tool cards or
+    permission prompts (#551). With ``tagged`` this request's turn names it, so
+    reply output naming none is another turn's too. Other unnamed events
+    (session-wide, older daemons) pass, and so do permission answers: they
+    close a card by its tool id, whichever run showed it."""
+    if event.get("type") in _PERMISSION_ANSWERS:
+        return False  # a parked card is answered by a later message
+    named = {str(i) for i in event.get("request_ids") or ()}
+    if event.get("type") in _TURN_OUTPUT:
+        named |= {str(event.get("request_id") or "")} - {""}
+        if not named:
+            return tagged
+    return bool(named and request_ids) and not named & request_ids
 
 
 def _is_image_goal(content: Any) -> bool:
@@ -98,11 +145,13 @@ async def send_message(session_id: str, body: MessageRequest):
 
     # Subscribe before submitting so no event can land in the gap.
     queue = session.subscribe()
+    # Always an id: a daemon that echoes it stamps this turn with it (#551).
+    request_id = body.request_id or uuid.uuid4().hex
 
     try:
         accepted = await session.send_message(
             body.content,
-            request_id=body.request_id,
+            request_id=request_id,
             thread_id=body.thread_id,
             origin_context=body.origin_context,
         )
@@ -116,8 +165,8 @@ async def send_message(session_id: str, body: MessageRequest):
         reason = accepted.get("reason", "rejected")
         status = 409 if "in flight" in reason else 400
         raise HTTPException(status_code=status, detail=accepted.get("message") or reason)
-    request_id = accepted.get("request_id") or body.request_id
-    request_ids = {str(request_id)} if request_id else set()
+    tagged = bool(accepted.get("request_id"))
+    request_ids = {str(accepted.get("request_id") or request_id)}
 
     # A replay already has a durable pending request or creation receipt. Its
     # acknowledgement belongs only to this response, never the shared tap.
@@ -126,8 +175,11 @@ async def send_message(session_id: str, body: MessageRequest):
         replay_queue = asyncio.Queue()
         replay_queue.put_nowait({
             "type": "token", "text": str(accepted.get("message") or "Goal request already processed."),
+            "request_id": next(iter(request_ids)),
         })
-        replay_queue.put_nowait({"type": "turn_complete", "stop_reason": "end_turn"})
+        replay_queue.put_nowait(
+            {"type": "turn_complete", "stop_reason": "end_turn", "request_id": next(iter(request_ids))}
+        )
 
     async def event_generator():
         try:
@@ -149,7 +201,9 @@ async def send_message(session_id: str, body: MessageRequest):
                     return
 
                 event.setdefault("session_id", session_id)
-                if _foreign_queued_client_completion(event, request_ids):
+                if _foreign_completion(event, request_ids, tagged):
+                    continue
+                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids, tagged):
                     continue
 
                 if event.get("type") == "daemon_closed":
@@ -818,6 +872,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         )
         submitted_contents: List[MessageContent] = []
         request_ids: set[str] = set()
+        untagged = False  # an admission that echoed no id: its turn carries none (#551)
         answered_prompts: set[str] = set()  # daemon tool ids this request answered
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
@@ -901,9 +956,10 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     message = command.get("message")
                     client_id = message.get("id") if isinstance(message, dict) else None
                     if _is_image_goal(message_content) and isinstance(client_id, str) and client_id:
-                        accepted = await session.send_message(message_content, request_id=client_id)
+                        request_id = client_id
                     else:
-                        accepted = await session.send_message(message_content)
+                        request_id = uuid.uuid4().hex
+                    accepted = await session.send_message(message_content, request_id=request_id)
                     saw_action = True
                     if not accepted.get("accepted"):
                         controller.add_error(
@@ -911,11 +967,13 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         )
                         return
                     if accepted.get("completed") is True:
+                        replay_id = str(accepted.get("request_id") or request_id)
                         queue = asyncio.Queue()
                         queue.put_nowait({
                             "type": "token", "text": str(accepted.get("message") or "Goal request already processed."),
+                            "request_id": replay_id,
                         })
-                        queue.put_nowait({"type": "turn_complete", "stop_reason": "end_turn"})
+                        queue.put_nowait({"type": "turn_complete", "stop_reason": "end_turn", "request_id": replay_id})
                     if accepted.get("goal_request_id") and isinstance(body.state, dict):
                         controller.state["goalSubmission"] = {
                             "requestId": str(accepted["goal_request_id"]),
@@ -927,6 +985,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         controller.state["error"] = ""
                     if accepted.get("request_id"):
                         request_ids.add(str(accepted["request_id"]))
+                    else:
+                        untagged = True
                     submitted_contents.append(message_content)
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
@@ -997,7 +1057,10 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     publish_progress()
                     continue
                 event_type = str(event.get("type") or "")
-                if _foreign_queued_client_completion(event, request_ids):
+                tagged = bool(request_ids) and not untagged
+                if _foreign_completion(event, request_ids, tagged):
+                    continue
+                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids, tagged):
                     continue
 
                 if event_type == "token":
