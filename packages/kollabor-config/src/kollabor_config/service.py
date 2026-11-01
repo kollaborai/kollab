@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional
 
 from .atomic_write import keep_unreadable_copy, write_text_atomic
 from .config_utils import (
+    ProjectStateLocationError,
     get_global_config_path,
     get_global_config_path_candidates,
     get_local_config_path,
@@ -90,6 +91,8 @@ class ConfigService:
                 self._cached_config = self.config_manager.config.copy()
                 self._config_error = None
                 logger.info("Created new configuration file")
+        except ProjectStateLocationError:
+            raise
         except Exception as e:
             self._config_error = str(e)
             logger.error(f"Failed to initialize configuration: {e}")

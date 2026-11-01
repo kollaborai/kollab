@@ -561,3 +561,295 @@ async def test_conversation_snapshot_refuses_tail_across_identical_histories(bou
                                                     expected_conversation_uid='conversation-a')
     assert second.metadata['conversation_uid'] == 'conversation-b'
     assert second.since is None
+
+
+@pytest.mark.asyncio
+async def test_same_image_submission_replays_one_pending_request_and_committed_receipt(boundary):
+    content = message('/goal inspect replay', b'replay-A')
+    first = await boundary.state.send_message(content, request_id='client-request-1')
+    replay = await boundary.state.send_message(content, request_id='client-request-1')
+    assert first['accepted'] and replay['accepted'] and replay['completed']
+    pending = boundary.service.pending_attachment_requests('conversation-a')
+    assert len(pending) == 1 and replay['request_id'] == pending[0]['request_id']
+    assert first['goal_request_id'] == replay['goal_request_id'] == pending[0]['request_id']
+    assert len(boundary.tasks) == 1
+    await finish(boundary)
+    goal = boundary.store.get_active('conversation-a')
+    receipt = await boundary.state.send_message(content, request_id='client-request-1')
+    assert receipt['accepted'] and receipt['completed'] and receipt['goal_id'] == goal.goal_id
+    assert receipt['request_id'] == pending[0]['request_id']
+    assert len(boundary.tasks) == 0
+    assert boundary.service.load_attachment(goal.attachment_refs[0]) == b'replay-A'
+
+
+@pytest.mark.asyncio
+async def test_client_request_key_reuse_conflicts_without_promotion_or_cross_session_leaks(boundary):
+    content = message('/goal inspect A', b'original-A')
+    first = await boundary.state.send_message(content, request_id='client-conflict')
+    assert first['accepted']
+    pending = boundary.service.pending_attachment_requests('conversation-a')
+    collision = await boundary.state.send_message(message('/goal inspect A', b'other-B'), request_id='client-conflict')
+    assert not collision['accepted'] and 'conflict' in collision['reason'].lower()
+    assert 'original-A' not in repr(collision) and pending[0]['request_id'] not in repr(collision)
+    import hashlib
+    assert not list((boundary.store.db_path.parent / 'artifacts').glob(hashlib.sha256(b'other-B').hexdigest() + '*'))
+    boundary.identity['uid'] = 'conversation-b'
+    foreign = await boundary.state.send_message(content, request_id='client-conflict')
+    assert not foreign['accepted'] and 'conflict' in foreign['reason'].lower()
+    assert pending[0]['request_id'] not in repr(foreign)
+    assert not boundary.service.pending_attachment_requests('conversation-b')
+    await finish(boundary)
+
+
+@pytest.mark.asyncio
+async def test_replayed_key_detects_changed_command_image_order_and_image_count(boundary):
+    content = message('/goal inspect original', b'first') + message('', b'second')[1:]
+    assert (await boundary.state.send_message(content, request_id='variants'))['accepted']
+    changed_text = message('/goal inspect changed', b'first') + message('', b'second')[1:]
+    reversed_images = [content[0], content[2], content[1]]
+    added_image = content + message('', b'third')[1:]
+    for altered in (changed_text, reversed_images, added_image):
+        result = await boundary.state.send_message(altered, request_id='variants')
+        assert not result['accepted'] and 'conflict' in result['reason'].lower()
+    assert len(boundary.service.pending_attachment_requests('conversation-a')) == 1
+    await finish(boundary)
+
+
+@pytest.mark.asyncio
+async def test_pending_submission_replay_after_restart_and_discard(boundary):
+    content = message('/goal inspect pending', b'pending-image')
+    assert (await boundary.state.send_message(content, request_id='restart-key'))['accepted']
+    request_id = boundary.service.pending_attachment_requests('conversation-a')[0]['request_id']
+    boundary.tasks[0].cancel()
+    await finish(boundary)
+    path = boundary.store.db_path
+    boundary.store.close()
+    boundary.store = GoalStore(path)
+    boundary.service = GoalService(boundary.store, daemon_id='test')
+    boundary.bus.services['goal_service'] = boundary.service
+    replay = await boundary.state.send_message(content, request_id='restart-key')
+    assert replay['completed'] and replay['request_id'] == request_id and replay['goal_id'] is None
+    assert len(boundary.service.pending_attachment_requests('conversation-a')) == 1
+    assert boundary.service.discard_attachment_request('conversation-a', request_id)
+    discarded = await boundary.state.send_message(content, request_id='restart-key')
+    assert not discarded['accepted'] and 'discarded' in discarded['reason']
+    assert boundary.service.pending_attachment_requests('conversation-a') == []
+
+
+@pytest.mark.asyncio
+async def test_goal_image_replay_through_socket_and_both_web_transports(boundary, monkeypatch, caplog):
+    import contextlib
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from kollabor_engine.routes import messages
+    from kollabor_engine.session import EngineSession
+
+    from kollabor.state.handlers import register_state_handlers
+    from kollabor.state.remote import RemoteStateService
+    from kollabor_config import local_ipc
+    from kollabor_rpc import RpcClient, RpcServer
+    from kollabor_tui.display_tap import DisplayTap
+    from plugins.hub.messenger import AgentSocketServer
+
+    caplog.set_level('DEBUG')
+    boundary.bus.block_on = EventType.SLASH_COMMAND_DETECTED
+    content = message('/goal inspect wire replay', b'wire-private-image')
+    with tempfile.TemporaryDirectory(prefix='goal-replay-rpc-') as socket_dir:
+        monkeypatch.setattr('plugins.hub.messenger.get_socket_dir', lambda: Path(socket_dir))
+        rpc = RpcServer()
+        register_state_handlers(rpc, boundary.state)
+        tap = DisplayTap(history_size=50)
+        boundary.bus.services['display_tap'] = tap
+        server = AgentSocketServer(agent_id='goal-replay', on_message=None, socket_name='goal')
+        server._display_tap, server._rpc_server = tap, rpc
+        reader, writer = await local_ipc.connect(await server.start())
+        client = RpcClient(writer)
+        writer.write((json.dumps({'action': 'attach', 'mode': 'interactive', 'client_id': 'engine'}) + '\n').encode())
+        await writer.drain()
+        async def read():
+            while data := await reader.readline():
+                frame = json.loads(data.decode())
+                if frame.get('action') == 'rpc_reply':
+                    client.on_reply(frame)
+        reader_task = asyncio.create_task(read())
+        class Session:
+            session_id = 'goal-session'
+            alive = True
+            send_message = EngineSession.send_message
+            poll_goal_reply = EngineSession.poll_goal_reply
+            def __init__(self):
+                self.state = RemoteStateService(client)
+                self.daemon = SimpleNamespace(rpc=client)
+                self.subscribers = []
+            def subscribe(self):
+                queue = asyncio.Queue()
+                self.subscribers.append(queue)
+                return queue
+            def unsubscribe(self, queue):
+                self.subscribers.remove(queue)
+            async def refresh_history(self):
+                return []
+        session = Session()
+        monkeypatch.setattr(messages, 'get_session_registry', lambda: SimpleNamespace(get=lambda _id: session))
+        async def collect(response):
+            return [part async for part in response.body_iterator]
+        try:
+            reply_id = 'goal-' + 'd' * 32
+            initial = await session.send_message(
+                content, request_id='wire-stable-id', private_goal_reply=True,
+                private_goal_reply_id=reply_id, goal_conversation_uid='conversation-a',
+            )
+            assert initial['accepted'] and initial['goal_reply_id'] == reply_id
+            await asyncio.wait_for(boundary.bus.reached.wait(), 2)
+            assert (await session.poll_goal_reply(reply_id))['status'] == 'pending'
+            saved_id = boundary.service.pending_attachment_requests('conversation-a')[0]['request_id']
+            assert initial['goal_request_id'] == saved_id
+            legacy = await messages.send_message(session.session_id, messages.MessageRequest(
+                content=content, request_id='wire-stable-id', conversation_uid='conversation-a',
+                goal_reply_id=reply_id))
+            assert legacy.headers['X-Kollab-Goal-Request'] == saved_id
+            assert 'X-Kollab-Goal-Reply' not in legacy.headers
+            pending = await asyncio.wait_for(collect(legacy), 4)
+            assert saved_id in repr(pending) and len(pending) == 2
+            abandoned = await messages.send_message(session.session_id, messages.MessageRequest(
+                content=content, request_id='wire-stable-id', conversation_uid='conversation-a',
+                goal_reply_id=reply_id))
+            await anext(abandoned.body_iterator)
+            await abandoned.body_iterator.aclose()
+            assert (await session.poll_goal_reply(reply_id))['status'] == 'pending'
+            command = {'type': 'add-message', 'message': {'id': 'wire-stable-id', 'parts': content}}
+            pending_assistant = await messages.assistant_transport(session.session_id, messages.AssistantRequest(
+                commands=[command], goal_reply_id=reply_id,
+                state={'messages': [], 'conversationUid': 'conversation-a'}))
+            pending_wire = await asyncio.wait_for(collect(pending_assistant), 4)
+            assert saved_id in repr(pending_wire)
+            assert (await session.poll_goal_reply(reply_id))['status'] == 'pending'
+            assert len(boundary.service.pending_attachment_requests('conversation-a')) == 1
+            boundary.bus.release.set()
+            await finish(boundary)
+            goal = boundary.store.get_active('conversation-a')
+            original = await session.poll_goal_reply(reply_id)
+            assert original['status'] == 'complete' and original['success'] is True
+            assistant = await messages.assistant_transport(session.session_id, messages.AssistantRequest(
+                commands=[command], state={'messages': [], 'conversationUid': 'conversation-a'}))
+            receipt = await asyncio.wait_for(collect(assistant), 4)
+            assert goal.goal_id in repr(receipt)
+            assert boundary.store.get_active('conversation-a').goal_id == goal.goal_id
+            assert not boundary.service.pending_attachment_requests('conversation-a')
+            assert not session.subscribers
+            boundary.identity['uid'] = 'conversation-b'
+            from fastapi import HTTPException
+            with pytest.raises(HTTPException) as changed:
+                await messages.send_message(session.session_id, messages.MessageRequest(
+                    content=content, request_id='wire-stable-id', conversation_uid='conversation-b'))
+            assert changed.value.status_code == 400 and 'conflict' in str(changed.value.detail).lower()
+            assert saved_id not in str(changed.value.detail)
+            encoded = base64.b64encode(b'wire-private-image').decode()
+            assert encoded not in caplog.text + repr(tap.get_snapshot())
+        finally:
+            boundary.bus.release.set()
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            reader_task.cancel()
+            await asyncio.gather(reader_task, return_exceptions=True)
+            await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_private_image_goal_cannot_stage_before_admission(boundary):
+    from kollabor.state.handlers import register_state_handlers
+    from kollabor_rpc import RpcServer
+
+    reply_id = "goal-" + "e" * 32
+    server = RpcServer()
+    register_state_handlers(server, boundary.state)
+    cancelled = await server.handle_wire({
+        "action": "rpc_request", "request_id": "cancel", "method": "state.cancel_goal_reply",
+        "params": {"reply_id": reply_id},
+    })
+    assert cancelled["result"]["cancelled"]
+    accepted = await boundary.state.send_message(
+        message("/goal inspect cancelled", b"cancelled-image"),
+        request_id="cancelled-image-key", private_goal_reply=True,
+        private_goal_reply_id=reply_id, goal_conversation_uid="conversation-a",
+    )
+    assert not accepted["accepted"] and "cancelled" in accepted["reason"]
+    assert boundary.service.pending_attachment_requests("conversation-a") == []
+    assert not boundary.tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_reply_id", [True, False])
+async def test_concurrent_private_image_replays_do_not_take_or_cancel_original(boundary, same_reply_id):
+    boundary.bus.block_on = EventType.SLASH_COMMAND_DETECTED
+    content = message("/goal inspect concurrent", b"concurrent-image")
+    reply_id = "goal-" + "a" * 32
+    replay_id = reply_id if same_reply_id else "goal-" + "b" * 32
+    async def submit(reply):
+        return await boundary.state.send_message(
+            content, request_id="concurrent-client-key", private_goal_reply=True,
+            private_goal_reply_id=reply, goal_conversation_uid="conversation-a",
+        )
+    try:
+        first, replay = await asyncio.gather(submit(reply_id), submit(replay_id))
+        assert first["accepted"] and first["goal_reply_id"] == reply_id
+        assert replay["accepted"] and replay["completed"] and replay["replayed"]
+        assert "goal_reply_id" not in replay
+        assert replay["goal_request_id"] == first["goal_request_id"]
+        assert len(boundary.service.pending_attachment_requests("conversation-a")) == 1
+        assert len(boundary.tasks) == 1
+        altered = await boundary.state.send_message(
+            message("/goal inspect concurrent", b"different-image"),
+            request_id="concurrent-client-key", private_goal_reply=True,
+            private_goal_reply_id=reply_id, goal_conversation_uid="conversation-a",
+        )
+        assert not altered["accepted"] and "conflict" in altered["reason"].lower()
+        assert first["goal_request_id"] not in repr(altered)
+        invalid = await boundary.state.send_message(
+            content, request_id="concurrent-client-key", private_goal_reply=True,
+            private_goal_reply_id="not-a-goal-reply", goal_conversation_uid="conversation-a",
+        )
+        assert not invalid["accepted"] and first["goal_request_id"] not in repr(invalid)
+        await asyncio.wait_for(boundary.bus.reached.wait(), 2)
+        assert boundary.state._goal_reply_mailbox.poll(reply_id, "conversation-a")["status"] == "pending"
+    finally:
+        boundary.bus.release.set()
+        await finish(boundary)
+    assert boundary.state._goal_reply_mailbox.poll(reply_id, "conversation-a")["success"] is True
+    assert boundary.store.get_active("conversation-a") is not None
+
+
+@pytest.mark.asyncio
+async def test_private_image_replay_after_daemon_restart_retains_discard_fence(boundary):
+    content = message("/goal inspect restart private", b"restart-private-image")
+    initial = await boundary.state.send_message(
+        content, request_id="restart-private-key", private_goal_reply=True,
+        private_goal_reply_id="goal-" + "c" * 32, goal_conversation_uid="conversation-a",
+    )
+    assert initial["accepted"]
+    request_id = initial["goal_request_id"]
+    boundary.tasks[0].cancel()
+    await finish(boundary)
+    path = boundary.store.db_path
+    boundary.store.close()
+    boundary.store = GoalStore(path)
+    boundary.service = GoalService(boundary.store, daemon_id="restarted")
+    boundary.bus.services["goal_service"] = boundary.service
+    restarted = LocalStateService(boundary.llm, boundary.llm.profile_manager, event_bus=boundary.bus)
+    restarted.get_conversation_uid = lambda: boundary.identity["uid"]
+    replay = await restarted.send_message(
+        content, request_id="restart-private-key", private_goal_reply=True,
+        private_goal_reply_id="goal-" + "f" * 32, goal_conversation_uid="conversation-a",
+    )
+    assert replay["accepted"] and replay["replayed"] and replay["completed"]
+    assert replay["goal_request_id"] == request_id and "goal_reply_id" not in replay
+    assert len(boundary.service.pending_attachment_requests("conversation-a")) == 1
+    assert boundary.service.discard_attachment_request("conversation-a", request_id)
+    discarded = await restarted.send_message(
+        content, request_id="restart-private-key", private_goal_reply=True,
+        private_goal_reply_id="goal-" + "f" * 32, goal_conversation_uid="conversation-a",
+    )
+    assert not discarded["accepted"] and "discarded" in discarded["reason"]

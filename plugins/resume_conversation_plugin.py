@@ -1706,26 +1706,21 @@ class ResumeConversationPlugin:
             )
             if session_id:
                 self.logger.info(f"[RESUME] Modal selected session: {session_id}")
+                state = self.event_bus.get_service("state_service") if self.event_bus else None
+                if state is None:
+                    data["display_messages"] = [("system", "[error] State service not available -- cannot resume.", {})]
+                else:
+                    try:
+                        result = await state.resume_conversation(session_id)
+                        if not isinstance(result, dict):
+                            raise ValueError("invalid resume response")
+                    except Exception as exc:
+                        data["display_messages"] = [("system", f"[error] Failed to resume: {exc}", {})]
+                    else:
+                        from kollabor.llm.session_resume import resume_display_sequence
 
-                if (
-                    self._ensure_conversation_manager()
-                    and self.conversation_manager is not None
-                    and self.conversation_manager.load_session(session_id)
-                ):
-                    # Load messages into llm_service history
-                    display_messages = self._prepare_session_display(
-                        header=f"--- Resumed session: {session_id} ---",
-                        success_msg=f"[ok] Resumed: {session_id}. Continue below.",
-                    )
-
-                    if display_messages:
-                        # Return messages for modal_controller to display AFTER modal exits
-                        # This avoids the race condition where ADD_MESSAGE displays to
-                        # the alternate buffer before the modal closes
-                        data["display_messages"] = [
-                            (role, content, meta)
-                            for role, content, meta in display_messages
-                        ]
+                        # The controller displays this only after leaving the modal.
+                        data["display_messages"] = resume_display_sequence(result)
 
         elif action == "branch_select_session":
             session_id = command.get("session_id") or command.get("metadata", {}).get(

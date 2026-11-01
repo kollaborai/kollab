@@ -19,15 +19,31 @@ from typing import Any
 import acp
 from acp.exceptions import RequestError
 from acp.schema import (
-    AgentCapabilities, AgentMessageChunk, AgentThoughtChunk, CloseSessionResponse,
-    Implementation, InitializeResponse, LoadSessionResponse, NewSessionResponse,
-    PermissionOption, PromptResponse, ResumeSessionResponse, SessionMode,
-    SessionModeState, SetSessionModeResponse, TextContentBlock, ToolCallStart,
-    ToolCallProgress, ToolCallUpdate, SessionNotification, UserMessageChunk,
+    AgentCapabilities,
+    AgentMessageChunk,
+    AgentThoughtChunk,
+    CloseSessionResponse,
+    Implementation,
+    InitializeResponse,
+    LoadSessionResponse,
+    NewSessionResponse,
+    PermissionOption,
+    PromptResponse,
+    ResumeSessionResponse,
+    SessionMode,
+    SessionModeState,
+    SessionNotification,
+    SetSessionModeResponse,
+    TextContentBlock,
+    ToolCallProgress,
+    ToolCallStart,
+    ToolCallUpdate,
+    UserMessageChunk,
 )
 
 from .acp_stdio import acp_streams, isolated_stdout
 from .llm.acp_state import ACPClientSessionStore
+from .state.interface import ACP_CONVERSATION_BUSY, ACP_HARNESS_UNAVAILABLE
 from .version import __version__
 
 
@@ -201,8 +217,15 @@ class KollabACPAgent:
             session = await self._create_session(cwd, mcp_servers)
             try:
                 await session.engine.state.resume_conversation(conversation)
+            except ValueError as exc:
+                message = str(exc)
+                if message.startswith("failed to load session "):
+                    raise RequestError.resource_not_found(session_id) from exc
+                if message in {ACP_CONVERSATION_BUSY, ACP_HARNESS_UNAVAILABLE}:
+                    raise RequestError(-32603, message) from exc
+                raise RequestError(-32603, "Conversation resume failed; retry or check daemon status") from exc
             except Exception as exc:
-                raise RequestError.resource_not_found(session_id) from exc
+                raise RequestError(-32603, "Conversation resume failed; retry or check daemon status") from exc
             self.sessions.pop(session.id, None)
             session.id = session_id
             self.sessions[session_id] = session

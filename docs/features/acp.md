@@ -116,6 +116,37 @@ Kollab's own windows continue to show them. Prompts currently accept text.
 restores context without replay. Native file edits include diff cards for UTF-8
 text files up to 256 KiB; larger and binary files show their tool result.
 
+## Model and effort picks
+
+A model or effort pick belongs to the ACP session it was made in:
+
+- A restart restores confirmed Model-panel picks ahead of ordinary profile
+  defaults. An explicit loadout model or effort takes precedence over those
+  saved picks without changing the saved file at launch.
+- A named or default ACP loadout starts only when its requested model and
+  effort are confirmed by the harness. Unsupported values, `temperature`,
+  and `max_tokens` stop startup with an error; an unavailable old saved pick
+  on its own remains a notice rather than a startup failure.
+- The Session tab's effort applies only to that daemon. It survives a harness
+  restart in that daemon and does not rewrite the shared Model-panel picks or
+  change another daemon using the same profile.
+- A restart into another profile does not apply the previous profile's picks.
+  The new profile starts from its own loadout and its own saved picks.
+- Selecting an ACP loadout inside the app applies its advertised model and
+  effort through the active harness, then saves those confirmed picks like the
+  Model panel. Unsupported model or effort values are refused.
+- While an ACP profile or loadout change is running, competing changes are
+  refused with a retry message. The new harness is ready only after its model
+  and effort are applied; a refused or cancelled change restores the previous
+  harness when one was active.
+- Restart, resume and web history clear share that ownership. A competing
+  change is refused before the conversation changes. If a reset or resume is
+  interrupted after changing local state, the harness is stopped and the
+  operation must be retried; local history may already have changed.
+- After a model change, the effort you picked is re-applied. If the new model
+  does not offer it, the highest effort the model offers is used, and a notice
+  says so. If the harness refuses the effort, the notice says that instead.
+
 For the implementation contract and qualification gates, see
 [`../specs/acp-bridge.md`](../specs/acp-bridge.md).
 The current evidence and open checks are recorded in

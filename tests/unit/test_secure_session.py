@@ -335,3 +335,32 @@ def test_no_ticket_resumption_is_configured_for_both_roles():
             assert session._context.options & ssl.OP_NO_TICKET
     assert server._context is not None
     assert server._context.num_tickets == 0
+
+
+def test_tls_identity_loads_where_os_has_no_getuid(monkeypatch):
+    """On Windows (os.name nt, no getuid/fchmod) the identity still loads, checked through private_fs (#439)."""
+    import os as real_os
+
+    from kollabor_config import private_fs
+
+    class NtOs:
+        name = "nt"
+
+        def __getattr__(self, attr):
+            if attr in ("getuid", "fchmod", "O_NOFOLLOW"):
+                raise AttributeError(attr)
+            return getattr(real_os, attr)
+
+    opened = []
+
+    def open_nofollow(path, flags, mode=0o600, **_):
+        opened.append(path)
+        return real_os.open(path, flags, mode)
+
+    monkeypatch.setattr(secure_session, "os", NtOs())
+    monkeypatch.setattr(private_fs, "open_nofollow", open_nofollow)
+    monkeypatch.setattr(private_fs, "owned_private", lambda path, st=None, **_: True)
+
+    client, server = _new_pair()
+    _complete_handshake(client, server)
+    assert opened, "the key files were written through private_fs.open_nofollow"

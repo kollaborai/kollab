@@ -225,17 +225,25 @@ def _parse_pinned_certificate(
 
 def _write_private_file(path: Path, contents: bytes) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
+    if os.name == "nt":  # no O_NOFOLLOW/fchmod/uid: private_fs checks reparse points and the ACL
+        from kollabor_config import private_fs
+
+        descriptor = private_fs.open_nofollow(path, flags, 0o600)
+    else:
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
+        descriptor = os.open(path, flags, 0o600)
     try:
-        os.fchmod(descriptor, 0o600)
-        info = os.fstat(descriptor)
-        if (
-            stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_uid != os.getuid()
-            or not stat.S_ISREG(info.st_mode)
-        ):
+        if os.name == "nt":
+            safe = private_fs.owned_private(path)
+        else:
+            os.fchmod(descriptor, 0o600)
+            info = os.fstat(descriptor)
+            safe = (
+                stat.S_IMODE(info.st_mode) == 0o600
+                and info.st_uid == os.getuid()
+                and stat.S_ISREG(info.st_mode)
+            )
+        if not safe:
             raise SecureSessionError("private TLS key file permissions are unsafe")
         with os.fdopen(descriptor, "wb", closefd=False) as output:
             output.write(contents)
@@ -248,11 +256,6 @@ def _load_identity_chain(
     context: ssl.SSLContext, certificate_pem: bytes, identity_seed: bytes
 ) -> None:
     """Load a local certificate and key without leaving a durable key file."""
-    if not hasattr(os, "getuid"):
-        raise SecureSessionError(
-            "secure TLS key loading is unsupported on this platform"
-        )
-
     private_key = Ed25519PrivateKey.from_private_bytes(identity_seed)
     private_key_pem = bytearray(
         private_key.private_bytes(
@@ -265,16 +268,24 @@ def _load_identity_chain(
     try:
         with tempfile.TemporaryDirectory(prefix="kollab-tls-") as temp_dir:
             directory = Path(temp_dir)
-            os.chmod(directory, 0o700)
-            directory_info = directory.stat()
-            if (
-                stat.S_IMODE(directory_info.st_mode) != 0o700
-                or directory_info.st_uid != os.getuid()
-                or not stat.S_ISDIR(directory_info.st_mode)
-            ):
-                raise SecureSessionError(
-                    "private TLS key directory permissions are unsafe"
-                )
+            if os.name == "nt":  # mkdtemp gives the folder an owner-only ACL
+                from kollabor_config import private_fs
+
+                if not private_fs.owned_private(directory):
+                    raise SecureSessionError(
+                        "private TLS key directory permissions are unsafe"
+                    )
+            else:
+                os.chmod(directory, 0o700)
+                directory_info = directory.stat()
+                if (
+                    stat.S_IMODE(directory_info.st_mode) != 0o700
+                    or directory_info.st_uid != os.getuid()
+                    or not stat.S_ISDIR(directory_info.st_mode)
+                ):
+                    raise SecureSessionError(
+                        "private TLS key directory permissions are unsafe"
+                    )
 
             certificate_path = directory / "identity.pem"
             key_path = directory / "identity-key.pem"

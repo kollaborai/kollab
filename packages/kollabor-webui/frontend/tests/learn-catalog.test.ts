@@ -40,6 +40,21 @@ test("Learn catalog keeps all eleven public topic IDs stable and useful", () => 
 });
 
 
+test("Hub messaging lesson teaches operator slash commands, not agent tool tags", () => {
+  const hub = getLearnTopic("hub-messaging");
+  const guidance = [hub.summary, ...hub.howTo, hub.example, hub.note].join(" ");
+
+  assert.match(guidance, /\/hub agents/);
+  assert.match(guidance, /\/hub status/);
+  assert.match(guidance, /\/hub msg <agent> <message>/);
+  assert.match(guidance, /\/hub broadcast <message>/);
+  assert.match(hub.example, /\/hub msg lapis Check the Learn links/);
+  assert.match(guidance, /Hub messages are visible to all hub members/);
+  assert.match(guidance, /Never send passwords, API keys, private keys, or one-time access codes/);
+  assert.doesNotMatch(guidance, /<hub_msg|hub_msg to=/);
+});
+
+
 test("PhoneLink lesson no longer advertises manual WireGuard setup", () => {
   const phone = getLearnTopic("phone-access");
   const guidance = [phone.summary, ...phone.howTo, phone.example, phone.note].join(" ");

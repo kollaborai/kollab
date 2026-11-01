@@ -898,7 +898,10 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
     # its in-memory profile, so mirror what it reports, not just this request.
     apply_profile_mirror(
         session,
-        body.name,
+        # The request may name a loadout, not a profile; mirror the
+        # resolved provider profile so the response's session dict
+        # cannot clobber it with the pre-switch profile (#605).
+        getattr(snapshot, "name", None) or body.name,
         getattr(snapshot, "model", None) or body.model,
         getattr(snapshot, "effort", None),
     )
@@ -1204,7 +1207,10 @@ async def clear_history(session_id: str):
 
     # state.restart_session clears the conversation and rebuilds the system
     # prompt, which is what "clear history but keep the prompt" means here.
-    await session.state.restart_session()
+    try:
+        await session.state.restart_session()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await session.refresh_history()
     session.last_turn_error = None
     return {"ok": True, "session_id": session_id}

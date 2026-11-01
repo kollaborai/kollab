@@ -217,8 +217,19 @@ Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `Agen
   falls back to its identity in Title Case (`agentName` in `utils/session-display.ts`).
   Gem Studio dresses gems only. A persona with no gem look has nothing to dress: its
   Properties (row menu, double-click on its picture, or the greeting's picture) show its
-  picture and name with the chat's own Hub switch and session facts, and no Eyes, Hat or
-  Color (`isGemAvatar` in `avatar-model.ts` tells the two apart).
+  picture and name with the chat's own Hub switch and session facts, and no Eyes or Hat
+  (`isGemAvatar` in `avatar-model.ts` tells the two apart).
+- **Gem Studio preview.** Activity is a single-choice control for the preview, not a set
+  of content panels. Keyboard navigation selects the focused activity and keeps the
+  focused choice visible inside its scrollable row. Look tabs retain their labelled
+  content panels and use the same visible focus treatment. On devices with any coarse
+  pointer, including a secondary touchscreen, these touch targets measure at least
+  44 by 44 CSS pixels. Footer actions wrap in order when needed, keeping their
+  labels and controls accessible; Save persists the look rather than the preview activity.
+  Long Reset names may be visually shortened, but retain the full accessible name
+  and tooltip. When the introduction or action area overflows, it scrolls and
+  becomes keyboard focusable. Save errors are announced and their beginning is
+  revealed, including when a long error must scroll.
 - **Avatar.** One component draws every agent picture: kind `gem` (or none) is the 3D
   gem; `image`, `emoji` and `initials` are a flat tile on the persona's color. Image
   files are fetched with the bearer token into blob URLs; a file that fails keeps the
