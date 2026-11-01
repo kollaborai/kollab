@@ -839,6 +839,16 @@ async def list_session_commands(session_id: str):
     return {"session_id": session_id, "commands": commands}
 
 
+def _live_model(snapshot: Any, fallback: Optional[str] = None) -> Optional[str]:
+    """The model a daemon snapshot reports for its session: a harness's own,
+    "" when it names none, never the saved one; a native profile's, else
+    ``fallback``. None: unreported."""
+    model = getattr(snapshot, "model", None)
+    if getattr(snapshot, "provider", "") == "acp":
+        return model
+    return model or fallback
+
+
 def apply_profile_mirror(
     session: Any,
     name: str,
@@ -859,7 +869,7 @@ def apply_profile_mirror(
         if selected is not None:
             session.profile = selected
             session._profile_revision = getattr(session, "_profile_revision", 0) + 1
-            if model:
+            if model is not None:  # "" is a harness that names no model
                 selected.model = model
             if effort is not None:
                 selected.effort = effort
@@ -898,7 +908,7 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
     apply_profile_mirror(
         session,
         body.name,
-        getattr(snapshot, "model", None) or body.model,
+        _live_model(snapshot, body.model),
         getattr(snapshot, "effort", None),
     )
 

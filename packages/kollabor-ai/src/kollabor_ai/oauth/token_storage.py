@@ -48,6 +48,23 @@ def _get_oauth_dir() -> Path:
     return base
 
 
+def stored_account_id(provider: str, profile_name: str | None = None) -> str:
+    """The account of the login stored for a provider, or for one profile's own
+    login; "" when there is none. Reads only: never refreshes, never raises."""
+    try:
+        if profile_name is not None:
+            from kollabor_config.provisioned_state import ProvisionedStateFile
+
+            data = ProvisionedStateFile().get_profile_oauth_tokens(profile_name)
+        else:
+            paths = [d / "oauth" / f"{provider}.json" for d in get_config_directory_candidates()]
+            path = next((p for p in paths if p.exists()), None)
+            data = json.loads(path.read_text(encoding="utf-8")) if path else None
+        return str((data or {}).get("account_id") or "")
+    except Exception:
+        return ""
+
+
 class OAuthTokenStorage:
     """Persistent file-based storage for OAuth tokens.
 

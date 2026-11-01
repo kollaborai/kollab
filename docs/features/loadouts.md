@@ -107,12 +107,16 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   (`~/.kollab/acp/options.json`), each at the levels the harness reported for
   it. A model it hasn't run yet gets the levels the harness reported for its
   last model (Claude Code's include its own `default`), never a login's or the
-  registry's: the harness may not use either. A level the harness refuses puts
-  its model back, and the picker says so. A model with no levels gets one row
+  registry's: the harness may not use either. A level the harness refuses, or a
+  request that fails partway, puts its model and level back, and the picker
+  says so; when that cannot work, it says what the session now runs and shows
+  it. A model with no levels gets one row
   that keeps the harness's level. A harness never started offers only its
   default; its models appear after its first session (#557).
 - Opening the list fetches any provider catalog older than an hour (up to
   8 s), so an endpoint's models show without opening Settings → Loadouts first.
+  A ChatGPT login's list is kept only while the account it was fetched with is
+  signed in: signing in as another account fetches that account's models.
 - An environment variable outranks a pick (`KOLLAB_<PROFILE>_MODEL`,
   `KOLLAB_<PROFILE>_EFFORT`, `KOLLAB_MODEL`, `KOLLAB_EFFORT`): the picker says
   which model kept running instead of showing the pick as applied.

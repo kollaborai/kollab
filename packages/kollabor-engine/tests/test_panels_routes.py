@@ -312,6 +312,30 @@ class TestApplyProfileMirror:
         apply_profile_mirror(session, "opus", "opus-5", "")  # reported empty: cleared
         assert profile.effort == ""
 
+    def test_a_harness_that_names_no_model_shows_none(self, monkeypatch):
+        # Amazonite on #553 round 6: a live ACP snapshot with no model put the
+        # saved model back on the session.
+        from kollabor_engine.routes.sessions import (  # type: ignore[import-not-found]
+            _live_model,
+            apply_profile_mirror,
+        )
+
+        import kollabor_ai
+
+        profile = SimpleNamespace(name="codex-cli", model="saved-model", effort="")
+        monkeypatch.setattr(
+            kollabor_ai,
+            "ProfileManager",
+            lambda: SimpleNamespace(get_profile=lambda name: profile),
+        )
+        harness = SimpleNamespace(provider="acp", model="", effort="max")
+        session = SimpleNamespace(session_id="s", profile=None)
+        apply_profile_mirror(session, "codex-cli", _live_model(harness, "saved-model"), harness.effort)
+        assert (profile.model, profile.effort) == ("", "max")
+        native = SimpleNamespace(provider="openai", model="")
+        assert _live_model(native, "body-model") == "body-model"  # a native profile always names one
+        assert _live_model(SimpleNamespace(provider="acp")) is None  # unreported: left as it is
+
     def test_never_raises(self, monkeypatch):
         from kollabor_engine.routes.sessions import (  # type: ignore[import-not-found]
             apply_profile_mirror,

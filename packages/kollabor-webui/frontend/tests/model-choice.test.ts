@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyModelChoice, matchesChoice } from "../src/components/shell/model-choice.ts";
+import { applyModelChoice, matchesChoice, PickError } from "../src/components/shell/model-choice.ts";
 
 const codexLunaMax = { profile: "codex-cli", provider: "acp", model: "gpt-6-luna", effort: "max" };
 const oauthLuna = { profile: "openai-oauth", provider: "openai_responses", model: "gpt-6-luna", effort: "" };
@@ -17,8 +17,9 @@ test("every typed word must match: 'codex luna max' finds Codex CLI's luna at ma
 });
 
 function fakeApi(
-  results: Record<string, { ok: boolean; message?: string }> = {},
+  results: Record<string, { ok: boolean; message?: string } | Error> = {},
   running?: { model: string; effort: string },
+  record: { model: string; effort: string } = { model: "old-model", effort: "" },
 ) {
   const calls: unknown[][] = [];
   const api = {
@@ -27,9 +28,16 @@ function fakeApi(
       calls.push(["profile", ...args]),
       { session_id: "s1", model: running?.model ?? args[2], effort: running?.effort ?? args[3] }
     ),
-    panelAction: async (...args: unknown[]) => (calls.push(["panel", ...args]), results[String(args[2])] ?? { ok: true }),
-    // The session record lags behind the harness: it still names the old model.
-    getSession: async (id: string) => (calls.push(["get", id]), { session_id: id, model: "old-model", effort: "" }),
+    // A result for "effort:max" answers only that level; one for "effort", every level.
+    panelAction: async (...args: unknown[]) => {
+      calls.push(["panel", ...args]);
+      const value = Object.values(args[3] as Record<string, string>)[0];
+      const result = results[`${String(args[2])}:${value}`] ?? results[String(args[2])] ?? { ok: true };
+      if (result instanceof Error) throw result; // a 502 or a dropped connection
+      return result;
+    },
+    // The session record lags behind the harness, unless a test says what it reports.
+    getSession: async (id: string) => (calls.push(["get", id]), { session_id: id, ...record }),
   };
   return { api: api as never, calls };
 }
@@ -58,6 +66,10 @@ test("a native pick an environment variable outranks is an error, not a pick sho
     applyModelChoice(api, { session_id: "s1", profile: "openai-oauth" }, { ...oauthLuna, effort: "high" }),
     /kept gpt-5\.4 · low\. KOLLAB_OPENAI_OAUTH_MODEL/,
   );
+  // Amazonite on #553 round 6: the switch applied, but the panel kept the old session.
+  const error = await applyModelChoice(api, { session_id: "s1", profile: "openai-oauth" }, oauthLuna).catch((e) => e);
+  assert.ok(error instanceof PickError);
+  assert.deepEqual([error.session.model, error.session.effort], ["gpt-5.4", "low"]);
 });
 
 test("an ACP pick switches the harness, then sets its own model and effort options", async () => {
@@ -81,18 +93,34 @@ test("an ACP pick on the harness already running skips the switch; a refused opt
   assert.equal(calls[0][0], "panel");
 });
 
-test("a level the harness refuses puts its model back, so a pick never half-applies", async () => {
+test("a level the harness refuses puts its model and level back, so a pick never half-applies", async () => {
   // Aragonite on #553 round 5: the harness took the model, refused the level, and stayed on the new model.
-  const { api, calls } = fakeApi({ effort: { ok: false, message: "max is not offered" } });
-  await assert.rejects(
-    applyModelChoice(api, { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra" }, codexLunaMax),
-    /max is not offered\. It stays on gpt-6\.1-terra\./,
+  // Amazonite on round 6: the model switch had moved its level too, and only the model went back.
+  const { api, calls } = fakeApi({ "effort:max": { ok: false, message: "max is not offered" } });
+  const before = { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra", effort: "high" };
+  const error = await applyModelChoice(api, before, codexLunaMax).catch((e) => e);
+  assert.match(error.message, /max is not offered\. It stays on gpt-6\.1-terra · high\./);
+  assert.deepEqual(calls.slice(2, 4), [
+    ["panel", "s1", "model", "select", { model: "gpt-6.1-terra" }],
+    ["panel", "s1", "model", "effort", { level: "high" }],
+  ]);
+  assert.deepEqual([error.session.model, error.session.effort], ["gpt-6.1-terra", "high"]);
+});
+
+test("a request that fails after the model moved puts it back too", async () => {
+  // Amazonite on #553 round 6: a 502 on the level left the new model running, with no rollback.
+  const { api, calls } = fakeApi({ "effort:max": new Error("502: daemon unreachable") });
+  const before = { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra", effort: "" };
+  await assert.rejects(applyModelChoice(api, before, codexLunaMax), /502: daemon unreachable\. It stays on gpt-6\.1-terra\./);
+  assert.deepEqual(calls[2], ["panel", "s1", "model", "select", { model: "gpt-6.1-terra" }]);
+});
+
+test("a pick with no earlier model to go back to says what the session now runs", async () => {
+  // It moved to another harness: the error names what that harness reports, and carries it.
+  const moved = fakeApi({ effort: { ok: false } }, undefined, { model: "gpt-6-luna", effort: "medium" });
+  const error = await applyModelChoice(moved.api, { session_id: "s1", profile: "openai-oauth" }, codexLunaMax).catch(
+    (e) => e,
   );
-  assert.deepEqual(calls[calls.length - 1], ["panel", "s1", "model", "select", { model: "gpt-6.1-terra" }]);
-  // A pick that moved to another harness has no model of its own to go back to: it says what runs.
-  const moved = fakeApi({ effort: { ok: false } });
-  await assert.rejects(
-    applyModelChoice(moved.api, { session_id: "s1", profile: "openai-oauth", model: "gpt-6.1-terra" }, codexLunaMax),
-    /codex-cli refused max\. It runs gpt-6-luna at the level it had\./,
-  );
+  assert.match(error.message, /codex-cli refused max\. It now runs gpt-6-luna · medium\./);
+  assert.deepEqual([error.session.model, error.session.effort], ["gpt-6-luna", "medium"]);
 });

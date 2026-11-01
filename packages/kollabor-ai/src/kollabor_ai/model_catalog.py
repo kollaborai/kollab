@@ -117,6 +117,25 @@ def _fresh(entry: Any, max_age: float) -> bool:
     return (time.time() - float(entry.get("timestamp", 0) or 0)) <= max_age
 
 
+def _login_of(profile: Any) -> Optional[str]:
+    """The account a ChatGPT login profile is signed in as: two logins can serve
+    different models, so a cached catalog is used only while the account it was
+    fetched with is still the one signed in (#553). None for other profiles."""
+    if profile is None:
+        return None
+    get = profile.get if isinstance(profile, dict) else (lambda key, default=None: getattr(profile, key, default))
+    try:
+        provider = str(profile.get_provider() or "").lower()
+    except Exception:
+        provider = str(get("provider", "") or "").lower()
+    if str(get("auth_type", "") or "").lower() != "oauth" and provider != "openai_responses":
+        return None
+    from kollabor_ai.oauth.token_storage import stored_account_id
+
+    name = str(get("name", "") or "")
+    return stored_account_id("openai", None if name in ("", "openai-oauth") else name)
+
+
 def cached_provider_models(
     profile: Any, max_age: float = CACHE_TTL_SECONDS
 ) -> List[Dict[str, Any]]:
@@ -129,10 +148,15 @@ def cached_provider_models(
     if not key:
         return []
 
+    login = _login_of(profile)
+
+    def usable(entry: Any) -> bool:
+        return _fresh(entry, max_age) and entry.get("login") == login
+
     entry = _MEMORY_CACHE.get(key)
-    if not _fresh(entry, max_age):
+    if not usable(entry):
         entry = _load_disk_cache().get(key)
-        if _fresh(entry, max_age):
+        if usable(entry):
             _MEMORY_CACHE[key] = entry  # type: ignore[assignment]
         else:
             return []
@@ -144,7 +168,7 @@ def _store(profile: Any, models: List[Dict[str, Any]]) -> None:
     key = _profile_key(profile)
     if not key:
         return
-    entry = {"timestamp": time.time(), "models": models}
+    entry = {"timestamp": time.time(), "models": models, "login": _login_of(profile)}
     _MEMORY_CACHE[key] = entry
     entries = _load_disk_cache()
     entries[key] = entry

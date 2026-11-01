@@ -34,7 +34,7 @@ import type {
   Session,
   SessionMcp,
 } from "@/api";
-import { applyModelChoice } from "@/components/shell/model-choice";
+import { applyModelChoice, PickError } from "@/components/shell/model-choice";
 import { ModelPicker } from "@/components/shell/ModelPicker";
 import {
   AlertDialog,
@@ -314,6 +314,7 @@ export function SessionPanel({
       onSessionUpdated(updated);
       onStatus(`Model: ${[updated.model || choice.profile, updated.effort].filter(Boolean).join(" · ")}`);
     } catch (error) {
+      if (error instanceof PickError && error.session) onSessionUpdated(error.session); // what runs now
       fail(error);
     }
   };

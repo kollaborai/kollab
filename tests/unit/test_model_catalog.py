@@ -315,6 +315,42 @@ def test_catalog_cache_v2_preserves_structured_oauth_context_window(
     assert model_catalog.cached_provider_models(profile) == models
 
 
+def test_a_chatgpt_catalog_is_used_only_while_its_account_is_signed_in(
+    tmp_path, monkeypatch
+):
+    # Amazonite on #553 round 6: a profile signed in again as another account
+    # was served the first account's cached models, fresh or stale, and so was
+    # a catalog cached before each profile asked with its own login.
+    from kollabor_ai.oauth import token_storage
+
+    (tmp_path / "oauth").mkdir()
+    login = tmp_path / "oauth" / "openai.json"
+    monkeypatch.setattr(token_storage, "get_config_directory_candidates", lambda: [tmp_path])
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: tmp_path / "model_catalog.cache")
+    model_catalog._MEMORY_CACHE.clear()
+    chatgpt = {"name": "openai-oauth", "provider": "openai_responses", "auth_type": "oauth"}
+    router = {"name": "router", "provider": "openrouter"}
+
+    login.write_text(json.dumps({"account_id": "acct-a"}), encoding="utf-8")
+    model_catalog._store(chatgpt, [{"id": "a-model"}])
+    model_catalog._store(router, [{"id": "r-model"}])
+    assert model_catalog.cached_provider_models(chatgpt) == [{"id": "a-model"}]
+
+    login.write_text(json.dumps({"account_id": "acct-b"}), encoding="utf-8")
+    assert model_catalog.cached_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []  # the stale fallback
+    model_catalog._MEMORY_CACHE.clear()  # a restart: only the disk cache is left
+    assert model_catalog.cached_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(router) == [{"id": "r-model"}]  # other profiles keep theirs
+
+    # An entry from before logins were recorded names none: it is never used.
+    cache = json.loads((tmp_path / "model_catalog.cache").read_text(encoding="utf-8"))
+    cache["entries"]["openai-oauth"] = {"timestamp": 9999999999, "models": [{"id": "old"}]}
+    (tmp_path / "model_catalog.cache").write_text(json.dumps(cache), encoding="utf-8")
+    model_catalog._MEMORY_CACHE.clear()
+    assert model_catalog.cached_provider_models(chatgpt) == []
+
+
 def test_catalog_cache_v1_is_ignored_after_structured_window_migration(
     tmp_path, monkeypatch
 ):
