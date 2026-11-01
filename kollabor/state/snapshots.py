@@ -150,6 +150,34 @@ class SessionStats(Snapshot):
 
 
 @dataclass
+class ContextCompactionSnapshot(Snapshot):
+    """JSON-safe context usage and compaction-policy status."""
+
+    schema_version: int = 1
+    observed_at: str | None = None
+    automatic_compaction_enabled: bool | None = None
+    automatic_compaction_disabled_reason: str | None = None
+    model_context_window_tokens: int | None = None
+    last_request_prompt_tokens: int | None = None
+    current_prompt_tokens: int | None = None
+    current_prompt_tokens_estimated: bool | None = None
+    outgoing_prompt_tokens: int | None = None
+    outgoing_prompt_tokens_estimated: bool | None = None
+    token_gate_prompt_tokens: int | None = None
+    token_gate_prompt_tokens_estimated: bool | None = None
+    automatic_compaction_threshold_tokens: int | None = None
+    threshold_source: str | None = None
+    configured_token_threshold_k: int | None = None
+    tokens_until_automatic_compaction: int | None = None
+    hard_cap_tokens: int | None = None
+    compaction_status: str | None = None
+    compaction_message: str | None = None
+    compaction_action: str | None = None
+    available: bool = True
+    error: str | None = None
+
+
+@dataclass
 class ProfileSnapshot(Snapshot):
     """A single LLM profile in wire format.
 

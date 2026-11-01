@@ -179,6 +179,8 @@ const mainConfig = defineConfig({
       "tests/prompts-page.test.ts",
       "tests/history-cache.test.ts",
       "tests/phone-frame.test.ts",
+      "tests/phone-transport.test.ts",
+      "tests/phone-relay-guards.test.ts",
       "tests/build-provenance.test.ts",
       "tests/voice-turn-groups.test.ts",
       "tests/path-text.test.ts",

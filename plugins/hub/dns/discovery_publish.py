@@ -22,9 +22,6 @@ from .. import file_lock
 from .discovery import MAX_INTEGER, SCHEMA, WELL_KNOWN, DiscoveryError, normalize_target, verify_manifest
 from .storage import _locked_atomic_write
 
-if os.name == "nt":  # the packaged relay runs on POSIX and ships without kollabor_config
-    from kollabor_config import private_fs
-
 
 def relay_healthy(url: str, *, origin: str | None = None) -> bool:
     """Bounded local readiness probe; operator config, never a remote URL."""
@@ -69,6 +66,22 @@ def relay_healthy(url: str, *, origin: str | None = None) -> bool:
         connection.close()
 
 
+def _ensure_key_private(key_path: Path) -> None:
+    """Refuse a service.key anyone else could read. Raises DiscoveryError.
+
+    Windows has no POSIX mode bits: the nt stat bits (0o666, or 0o444 when
+    read-only) can never pass a 0o077 mask, so private_fs checks the ACL
+    instead. POSIX keeps the plain st_mode check.
+    """
+    if os.name == "nt":
+        from kollabor_config import private_fs
+
+        if not private_fs.owned_private(key_path):
+            raise DiscoveryError("key_permissions", "service.key must be readable only by its owner (mode 600)")
+    elif key_path.stat().st_mode & 0o077:
+        raise DiscoveryError("key_permissions", "service.key must be readable only by its owner (mode 600)")
+
+
 def publish(origin: str, state_dir: Path, output: Path, *, relay_control: str | None = None) -> dict:
     target = normalize_target(origin)
     if target.explicit:
@@ -100,13 +113,7 @@ def publish(origin: str, state_dir: Path, output: Path, *, relay_control: str | 
                 stream.write(SigningKey.generate().encode())
                 stream.flush()
                 os.fsync(stream.fileno())
-        if os.name == "nt":
-            # nt's stat permission bits are 0o666 (writable) or 0o444 (read-only) and cannot express
-            # mode 600, so the ACL decides: private_fs holds the owner-only rule there (#439, #450).
-            if not private_fs.owned_private(key_path, mask=0o077):
-                raise DiscoveryError("key_permissions", "service.key must be readable only by its owner (mode 600)")
-        elif key_path.stat().st_mode & 0o077:
-            raise DiscoveryError("key_permissions", "service.key must be readable only by its owner (mode 600)")
+        _ensure_key_private(key_path)
         # Corrupt keys stop publication; never silently generate a replacement.
         key = SigningKey(key_path.read_bytes())
         public_key = key.verify_key.encode().hex()

@@ -2,7 +2,6 @@
 
 import json
 from dataclasses import asdict
-from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +10,7 @@ from kollabor.state.local import LocalStateService
 from kollabor_agent.queue_processor import _xml_tool_result_entry
 from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_ai.api_communication_service import APICommunicationService
-from kollabor_ai.conversation_logger import KollaborConversationLogger
+from kollabor_ai.conversation_logger import KollaborConversationLogger, utc_stamp
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_engine.history_xml_tools import web_history
 from kollabor_events import EventBus
@@ -132,7 +131,7 @@ async def test_compaction_cannot_restore_a_superseded_calls_late_result(tmp_path
     ])
     await writer._append_to_jsonl({
         "type": "context_compaction", "uuid": "summary", "content": "Compacted",
-        "timestamp": datetime.now().isoformat() + "Z", "compaction_round": 1,
+        "timestamp": utc_stamp(), "compaction_round": 1,
     })
     await writer.log_system_message("Old late output", parent_uuid=old, subtype="tool_result", tool_use_id="reused")
     await writer.log_user_message("New task")

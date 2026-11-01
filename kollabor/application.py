@@ -1000,6 +1000,9 @@ class TerminalLLMChat:
             widget_context.runtime_mode = "daemon"
         else:
             widget_context.runtime_mode = "local"
+        # The layout_manager service carries the same mode for gates that run
+        # outside the renderer (detached first-turn revival, #453).
+        self.layout_manager.runtime_mode = widget_context.runtime_mode
         self.layout_renderer.set_context(widget_context)
         # Store reference for plugin widget access
         self._widget_context = widget_context
@@ -1046,6 +1049,14 @@ class TerminalLLMChat:
         )
         if voice_plugin is not None:
             self.event_bus.register_service("voice_plugin", voice_plugin)
+
+        context_compaction_plugin = self.plugin_instances.get(
+            "context_compaction"
+        ) or self.plugin_instances.get("ContextCompactionPlugin")
+        if context_compaction_plugin is not None:
+            self.event_bus.register_service(
+                "context_compaction_plugin", context_compaction_plugin
+            )
 
         # Task tracking for race condition prevention
         self.running = False

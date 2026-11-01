@@ -320,6 +320,12 @@ class EngineSession:
             is_acp = str(getattr(self.profile, "provider", "")).lower() == "acp"
         if is_acp:
             await self._await_acp_startup()
+            # The harness advertises image support only after initialize.
+            # Read the daemon's negotiated value, not the profile's model guess.
+            try:
+                self.profile = await self.state.get_active_profile()
+            except Exception as exc:
+                logger.warning("session %s: could not read ACP profile (%s)", self.session_id, type(exc).__name__)
 
         if self.approval_mode:
             try:
@@ -1038,6 +1044,8 @@ class EngineSession:
                     self.acp_plan = {}
                     self.acp_usage = {}
                     self.acp_waiting = False
+                    if isinstance(self.profile, ProfileSnapshot) and self.profile.provider == "acp":
+                        self.profile.supports_vision = event.get("supports_vision") is True
                 elif etype == "profile_changed":
                     payload = event.get("profile")
                     if isinstance(payload, dict) and payload.get("name"):
@@ -1085,7 +1093,10 @@ class EngineSession:
             "model": model,
             # What the daemon will send next (mirrored by apply_profile_mirror).
             "effort": getattr(self.profile, "effort", "") or "",
-            "supports_vision": supports_vision(model, provider),
+            "supports_vision": (
+                bool(getattr(self.profile, "supports_vision", False))
+                if provider == "acp" else supports_vision(model, provider)
+            ),
             "agent": agent_name,
             "workspace": self.workspace,
             "device": self.device,

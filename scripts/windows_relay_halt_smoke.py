@@ -327,13 +327,13 @@ async def _tls_front(certs: Path, address: str) -> None:
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ctx.load_cert_chain(certs / "cert.pem", certs / "key.pem")
 
-    async def handle(down):
+    async def handle(_reader, down):  # start_server passes (reader, writer)
         try:
             up = await asyncio.open_connection("127.0.0.1", RELAY_PORT)
         except OSError:
             down.close()
             return
-        await asyncio.gather(_pipe(down, up[1]), _pipe(up[0], down))
+        await asyncio.gather(_pipe(_reader, up[1]), _pipe(up[0], down))
 
     server = await asyncio.start_server(handle, address, TLS_PORT, ssl=ctx)
     async with server:

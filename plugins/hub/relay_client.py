@@ -47,6 +47,7 @@ from .relay_state import (
     MAX_REVOKED,
     MAX_VOUCHERS,
     RelayError,
+    RelayFrameShapeError,
     RelayStateStore,
     canonical_origin,
     failure_text,
@@ -1037,7 +1038,16 @@ class RelayClient:
             try:
                 async for message in ws:
                     if message.type == aiohttp.WSMsgType.TEXT:
-                        await self._handle_frame(strict_json(message.data))
+                        try:
+                            await self._handle_frame(strict_json(message.data))
+                        except RelayFrameShapeError as exc:
+                            # Well-formed text that is not a JSON object: a
+                            # healthy socket must not reconnect over it.
+                            self._counts["peer_state_frame_errors"] += 1
+                            _LOGGER.warning(
+                                "relay frame rejected without reconnect: %s",
+                                exc,
+                            )
                     elif message.type == aiohttp.WSMsgType.BINARY:
                         raise RelayError("binary relay frames are unsupported")
                     elif message.type == aiohttp.WSMsgType.ERROR:
@@ -1376,7 +1386,7 @@ class RelayClient:
             {"type": "send", "to": key, "id": message_id, "ciphertext": ciphertext}
         )
 
-    async def _handle_frame(self, frame):
+    async def _apply_frame(self, frame):
         if frame.get("type") == "peers":
             self._set_peers(frame)
         elif frame.get("type") == "error":
@@ -1443,6 +1453,25 @@ class RelayClient:
             # A frame from a newer directory: ignored, never a reason to drop
             # the connection.
             self._counts["ignored_frames"] += 1
+
+    async def _handle_frame(self, frame):
+        # Linked devices come and go constantly (phone screen lock, engine
+        # restarts, lease pruning). A received frame whose content cannot be
+        # applied fails at most the pending requests it concerns; it must
+        # never tear down the whole relay connection, because a reconnect
+        # mints a fresh session and re-keys every peer. Genuine transport
+        # failures (send/receive errors, invalid wire JSON) still reconnect.
+        if not isinstance(frame, dict):
+            self._counts["peer_state_frame_errors"] += 1
+            _LOGGER.warning(
+                "relay frame rejected without reconnect: non-object frame"
+            )
+            return
+        try:
+            await self._apply_frame(frame)
+        except RelayError as exc:
+            self._counts["peer_state_frame_errors"] += 1
+            _LOGGER.warning("relay frame rejected without reconnect: %s", exc)
 
     def set_knock_handler(
         self, handler: Callable[[dict], Awaitable[None]] | None

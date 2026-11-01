@@ -18,10 +18,19 @@ from typing import Any, Awaitable, Callable, ClassVar
 
 import acp
 import psutil
-from acp.schema import AllowedOutcome, DeniedOutcome, EnvVariable, Implementation, McpServerStdio, TextContentBlock
+from acp.schema import (
+    AllowedOutcome,
+    DeniedOutcome,
+    EnvVariable,
+    ImageContentBlock,
+    Implementation,
+    McpServerStdio,
+    TextContentBlock,
+)
+
+from kollabor.version import __version__
 
 from .acp_state import ACPBinding
-from kollabor.version import __version__
 
 
 class ACPError(RuntimeError):
@@ -46,12 +55,18 @@ class ACPProfile:
         "claude-code": {
             "command": ["claude-agent-acp"],
             "managed_dir": "claude-0.89.0",
-            "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0",
+            "install": (
+                "npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save "
+                "@agentclientprotocol/claude-agent-acp@0.89.0"
+            ),
         },
         "codex-cli": {
             "command": ["codex-acp"],
             "managed_dir": "codex-2.1.1",
-            "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1",
+            "install": (
+                "npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save "
+                "@agentclientprotocol/codex-acp@2.1.1"
+            ),
         },
     }
     _PROVIDER_KEYS: ClassVar[frozenset[str]] = frozenset({
@@ -333,6 +348,7 @@ class ACPAdmission:
     text: str
     future: asyncio.Future["ACPResult"]
     origin: dict[str, Any] = field(default_factory=dict)
+    images: tuple[dict[str, str], ...] = field(default_factory=tuple, repr=False)
 
 
 @dataclass(frozen=True)
@@ -718,16 +734,21 @@ class ACPRunner:
         source: str,
         thread_id: str | None = None,
         origin: dict[str, Any] | None = None,
+        images: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
         if not self.session_id or self._connection is None:
             raise ACPError("ACP runner is not started")
         if not text.strip():
             raise ValueError("prompt must not be empty")
+        if images and not self.supports_image_input:
+            raise ACPError("This harness can't take images.")
         generation = self.generation
         self._next_turn_id += 1
         turn_id = self._next_turn_id
         future: asyncio.Future[ACPResult] = asyncio.get_running_loop().create_future()
-        admission = ACPAdmission(request_id, source, thread_id, generation, turn_id, text, future, dict(origin or {}))
+        admission = ACPAdmission(
+            request_id, source, thread_id, generation, turn_id, text, future, dict(origin or {}), images
+        )
         try:
             self._queue.put_nowait(admission)
         except asyncio.QueueFull as exc:
@@ -835,9 +856,15 @@ class ACPRunner:
                                   "turn_id": turn_id, "source": admission.source,
                                   "thread_id": admission.thread_id, "generation": generation})
         try:
+            if admission.images and not self.supports_image_input:
+                raise ACPError("This harness can't take images.")
             response = await self._connection.prompt(
                 session_id=self.session_id,
-                prompt=[TextContentBlock(type="text", text=text)],
+                prompt=[
+                    TextContentBlock(type="text", text=text),
+                    *(ImageContentBlock(type="image", data=image["data"], mimeType=image["mime_type"])
+                      for image in admission.images),
+                ],
             )
             await asyncio.sleep(0)
             stop_reason = str(response.stopReason) if response else None
@@ -862,11 +889,16 @@ class ACPRunner:
                 thread_id=admission.thread_id,
             )
         except Exception as exc:
+            if isinstance(exc, ACPError):
+                raise
             exit_code = getattr(self._process, "returncode", None)
             if isinstance(exc, acp.RequestError):
                 raise self._request_error(exc, self._updates) from exc
             if exit_code is not None:
-                line = f"{self.profile.name}: harness exited ({type(exc).__name__}, exit={exit_code}); it may have stopped mid-change"
+                line = (
+                    f"{self.profile.name}: harness exited ({type(exc).__name__}, exit={exit_code}); "
+                    "it may have stopped mid-change"
+                )
             else:
                 line = f"{self.profile.name}: harness request failed ({type(exc).__name__})"
             raise ACPError(line) from exc
@@ -891,7 +923,15 @@ class ACPRunner:
     def supports_steering(self) -> bool:
         return bool((self.initialize_metadata.get("steering") or {}).get("supported"))
 
-    async def steer(self, text: str, *, origin: dict[str, Any], thread_id: str | None = None) -> bool:
+    @property
+    def supports_image_input(self) -> bool:
+        prompt_capabilities = self.capabilities.get("promptCapabilities")
+        return isinstance(prompt_capabilities, dict) and prompt_capabilities.get("image") is True
+
+    async def steer(
+        self, text: str, *, origin: dict[str, Any], thread_id: str | None = None,
+        images: tuple[dict[str, str], ...] = (),
+    ) -> bool:
         active = getattr(self, "_active_context", None)
         if not self._active_turn_id or not active or not self.supports_steering:
             return False
@@ -902,10 +942,16 @@ class ACPRunner:
         )
         if not human and not same_requester:
             return False
+        if images and not self.supports_image_input:
+            raise ACPError("This harness can't take images.")
         try:
             await asyncio.wait_for(self._connection.ext_method("session/steering", {
                 "sessionId": self.session_id,
-                "prompt": [{"type": "text", "text": text}],
+                "prompt": [
+                    {"type": "text", "text": text},
+                    *({"type": "image", "data": image["data"], "mimeType": image["mime_type"]}
+                      for image in images),
+                ],
             }), timeout=10)
             return True
         except Exception:
