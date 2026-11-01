@@ -149,6 +149,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous profile's model and effort picks; a restart of the same profile
   still restores its saved picks, except where an explicit loadout sets the
   value, and the explicit loadout wins.
+- CLI: `--llm` loadout names no longer emit a misleading profile-not-found error during profile probing before loadout resolution (#563).
 - ACP: Codex multi-tool turns now report prompt token usage matching the harness
   ledger. Reconciled prompt-response totals settle once into session stats and
   appear in the status line. Coverage depends on the adapter: Claude's prompt

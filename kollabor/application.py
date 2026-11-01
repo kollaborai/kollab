@@ -377,7 +377,9 @@ class TerminalLLMChat:
 
         if profile_name:
             # CLI --llm is a one-time override, don't persist active selection
-            if not self.profile_manager.set_active_profile(profile_name, persist=False):
+            if not self.profile_manager.set_active_profile(
+                profile_name, persist=False, log_not_found=False
+            ):
                 # Not an existing profile -- try resolving it as a loadout (a
                 # named preset of provider profile + model + params that
                 # layers on top of profiles; see loadout_manager.py). Applied
