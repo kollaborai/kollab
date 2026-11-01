@@ -138,6 +138,79 @@ async def test_a_write_from_another_thread_is_never_lost_to_the_pass(monkeypatch
     assert [e.id for e in CrystalStore(vault).get_all()] == kept
 
 
+def test_a_first_load_never_erases_a_write_saved_during_it(monkeypatch):
+    # Jadeite on #547 round 7: a first load read the old vault, a writer loaded,
+    # added and saved meanwhile, and the old read then replaced its entry.
+    vault = _vault(_CHAIN[:2])
+    store, wrote = CrystalStore(vault), []
+    parse, reading, resume = store._parse_file, threading.Event(), threading.Event()
+
+    def first_parse_pauses():
+        entries = parse()
+        if not reading.is_set():
+            reading.set()
+            resume.wait(5)
+        return entries
+
+    monkeypatch.setattr(store, "_parse_file", first_parse_pauses)
+    loader = threading.Thread(target=store.get_all)
+    loader.start()
+    assert reading.wait(5)
+    writer = threading.Thread(
+        target=lambda: wrote.append(store.add_entry("Zulu yankee xray whiskey victor.", ["zulu"]))
+    )
+    writer.start()
+    writer.join(0.2)  # the old code loads again by itself and saves here
+    resume.set()
+    loader.join(5)
+    writer.join(5)
+    kept = ["crys-001", "crys-002", wrote[0].id]
+    assert [e.id for e in store.get_all()] == kept
+    assert [e.id for e in CrystalStore(vault).get_all()] == kept
+    assert store._next_id == 4
+
+
+@pytest.mark.asyncio
+async def test_the_dreaming_pass_loads_the_vault_off_the_loop():
+    # Jadeite on #547 round 7: a 2,608-entry vault's first load took 57-114 ms
+    # on the event loop.
+    store, loaded_on = CrystalStore(_vault(_CHAIN)), []
+    parse = store._parse_file
+    store._parse_file = lambda: (loaded_on.append(threading.current_thread()), parse())[1]
+    assert await store.deduplicate_in_slices() == 1
+    assert loaded_on and loaded_on[0] is not threading.current_thread()
+
+
+def test_dreaming_writes_its_insights_off_the_loop_in_order():
+    # Jadeite on #547 round 7: dreaming's 3-5 writes, each saving the whole
+    # vault, ran on the event loop before the sliced pass: 80-119 ms with no turn.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from plugins.hub.plugin import HubPlugin
+
+    insights = [f"Insight {n}: the relay hands each peer its messages in the order they were sent." for n in range(3)]
+    writes = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(identity="lapis", state="idle", current_task=None)
+    plugin._vault = MagicMock()
+    plugin._presence = None
+    plugin._crystal_store = SimpleNamespace(
+        add_entry=lambda text: writes.append((text, threading.current_thread())),
+        deduplicate_in_slices=AsyncMock(return_value=0),
+    )
+    plugin._build_dreaming_prompt = lambda entries: "prompt"
+    plugin._dreaming_llm_call = AsyncMock(return_value="\n\n".join(insights))
+
+    async def dream():
+        await plugin._dream([])
+        return threading.current_thread()
+
+    loop_thread = asyncio.run(dream())
+    assert [text for text, _ in writes] == insights
+    assert all(thread is not loop_thread for _, thread in writes)
+
+
 def test_a_chain_merges_in_list_order():
     store = CrystalStore(_vault(_CHAIN))
     assert store.deduplicate() == 1
@@ -215,6 +288,7 @@ async def test_writes_during_every_pass_leave_the_entries_whole_for_the_next_cyc
     # merge for good. Now no pass applies half its merges: one that sees no
     # write merges them all.
     store = CrystalStore(_vault(_CHAIN))
+    store.get_all()  # loaded: the pass starts at once, as the writes expect
 
     async def write_every_pass():
         for n in range(3):

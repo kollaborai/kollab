@@ -154,8 +154,14 @@ class CrystalStore:
         self._summary_words: dict = {}
 
     def _ensure_loaded(self) -> None:
-        """Lazy-load entries from disk on first access."""
-        if not self._loaded:
+        """Lazy-load entries from disk on first access, under the lock: a load
+        that read the file before a write saved, then published, would erase
+        that write (#546). Writers already hold the lock."""
+        if self._loaded:
+            return
+        with self._lock:
+            if self._loaded:
+                return
             self._entries = self._parse_file()
             if self._entries:
                 # Set next ID from highest existing
@@ -490,7 +496,8 @@ class CrystalStore:
         leaves the entries as they are until the next cycle. A store unchanged
         since a pass found nothing to merge skips it: it would find nothing again.
         """
-        self._ensure_loaded()
+        if not self._loaded:
+            await asyncio.to_thread(self._ensure_loaded)  # 57-114 ms for 2,608 entries
         if self._dedup_clean == self._revision:
             return 0
         for _ in range(attempts):

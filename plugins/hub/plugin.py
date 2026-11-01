@@ -6210,8 +6210,10 @@ class HubPlugin(BasePlugin):
                             logger.debug("dreaming: filtered preamble paragraph")
                             continue
                         paragraphs.append(p_stripped)
-                    for paragraph in paragraphs:
-                        self._crystal_store.add_entry(paragraph)
+                    # Each write saves the whole vault, tens of ms on thousands
+                    # of entries: they run off the loop, in order (#546).
+                    store = self._crystal_store
+                    await asyncio.to_thread(lambda: [store.add_entry(p) for p in paragraphs])
                     added = len(paragraphs)
                 else:
                     # Fallback to raw append if crystal_store unavailable
