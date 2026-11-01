@@ -39,7 +39,7 @@ Privileged material stays in the team workspace; no external sharing.
 
 | Hub name | Name | Role | Bundle | Reports to |
 |---|---|---|---|---|
-| `margaret` | Margaret Doyle | General Counsel (AI legal operations lead) | `default` | human |
+| `margaret` | Margaret Doyle | Legal Ops Lead | `default` | human |
 | `daniel` | Daniel Cho | Contracts Specialist | `research` | margaret |
 | `leila` | Leila Haddadi | Privacy Officer | `research` | margaret |
 | `hugo` | Hugo Lefevre | Compliance Analyst | `research` | margaret |

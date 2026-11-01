@@ -36,7 +36,7 @@ dates. Prepared for an accountant; not tax advice.
 
 | Hub name | Name | Role | Bundle | Reports to |
 |---|---|---|---|---|
-| `catherine` | Catherine Shaw | Controller & Finance Lead | `data-analyst` | human |
+| `catherine` | Catherine Shaw | Controller | `data-analyst` | human |
 | `ben` | Ben Okoro | Bookkeeper (AP/AR) | `data-analyst` | catherine |
 | `simone` | Simone Laurent | FP&A Analyst | `data-analyst` | catherine |
 | `raj` | Raj Patel | Procurement & Vendor Manager | `research` | catherine |
