@@ -18,6 +18,7 @@ from .context import ContextListSnapshot, ConversationContext
 from .snapshots import (
     AgentListSnapshot,
     AgentSnapshot,
+    ContextCompactionSnapshot,
     ConversationSnapshot,
     HubSnapshot,
     McpSnapshot,
@@ -149,6 +150,13 @@ class StateService(Protocol):
         Used by status widgets that show message count and token usage.
         """
         ...
+
+    # === Context compaction ===
+
+    async def get_context_compaction_snapshot(self) -> ContextCompactionSnapshot:
+        """Return current context usage and compaction-policy status."""
+        ...
+
 
     # === Profile ===
 

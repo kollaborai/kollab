@@ -11,6 +11,7 @@ check — user input wins, stop intents apply, bounds gate dispatch.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import time
@@ -18,10 +19,13 @@ from typing import Any, Dict, List, Optional
 
 from kollabor.goals.service import (
     BoundaryContext,
+    GoalError,
     GoalService,
     TurnOutcome,
 )
 from kollabor.state.goal_store import GoalStoreError
+from kollabor_ai.goal_image_scope import goal_image_scope
+from kollabor_ai.message_content import MessageContentError, normalize_message_content
 
 logger = logging.getLogger(__name__)
 
@@ -383,12 +387,44 @@ class GoalTurnDriver:
             return "error", capability_error
         record = self.service.store.get(goal_id)
 
-        # rehydrate attachments (9.2): missing artifact pauses hard
-        for ref in record.attachment_refs:
-            if ref.get("kind") == "image" and self.service.load_attachment(ref) is None:
-                self.service.pause_artifact_missing(goal_id, str(ref.get("ref")))
-                return "cancelled", f"artifact_missing: {ref.get('ref')}"
+        # Rehydrate into the existing bounded session resolver, only for this
+        # attempt. Do not allocate or encode an unbounded artifact.
+        refs = [ref for ref in record.attachment_refs if ref.get("kind") == "image"]
+        if refs and not self.coord.supports_image_input():
+            return "error", "goal attachments require a model that accepts images"
+        parts = []
+        scope = None
+        try:
+            for ref in refs:
+                image_store = self.coord._image_store
+                available = max(0, image_store.max_total_bytes - image_store.total_bytes)
+                limit = min(image_store.max_image_bytes, available)
+                payload = self.service.load_attachment(ref, max_bytes=limit)
+                if payload is None:
+                    self.service.pause_artifact_missing(goal_id, str(ref.get("ref")))
+                    return "cancelled", f"artifact_missing: {ref.get('ref')}"
+                media_type = str(ref.get("media_type") or "")
+                encoded = base64.b64encode(payload).decode("ascii")
+                part = {"type": "image", "image": f"data:{media_type};base64,{encoded}"}
+                parts.extend(normalize_message_content([part], image_store))
+            with goal_image_scope(
+                parts, self.coord._queue_processor, getattr(self.coord, "api_service", None),
+            ) as scope:
+                return await self._run_turn_with_context(record, scope)
+        except (GoalError, MessageContentError) as exc:
+            return "error", f"goal image unavailable: {exc}"
+        finally:
+            if scope is not None:
+                # This private marker survives in-memory compaction copies but
+                # is not a dataclass field or persisted message metadata.
+                messages = [scope.carrier, *getattr(self.coord, "conversation_history", [])]
+                for message in messages:
+                    if getattr(message, "_goal_image_marker", None) == scope.marker:
+                        delattr(message, "_goal_image_marker")
+            for part in parts:
+                self.coord._image_store.remove(part["source"]["media_id"])
 
+    async def _run_turn_with_context(self, record, image_scope) -> tuple[str, Optional[str]]:
         note = self.service.render_goal_context(record)
         previous_hud = tuple(getattr(self.coord, "_pending_agent_hud", None) or ())
         previous_hud_ids = {id(entry) for entry in previous_hud}
@@ -465,6 +501,8 @@ class GoalTurnDriver:
             logger.error("goal turn error: %s", exc)
             error = str(exc)
         finally:
+            if image_scope is not None:
+                image_scope.close()
             qp.is_processing = False
             cancelled = bool(qp.cancel_processing)
             # drain any user messages that queued while we held processing
