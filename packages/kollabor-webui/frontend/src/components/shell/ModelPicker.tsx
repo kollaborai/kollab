@@ -4,6 +4,7 @@ import type { EngineApi, ModelChoice, Profile } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { optionRowCheckClassName, optionRowClassName } from "@/components/ui/select";
 import { choiceLabel, matchesChoice, sameChoice } from "@/components/shell/model-choice";
 import { cn } from "@/lib/utils";
 
@@ -195,15 +196,14 @@ export function ModelPicker({
                     aria-selected={index === active}
                     onMouseEnter={() => setActive(index)}
                     onClick={() => pick(choice)}
-                    className={cn(
-                      "relative flex w-full items-center rounded-sm py-1.5 pr-8 pl-2 text-left text-sm outline-hidden select-none",
-                      index === active && "bg-accent text-accent-foreground",
-                    )}
+                    className={cn(optionRowClassName, "text-left", index === active && "bg-accent text-accent-foreground")}
                   >
                     <ChoiceLabel parts={[choice.model || "Default Model", choice.effort]} />
                     {sameChoice(choice, value) ? (
                       <>
-                        <CheckIcon className="absolute right-2 size-4" />
+                        <span className={optionRowCheckClassName}>
+                          <CheckIcon className="size-4" />
+                        </span>
                         <span className="sr-only">, current</span>
                       </>
                     ) : null}
