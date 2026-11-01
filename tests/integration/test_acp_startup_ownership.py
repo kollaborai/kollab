@@ -10,7 +10,7 @@ from kollabor_engine.routes import sessions
 from kollabor.llm import acp_orchestrator as acp_mod
 from kollabor.state.handlers import register_state_handlers
 from kollabor.state.local import LocalStateService
-from kollabor_ai.loadout_manager import LoadoutManager
+from kollabor_ai.loadout_manager import Loadout, LoadoutManager
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_rpc.server import RpcServer
 from tests.unit.test_acp_effort_restore import _options
@@ -107,6 +107,8 @@ async def test_overlapping_state_rpc_web_and_loadouts_cannot_replace_start_owner
         ctx = SimpleNamespace(_profile_manager=pm, _llm_service=bus.services['llm_service'], _event_bus=bus)
         panel = await llm_panel.PANELS['llm'].act(ctx, 'activate', {'name': 'other-preset'})
         assert not panel['ok']
+        with pytest.raises(ValueError, match='progress'):
+            await manager.activate(Loadout('native-preset', 'native-profile', 'fixture'), bus)
         assert len(created) == 1 and orch.runner is owner and not owner.closed
         assert pm.get_active_profile().name == 'claude-code'
 
@@ -244,6 +246,36 @@ async def test_shutdown_cancels_owned_loadout_transition_and_closes_restored_run
     assert activation.cancelled()
     assert not orch.active and orch.runner is None
     assert all(runner.closed for runner in created)
+
+
+@pytest.mark.asyncio
+async def test_stale_start_cleanup_can_only_retire_its_own_runner(tmp_path, monkeypatch):
+    first, pm, _bus, orch, _state, _manager, created, entered, release = await _setup(tmp_path, monkeypatch)
+    startup = asyncio.create_task(orch.start(first, loadout=('haiku', 'max')))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        original = created[0]
+        # This intentionally bypasses the public transition guard to test the
+        # second fence: a stale attempt must still not tear down a successor.
+        successor = type(original)(SimpleNamespace(name='other-acp'))
+        successor.state = 'ready'
+        orch._runner = successor
+        orch._selected_profile = pm.get_profile('other-acp')
+        orch._profile_name = 'other-acp'
+        orch._starting = False
+        orch._closed = False
+        release.set()
+        with pytest.raises(ValueError, match='loadout'):
+            await startup
+        assert original.closed and not successor.closed
+        assert orch.runner is successor and orch.active and orch.startup_error is None
+        assert (await orch.submit('hello', source='rpc'))['text'] == 'hello'
+    finally:
+        release.set()
+        if not startup.done():
+            startup.cancel()
+        await asyncio.gather(startup, return_exceptions=True)
+        await orch.shutdown()
 
 
 REAL_OVERLAP_AGENT = r'''
