@@ -8215,6 +8215,7 @@ class HubPlugin(BasePlugin):
             message_id=message.id,
             opened_at=time.monotonic(),
         )
+        origin_context = self._agent_message_origin_context(message)
         parked_line = getattr(self, "_acp_busy_parked", None)
         if parked_line and len(parked_line) < _ACP_BUSY_PARK_LIMIT:
             # Fairness (#483): a message arriving while earlier ones are
@@ -8226,6 +8227,7 @@ class HubPlugin(BasePlugin):
                     "turn": turns.get(message.id),
                     "attempts": 1,
                     "ts": time.monotonic(),
+                    "origin_context": dict(origin_context),
                 }
             )
             self._schedule_parked_ttl()
@@ -8245,14 +8247,7 @@ class HubPlugin(BasePlugin):
             source="agent",
             request_id=message.id,
             thread_id=getattr(message, "thread_id", "") or message.id,
-            origin_context={
-                "sender": message.from_agent,
-                "sender_identity": message.from_identity,
-                "relay_turn_id": getattr(getattr(self, "_relay_agent", None), "_turn", None).get() if getattr(getattr(self, "_relay_agent", None), "_turn", None) is not None else None,
-                "correlated_relay_event": bool((message.metadata or {}).get("relay_event")),
-                "authenticated": True,
-                "operator": False,
-            },
+            origin_context=dict(origin_context),
         )
         if isinstance(result, dict) and result.get("status") == "injected":
             # Steering belongs to the already running request. It does not
@@ -8276,6 +8271,7 @@ class HubPlugin(BasePlugin):
                         "turn": turn,
                         "attempts": 1,
                         "ts": time.monotonic(),
+                        "origin_context": dict(origin_context),
                     }
                 )
                 self._schedule_parked_ttl()
@@ -9628,16 +9624,74 @@ class HubPlugin(BasePlugin):
         except Exception:
             logger.debug("Hub ACP working presence update failed", exc_info=True)
 
+    def _agent_message_origin_context(self, message: HubMessage) -> Dict[str, Any]:
+        """Snapshot authenticated arrival provenance for direct and retried ACP."""
+        relay_turn = getattr(getattr(self, "_relay_agent", None), "_turn", None)
+        return {
+            "sender": message.from_agent,
+            "sender_identity": message.from_identity,
+            "relay_turn_id": relay_turn.get() if relay_turn is not None else None,
+            "correlated_relay_event": bool(
+                (message.metadata or {}).get("relay_event")
+            ),
+            "authenticated": True,
+            "operator": False,
+        }
+
+    @staticmethod
+    def _parked_entry_present(entries: list[dict], target: dict) -> bool:
+        """Return whether the exact parked entry is still owned by the list."""
+        return any(entry is target for entry in entries)
+
+    @staticmethod
+    def _remove_parked_entry(entries: list[dict], target: dict) -> bool:
+        """Remove one parked entry by identity, never an equal neighbour."""
+        for index, entry in enumerate(entries):
+            if entry is target:
+                entries.pop(index)
+                return True
+        return False
+
+    def _cancel_busy_retry_for_entries(
+        self, entries: list[dict]
+    ) -> Optional[asyncio.Task]:
+        """Cancel admission when a sweep takes ownership of its exact entry."""
+        retry_entry = getattr(self, "_busy_retry_entry", None)
+        if retry_entry is None or not any(
+            entry is retry_entry for entry in entries
+        ):
+            return None
+        retry_task = getattr(self, "_busy_retry_task", None)
+        if retry_task is None or retry_task.done():
+            return None
+        retry_task.cancel()
+        return retry_task
+
     def _schedule_parked_ttl(self) -> None:
-        """Arm the one-shot TTL sweep for the parked list (#483)."""
-        if getattr(self, "_parked_ttl_handle", None) is not None:
-            return  # already armed
+        """Arm the TTL sweep for the oldest remaining parked deadline."""
+        parked = getattr(self, "_acp_busy_parked", None) or []
+        old_handle = getattr(self, "_parked_ttl_handle", None)
+        if old_handle is not None:
+            old_handle.cancel()
+            self._parked_ttl_handle = None
+        if not parked:
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # no loop here; the next park re-arms
+        now = time.monotonic()
+        delay = min(
+            max(
+                0.0,
+                float(entry.get("ts", now))
+                + _ACP_BUSY_PARK_TTL_SECONDS
+                - now,
+            )
+            for entry in parked
+        )
         self._parked_ttl_handle = loop.call_later(
-            _ACP_BUSY_PARK_TTL_SECONDS, self._expire_parked_busy
+            delay, self._expire_parked_busy
         )
 
     def _expire_parked_busy(self) -> None:
@@ -9656,7 +9710,8 @@ class HubPlugin(BasePlugin):
             self._schedule_parked_ttl()  # re-arm for the remaining horizon
             return
         for entry in expired:
-            parked.remove(entry)
+            self._remove_parked_entry(parked, entry)
+        self._cancel_busy_retry_for_entries(expired)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -9721,7 +9776,11 @@ class HubPlugin(BasePlugin):
             if not departed:
                 return
             for entry in departed:
-                parked.remove(entry)
+                self._remove_parked_entry(parked, entry)
+            retry_task = self._cancel_busy_retry_for_entries(departed)
+            self._schedule_parked_ttl()
+            if retry_task is not None and retry_task is not asyncio.current_task():
+                await asyncio.gather(retry_task, return_exceptions=True)
             await self._end_parked_busy_turns(
                 departed,
                 outcome="unavailable",
@@ -9806,36 +9865,48 @@ class HubPlugin(BasePlugin):
             while parked:
                 entry = parked[0]
                 message = entry["message"]
-                result = await llm.submit_human_input(
-                    message.content,
-                    source="agent",
-                    request_id=message.id,
-                    thread_id=getattr(message, "thread_id", "") or message.id,
-                    origin_context={
-                        "sender": message.from_agent,
-                        "sender_identity": message.from_identity,
-                        "relay_turn_id": (
-                            getattr(getattr(self, "_relay_agent", None), "_turn", None).get()
-                            if getattr(getattr(self, "_relay_agent", None), "_turn", None) is not None
-                            else None
+                self._busy_retry_entry = entry
+                try:
+                    result = await llm.submit_human_input(
+                        message.content,
+                        source="agent",
+                        request_id=message.id,
+                        thread_id=(
+                            getattr(message, "thread_id", "") or message.id
                         ),
-                        "correlated_relay_event": bool((message.metadata or {}).get("relay_event")),
-                        "authenticated": True,
-                        "operator": False,
-                    },
-                )
+                        origin_context=dict(
+                            entry.get("origin_context")
+                            or self._agent_message_origin_context(message)
+                        ),
+                    )
+                except asyncio.CancelledError:
+                    current = getattr(self, "_acp_busy_parked", None) or []
+                    if not self._parked_entry_present(current, entry):
+                        # Expiry or departure took terminal ownership while
+                        # admission was suspended. Its cancellation prevents
+                        # this request from being admitted after that ending.
+                        return
+                    raise
+                finally:
+                    if getattr(self, "_busy_retry_entry", None) is entry:
+                        self._busy_retry_entry = None
+                parked = getattr(self, "_acp_busy_parked", None) or []
+                if not self._parked_entry_present(parked, entry):
+                    # A legacy or external sweep already owns this turn. Do
+                    # not mutate another parked entry by position.
+                    return
                 status = result.get("status") if isinstance(result, dict) else None
                 if status == "queued":
                     # The freed slot took it; the open network turn owns
                     # delivery, exactly like the direct admission path.
-                    parked.pop(0)
+                    self._remove_parked_entry(parked, entry)
                     continue
                 if status == "injected":
                     # Steering joins the running request and never gains a
                     # second completion owner; drop the parked turn.
                     turns = getattr(self, "_acp_network_turns", None) or {}
                     turns.pop(message.id, None)
-                    parked.pop(0)
+                    self._remove_parked_entry(parked, entry)
                     continue
                 reason = str(result.get("reason") or "") if isinstance(result, dict) else ""
                 is_busy = "queue" in reason.lower() or "full" in reason.lower()
@@ -9849,7 +9920,7 @@ class HubPlugin(BasePlugin):
                         else:
                             waiting["attempts"] += 1
                     for waiting in aged_out:
-                        parked.remove(waiting)
+                        self._remove_parked_entry(parked, waiting)
                     if aged_out:
                         # Aged-out entries end busy front-first, the way the
                         # direct path would have refused them.
@@ -9859,7 +9930,7 @@ class HubPlugin(BasePlugin):
                     return  # still full; wait for the next turn boundary
                 # Out of boundaries or rejected outright: fail the turn the
                 # way the direct path would have.
-                parked.pop(0)
+                self._remove_parked_entry(parked, entry)
                 turn = entry["turn"]
                 if turn is not None and not turn.ended:
                     turns = getattr(self, "_acp_network_turns", None) or {}

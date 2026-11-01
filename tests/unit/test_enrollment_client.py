@@ -1630,14 +1630,27 @@ async def test_issuer_requires_explicit_decision_after_proof(
             raise RuntimeError("simulated process interruption after receipt")
 
         monkeypatch.setattr(relay, "approve", fail_peer_approval)
+    polling_started_at = time.monotonic()
     task = asyncio.create_task(issuer._serve_offer(offer))
+    # Prove the polling window survives the >5 s scheduling delay observed on
+    # loaded CI runners without relying on an actual flaky runner. The deadline
+    # stays anchored before this deterministic delay, so a 5 s bound would fail.
+    delayed_proof_case = (
+        decision_name == "accept"
+        and not tamper_ack
+        and not wrong_ack_digest
+        and not crash_before_peer_approval
+        and not revoke_after_receipt_before_peer_approval
+    )
+    if delayed_proof_case:
+        await real_sleep(5.3)
     # Real wall-clock deadline, not a fixed iteration count: a fixed count of
     # 1ms sleeps assumes the event loop gets scheduled promptly, which is not
     # true under full-suite CPU contention and was the source of a flaky
     # "verified proof did not become a pending request" failure (issue #121).
-    # 5 s still flaked once on a loaded CI runner; the issuer's own offer
-    # expiry is far longer, so 30 s keeps the same bound with real headroom.
-    deadline = time.monotonic() + 30.0
+    # The issuer's own offer expiry is far longer, so 30 s keeps the same bound
+    # with measured headroom.
+    deadline = polling_started_at + 30.0
     while time.monotonic() < deadline:
         requests = issuer.pending_requests()
         if requests:

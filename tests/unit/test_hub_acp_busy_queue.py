@@ -263,7 +263,12 @@ def _held_turn(plugin, message: HubMessage, attempts: int = 1) -> None:
     )
     plugin._acp_network_turns[message.id] = turn
     plugin._acp_busy_parked.append(
-        {"message": message, "turn": turn, "attempts": attempts, "ts": 0.0}
+        {
+            "message": message,
+            "turn": turn,
+            "attempts": attempts,
+            "ts": hub_plugin_module.time.monotonic(),
+        }
     )
 
 
@@ -473,3 +478,161 @@ async def test_a_failed_end_re_parks_the_message_instead_of_losing_it(caplog):
     assert plugin._acp_busy_parked == []
     assert message.id not in plugin._acp_network_turns
     assert plugin._end_network_turn.await_count == 2  # retried, then ended
+
+
+@pytest.mark.asyncio
+async def test_departure_during_inflight_retry_preserves_other_message():
+    """A departure while admission is suspended must not lose the next peer."""
+    plugin, llm = _acp_plugin()
+    gone = _agent_request("departing", from_identity=ASKER)
+    staying = _agent_request("staying", from_identity="onyx@other")
+    staying.id = "s" * 32
+    _held_turn(plugin, gone)
+    _held_turn(plugin, staying)
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def blocked_admission(*_args, **_kwargs):
+        entered.set()
+        await resume.wait()
+        return {"status": "queued"}
+
+    llm.submit_human_input = AsyncMock(side_effect=blocked_admission)
+    plugin._kick_parked_busy_retries()
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+    await plugin._sweep_parked_for_departure(ASKER)
+    assert [entry["message"] for entry in plugin._acp_busy_parked] == [staying]
+    assert gone.id not in plugin._acp_network_turns
+    assert staying.id in plugin._acp_network_turns
+
+    resume.set()
+    await asyncio.wait_for(plugin._busy_retry_task, timeout=1.0)
+
+    assert [entry["message"] for entry in plugin._acp_busy_parked] == [staying]
+    assert staying.id in plugin._acp_network_turns
+    assert plugin._end_network_turn.await_args.kwargs["outcome"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_retry_preserves_manual_relay_authority():
+    """A parked request must retry under its own manual relay authority."""
+    from contextvars import ContextVar
+    from types import MethodType
+
+    from plugins.hub.relay_agent import RelayAgentBridge
+    from plugins.hub.relay_state import RelayError
+
+    plugin, llm = _acp_plugin()
+    relay = SimpleNamespace(
+        _turn=ContextVar("parked_relay_turn", default=None),
+        _correlated_event_context=ContextVar("parked_relay_event", default=None),
+        _authorize_active=MagicMock(side_effect=RelayError("approval revoked")),
+        active=None,
+    )
+    plugin._relay_agent = relay
+    message = _agent_request("manual task", from_identity="relay:manual-peer")
+    llm.submit_human_input = AsyncMock(
+        side_effect=[_busy_reject(), {"status": "queued"}]
+    )
+    token = relay._turn.set("manual-task-123")
+    try:
+        await plugin._submit_authenticated_agent_message(message, llm)
+    finally:
+        relay._turn.reset(token)
+
+    await plugin._retry_parked_busy_messages()
+    if plugin._parked_ttl_handle is not None:
+        plugin._parked_ttl_handle.cancel()
+
+    first_origin = llm.submit_human_input.await_args_list[0].kwargs["origin_context"]
+    retry_origin = llm.submit_human_input.await_args_list[1].kwargs["origin_context"]
+    assert retry_origin["relay_turn_id"] == first_origin["relay_turn_id"]
+
+    relay.guard_tool = MethodType(RelayAgentBridge.guard_tool, relay)
+    active = SimpleNamespace(origin=retry_origin)
+    acp = SimpleNamespace(runner=SimpleNamespace(_active_context=active))
+    plugin.event_bus.get_service.side_effect = (
+        lambda name: acp if name == "acp_orchestrator" else None
+    )
+    plugin._acp_hub_token = "review-token"
+    plugin._acp_hub_generation = "1"
+    plugin._acp_hub_tools = SimpleNamespace(call=AsyncMock(return_value="executed"))
+
+    denied = await plugin._handle_acp_hub_call(
+        token="review-token", generation="1", name="hub_msg", arguments={}
+    )
+
+    assert "authority is no longer valid" in denied["error"].lower()
+    relay._authorize_active.assert_called_once()
+    plugin._acp_hub_tools.call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ttl_rearm_uses_oldest_remaining_expiry(monkeypatch):
+    """Staggered messages expire within one TTL from their own arrival."""
+    plugin, _llm = _acp_plugin()
+    first = _agent_request("first")
+    second = _agent_request("second")
+    second.id = "s" * 32
+    _held_turn(plugin, first)
+    _held_turn(plugin, second)
+    monkeypatch.setattr(
+        hub_plugin_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: 1000.0),
+    )
+    ttl = hub_plugin_module._ACP_BUSY_PARK_TTL_SECONDS
+    plugin._acp_busy_parked[0]["ts"] = 1000.0 - ttl - 1.0
+    plugin._acp_busy_parked[1]["ts"] = 1000.0 - ttl / 2.0
+
+    plugin._expire_parked_busy()
+
+    delay = plugin._parked_ttl_handle.when() - asyncio.get_running_loop().time()
+    plugin._parked_ttl_handle.cancel()
+    await asyncio.sleep(0)
+    assert delay <= ttl / 2.0 + 1.0
+
+
+@pytest.mark.asyncio
+async def test_expiry_during_inflight_retry_preserves_other_message(monkeypatch):
+    """Expiring the retry head must not remove the next parked request."""
+    plugin, llm = _acp_plugin()
+    expired = _agent_request("expired")
+    staying = _agent_request("staying", from_identity="onyx@other")
+    staying.id = "s" * 32
+    _held_turn(plugin, expired)
+    _held_turn(plugin, staying)
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def blocked_admission(*_args, **_kwargs):
+        entered.set()
+        await resume.wait()
+        return {"status": "queued"}
+
+    llm.submit_human_input = AsyncMock(side_effect=blocked_admission)
+    now = 1000.0
+    ttl = hub_plugin_module._ACP_BUSY_PARK_TTL_SECONDS
+    plugin._acp_busy_parked[0]["ts"] = now - ttl - 1.0
+    plugin._acp_busy_parked[1]["ts"] = now
+    monkeypatch.setattr(
+        hub_plugin_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: now),
+    )
+
+    plugin._kick_parked_busy_retries()
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+    plugin._expire_parked_busy()
+    if plugin._parked_ttl_handle is not None:
+        plugin._parked_ttl_handle.cancel()
+    await asyncio.sleep(0)
+
+    resume.set()
+    await asyncio.wait_for(plugin._busy_retry_task, timeout=1.0)
+
+    assert [entry["message"] for entry in plugin._acp_busy_parked] == [staying]
+    assert expired.id not in plugin._acp_network_turns
+    assert staying.id in plugin._acp_network_turns
+    assert plugin._end_network_turn.await_args.kwargs["outcome"] == "busy"
