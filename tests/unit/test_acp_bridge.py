@@ -1007,6 +1007,9 @@ async def test_restart_failure_cleans_connection_process_and_stderr(tmp_path, mo
     connection = Connection()
     runner._connection = connection
     runner._process = process
+
+    # This synthetic process is not owned by the test; do not discover host processes.
+    monkeypatch.setattr(runner, "_live_owned_processes", lambda: [])
     runner._stderr_task = asyncio.create_task(asyncio.sleep(60))
     monkeypatch.setattr(bridge_mod.os, "killpg", lambda *_args: None)
 

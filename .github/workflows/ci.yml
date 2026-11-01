@@ -56,6 +56,7 @@ jobs:
       - name: Run unit tests in parallel
         run: >-
           uv run python -m pytest tests/unit/ -q -n auto
+          --allow-host-process-enumeration
           --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle
           --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
 
