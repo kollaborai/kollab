@@ -1,0 +1,37 @@
+{
+  "description": "PR shepherd - keeps kollaborai/kollab pull requests moving: hygiene checks, issue links, labels, review routing, stale drafts. Never merges, approves, or un-drafts.",
+  "tools": [
+    "terminal",
+    "terminal-output",
+    "terminal-status",
+    "file-read",
+    "file-grep",
+    "directory",
+    "file-create",
+    "file-append",
+    "hub-msg",
+    "hub-status",
+    "hub-agents",
+    "scratchpad",
+    "scratchpad-append",
+    "scratchpad-get",
+    "scratchpad-clear",
+    "task-checkpoint",
+    "task-complete",
+    "context-query",
+    "curate",
+    "evict",
+    "compact"
+  ],
+  "skills": [
+    "oss-maintainers",
+    "pr-shepherding",
+    "code-review",
+    "git-workflow"
+  ],
+  "default_skills": [
+    "oss-maintainers",
+    "pr-shepherding"
+  ],
+  "vault_enabled": true
+}

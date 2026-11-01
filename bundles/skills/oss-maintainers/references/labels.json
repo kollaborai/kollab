@@ -1,0 +1,60 @@
+{
+  "_comment": "Kollab OSS label taxonomy v1. Source of truth for every OSS agent. Creating/editing these labels on GitHub is a mutation: propose as a batch, apply only on human approval. Existing GitHub defaults are KEPT (bug, enhancement, documentation, question, duplicate, invalid, wontfix, good first issue, help wanted) because the issue templates and contributors already use them.",
+  "rules": {
+    "type": "exactly one per issue/PR",
+    "priority": "exactly one once triaged (none while needs-triage)",
+    "area": "one or more; at least one once triaged",
+    "status": "at most one, except needs-triage which is removed when triage completes",
+    "platform": "optional, only when the problem is platform-specific"
+  },
+  "labels": [
+    {"group": "type", "name": "bug", "color": "d73a4a", "description": "Something is broken (fix:)", "exists": true},
+    {"group": "type", "name": "enhancement", "color": "a2eeef", "description": "New feature or improvement (feat:)", "exists": true},
+    {"group": "type", "name": "documentation", "color": "0075ca", "description": "Docs only (docs:)", "exists": true},
+    {"group": "type", "name": "question", "color": "d876e3", "description": "Support or usage question, not a defect", "exists": true},
+    {"group": "type", "name": "performance", "color": "f9a03f", "description": "Speed, memory, or resource use (perf:)", "exists": false},
+    {"group": "type", "name": "security", "color": "b60205", "description": "Security hardening or vulnerability fix (security:). Report holes privately per SECURITY.md", "exists": false},
+    {"group": "type", "name": "testing", "color": "bfd4f2", "description": "Tests, flaky tests, test infrastructure (test:)", "exists": false},
+    {"group": "type", "name": "chore", "color": "e4e4e4", "description": "CI, build, refactor, tooling, release plumbing (ci:/build:/refactor:/chore:)", "exists": false},
+
+    {"group": "priority", "name": "priority/p0", "color": "b60205", "description": "Critical: outage, data loss, security exposure, or broken release. Drop everything", "exists": false},
+    {"group": "priority", "name": "priority/p1", "color": "d93f0b", "description": "High: major regression or blocker, no reasonable workaround. Next release", "exists": false},
+    {"group": "priority", "name": "priority/p2", "color": "fbca04", "description": "Normal: real, actionable, has a workaround. Planned work", "exists": false},
+    {"group": "priority", "name": "priority/p3", "color": "0e8a16", "description": "Low: nice-to-have, polish, or long-term idea. Backlog", "exists": false},
+
+    {"group": "status", "name": "needs-triage", "color": "ededed", "description": "New; a maintainer has not evaluated it yet (applied by issue templates)", "exists": false},
+    {"group": "status", "name": "status/needs-info", "color": "fef2c0", "description": "Waiting on the reporter for specific details", "exists": false},
+    {"group": "status", "name": "status/needs-repro", "color": "fef2c0", "description": "Bug without steps someone else can follow", "exists": false},
+    {"group": "status", "name": "status/accepted", "color": "0e8a16", "description": "Triaged and accepted; ready to be picked up", "exists": false},
+    {"group": "status", "name": "status/ready-for-agent", "color": "1d76db", "description": "Fully specified; a coder agent can take it via koordinator", "exists": false},
+    {"group": "status", "name": "status/ready-for-human", "color": "5319e7", "description": "Needs human judgment, design, credentials, or manual testing", "exists": false},
+    {"group": "status", "name": "status/blocked", "color": "000000", "description": "Waiting on another issue, PR, or external decision (name it in a comment)", "exists": false},
+    {"group": "status", "name": "status/stale", "color": "c2c2c2", "description": "No qualifying activity for 45 days; closure proposed to a human", "exists": false},
+    {"group": "status", "name": "status/no-stale", "color": "c2c2c2", "description": "Exempt from stale sweeps", "exists": false},
+
+    {"group": "area", "name": "area/hub", "color": "c5def5", "description": "Hub mesh, identities, membership, relay, vaults, cron", "exists": false},
+    {"group": "area", "name": "area/acp", "color": "c5def5", "description": "ACP harnesses and backends (Claude, Codex, ...)", "exists": false},
+    {"group": "area", "name": "area/engine", "color": "c5def5", "description": "kollabor-engine HTTP/socket service, sessions, attach", "exists": false},
+    {"group": "area", "name": "area/webui", "color": "c5def5", "description": "kollabor-webui frontend", "exists": false},
+    {"group": "area", "name": "area/tui", "color": "c5def5", "description": "Terminal UI, input, rendering", "exists": false},
+    {"group": "area", "name": "area/agent", "color": "c5def5", "description": "Agent runtime, tools, bundles, skills, queue", "exists": false},
+    {"group": "area", "name": "area/llm", "color": "c5def5", "description": "Providers, profiles, OAuth, model/effort pickers, fallback", "exists": false},
+    {"group": "area", "name": "area/conversation", "color": "c5def5", "description": "History, compaction, resume, goals", "exists": false},
+    {"group": "area", "name": "area/voice", "color": "c5def5", "description": "kollabor-voice runtime and devices", "exists": false},
+    {"group": "area", "name": "area/mobile", "color": "c5def5", "description": "PhoneLink, phone app, mobile builds", "exists": false},
+    {"group": "area", "name": "area/ci", "color": "c5def5", "description": "GitHub workflows, test infrastructure, release pipeline", "exists": false},
+
+    {"group": "platform", "name": "platform/windows", "color": "d4c5f9", "description": "Windows-only behavior", "exists": false},
+    {"group": "platform", "name": "platform/macos", "color": "d4c5f9", "description": "macOS-only behavior", "exists": false},
+    {"group": "platform", "name": "platform/linux", "color": "d4c5f9", "description": "Linux-only behavior", "exists": false},
+
+    {"group": "resolution", "name": "duplicate", "color": "cfd3d7", "description": "Same root cause as another OPEN item (cite it)", "exists": true},
+    {"group": "resolution", "name": "invalid", "color": "e4e669", "description": "Not a Kollab problem, spam, or a test submission", "exists": true},
+    {"group": "resolution", "name": "wontfix", "color": "ffffff", "description": "Will not be actioned (human decision only)", "exists": true},
+
+    {"group": "community", "name": "good first issue", "color": "7057ff", "description": "Small, well-specified, good for newcomers", "exists": true},
+    {"group": "community", "name": "help wanted", "color": "008672", "description": "Maintainers welcome an outside contribution", "exists": true},
+    {"group": "flag", "name": "regression", "color": "e11d21", "description": "Worked in an earlier release", "exists": false},
+    {"group": "flag", "name": "breaking-change", "color": "e11d21", "description": "Changes user-visible behavior or config; needs a changelog note", "exists": false}
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "description": "Community and docs agent - drafts specific, welcoming replies, answers usage questions from the docs, curates good-first-issue candidates, and flags docs gaps for kollaborai/kollab. Every public reply is a draft for approval.",
+  "tools": [
+    "terminal",
+    "terminal-output",
+    "terminal-status",
+    "file-read",
+    "file-grep",
+    "directory",
+    "file-create",
+    "file-append",
+    "hub-msg",
+    "hub-status",
+    "hub-agents",
+    "scratchpad",
+    "scratchpad-append",
+    "scratchpad-get",
+    "scratchpad-clear",
+    "task-checkpoint",
+    "task-complete",
+    "context-query",
+    "curate",
+    "evict",
+    "compact"
+  ],
+  "skills": [
+    "oss-maintainers",
+    "community-care",
+    "readme-writing",
+    "style-guide"
+  ],
+  "default_skills": [
+    "oss-maintainers",
+    "community-care"
+  ],
+  "vault_enabled": true
+}
