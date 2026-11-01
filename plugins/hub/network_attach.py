@@ -37,6 +37,7 @@ import secrets
 import shutil
 import tempfile
 import time
+import weakref
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,12 +91,21 @@ class _Withdrawn(SendGuardRevoked):
 
 
 @dataclass(eq=False)
+class _PolicyLease:
+    peer: str
+    name: str
+    requester: bool
+    valid: bool = True
+
+
+@dataclass(eq=False)
 class _Channel:
     id: str
     peer: str
     name: str
     requester: bool
     peer_guard: Callable[[], bool] | None = None
+    policy_guard: Callable[[], bool] | None = None
     agent_id: str = ""
     reader: asyncio.StreamReader | None = None
     writer: asyncio.StreamWriter | None = None
@@ -199,9 +209,34 @@ class NetworkAttach:
         # None in tests that build a bare NetworkAttach.
         self._halt_active = halt_active
         self._channels: dict[tuple[str, str], _Channel] = {}
+        # Weak references keep pending opens and live channels observable
+        # without retaining a lease after its operation has ended.
+        self._policy_leases: weakref.WeakSet[_PolicyLease] = weakref.WeakSet()
         self._pacer = _Pacer()
         self._socket_dir: Path | None = None
         self._closed = False
+
+    def _capture_policy_guard(self, peer: str, name: str, *, requester: bool) -> Callable[[], bool]:
+        lease = _PolicyLease(peer, name, requester)
+        self._policy_leases.add(lease)
+        return lambda: lease.valid
+
+    def invalidate_device_permissions(self, allowed: Callable[[str, str], bool]) -> None:
+        """Permanently fence operations whose device-side permission was withdrawn."""
+        for lease in tuple(self._policy_leases):
+            if lease.requester or not lease.valid:
+                continue
+            try:
+                permitted = allowed(lease.peer, lease.name)
+            except Exception:
+                permitted = False
+            if not permitted:
+                lease.valid = False
+
+    def invalidate_for_halt(self) -> None:
+        """A learned local halt withdraws pending and established channels."""
+        for lease in tuple(self._policy_leases):
+            lease.valid = False
 
     # -- requester ------------------------------------------------------
 
@@ -228,8 +263,10 @@ class NetworkAttach:
             peer_guard = self._capture_peer_guard(peer)
         except RelayError as exc:
             raise AttachRefused("network access is unavailable for this device") from exc
+        policy_guard = self._capture_policy_guard(peer, name, requester=True)
         channel = _Channel(
-            id=secrets.token_hex(16), peer=peer, name=name, requester=True, peer_guard=peer_guard
+            id=secrets.token_hex(16), peer=peer, name=name, requester=True,
+            peer_guard=peer_guard, policy_guard=policy_guard,
         )
         request = {"channel": channel.id, "agent_id": agent_id, "name": name}
         if quiet:
@@ -243,7 +280,7 @@ class NetworkAttach:
             raise AttachRefused(refused[:500])
         if response.get("open") is not True:
             raise RelayError(f"{self._peer_name(peer)} did not open {name}")
-        if self._closed or not peer_guard() or (
+        if self._closed or not peer_guard() or not policy_guard() or (
             self._halt_active is not None and self._halt_active()
         ):
             # A halt or shutdown may have landed while the remote open was
@@ -261,7 +298,7 @@ class NetworkAttach:
                 lambda reader, writer: self._connected(channel, reader, writer),
                 channel.path,
             )
-            if channel.closed or self._closed or not peer_guard() or (
+            if channel.closed or self._closed or not peer_guard() or not policy_guard() or (
                 self._halt_active is not None and self._halt_active()
             ):
                 # A recheck can retire the path while serve() is still
@@ -365,13 +402,14 @@ class NetworkAttach:
             peer_guard = self._capture_peer_guard(peer)
         except RelayError:
             return {"refused": "network access is unavailable for this device"}
+        policy_guard = self._capture_policy_guard(peer, name, requester=False)
         # Only the agents that device holds open here count against its share.
         held = sum(1 for (key, _), ch in self._channels.items() if key == peer and not ch.requester)
         if len(self._channels) >= MAX_CHANNELS or held >= MAX_CHANNELS_PER_PEER:
             return {"refused": "too many of this computer's agents are open from there"}
         try:
             socket_path = await self._target(peer, agent_id, name)
-            if not peer_guard():
+            if not peer_guard() or not policy_guard():
                 raise AttachRefused("network access changed while opening the agent")
             reader, writer = await asyncio.wait_for(
                 local_ipc.connect(socket_path, limit=4 * READ_BYTES), 10.0
@@ -385,7 +423,7 @@ class NetworkAttach:
         # earlier check, and close the just-opened socket on every refusal.
         try:
             current_path = await self._target(peer, agent_id, name)
-            if not peer_guard():
+            if not peer_guard() or not policy_guard():
                 raise AttachRefused("network access changed while opening the agent")
             if current_path != socket_path:
                 raise AttachRefused(f"{name} changed while it was opening")
@@ -414,6 +452,7 @@ class NetworkAttach:
             name=name,
             requester=False,
             peer_guard=peer_guard,
+            policy_guard=policy_guard,
             agent_id=agent_id,
             reader=reader,
             writer=writer,
@@ -429,7 +468,9 @@ class NetworkAttach:
 
     async def _allowed(self, channel: _Channel) -> bool:
         """Ask the current rules (trust, grants, membership) without a cache."""
-        if channel.peer_guard is not None and not channel.peer_guard():
+        if (channel.peer_guard is not None and not channel.peer_guard()) or (
+            channel.policy_guard is not None and not channel.policy_guard()
+        ):
             return False
         if channel.requester:
             # F19 requester side: a local halt withdraws this device's
@@ -447,7 +488,9 @@ class NetworkAttach:
         except Exception as exc:  # AttachRefused, or rules that cannot be read: closed either way
             logger.info("network attach %s for %s withdrawn: %s", channel.name, channel.peer[:12], exc)
             return False
-        return channel.peer_guard is None or channel.peer_guard()
+        return (channel.peer_guard is None or channel.peer_guard()) and (
+            channel.policy_guard is None or channel.policy_guard()
+        )
 
     # -- both ends ------------------------------------------------------
 

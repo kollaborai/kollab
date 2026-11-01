@@ -502,6 +502,32 @@ class RelayAgentBridge:
         """Open and agents trust send an ordinary message with no human grant."""
         return level in ("open", "agents")
 
+    def _invalidate_denied_attach_leases(self, state=None) -> None:
+        attach = getattr(self, "network_attach", None)
+        if attach is None:
+            return
+        if state is None:
+            try:
+                state = self._state().state
+            except Exception:
+                attach.invalidate_device_permissions(lambda _peer, _name: False)
+                return
+
+        def allowed(peer: str, name: str) -> bool:
+            if peer in state.links or peer not in self.commands.client.state.approvals:
+                return False
+            trust = "manual" if state.trust == "manual" else state.peer_trust.get(peer, state.trust)
+            if trust == "open":
+                return True
+            if trust != "agents":
+                return False
+            return any(
+                row["peer"] == peer and row["agent"] == name
+                for row in self.store.grants(state.room)
+            )
+
+        attach.invalidate_device_permissions(allowed)
+
     def set_trust_level(self, level: str) -> str:
         self._require_human_network_context(
             "remote model turns cannot change network trust"
@@ -512,6 +538,7 @@ class RelayAgentBridge:
             raise RelayError(str(exc)) from exc
         store = self._state()
         store.state.trust = level
+        self._invalidate_denied_attach_leases(store.state)
         store.save()
         logger.info("network trust set to %s (pid %d)", level, os.getpid())
         return store.state.trust
@@ -536,6 +563,7 @@ class RelayAgentBridge:
         store = self._state()
         validate_public_key(peer_key)
         store.state.peer_trust[peer_key] = level
+        self._invalidate_denied_attach_leases(store.state)
         store.save()
         return level
 
@@ -543,6 +571,7 @@ class RelayAgentBridge:
         self._require_human_network_context("remote model turns cannot change peer trust")
         store = self._state()
         if store.state.peer_trust.pop(peer_key, None) is not None:
+            self._invalidate_denied_attach_leases(store.state)
             store.save()
 
     def set_peer_link(self, peer_key: str) -> None:
@@ -554,6 +583,7 @@ class RelayAgentBridge:
             if len(store.state.links) >= MAX_APPROVALS:
                 raise RelayError("local peer approval capacity reached", "capacity")
             store.state.links.append(peer_key)
+            self._invalidate_denied_attach_leases(store.state)
             store.save()
 
     def _known_device_names(self, *, except_key: str = "") -> set[str]:
@@ -2871,6 +2901,9 @@ class RelayAgentBridge:
         control = self._network_control()
         if not control.halt_book().active():
             return
+        attach = getattr(self, "network_attach", None)
+        if attach is not None:
+            attach.invalidate_for_halt()
         try:
             if network in (hr.read_halt().get("scopes") or {}):
                 return  # the listener already holds it
@@ -3063,9 +3096,12 @@ class RelayAgentBridge:
         if head == "deny":
             if len(parts) not in (1, 2):
                 return "usage: /connect deny <device> [agent]"
-            self.store.revoke(
-                client.state.room, parts[0], parts[1] if len(parts) == 2 else None
-            )
+            try:
+                self.store.revoke(
+                    client.state.room, parts[0], parts[1] if len(parts) == 2 else None
+                )
+            finally:
+                self._invalidate_denied_attach_leases()
             return "conversation grant revoked; affected work cancelled"
         if head == "grants":
             sender = str(
