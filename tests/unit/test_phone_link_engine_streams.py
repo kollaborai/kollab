@@ -529,3 +529,61 @@ async def test_stream_loss_releases_real_assistant_callback_without_stopping_wor
     await until(lambda: not probe.session.queues and exchange.task.done())
     assert not probe.manager.exchanges
     assert probe.session.stops == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["message", "assistant"])
+@pytest.mark.parametrize("reply_ready", [False, True])
+async def test_phone_revocation_closes_private_goal_reply(engine_stream, route, reply_ready):
+    """Revocation wins over a private reply becoming available at the same time."""
+    probe = engine_stream
+    polling = asyncio.Event()
+    release = asyncio.Event()
+
+    async def send_goal(content, **kwargs):
+        assert kwargs.get("private_goal_reply") is True
+        return {"accepted": True, "goal_reply_id": "a" * 32}
+
+    async def poll_goal(_reply_id):
+        polling.set()
+        await release.wait()
+        return {
+            "status": "complete",
+            "success": True,
+            "message": "private-goal-result-after-revocation",
+            "conversation_uid": "conversation-a",
+        }
+
+    probe.session.send_message = send_goal
+    probe.session.poll_goal_reply = poll_goal
+    if route == "message":
+        body = {"content": "/goal show", "conversation_uid": "conversation-a"}
+    else:
+        body = {
+            "commands": [{"type": "add-message", "message": {
+                "parts": [{"type": "text", "text": "/goal show"}],
+            }}],
+            "state": {"messages": [], "conversationUid": "conversation-a"},
+        }
+    stream_id = await _start(probe.packet, f"/sessions/{probe.session.session_id}/{route}", body)
+    await asyncio.wait_for(polling.wait(), timeout=2)
+    context = next(iter(probe.session.subscription_contexts.values()))
+    assert context is not None
+    exchange = probe.manager.exchanges[(probe.link[1]["id"], stream_id)]
+    assert exchange.task is not None
+    if reply_ready:
+        release.set()  # The reply and revocation become ready in the same loop turn.
+    context.revoked = True
+    assert probe.session.close_for_context(context) == 1
+    try:
+        # The subscriber signal must stop the stream even while the private
+        # reply stays blocked. PhoneLink's outer cancellation is a second fence.
+        await asyncio.wait_for(asyncio.shield(exchange.task), timeout=1)
+        assert release.is_set() is reply_ready
+    finally:
+        release.set()
+        if not exchange.task.done():
+            exchange.task.cancel()
+        await asyncio.gather(exchange.task, return_exceptions=True)
+    assert b"private-goal-result-after-revocation" not in repr(list(exchange.events._queue)).encode()
+    await until(lambda: not probe.session.queues)
