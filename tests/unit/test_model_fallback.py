@@ -181,6 +181,48 @@ async def test_a_usage_limit_switches_once_and_runs_the_turn_again(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_reply_streamed_in_part_is_switched_but_never_asked_again(monkeypatch):
+    # Morganite on #549 round 2: the retry's answer joined the failed model's
+    # streamed part as one reply.
+    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    assert not await _native_turn_fails(plugin, "Usage limit reached for 5 hour.", streamed=True)
+    assert _Loadouts.activated == ["codex"]
+    notice = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
+    assert notice[0]["message"] == (
+        "glm-5.3-flash hit its usage limit. Switched to codex. Send your message again."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_harness_with_other_prompts_in_flight_is_not_switched_yet(monkeypatch):
+    # Morganite on #549 round 2: switching closed the harness, so a request it
+    # had already started failed with "ACP runner closed".
+    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    runner = SimpleNamespace(busy=True)
+    bus.register_service("acp_orchestrator", SimpleNamespace(runner=runner))
+    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
+    assert _Loadouts.activated == []
+    runner.busy = False  # that prompt ended too: the next failure switches
+    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
+    assert _Loadouts.activated == ["codex"]
+
+
+@pytest.mark.asyncio
+async def test_a_runner_is_busy_while_a_prompt_runs_or_waits():
+    from kollabor.llm.acp_bridge import ACPRunner
+
+    runner = ACPRunner.__new__(ACPRunner)
+    runner._active_future, runner._queue = None, asyncio.Queue()
+    assert runner.busy is False
+    runner._active_future = asyncio.get_running_loop().create_future()
+    assert runner.busy is True
+    runner._active_future.set_result(None)
+    assert runner.busy is False
+    runner._queue.put_nowait(object())  # admitted, waiting its turn
+    assert runner.busy is True
+
+
+@pytest.mark.asyncio
 async def test_other_errors_and_unset_fallbacks_never_switch(monkeypatch):
     plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
     assert not await _native_turn_fails(plugin, "Connection reset by peer")

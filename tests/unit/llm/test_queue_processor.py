@@ -829,6 +829,30 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertIn("error", published)
         self.assertIn("turn_complete", published)
 
+    def test_a_reply_streamed_in_part_is_never_asked_again(self):
+        # Morganite on #549 round 2: the new model's answer joined the failed
+        # model's streamed part as one reply.
+        self.streaming_handler.call_llm.side_effect = RuntimeError("Usage limit reached for 5 hour.")
+        self.processor.api_service.last_call_streamed = True
+        seen = []
+
+        async def hooks(event_type, data, source):
+            if event_type is EventType.LLM_REQUEST_ERROR:
+                seen.append(data.get("streamed"))
+            return {"main": {"final_data": {"retry": True}}}
+
+        self.event_bus.emit_with_hooks.side_effect = hooks
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=False, current_parent_uuid="part",
+            )
+        )
+        tap = self.renderer.get_service.return_value
+        published = [call.args[0]["type"] for call in tap.publish.call_args_list]
+        self.assertEqual(seen, [True])
+        self.assertTrue(self.processor.turn_completed)
+        self.assertIn("error", published)
+
 
     def test_pre_request_hook_can_withhold_tools_for_one_request(self):
         self.native_tools_handler.tools = [{"name": "terminal"}]

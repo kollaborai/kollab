@@ -108,11 +108,17 @@ Precedence is explicit flag → loadout field → provider profile value.
 fails because its model can't serve it: a usage limit, a quota, a rate limit
 that outlasted the retries, or an expired login. The agent says so in one line
 in the chat, switches once and runs the turn again, in the same reply. It stays
-on the fallback until you switch back with `/llm`. Two cases are not run again,
-and the notice asks you to send the message again:
+on the fallback until you switch back with `/llm`. Three cases are not run
+again, and the notice asks you to send the message again:
 
 - the fallback is an ACP harness, which has its own conversation;
-- the failed turn was an ACP harness's, which has ended before the switch.
+- the failed turn was an ACP harness's, which has ended before the switch;
+- the failed model had already streamed part of its reply, which the new
+  answer would join as one.
+
+An ACP harness still running or holding other messages is not switched yet:
+switching closes it, which would fail them too. Its next failure, once it has
+none, switches.
 
 - `/llm fallback` shows the choice; `/llm fallback off` turns it off.
 - In the web UI: Settings → Loadouts → Fallback Model, a dropdown of every

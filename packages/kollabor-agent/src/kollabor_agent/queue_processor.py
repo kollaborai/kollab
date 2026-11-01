@@ -2314,6 +2314,9 @@ class QueueProcessor:
                 )
             )
             retry = False
+            # Part of a reply already streamed would read as the start of the
+            # new model's answer, so such a turn is never asked again.
+            streamed = getattr(getattr(self, "api_service", None), "last_call_streamed", False) is True
             event_bus = getattr(self, "event_bus", None)
             if event_bus is not None:
                 try:
@@ -2324,6 +2327,7 @@ class QueueProcessor:
                             "error_code": error_code,
                             "context_window_exceeded": context_window_exceeded,
                             "message": error_msg,
+                            "streamed": streamed,
                         },
                         "llm_service",
                     )
@@ -2332,7 +2336,7 @@ class QueueProcessor:
                 except Exception:
                     logger.exception("Failed to dispatch LLM request error hooks")
 
-            if retry and not self.cancel_processing and not getattr(self, "_error_retried", False):
+            if retry and not streamed and not self.cancel_processing and not getattr(self, "_error_retried", False):
                 # Asked inside this turn, so its request's stream gets the new
                 # model's answer. Once per turn, whatever a hook asks, and never
                 # after a Stop: no loop runs the retry then, so the turn ends here.

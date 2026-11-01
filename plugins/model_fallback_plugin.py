@@ -159,7 +159,10 @@ class ModelFallbackPlugin(BasePlugin):
         kind = None if data.get("context_window_exceeded") else failure_kind(
             message, error_type=data.get("error_type"), error_code=data.get("error_code")
         )
-        if kind and await self.fall_back(message, kind=kind, retry=True) == "retry":
+        # A model that streamed part of a reply is switched and the message asked
+        # for again: a retry's answer would read as that reply's continuation.
+        retry = data.get("streamed") is not True
+        if kind and await self.fall_back(message, kind=kind, retry=retry) == "retry":
             data["retry"] = True  # the turn sends the request again, to the new model
         return data
 
@@ -178,8 +181,15 @@ class ModelFallbackPlugin(BasePlugin):
                 self._loop.call_soon_threadsafe(self._start, message)
 
     def _start(self, message: str) -> None:
-        if self._task is None or self._task.done():
-            self._task = asyncio.ensure_future(self.fall_back(message))
+        if self._task is not None and not self._task.done():
+            return
+        acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
+        if getattr(getattr(acp, "runner", None), "busy", False) is True:
+            # Another prompt runs or waits on this harness, and switching closes
+            # it ("ACP runner closed"). The next failure, on an idle harness, switches.
+            logger.info("model fallback: the harness has other prompts in flight; not switching yet")
+            return
+        self._task = asyncio.ensure_future(self.fall_back(message))
 
     # -- switching ------------------------------------------------------------
 
