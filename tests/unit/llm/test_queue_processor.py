@@ -430,7 +430,7 @@ class TestQueueProcessor(unittest.TestCase):
             await self.processor._turn_lock.acquire()  # a hub turn is running
             waiting = asyncio.create_task(voice_turn())
             await asyncio.sleep(0.01)
-            self.processor._stamp_voice_turn(None)  # the hub turn ends
+            self.processor._stamp_turn(None)  # the hub turn ends
             self.processor._turn_lock.release()
             return await waiting
 
