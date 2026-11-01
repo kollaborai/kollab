@@ -508,6 +508,104 @@ class ContextCompactionPlugin(BasePlugin):
     # Status widget
     # ------------------------------------------------------------------
 
+    def get_runtime_status_snapshot(self) -> Dict[str, Any]:
+        """Return context usage and compaction policy without conflating them."""
+        llm_service = getattr(self, "_llm_service", None)
+        has_session_usage = llm_service is not None
+        history = (self._get_conversation_history() or []) if has_session_usage else []
+        reported_prompt_tokens = self._get_prompt_tokens() if has_session_usage else 0
+        last_request_prompt_tokens = (
+            reported_prompt_tokens if reported_prompt_tokens > 0 else None
+        )
+        token_usage_stale = bool(
+            getattr(self, "_token_usage_stale_after_compaction", False)
+        )
+
+        if has_session_usage:
+            if token_usage_stale:
+                # A history swap invalidates the last request as a gate sample.
+                # The next LLM_REQUEST_POST clears this flag before evaluating
+                # the real gate; until then, expose no current gate or distance.
+                token_gate_prompt_tokens = None
+                token_gate_prompt_tokens_estimated = None
+            elif reported_prompt_tokens > 0:
+                token_gate_prompt_tokens = reported_prompt_tokens
+                token_gate_prompt_tokens_estimated = self._prompt_tokens_are_estimated()
+            else:
+                token_gate_prompt_tokens = self._estimate_history_tokens(history)
+                token_gate_prompt_tokens_estimated = True
+
+            current_prompt_tokens = self._effective_prompt_tokens()
+            current_prompt_tokens_estimated = bool(
+                token_usage_stale
+                or reported_prompt_tokens <= 0
+                or self._prompt_tokens_are_estimated()
+            )
+            outgoing_prompt_tokens = self._outgoing_prompt_tokens(history)
+            outgoing_prompt_tokens_estimated = bool(
+                current_prompt_tokens_estimated
+                or outgoing_prompt_tokens > current_prompt_tokens
+            )
+        else:
+            token_gate_prompt_tokens = None
+            token_gate_prompt_tokens_estimated = None
+            current_prompt_tokens = None
+            current_prompt_tokens_estimated = None
+            outgoing_prompt_tokens = None
+            outgoing_prompt_tokens_estimated = None
+
+        raw_context_window = self._get_context_window_tokens()
+        model_context_window_tokens = raw_context_window or None
+        automatic_threshold, threshold_source = self._get_token_threshold_details()
+        hard_cap = self._get_hard_cap_threshold()
+        tokens_until_automatic_compaction = (
+            max(0, automatic_threshold - token_gate_prompt_tokens)
+            if token_gate_prompt_tokens is not None
+            else None
+        )
+        raw_manual_threshold = self.config.get(
+            "plugins.context_compaction.token_threshold_k", 0
+        )
+        try:
+            configured_token_threshold_k = max(0, int(raw_manual_threshold))
+        except (TypeError, ValueError, OverflowError):
+            configured_token_threshold_k = 0
+
+        configured_enabled = bool(
+            self.config.get("plugins.context_compaction.enabled", True)
+        )
+        disabled_for_session = bool(getattr(self, "_disabled_for_session", False))
+        automatic_compaction_enabled = configured_enabled and not disabled_for_session
+        if not configured_enabled:
+            automatic_compaction_disabled_reason = "configuration"
+        elif disabled_for_session:
+            automatic_compaction_disabled_reason = "session_failures"
+        else:
+            automatic_compaction_disabled_reason = None
+
+        return {
+            "schema_version": 1,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "automatic_compaction_enabled": automatic_compaction_enabled,
+            "automatic_compaction_disabled_reason": automatic_compaction_disabled_reason,
+            "model_context_window_tokens": model_context_window_tokens,
+            "last_request_prompt_tokens": last_request_prompt_tokens,
+            "current_prompt_tokens": current_prompt_tokens,
+            "current_prompt_tokens_estimated": current_prompt_tokens_estimated,
+            "outgoing_prompt_tokens": outgoing_prompt_tokens,
+            "outgoing_prompt_tokens_estimated": outgoing_prompt_tokens_estimated,
+            "token_gate_prompt_tokens": token_gate_prompt_tokens,
+            "token_gate_prompt_tokens_estimated": token_gate_prompt_tokens_estimated,
+            "automatic_compaction_threshold_tokens": automatic_threshold,
+            "threshold_source": threshold_source,
+            "configured_token_threshold_k": configured_token_threshold_k,
+            "tokens_until_automatic_compaction": tokens_until_automatic_compaction,
+            "hard_cap_tokens": hard_cap,
+            "compaction_status": getattr(self, "_compaction_status", "unknown"),
+            "compaction_message": getattr(self, "_compaction_status_message", ""),
+            "compaction_action": getattr(self, "_compaction_status_action", ""),
+        }
+
     def _set_compaction_status(
         self, status: str, message: str, action: str = ""
     ) -> None:
@@ -1227,13 +1325,13 @@ class ContextCompactionPlugin(BasePlugin):
             return min(AUTO_THRESHOLD_CAP, 100_000)
         return min(context_window, AUTO_THRESHOLD_CAP)
 
-    def _get_token_threshold(self) -> int:
-        """Return the lower automatic trigger from ratio, manual value, and cap.
+    def _get_token_threshold_details(self) -> tuple[int, str]:
+        """Return the effective threshold and the policy source that binds it.
 
         A manual token threshold can lower the automatic trigger, but cannot
-        override the model safety percentage or 272K ceiling. The hard boundary
-        guard uses ``_get_hard_cap_threshold`` independently. Unknown model
-        windows retain the conservative 100K automatic fallback.
+        override the model safety percentage or 272K ceiling. It is reported as
+        manual only when it is strictly lower than that policy ceiling. Unknown
+        model windows retain the conservative 100K automatic fallback.
         """
         context_window = self._get_context_window_tokens()
         raw_ratio = self.config.get(
@@ -1246,10 +1344,9 @@ class ContextCompactionPlugin(BasePlugin):
         if not math.isfinite(ratio):
             ratio = 0.75
         ratio = max(0.50, min(0.95, ratio))
-        provider_cap = (
-            int(context_window * ratio) if context_window > 0 else 100_000
-        )
+        provider_cap = int(context_window * ratio) if context_window > 0 else 100_000
         safe_cap = min(provider_cap, AUTO_THRESHOLD_CAP)
+        policy_source = "automatic" if context_window > 0 else "fallback"
 
         raw_token_k = self.config.get(
             "plugins.context_compaction.token_threshold_k", 0
@@ -1259,8 +1356,14 @@ class ContextCompactionPlugin(BasePlugin):
         except (TypeError, ValueError, OverflowError):
             token_k = 0
         if token_k > 0:
-            return min(token_k * 1000, safe_cap)
-        return safe_cap
+            manual_threshold = token_k * 1000
+            if manual_threshold < safe_cap:
+                return manual_threshold, "manual"
+        return safe_cap, policy_source
+
+    def _get_token_threshold(self) -> int:
+        """Return the lower automatic trigger from ratio, manual value, and cap."""
+        return self._get_token_threshold_details()[0]
 
     def _should_compact(self, history: List[ConversationMessage]) -> bool:
         """Determine if compaction should trigger.
@@ -1285,6 +1388,7 @@ class ContextCompactionPlugin(BasePlugin):
         if estimated:
             prompt_tokens = self._estimate_history_tokens(history)
         token_threshold = self._get_token_threshold()
+        _, threshold_source = self._get_token_threshold_details()
         if prompt_tokens < token_threshold:
             if self._compaction_status == "paused":
                 self._set_compaction_status("idle", "")
@@ -1327,16 +1431,8 @@ class ContextCompactionPlugin(BasePlugin):
         ):
             return False
 
-        # Determine threshold source for logging
-        token_k_override = int(
-            self.config.get("plugins.context_compaction.token_threshold_k", 0)
-        )
-        if token_k_override > 0:
-            source = "manual"
-        elif self._resolve_context_window():
-            source = "auto"
-        else:
-            source = "fallback"
+        # Keep log provenance aligned with the effective policy source.
+        source = "auto" if threshold_source == "automatic" else threshold_source
 
         logger.info(
             f"Compaction triggered: {prompt_tokens} tokens"

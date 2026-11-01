@@ -21,7 +21,9 @@ import logging
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from ..message_content import serialize_openai_chat_content
+from ..goal_image_scope import safe_goal_error_cause
+
+from ..message_content import redact_error_media, serialize_openai_chat_content
 from .base import LLMProvider
 from .errors import map_openai_error
 from .message_sanitizer import strip_local_message_metadata_from_message
@@ -251,10 +253,10 @@ class OpenRouterProvider(LLMProvider):
         except ImportError as e:
             raise ImportError(
                 "OpenAI SDK not installed (required for OpenRouter). Install with: pip install openai"
-            ) from e
+            ) from safe_goal_error_cause(e)
         except Exception as e:
-            logger.error(f"Failed to initialize OpenRouter client: {e}")
-            raise map_openai_error(e, "openrouter") from e
+            logger.error(f"Failed to initialize OpenRouter client: {redact_error_media(str(e))}")
+            raise map_openai_error(e, "openrouter") from safe_goal_error_cause(e)
 
     async def call(
         self,
@@ -317,8 +319,8 @@ class OpenRouterProvider(LLMProvider):
             return unified_response
 
         except Exception as e:
-            logger.error(f"OpenRouter API call failed: {type(e).__name__}: {e}")
-            raise map_openai_error(e, "openrouter") from e
+            logger.error(f"OpenRouter API call failed: {type(e).__name__}: {redact_error_media(str(e))}")
+            raise map_openai_error(e, "openrouter") from safe_goal_error_cause(e)
 
         finally:
             await self._track_request_end()
@@ -413,8 +415,8 @@ class OpenRouterProvider(LLMProvider):
 
         except Exception as e:
             # Not an error yet: api_communication_service retries it and logs the final failure.
-            logger.warning(f"OpenRouter stream failed: {e}")
-            raise map_openai_error(e, "openrouter") from e
+            logger.warning(f"OpenRouter stream failed: {redact_error_media(str(e))}")
+            raise map_openai_error(e, "openrouter") from safe_goal_error_cause(e)
 
         finally:
             await self._track_request_end()

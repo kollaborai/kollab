@@ -22,6 +22,7 @@ DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024
 _DATA_URI_PREFIX = re.compile(r"^data:(image/[a-z0-9.+-]+);base64$", re.I)
 _BASE64 = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
+_IMAGE_DATA_URL = re.compile(r"data:image/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+", re.I)
 
 
 class MessageContentError(ValueError):
@@ -434,13 +435,48 @@ def serialize_gemini_parts(
 
 
 def redact_media_data(value: Any) -> Any:
-    """Copy a payload while replacing provider-ready image data URLs."""
+    """Copy a payload while replacing provider-ready image bytes."""
     if isinstance(value, str):
-        return "[image data redacted]" if _is_image_data_url(value) else value
+        if _is_image_data_url(value):
+            return "[image data redacted]"
+        return _IMAGE_DATA_URL.sub("[image data redacted]", value)
     if isinstance(value, list):
         return [redact_media_data(item) for item in value]
     if isinstance(value, tuple):
         return tuple(redact_media_data(item) for item in value)
     if isinstance(value, dict):
-        return {key: redact_media_data(item) for key, item in value.items()}
+        media_type = value.get("media_type") or value.get("mime_type") or value.get("mimeType")
+        image_data = isinstance(media_type, str) and media_type.lower().startswith("image/")
+        return {
+            key: "[image data redacted]" if key == "data" and image_data else redact_media_data(item)
+            for key, item in value.items()
+        }
     return value
+
+
+
+def redact_error_media(value: Any) -> Any:
+    """Withhold untrusted diagnostics during image-goal provider requests."""
+    from kollabor_ai.goal_image_scope import goal_image_diagnostics_active
+
+    if goal_image_diagnostics_active():
+        return "[provider error details withheld for image request]"
+    return redact_media_data(value)
+
+
+def safe_provider_error_code(value: Any) -> str | None:
+    """Keep known machine codes without exposing provider-supplied content."""
+    if not value:
+        return None
+    from kollabor_ai.goal_image_scope import goal_image_diagnostics_active
+
+    code = str(value)
+    if not goal_image_diagnostics_active():
+        return str(redact_media_data(code))
+    known = {
+        "authentication_error", "rate_limit_error", "timeout", "connection_error",
+        "transient_http_409", "invalid_request", "not_found", "vision_not_supported",
+        "context_length_exceeded", "context_window_exceeded", "model_context_window_exceeded",
+        "empty_response", "malformed_stream_event",
+    }
+    return code if code in known or re.fullmatch(r"server_error_5[0-9]{2}", code) else "image_request_error"
