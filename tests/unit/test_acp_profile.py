@@ -43,7 +43,7 @@ def test_default_acp_profiles_are_selectable_without_native_fallback():
 
     for name, command, package in (
         ("claude-code", "claude-agent-acp", "claude-agent-acp@0.89.0"),
-        ("codex-cli", "codex-acp", "codex-acp@2.1.1"),
+        ("codex-cli", "codex-acp", "codex-acp@2.5.0"),
     ):
         data = ProfileManager.DEFAULT_PROFILES[name]
         profile = LLMProfile.from_dict(name, data)
