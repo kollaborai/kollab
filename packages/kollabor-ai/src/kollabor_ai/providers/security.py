@@ -24,6 +24,8 @@ import re
 import secrets
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
+
+from ..goal_image_scope import safe_goal_error_cause
 from urllib.parse import urlparse
 
 # Cryptography imports for Tier 2 encrypted file storage
@@ -148,7 +150,7 @@ class APIKeyManager:
                 raise RuntimeError(
                     f"Failed to store API key in keyring: {e}\n"
                     "Check OS keyring permissions."
-                ) from e
+                ) from safe_goal_error_cause(e)
 
     async def get_key(self, profile_name: str) -> Optional[str]:
         """
@@ -292,7 +294,7 @@ class EncryptedFileKeyStorage:
             raise RuntimeError(
                 "Failed to decrypt keys. "
                 "Check KOLLAB_KEY_ENCRYPTION_PASSWORD or delete keystore file."
-            ) from e
+            ) from safe_goal_error_cause(e)
 
     def _save_keystore(self, keystore: Dict[str, str]) -> None:
         """

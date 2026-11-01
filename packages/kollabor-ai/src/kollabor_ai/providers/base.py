@@ -71,12 +71,9 @@ class LLMProvider(ABC):
         )
         self._media_resolver: Optional[Callable[[str], Optional[str]]] = None
 
-        # Last wire request payload — the exact dict handed to the HTTP
-        # client / SDK immediately before transport. Captured by each
-        # provider in call() and stream() so api_communication_service
-        # can include it in the raw conversation log. Provider-native
-        # shape; consumers tag with self.provider_type to interpret.
-        self.last_request_payload: Optional[Dict[str, Any]] = None
+        # Provider-native request snapshot for raw logs. Image bytes are
+        # redacted when stored; the actual transport payload is untouched.
+        self._last_request_payload: Optional[Dict[str, Any]] = None
 
         logger.debug(
             f"Initialized {self._provider_name} provider (model: {self.model})"
@@ -242,6 +239,16 @@ class LLMProvider(ABC):
     def is_shutdown(self) -> bool:
         """Check if provider has been shut down."""
         return self._shutdown
+
+    @property
+    def last_request_payload(self) -> Optional[Dict[str, Any]]:
+        return self._last_request_payload
+
+    @last_request_payload.setter
+    def last_request_payload(self, payload: Optional[Dict[str, Any]]) -> None:
+        from ..message_content import redact_media_data
+
+        self._last_request_payload = redact_media_data(payload)
 
     @property
     def active_requests(self) -> int:
