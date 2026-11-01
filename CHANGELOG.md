@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Hub tests now cover short AF_UNIX hub-state socket paths, so long
+  socket paths cannot silently regress the hub state client (#582).
 - Hub status flags an idle agent that still holds an open task as
   stalled after 15 minutes (#533).
 - Windows: agent commands run in Git Bash when Git for Windows is installed,
@@ -126,6 +128,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- The enrollment pending-request test fails fast with the issuer task's
+  outcome when the task has stopped, instead of burning a 5-second generic
+  timeout; a suppressed task error still reports as a clean exit, and the
+  original CI failure remains under investigation (#574).
+- ACP restart, resume and web history clear no longer report success while a
+  competing profile change leaves the old harness conversation active.
+- ACP profile and loadout changes no longer replace a harness while another
+  startup or rollback owns it. Competing changes can be retried after it ends.
+- ACP startup loadouts now stop with an error when the harness does not confirm
+  the requested model or effort, or when native-only temperature or max-token
+  settings are supplied.
+- ACP Session tab: effort set with Apply now sticks. Apply max, then switch
+  model, and the effort stays max (before, it could drop back to xhigh). A
+  model that does not offer the effort uses the highest level it offers and
+  shows a notice saying so.
+- ACP: a model change keeps the effort you picked, falls back to the highest
+  effort the new model offers, or shows a notice saying why it could not.
+  Behavior change: a restart into another ACP profile no longer keeps the
+  previous profile's model and effort picks; a restart of the same profile
+  still restores its saved picks, except where an explicit loadout sets the
+  value, and the explicit loadout wins.
+- CLI: `--llm` loadout names no longer emit a misleading profile-not-found error during profile probing before loadout resolution (#563).
 - ACP: Codex multi-tool turns now report prompt token usage matching the harness
   ledger. Reconciled prompt-response totals settle once into session stats and
   appear in the status line. Coverage depends on the adapter: Claude's prompt

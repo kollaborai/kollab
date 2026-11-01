@@ -1204,7 +1204,10 @@ async def clear_history(session_id: str):
 
     # state.restart_session clears the conversation and rebuilds the system
     # prompt, which is what "clear history but keep the prompt" means here.
-    await session.state.restart_session()
+    try:
+        await session.state.restart_session()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await session.refresh_history()
     session.last_turn_error = None
     return {"ok": True, "session_id": session_id}
