@@ -9652,20 +9652,167 @@ class HubPlugin(BasePlugin):
                 return True
         return False
 
-    def _cancel_busy_retry_for_entries(
-        self, entries: list[dict]
-    ) -> Optional[asyncio.Task]:
-        """Cancel admission when a sweep takes ownership of its exact entry."""
+    def _defer_busy_sweep_for_entries(
+        self, entries: list[dict], *, outcome: str, detail: str
+    ) -> list[dict]:
+        """Defer only the in-flight entry until admission has really settled.
+
+        Cancelling an ACP RPC waiter cannot retract a request already written to
+        the harness.  Record the sweep outcome, wake the retry pass so followers
+        can advance, and let a detached settler decide who owns the turn.
+        """
         retry_entry = getattr(self, "_busy_retry_entry", None)
-        if retry_entry is None or not any(
-            entry is retry_entry for entry in entries
-        ):
-            return None
         retry_task = getattr(self, "_busy_retry_task", None)
-        if retry_task is None or retry_task.done():
-            return None
-        retry_task.cancel()
-        return retry_task
+        immediate: list[dict] = []
+        for entry in entries:
+            if (
+                entry is retry_entry
+                and retry_task is not None
+                and not retry_task.done()
+            ):
+                entry["_busy_sweep_intent"] = (outcome, detail)
+                sweep_event = entry.get("_busy_sweep_event")
+                if sweep_event is not None:
+                    sweep_event.set()
+                continue
+            immediate.append(entry)
+        return immediate
+
+    def _parked_retry_authorized(self, entry: dict) -> bool:
+        """Revalidate saved manual-relay authority before retry admission."""
+        origin = entry.get("origin_context")
+        turn_id = origin.get("relay_turn_id") if isinstance(origin, dict) else None
+        if not turn_id:
+            return True
+        relay = getattr(self, "_relay_agent", None)
+        active = getattr(relay, "active", None) if relay is not None else None
+        record = getattr(active, "record", None)
+        if (
+            active is None
+            or getattr(active, "finished", False)
+            or not isinstance(record, dict)
+            or record.get("id") != turn_id
+        ):
+            return False
+        authorize = getattr(relay, "_authorize_active", None)
+        if not callable(authorize):
+            return False
+        from .relay_state import RelayError
+
+        try:
+            authorize(turn_id=turn_id)
+        except RelayError:
+            return False
+        return True
+
+    def _track_detached_busy_admission(
+        self, entry: dict, admission_task: asyncio.Task
+    ) -> asyncio.Task:
+        """Keep a swept admission alive until its authoritative result arrives."""
+        existing = entry.get("_busy_settler_task")
+        if isinstance(existing, asyncio.Task) and not existing.done():
+            return existing
+        loop = asyncio.get_running_loop()
+        settler = loop.create_task(
+            self._settle_detached_busy_admission(entry, admission_task)
+        )
+        entry["_busy_settler_task"] = settler
+        tasks = getattr(self, "_busy_detached_tasks", None)
+        if tasks is None:
+            tasks = self._busy_detached_tasks = set()
+        tasks.add(settler)
+
+        def _discard(done: asyncio.Task) -> None:
+            tasks.discard(done)
+            if entry.get("_busy_settler_task") is done:
+                entry.pop("_busy_settler_task", None)
+
+        settler.add_done_callback(_discard)
+        return settler
+
+    async def _settle_detached_busy_admission(
+        self, entry: dict, admission_task: asyncio.Task
+    ) -> None:
+        """Finish a swept admission without inventing a rollback outcome."""
+        try:
+            result = await asyncio.shield(admission_task)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.debug("detached parked admission failed", exc_info=True)
+            result = {"status": "rejected", "reason": "admission failed"}
+        await self._settle_swept_busy_admission(entry, result)
+
+    async def _settle_swept_busy_admission(
+        self, entry: dict, result: Any
+    ) -> None:
+        """Transfer a swept turn to admission, or apply its deferred ending."""
+        intent = entry.pop("_busy_sweep_intent", None)
+        entry.pop("_busy_sweep_event", None)
+        if intent is None:
+            return
+        status = result.get("status") if isinstance(result, dict) else None
+        if status == "queued":
+            return
+        if status == "injected":
+            message = entry["message"]
+            turns = getattr(self, "_acp_network_turns", None) or {}
+            turns.pop(message.id, None)
+            return
+        outcome, detail = intent
+        await self._end_parked_busy_turns(
+            [entry], outcome=outcome, detail=detail
+        )
+
+    async def _await_parked_busy_admission(
+        self, llm: Any, entry: dict
+    ) -> tuple[bool, Any]:
+        """Wait for admission or detach it when a sweep removes this entry."""
+        message = entry["message"]
+        sweep_event = asyncio.Event()
+        entry["_busy_sweep_event"] = sweep_event
+        self._busy_retry_entry = entry
+        loop = asyncio.get_running_loop()
+        admission_task = loop.create_task(
+            llm.submit_human_input(
+                message.content,
+                source="agent",
+                request_id=message.id,
+                thread_id=getattr(message, "thread_id", "") or message.id,
+                origin_context=dict(
+                    entry.get("origin_context")
+                    or self._agent_message_origin_context(message)
+                ),
+            )
+        )
+        sweep_task = loop.create_task(sweep_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {admission_task, sweep_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if admission_task in done:
+                return False, admission_task.result()
+            self._track_detached_busy_admission(entry, admission_task)
+            return True, None
+        except asyncio.CancelledError:
+            entry.setdefault(
+                "_busy_sweep_intent",
+                (
+                    "busy",
+                    "the receiving agent stopped while admission was pending",
+                ),
+            )
+            self._track_detached_busy_admission(entry, admission_task)
+            raise
+        finally:
+            if not sweep_task.done():
+                sweep_task.cancel()
+                await asyncio.gather(sweep_task, return_exceptions=True)
+            if getattr(self, "_busy_retry_entry", None) is entry:
+                self._busy_retry_entry = None
+            if admission_task.done() and "_busy_sweep_intent" not in entry:
+                entry.pop("_busy_sweep_event", None)
 
     def _schedule_parked_ttl(self) -> None:
         """Arm the TTL sweep for the oldest remaining parked deadline."""
@@ -9709,18 +9856,19 @@ class HubPlugin(BasePlugin):
         if not expired:
             self._schedule_parked_ttl()  # re-arm for the remaining horizon
             return
+        detail = "the busy park TTL expired"
         for entry in expired:
             self._remove_parked_entry(parked, entry)
-        self._cancel_busy_retry_for_entries(expired)
+        immediate = self._defer_busy_sweep_for_entries(
+            expired, outcome="busy", detail=detail
+        )
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-        if loop is not None:
+        if loop is not None and immediate:
             loop.create_task(
-                self._end_parked_busy_turns(
-                    expired, detail="the busy park TTL expired"
-                )
+                self._end_parked_busy_turns(immediate, detail=detail)
             )
         if parked:
             self._schedule_parked_ttl()
@@ -9775,19 +9923,17 @@ class HubPlugin(BasePlugin):
             ]
             if not departed:
                 return
+            detail = (
+                f"{from_name} went offline before the prompt queue freed a slot"
+            )
             for entry in departed:
                 self._remove_parked_entry(parked, entry)
-            retry_task = self._cancel_busy_retry_for_entries(departed)
+            immediate = self._defer_busy_sweep_for_entries(
+                departed, outcome="unavailable", detail=detail
+            )
             self._schedule_parked_ttl()
-            if retry_task is not None and retry_task is not asyncio.current_task():
-                await asyncio.gather(retry_task, return_exceptions=True)
             await self._end_parked_busy_turns(
-                departed,
-                outcome="unavailable",
-                detail=(
-                    f"{from_name} went offline before the prompt queue "
-                    "freed a slot"
-                ),
+                immediate, outcome="unavailable", detail=detail
             )
         except Exception:
             logger.debug(
@@ -9865,33 +10011,26 @@ class HubPlugin(BasePlugin):
             while parked:
                 entry = parked[0]
                 message = entry["message"]
-                self._busy_retry_entry = entry
-                try:
-                    result = await llm.submit_human_input(
-                        message.content,
-                        source="agent",
-                        request_id=message.id,
-                        thread_id=(
-                            getattr(message, "thread_id", "") or message.id
-                        ),
-                        origin_context=dict(
-                            entry.get("origin_context")
-                            or self._agent_message_origin_context(message)
-                        ),
+                if not self._parked_retry_authorized(entry):
+                    self._remove_parked_entry(parked, entry)
+                    await self._end_parked_busy_turns(
+                        [entry],
+                        outcome="unavailable",
+                        detail="remote conversation authority is no longer valid",
                     )
-                except asyncio.CancelledError:
-                    current = getattr(self, "_acp_busy_parked", None) or []
-                    if not self._parked_entry_present(current, entry):
-                        # Expiry or departure took terminal ownership while
-                        # admission was suspended. Its cancellation prevents
-                        # this request from being admitted after that ending.
-                        return
-                    raise
-                finally:
-                    if getattr(self, "_busy_retry_entry", None) is entry:
-                        self._busy_retry_entry = None
+                    parked = getattr(self, "_acp_busy_parked", None) or []
+                    continue
+                detached, result = await self._await_parked_busy_admission(
+                    llm, entry
+                )
                 parked = getattr(self, "_acp_busy_parked", None) or []
+                if detached:
+                    continue
                 if not self._parked_entry_present(parked, entry):
+                    if "_busy_sweep_intent" in entry:
+                        await self._settle_swept_busy_admission(entry, result)
+                        parked = getattr(self, "_acp_busy_parked", None) or []
+                        continue
                     # A legacy or external sweep already owns this turn. Do
                     # not mutate another parked entry by position.
                     return
@@ -15919,12 +16058,9 @@ class HubPlugin(BasePlugin):
             bound_task.cancel()
             await asyncio.gather(bound_task, return_exceptions=True)
 
-        # Parked busy messages (#483) must not vanish with the agent: their
-        # network turns end busy so the asking agent learns immediately.
-        retry_task = getattr(self, "_busy_retry_task", None)
-        if retry_task is not None and not retry_task.done():
-            retry_task.cancel()
-            await asyncio.gather(retry_task, return_exceptions=True)
+        # Parked busy messages (#483) must not vanish with the agent.  An
+        # in-flight ACP RPC may already be on the wire, so shutdown signals its
+        # deferred outcome instead of cancelling and pretending it rolled back.
         settle_task = getattr(self, "_acp_settle_recheck_task", None)
         if settle_task is not None and not settle_task.done():
             settle_task.cancel()
@@ -15933,16 +16069,26 @@ class HubPlugin(BasePlugin):
         if ttl_handle is not None:
             ttl_handle.cancel()
             self._parked_ttl_handle = None
+        detail = (
+            "the receiving agent shut down before the prompt queue freed a slot"
+        )
         parked = list(getattr(self, "_acp_busy_parked", None) or [])
-        if parked:
-            self._acp_busy_parked = []
-            await self._end_parked_busy_turns(
-                parked,
-                detail=(
-                    "the receiving agent shut down before the prompt "
-                    "queue freed a slot"
-                ),
-            )
+        self._acp_busy_parked = []
+        immediate = self._defer_busy_sweep_for_entries(
+            parked, outcome="busy", detail=detail
+        )
+        if immediate:
+            await self._end_parked_busy_turns(immediate, detail=detail)
+        retry_task = getattr(self, "_busy_retry_task", None)
+        if (
+            retry_task is not None
+            and retry_task is not asyncio.current_task()
+            and not retry_task.done()
+        ):
+            await asyncio.gather(retry_task, return_exceptions=True)
+        detached_tasks = list(getattr(self, "_busy_detached_tasks", None) or ())
+        if detached_tasks:
+            await asyncio.gather(*detached_tasks, return_exceptions=True)
 
         relay_start = getattr(self, "_relay_startup_task", None)
         if relay_start:
