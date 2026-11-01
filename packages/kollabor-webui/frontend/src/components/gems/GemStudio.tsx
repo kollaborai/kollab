@@ -266,13 +266,21 @@ function StudioBody({
             </div>
             {!dressGem ? null : (
               <>
-                <div className="flex flex-wrap justify-center gap-1.5" role="group" aria-label="Preview activity">
-                  {STAGE_ACTIVITIES.map((option) => (
-                    <Chip key={option} active={option === activity} onClick={() => setActivity(option)}>
-                      {titleCase(option)}
-                    </Chip>
-                  ))}
-                </div>
+                {/* Keep the row scrollable on touch without adding a second tab stop
+                    around the selected trigger inside the dialog's focus loop. */}
+                <Tabs value={activity} onValueChange={(value) => setActivity(value as Activity)} className="w-full min-w-0 max-w-max">
+                  <TabsList
+                    aria-label="Preview activity"
+                    tabIndex={-1}
+                    className="pointer-coarse:h-11 w-full min-w-0 max-w-full justify-start overflow-x-auto"
+                  >
+                    {STAGE_ACTIVITIES.map((option) => (
+                      <TabsTrigger key={option} value={option} className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5 text-xs">
+                        {titleCase(option)}
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
                 <Button
                   type="button"
                   variant="outline"
@@ -287,21 +295,21 @@ function StudioBody({
             )}
           </section>
 
-          <aside className="bg-muted/20 flex shrink-0 flex-col lg:min-h-0">
+          <aside className="bg-muted/20 flex min-w-0 shrink-0 flex-col lg:min-h-0">
             {(
               <Tabs
                 defaultValue={focus?.tab ?? (focus && !dressGem ? "avatar" : "eyes")}
-                className="flex flex-col gap-0 lg:min-h-0 lg:flex-1"
+                className="flex min-w-0 flex-col gap-0 lg:min-h-0 lg:flex-1"
               >
-                <TabsList aria-label="Look" className="mx-3 mt-3 w-auto shrink-0 justify-start overflow-x-auto">
-                  {focus ? <TabsTrigger className="flex-none px-1.5" value="avatar">Avatar</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="shape">Shape</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="eyes">Eyes</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="hair">Hair</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="hat">Hat</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="aura">Aura</TabsTrigger> : null}
-                  <TabsTrigger className="flex-none px-1.5" value="color">Color</TabsTrigger>
-                  {chat ? <TabsTrigger className="flex-none px-1.5" value="chat">Chat</TabsTrigger> : null}
+                <TabsList aria-label="Look" tabIndex={-1} className="pointer-coarse:h-11 mx-3 mt-3 w-auto shrink-0 justify-start overflow-x-auto">
+                  {focus ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="avatar">Avatar</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="shape">Shape</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="eyes">Eyes</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="hair">Hair</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="hat">Hat</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="aura">Aura</TabsTrigger> : null}
+                  <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="color">Color</TabsTrigger>
+                  {chat ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="chat">Chat</TabsTrigger> : null}
                 </TabsList>
 
                 {focus && current ? (
@@ -572,7 +580,12 @@ function StudioBody({
         <Button type="button" variant="outline" onClick={onDone}>
           Cancel
         </Button>
-        <Button type="button" onClick={() => void save()} disabled={saving || !studio}>
+        <Button
+          type="button"
+          onClick={() => void save()}
+          disabled={saving || !studio}
+          className="bg-highlight text-highlight-foreground hover:bg-highlight/90"
+        >
           {saving ? <Loader2 className="size-4 animate-spin" /> : null}
           Save
         </Button>
