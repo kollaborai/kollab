@@ -1656,7 +1656,7 @@ def _source_ip(
 ) -> str | None:
     transport = request.transport
     sock = transport.get_extra_info("socket") if transport is not None else None
-    if sock is not None and sock.family == socket.AF_UNIX:
+    if sock is not None and sock.family == getattr(socket, "AF_UNIX", None):
         # Only a process allowed to open the listener's socket file (the proxy;
         # see bind_unix_socket) gets here, so its X-Real-IP is the client. No
         # header means a misconfigured proxy: refuse rather than share one bucket.
