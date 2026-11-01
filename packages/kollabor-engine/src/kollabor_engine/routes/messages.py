@@ -11,12 +11,13 @@ import copy
 import json
 import logging
 import time
+import uuid
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import anyio
-from fastapi import APIRouter, HTTPException  # type: ignore[import-not-found]
+from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not-found]
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import-not-found]
 
@@ -28,9 +29,32 @@ from kollabor_ai.message_content import (
 
 from .. import sse
 from ..server import get_session_registry
+from ..session_context import (
+    PHONE_STREAM_REVOKED,
+    SESSION_READ_CONTEXT_SCOPE_KEY,
+    SessionReadContext,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["messages"])
+
+
+
+def _request_read_context(request: Request | None) -> SessionReadContext | None:
+    """Read only the typed identity installed in the server-owned ASGI scope."""
+    if request is None:
+        return None
+    state = request.scope.get("state")
+    if not isinstance(state, dict):
+        return None
+    context = state.get(SESSION_READ_CONTEXT_SCOPE_KEY)
+    return context if isinstance(context, SessionReadContext) else None
+
+
+def _subscribe(session, context: SessionReadContext | None):
+    if context is None:
+        return session.subscribe()
+    return session.subscribe(context=context)
 
 # A turn can legitimately run for a long time (big builds, long tool chains).
 # This only bounds silence: any event from the daemon resets it.
@@ -42,12 +66,58 @@ EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 STREAM_PUBLISH_INTERVAL = 0.15
 
 
-def _foreign_queued_client_completion(event: Dict[str, Any], request_ids: set[str]) -> bool:
-    """A cancelled pre-start client request cannot finish another active stream."""
-    return (event.get("type") == "turn_complete"
-            and event.get("input_source") == "acp_client"
-            and event.get("queued") is True
-            and str(event.get("request_id") or "") not in request_ids)
+def _foreign_completion(event: Dict[str, Any], request_ids: set[str], tagged: bool = False) -> bool:
+    """Another request's turn_complete never finishes this stream.
+
+    A cancelled pre-start client request is one. So is an earlier turn's
+    completion the daemon published while the engine was reattaching: it
+    arrives after this request was accepted (#543). With ``tagged`` the daemon
+    echoed this request's id, so its turn carries it: a completion naming
+    none belongs to a turn that was running when this request came (#551).
+    """
+    if event.get("type") != "turn_complete":
+        return False
+    request_id = str(event.get("request_id") or "")
+    if event.get("input_source") == "acp_client" and event.get("queued") is True:
+        return request_id not in request_ids
+    named = {request_id} - {""} | {str(i) for i in event.get("request_ids") or ()}
+    if not named:
+        return tagged
+    return bool(request_ids) and not named & request_ids
+
+
+def _foreign_error(event: Dict[str, Any], request_ids: set[str]) -> bool:
+    """An error that names only other requests is theirs: a frame dropped for an
+    old turn, replayed after a reattach, must not fail this request (#543)."""
+    if event.get("type") != "error":
+        return False
+    named = {str(event.get("request_id") or "")} - {""} | {str(i) for i in event.get("request_ids") or ()}
+    return bool(named and request_ids) and not named & request_ids
+
+
+# What a turn streams as its reply. A voice or ACP turn names its request by
+# request_id alone; a turn typed in the terminal names none.
+_TURN_OUTPUT = frozenset(
+    {"token", "response", "thinking", "acp_update", "tool_start", "tool_result", "permission_request"}
+)
+_PERMISSION_ANSWERS = frozenset({"permission_granted", "permission_denied", "permission_cancelled"})
+
+
+def _foreign_output(event: Dict[str, Any], request_ids: set[str], tagged: bool = False) -> bool:
+    """An event a turn names for other requests only is theirs: a message sent
+    while another turn runs gets none of that turn's text, tool cards or
+    permission prompts (#551). With ``tagged`` this request's turn names it, so
+    reply output naming none is another turn's too. Other unnamed events
+    (session-wide, older daemons) pass, and so do permission answers: they
+    close a card by its tool id, whichever run showed it."""
+    if event.get("type") in _PERMISSION_ANSWERS:
+        return False  # a parked card is answered by a later message
+    named = {str(i) for i in event.get("request_ids") or ()}
+    if event.get("type") in _TURN_OUTPUT:
+        named |= {str(event.get("request_id") or "")} - {""}
+        if not named:
+            return tagged
+    return bool(named and request_ids) and not named & request_ids
 
 
 def _contains_reserved_voice_origin(value: Any) -> bool:
@@ -70,7 +140,9 @@ class MessageRequest(BaseModel):
 
 
 @router.post("/{session_id}/message")
-async def send_message(session_id: str, body: MessageRequest):
+async def send_message(
+    session_id: str, body: MessageRequest, request: Request = None
+):
     if _contains_reserved_voice_origin(
         {"origin_context": body.origin_context, "content": body.content}
     ):
@@ -87,12 +159,14 @@ async def send_message(session_id: str, body: MessageRequest):
         raise HTTPException(status_code=409, detail="Session daemon is not running")
 
     # Subscribe before submitting so no event can land in the gap.
-    queue = session.subscribe()
+    queue = _subscribe(session, _request_read_context(request))
+    # Always an id: a daemon that echoes it stamps this turn with it (#551).
+    request_id = body.request_id or uuid.uuid4().hex
 
     try:
         accepted = await session.send_message(
             body.content,
-            request_id=body.request_id,
+            request_id=request_id,
             thread_id=body.thread_id,
             origin_context=body.origin_context,
         )
@@ -106,8 +180,8 @@ async def send_message(session_id: str, body: MessageRequest):
         reason = accepted.get("reason", "rejected")
         status = 409 if "in flight" in reason else 400
         raise HTTPException(status_code=status, detail=accepted.get("message") or reason)
-    request_id = accepted.get("request_id") or body.request_id
-    request_ids = {str(request_id)} if request_id else set()
+    tagged = bool(accepted.get("request_id"))
+    request_ids = {str(accepted.get("request_id") or request_id)}
 
     async def event_generator():
         try:
@@ -128,8 +202,12 @@ async def send_message(session_id: str, body: MessageRequest):
                     }
                     return
 
+                if event is PHONE_STREAM_REVOKED:
+                    return
                 event.setdefault("session_id", session_id)
-                if _foreign_queued_client_completion(event, request_ids):
+                if _foreign_completion(event, request_ids, tagged):
+                    continue
+                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids, tagged):
                     continue
 
                 if event.get("type") == "daemon_closed":
@@ -151,7 +229,7 @@ async def send_message(session_id: str, body: MessageRequest):
 
 
 @router.get("/{session_id}/events")
-async def stream_events(session_id: str):
+async def stream_events(session_id: str, request: Request = None):
     """Follow a session's event stream without submitting a turn.
 
     A client that reloads mid-turn loses the POST /message stream, but the
@@ -171,7 +249,7 @@ async def stream_events(session_id: str):
     if not session.alive:
         raise HTTPException(status_code=409, detail="Session daemon is not running")
 
-    queue = session.subscribe()
+    queue = _subscribe(session, _request_read_context(request))
 
     async def event_generator():
         try:
@@ -183,6 +261,8 @@ async def stream_events(session_id: str):
                 except asyncio.TimeoutError:
                     return
 
+                if event is PHONE_STREAM_REVOKED:
+                    return
                 event.setdefault("session_id", session_id)
                 if event.get("type") == "daemon_closed":
                     yield {
@@ -295,7 +375,8 @@ async def _assistant_next_event(queue, controller, timeout=None):
         if event_task not in done:
             return {}
         cancel_task.cancel()
-        return event_task.result()
+        event = event_task.result()
+        return None if event is PHONE_STREAM_REVOKED else event
     finally:
         for task in (event_task, cancel_task):
             if not task.done():
@@ -760,7 +841,9 @@ async def _assistant_protocol_stream(stream, completion: Dict[str, Any]):
 
 
 @router.post("/{session_id}/assistant")
-async def assistant_transport(session_id: str, body: AssistantRequest):
+async def assistant_transport(
+    session_id: str, body: AssistantRequest, request: Request = None
+):
     """Serve one assistant-ui assistant-transport run for a session.
 
     The daemon remains the source of truth.  This adapter translates its
@@ -774,6 +857,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
     if not session.alive:
         raise HTTPException(status_code=409, detail="Session daemon is not running")
 
+    read_context = _request_read_context(request)
+
     try:
         from assistant_stream import RunController, create_run
         from assistant_stream.serialization import AssistantTransportResponse
@@ -786,7 +871,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
     completion: Dict[str, Any] = {"completed": False}
 
     async def run_callback(controller: RunController):
-        queue = session.subscribe()
+        queue = _subscribe(session, read_context)
         tool_controllers: Dict[str, Any] = {}
         permission_controllers: Dict[str, Any] = {}
         permission_tool_ids: Dict[str, str] = {}
@@ -796,6 +881,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         )
         submitted_contents: List[MessageContent] = []
         request_ids: set[str] = set()
+        untagged = False  # an admission that echoed no id: its turn carries none (#551)
         answered_prompts: set[str] = set()  # daemon tool ids this request answered
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
@@ -869,7 +955,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     if not content_to_text(message_content).strip():
                         controller.add_error("add-message command has no text")
                         return
-                    accepted = await session.send_message(message_content)
+                    accepted = await session.send_message(message_content, request_id=uuid.uuid4().hex)
                     saw_action = True
                     if not accepted.get("accepted"):
                         controller.add_error(
@@ -882,6 +968,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                         controller.state["error"] = ""
                     if accepted.get("request_id"):
                         request_ids.add(str(accepted["request_id"]))
+                    else:
+                        untagged = True
                     submitted_contents.append(message_content)
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
@@ -952,7 +1040,10 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     publish_progress()
                     continue
                 event_type = str(event.get("type") or "")
-                if _foreign_queued_client_completion(event, request_ids):
+                tagged = bool(request_ids) and not untagged
+                if _foreign_completion(event, request_ids, tagged):
+                    continue
+                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids, tagged):
                     continue
 
                 if event_type == "token":

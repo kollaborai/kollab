@@ -127,7 +127,7 @@ Session and message endpoints:
 | `DELETE` | `/sessions/{session_id}` | shut down and remove a session; a removal that stops the agent but cannot update its owner record returns 503 with a retry hint and keeps the session listed (`deletion_pending`), and a retried call clears the record without stopping it again |
 | `GET` | `/sessions/{session_id}/history` | read conversation history |
 | `DELETE` | `/sessions/{session_id}/history` | clear history, preserving system prompt |
-| `POST` | `/sessions/{session_id}/message` | send one turn; returns SSE |
+| `POST` | `/sessions/{session_id}/message` | send one turn; returns SSE until that turn's `turn_complete`. The engine always sends a request id, and a daemon that echoes it names it in the answering turn's `request_ids`, so a turn already running when the message came never ends this stream |
 | `POST` | `/sessions/{session_id}/cancel` | cancel active turn |
 
 Permissions:

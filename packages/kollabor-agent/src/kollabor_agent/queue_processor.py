@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -52,12 +53,59 @@ CancellationOrigin = Literal["human", "remote_task", "external"]
 
 
 @dataclass
+class TaggedInput:
+    """Typed input a client follows by request id (#551).
+
+    Not a QueuedInput: overflow may drop it like any typed message. Its turn's
+    events carry ``request_ids``, so the client's stream ends on this turn's
+    completion, not on one that was already running when the input arrived.
+    """
+
+    content: MessageContent
+    request_ids: tuple[str, ...]
+
+
+def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
+    """The request ids a batch answers (#551)."""
+    return tuple(i for m in messages if isinstance(m, TaggedInput) for i in m.request_ids)
+
+
+@dataclass
 class QueuedInput:
     """A user message with routing metadata preserved through queue batching."""
 
     content: MessageContent
     voice: dict
     origin_context: dict[str, Any] | None = None
+    # Marks a system-initiated corrective nudge (first-turn stall revival,
+    # #453): never resets the nudge budget, so it cannot loop.
+    is_system_nudge: bool = False
+
+
+_UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")
+
+
+def first_turn_stall_signature(response_text: str) -> tuple[str, str] | None:
+    """Detect a reply that stalled instead of acting (#453).
+
+    Returns (kind, detail) when the reply ends in one of the two stall
+    shapes seen in detached first turns, else None:
+    - ("unfinished_tool_tag", "<tag>") — trailing unclosed or truncated
+      tool tag with no matching closer anywhere in the reply.
+    - ("announced_no_action", "") — reply ends with ':' right after
+      announcing the next step, the todo-plan-then-idle shape.
+    """
+    text = (response_text or "").rstrip()
+    if not text:
+        return None
+    match = _UNFINISHED_TAG_RE.search(text)
+    if match:
+        tag = match.group(1)
+        if f"</{tag}>" not in text:
+            return ("unfinished_tool_tag", f"<{tag}>")
+    if text.endswith(":"):
+        return ("announced_no_action", "")
+    return None
 
 
 def merge_livekit_origin_contexts(messages: List[Any]) -> dict[str, Any] | None:
@@ -560,8 +608,13 @@ class QueueProcessor:
         # parity, hooks read it on stdin), the counter caps blocks per turn.
         self._stop_hook_active = False
         self._stop_hook_continuations = 0
+        # First-turn stall revival budget (#453): one corrective system
+        # nudge per real inbound batch. Only process_message_batch resets
+        # it, and never for a batch that is itself a nudge.
+        self._first_turn_nudge_budget = 0
         self.active_origin_context: dict[str, Any] | None = None
-        self._voice_turn_token: Any = None  # current_turn stamp (_stamp_voice_turn)
+        self._turn_token: Any = None  # current_turn stamp (_stamp_turn)
+        self.active_request_ids: tuple[str, ...] = ()  # what the running batch answers (#551)
         self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
         self._after_turn: list[tuple[str, Callable[[], Awaitable[Any]]]] = []  # see after_turn
         self._after_turn_flush: asyncio.Task | None = None
@@ -645,7 +698,23 @@ class QueueProcessor:
         self._cancel_generation += 1
         self._cancel_processing = True
         self._cancel_origin = origin
+        self._end_queued_chat()
         return self._cancel_generation
+
+    def _end_queued_chat(self) -> None:
+        """A cancel stops the drain, and the queue waits for the next message:
+        a chat message in it would wait with its stream open, so it ends now (#551)."""
+        queue = getattr(self, "processing_queue", None)
+        for item in [i for i in getattr(queue, "_queue", ()) if isinstance(i, TaggedInput)]:
+            self._end_queued(item)
+
+    def _end_queued(self, item: Any) -> None:
+        """Take a chat message out of the queue unrun, and end its stream."""
+        queue = self.processing_queue
+        queue._queue.remove(item)
+        queue.task_done()
+        queue._wakeup_next(queue._putters)
+        self._end_dropped(item, "Stopped before this message ran. Send it again.")
 
     def clear_remote_task_cancellation(self, generation: int) -> bool:
         """Clear an idle relay cancellation only if no newer request replaced it."""
@@ -761,6 +830,58 @@ class QueueProcessor:
                 carried[key] = (target, text)
         self._carried_context = carried
 
+    def _is_unattended_runtime(self) -> bool:
+        """True when this processor runs inside a detached daemon (#453).
+
+        Interactive and attach sessions have a human watching the reply;
+        only an unattended daemon turn needs the corrective nudge.
+        """
+        if not self.event_bus:
+            return False
+        layout = self.event_bus.get_service("layout_manager")
+        return str(getattr(layout, "runtime_mode", "") or "") == "daemon"
+
+    async def _maybe_nudge_first_turn_stall(
+        self, response_text: str
+    ) -> None:
+        """Queue one corrective nudge for a stalled first turn (#453).
+
+        A zero-tool reply that ends mid-tool-tag or right after announcing
+        a next step leaves a detached agent idle with nobody watching. The
+        nudge is a plain queued message, so the existing drain loop handles
+        the revival exactly like a peer nudge. One per real inbound batch;
+        a nudge batch never re-arms the budget, so it cannot loop.
+        """
+        if self._first_turn_nudge_budget <= 0:
+            return
+        if not self._is_unattended_runtime():
+            return
+        signature = first_turn_stall_signature(response_text)
+        if signature is None:
+            return
+        kind, detail = signature
+        self._first_turn_nudge_budget = 0
+        if kind == "unfinished_tool_tag":
+            content = (
+                f"Your last reply ended with an unfinished tool tag {detail} "
+                "and no tool ran. Finish the tool call now — emit the "
+                "complete tag with its closing marker — or state plainly "
+                "that no tool is needed and complete the task."
+            )
+        else:
+            content = (
+                "Your last reply announced the next step but made no tool "
+                "call. Take that step now using your tools, or report the "
+                "task complete."
+            )
+        logger.info(
+            "First-turn stall detected (%s); queueing corrective nudge (#453)",
+            kind,
+        )
+        await self.enqueue(
+            QueuedInput(content=content, voice={}, is_system_nudge=True)
+        )
+
     async def enqueue(self, message: MessageContent) -> None:
         """Enqueue message with overflow strategy."""
         # Watchdog heartbeat: new work arriving is activity — keeps a session
@@ -789,15 +910,53 @@ class QueueProcessor:
             pass
 
         strategy = self.task_config.queue.overflow_strategy
+        generation = getattr(self, "_cancel_generation", 0)
 
-        if strategy == "drop_oldest":
-            await self._drop_oldest_strategy(message)
-        elif strategy == "drop_newest":
-            self._drop_newest_strategy()
-        elif strategy == "block":
-            await self._block_strategy(message)
-        else:
-            self._unknown_strategy(message)
+        try:
+            if strategy == "drop_oldest":
+                await self._drop_oldest_strategy(message)
+            elif strategy == "drop_newest":
+                self._drop_newest_strategy()
+            elif strategy == "block":
+                await self._block_strategy(message)
+            else:
+                self._unknown_strategy(message)
+        except RuntimeError:
+            self._end_dropped(message)  # refused: it never runs, so its stream ends now
+            raise
+        if (
+            getattr(self, "_cancel_generation", 0) != generation
+            and isinstance(message, TaggedInput)
+            and message in self.processing_queue._queue
+        ):
+            # A Stop swept the queue while this waited for room: no drain runs it
+            # until the next message, so it ends as the swept ones did.
+            self._end_queued(message)
+
+    def _end_dropped(
+        self,
+        item: Any,
+        why: str = "The agent's queue was full, so this message was dropped. Send it again.",
+    ) -> None:
+        """A chat message that never runs: its stream ends, saying why (#551)."""
+        if isinstance(item, TaggedInput):
+            ids = list(item.request_ids)
+            publish_semantic(self.renderer, "error", request_ids=ids, message=why)
+            publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
+
+    def _end_requests(self, why: str) -> None:
+        """A chain stopped short of its turn's completion still ends the requests
+        it answers: their streams wait for one, and the next turn would name them."""
+        if not self.active_request_ids:
+            return
+        self._publish_ended(self.active_request_ids, why)
+        self.active_request_ids = ()
+        self._stamp_turn(None)
+
+    def _publish_ended(self, request_ids: tuple[str, ...], why: str) -> None:
+        ids = list(request_ids)
+        publish_semantic(self.renderer, "error", request_ids=ids, message=why)
+        publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
 
     async def _drop_oldest_strategy(self, message: MessageContent) -> None:
         """Drop oldest task to make room."""
@@ -810,7 +969,7 @@ class QueueProcessor:
         # Note: We need access to task_manager metadata here
         # For now, we'll drop from queue directly
         try:
-            self.processing_queue.get_nowait()
+            self._end_dropped(self.processing_queue.get_nowait())
             self._queue_metrics["drop_oldest_count"] += 1
             if self.task_config.queue.log_queue_events:
                 logger.info("Dropped oldest message from queue")
@@ -824,6 +983,7 @@ class QueueProcessor:
             self._queue_metrics["total_enqueue_successes"] += 1
         except asyncio.QueueFull:
             self.dropped_messages += 1
+            self._end_dropped(message)
 
     def _drop_newest_strategy(self) -> None:
         """Raise error when queue is full."""
@@ -865,6 +1025,7 @@ class QueueProcessor:
                         f"Block timeout after {elapsed:.2f}s, dropping message"
                     )
                 self.dropped_messages += 1
+                self._end_dropped(message)
                 return
 
             await asyncio.sleep(poll_interval)
@@ -877,11 +1038,12 @@ class QueueProcessor:
             f"Unknown overflow strategy '{self.task_config.queue.overflow_strategy}', defaulting to drop_oldest"
         )
         try:
-            self.processing_queue.get_nowait()
+            self._end_dropped(self.processing_queue.get_nowait())
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
         except asyncio.QueueEmpty:
             self.dropped_messages += 1
+            self._end_dropped(message)
 
     def note_chain_end(self) -> None:
         """Tell the hub a whole chain just ended (a remote request's turn ends here).
@@ -1009,12 +1171,13 @@ class QueueProcessor:
                             f"({MAX_CONTINUATION_TURNS}) without completing — "
                             f"stopping runaway chain"
                         )
-                        self.message_display_service.display_error_message(
-                            f"Continuation stopped after "
-                            f"{MAX_CONTINUATION_TURNS} turns without "
+                        why = (
+                            f"Continuation stopped after {MAX_CONTINUATION_TURNS} turns without "
                             f"completing. This is a safety backstop."
                         )
+                        self.message_display_service.display_error_message(why)
                         self.turn_completed = True
+                        self._end_requests(why)
                         break
 
                     try:
@@ -1034,11 +1197,10 @@ class QueueProcessor:
                                 f"Circuit breaker: {stuck.count} identical "
                                 f"tool errors in a row, breaking loop"
                             )
-                            self.message_display_service.display_error_message(
-                                f"Stuck loop detected: same tool error repeated "
-                                f"{stuck.count} times. Breaking."
-                            )
+                            why = f"Stuck loop detected: same tool error repeated {stuck.count} times. Breaking."
+                            self.message_display_service.display_error_message(why)
                             self.turn_completed = True
+                            self._end_requests(why)
                             break
 
                     except Exception as e:
@@ -1052,6 +1214,7 @@ class QueueProcessor:
                             f"conversation failed on turn {turn_count}: {e}"
                         )
                         self.turn_completed = True
+                        self._end_requests(self.last_turn_error)
                         break
 
                 # Done, cancelled or cut off by new input: no round of it is left.
@@ -1131,12 +1294,15 @@ class QueueProcessor:
         self,
         messages: List[MessageContent],
         current_parent_uuid: str,
+        request_ids: tuple[str, ...] | None = None,
     ) -> str:
         """Process a batch of messages.
 
         Args:
             messages: List of user messages to process
             current_parent_uuid: Current parent UUID for message threading
+            request_ids: What the batch answers, when the caller merged its
+                TaggedInputs away; else read from ``messages``
 
         Returns:
             Updated parent UUID
@@ -1148,55 +1314,70 @@ class QueueProcessor:
         # read it as its own continuation and skip blocking.
         self._stop_hook_continuations = 0
         self._stop_hook_active = False
-        voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
-        self.active_voice = voice_inputs[-1].voice if voice_inputs else None
-        merged_origin_context = merge_voice_origin_contexts(messages)
-        previous_origin_context = self.active_origin_context
-        if (
-            is_voice_origin(previous_origin_context)
-            and (
-                not isinstance(merged_origin_context, dict)
-                or merged_origin_context.get("admission_capability")
-                != previous_origin_context.get("admission_capability")
+        # Real (non-nudge) inbound input re-arms the one-per-batch
+        # first-turn stall nudge (#453); a nudge batch never does.
+        self._first_turn_nudge_budget = 0 if any(
+            getattr(m, "is_system_nudge", False) for m in messages
+        ) else 1
+        # Taken up once this batch's turn holds the lock (#551): a turn still
+        # running clears what it answered as it ends, never these.
+        batch_ids = batch_request_ids(messages) if request_ids is None else request_ids
+        try:
+            voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
+            self.active_voice = voice_inputs[-1].voice if voice_inputs else None
+            merged_origin_context = merge_voice_origin_contexts(messages)
+            previous_origin_context = self.active_origin_context
+            if (
+                is_voice_origin(previous_origin_context)
+                and (
+                    not isinstance(merged_origin_context, dict)
+                    or merged_origin_context.get("admission_capability")
+                    != previous_origin_context.get("admission_capability")
+                )
+            ):
+                revoke_voice_admission_context(previous_origin_context)
+                if isinstance(merged_origin_context, dict):
+                    revoke_voice_admission_context(merged_origin_context)
+                # Its reply goes to the voice turn in it, else to the one it cut off.
+                turn_id = _voice_turn_id(merged_origin_context) or _voice_turn_id(previous_origin_context)
+                merged_origin_context = (
+                    _invalid_voice_context(turn_id)
+                    if turn_id or previous_origin_context.get("source") != DEVICE_VOICE_SOURCE
+                    else _invalid_device_voice_context()
+                )
+            self.active_origin_context = merged_origin_context
+            self._open_voice_turn = _voice_turn_id(merged_origin_context)
+            combined_message = combine_message_contents(
+                [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
-        ):
-            revoke_voice_admission_context(previous_origin_context)
-            if isinstance(merged_origin_context, dict):
-                revoke_voice_admission_context(merged_origin_context)
-            # Its reply goes to the voice turn in it, else to the one it cut off.
-            turn_id = _voice_turn_id(merged_origin_context) or _voice_turn_id(previous_origin_context)
-            merged_origin_context = (
-                _invalid_voice_context(turn_id)
-                if turn_id or previous_origin_context.get("source") != DEVICE_VOICE_SOURCE
-                else _invalid_device_voice_context()
+            if self.active_voice:
+                from kollabor_voice.voice_context import voice_preamble
+
+                combined_message = prepend_text(
+                    voice_preamble(
+                        self.active_voice, self._voice_rules_in_context(self.active_voice)
+                    ),
+                    combined_message,
+                )
+
+            metadata: dict[str, Any] = (
+                {"source": "voice", "voice": self.active_voice} if self.active_voice else {}
             )
-        self.active_origin_context = merged_origin_context
-        self._open_voice_turn = _voice_turn_id(merged_origin_context)
-        combined_message = combine_message_contents(
-            [m.content if isinstance(m, QueuedInput) else m for m in messages]
-        )
-        if self.active_voice:
-            from kollabor_voice.voice_context import voice_preamble
+            approvals = getattr(self.tool_executor, "yes_approvals", None)
+            if isinstance(approvals, YesApprovals) and (note := approvals.take_note()):
+                metadata["injected_context"] = note  # what the user's yes approved, model-only
 
-            combined_message = prepend_text(
-                voice_preamble(
-                    self.active_voice, self._voice_rules_in_context(self.active_voice)
-                ),
-                combined_message,
+            # Add user message to conversation history
+            self._add_message_fn(
+                ConversationMessage(role="user", content=combined_message, metadata=metadata),
+                parent_uuid=current_parent_uuid,
             )
-
-        metadata: dict[str, Any] = (
-            {"source": "voice", "voice": self.active_voice} if self.active_voice else {}
-        )
-        approvals = getattr(self.tool_executor, "yes_approvals", None)
-        if isinstance(approvals, YesApprovals) and (note := approvals.take_note()):
-            metadata["injected_context"] = note  # what the user's yes approved, model-only
-
-        # Add user message to conversation history
-        self._add_message_fn(
-            ConversationMessage(role="user", content=combined_message, metadata=metadata),
-            parent_uuid=current_parent_uuid,
-        )
+        except Exception as exc:
+            # No turn took its requests up: they end here, or their streams
+            # wait for a completion that never comes (#551).
+            if batch_ids:
+                self._publish_ended(batch_ids, str(exc) or type(exc).__name__)
+            raise
 
         # Execute LLM turn with user message
         if self.active_origin_context is not None:
@@ -1204,10 +1385,12 @@ class QueueProcessor:
                 user_message_provided=True,
                 current_parent_uuid=current_parent_uuid,
                 execution_context=self.active_origin_context,
+                request_ids=batch_ids,
             )
         return await self._execute_llm_turn(
             user_message_provided=True,
             current_parent_uuid=current_parent_uuid,
+            request_ids=batch_ids,
         )
 
     async def _goal_scoped_call_llm(self, **kwargs):
@@ -1277,6 +1460,7 @@ class QueueProcessor:
         user_message_provided: bool,
         current_parent_uuid: str,
         execution_context: dict[str, Any] | None = None,
+        request_ids: tuple[str, ...] = (),
     ) -> str:
         """Execute a single LLM turn (deduped from process_message_batch and continue_conversation).
 
@@ -1304,8 +1488,11 @@ class QueueProcessor:
             await self._run_after_turn()  # a talk-over's cut of an earlier turn lands first
             self.last_turn_error = None
             # Stamped under the lock: a turn still running when this one was
-            # queued clears its own stamp as it ends, never this one's.
-            self._stamp_voice_turn(_voice_turn_id(execution_context))
+            # queued clears its own stamp as it ends, never this one's. A chain
+            # this batch cuts into still owes its requests their completion, so
+            # this turn's names them too (#551).
+            self.active_request_ids = tuple(dict.fromkeys((*self.active_request_ids, *request_ids)))
+            self._stamp_turn(_voice_turn_id(execution_context), self.active_request_ids)
             try:
                 if execution_context is not None:
                     parent_uuid = await self._execute_llm_turn_inner(
@@ -1323,6 +1510,17 @@ class QueueProcessor:
                 # call) kills its chain, whichever driver then swallows it.
                 if not self.cancel_processing:
                     self.last_turn_error = str(exc) or type(exc).__name__
+                if self.active_request_ids:
+                    # It died before its body could answer them: their streams
+                    # end on this turn, not on whichever turn runs next (#551).
+                    if self.last_turn_error:
+                        publish_semantic(self.renderer, "error", message=self.last_turn_error)
+                    publish_semantic(
+                        self.renderer, "turn_complete",
+                        stop_reason="error" if self.last_turn_error else "end_turn",
+                    )
+                    self.active_request_ids = ()
+                    self._stamp_turn(None)
                 if self._after_turn:  # queued while this round ran: lands once the lock is free
                     self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
                 raise
@@ -1791,6 +1989,17 @@ class QueueProcessor:
             self.turn_completed = parsed_response["turn_completed"]
             if has_native_tools:
                 self.turn_completed = False
+            # First-turn stall revival (#453): a zero-tool reply ending
+            # mid-tool-tag or on an announced-but-unstarted step leaves a
+            # detached agent idle with nobody watching. Queue one
+            # corrective nudge; no-op unless unattended with budget left.
+            if (
+                not has_native_tools
+                and not all_tools
+                and self.turn_completed
+                and not self.cancel_processing
+            ):
+                await self._maybe_nudge_first_turn_stall(response)
             self.stats["total_thinking_time"] += thinking_duration
             self.session_stats["messages"] += 1
 
@@ -2341,6 +2550,7 @@ class QueueProcessor:
             self.active_voice = None
             revoke_voice_admission_context(self.active_origin_context)
             self.active_origin_context = None
+            self.active_request_ids = ()  # stamped already; a later chain answers none
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
             if context_size > 0 and not self.last_turn_error:
@@ -2361,26 +2571,31 @@ class QueueProcessor:
                 stop_reason=getattr(self.api_service, "last_stop_reason", "")
                 or ("error" if self.last_turn_error else "end_turn"),
             )
-            self._stamp_voice_turn(None)
+            self._stamp_turn(None)
 
         return parent_uuid
 
-    def _stamp_voice_turn(self, turn_id: str | None) -> None:
-        """Every event of a voice turn carries its id, its turn_complete last.
+    def _stamp_turn(self, turn_id: str | None, request_ids: tuple[str, ...] = ()) -> None:
+        """Every event of a turn carries the ids it answers, its turn_complete last.
 
-        The Engine streams a voice turn's reply by that id (request_id): the
+        The Engine streams a voice turn's reply by its id (request_id): the
         next turn's stream starts before a talked-over turn's late events are
-        out, and its turn_complete would end that stream before the reply.
+        out, and its turn_complete would end that stream before the reply. A
+        chat message sent while another turn runs is followed the same way by
+        its request id (request_ids, #551).
         """
-        token, self._voice_turn_token = self._voice_turn_token, None
+        token, self._turn_token = self._turn_token, None
         if token is not None:
             try:
                 current_turn.reset(token)
             except ValueError:  # set in another task: nothing of it is here
                 pass
-        if turn_id:
-            fields = {**current_turn.get(), "request_id": turn_id}
-            self._voice_turn_token = current_turn.set(fields)
+        fields = {
+            **({"request_id": turn_id} if turn_id else {}),
+            **({"request_ids": list(request_ids)} if request_ids else {}),
+        }
+        if fields:
+            self._turn_token = current_turn.set({**current_turn.get(), **fields})
 
     def _voice_turn_metadata(self) -> dict[str, Any]:
         """Which voice turn a reply belongs to: a talk-over after it finished cuts

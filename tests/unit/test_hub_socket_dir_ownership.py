@@ -7,6 +7,7 @@ ours (tightened to 0700) or refused, and a client never connects to a
 socket file another user owns.
 """
 
+import asyncio
 import os
 import socket as socket_mod
 import stat
@@ -251,3 +252,29 @@ def test_hub_state_client_same_uid_socket_reaches_connect(monkeypatch):
 
         with pytest.raises(HubStateClientError, match="failed to open socket"):
             asyncio.run(attempt())
+
+
+def test_a_socket_restart_remakes_a_deleted_directory():
+    """#542: a /tmp cleanup took the socket directory; the heartbeat's restart binds again."""
+    import shutil
+
+    from plugins.hub.messenger import AgentSocketServer
+
+    async def on_message(*_args, **_kwargs):
+        return None
+
+    async def restart_after_cleanup():
+        server = AgentSocketServer("p542", on_message, socket_name="p542")
+        path = Path(await server.start())
+        try:
+            shutil.rmtree(path.parent)  # the cleanup, under a running agent
+            await server.stop()
+            path = Path(await server.start())  # what the heartbeat does next
+            assert path.is_socket()
+            info = os.lstat(path.parent)
+            assert info.st_uid == os.getuid()
+            assert stat.S_IMODE(info.st_mode) == 0o700
+        finally:
+            await server.stop()
+
+    asyncio.run(restart_after_cleanup())
