@@ -88,6 +88,10 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   CLI, Claude Code) owns its model and effort, so they go to its own options,
   as the Model tab sets them. New Session starts on the profile, then applies
   the pick.
+- Each opening asks the engine for the list again. Until it answers, the
+  picker lists each profile's saved model and says "Loading models…". If the
+  request fails, it keeps those rows, says the full model list did not load
+  and offers Retry. "No model matches." shows only for a list that loaded.
 - Each row names the effort it runs at. A native model also has a default
   row, which runs it at its own default and clears an earlier pick. Its levels
   are ones a request on it carries, by the request's own rule:

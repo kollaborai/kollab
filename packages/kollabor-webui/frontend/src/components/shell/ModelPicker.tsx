@@ -1,22 +1,26 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type { EngineApi, ModelChoice, Profile } from "@/api";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { choiceLabel, matchesChoice, sameChoice } from "@/components/shell/model-choice";
 import { cn } from "@/lib/utils";
 
 /**
- * "gpt-6-luna · max · codex-cli": the parts after the first in muted text. A long first part is cut
- * short, never the level after it, and the whole label shows on hover.
+ * "gpt-6-luna · max · codex-cli": the parts after the first in muted text. The level never shrinks: a
+ * narrow label drops the profile first, then cuts the model short. The whole label shows on hover.
  */
 function ChoiceLabel({ parts }: { parts: string[] }) {
-  const [first, ...rest] = parts.filter(Boolean);
+  const [first, level, ...rest] = parts;
+  const profile = rest.filter(Boolean).join(" · ");
   return (
-    <span className="flex min-w-0 overflow-hidden" title={[first, ...rest].join(" · ")}>
-      <span className="truncate">{first}</span>
-      {rest.length ? (
-        <span className="text-muted-foreground shrink-0 whitespace-pre"> · {rest.join(" · ")}</span>
+    <span className="flex min-w-0 flex-1 overflow-hidden" title={parts.filter(Boolean).join(" · ")}>
+      <span data-part="model" className="truncate">{first}</span>
+      {level ? <span data-part="level" className="text-muted-foreground shrink-0 whitespace-pre"> · {level}</span> : null}
+      {profile ? (
+        // basis 0: the profile gets only the room the model and level leave, so it is the first to go
+        <span data-part="profile" className="text-muted-foreground min-w-0 flex-1 basis-0 overflow-hidden text-ellipsis whitespace-pre"> · {profile}</span>
       ) : null}
     </span>
   );
@@ -49,7 +53,10 @@ export function ModelPicker({
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const [loaded, setLoaded] = useState<ModelChoice[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0); // Retry asks again
   const list = useRef<HTMLDivElement>(null);
+  const search = useRef<HTMLInputElement>(null);
   const listId = useId();
 
   useEffect(() => {
@@ -57,13 +64,14 @@ export function ModelPicker({
     let live = true;
     api.listModelChoices().then(
       (result) => live && setLoaded(result.choices),
-      () => undefined, // an engine without the list, or a failed refresh, keeps the profile rows
+      () => live && setFailed(true), // the profile rows stay, and the picker says the full list did not load
     );
     return () => {
       live = false;
       setLoaded(null); // each opening asks again: a list fetched as an earlier login never shows
+      setFailed(false);
     };
-  }, [open, api]);
+  }, [open, api, attempt]);
 
   const choices = useMemo<ModelChoice[]>(
     () =>
@@ -117,19 +125,18 @@ export function ModelPicker({
       }}
     >
       <PopoverTrigger asChild>
-        <button
+        <Button
           id={id}
           type="button"
+          variant="outline"
+          size="sm"
           disabled={disabled}
           aria-label="Model"
-          className={cn(
-            "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/50 px-3 py-2 text-sm whitespace-nowrap shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30 dark:hover:bg-input/50",
-            className,
-          )}
+          className={cn("w-full min-w-0 shrink justify-between font-normal", className)}
         >
           <ChoiceLabel parts={choiceLabel(value, current)} />
           <ChevronDownIcon className="size-4 shrink-0 opacity-50" />
-        </button>
+        </Button>
       </PopoverTrigger>
       <PopoverContent
         align="start"
@@ -137,6 +144,7 @@ export function ModelPicker({
         className="w-(--radix-popover-trigger-width) max-w-[calc(100vw-1.5rem)] min-w-72 p-0"
       >
         <Input
+          ref={search}
           autoFocus
           value={query}
           onChange={(event) => {
@@ -153,6 +161,24 @@ export function ModelPicker({
           aria-activedescendant={shown[active] ? `${listId}-${active}` : undefined}
           className="h-9 rounded-none border-0 border-b bg-transparent shadow-none focus-visible:ring-0 dark:bg-transparent"
         />
+        {loaded === null ? (
+          <p role="status" className="text-muted-foreground flex min-h-8 items-center gap-2 px-3 text-xs">
+            {failed ? "The full model list did not load." : "Loading models…"}
+            {failed ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={() => {
+                  setAttempt((count) => count + 1);
+                  search.current?.focus();
+                }}
+              >
+                Retry
+              </Button>
+            ) : null}
+          </p>
+        ) : null}
         <div ref={list} id={listId} role="listbox" aria-label="Models" className="max-h-72 overflow-y-auto p-1">
           {groups.length ? (
             groups.map(([label, rows]) => (
@@ -185,9 +211,9 @@ export function ModelPicker({
                 ))}
               </div>
             ))
-          ) : (
+          ) : loaded !== null ? (
             <p className="text-muted-foreground px-2 py-1.5 text-sm">No model matches.</p>
-          )}
+          ) : null}
         </div>
       </PopoverContent>
     </Popover>
