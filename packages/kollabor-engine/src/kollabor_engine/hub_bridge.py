@@ -272,16 +272,15 @@ class HubBridge:
         written by the agent, which is identity-named, not agent_id-named).
         Returns parsed response dict, or None on any failure.
         """
+        # The cache can predate the agent or its socket: an agent's first record has none (#555).
         agent_data = self.get_agent(agent_id)
+        sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
+        if sock_path is None or not sock_path.exists():
+            agent_data = self.get_agent(agent_id, use_cache=False)
+            sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if agent_data is None:
             logger.debug(f"No presence data for agent {agent_id}")
             return None
-
-        sock_path = self._socket_path_for_agent(agent_data)
-        if sock_path is None or not sock_path.exists():
-            # A cached record can predate the socket: an agent's first has none (#555).
-            agent_data = self.get_agent(agent_id, use_cache=False) or agent_data
-            sock_path = self._socket_path_for_agent(agent_data)
         if sock_path is None or not sock_path.exists():
             logger.debug(f"Socket not found for {agent_id}: {sock_path}")
             return None
@@ -296,16 +295,20 @@ class HubBridge:
         timeout: float = 5.0,
     ) -> Optional[Dict[str, Any]]:
         """Send a JSON action to an agent identified by its identity string."""
+        # The cache can predate the agent or its socket: an agent's first record has none (#555).
+        # A cached record is read again by its own id: a name repeats across folders.
         agent_data = self.get_agent_by_identity(identity)
+        sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
+        if sock_path is None or not sock_path.exists():
+            agent_data = (
+                self.get_agent(str(agent_data.get("agent_id") or ""), use_cache=False)
+                if agent_data is not None
+                else self.get_agent_by_identity(identity, use_cache=False)
+            )
+            sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if agent_data is None:
             logger.debug(f"No presence data for identity {identity}")
             return None
-
-        sock_path = self._socket_path_for_agent(agent_data)
-        if sock_path is None or not sock_path.exists():
-            # A cached record can predate the socket: an agent's first has none (#555).
-            agent_data = self.get_agent_by_identity(identity, use_cache=False) or agent_data
-            sock_path = self._socket_path_for_agent(agent_data)
         if sock_path is None or not sock_path.exists():
             logger.debug(f"Socket not found for identity {identity}: {sock_path}")
             return None

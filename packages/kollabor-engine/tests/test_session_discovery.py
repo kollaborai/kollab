@@ -92,6 +92,71 @@ async def test_a_message_reaches_a_socket_published_after_the_cached_record(tmp_
     assert send.await_args.args[0] == str(socket)
 
 
+def _presence_bridge(tmp_path, monkeypatch, *records):
+    """A bridge that reads these presence records from one folder, and that folder."""
+    import json
+
+    from kollabor_engine import hub_bridge
+
+    presence = tmp_path / "presence"
+    presence.mkdir()
+    for record in records:
+        (presence / f"{record['agent_id']}.json").write_text(json.dumps(record))
+    monkeypatch.setattr(hub_bridge, "_find_presence_dirs", lambda: [presence])
+    return HubBridge(), presence
+
+
+def _record(agent_id, identity, **fields):
+    import os
+    import time
+
+    return {"agent_id": agent_id, "identity": identity, "pid": os.getpid(), "last_heartbeat": time.time(), **fields}
+
+
+@pytest.mark.asyncio
+async def test_a_record_read_again_is_the_same_agent_never_a_namesake_elsewhere(tmp_path, monkeypatch):
+    # Hiddenite on #556 round 2: the reread looked the name up again, and once
+    # this folder's lapis had gone it found another folder's lapis and sent there.
+    import json
+    from unittest.mock import AsyncMock
+
+    bridge, presence = _presence_bridge(tmp_path, monkeypatch, _record("a1", "lapis", project="/w/here"))
+    assert bridge.get_agent_by_identity("lapis")["agent_id"] == "a1"  # caches this folder's lapis
+    (presence / "a1.json").unlink()
+    socket = tmp_path / "lapis.sock"
+    socket.touch()
+    namesake = _record("b1", "lapis", project="/w/elsewhere", socket_path=str(socket))
+    (presence / "b1.json").write_text(json.dumps(namesake))
+    send = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(bridge, "_query_socket_path", send)
+
+    assert await bridge.query_socket_by_identity("lapis", "ping") is None
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by_identity", [False, True])
+async def test_a_message_reaches_an_agent_that_started_after_the_cache(tmp_path, monkeypatch, by_identity):
+    # Hiddenite on #556 round 2: an agent missing from a cache taken before it
+    # started stayed unreachable for up to five seconds, its socket published.
+    import json
+    from unittest.mock import AsyncMock
+
+    bridge, presence = _presence_bridge(tmp_path, monkeypatch, _record("x1", "ruby"))
+    assert [agent["agent_id"] for agent in bridge.get_agents()] == ["x1"]  # a cache with no lapis
+    socket = tmp_path / "lapis.sock"
+    socket.touch()
+    (presence / "c1.json").write_text(json.dumps(_record("c1", "lapis", socket_path=str(socket))))
+    send = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(bridge, "_query_socket_path", send)
+
+    if by_identity:
+        assert await bridge.query_socket_by_identity("lapis", "ping") == {"ok": True}
+    else:
+        assert await bridge.query_socket("c1", "ping") == {"ok": True}
+    assert send.await_args.args[0] == str(socket)
+
+
 def test_discover_sessions_carries_what_the_agent_publishes(tmp_path, monkeypatch):
     # The row reads the same before the engine opens the agent as after:
     # EngineSession.to_dict answers profile and model, so presence must too.
