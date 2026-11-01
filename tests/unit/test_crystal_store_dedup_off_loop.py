@@ -2,7 +2,10 @@
 milliseconds at a time, started over when the store is written to meanwhile."""
 
 import asyncio
+import random
 import tempfile
+import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,8 +21,8 @@ _CHAIN = [
 ]
 
 
-def _vault(entries) -> Path:
-    vault = Path(tempfile.mkdtemp())
+def _vault(entries, root=None) -> Path:
+    vault = Path(tempfile.mkdtemp(dir=root))
     blocks = [
         f"---\nid: {entry_id}\ndate: 2026-10-01\nkeywords: {keywords}\nsummary: {summary}\n---\n{summary} body.\n"
         for entry_id, keywords, summary in entries
@@ -30,6 +33,109 @@ def _vault(entries) -> Path:
 
 def _state(store):
     return [(e.id, list(e.keywords), e.summary, e.body) for e in store.get_all()]
+
+
+def _every_pair(store, entries):
+    """The pass before the index (#547 round 6): every later entry, in list order."""
+    from plugins.hub.crystal_store import DEDUP_THRESHOLD, SUMMARY_DEDUP_THRESHOLD, _jaccard, token_overlap
+
+    def words(entry):
+        return store._words(entry.summary) if entry.summary else frozenset()
+
+    i = 0
+    while i < len(entries):
+        j = i + 1
+        while j < len(entries):
+            a, b = entries[i], entries[j]
+            if token_overlap(words(a), words(b)) > SUMMARY_DEDUP_THRESHOLD or (
+                _jaccard(frozenset(a.keywords), frozenset(b.keywords)) > DEDUP_THRESHOLD
+            ):
+                store._merge_into(a, entries.pop(j))
+            else:
+                j += 1
+        i += 1
+
+
+def test_the_indexed_pass_merges_exactly_as_comparing_every_pair(tmp_path):
+    # Sunstone on #547 round 6: comparing every pair after each dreaming write
+    # took 4 s on 2,609 entries. The index skips pairs that share nothing, and
+    # must keep the merges of the full ordered pass, chains included.
+    names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet"]
+    for seed in range(150):
+        rng = random.Random(seed)
+        entries = [
+            (f"crys-{n:03d}", ", ".join(rng.sample("abcdefgh", rng.randint(1, 3))),
+             " ".join(rng.sample(names, rng.randint(2, 5))))
+            for n in range(1, 41)
+        ]
+        indexed, reference = CrystalStore(_vault(entries, tmp_path)), CrystalStore(_vault(entries, tmp_path))
+        indexed.deduplicate()
+        expected = reference.get_all()
+        _every_pair(reference, expected)
+        assert _state(indexed) == [(e.id, list(e.keywords), e.summary, e.body) for e in expected], seed
+
+
+@pytest.mark.asyncio
+async def test_a_pass_after_writes_merges_as_comparing_every_pair(tmp_path):
+    # Only a pair with an entry written since the last pass can match, so the
+    # pass after a dreaming write compares only those; the merges must still be
+    # the full ordered pass's.
+    names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet"]
+    for seed in range(100):
+        rng = random.Random(seed)
+
+        def summary():
+            return " ".join(rng.sample(names, rng.randint(2, 5)))
+
+        entries = [(f"crys-{n:03d}", ", ".join(rng.sample("abcdefgh", rng.randint(1, 3))), summary())
+                   for n in range(1, 31)]
+        store = CrystalStore(_vault(entries, tmp_path))
+        await store.deduplicate_in_slices(slice_s=1)
+        for _ in range(rng.randint(1, 4)):
+            if rng.random() < 0.5:
+                store.add_entry(summary() + ".", rng.sample("abcdefgh", rng.randint(1, 3)))
+            else:
+                store.update_entry(rng.choice(store.get_all()).id, summary() + " edited.")
+        expected = [replace(e, keywords=list(e.keywords)) for e in store.get_all()]
+        _every_pair(store, expected)
+        await store.deduplicate_in_slices(slice_s=1)
+        assert _state(store) == [(e.id, list(e.keywords), e.summary, e.body) for e in expected], seed
+
+
+def test_entries_that_share_no_word_or_keyword_are_never_compared(monkeypatch):
+    import plugins.hub.crystal_store as crystal_store
+
+    entries = [(f"crys-{n:04d}", f"k{n}, j{n}", f"w{n} x{n} y{n} z{n}") for n in range(1, 2610)]
+    store, compared = CrystalStore(_vault(entries)), []
+    overlap = crystal_store.token_overlap
+    monkeypatch.setattr(crystal_store, "token_overlap", lambda a, b: compared.append(1) or overlap(a, b))
+    assert store.deduplicate() == 0
+    assert compared == []
+
+
+@pytest.mark.asyncio
+async def test_a_write_from_another_thread_is_never_lost_to_the_pass(monkeypatch):
+    # Sunstone on #547 round 6: a thread's add_entry finished after the pass's
+    # last check and before its commit, which then dropped it from memory and disk.
+    vault = _vault(_CHAIN[:2])  # crys-001 and crys-002 merge
+    store, wrote = CrystalStore(vault), []
+    store.get_all()
+    steps = store._merge_steps
+
+    def steps_then_a_thread_writes(*args):
+        yield from steps(*args)
+        if not wrote:  # between the pass's last step and its commit
+            writer = threading.Thread(
+                target=lambda: wrote.append(store.add_entry("Zulu yankee xray whiskey victor.", ["zulu"]))
+            )
+            writer.start()
+            writer.join()
+
+    monkeypatch.setattr(store, "_merge_steps", steps_then_a_thread_writes)
+    assert await store.deduplicate_in_slices() == 1
+    kept = ["crys-001", wrote[0].id]
+    assert [e.id for e in store.get_all()] == kept
+    assert [e.id for e in CrystalStore(vault).get_all()] == kept
 
 
 def test_a_chain_merges_in_list_order():
@@ -48,7 +154,8 @@ def test_duplicates_already_on_disk_merge_after_a_restart():
 async def test_the_dreaming_pass_gives_the_loop_back_and_merges_as_a_full_pass():
     # #546: run whole on the loop, a pass over 2,608 entries took 105 s, the agent
     # answered nothing and peers deleted its socket as dead.
-    entries = [(f"crys-{n:03d}", f"k{n // 2}, j{n // 2}", f"w{n} x{n} y{n} z{n}") for n in range(1, 300)]
+    # A keyword they all share: every pair is compared, and the pass still gives the loop back.
+    entries = [(f"crys-{n:03d}", f"all, k{n // 2}, j{n // 2}", f"w{n} x{n} y{n} z{n}") for n in range(1, 300)]
     whole = CrystalStore(_vault(entries))
     assert whole.deduplicate() > 100
     store, ticks = CrystalStore(_vault(entries)), 0
@@ -71,7 +178,7 @@ async def test_the_dreaming_pass_gives_the_loop_back_and_merges_as_a_full_pass()
 async def test_a_store_unchanged_since_a_pass_found_nothing_skips_the_next():
     store, passes = CrystalStore(_vault(_CHAIN)), []
     steps = store._merge_steps
-    store._merge_steps = lambda entries: (passes.append(len(entries)), steps(entries))[1]
+    store._merge_steps = lambda entries, *rest: (passes.append(len(entries)), steps(entries, *rest))[1]
     assert await store.deduplicate_in_slices(slice_s=0) == 1
     assert await store.deduplicate_in_slices(slice_s=0) == 0  # the merge was a write: another pass
     assert await store.deduplicate_in_slices(slice_s=0) == 0 and passes == [3, 2]  # nothing since

@@ -17,6 +17,9 @@ Entries are separated by blank lines between the body and the next ---.
 """
 
 import asyncio
+import bisect
+import functools
+import heapq
 import logging
 import re
 import threading
@@ -72,6 +75,19 @@ def _jaccard(a: frozenset, b: frozenset) -> float:
     return len(a & b) / len(a | b)
 
 
+def _locked(method):
+    """Run a store write under its lock. A dedup pass checks for writes and
+    commits under the same lock, so a write from another thread lands wholly
+    before that commit or after it, never lost inside it (#546)."""
+
+    @functools.wraps(method)
+    def run(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return run
+
+
 # Regex for parsing structured entries (header + body)
 _ENTRY_RE = re.compile(
     r"---\n"
@@ -122,7 +138,7 @@ class CrystalStore:
 
     def __init__(self, vault_dir: Path):
         self._path = vault_dir / "crystallized.md"
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # every write and dedup's commit (_locked)
         self._entries: List[CrystalEntry] = []
         self._next_id: int = 1
         self._loaded = False
@@ -130,6 +146,9 @@ class CrystalStore:
         # and the count at which a pass last found nothing to merge.
         self._revision = 0
         self._dedup_clean = -1
+        # The ids of entries changed since the last dedup pass: only pairs with
+        # one of them can match. None: unknown, so every entry (#546).
+        self._changed: Optional[set] = None
         # Stemmed summary words, by summary text: stemming every pair again
         # made a pass over thousands of entries take minutes (#546).
         self._summary_words: dict = {}
@@ -194,13 +213,17 @@ class CrystalStore:
 
     def _save_to_disk(self) -> None:
         """Write all entries back to crystallized.md."""
-        self._revision += 1
-        try:
-            content = "\n".join(e.to_block() for e in self._entries)
-            with self._lock:
-                self._path.write_text(content)
-        except OSError as e:
-            logger.warning("crystal_store write error: %s", e)
+        with self._lock:
+            self._revision += 1
+            try:
+                self._path.write_text("\n".join(e.to_block() for e in self._entries))
+            except OSError as e:
+                logger.warning("crystal_store write error: %s", e)
+
+    def _mark(self, entry_id: str) -> None:
+        """Note an entry a write changed, for the next dedup pass."""
+        if self._changed is not None:
+            self._changed.add(entry_id)
 
     def _generate_id(self) -> str:
         """Generate next sequential entry ID."""
@@ -244,6 +267,7 @@ class CrystalStore:
         self._ensure_loaded()
         return len(self._entries)
 
+    @_locked
     def add_entry(
         self,
         text: str,
@@ -284,6 +308,7 @@ class CrystalStore:
             if len(text) > len(existing.body):
                 existing.body = text
                 existing.summary = summary
+            self._mark(existing.id)
             self._save_to_disk()
             logger.debug(
                 "crystal_store: merged into %s (keyword overlap > %.0f%%)",
@@ -301,6 +326,7 @@ class CrystalStore:
             body=text,
         )
         self._entries.append(entry)
+        self._mark(entry.id)
         self._save_to_disk()
         logger.debug("crystal_store: added %s (%d keywords)", entry.id, len(entry.keywords))
         return entry
@@ -415,6 +441,7 @@ class CrystalStore:
         self._ensure_loaded()
         return list(self._entries)
 
+    @_locked
     def reindex_keywords(self) -> int:
         """Re-extract keywords for all entries using current stemmer.
 
@@ -423,6 +450,7 @@ class CrystalStore:
         """
         self._ensure_loaded()
         count = 0
+        self._changed = None  # every entry's keywords change
         for entry in self._entries:
             new_keywords = extract_keywords(entry.body)
             entry.keywords = new_keywords
@@ -432,6 +460,7 @@ class CrystalStore:
             logger.info("crystal_store: reindexed %d entries", count)
         return count
 
+    @_locked
     def deduplicate(self) -> int:
         """Merge entries with keyword or summary overlap above threshold.
 
@@ -441,7 +470,9 @@ class CrystalStore:
         Returns number of entries merged.
         """
         self._ensure_loaded()
-        merged_count = self._merge_pass(self._entries)
+        targets: list = []
+        merged_count = self._merge_pass(self._entries, targets)
+        self._changed = {entry.id for entry in targets}
         if merged_count > 0:
             self._save_to_disk()
             logger.info("crystal_store: deduplicated %d entries", merged_count)
@@ -463,70 +494,112 @@ class CrystalStore:
         if self._dedup_clean == self._revision:
             return 0
         for _ in range(attempts):
-            revision = self._revision
-            copies = [replace(e, keywords=list(e.keywords)) for e in self._entries]
-            merged, deadline = 0, time.monotonic() + slice_s
-            for merged in self._merge_steps(copies):
+            with self._lock:
+                revision = self._revision
+                copies = [replace(e, keywords=list(e.keywords)) for e in self._entries]
+                ids = self._changed
+                changed = None if ids is None else {n for n, e in enumerate(copies) if e.id in ids}
+            merged, deadline, written, targets = 0, time.monotonic() + slice_s, False, []
+            for merged in self._merge_steps(copies, changed, targets):
                 if time.monotonic() < deadline:
                     continue
                 await asyncio.sleep(0)
                 if self._revision != revision:
+                    written = True
                     break
                 deadline = time.monotonic() + slice_s
-            else:
-                # Nothing awaited since the last check, so nothing wrote meanwhile.
+            if written:
+                continue
+            with self._lock:  # a write from another thread waits, or already counted
+                if self._revision != revision:
+                    continue
+                self._changed = {entry.id for entry in targets}
                 if merged:
                     self._entries = copies
                     self._save_to_disk()
                     logger.info("crystal_store: deduplicated %d entries", merged)
                 else:
                     self._dedup_clean = self._revision
-                return merged
+            return merged
         logger.info("crystal_store: written to during %d dedup passes; the next cycle tries again", attempts)
         return 0
 
-    def _merge_pass(self, entries: List[CrystalEntry]) -> int:
+    def _merge_pass(self, entries: List[CrystalEntry], targets: Optional[list] = None) -> int:
         """Merge duplicates in ``entries`` in place, each into the earliest match."""
         merged = 0
-        for merged in self._merge_steps(entries):
+        for merged in self._merge_steps(entries, targets=targets):
             pass
         return merged
 
-    def _merge_steps(self, entries: List[CrystalEntry]) -> Iterator[int]:
+    def _merge_steps(
+        self, entries: List[CrystalEntry], changed: Optional[set] = None, targets: Optional[list] = None
+    ) -> Iterator[int]:
         """_merge_pass, yielding its merge count every 64 entries it reads, every 512
-        comparisons and once at the end.
+        comparisons and once at the end. ``changed`` holds the positions of the
+        entries changed since the last pass (None: all of them); ``targets`` gets
+        each entry another merged into.
 
-        The words and keyword sets are built once per entry, not once per pair.
+        Two entries that share no summary word and no keyword score 0 on both
+        measures, and two unchanged since the last pass were compared there and
+        did not match. So each entry is compared only with the later ones it
+        shares a word or keyword with, and an unchanged one only with changed
+        ones until it takes in a merge, in list order and with what it holds
+        after each merge: the merges of comparing every pair, without the
+        quadratic scan after every write (#546).
         """
-        # ponytail: every pair, about 20 s for 2,628 entries; index entries by
-        # word if vaults grow to tens of thousands.
-        words, keyword_sets = [], []
-        for n, entry in enumerate(entries, 1):
+        words, keyword_sets, postings, changed_postings = [], [], {}, {}
+        for n, entry in enumerate(entries):
             words.append(self._words(entry.summary) if entry.summary else frozenset())
             keyword_sets.append(frozenset(entry.keywords))
-            if n % 64 == 0:  # stemming a summary the cache has not seen is slow
+            for token in words[n] | keyword_sets[n]:
+                postings.setdefault(token, []).append(n)
+                if changed is None or n in changed:
+                    changed_postings.setdefault(token, []).append(n)
+            if (n + 1) % 64 == 0:  # stemming a summary the cache has not seen is slow
                 yield 0
+
+        def after(index, tokens, position):
+            for token in tokens:
+                found = index.get(token, [])
+                yield from found[bisect.bisect_right(found, position):]
+
+        alive = [True] * len(entries)
         merged_count = compared = 0
-        i = 0
-        while i < len(entries):
-            j = i + 1
-            while j < len(entries):
+        for i in range(len(entries)):
+            if not alive[i]:
+                continue
+            fresh = changed is None or i in changed
+            tokens = words[i] | keyword_sets[i]
+            if not fresh:  # an unchanged entry can match only a changed one
+                tokens = changed_postings.keys() & tokens
+            seen = set(after(postings if fresh else changed_postings, tokens, i))
+            queue = sorted(seen)  # a sorted list is a heap
+            while queue:
+                j = heapq.heappop(queue)
+                if not alive[j]:
+                    continue
                 compared += 1
                 if compared % 512 == 0:
                     yield merged_count
                 if token_overlap(words[i], words[j]) > SUMMARY_DEDUP_THRESHOLD or (
                     _jaccard(keyword_sets[i], keyword_sets[j]) > DEDUP_THRESHOLD
                 ):
-                    target, source = entries[i], entries.pop(j)
-                    self._merge_into(target, source)
-                    words.pop(j)
-                    keyword_sets.pop(j)
-                    words[i] = self._words(target.summary) if target.summary else frozenset()
-                    keyword_sets[i] = frozenset(target.keywords)
+                    held = words[i] | keyword_sets[i] if fresh else frozenset()
+                    self._merge_into(entries[i], entries[j])
+                    alive[j] = False
+                    words[i] = self._words(entries[i].summary) if entries[i].summary else frozenset()
+                    keyword_sets[i] = frozenset(entries[i].keywords)
                     merged_count += 1
-                else:
-                    j += 1
-            i += 1
+                    if targets is not None:
+                        targets.append(entries[i])
+                    # Changed now: a later entry sharing what it gained can match it
+                    # (all it holds, if it was unchanged); those before j were passed.
+                    fresh = True
+                    for k in after(postings, (words[i] | keyword_sets[i]) - held, j):
+                        if k not in seen:
+                            seen.add(k)
+                            heapq.heappush(queue, k)
+        entries[:] = [entry for entry, kept in zip(entries, alive) if kept]
         yield merged_count
 
     @staticmethod
@@ -547,6 +620,7 @@ class CrystalStore:
             target.body = source.body
             target.summary = source.summary
 
+    @_locked
     def delete_entry(self, entry_id: str) -> Optional[CrystalEntry]:
         """Remove an entry by ID. Returns the removed entry or None."""
         self._ensure_loaded()
@@ -559,6 +633,7 @@ class CrystalStore:
                 return removed
         return None
 
+    @_locked
     def update_entry(
         self,
         entry_id: str,
@@ -591,6 +666,7 @@ class CrystalStore:
         else:
             # Re-extract keywords from new body
             entry.keywords = extract_keywords(body)
+        self._mark(entry.id)
 
         self._save_to_disk()
         logger.debug("crystal_store: updated %s", entry.id)
