@@ -333,6 +333,10 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
     profile = pm.get_profile(base.provider_profile)
     existing = {entry.name for entry in manager.list_loadouts()}
     codex = is_chatgpt_codex_profile(pm, base.provider_profile)
+    provider = profile.get_provider() if hasattr(profile, "get_provider") else getattr(profile, "provider", "")
+    is_acp = str(provider or "").lower() == "acp"
+    command = tuple(getattr(profile, "command", ()) or ())
+    model_value = "" if is_acp and base.implicit and command and base.model == command[0] else base.model
     temperature = base.temperature
     if temperature is None:
         temperature = getattr(profile, "temperature", None) or 0.7
@@ -344,10 +348,15 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
             value=base.name if mode == "edit" else suggest_name(base.model, existing, style),
             editable=mode == "create",
         ),
-        make_field("model", "label", "Model", value=f"{base.provider_profile} · {base.model}"),
+        make_field(
+            "model", "text_input" if is_acp else "label", "Model",
+            value=model_value if is_acp else f"{base.provider_profile} · {base.model}",
+            help="Use a model advertised by the ACP harness." if is_acp else "",
+        ),
         make_field(
             "temperature", "slider", "Temperature",
-            value=temperature, min_value=0, max_value=2, step=0.05,
+            value=temperature, min_value=0, max_value=2, step=0.05, editable=not is_acp,
+            help="Managed by the ACP harness." if is_acp else "",
         ),
         make_field(
             "effort", "dropdown", "Reasoning Effort",
@@ -356,10 +365,11 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
         make_field(
             "max_tokens", "text_input", "Max Output Tokens",
             value=str(base.max_tokens) if base.max_tokens else "",
-            editable=not codex,
-            help="ChatGPT sign-in uses the backend default."
-            if codex
-            else f"Empty uses the provider default ({default_max_tokens(base.model):,}).",
+            editable=not codex and not is_acp,
+            help="Managed by the ACP harness." if is_acp else (
+                "ChatGPT sign-in uses the backend default."
+                if codex else f"Empty uses the provider default ({default_max_tokens(base.model):,})."
+            ),
         ),
         make_field("description", "text_input", "Description", value=base.description or ""),
     ]
@@ -378,23 +388,30 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
     }
 
 
-def _loadout_values(payload: dict, codex: bool, model: str) -> tuple[dict, dict]:
+def _loadout_values(payload: dict, codex: bool, model: str, *, is_acp: bool = False) -> tuple[dict, dict]:
     """(values, errors) from a save payload; the same rules as the terminal form."""
     values: dict = {}
     errors: dict = {}
-    try:
-        values["temperature"] = float(payload.get("temperature"))
-        if not 0 <= values["temperature"] <= 2:
-            raise ValueError
-    except (TypeError, ValueError):
-        errors["temperature"] = "Temperature must be a number from 0 to 2."
+    if is_acp:
+        values["temperature"] = None
+        if payload.get("temperature") not in (None, ""):
+            errors["temperature"] = "Temperature is managed by the ACP harness."
+    else:
+        try:
+            values["temperature"] = float(payload.get("temperature"))
+            if not 0 <= values["temperature"] <= 2:
+                raise ValueError
+        except (TypeError, ValueError):
+            errors["temperature"] = "Temperature must be a number from 0 to 2."
     effort = str(payload.get("effort") or "default")
     if effort not in EFFORT_OPTIONS:
         errors["effort"] = "Unknown effort level."
     values["effort"] = "" if effort == "default" else effort
     values["max_tokens"] = None
     raw = str(payload.get("max_tokens") or "").strip()
-    if raw and not codex:
+    if raw and is_acp:
+        errors["max_tokens"] = "Max Output Tokens is managed by the ACP harness."
+    elif raw and not codex:
         try:
             tokens = int(raw)
             ceiling = model_registry_info(model).get("max_output")
@@ -532,7 +549,13 @@ class LlmPanel:
             raise PanelError("mode must be create or edit", errors={"mode": "Unknown mode."})
         name = base.name if mode == "edit" else str(changes.get("name") or "").strip()
         codex = is_chatgpt_codex_profile(ctx._profile_manager, base.provider_profile)
-        values, errors = _loadout_values(changes, codex, base.model)
+        profile = ctx._profile_manager.get_profile(base.provider_profile)
+        provider = profile.get_provider() if hasattr(profile, "get_provider") else getattr(profile, "provider", "")
+        is_acp = str(provider or "").lower() == "acp"
+        model = str(changes.get("model", base.model) or "").strip() if is_acp else base.model
+        values, errors = _loadout_values(changes, codex, model, is_acp=is_acp)
+        if is_acp and (not model or len(model) > 200 or not model.isprintable() or any(c.isspace() for c in model)):
+            errors["model"] = "Enter a model advertised by the ACP harness."
         if not name:
             errors["name"] = "Name is required."
         elif mode == "create" and name in {entry.name for entry in manager.list_loadouts()}:
@@ -540,10 +563,12 @@ class LlmPanel:
         if errors:
             raise PanelError("Check the highlighted fields.", errors=errors)
         if mode == "edit":
+            if is_acp:
+                values["model"] = model
             saved = manager.update(name, **values)
         else:
             saved = manager.create(
-                name, provider_profile=base.provider_profile, model=base.model, **values
+                name, provider_profile=base.provider_profile, model=model, **values
             )
         if not saved:
             return error_result(f"Could not save loadout '{name}'.")
