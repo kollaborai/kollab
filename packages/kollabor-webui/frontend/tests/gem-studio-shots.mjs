@@ -1,6 +1,6 @@
 // Screenshots + assertions for the Gem Studio at phone, tablet and desktop
 // widths, in dark and light tokens, global and focused (Properties) states,
-// plus a coarse-pointer pass proving >=44px touch targets.
+// plus coarse and simulated hybrid-pointer passes proving >=44px touch targets.
 // The engine is a fixture; the UI is the built app (identity in BUILD.txt).
 //   node tests/gem-studio-shots.mjs <outDir> [width] [width/theme/pointer/surface]
 // Proves issue #465 and the round-2 review: one-row activity tabs, highlighted
@@ -14,11 +14,13 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(here, "../dist");
+const root = path.resolve(process.env.GEM_STUDIO_DIST || path.join(here, "../dist"));
 const out = process.argv[2];
 if (!out) throw new Error("Pass an output directory for screenshots and build evidence.");
 const only = process.argv[3];
 const onlyCase = process.argv[4];
+const textScale = Number(process.env.GEM_STUDIO_TEXT_SCALE || 1);
+if (!Number.isFinite(textScale) || textScale < 1 || textScale > 3) throw new Error("Text scale must be between 1 and 3.");
 fs.mkdirSync(out, { recursive: true });
 
 // Build identity: which head and which built artifact produced every shot.
@@ -30,6 +32,7 @@ fs.writeFileSync(
   [
     `built_at ${new Date().toISOString()}`,
     `git_head ${head}`,
+    `text_scale ${textScale}`,
     `git_status ${JSON.stringify(execSync("git status --porcelain --untracked-files=no", { cwd: path.resolve(here, "../..") }).toString().trim())}`,
     `GemStudio.tsx ${sha256(path.join(here, "../src/components/gems/GemStudio.tsx"))}`,
     `harness ${sha256(fileURLToPath(import.meta.url))}`,
@@ -111,6 +114,7 @@ const answer = (url, method) => {
 };
 
 const failures = [];
+let captureCount = 0;
 const rowRects = async (tabs) =>
   tabs.evaluateAll((nodes) => {
     const list = nodes[0]?.closest("[role='tablist'], [role='radiogroup']");
@@ -145,7 +149,7 @@ const highlightOf = (page) =>
     return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
   });
 
-const makeContext = async (browser, width, height, theme, extra = {}) => {
+const makeContext = async (browser, width, height, theme, extra = {}, simulateHybrid = false) => {
   const context = await browser.newContext({ viewport: { width, height }, ...extra });
   await context.addInitScript(() => localStorage.setItem("kollab.setup-guide.v1", "dismissed"));
   const page = await context.newPage();
@@ -159,6 +163,22 @@ const makeContext = async (browser, width, height, theme, extra = {}) => {
     const request = route.request();
     const url = new URL(request.url());
     const engine = ["7433", "8080"].includes(url.port);
+    if (simulateHybrid && url.origin === base && request.resourceType() === "stylesheet") {
+      // Headless Chromium's touch emulation changes its primary pointer to
+      // coarse; it cannot expose fine primary + coarse secondary. Exercise
+      // the built any-pointer branch with the native fine pointer instead.
+      // This simulates the CSS condition, not a physical hybrid device.
+      const file = path.join(root, url.pathname);
+      if (!file.startsWith(root) || !fs.existsSync(file)) {
+        failures.push(`${width}/${theme}/hybrid: stylesheet not found`);
+        return route.abort();
+      }
+      const css = fs.readFileSync(file, "utf8");
+      const media = /@media\s*\(\s*any-pointer\s*:\s*coarse\s*\)/g;
+      if (!media.test(css)) failures.push(`${width}/${theme}/hybrid: built CSS has no any-pointer coarse rule`);
+      media.lastIndex = 0;
+      return route.fulfill({ status: 200, contentType: "text/css", body: css.replace(media, "@media (pointer:fine)") });
+    }
     if ((engine || url.origin === base) && url.pathname.endsWith("/events")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
     }
@@ -173,6 +193,7 @@ const makeContext = async (browser, width, height, theme, extra = {}) => {
   });
   await page.goto(base);
   await page.waitForTimeout(800);
+  if (textScale !== 1) await page.addStyleTag({ content: `html { font-size: ${textScale * 100}% !important; }` });
   // The app pins the dark class (src/main.tsx); light is a token-level variant
   // captured by removing the class so both palettes are proven.
   if (theme === "light") await page.evaluate(() => document.documentElement.classList.remove("dark"));
@@ -245,7 +266,7 @@ const openProperties = async (page, label) => {
   console.log(`${label}: openProperties gave up after 3 attempts`);
   return null;
 };
-const verifyTabBar = async (page, dialog, barName, expectedCount, label, touch) => {
+const verifyTabBar = async (page, dialog, barName, expectedCount, label, touch, largeTargets = touch) => {
   const activity = barName === "Preview activity";
   const list = dialog.getByRole(activity ? "radiogroup" : "tablist", { name: barName });
   const tabs = list.getByRole(activity ? "radio" : "tab");
@@ -268,18 +289,33 @@ const verifyTabBar = async (page, dialog, barName, expectedCount, label, touch) 
       failures.push(`${label}/${barName}: invalid selected control relationship ${JSON.stringify(info)}`);
   };
   await tabs.first().waitFor({ state: "visible", timeout: 8000 });
+  // Large text can place the next row below the viewport. Reach it as a user
+  // would before testing its wheel, focus and target geometry.
+  await list.scrollIntoViewIfNeeded();
   if (await tabs.count() !== expectedCount) {
     failures.push(`${label}/${barName}: expected ${expectedCount} tabs, got ${await tabs.count()}`);
     return;
   }
   const rows = await rowRects(tabs);
   if (!rows.oneRow) failures.push(`${label}/${barName}: tabs wrapped`);
-  if (touch) {
+  if (largeTargets && rows.listHeight < 44)
+    failures.push(`${label}/${barName}: row is shorter than its touch targets`);
+  if (!largeTargets && textScale === 1 && rows.listHeight > 38)
+    failures.push(`${label}/${barName}: mouse-only row lost its compact size`);
+  if (largeTargets) {
     for (const [i, box] of rows.boxes.entries()) {
       if (box.w < 43.99 || box.h < 43.99)
         failures.push(`${label}/${barName}: tab ${i} target ${box.w}x${box.h}, need >=44x44`);
     }
   }
+  const clippedLabels = await tabs.evaluateAll((nodes) => nodes.flatMap((node, index) => {
+    const item = node.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const text = range.getBoundingClientRect();
+    return text.top < item.top - 0.75 || text.bottom > item.bottom + 0.75 ? [index] : [];
+  }));
+  if (clippedLabels.length) failures.push(`${label}/${barName}: labels clipped vertically at ${clippedLabels.join(",")}`);
   const measure = () => list.evaluate((node) => {
     const listRect = node.getBoundingClientRect();
     const dialogRect = node.closest('[role="dialog"]').getBoundingClientRect();
@@ -391,14 +427,23 @@ const verifyTabBar = async (page, dialog, barName, expectedCount, label, touch) 
   console.log(`${label}/${barName}`, JSON.stringify({ boxes: rows.boxes, first, last, focusedFirst, focusedLast, previousFocus, tabFocus, focusRings }));
 };
 
-const capture = async (browser, name, width, height, theme, surface, touch) => {
-  const pointer = touch ? "coarse" : "fine";
+const capture = async (browser, name, width, height, theme, surface, pointer) => {
+  captureCount += 1;
+  const touch = pointer === "coarse";
+  const hybrid = pointer === "hybrid";
   const label = `${name}/${theme}/${pointer}/${surface}`;
   const extra = touch ? { isMobile: true, hasTouch: true, deviceScaleFactor: 2 } : {};
-  const { context, page } = await makeContext(browser, width, height, theme, extra);
+  const { context, page } = await makeContext(browser, width, height, theme, extra, hybrid);
   try {
-    const coarse = await page.evaluate(() => matchMedia("(pointer: coarse)").matches);
-    if (coarse !== touch) failures.push(`${label}: unexpected pointer media query ${coarse}`);
+    const media = await page.evaluate(() => ({
+      coarse: matchMedia("(pointer: coarse)").matches,
+      fine: matchMedia("(pointer: fine)").matches,
+      anyCoarse: matchMedia("(any-pointer: coarse)").matches,
+    }));
+    if (media.coarse !== touch || media.anyCoarse !== touch)
+      failures.push(`${label}: unexpected native pointer media ${JSON.stringify(media)}`);
+    if (hybrid && !media.fine) failures.push(`${label}: hybrid simulation requires a native fine pointer`);
+    console.log(`${label}/native-media`, JSON.stringify(media));
     if (!(await openStudio(page, label))) throw new Error("Gem Studio did not open");
     let dialog = page.getByRole("dialog", { name: "Gem Studio" });
     if (surface === "properties") {
@@ -411,12 +456,17 @@ const capture = async (browser, name, width, height, theme, surface, touch) => {
     if (overflow) failures.push(`${label}: document has horizontal overflow`);
     const save = dialog.getByRole("button", { name: /^Save$/ });
     await save.waitFor({ state: "visible", timeout: 8000 });
+    // Enlarging text can move Save beneath the previous click position.
+    // Measure its default highlight state, not the separate hover state.
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(350);
     const saveBg = await save.evaluate((node) => getComputedStyle(node).backgroundColor);
     const saveRect = await save.boundingBox();
     if (!saveRect || saveRect.x < 0 || saveRect.x + saveRect.width > width ||
         saveRect.y < 0 || saveRect.y + saveRect.height > height)
       failures.push(`${label}: Save is outside the viewport`);
-    if (saveBg !== await highlightOf(page)) failures.push(`${label}: Save does not use the highlight token`);
+    const highlight = await highlightOf(page);
+    if (saveBg !== highlight) failures.push(`${label}: Save background ${saveBg} differs from highlight ${highlight}`);
     await page.screenshot({ path: path.join(out, `gem-studio-${name}-${theme}-${pointer}-${surface}.png`) });
     if (width === 390) {
       const scroll = await dialog.getByRole("radiogroup", { name: "Preview activity" }).evaluate((node) => {
@@ -433,7 +483,7 @@ const capture = async (browser, name, width, height, theme, surface, touch) => {
         failures.push(`${label}: dialog content cannot scroll to the bottom`);
       console.log(`${label}/vertical-scroll`, JSON.stringify(scroll));
     }
-    await verifyTabBar(page, dialog, "Preview activity", 7, label, touch);
+    await verifyTabBar(page, dialog, "Preview activity", 7, label, touch, touch || hybrid);
     if (width === 390) {
       const activity = dialog.getByRole("radiogroup", { name: "Preview activity" });
       await activity.evaluate((node) => { node.scrollLeft = node.scrollWidth; });
@@ -441,7 +491,7 @@ const capture = async (browser, name, width, height, theme, surface, touch) => {
       await page.screenshot({ path: path.join(out, `gem-studio-${name}-${theme}-${pointer}-${surface}-last.png`) });
       await activity.evaluate((node) => { node.scrollLeft = 0; });
     }
-    await verifyTabBar(page, dialog, "Look", surface === "properties" ? 8 : 6, label, touch);
+    await verifyTabBar(page, dialog, "Look", surface === "properties" ? 8 : 6, label, touch, touch || hybrid);
   } catch (error) {
     failures.push(`${label}: ${String(error.message).split("\n")[0]}`);
   } finally {
@@ -451,22 +501,32 @@ const capture = async (browser, name, width, height, theme, surface, touch) => {
 
 // A focused non-gem has no activity row: Look is the first control in the
 // dialog, so its tablist must also cycle correctly at the focus boundary.
-const captureNonGem = async (browser) => {
-  const label = "390/dark/coarse/non-gem";
+const captureNonGem = async (browser, pointer) => {
+  captureCount += 1;
+  const touch = pointer === "coarse";
+  const hybrid = pointer === "hybrid";
+  const label = `390/dark/${pointer}/non-gem`;
   const oldAvatar = pool.agents[0].avatar;
   pool.agents[0].avatar = { kind: "initials" };
-  const { context, page } = await makeContext(browser, 390, 844, "dark", {
-    isMobile: true, hasTouch: true, deviceScaleFactor: 2,
-  });
+  const extra = touch ? { isMobile: true, hasTouch: true, deviceScaleFactor: 2 } : {};
+  const { context, page } = await makeContext(browser, 390, 844, "dark", extra, hybrid);
   try {
+    const media = await page.evaluate(() => ({
+      coarse: matchMedia("(pointer: coarse)").matches,
+      fine: matchMedia("(pointer: fine)").matches,
+      anyCoarse: matchMedia("(any-pointer: coarse)").matches,
+    }));
+    if (media.coarse !== touch || media.anyCoarse !== touch || (hybrid && !media.fine))
+      failures.push(`${label}: unexpected native pointer media ${JSON.stringify(media)}`);
+    console.log(`${label}/native-media`, JSON.stringify(media));
     if (!(await openStudio(page, label))) throw new Error("Gem Studio did not open");
     const result = await openProperties(page, label);
     if (!result) throw new Error("Properties did not open");
     await page.waitForTimeout(900);
     if (await result.dialog.getByRole("radiogroup", { name: "Preview activity" }).count())
       failures.push(`${label}: a non-gem unexpectedly has an activity row`);
-    await page.screenshot({ path: path.join(out, "gem-studio-390-dark-coarse-non-gem.png") });
-    await verifyTabBar(page, result.dialog, "Look", 3, label, true);
+    await page.screenshot({ path: path.join(out, `gem-studio-390-dark-${pointer}-non-gem.png`) });
+    await verifyTabBar(page, result.dialog, "Look", 3, label, touch, touch || hybrid);
   } catch (error) {
     failures.push(`${label}: ${String(error.message).split("\n")[0]}`);
   } finally {
@@ -482,21 +542,26 @@ try {
     ["390", 390, 844], ["820", 820, 1180], ["1440", 1440, 900],
   ].filter(([name]) => !only || name === only)) {
     for (const theme of ["dark", "light"]) {
-      for (const touch of [false, true]) {
+      for (const pointer of ["fine", "coarse", "hybrid"]) {
         for (const surface of ["global", "properties"]) {
-          if (onlyCase && `${name}/${theme}/${touch ? "coarse" : "fine"}/${surface}` !== onlyCase) continue;
-          await capture(browser, name, width, height, theme, surface, touch);
+          if (onlyCase && `${name}/${theme}/${pointer}/${surface}` !== onlyCase) continue;
+          await capture(browser, name, width, height, theme, surface, pointer);
         }
       }
     }
   }
-  if ((!only || only === "390") && (!onlyCase || onlyCase === "390/dark/coarse/non-gem"))
-    await captureNonGem(browser);
+  if (!only || only === "390") {
+    for (const pointer of ["coarse", "hybrid"]) {
+      if (!onlyCase || onlyCase === `390/dark/${pointer}/non-gem`)
+        await captureNonGem(browser, pointer);
+    }
+  }
 } finally {
   if (browser) await browser.close();
   await new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
 }
+if (!captureCount) throw new Error("No screenshot cases matched the requested filter.");
 if (failures.length) throw new Error(failures.join("; "));
 console.log("gem studio shots: PASS");

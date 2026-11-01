@@ -53,7 +53,7 @@ type Rgb = [number, number, number];
 
 const STAGE_ACTIVITIES: Activity[] = ["idle", "thinking", "typing", "speaking", "dance", "error", "dreaming"];
 const HAT_GROUPS = [...new Set(HAT_STYLES.map((hat) => hat.group))];
-const SCROLL_TAB = "pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5 focus-visible:ring-inset";
+const SCROLL_TAB = "any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px] h-auto flex-none self-stretch px-1.5 focus-visible:ring-inset";
 
 const toHex = (rgb: readonly number[]) =>
   `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
@@ -278,7 +278,7 @@ function StudioBody({
                   onFocus={revealFocused}
                   orientation="horizontal"
                   tabIndex={-1}
-                  className="pointer-coarse:h-11 inline-flex h-9 w-full min-w-0 max-w-max items-center justify-start gap-1 overflow-x-auto text-muted-foreground"
+                  className="any-pointer-coarse:min-h-[44px] inline-flex min-h-9 w-full min-w-0 max-w-max items-center justify-start gap-1 overflow-x-auto text-muted-foreground"
                 >
                   {STAGE_ACTIVITIES.map((option) => (
                     <RadioGroup.Item
@@ -287,7 +287,7 @@ function StudioBody({
                       onFocus={() => setActivity(option)}
                       className={cn(
                         SCROLL_TAB,
-                        "inline-flex h-full items-center justify-center border-b-2 py-1 text-xs font-medium whitespace-nowrap transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none",
+                        "inline-flex items-center justify-center border-b-2 py-1 text-xs font-medium whitespace-nowrap transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none",
                         activity === option ? "border-highlight text-foreground" : "border-transparent hover:text-foreground/80",
                       )}
                     >
@@ -315,7 +315,7 @@ function StudioBody({
                 defaultValue={focus?.tab ?? (focus && !dressGem ? "avatar" : "eyes")}
                 className="flex min-w-0 flex-col gap-0 lg:min-h-0 lg:flex-1"
               >
-                <TabsList aria-label="Look" tabIndex={-1} onFocus={revealFocused} className="pointer-coarse:h-11 mx-3 mt-3 w-auto shrink-0 justify-start overflow-x-auto">
+                <TabsList aria-label="Look" tabIndex={-1} onFocus={revealFocused} className="any-pointer-coarse:min-h-[44px] mx-3 mt-3 h-auto min-h-9 w-auto shrink-0 justify-start overflow-x-auto">
                   {focus ? <TabsTrigger className={SCROLL_TAB} value="avatar">Avatar</TabsTrigger> : null}
                   {dressGem ? <TabsTrigger className={SCROLL_TAB} value="shape">Shape</TabsTrigger> : null}
                   {dressGem ? <TabsTrigger className={SCROLL_TAB} value="eyes">Eyes</TabsTrigger> : null}

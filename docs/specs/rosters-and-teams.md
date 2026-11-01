@@ -222,8 +222,9 @@ Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `Agen
 - **Gem Studio preview.** Activity is a single-choice control for the preview, not a set
   of content panels. Keyboard navigation selects the focused activity and keeps the
   focused choice visible inside its scrollable row. Look tabs retain their labelled
-  content panels and use the same visible focus treatment. Touch targets are at least
-  44 pixels; Save persists the look rather than the preview activity.
+  content panels and use the same visible focus treatment. On devices with any coarse
+  pointer, including a secondary touchscreen, these touch targets measure at least
+  44 by 44 CSS pixels; Save persists the look rather than the preview activity.
 - **Avatar.** One component draws every agent picture: kind `gem` (or none) is the 3D
   gem; `image`, `emoji` and `initials` are a flat tile on the persona's color. Image
   files are fetched with the bearer token into blob URLs; a file that fails keeps the
