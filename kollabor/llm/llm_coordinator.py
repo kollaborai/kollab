@@ -20,6 +20,8 @@ from kollabor_agent.queue_processor import (
     CancellationOrigin,
     QueuedInput,
     QueueProcessor,
+    TaggedInput,
+    batch_request_ids,
     merge_voice_origin_contexts,
 )
 from kollabor_agent.tool_executor import ToolExecutor
@@ -1722,11 +1724,12 @@ class LLMService:
 
     async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
+        request_ids = batch_request_ids(messages)
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
             merged_origin_context = merge_voice_origin_contexts(messages)
             combined = combine_message_contents(
-                [m.content if isinstance(m, QueuedInput) else m for m in messages]
+                [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
             combined = self.merge_pending_agent_hud(combined)
             messages = [
@@ -1741,6 +1744,7 @@ class LLMService:
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
             current_parent_uuid=self.current_parent_uuid,
+            request_ids=request_ids,
         )
 
     async def _continue_conversation(self):
@@ -1932,6 +1936,7 @@ class LLMService:
         origin_context: dict | None = None,
         may_answer: bool = False,
         native_only: bool = False,
+        request_id: str | None = None,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1948,6 +1953,8 @@ class LLMService:
                 generation prompt, a hub peer, a pipe is never the user's yes.
             native_only: the caller needs the native tool loop (agent/skill
                 generation writes files); refused while ACP owns the chat.
+            request_id: the client follows this turn by it (#551): its events
+                carry it in ``request_ids``, and the result echoes it.
 
         Returns:
             Status information about processing
@@ -2051,6 +2058,8 @@ class LLMService:
         await self._enqueue_with_overflow_strategy(
             QueuedInput(normalized_message, voice or {}, trusted_origin_context)
             if voice or trusted_origin_context
+            else TaggedInput(normalized_message, (request_id,))
+            if request_id
             else normalized_message
         )
 
@@ -2060,6 +2069,8 @@ class LLMService:
                 lambda: self._process_queue(), name="process_queue"
             )
 
+        if request_id and not (voice or trusted_origin_context):
+            return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
 
     def _voice_aside_due(self, origin: dict) -> bool:
