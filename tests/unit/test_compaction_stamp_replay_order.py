@@ -10,6 +10,7 @@ TZ=America/Phoenix and TZ=UTC (the old code was red under Phoenix).
 """
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -179,6 +180,147 @@ def test_durable_append_spills_to_sidecar_after_two_failures(tmp_path, monkeypat
     assert Path(sidecar).read_text() == json.dumps(record) + "\n"
 
 
+def test_durable_append_fsyncs_primary(tmp_path, monkeypatch):
+    target = tmp_path / "session_fsync.jsonl"
+    real_fsync = os.fsync
+    fsync_calls = []
+
+    def counting_fsync(fd):
+        fsync_calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", counting_fsync)
+    record = {"type": "context_compaction", "content": "summary"}
+    assert _append_jsonl_durable(str(target), record) is None
+    assert fsync_calls, "primary append must fsync before returning success"
+
+
+def test_durable_append_fsyncs_sidecar_spill(tmp_path, monkeypatch):
+    target = tmp_path / "session_spill_fsync.jsonl"
+    real_open = open
+    real_fsync = os.fsync
+    fsync_calls = []
+
+    def flaky_open(file, mode="r", *args, **kwargs):
+        if Path(file) == target:
+            raise OSError("disk hiccup")
+        return real_open(file, mode, *args, **kwargs)
+
+    def counting_fsync(fd):
+        fsync_calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr("builtins.open", flaky_open)
+    monkeypatch.setattr(os, "fsync", counting_fsync)
+    record = {"type": "context_compaction", "content": "summary"}
+    spilled = _append_jsonl_durable(str(target), record)
+    assert spilled == str(target) + ".compaction-recovery.jsonl"
+    # The only successful open in this run is the sidecar's, so any fsync
+    # call here proves the spill path flushes to disk before returning.
+    assert fsync_calls, "sidecar spill must fsync before returning success"
+
+
+def _checkpoint_plugin(tmp_path):
+    from plugins.context_compaction_plugin import ContextCompactionPlugin
+
+    plugin = ContextCompactionPlugin(
+        "compaction", SimpleNamespace(), SimpleNamespace(), SimpleNamespace()
+    )
+    session_file = tmp_path / "session_pin.jsonl"
+    session_file.write_text("")
+    plugin._conversation_logger = SimpleNamespace(
+        session_file=session_file, session_id="pin-test"
+    )
+    return plugin, session_file
+
+
+def test_checkpoint_writer_failure_is_logged_not_raised(tmp_path, monkeypatch, caplog):
+    # Pins the fix for the swallowed checkpoint write: a failed checkpoint
+    # must log a warning and return None, never raise into the compaction
+    # flow and never vanish silently.
+    plugin, session_file = _checkpoint_plugin(tmp_path)
+    real_open = open
+
+    def failing_open(file, mode="r", *args, **kwargs):
+        if Path(file) == session_file.parent / "session_pin.checkpoint.r1.jsonl":
+            raise OSError("disk full")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+    with caplog.at_level("WARNING", logger="plugins.context_compaction_plugin"):
+        result = plugin._write_compaction_checkpoint([])
+    assert result is None
+    assert any(
+        "Failed to write compaction checkpoint" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_checkpoint_event_failure_is_logged_not_raised(tmp_path, monkeypatch, caplog):
+    # Pins the sibling path: a failed checkpoint-event append to the main
+    # session file must warn, not raise.
+    plugin, session_file = _checkpoint_plugin(tmp_path)
+    real_open = open
+
+    def failing_open(file, mode="r", *args, **kwargs):
+        if Path(file) == session_file:
+            raise OSError("disk full")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+    with caplog.at_level("WARNING", logger="plugins.context_compaction_plugin"):
+        plugin._log_checkpoint_event("session_pin.checkpoint.r1.jsonl", 3)
+    assert any(
+        "Failed to log checkpoint event" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_calculate_duration_skips_none_and_garbage_stamps(tmp_path):
+    # The resume-persist path (save_session -> get_conversation_summary)
+    # used to crash on records with missing or unparseable stamps:
+    # AttributeError on None.replace, ValueError on bad strings. Duration
+    # must span the first-to-last PARSEABLE stamps instead.
+    mgr = manager(tmp_path)
+    base = datetime(2026, 10, 31, 9, 30, tzinfo=timezone.utc)
+    mgr.messages = [
+        {"role": "user", "content": "hello", "timestamp": None},
+        {"role": "assistant", "content": "hi", "timestamp": base.isoformat()},
+        {"role": "user", "content": "ok", "timestamp": "not-a-timestamp"},
+        {
+            "role": "assistant",
+            "content": "done",
+            "timestamp": (base + timedelta(minutes=30)).isoformat(),
+        },
+    ]
+    assert mgr._calculate_duration() == "30m"
+
+
+def test_calculate_duration_all_bad_stamps_is_zero(tmp_path):
+    mgr = manager(tmp_path)
+    mgr.messages = [
+        {"role": "user", "content": "hello", "timestamp": None},
+        {"role": "assistant", "content": "hi", "timestamp": "not-a-timestamp"},
+    ]
+    assert mgr._calculate_duration() == "0m"
+
+
+def test_save_session_survives_none_and_garbage_stamps(tmp_path):
+    # A session whose records carry missing or unparseable stamps must
+    # still save; the summary's duration calculation must not make the
+    # resumed session fail to persist.
+    mgr = manager(tmp_path)
+    mgr.messages = [
+        {"role": "user", "content": "hello", "timestamp": None},
+        {"role": "assistant", "content": "hi", "timestamp": "not-a-timestamp"},
+    ]
+    assert mgr.save_session("stampless-save") is True
+    saved = tmp_path / "stampless-save.jsonl"
+    assert saved.exists()
+    payload = json.loads(saved.read_text().strip())
+    assert payload["summary"]["duration"] == "0m"
+
+
 def test_stampless_compaction_keeps_prior_boundary(tmp_path):
     # A later compaction record with a missing stamp must not reset a
     # valid earlier boundary to None: resetting it un-suppressed the
@@ -203,3 +345,63 @@ def test_stampless_compaction_keeps_prior_boundary(tmp_path):
     # Order: final summary first, then post-boundary tail records. Under
     # the old code the reset to None would un-suppress "Before" here.
     assert contents(reader) == ["Second", "Between", "Tail"]
+
+
+def spill_sidecar(directory, session_id, records):
+    """Write records the way _append_jsonl_durable's spill path would."""
+    sidecar = directory / f"{session_id}.jsonl.compaction-recovery.jsonl"
+    with open(sidecar, "a") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+    return sidecar
+
+
+@pytest.mark.asyncio
+async def test_spilled_compaction_sidecar_replays_on_resume(tmp_path):
+    # The compaction summary append failed twice and spilled to the
+    # recovery sidecar; the primary never got it. Old behavior: the
+    # loader read the primary only, so the summary was silently absent
+    # from replay and the pre-compaction chat came back in full.
+    compaction_at = BASE
+    sid = write_session(tmp_path, "sidecar-merge", [
+        chat_record(z_stamp(compaction_at - timedelta(minutes=1)), "Before"),
+        chat_record(z_stamp(compaction_at + timedelta(minutes=1)), "Tail"),
+    ])
+    spill_sidecar(tmp_path, "sidecar-merge", [
+        compaction_record(z_stamp(compaction_at), "Spilled summary"),
+    ])
+    _, reader, _, _ = await resume(tmp_path, sid)
+    assert contents(reader) == ["Spilled summary", "Tail"]
+
+
+@pytest.mark.asyncio
+async def test_sidecar_record_already_in_primary_is_not_duplicated(tmp_path):
+    # A sidecar copy of a record the primary also has (retry landed after
+    # the spill) must not replay twice.
+    compaction_at = BASE
+    dup = compaction_record(z_stamp(compaction_at), "Landed twice")
+    sid = write_session(tmp_path, "sidecar-dup", [
+        chat_record(z_stamp(compaction_at - timedelta(minutes=1)), "Before"),
+        dup,
+        chat_record(z_stamp(compaction_at + timedelta(minutes=1)), "Tail"),
+    ])
+    spill_sidecar(tmp_path, "sidecar-dup", [dup])
+    _, reader, _, _ = await resume(tmp_path, sid)
+    assert contents(reader) == ["Landed twice", "Tail"]
+
+
+@pytest.mark.asyncio
+async def test_older_sidecar_round_does_not_supersede_newer_primary_round(tmp_path):
+    # Last-round-wins is by compaction order, not by which file was read
+    # last: a stale spilled round must not replace a newer primary round.
+    compaction_at = BASE
+    sid = write_session(tmp_path, "sidecar-order", [
+        chat_record(z_stamp(compaction_at - timedelta(minutes=2)), "Before"),
+        compaction_record(z_stamp(compaction_at + timedelta(minutes=1)), "New round"),
+        chat_record(z_stamp(compaction_at + timedelta(minutes=2)), "Tail"),
+    ])
+    spill_sidecar(tmp_path, "sidecar-order", [
+        compaction_record(z_stamp(compaction_at), "Old spilled round"),
+    ])
+    _, reader, _, _ = await resume(tmp_path, sid)
+    assert contents(reader) == ["New round", "Tail"]

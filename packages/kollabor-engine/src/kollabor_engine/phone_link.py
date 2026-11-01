@@ -41,12 +41,14 @@ from plugins.hub.relay_client import RelayClient
 from plugins.hub.relay_state import ID, KEY, RelayError, canonical_origin, strict_json
 
 from .auth import get_token, read_token_from_disk
+from .daemon_pool import get_daemon_pool
 from .hub_bridge import network_daemons
 from .phonelink_events import (
     PhoneLinkEventLog,
     normalize_phone_diagnostic,
     safe_event_label,
 )
+from .session_context import SESSION_READ_CONTEXT_SCOPE_KEY, SessionReadContext
 
 PHONE_PROTOCOL = "kollab-phonelink/1"
 MAX_PHONES = 8
@@ -292,6 +294,7 @@ class HttpExchange:
     task: asyncio.Task | None = None
     used: float = field(default_factory=time.monotonic)
     sequence: int = 0
+    read_context: SessionReadContext | None = None
 
 
 class PhoneLink:
@@ -300,6 +303,7 @@ class PhoneLink:
         self.app = app
         self.directory = directory or get_config_directory() / "phonelink"
         self.records: dict[str, dict] = {}
+        self._read_contexts: dict[str, SessionReadContext] = {}
         self.clients: dict[str, RelayClient] = {}
         self.sessions: dict[str, PhoneSession] = {}
         self._idle_announced: set[str] = set()
@@ -465,6 +469,8 @@ class PhoneLink:
                 raise PhoneLinkError(
                     "PhoneLink state could not be locked. Its saved data has been preserved."
                 ) from None
+            self._read_contexts.clear()
+
             path = self.directory / "phones.json"
             try:
                 data = strict_json(path.read_bytes(), limit=32768)
@@ -495,6 +501,11 @@ class PhoneLink:
                     if type(row.setdefault("seen", 0)) is not int:
                         raise ValueError()
                 self.records = records
+                self._read_contexts = {
+                    identifier: SessionReadContext(owner_id="local", phone_id=identifier)
+                    for identifier, row in records.items()
+                    if row["key"]
+                }
             except FileNotFoundError:
                 self.records = {}
             except OSError, ValueError, KeyError, TypeError:
@@ -892,8 +903,12 @@ class PhoneLink:
             row["key"] = key
             try:
                 self._persist()
+                self._read_contexts[identifier] = SessionReadContext(
+                    owner_id="local", phone_id=identifier
+                )
                 client.approve(key)
             except BaseException:
+                self._read_contexts.pop(identifier, None)
                 row["key"] = ""
                 self._persist()
                 raise
@@ -927,6 +942,10 @@ class PhoneLink:
             except BaseException:
                 self.records[identifier] = row
                 raise
+            context = self._read_contexts.pop(identifier, None)
+            if context is not None:
+                context.revoked = True
+                get_daemon_pool().close_streams_for_context(context)
             self._maintenance_errors.pop(f"maintenance:{identifier}", None)
             event_name = "revoked" if row["key"] else "invitation_cancelled"
             self._event(
@@ -1035,6 +1054,9 @@ class PhoneLink:
             or (session.host_session, session.phone_session) != (host_session, phone_session)
         ):
             raise RelayError("phone session is unavailable")
+        read_context = self._read_contexts.get(identifier)
+        if read_context is None or read_context.revoked:
+            raise RelayError("phone session is unavailable")
         try:
             raw = base64.b64decode(payload["packet"], validate=True)
             packet = session.incoming.decrypt(raw)
@@ -1055,6 +1077,7 @@ class PhoneLink:
             result = await self._http(
                 identifier,
                 request,
+                read_context=read_context,
                 chunk_size=session.chunk_size,
                 coalesce_headers=session.coalesce_reads,
                 zero_body_autorun=session.zero_body_autorun,
@@ -1108,6 +1131,7 @@ class PhoneLink:
         phone: str,
         request: dict,
         *,
+        read_context: SessionReadContext | None = None,
         chunk_size: int = LEGACY_CHUNK,
         coalesce_headers: bool = False,
         zero_body_autorun: bool = False,
@@ -1159,6 +1183,7 @@ class PhoneLink:
                 size,
                 chunk_size=chunk_size,
                 coalesce_headers=coalesce_headers,
+                read_context=read_context,
             )
             if decoded.split("/")[1] == "phone-app":
                 if method != "GET" or size:
@@ -1311,6 +1336,11 @@ class PhoneLink:
             "headers": headers,
             "client": ("127.0.0.1", 0),
             "server": ("127.0.0.1", 0),
+            "state": (
+                {SESSION_READ_CONTEXT_SCOPE_KEY: exchange.read_context}
+                if exchange.read_context is not None
+                else {}
+            ),
         }
         received = False
 

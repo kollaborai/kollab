@@ -4,7 +4,7 @@ Reads agent presence from disk and queries agent unix sockets
 to expose hub state through the engine REST API.
 
 Presence files: ~/.kollab/projects/<encoded>/hub/presence/{agent_id}.json
-Agent sockets:  /tmp/kollabor-hub/<project-hash>/<identity>.sock  (from socket_path field)
+Agent endpoints: <platform socket root>/<project-hash>/<identity>.sock
 """
 
 import asyncio
@@ -181,6 +181,17 @@ class HubBridge:
                 return agent
         return None
 
+    def _fresh_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """This agent's record read from disk now, leaving the cached roster alone.
+
+        A fresh roster in the cache would let the next lookup by name find another
+        folder's namesake before the cache would have expired (#556).
+        """
+        for agent in self._read_presence_files():
+            if agent.get("agent_id") == agent_id:
+                return agent
+        return None
+
     def discover_sessions(self, use_cache: bool = True) -> List[Dict[str, Any]]:
         """Return every live agent on this computer that has an attach socket.
 
@@ -276,7 +287,7 @@ class HubBridge:
         agent_data = self.get_agent(agent_id)
         sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if sock_path is None or not sock_path.exists():
-            agent_data = self.get_agent(agent_id, use_cache=False)
+            agent_data = self._fresh_agent(agent_id)
             sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if agent_data is None:
             logger.debug(f"No presence data for agent {agent_id}")
@@ -304,7 +315,7 @@ class HubBridge:
             return None
         sock_path = self._socket_path_for_agent(agent_data)
         if sock_path is None or not sock_path.exists():
-            agent_data = self.get_agent(str(agent_data.get("agent_id") or ""), use_cache=False)
+            agent_data = self._fresh_agent(str(agent_data.get("agent_id") or ""))
             sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if sock_path is None or not sock_path.exists():
             logger.debug(f"Socket not found for identity {identity}: {sock_path}")
@@ -407,7 +418,8 @@ class HubBridge:
         import time as _time
         import uuid
 
-        agent_data = self.get_agent(target_agent_id)
+        # The recipient wakes for a message to its identity: find its record as query_socket does (#556).
+        agent_data = self.get_agent(target_agent_id) or self._fresh_agent(target_agent_id)
         target_identity = agent_data.get("identity", target_agent_id) if agent_data else target_agent_id
 
         resp = await self.query_socket(

@@ -36,6 +36,7 @@ from .daemon_pool import DaemonHandle, get_daemon_pool
 from .history_provenance import mark_system_initialization
 from .history_store import anchor_digest, read_history_from_disk_async
 from .history_xml_tools import web_history
+from .session_context import SessionReadContext
 
 logger = logging.getLogger(__name__)
 
@@ -568,10 +569,14 @@ class EngineSession:
     def alive(self) -> bool:
         return self.daemon is not None and self.daemon.alive
 
-    def subscribe(self) -> asyncio.Queue:
+    def subscribe(
+        self, context: SessionReadContext | None = None
+    ) -> asyncio.Queue:
         if self.daemon is None:
             raise RuntimeError(f"session {self.session_id} has no live daemon")
-        return self.daemon.subscribe()
+        if context is None:
+            return self.daemon.subscribe()
+        return self.daemon.subscribe(context=context)
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
         if self.daemon is not None:

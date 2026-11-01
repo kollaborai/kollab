@@ -173,6 +173,112 @@ async def test_a_name_the_cache_lacks_is_refused_never_found_in_another_folder(t
     send.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_a_fresh_read_by_id_never_hands_the_name_to_another_folder(tmp_path, monkeypatch):
+    # Kyanite on #556 round 4: the reread by id replaced the cached roster, so the
+    # next message for lapis found another folder's lapis while main still refused.
+    import json
+    from unittest.mock import AsyncMock
+
+    here = tmp_path / "here.sock"
+    here.touch()
+    first = _record("a1", "lapis", project="/w/here", socket_path=str(here))
+    bridge, presence = _presence_bridge(tmp_path, monkeypatch, first)
+    assert [agent["agent_id"] for agent in bridge.get_agents()] == ["a1"]
+    (presence / "a1.json").unlink()
+    here.unlink()
+    elsewhere = tmp_path / "elsewhere.sock"
+    elsewhere.touch()
+    namesake = _record("b1", "lapis", project="/w/elsewhere", socket_path=str(elsewhere))
+    (presence / "b1.json").write_text(json.dumps(namesake))
+    send = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(bridge, "_query_socket_path", send)
+
+    assert await bridge.query_socket_by_identity("lapis", "ping") is None
+    assert await bridge.query_socket_by_identity("lapis", "ping") is None
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_read_for_another_agent_never_hands_the_name_to_another_folder(tmp_path, monkeypatch):
+    # Kyanite on #556 round 4: a cache miss for any agent id refreshed the shared
+    # roster, and a name the cache lacked then found another folder's agent.
+    import json
+    from unittest.mock import AsyncMock
+
+    bridge, presence = _presence_bridge(tmp_path, monkeypatch, _record("x1", "ruby", project="/w/here"))
+    assert [agent["agent_id"] for agent in bridge.get_agents()] == ["x1"]
+    sapphire = tmp_path / "sapphire.sock"
+    sapphire.touch()
+    peer = _record("c1", "sapphire", project="/w/here", socket_path=str(sapphire))
+    (presence / "c1.json").write_text(json.dumps(peer))
+    lapis = tmp_path / "lapis.sock"
+    lapis.touch()
+    namesake = _record("b1", "lapis", project="/w/elsewhere", socket_path=str(lapis))
+    (presence / "b1.json").write_text(json.dumps(namesake))
+    send = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(bridge, "_query_socket_path", send)
+
+    assert await bridge.query_socket("c1", "ping") == {"ok": True}
+    assert await bridge.query_socket_by_identity("lapis", "ping") is None
+    assert [call.args[0] for call in send.await_args_list] == [str(sapphire)]
+
+
+@pytest.mark.asyncio
+async def test_a_message_for_an_agent_the_cache_lacks_is_addressed_to_its_identity(tmp_path, monkeypatch):
+    # Kyanite on #556 round 4: the message named the id, so the agent took it as
+    # someone else's and never woke for it.
+    import json
+    from unittest.mock import AsyncMock
+
+    bridge, presence = _presence_bridge(tmp_path, monkeypatch, _record("x1", "ruby"))
+    assert [agent["agent_id"] for agent in bridge.get_agents()] == ["x1"]
+    socket = tmp_path / "lapis.sock"
+    socket.touch()
+    (presence / "c1.json").write_text(json.dumps(_record("c1", "lapis", socket_path=str(socket))))
+    send = AsyncMock(return_value={"type": "ack"})
+    monkeypatch.setattr(bridge, "_query_socket_path", send)
+
+    assert await bridge.send_message("c1", "hello") is True
+    assert send.await_args.args[2]["to"] == "lapis"
+
+
+@pytest.mark.asyncio
+async def test_hub_messages_refuses_a_namesake_after_an_id_refresh(tmp_path, monkeypatch):
+    """The route must not rebind the second message after a failed refresh (#556)."""
+    import json
+    from unittest.mock import AsyncMock
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from kollabor_engine.routes import hub as hub_route
+
+    first_socket = tmp_path / "here.sock"
+    first_socket.touch()
+    first = _record("a1", "lapis", project="/w/here", socket_path=str(first_socket))
+    bridge, presence = _presence_bridge(tmp_path, monkeypatch, first)
+    assert bridge.get_agents()[0]["agent_id"] == "a1"
+    (presence / "a1.json").unlink()
+    first_socket.unlink()
+    other_socket = tmp_path / "elsewhere.sock"
+    other_socket.touch()
+    other = _record("b1", "lapis", project="/w/elsewhere", socket_path=str(other_socket))
+    (presence / "b1.json").write_text(json.dumps(other))
+    send = AsyncMock(return_value={"type": "ack"})
+    monkeypatch.setattr(bridge, "_query_socket_path", send)
+    monkeypatch.setattr(hub_route, "_bridge", bridge)
+    app = FastAPI()
+    app.include_router(hub_route.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        statuses = [
+            (await client.post("/hub/messages", json={"target": "lapis", "content": "hello"})).status_code
+            for _ in range(2)
+        ]
+
+    assert statuses == [503, 503]
+    send.assert_not_awaited()
+
+
 def test_discover_sessions_carries_what_the_agent_publishes(tmp_path, monkeypatch):
     # The row reads the same before the engine opens the agent as after:
     # EngineSession.to_dict answers profile and model, so presence must too.

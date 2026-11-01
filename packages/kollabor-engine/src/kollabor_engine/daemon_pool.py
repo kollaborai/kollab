@@ -45,6 +45,7 @@ import psutil
 from . import sse
 from .folders import agents_in_folder
 from .hub_bridge import HubBridge
+from .session_context import PHONE_STREAM_REVOKED, SessionReadContext
 
 
 def _pid_start_time(pid: int) -> Optional[float]:
@@ -134,9 +135,15 @@ def _frame_field(head: bytes, tail: bytes, key: str) -> Any:
 
 
 def _frame_request(head: bytes, tail: bytes) -> Dict[str, Any]:
-    """The request an oversized frame names, as the fields to tag what replaces it with."""
+    """The requests an oversized frame names, as the fields to tag what replaces it with."""
+    named: Dict[str, Any] = {}
     request_id = _frame_field(head, tail, "request_id")
-    return {"request_id": request_id} if isinstance(request_id, str) and request_id else {}
+    if isinstance(request_id, str) and request_id:
+        named["request_id"] = request_id
+    request_ids = _frame_field(head, tail, "request_ids")  # a chat turn's (#551)
+    if isinstance(request_ids, list) and request_ids:
+        named["request_ids"] = request_ids
+    return named
 
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,7 +188,7 @@ def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
         "risk_reason": details.get("risk_reason", ""),
         "details": details,
     }
-    for key in ("ts", "session_id", "request_id", "turn_id", "input_source", "generation"):
+    for key in ("ts", "session_id", "request_id", "request_ids", "turn_id", "input_source", "generation"):
         if key in event:
             flat[key] = event[key]
     return flat
@@ -221,6 +228,8 @@ class DaemonHandle:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._read_task: Optional[asyncio.Task] = None
         self._subscribers: Set[asyncio.Queue] = set()
+
+        self._subscriber_contexts: Dict[asyncio.Queue, SessionReadContext] = {}
         self._closed = False
         self.startup_error: str = ""
         # The daemon replays its recent events on every attach. After a reattach
@@ -500,13 +509,33 @@ class DaemonHandle:
         """Engine-generated event to every SSE subscriber of this session."""
         self._fan_out(event)
 
-    def subscribe(self) -> asyncio.Queue:
+    def subscribe(self, context: SessionReadContext | None = None) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        if context is not None and context.revoked:
+            queue.put_nowait(PHONE_STREAM_REVOKED)
+            return queue
         self._subscribers.add(queue)
+        if context is not None:
+            self._subscriber_contexts[queue] = context
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
         self._subscribers.discard(queue)
+        self._subscriber_contexts.pop(queue, None)
+
+    def close_streams_for_context(self, context: SessionReadContext) -> int:
+        """Synchronously close and remove every SSE queue owned by a revoked pairing."""
+        closed = 0
+        for queue, subscribed_context in tuple(self._subscriber_contexts.items()):
+            if subscribed_context is not context:
+                continue
+            self._subscriber_contexts.pop(queue, None)
+            self._subscribers.discard(queue)
+            while not queue.empty():
+                queue.get_nowait()
+            queue.put_nowait(PHONE_STREAM_REVOKED)
+            closed += 1
+        return closed
 
     @property
     def alive(self) -> bool:
@@ -754,6 +783,13 @@ class DaemonPool:
 
     def all(self) -> List[DaemonHandle]:
         return list(self._daemons.values())
+
+
+    def close_streams_for_context(self, context: SessionReadContext) -> int:
+        """Close a revoked PhoneLink pairing's queues across active session daemons."""
+        return sum(
+            handle.close_streams_for_context(context) for handle in self.all()
+        )
 
     def starting_folders(self) -> List[str]:
         """Folders with an agent being launched by this engine."""

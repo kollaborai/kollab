@@ -5,8 +5,8 @@ import functools
 import json
 import os
 import tempfile
-import types
 import time
+import types
 
 import pytest
 from kollabor_engine.daemon_pool import DaemonHandle
@@ -350,10 +350,12 @@ class _StreamSession:
     session_id = "s9"
     alive = True
 
-    def __init__(self, events):
+    def __init__(self, events, admission=None):
         self.queue = asyncio.Queue()
         for event in events:
             self.queue.put_nowait(event)
+        self.admission = admission or {"accepted": True, "request_id": "new"}
+        self.sent = []
 
     def subscribe(self):
         return self.queue
@@ -362,7 +364,8 @@ class _StreamSession:
         pass
 
     async def send_message(self, *args, **kwargs):
-        return {"accepted": True, "request_id": "new"}
+        self.sent.append(kwargs)
+        return self.admission
 
 
 @pytest.mark.asyncio
@@ -370,8 +373,9 @@ async def test_an_oversized_turn_complete_still_ends_its_turn(monkeypatch):
     # Kyanite on #543 round 4: a >16 MiB turn_complete (a harness error with
     # its whole output) was dropped like any update, so the message stream
     # waited out its 600 s idle timeout and the reply never ended.
-    import kollabor_rpc.transport
     from kollabor_engine.routes import messages
+
+    import kollabor_rpc.transport
 
     monkeypatch.setattr(kollabor_rpc.transport, "LARGE_BUFFER_LIMIT", 1024)
     big = {"type": "turn_complete", "request_id": "new", "stop_reason": "error", "error": "x" * 4096, "seq": 3}
@@ -386,6 +390,12 @@ async def test_an_oversized_turn_complete_still_ends_its_turn(monkeypatch):
     # so the completion named no request and ended whichever stream was open.
     odd = {**big, "request_id": 'old"id-\u00e9', "seq": 1}
     assert (await _pool_events([odd], 2))[1]["request_id"] == 'old"id-\u00e9'
+    # A chat turn names its requests in request_ids (#551); the stream that sent
+    # one is waiting on exactly that completion.
+    chat = {"type": "turn_complete", "stop_reason": "error", "error": "x" * 4096, "request_ids": ["r1"], "seq": 1}
+    answered = (await _pool_events([chat], 2))[1]
+    assert answered["request_ids"] == ["r1"]
+    assert not messages._foreign_completion(answered, {"r1"}, tagged=True)
 
     # The message route ends its stream on it instead of idling 600 s.
     monkeypatch.setattr(messages, "get_session_registry", lambda: types.SimpleNamespace(
@@ -397,6 +407,109 @@ async def test_an_oversized_turn_complete_still_ends_its_turn(monkeypatch):
 
     sent = await asyncio.wait_for(drain(), 5)
     assert '"turn_complete"' in str(sent[-1])
+
+
+async def _route_stream(monkeypatch, session, request_id=None):
+    """What POST /sessions/{id}/message streams for ``session``'s events."""
+    from kollabor_engine.routes import messages
+
+    monkeypatch.setattr(messages, "get_session_registry", lambda: types.SimpleNamespace(get=lambda sid: session))
+    response = await messages.send_message("s9", messages.MessageRequest(content="hi", request_id=request_id))
+
+    async def drain():
+        return [str(item) async for item in response.body_iterator]
+
+    return await asyncio.wait_for(drain(), 5)
+
+
+@pytest.mark.asyncio
+async def test_a_message_sent_while_a_turn_runs_streams_its_own_reply(monkeypatch):
+    # #551: B's stream ended on the untagged completion of turn A, still
+    # running when B was sent, and B's reply never streamed.
+    session = _StreamSession([
+        {"type": "turn_complete", "stop_reason": "end_turn"},
+        {"type": "token", "text": "B-OK", "request_ids": ["new"]},
+        {"type": "turn_complete", "stop_reason": "end_turn", "request_ids": ["new"]},
+    ])
+    sent = await _route_stream(monkeypatch, session)
+    assert "B-OK" in sent[-2] and '"turn_complete"' in sent[-1]
+    # The client sent no id, so the engine made one for the daemon to stamp.
+    assert len(session.sent[0]["request_id"]) == 32
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theirs", [{}, {"request_id": "voice-A"}], ids=["typed", "voice"])
+async def test_a_message_sent_while_an_unnamed_turn_runs_gets_none_of_it(monkeypatch, theirs):
+    # Chalcedony on #554 round 5: a turn typed in the terminal (no ids) or a
+    # voice turn (its own id only) streamed its text and permission prompt
+    # into a message sent meanwhile.
+    session = _StreamSession([
+        {"type": "token", "text": "THEIRS", **theirs},
+        {"type": "permission_request", "tool_id": "their-tool", **theirs},
+        {"type": "turn_complete", "stop_reason": "end_turn", **theirs},
+        {"type": "token", "text": "B-OK", "request_ids": ["new"]},
+        {"type": "turn_complete", "stop_reason": "end_turn", "request_ids": ["new"]},
+    ])
+    sent = await _route_stream(monkeypatch, session)
+    assert len(sent) == 2 and "B-OK" in sent[0] and '"turn_complete"' in sent[1]
+
+
+@pytest.mark.asyncio
+async def test_an_admission_that_echoes_no_id_ends_on_any_completion(monkeypatch):
+    # A slash command or hub mention publishes an untagged completion of its
+    # own; its stream must still end on it.
+    session = _StreamSession(
+        [{"type": "token", "text": "done"}, {"type": "turn_complete", "stop_reason": "end_turn"}],
+        admission={"accepted": True, "reason": "slash command"},
+    )
+    sent = await _route_stream(monkeypatch, session, request_id="client-1")
+    assert '"turn_complete"' in sent[-1]
+    assert session.sent[0]["request_id"] == "client-1"
+
+
+def test_a_tagged_request_ends_only_on_a_completion_naming_it():
+    from kollabor_engine.routes.messages import _foreign_completion
+
+    mine = {"new"}
+    untagged = {"type": "turn_complete"}
+    assert _foreign_completion(untagged, mine, tagged=True)  # a turn running when this was sent
+    assert not _foreign_completion(untagged, mine)  # nothing is tagged: as before
+    # One batch can answer two requests; a voice turn keeps its own id as well.
+    assert not _foreign_completion({"type": "turn_complete", "request_ids": ["old", "new"]}, mine, tagged=True)
+    assert _foreign_completion({"type": "turn_complete", "request_ids": ["old"]}, mine, tagged=True)
+    assert not _foreign_completion(
+        {"type": "turn_complete", "request_id": "voice-1", "request_ids": ["new"]}, mine, tagged=True
+    )
+
+
+def test_a_stream_gets_none_of_another_requests_output():
+    # Variscite on #554 round 4: a message sent while turn A ran streamed A's
+    # text, tool cards and permission prompt as its own.
+    from kollabor_engine.daemon_pool import _normalize_event
+    from kollabor_engine.routes.messages import _foreign_output
+
+    mine = {"B"}
+    assert _foreign_output({"type": "token", "request_ids": ["A"]}, mine)
+    assert _foreign_output({"type": "tool_start", "request_ids": ["A"]}, mine)
+    assert not _foreign_output({"type": "token", "request_ids": ["A", "B"]}, mine)  # one batch answers both
+    assert not _foreign_output({"type": "token"}, mine)  # session-wide, or a daemon that tags nothing
+    assert not _foreign_output({"type": "token", "request_ids": ["A"]}, set())  # a stream with no id
+    prompt = _normalize_event(
+        {"type": "permission_request", "request_ids": ["A"], "details": {"tool_name": "terminal"}}
+    )
+    assert prompt["request_ids"] == ["A"] and _foreign_output(prompt, mine)
+    # Chalcedony on #554 round 5: a turn typed in the terminal names no request
+    # and a voice turn only its own id, so both reached a tagged request.
+    assert _foreign_output({"type": "token"}, mine, tagged=True)
+    assert _foreign_output({"type": "permission_request", "tool_id": "t1"}, mine, tagged=True)
+    assert _foreign_output({"type": "token", "request_id": "voice-A"}, mine)
+    assert not _foreign_output({"type": "token", "request_id": "B"}, mine, tagged=True)  # an ACP turn names it so
+    assert not _foreign_output({"type": "permission_granted", "tool_id": "t1"}, mine, tagged=True)  # by its tool
+    assert not _foreign_output({"type": "daemon_closed"}, mine, tagged=True)  # session-wide
+    # Danburite on #554 round 6: a parked card's answer names the turn that
+    # showed it, and the later message that gives it must still close the card.
+    answer = {"type": "permission_denied", "tool_id": "t1", "request_ids": ["A"]}
+    assert not _foreign_output(answer, mine, tagged=True)
 
 
 def test_only_this_requests_completion_ends_its_stream():
@@ -433,8 +546,8 @@ async def test_an_old_turns_dropped_frame_fails_no_other_request(monkeypatch):
     assert messages._foreign_error(error, {"new"}) and not messages._foreign_error(error, {"old"})
     assert not messages._foreign_error({"type": "error", "message": "x"}, {"new"})  # names none: everyone's
 
-    reply = [
-        {"type": "token", "text": "fine"},
+    reply = [  # a daemon that echoes the id names it on its turn's events (#551)
+        {"type": "token", "text": "fine", "request_id": "new"},
         {"type": "turn_complete", "request_id": "new", "stop_reason": "end_turn"},
     ]
     monkeypatch.setattr(messages, "get_session_registry", lambda: types.SimpleNamespace(

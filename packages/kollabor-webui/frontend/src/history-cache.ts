@@ -414,3 +414,81 @@ export class IndexedDbHistoryPageCache implements HistoryPageCache {
 }
 
 export const historyPageCache: HistoryPageCache = new IndexedDbHistoryPageCache();
+
+
+/** Slimmed page entries keep a signed reference but lose heavy metadata
+ * lists (acp_updates, tool_calls, ...), so restored tool runs would render
+ * empty. Fetch each marked entry's full metadata once and merge back the
+ * missing keys; entries whose fetch fails stay slimmed. (issue #522) */
+const HISTORY_SLIMMED_MARKERS = [
+  "acp_updates_dropped",
+  "tool_calls_dropped",
+  "xml_tool_calls_dropped",
+  "provider_reasoning_dropped",
+];
+
+export interface HistoryMetadataClient {
+  getHistoryMetadata(
+    sessionId: string,
+    reference: string,
+  ): Promise<{ metadata: Record<string, unknown> }>;
+}
+
+export async function restoreSlimmedHistoryMetadata(
+  sessionId: string,
+  api: HistoryMetadataClient,
+  history: HistoryMessage[],
+): Promise<HistoryMessage[]> {
+  const targets: number[] = [];
+  for (let index = 0; index < history.length; index += 1) {
+    const metadata = history[index]?.metadata;
+    if (!metadata) {
+      continue;
+    }
+    const reference = metadata.history_output_ref;
+    if (
+      typeof reference === "string" &&
+      reference.length > 0 &&
+      HISTORY_SLIMMED_MARKERS.some((marker) => marker in metadata)
+    ) {
+      targets.push(index);
+    }
+  }
+  if (targets.length === 0) {
+    return history;
+  }
+
+  const results = await Promise.allSettled(
+    targets.map((index) =>
+      api.getHistoryMetadata(
+        sessionId,
+        history[index].metadata?.history_output_ref as string,
+      ),
+    ),
+  );
+  const restored = [...history];
+  results.forEach((result, position) => {
+    if (result.status !== "fulfilled") {
+      return;
+    }
+    const index = targets[position];
+    const full = result.value.metadata;
+    if (!full || typeof full !== "object") {
+      return;
+    }
+    const metadata = { ...restored[index].metadata };
+    for (const [key, value] of Object.entries(full)) {
+      if (!(key in metadata)) {
+        metadata[key] = value;
+      }
+    }
+    for (const marker of HISTORY_SLIMMED_MARKERS) {
+      const key = marker.replace(/_dropped$/, "");
+      if (key in metadata) {
+        delete metadata[marker];
+      }
+    }
+    restored[index] = { ...restored[index], metadata };
+  });
+  return restored;
+}
