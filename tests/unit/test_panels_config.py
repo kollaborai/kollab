@@ -186,8 +186,40 @@ def test_hub_dropdowns_name_their_options_for_people_and_save_the_ids(home):
     fields = fields_of(describe(config))
 
     roster = fields["plugins.hub.roster"]
-    assert roster["options"] == ["gems", "marketing-crew"]
-    assert roster["option_labels"] == {"gems": "Gems", "marketing-crew": "Marketing Crew"}
+    assert roster["options"] == [
+        "data-crew",
+        "finance-crew",
+        "gems",
+        "legal-crew",
+        "marketing-crew",
+        "oss-crew",
+        "people-crew",
+        "personal-crew",
+        "product-crew",
+        "research-crew",
+        "sales-crew",
+        "security-crew",
+        "social-crew",
+        "store-crew",
+        "support-crew",
+    ]
+    assert roster["option_labels"] == {
+        "data-crew": "Data Crew",
+        "finance-crew": "Finance Crew",
+        "gems": "Gems",
+        "legal-crew": "Legal Crew",
+        "marketing-crew": "Marketing Crew",
+        "oss-crew": "Open Source Crew",
+        "people-crew": "People Crew",
+        "personal-crew": "Personal Crew",
+        "product-crew": "Product Crew",
+        "research-crew": "Research Crew",
+        "sales-crew": "Sales Crew",
+        "security-crew": "Security Crew",
+        "social-crew": "Social Crew",
+        "store-crew": "Store Crew",
+        "support-crew": "Support Crew",
+    }
     assert roster["value"] == "marketing-crew"  # the saved id, not its label
     assert fields["plugins.hub.arrival_wake"]["option_labels"] == {
         "all": "All",
