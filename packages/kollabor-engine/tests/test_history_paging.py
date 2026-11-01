@@ -324,3 +324,80 @@ def test_tool_output_ref_is_session_bound():
 
     with pytest.raises(ValueError):
         resolve_history_output("another-session", history, ref)
+
+
+def _acp_reply_message(acp_updates):
+    """The Claude ACP reply shape: small text, huge streaming-update list."""
+    return {
+        "role": "assistant",
+        "content": "done",
+        "metadata": {
+            "provider": "acp",
+            "profile": "claude-code",
+            "acp_updates": acp_updates,
+            "stop_reason": "end_turn",
+        },
+    }
+
+
+def test_472kb_acp_updates_page_light_with_dropped_marker():
+    updates = [{"kind": "text", "text": "x" * 118}] * 4_000  # ~472 KB
+    history = [
+        _message(0),
+        {"role": "assistant", "content": "earlier", "metadata": {}},
+        _acp_reply_message(updates),
+    ]
+
+    page = build_history_page("session-1", history, tool_output_preview=True)
+
+    reply = page["history"][-1]
+    assert _wire_size(page) <= HISTORY_MAX_PAGE_BYTES
+    assert reply["metadata"]["history_output_truncated"] is True
+    assert reply["metadata"]["acp_updates_dropped"] == 4_000
+    assert "acp_updates" not in reply["metadata"]
+    assert reply["metadata"]["provider"] == "acp"
+    assert reply["content"].startswith("done")
+
+
+def test_oversized_acp_message_pages_to_the_top_without_page_too_large():
+    updates = [{"kind": "text", "text": "y" * 118}] * 4_000
+    history = [
+        _acp_reply_message([{"kind": "text", "text": f"m{index}"}]) if index % 2
+        else _message(index)
+        for index in range(40)
+    ] + [_acp_reply_message(updates), _message(999)]
+
+    cursor = None
+    pages = 0
+    while True:
+        page = build_history_page("session-1", history, before=cursor)
+        pages += 1
+        assert _wire_size(page) <= HISTORY_MAX_PAGE_BYTES
+        if not page["has_more_older"]:
+            break
+        cursor = page["older_cursor"]
+    assert pages > 1
+    assert pages < 20  # bounded walk, no runaway
+
+
+def test_small_acp_updates_stay_whole_in_the_page_copy():
+    updates = [{"kind": "text", "text": "hello"}]
+    history = [_acp_reply_message(updates)]
+
+    page = build_history_page("session-1", history, tool_output_preview=True)
+
+    reply = page["history"][-1]
+    assert reply["metadata"]["acp_updates"] == updates
+    assert "acp_updates_dropped" not in reply["metadata"]
+
+
+def test_472kb_acp_updates_truncates_in_default_form_too():
+    updates = [{"kind": "text", "text": "x" * 118}] * 4_000
+    history = [_acp_reply_message(updates)]
+
+    page = build_history_page("session-1", history)
+
+    reply = page["history"][-1]
+    assert reply["metadata"]["history_output_truncated"] is True
+    assert reply["metadata"]["acp_updates_dropped"] == 4_000
+    assert _wire_size(page) <= HISTORY_MAX_PAGE_BYTES

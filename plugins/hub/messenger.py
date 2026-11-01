@@ -448,6 +448,11 @@ class AgentSocketServer:
 
     async def start(self) -> str:
         """Start the socket server. Returns the socket path."""
+        if not self.socket_path.parent.exists():
+            # A /tmp cleanup deleted the socket directory under this running
+            # agent: make it again (ours, 0700), or every re-bind fails with
+            # "No such file or directory" until another agent starts (#542).
+            get_socket_dir()
         # Clean stale socket
         if self.socket_path.exists():
             self.socket_path.unlink()

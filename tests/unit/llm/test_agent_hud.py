@@ -119,7 +119,7 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.messages = None
 
-            async def process_message_batch(self, messages, current_parent_uuid):
+            async def process_message_batch(self, messages, current_parent_uuid, request_ids=None):
                 self.messages = messages
                 return "next-parent"
 
