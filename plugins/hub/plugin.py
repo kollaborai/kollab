@@ -11508,7 +11508,11 @@ class HubPlugin(BasePlugin):
                 SubcommandInfo("whoami", "", "Show your identity"),
                 SubcommandInfo("vault", "[name]", "Show vault info for an agent"),
                 SubcommandInfo("vaults", "", "List all agent vaults"),
-                SubcommandInfo("org", "<name> [mission]", "Launch an organization"),
+                SubcommandInfo(
+                    "org",
+                    "[team] [mission]",
+                    "Choose a team, roster, lead, and mission to launch",
+                ),
                 SubcommandInfo("orgs", "", "List available teams"),
                 SubcommandInfo("feed", "", "Live dashboard of agent activity"),
                 SubcommandInfo(
@@ -15309,28 +15313,75 @@ class HubPlugin(BasePlugin):
         return "\n".join(lines)
 
     async def _handle_org_command(self, args: str) -> str:
-        """Launch a team."""
-        from .org_launcher import OrgLauncher, load_organization
-        from .rosters import team_launch_order
+        """Open the roster picker and launch the selected effective team."""
+        from .org_launcher import OrgLauncher, list_organizations, load_organization
+        from .rosters import LibraryError, effective_team, team_launch_order
 
         parts = args.strip().split(maxsplit=1)
-        if not parts:
-            return "usage: /hub org <team> [mission]"
-
-        org_name = parts[0]
+        requested_name = parts[0] if parts else ""
         mission = parts[1] if len(parts) > 1 else ""
         project = self._identity.project if self._identity else ""
+        teams = list_organizations(project)
+        if not teams:
+            return "no teams found. try /hub orgs"
 
-        team = load_organization(org_name, project)
-        if not team:
-            return f"team '{org_name}' not found. try /hub orgs"
+        selected_team = None
+        if requested_name:
+            selected_team = next(
+                (team for team in teams if team.name == requested_name), None
+            )
+            if selected_team is None:
+                return f"team '{requested_name}' not found. try /hub orgs"
 
-        # Waits for each member to come online: off the event loop, or the hub and the UI freeze.
-        launch = await asyncio.to_thread(OrgLauncher(project).launch_org, org_name, mission)
+        if not self.event_bus:
+            return "team picker unavailable: hub event bus is not ready"
+
+        try:
+            from kollabor_tui.altview.stack_manager import AltViewUnavailable
+            from plugins.altview.org_picker_altview import OrgPickerAltView
+
+            stack_mgr = self._altview_stack()
+            if stack_mgr is None:
+                return "team picker unavailable: alternate-view manager is not ready"
+            picker = OrgPickerAltView(teams, team=selected_team, mission=mission)
+            pushed = await stack_mgr.push(picker, "hub-org-picker", reuse=False)
+        except AltViewUnavailable:
+            return "team picker requires an interactive terminal; use `kollab --hub org`"
+        except Exception as exc:
+            logger.exception("Failed to open the team picker")
+            return f"could not open team picker: {type(exc).__name__}: {exc}"
+
+        if not pushed:
+            return "team picker could not open because the alternate-view stack is full"
+        selection = picker.result
+        if selection is None:
+            return "team launch cancelled"
+
+        org_name = selection.team.name
+        try:
+            team = load_organization(org_name, project)
+            if not team:
+                return f"team '{org_name}' not found. try /hub orgs"
+            effective, _ = effective_team(
+                team, members=list(selection.members), lead=selection.lead
+            )
+            # Waiting for members is blocking; keep the event loop responsive.
+            launch = await asyncio.to_thread(
+                OrgLauncher(project).launch_org,
+                org_name,
+                selection.mission,
+                members=list(selection.members),
+                lead=selection.lead,
+            )
+        except LibraryError as exc:
+            return f"invalid team selection: {exc}"
+        except Exception as exc:
+            logger.exception("Failed to launch team %s", org_name)
+            return f"team launch failed: {type(exc).__name__}: {exc}"
 
         lines = [f"launched team '{org_name}': {len(launch.started)} agents"]
         reports: Dict[str, list] = {}
-        for member in team_launch_order(team):
+        for member in team_launch_order(effective):
             reports.setdefault(member.reports_to or "", []).append(member)
 
         def add_reports(boss: str, indent: int) -> None:
@@ -15341,15 +15392,16 @@ class HubPlugin(BasePlugin):
 
         add_reports("", 0)
 
-        if mission:
-            lines.append(f"\nmission: {mission}")
+        if selection.mission:
+            lines.append(f"\nmission: {selection.mission}")
 
-        lines.extend(launch.notes(team, mission))
+        lines.extend(launch.notes(team, selection.mission))
         return "\n".join(lines)
 
     def _format_orgs(self) -> str:
-        """List available teams."""
+        """List teams with source, size, and reporting outline."""
         from .org_launcher import list_organizations
+        from .rosters import team_launch_order
 
         teams = list_organizations(self._identity.project if self._identity else None)
         if not teams:
@@ -15357,9 +15409,23 @@ class HubPlugin(BasePlugin):
 
         lines = [f"teams: {len(teams)} available"]
         for team in teams:
-            source = f" ({team.source})" if team.source != "bundled" else ""
-            lines.append(f"  {team.name}{source}: {team.description}")
-        lines.append("\nusage: /hub org <team> [mission]")
+            lines.append(
+                f"  {team.name} [{team.source}] — {len(team.members)} members: "
+                f"{team.description}"
+            )
+            reports: Dict[str, list] = {}
+            for member in team_launch_order(team):
+                reports.setdefault(member.reports_to or "", []).append(member)
+
+            def add_outline(parent: str, indent: int) -> None:
+                for member in reports.get(parent, []):
+                    lines.append(
+                        f"    {'  ' * indent}{member.persona.name}: {member.role}"
+                    )
+                    add_outline(member.persona.name, indent + 1)
+
+            add_outline("", 0)
+        lines.append("\nusage: /hub org [team] [mission] (opens the roster picker)")
         lines.append("custom: add a JSON file to ~/.kollab/teams/ or .kollab/teams/")
         return "\n".join(lines)
 

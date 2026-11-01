@@ -30,9 +30,37 @@ export function teamRows(team: Pick<Team, "lead" | "members">): TeamRow[] {
   return rows;
 }
 
+/** A non-mutating selection preview; omitted managers are bypassed to the nearest selected ancestor. */
+export function effectiveTeam(team: Team, names: readonly string[], lead: string): Team | null {
+  const known = new Set(team.members.map((member) => member.persona.name));
+  const selected = new Set(names.filter((name) => known.has(name)));
+  if (!lead || !selected.has(lead)) return null;
+
+  const parentByName = new Map(team.members.map((member) => [member.persona.name, member.reports_to]));
+  const members = team.members
+    .filter((member) => selected.has(member.persona.name))
+    .map((member) => {
+      let reportsTo = member.reports_to;
+      const visited = new Set([member.persona.name]);
+      while (reportsTo && !selected.has(reportsTo)) {
+        if (visited.has(reportsTo)) {
+          reportsTo = null;
+          break;
+        }
+        visited.add(reportsTo);
+        reportsTo = parentByName.get(reportsTo) ?? null;
+      }
+      if (reportsTo === member.persona.name) reportsTo = null;
+      return { ...member, reports_to: reportsTo };
+    });
+
+  return { ...team, lead, members };
+}
+
+
 /** What Launch Team did, one plain line per outcome that happened. */
 export function launchLines(
-  result: Pick<TeamLaunchResult, "started" | "skipped" | "failed">,
+  result: Pick<TeamLaunchResult, "started" | "skipped" | "failed" | "excluded" | "notes">,
   nameOf: (persona: string) => string,
 ): { label: string; text: string; failed: boolean }[] {
   const lines: { label: string; text: string; failed: boolean }[] = [];
@@ -40,6 +68,14 @@ export function launchLines(
   if (result.skipped.length) {
     lines.push({ label: "Already Running", text: result.skipped.map((item) => nameOf(item.persona)).join(", "), failed: false });
   }
+  if (result.excluded?.length) {
+    lines.push({ label: "Not Selected", text: result.excluded.map(nameOf).join(", "), failed: false });
+  }
+
+  if (result.notes?.length) {
+    lines.push({ label: "Note", text: result.notes.join("; "), failed: false });
+  }
+
   if (result.failed.length) {
     lines.push({
       label: "Failed",
