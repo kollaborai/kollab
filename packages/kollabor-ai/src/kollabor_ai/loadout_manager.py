@@ -30,6 +30,7 @@ import logging
 import re
 from dataclasses import dataclass
 from difflib import get_close_matches
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from kollabor_ai.model_registry import list_models_for_provider
@@ -285,29 +286,48 @@ class LoadoutManager:
         row says what runs: a blank effort is offered only for a model that
         takes none (a blank sends nothing, so an earlier pick would stay).
 
-        A model's levels are its own: what a live catalog lists for it (Codex
-        publishes them per model, and Codex CLI serves the same models), else
-        the registry's, else (native only) what every effort API takes. An ACP
-        harness offers the models its sessions last reported
-        (``acp_options[profile name]``), each at the levels it reported for
-        that model; another model's levels say nothing about it. Saved loadouts
-        are not rows: one saves to its provider profile, which every session on
-        it shares, and a pick changes one session.
+        A model's levels are its own: what its profile's live catalog lists for
+        it (Codex publishes them per model), else the registry's, else (native
+        only) what every effort API takes; one endpoint's catalog says nothing
+        about another's. An ACP harness offers the models its sessions last
+        reported (``acp_options[profile name]``), each at the levels it reported
+        for that model. A model it has not run takes its backend's levels for
+        the two adapters whose backend is known (Codex CLI serves the ChatGPT
+        login's models, Claude Code Anthropic's), and none for any other
+        harness, which could refuse a guess after switching models. Saved
+        loadouts are not rows: one saves to its provider profile, which every
+        session on it shares, and a pick changes one session.
         """
         from kollabor_ai.model_registry import DEFAULT_EFFORT_LEVELS, effort_levels
         from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
         profiles = self.provider_profiles()
-        catalog: Dict[str, List[str]] = {}
-        for profile in profiles:
-            # A model's levels barely change: an old catalog still names them.
-            for entry in self._cached_catalog(profile, max_age=float("inf")):
-                if entry.get("id") and _catalog_efforts(entry):
-                    catalog.setdefault(str(entry["id"]), _catalog_efforts(entry))
+        # A model's levels barely change: an old catalog still names them.
+        catalogs = {
+            profile.name: {
+                str(entry["id"]): _catalog_efforts(entry)
+                for entry in self._cached_catalog(profile, max_age=float("inf"))
+                if entry.get("id") and _catalog_efforts(entry)
+            }
+            for profile in profiles
+        }
+        codex = {  # the ChatGPT login's catalog: the Codex backend's levels
+            model: levels
+            for profile in profiles
+            if (profile.get_provider() or "").lower() == "openai_responses"
+            for model, levels in catalogs[profile.name].items()
+        }
 
-        def known(model: str, fallback: List[str]) -> List[str]:
-            levels = catalog[model] if model in catalog else effort_levels(model)
+        def registry(model: str, fallback: List[str]) -> List[str]:
+            levels = effort_levels(model)
             return fallback if levels is None else levels
+
+        def untried(adapter: str, model: str) -> List[str]:
+            if adapter == "codex-acp":
+                return codex.get(model, [])
+            if adapter == "claude-agent-acp":
+                return registry(model, [])
+            return []
 
         rows: List[Dict[str, str]] = []
         for profile in profiles:
@@ -316,12 +336,18 @@ class LoadoutManager:
                 reported = (acp_options or {}).get(profile.name) or {}
                 seen = reported.get("efforts_by_model") or {}
                 models = [str(m) for m in reported.get("models") or []] or [""]
-                levels = {m: [str(e) for e in seen[m]] if m in seen else known(m, []) for m in models}
+                command = getattr(profile, "command", ()) or ()
+                adapter = Path(command[0]).name if command else ""
+                levels = {m: [str(e) for e in seen[m]] if m in seen else untried(adapter, m) for m in models}
             else:
                 own = [profile.get_model()] if profile.get_model() else []
                 models = list(dict.fromkeys(own + self.models_for_profile(profile)))
                 takes_effort = provider in EFFORT_SUPPORTED_PROVIDERS
-                levels = {m: known(m, list(DEFAULT_EFFORT_LEVELS)) if takes_effort else [] for m in models}
+                found = catalogs[profile.name]
+                levels = {
+                    m: (found.get(m) or registry(m, list(DEFAULT_EFFORT_LEVELS))) if takes_effort else []
+                    for m in models
+                }
             for model in models:
                 for effort in levels[model] or [""]:
                     rows.append({"profile": profile.name, "provider": provider, "model": model, "effort": effort})

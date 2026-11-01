@@ -108,7 +108,8 @@ def test_saved_loadouts_are_not_rows(monkeypatch):
 def test_an_acp_harness_offers_each_model_only_its_own_levels(monkeypatch):
     # Sodalite on #553 round 2: alpha's levels say nothing about beta, which takes
     # only low; picking beta at ultra switched the harness to beta, then failed.
-    manager = _manager(_Profile("codex-cli", "acp", command=("codex-acp",)), _Profile("claude-code", "acp"),
+    manager = _manager(_Profile("codex-cli", "acp", command=("codex-acp",)),
+                       _Profile("claude-code", "acp", command=("claude-agent-acp",)),
                        _Profile("openai-oauth", "openai_responses", "gpt-6-luna"))
     monkeypatch.setattr(manager, "models_for_profile", lambda p: [])
     # Codex CLI serves the ChatGPT login's models: their catalog levels hold there too.
@@ -130,6 +131,26 @@ def test_an_acp_harness_offers_each_model_only_its_own_levels(monkeypatch):
     fresh = _manager(_Profile("pi", "acp"))
     monkeypatch.setattr(fresh, "_cached_catalog", lambda p, **_: [])
     assert fresh.list_choices({}) == [{"profile": "pi", "provider": "acp", "model": "", "effort": ""}]
+
+
+def test_one_catalog_says_nothing_about_another_endpoint_or_harness(monkeypatch):
+    # Iolite on #553 round 3: a second endpoint serving the same model id took the
+    # ChatGPT login's levels, and so did an unrelated harness, which refused them.
+    manager = _manager(_Profile("openai-oauth", "openai_responses", "gpt-6-luna"),
+                       _Profile("router", "openrouter", "gpt-6-luna"),
+                       _Profile("pi", "acp", command=("/opt/bin/pi-acp",)),
+                       _Profile("codex-cli", "acp", command=("/opt/adapters/codex-acp",)))
+    monkeypatch.setattr(manager, "models_for_profile", lambda p: [])
+    monkeypatch.setattr(manager, "_cached_catalog", lambda p, **_: (
+        [{"id": "gpt-6-luna", "efforts": ["low", "ultra"]}] if p.name == "openai-oauth" else []))
+    reported = {"pi": {"models": ["gpt-6-luna", "other"], "efforts_by_model": {"other": ["low"]}},
+                "codex-cli": {"models": ["gpt-6-luna"], "efforts_by_model": {}}}
+    levels = _levels(manager.list_choices(reported))
+    assert levels[("openai-oauth", "gpt-6-luna")] == ["low", "ultra"]
+    assert levels[("router", "gpt-6-luna")] == ["low", "medium", "high"]  # its own catalog has none
+    assert levels[("pi", "gpt-6-luna")] == [""]  # never run there, and its backend is unknown
+    assert levels[("pi", "other")] == ["low"]
+    assert levels[("codex-cli", "gpt-6-luna")] == ["low", "ultra"]  # the adapter, wherever it is installed
 
 
 def test_a_harness_session_remembers_its_options():
@@ -197,6 +218,12 @@ def test_a_level_the_model_does_not_take_is_never_sent(monkeypatch):
     assert effort("anthropic", "claude-opus-4-6", "xhigh") == ""  # no xhigh before Opus 4.7
     assert effort("anthropic", "claude-opus-4-6", "max") == "max"
     assert effort("openai_responses", "gpt-6-luna", "ultra") == "ultra"  # the registry does not say: as set
+    # Iolite on #553 round 3: an unlisted Claude model got max (a 400 on Opus 4.5),
+    # and a provider that sends no effort reported the saved one.
+    assert effort("anthropic", "claude-opus-4-5", "max") == ""
+    assert effort("anthropic", "claude-opus-4-5", "high") == "high"
+    assert effort("gemini", "gemini-2.5-pro", "high") == ""
+    assert effort("acp", "", "high") == ""  # a harness keeps its own
 
 
 @pytest.mark.asyncio
@@ -263,3 +290,10 @@ async def test_an_acp_session_reports_the_harness_effort(monkeypatch):
     options.pop()  # a harness with no effort option reports none, not the profile's
     snapshot = await state.get_active_profile()
     assert (snapshot.model, snapshot.effort) == ("alpha", "")
+    # Iolite on #553 round 3: one that names no model still reports its effort.
+    options[:] = [{"id": "thought_level", "category": "thought_level", "currentValue": "ultra"}]
+    snapshot = await state.get_active_profile()
+    assert (snapshot.model, snapshot.effort) == ("", "ultra")
+    acp.active = False  # a native turn: the profile's own
+    snapshot = await state.get_active_profile()
+    assert (snapshot.model, snapshot.effort) == ("", "high")

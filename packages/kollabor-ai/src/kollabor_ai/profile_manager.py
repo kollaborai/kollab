@@ -717,9 +717,19 @@ class LLMProfile:
                 f"Profile '{self.name}': effort '{value}' is not one of {'/'.join(EFFORT_LEVELS)} — ignoring"
             )
             return ""
-        from kollabor_ai.model_registry import effort_levels
+        from kollabor_ai.model_registry import DEFAULT_EFFORT_LEVELS, effort_levels
+        from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
+        provider = (self.get_provider() or "").lower()
+        if provider not in EFFORT_SUPPORTED_PROVIDERS:
+            # Its requests carry no effort (an ACP harness keeps its own), so
+            # none is in effect, whatever was saved.
+            return ""
         levels = effort_levels(self.get_model())
+        if levels is None and provider == "anthropic":
+            # Claude answers a level its model does not take with a 400 (max on
+            # Opus 4.5): a model the registry does not list gets what every one takes.
+            levels = list(DEFAULT_EFFORT_LEVELS)
         if levels is not None and value not in levels:
             # A level the model does not take (any level, if it does not reason)
             # is a 400 or a dropped field: it runs at its own default instead.

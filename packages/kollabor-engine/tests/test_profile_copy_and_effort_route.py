@@ -25,7 +25,7 @@ class _Manager(ProfileManager):
             "pinned": LLMProfile(
                 name="pinned",
                 provider="anthropic",
-                model="claude-x",
+                model="claude-opus-5-5",
                 api_key="test-key",
                 auth_type="api_key",
                 effort="max",
@@ -77,7 +77,7 @@ async def test_create_persists_normalized_effort(client, manager):
         json={
             "name": "coordinator",
             "provider": "anthropic",
-            "model": "claude-x",
+            "model": "claude-opus-5-5",
             "effort": " MAX ",
         },
     )
@@ -96,7 +96,7 @@ async def test_create_rejects_unknown_effort_with_422(client):
         json={
             "name": "bad",
             "provider": "anthropic",
-            "model": "claude-x",
+            "model": "claude-opus-5-5",
             "effort": "maximum",
         },
     )
@@ -109,7 +109,7 @@ async def test_create_rejects_unknown_effort_with_422(client):
 async def test_create_without_effort_omits_it(client, manager):
     response = await client.post(
         "/profiles",
-        json={"name": "plain", "provider": "anthropic", "model": "claude-x"},
+        json={"name": "plain", "provider": "anthropic", "model": "claude-opus-5-5"},
     )
 
     assert response.status_code == 201
@@ -177,7 +177,7 @@ async def test_copy_keeps_saved_key_and_unshown_settings(client, manager):
     assert (copy.timeout, copy.extra_headers) == (600, {"x-team": "a"})
     assert (copy.model, copy.effort) == ("claude-y", "")
     assert "pinned-copy" in manager.persisted_profiles
-    assert manager.get_profile("pinned").model == "claude-x"
+    assert manager.get_profile("pinned").model == "claude-opus-5-5"
 
 
 @pytest.mark.asyncio
@@ -187,7 +187,7 @@ async def test_copy_with_a_typed_key_uses_it(client, manager):
         json={
             "name": "pinned-2",
             "provider": "anthropic",
-            "model": "claude-x",
+            "model": "claude-opus-5-5",
             "api_key": "new-key",
             "effort": "high",
             "copy_from": "pinned",
@@ -254,7 +254,7 @@ async def test_copy_does_not_inherit_source_specific_effort_env(
         LLMProfile(
             name="anthropic",
             provider="anthropic",
-            model="claude-x",
+            model="claude-opus-5-5",
             effort="medium",
         )
     )

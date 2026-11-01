@@ -651,13 +651,22 @@ class LocalStateService(StateService):
         if active is None:
             return ProfileSnapshot(name="", is_active=False)
         snapshot = self._profile_to_snapshot(active, is_active=True)
-        harness_model = self._acp_harness_model()
-        if harness_model:
+        if self._acp_active():
             # A harness picks its own model and effort (/model sets them there):
-            # report those, not the profile's, which the harness does not read.
-            snapshot.model = harness_model
+            # report those, not the profile's, which the harness does not read,
+            # though it may name no model.
+            snapshot.model = self._acp_harness_model() or snapshot.model
             snapshot.effort = self._acp_harness_effort()
         return snapshot
+
+    def _acp_active(self) -> bool:
+        """Whether an ACP harness runs this session's turns."""
+        try:
+            acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
+            return getattr(acp, "active", False) is True
+        except Exception:
+            logger.debug("ACP state unavailable", exc_info=True)
+            return False
 
     def _acp_harness_model(self) -> str:
         """The active ACP harness's current model option, or "" when there is none."""

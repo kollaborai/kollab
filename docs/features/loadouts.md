@@ -89,19 +89,22 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   as the Model tab sets them. New Session starts on the profile, then applies
   the pick.
 - Each row names the effort it runs at, and only levels that model takes:
-  - its live catalog's (gpt-6-luna stops at max);
+  - its profile's live catalog's (gpt-6-luna stops at max); another
+    endpoint's catalog says nothing about it;
   - else the registry's (`effort_levels` in `bundles/data/models.json`: Claude
     Opus 4.6 has no xhigh, Claude Haiku 4.5 takes none);
   - else low, medium and high.
 
   A model that doesn't reason, or a provider that sends no effort, gets one
-  row with none. Whichever screen set a level, a level the model doesn't take
-  is never sent.
+  row with none, and a session on such a provider shows none, whatever was
+  saved. Whichever screen set a level, a level the model doesn't take is never
+  sent: a Claude model the registry doesn't list gets at most high.
 - An ACP harness offers the models its sessions last reported
   (`~/.kollab/acp/options.json`). Each model gets the levels the harness
-  reported for it, else the levels known for that model id (Codex CLI serves
-  the ChatGPT login's models), never another model's. A model with nothing
-  known gets one row that keeps the harness's effort; its levels appear once a
+  reported for it, never another model's. A model it hasn't run gets its
+  backend's levels for the two harnesses whose backend is known: Codex CLI the
+  ChatGPT login catalog's, Claude Code the registry's. Any other harness's
+  untried model gets one row that keeps its effort; its levels appear once a
   session runs it. A harness never started offers only its default.
 - Opening the list fetches any provider catalog older than an hour (up to
   8 s), so an endpoint's models show without opening Settings → Loadouts first.
