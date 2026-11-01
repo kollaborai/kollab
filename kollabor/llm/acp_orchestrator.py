@@ -89,9 +89,11 @@ class ACPOrchestrator:
         self._observation_rows: list[str] = []
         self._unwritten_observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_count = 0
-        # (request_id, turn_id) pairs whose response usage already
-        # settled; replays of terminal events must not double count (#495).
-        self._settled_usage_turns: set[tuple[str, int]] = set()
+        # Runner turn IDs are consecutive within this orchestrator lifecycle.
+        # A frontier plus completed ranges preserves replay protection without
+        # retaining one key per turn. Ranges represent only out-of-order work.
+        self._usage_settled_through = 0
+        self._usage_settled_ranges: list[tuple[int, int]] = []
         # Only the current display's validated payload is needed on a replay;
         # retaining every turn's full usage would grow for the whole session.
         self._display_usage_payload: tuple[tuple[str, int], dict[str, Any]] | None = None
@@ -183,7 +185,8 @@ class ACPOrchestrator:
         self._terminal_session_id = None
         self._observations.clear()
         self._observation_count = 0
-        self._settled_usage_turns.clear()
+        self._usage_settled_through = 0
+        self._usage_settled_ranges.clear()
         self._display_usage_payload = None
         self._usage_display_turn = None
         self._observation_rows.clear()
@@ -494,6 +497,28 @@ class ACPOrchestrator:
         except Exception:
             logger.exception("ACP Hub completion callback failed")
 
+    def _mark_usage_settled(self, turn_id: int) -> bool:
+        """Mark one unique runner turn; compress already settled neighbors."""
+        if turn_id <= self._usage_settled_through:
+            return False
+        ranges = self._usage_settled_ranges
+        index = 0
+        while index < len(ranges) and ranges[index][1] < turn_id - 1:
+            index += 1
+        if index < len(ranges) and ranges[index][0] <= turn_id <= ranges[index][1]:
+            return False
+        start = end = turn_id
+        if index < len(ranges) and ranges[index][1] == turn_id - 1:
+            start = ranges[index][0]
+            ranges.pop(index)
+        if index < len(ranges) and ranges[index][0] == turn_id + 1:
+            end = ranges[index][1]
+            ranges.pop(index)
+        ranges.insert(index, (start, end))
+        if ranges[0][0] == self._usage_settled_through + 1:
+            self._usage_settled_through = ranges.pop(0)[1]
+        return True
+
     def _settle_turn_usage(self, result: ACPResult) -> dict[str, Any] | None:
         """Fold one prompt response's reconciled token totals into session stats.
 
@@ -505,9 +530,8 @@ class ACPOrchestrator:
         Each (request, turn) settles once. Cost is never invented (#495).
         """
         key = (result.request_id, result.turn_id)
-        if key in self._settled_usage_turns:
+        if not self._mark_usage_settled(result.turn_id):
             return None
-        self._settled_usage_turns.add(key)
         usage = getattr(result, "usage", None) or (result.end_frame or {}).get("acp_turn_usage")
         current_display = self._usage_display_turn in (None, key)
         llm = self.event_bus.get_service("llm_service")
@@ -581,6 +605,10 @@ class ACPOrchestrator:
                     if isinstance(received, ACPResult):
                         result = received
                         settled_usage = self._settle_turn_usage(result)
+            if result is None:
+                # No result can arrive through this completed/cancelled future.
+                # Close its ID as well so later turns do not leave a gap.
+                self._mark_usage_settled(admission.turn_id)
             observed = self._observed_turns.get((admission.request_id, admission.turn_id))
             if (result is None and observed is not None and not observed.finished.is_set()
                     and not isinstance(exc, asyncio.CancelledError)):

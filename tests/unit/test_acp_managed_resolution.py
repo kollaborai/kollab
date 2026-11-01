@@ -37,12 +37,16 @@ def environment(tmp_path, monkeypatch):
 def managed(home, version, contents="#!/bin/sh\n"):
     path = home / ".local/share/kollab/acp-adapters" / version / "node_modules/.bin/codex-acp"
     path.parent.mkdir(parents=True, exist_ok=True)
-    (path.parent / "package.json").write_text(json.dumps({
+    package = path.parent.parent / "@agentclientprotocol/codex-acp"
+    package.mkdir(parents=True, exist_ok=True)
+    target = package / "adapter"
+    (package / "package.json").write_text(json.dumps({
         "name": "@agentclientprotocol/codex-acp", "version": version.removeprefix("codex-"),
-        "bin": {"codex-acp": "codex-acp"},
+        "bin": {"codex-acp": "adapter"},
     }))
-    path.write_text(contents)
-    path.chmod(0o755)
+    target.write_text(contents)
+    target.chmod(0o755)
+    path.symlink_to(target)
     return path
 
 
@@ -136,7 +140,7 @@ def test_explicit_global_replaces_old_managed_cache_before_new_pin(environment, 
     ("@agentclientprotocol/codex-acp", [2, 5, 0], False),
 ])
 def test_prompt_usage_requires_recognized_resolved_package(tmp_path, name, version, expected):
-    package = tmp_path / "package"
+    package = tmp_path / "node_modules" / (name if isinstance(name, str) else "custom-adapter")
     executable = package / "dist/adapter"
     executable.parent.mkdir(parents=True)
     executable.write_text("#!/bin/sh\n")
@@ -146,6 +150,17 @@ def test_prompt_usage_requires_recognized_resolved_package(tmp_path, name, versi
         "name": name, "version": version, "bin": {binary_name: "dist/adapter"},
     }))
     assert acp_bridge._known_prompt_usage(str(executable)) is expected
+
+
+def test_claimed_official_manifest_beside_arbitrary_wrapper_is_not_trusted(tmp_path):
+    executable = tmp_path / "codex-acp"
+    executable.write_text("#!/bin/sh\n")
+    (tmp_path / "package.json").write_text(json.dumps({
+        "name": "@agentclientprotocol/codex-acp", "version": "2.5.0",
+        "bin": {"codex-acp": "codex-acp"},
+    }))
+    assert acp_bridge._adapter_package_identity(str(executable)) is None
+    assert not acp_bridge._known_prompt_usage(str(executable))
 
 
 def test_prompt_usage_does_not_trust_missing_or_invalid_metadata(tmp_path):
@@ -249,13 +264,22 @@ async def test_real_resolver_launches_selected_adapter_and_projects_its_usage(en
         usage = old_usage if scenario == "old-global" else (
             "Usage(totalTokens=83575, inputTokens=2000, outputTokens=3777, cachedReadTokens=77798)"
         )
-        expected.write_text(f"#!{sys.executable}\n" + ADAPTER.replace("USAGE", usage))
-        expected.chmod(0o755)
         if scenario == "old-global":
-            (expected.parent / "package.json").write_text(json.dumps({
+            package = home / "global/node_modules/@agentclientprotocol/codex-acp"
+            package.mkdir(parents=True)
+            target = package / "adapter"
+            target.write_text(f"#!{sys.executable}\n" + ADAPTER.replace("USAGE", usage))
+            target.chmod(0o755)
+            expected.symlink_to(target)
+            (package / "package.json").write_text(json.dumps({
                 "name": "@agentclientprotocol/codex-acp", "version": "2.1.1",
-                "bin": {"codex-acp": "codex-acp"},
+                "bin": {"codex-acp": "adapter"},
             }))
+            assert acp_bridge._adapter_package_identity(str(expected)) == (
+                "@agentclientprotocol/codex-acp", "2.1.1")
+        else:
+            expected.write_text(f"#!{sys.executable}\n" + ADAPTER.replace("USAGE", usage))
+            expected.chmod(0o755)
         cache(config, expected)
     else:
         expected = old
@@ -305,13 +329,14 @@ async def test_managed_upgrade_resumes_saved_session_without_changing_other_bind
     assert not profile._matches_managed_upgrade(
         replace(binding, command=(str(old), "--different")), str(home), (str(new),)
     )
-    global_path = home / "global/codex-acp"
-    global_path.parent.mkdir()
+    package = home / "global/node_modules/@agentclientprotocol/codex-acp"
+    global_path = package / "dist/codex-acp"
+    global_path.parent.mkdir(parents=True)
     global_path.write_text("#!/bin/sh\n")
     global_path.chmod(0o755)
-    (global_path.parent / "package.json").write_text(json.dumps({
+    (package / "package.json").write_text(json.dumps({
         "name": "@agentclientprotocol/codex-acp", "version": "2.5.0",
-        "bin": {"codex-acp": "codex-acp"},
+        "bin": {"codex-acp": "dist/codex-acp"},
     }))
     assert profile._matches_managed_upgrade(binding, str(home), (str(global_path),))
 

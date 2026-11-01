@@ -155,6 +155,8 @@ async def test_no_result_cancellation_has_no_invented_usage():
     assert "acp_turn_usage" not in outcome["end_frame"]
     assert "total_input_tokens" not in llm.session_stats
     assert engine.total_input_tokens == engine.total_output_tokens == 0
+    assert orch._usage_settled_through == 1
+    assert orch._usage_settled_ranges == []
 
 
 @pytest.mark.asyncio
@@ -235,3 +237,45 @@ async def test_late_old_completion_counts_usage_without_replacing_newer_display(
     assert llm.session_stats["total_input_tokens"] == engine.total_input_tokens == 96521 + 600
     assert llm.session_stats["total_output_tokens"] == engine.total_output_tokens == 143 + 25
     assert llm.session_stats["acp_turn_usage"] == engine.acp_turn_usage == newer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_fails", [False, True])
+@pytest.mark.parametrize("first_no_result", [False, True])
+async def test_out_of_order_completion_and_replay_settle_once(second_fails, first_no_result):
+    orch, llm, engine, events, queue, tracker, first = await rig()
+    old_task = asyncio.create_task(orch._complete(first))
+    await asyncio.sleep(0)
+    future = asyncio.get_running_loop().create_future()
+    second = ACPAdmission("second", "rpc", None, 1, 2, "next", future)
+    second_usage = {"total_tokens": 625, "input_tokens": 100, "cached_read_tokens": 200,
+                    "cached_write_tokens": 300, "output_tokens": 25}
+    newer = replace(result(), request_id="second", turn_id=2, text="second answer",
+                    usage=second_usage, end_frame={"acp_turn_usage": second_usage})
+    future.set_result(newer)
+    if second_fails:
+        original = orch._record_result
+        async def fail_second(value):
+            if value.request_id == "second":
+                raise OSError("history failure after usage")
+            await original(value)
+        orch._record_result = fail_second
+    orch._on_runner_update({"kind": "turn_start", "request_id": "second", "turn_id": 2,
+                            "generation": 1})
+    outcome = await orch._complete(second)
+    assert outcome["stop_reason"] == ("error" if second_fails else "end_turn")
+    assert llm.session_stats["total_input_tokens"] == 600
+    assert orch._usage_settled_ranges == [(2, 2)]
+    if first_no_result:
+        first.future.set_exception(OSError("first turn produced no result"))
+    else:
+        first.future.set_result(result())
+    await old_task
+    await orch._complete(second)
+    await orch._complete(first)
+    await finish(queue, tracker)
+    assert llm.session_stats["total_input_tokens"] == engine.total_input_tokens == (600 if first_no_result else 97121)
+    assert llm.session_stats["total_output_tokens"] == engine.total_output_tokens == (25 if first_no_result else 168)
+    assert llm.session_stats["acp_turn_usage"] == second_usage
+    assert orch._usage_settled_through == 2
+    assert orch._usage_settled_ranges == []

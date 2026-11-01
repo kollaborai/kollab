@@ -132,7 +132,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   usage excludes subagent and sidechain costs. When a usable total is absent,
   the last-request context sample is labeled "· last req". An existing managed
   Codex 2.1.1 remains usable; install the managed 2.5.0 adapter to get its
-  verified prompt totals. Unknown adapters are not assumed to report totals (#495).
+  verified prompt totals. Known npm Windows launchers retain their adapter
+  identity and saved sessions; unknown wrappers remain unverified. Completed
+  turn accounting no longer retains a key for every turn (#495).
 - A hub agent that is busy for a while keeps its socket: peers no longer delete a live agent's presence
   and socket after a 15 s late heartbeat, which cut every connection to it; they wait 10 min (#545).
 - History: expanding an old slimmed history entry loads its full metadata

@@ -133,6 +133,11 @@ When an existing managed 2.1.1 session moves to an identified Codex adapter,
 kollab attempts to resume the same session. If the selected adapter cannot be
 identified or resume fails, startup reports the problem and retains the saved
 binding instead of silently replacing it with a fresh session.
+On Windows the managed executable is npm's `.cmd` launcher. Kollab recognizes
+the checked npm Node-shim templates only when their complete contents and
+declared package bin agree; modified or unknown wrappers remain unverified.
+Both the `.cmd` and extensionless forms of an existing managed binding are
+eligible for the same guarded resume.
 
 **Environment.** The child gets your environment minus provider keys
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
@@ -364,6 +369,9 @@ wrappers and custom adapters still run, but their response usage is not treated
 as a verified turn total. These two recognized adapters report cache counters
 separately from input and include reasoning in output; settle only when input,
 cache and output reconcile with the reported total.
+Settlement tracks consecutive completed turn IDs compactly, including turns
+that fail without a result. A late older result still settles without allowing
+a replay to add its usage twice.
 The reported scope is adapter-dependent: Claude prompt usage excludes
 subagent and sidechain costs. Show context samples separately from the
 reported prompt total; when there is no usable total, label the context sample

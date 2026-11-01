@@ -12,6 +12,8 @@ on:
       - uv.lock
       - scripts/windows_import_smoke.py
       - scripts/windows_relay_serve_smoke.py
+      - tests/unit/test_acp_windows_npm.py
+      - tests/fixtures/acp-npm-shims/**
       - .github/workflows/windows-smoke.yml
   workflow_dispatch:
 
@@ -25,6 +27,10 @@ jobs:
         with:
           python-version: "3.14"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.18.0"
+
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
@@ -35,6 +41,9 @@ jobs:
 
       - name: MCP command splitting
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_mcp_split_command.py
+
+      - name: ACP npm shim launch and resume
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_acp_windows_npm.py
 
       # The network's private state files: device records, enrollment state (kollab #268).
       - name: Network private files
