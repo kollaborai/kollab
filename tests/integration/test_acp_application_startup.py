@@ -229,3 +229,34 @@ async def test_deferred_startup_orders_plugins_hub_ready_then_acp(monkeypatch):
     with pytest.raises(StopAfterStartupGate):
         await application_module.TerminalLLMChat._deferred_startup(app)
     assert events == ["plugins", "hub-ready", "acp-before-ready=False"]
+
+
+@pytest.mark.parametrize('selection', ['named-loadout', 'default-loadout', 'profile'])
+def test_acp_startup_tracks_explicit_loadout_without_changing_profile_defaults(tmp_path, monkeypatch, selection):
+    project = tmp_path / 'project'
+    home = tmp_path / 'home'
+    global_config = tmp_path / 'global'
+    for directory in (project, home, global_config):
+        directory.mkdir()
+    llm = {
+        'default_profile': 'claude-code',
+        'loadouts': {'haiku-max': {'provider_profile': 'claude-code', 'model': 'haiku', 'effort': 'max'}},
+    }
+    if selection == 'default-loadout':
+        llm['default_loadout'] = {'name': 'haiku-max'}
+    (global_config / 'config.json').write_text(json.dumps({'kollabor': {'llm': llm}}))
+    registry = SimpleNamespace(get_merged_config=lambda: {}, list_plugins=lambda: [],
+                               instantiate_plugins=lambda *args, **kwargs: {})
+    monkeypatch.chdir(project)
+    requested = 'haiku-max' if selection == 'named-loadout' else 'claude-code' if selection == 'profile' else None
+    with patch.object(config_utils, 'get_config_directory', return_value=global_config), patch.object(
+        Path, 'home', return_value=home
+    ):
+        app = application_module.TerminalLLMChat(
+            args=SimpleNamespace(simple=True), profile_name=requested, plugin_registry=registry
+        )
+    assert app.profile_manager.get_active_profile().provider == 'acp'
+    assert app.profile_manager.get_active_profile().model == ''
+    assert app.profile_manager.get_active_profile().effort == ''
+    expected = None if selection == 'profile' else ('claude-code', 'haiku', 'max')
+    assert app._startup_acp_loadout == expected
