@@ -236,6 +236,8 @@ class EngineSession:
         self.acp_waiting = False
         self.acp_plan: Dict[str, Any] = {}
         self.acp_usage: Dict[str, Any] = {}
+        self.acp_turn_usage: Dict[str, Any] = {}
+        self._acp_usage_display_turn: tuple[str, int] | None = None
 
         self._pending_permissions: Dict[str, Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
@@ -1039,6 +1041,15 @@ class EngineSession:
                 if etype == "error":
                     turn_error = str(event.get("message") or "") or "engine error"
 
+                elif etype == "turn_start" and event.get("generation") is not None:
+                    # ACP can start another prompt while the prior completion
+                    # is still persisting. Never display that prior turn as the
+                    # new turn's usage if its completion arrives late.
+                    self._acp_usage_display_turn = (
+                        str(event.get("request_id") or ""), int(event.get("turn_id") or 0)
+                    )
+                    self.acp_turn_usage = {}
+
                 elif etype == "turn_complete":
                     if event.get("input_source") == "acp_client" and event.get("queued") is True:
                         # This admitted request was cancelled before a native
@@ -1047,6 +1058,12 @@ class EngineSession:
                     self.total_turns += 1
                     self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
                     self.total_output_tokens += int(event.get("output_tokens", 0) or 0)
+                    # Reconciled per-prompt totals when the adapter reports
+                    # them on the response; cleared each turn so a
+                    # stale total never lingers on adapters without it (#495).
+                    usage_turn = (str(event.get("request_id") or ""), int(event.get("turn_id") or 0))
+                    if self._acp_usage_display_turn in (None, usage_turn):
+                        self.acp_turn_usage = dict(event.get("turn_usage") or {})
                     await self.refresh_history()
                     self.last_turn_error = (
                         {"message": turn_error, "history_length": len(self.history)}
@@ -1102,6 +1119,8 @@ class EngineSession:
                 elif etype == "acp_session":
                     self.acp_plan = {}
                     self.acp_usage = {}
+                    self.acp_turn_usage = {}
+                    self._acp_usage_display_turn = None
                     self.acp_waiting = False
                     if isinstance(self.profile, ProfileSnapshot) and self.profile.provider == "acp":
                         self.profile.supports_vision = event.get("supports_vision") is True
@@ -1115,6 +1134,8 @@ class EngineSession:
                         if self.profile.provider != "acp":
                             self.acp_plan = {}
                             self.acp_usage = {}
+                            self.acp_turn_usage = {}
+                            self._acp_usage_display_turn = None
                             self.acp_waiting = False
 
                 elif etype == "daemon_closed":
@@ -1143,6 +1164,7 @@ class EngineSession:
             "provider": provider,
             "acp_waiting": self.acp_waiting,
             "acp_usage": self.acp_usage,
+            "acp_turn_usage": self.acp_turn_usage,
             "acp_plan": self.acp_plan,
             "session_id": self.session_id,
             "conversation_id": self.conversation_id,
