@@ -39,6 +39,41 @@ HOST_PROCESS_SCAN_TESTS = {
             "test_history_error_after_assistant_write_does_not_retry_or_duplicate_terminal",
         }
     ),
+    "unit/test_acp_cancel_transcript.py": frozenset(
+        {
+            "test_cancelled_turn_is_stored_once_with_the_reply_streamed_before_the_cancel",
+            "test_prose_the_agent_sends_after_the_cancel_is_neither_stored_nor_streamed",
+        }
+    ),
+    "unit/test_acp_managed_resolution.py": frozenset(
+        {
+            "test_real_resolver_launches_selected_adapter_and_projects_its_usage",
+            "test_managed_upgrade_resumes_saved_session_without_changing_other_bindings",
+            "test_managed_upgrade_resume_failure_does_not_overwrite_binding",
+            "test_managed_upgrade_without_resume_capability_preserves_binding",
+            "test_managed_upgrade_cancel_does_not_overwrite_binding",
+            "test_unrecognized_global_keeps_old_binding_but_still_runs_for_new_sessions",
+        }
+    ),
+    "unit/test_acp_npm_shims.py": frozenset({"test_generated_shim_old_binding_resume_or_preservation"}),
+    "unit/test_cli_web_ui_engine_port.py": frozenset(
+        {
+            "test_an_engine_on_this_interpreter_is_ours",
+            "test_an_engine_on_another_interpreter_is_not",
+            "test_a_port_with_no_engine_is_not_ours",
+        }
+    ),
+    "unit/test_cli_web_ui_reuse.py": frozenset(
+        {
+            "test_restart_stops_the_launcher_that_owns_the_ui",
+            "test_restart_stops_a_ui_started_by_hand",
+        }
+    ),
+    "unit/test_halt_confirmed.py": frozenset({"test_the_daemon_refuses_an_unconfirmed_act"}),
+    "unit/test_hub_enrollment_commands.py": frozenset({"test_revoke_drops_the_peer_device_binding"}),
+    "unit/test_hub_network_surface.py": frozenset({"test_connect_revoke_rejects_an_unknown_device"}),
+    "unit/test_network_halt_windows.py": frozenset({"test_win_processes_links_this_process_to_its_parent"}),
+    "unit/test_stranger_delivery.py": frozenset({"test_revoke_removes_the_link_at_the_relay_and_nothing_is_delivered"}),
     "unit/test_halt_runtime_review_f2.py": frozenset(
         {"test_sweep_reaches_a_tool_child_with_no_kollab_in_its_command_line"}
     ),
