@@ -45,7 +45,7 @@ class _ObservedTurn:
 
 
 # Saved picks are keyed by what the option means, so a harness that renames its option still restores it.
-_CANONICAL_PICK_KEYS = {"model": "model", "thought_level": "effort"}
+_CANONICAL_PICK_KEYS = {"model": "model", "thought_level": "effort", "effort": "effort"}
 
 
 def _effort_rank(level: str) -> int:
@@ -91,6 +91,10 @@ class ACPOrchestrator:
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
         self._terminal_session_id: str | None = None
         self._selected_profile: LLMProfile | None = None
+        # Explicit loadouts and Session-tab overrides belong to this daemon,
+        # separate from ordinary profile defaults and shared saved picks.
+        self._loadout_override: tuple[str, str, str] | None = None
+        self._session_options: dict[str, dict[str, str | bool]] = {}
         self.startup_error: str | None = None
         self._parents: dict[str, str] = {}
         self._history_tasks: set[asyncio.Task] = set()
@@ -142,8 +146,10 @@ class ACPOrchestrator:
             return []
         return runner.advertised_config_options()
 
-    async def set_config_option(self, config_id: str, value: str | bool) -> list[dict[str, Any]]:
-        """Set an advertised ACP config option on the active session."""
+    async def set_config_option(
+        self, config_id: str, value: str | bool, *, persist: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Set a confirmed ACP option, optionally for this daemon only."""
         runner = self._runner
         if runner is None or self._closed:
             raise ACPError("ACP session is not active")
@@ -158,15 +164,20 @@ class ACPOrchestrator:
             if effort is not None and effort.get("id") == config_id:
                 self._effort_pick = value  # the effort option, found by category or by its ID if uncategorized
         if self._profile_name and reported == value:
-            # Persist only a value the harness confirmed; a refused pick must not replay at the next start.
-            saved = self._saved_options()
             key = _CANONICAL_PICK_KEYS.get(category, config_id)
-            saved.setdefault(self._profile_name, {})[key] = value
-            try:
-                self._options_path.parent.mkdir(parents=True, exist_ok=True)
-                self._options_path.write_text(json.dumps(saved, indent=2))
-            except OSError as exc:
-                logger.warning("ACP option save failed: %s", exc)
+            session_options = getattr(self, "_session_options", None)
+            if session_options is None:
+                session_options = self._session_options = {}
+            if persist:
+                try:
+                    self._save_confirmed_options({key: value})
+                except OSError as exc:
+                    # The live pick still belongs to this daemon even if the
+                    # shared store could not safely be updated.
+                    session_options.setdefault(self._profile_name, {})[key] = value
+                    logger.warning("ACP option save failed: %s", exc)
+            else:
+                session_options.setdefault(self._profile_name, {})[key] = value
         if category == "model" or config_id == "model":
             await self._reapply_effort_after_model()
             options = runner.advertised_config_options()  # the effort may have changed after the model reply
@@ -216,19 +227,41 @@ class ACPOrchestrator:
             return {}
         return saved if isinstance(saved, dict) else {}
 
+    def _save_confirmed_options(self, picks: dict[str, str | bool]) -> None:
+        """Atomically save already-confirmed picks without losing sibling profiles."""
+        if not self._profile_name:
+            raise OSError("ACP profile is not active")
+        from kollabor_config.atomic_write import write_text_atomic
+        from kollabor_config.file_lock import locked_file
+
+        self._options_path.parent.mkdir(parents=True, exist_ok=True)
+        with locked_file(str(self._options_path) + ".lock", private=True):
+            if self._options_path.exists():
+                try:
+                    saved = json.loads(self._options_path.read_text())
+                except (OSError, ValueError) as exc:
+                    raise OSError("ACP options are unreadable; saved picks were not overwritten") from exc
+                if not isinstance(saved, dict) or not isinstance(saved.get(self._profile_name, {}), dict):
+                    raise OSError("ACP options have an invalid shape; saved picks were not overwritten")
+            else:
+                saved = {}
+            saved.setdefault(self._profile_name, {}).update(picks)
+            write_text_atomic(self._options_path, json.dumps(saved, indent=2))
+        for key in picks:
+            getattr(self, "_session_options", {}).get(self._profile_name, {}).pop(key, None)
+
     def _effort_option(self) -> dict[str, Any] | None:
         """The advertised reasoning-effort option, found by category. The ID "effort" is only the
         fallback for a harness that advertises it with no category."""
         options = self.advertised_config_options()
-        return (next((o for o in options if str(o.get("category") or "").lower() == "thought_level"), None)
+        return (next((o for o in options if str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
                 or next((o for o in options if o.get("id") == "effort" and not o.get("category")), None))
 
     async def _restore_options(self, profile: LLMProfile) -> list[str]:
-        """Re-apply the loadout's model and effort, then the other saved picks.
+        """Restore daemon, loadout, saved, then profile picks in precedence order.
 
-        Order: model first (a model change alters which efforts exist), then
-        effort, then saved picks. The loadout wins over saved values. Returns
-        one line per requested value the harness did not take.
+        Apply model before effort because changing the model changes the
+        advertised effort values. Returns a notice for each rejected pick.
         """
         notices: list[str] = []
         runner = self._runner
@@ -236,16 +269,19 @@ class ACPOrchestrator:
             return notices
         saved = dict(self._saved_options().get(profile.name) or {})
         picked = getattr(self, "_user_picks", {})  # confirmed this session: a replay must not undo them
-        loadout_model = str(getattr(profile, "model", "") or "")
-        loadout_effort = str(getattr(profile, "effort", "") or "")
-        if not (saved or loadout_model or loadout_effort):
+        override = getattr(self, "_loadout_override", None)
+        loadout_model, loadout_effort = override[1:] if override and override[0] == profile.name else ("", "")
+        session = getattr(self, "_session_options", {}).get(profile.name, {})
+        profile_model = str(getattr(profile, "model", "") or "")
+        profile_effort = str(getattr(profile, "effort", "") or "")
+        if not (saved or session or loadout_model or loadout_effort or profile_model or profile_effort):
             return notices  # nothing to re-apply: stay lazy, as before
         model = next((o for o in self.advertised_config_options()
                       if o.get("category") == "model" or o.get("id") == "model"), None)
         saved_model = saved.pop("model", None)
         if saved_model is None and model is not None and str(model["id"]) not in picked:
             saved_model = saved.pop(str(model["id"]), None)  # an older save under the raw ID
-        model_value = loadout_model or saved_model
+        model_value = session.get("model") or loadout_model or saved_model or profile_model
         model_ok = True
         if model is None and model_value:
             model_ok = False
@@ -270,12 +306,13 @@ class ACPOrchestrator:
         if saved_effort is None and effort is not None and effort_id not in picked:
             saved_effort = saved.pop(effort_id, None)  # an older save under the raw ID
         if not model_ok:
-            if loadout_effort or saved_effort:
+            effort_value = session.get("effort") or loadout_effort or saved_effort or profile_effort
+            if effort_value:
                 notices.append(
-                    f"effort {loadout_effort or saved_effort} was not applied because the model is not active"
+                    f"effort {effort_value} was not applied because the model is not active"
                 )
         elif effort is not None:
-            effort_value = loadout_effort or saved_effort
+            effort_value = session.get("effort") or loadout_effort or saved_effort or profile_effort
             if effort_value and str(effort_value) == effort.get("currentValue"):
                 self._effort_pick = str(effort_value)  # already set: still the pick a model change must keep
             if effort_value and str(effort_value) != effort.get("currentValue"):
@@ -298,16 +335,17 @@ class ACPOrchestrator:
                             notices.append(f"effort {value} was accepted but the harness reports {reported}")
                         else:
                             self._effort_pick = value  # the loadout's effort is kept across a model change
-        elif loadout_effort or saved_effort:
+        elif session.get("effort") or loadout_effort or saved_effort or profile_effort:
+            effort_value = session.get("effort") or loadout_effort or saved_effort or profile_effort
             notices.append(
-                f"this harness advertises no effort option, so effort {loadout_effort or saved_effort} was not applied"
+                f"this harness advertises no effort option, so effort {effort_value} was not applied"
             )
         # An option the loadout or a canonical saved pick already set is not re-sent under its
         # raw ID (an older save): the loadout wins, and a raw copy must not undo it.
         handled = set()
         if model is not None and model_value:
             handled.add(str(model["id"]))
-        if effort_id is not None and (loadout_effort or saved_effort):
+        if effort_id is not None and (session.get("effort") or loadout_effort or saved_effort or profile_effort):
             handled.add(effort_id)
         handled |= {option_id for option_id in (effort_id, model and str(model["id"])) if option_id in picked}
         for config_id, value in saved.items():
@@ -329,11 +367,19 @@ class ACPOrchestrator:
             logger.warning("ACP restore: %s", notice)
         return notices
 
-    async def start(self, profile: LLMProfile, *, resume_conversation: str | None = None) -> None:
+    async def start(
+        self, profile: LLMProfile, *, resume_conversation: str | None = None,
+        loadout: tuple[str, str] | None = None,
+    ) -> None:
         if profile.provider != "acp":
             raise ValueError(f"profile {profile.name!r} is not an ACP profile")
         if not profile.command:
             raise ValueError(f"ACP profile {profile.name!r} has no command")
+        if loadout is not None:
+            self._loadout_override = (profile.name, loadout[0], loadout[1])
+            self._session_options.pop(profile.name, None)
+        elif self._loadout_override and self._loadout_override[0] != profile.name:
+            self._loadout_override = None
         binding = self._bindings.load(resume_conversation) if resume_conversation else None
         if self._runner is not None:
             # A restart is transactional: retire the old child/session before

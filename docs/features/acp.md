@@ -120,11 +120,17 @@ text files up to 256 KiB; larger and binary files show their tool result.
 
 A model or effort pick belongs to the ACP session it was made in:
 
-- A restart of the same profile restores the picks that were confirmed and saved,
-  except where an explicit loadout model or effort sets that value. The explicit
-  loadout wins over the saved pick, and the saved file is left as it was.
-- A restart into another profile forgets the previous profile's picks. The new
-  profile starts from its own loadout and its own saved picks.
+- A restart restores confirmed Model-panel picks ahead of ordinary profile
+  defaults. An explicit loadout model or effort takes precedence over those
+  saved picks without changing the saved file at launch.
+- The Session tab's effort applies only to that daemon. It survives a harness
+  restart in that daemon and does not rewrite the shared Model-panel picks or
+  change another daemon using the same profile.
+- A restart into another profile does not apply the previous profile's picks.
+  The new profile starts from its own loadout and its own saved picks.
+- Selecting an ACP loadout inside the app applies its advertised model and
+  effort through the active harness, then saves those confirmed picks like the
+  Model panel. Unsupported model or effort values are refused.
 - After a model change, the effort you picked is re-applied. If the new model
   does not offer it, the highest effort the model offers is used, and a notice
   says so. If the harness refuses the effort, the notice says that instead.

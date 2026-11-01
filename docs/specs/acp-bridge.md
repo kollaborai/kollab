@@ -702,7 +702,13 @@ A clean transcript is the bar on every live run.
 
 - Model choice and reasoning effort: when an agent advertises ACP `model` or
   `thought_level` config options, `/model` and the Model panel list and set them
-  through `session/set_config_option`; unadvertised options are refused.
+  through `session/set_config_option`; unadvertised options are refused. Confirmed
+  Model-panel picks are saved per profile and override ordinary profile defaults.
+  Explicit startup loadouts take precedence over those saved picks without
+  rewriting them. Session-tab effort is scoped to the current daemon, survives
+  its harness restart, and never changes another daemon's saved options. An
+  in-app ACP loadout applies its advertised model and effort before saving the
+  confirmed picks; a refused value restores the previous active profile.
 - Notices: when an SDK release carries `session.notices`, advertise them
   outbound and send mesh-started turns to attached clients. They stay live
   only: never history, never replayed by load or resume, never in a harness

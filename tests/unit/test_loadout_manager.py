@@ -817,14 +817,14 @@ async def test_activate_acp_rejects_native_overrides_and_remote_delegates():
     profile.command = ("owned-fixture",)
     pm = _FakeProfileManager([profile])
     manager = LoadoutManager(pm, config=_MemoryConfig())
-    state = SimpleNamespace(set_active_profile=AsyncMock())
+    state = SimpleNamespace(_rpc=object(), panel_action=AsyncMock(return_value={"ok": True}))
     bus = SimpleNamespace(get_service=lambda name: state if name == "state_service" else None)
     rejected = await manager.activate(
-        Loadout("claude-code", "claude-code", "owned-fixture", effort="high"), bus
+        Loadout("too-hot", "claude-code", "haiku", temperature=0.5), bus
     )
     assert rejected is None
     accepted = await manager.activate(
-        Loadout("claude-code", "claude-code", "owned-fixture"), bus
+        Loadout("haiku-max", "claude-code", "haiku", effort="max"), bus
     )
     assert accepted is not None
-    state.set_active_profile.assert_awaited_once_with("claude-code", reload_profile=True)
+    state.panel_action.assert_awaited_once_with("llm", "activate", {"name": "haiku-max"})

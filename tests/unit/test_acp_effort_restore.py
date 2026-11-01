@@ -49,6 +49,11 @@ def _orchestrator(tmp_path, options, saved=None):
 LOADOUT = SimpleNamespace(name="claude-code", model="haiku", effort="max")
 
 
+def _explicit(orch, profile):
+    orch._loadout_override = (profile.name, profile.model, profile.effort)
+    return profile
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("saved", [
     {"model": "sonnet", "effort": "xhigh"},
@@ -57,7 +62,7 @@ LOADOUT = SimpleNamespace(name="claude-code", model="haiku", effort="max")
 async def test_loadout_wins_and_saved_model_and_effort_are_never_sent(tmp_path, saved):
     options = _options()
     orch = _orchestrator(tmp_path, options, saved=saved)
-    notices = await orch._restore_options(LOADOUT)
+    notices = await orch._restore_options(_explicit(orch, LOADOUT))
     assert notices == []
     assert orch._runner.calls == [("model", "haiku"), ("effort", "max")]
 
@@ -66,7 +71,7 @@ async def test_loadout_wins_and_saved_model_and_effort_are_never_sent(tmp_path, 
 async def test_rejected_model_gets_no_effort_and_says_why(tmp_path):
     options = _options(model_values=("sonnet",))
     orch = _orchestrator(tmp_path, options)
-    notices = await orch._restore_options(LOADOUT)
+    notices = await orch._restore_options(_explicit(orch, LOADOUT))
     assert orch._runner.calls == []
     assert any("model haiku was not applied" in n for n in notices)
     assert any("effort max was not applied because the model is not active" in n for n in notices)
@@ -77,7 +82,7 @@ async def test_rejected_model_gets_no_effort_and_says_why(tmp_path):
 async def test_unoffered_effort_is_named_with_the_choices(tmp_path):
     options = _options(effort_values=("high", "xhigh"))
     orch = _orchestrator(tmp_path, options)
-    notices = await orch._restore_options(LOADOUT)
+    notices = await orch._restore_options(_explicit(orch, LOADOUT))
     assert orch._runner.calls == [("model", "haiku")]
     assert any("effort max is not offered by this model (available: high, xhigh)" in n for n in notices)
 
@@ -86,7 +91,7 @@ async def test_unoffered_effort_is_named_with_the_choices(tmp_path):
 async def test_each_notice_is_shown_in_the_chat(tmp_path):
     options = _options(model_values=("sonnet",))
     orch = _orchestrator(tmp_path, options)
-    orch.restore_notices = await orch._restore_options(LOADOUT)
+    orch.restore_notices = await orch._restore_options(_explicit(orch, LOADOUT))
 
     shown = []
 
@@ -127,7 +132,7 @@ async def test_no_advertised_model_option_refuses_model_and_effort(tmp_path):
     """(1) A harness that offers no model selector must not get the loadout effort."""
     options = [_options()[1]]  # effort only
     orch = _orchestrator(tmp_path, options)
-    notices = await orch._restore_options(LOADOUT)
+    notices = await orch._restore_options(_explicit(orch, LOADOUT))
     assert orch._runner.calls == []
     assert any("model haiku was not applied: the harness advertises no model option" in n for n in notices)
     assert any("effort max was not applied because the model is not active" in n for n in notices)
@@ -175,7 +180,7 @@ async def test_raw_effort_id_saved_pick_cannot_undo_the_loadout_effort(tmp_path)
     options = _options()
     options[1]["id"] = "reasoning_budget"  # the same meaning under a custom ID
     orch = _orchestrator(tmp_path, options, saved={"reasoning_budget": "xhigh"})
-    await orch._restore_options(LOADOUT)
+    await orch._restore_options(_explicit(orch, LOADOUT))
     assert orch._runner.calls == [("model", "haiku"), ("reasoning_budget", "max")]
     assert options[1]["currentValue"] == "max"
 
@@ -185,7 +190,7 @@ async def test_raw_model_id_saved_pick_cannot_undo_the_loadout_model(tmp_path):
     options = _options()
     options[0]["id"] = "llm_model"  # the same meaning under a custom ID
     orch = _orchestrator(tmp_path, options, saved={"llm_model": "sonnet"})
-    await orch._restore_options(LOADOUT)
+    await orch._restore_options(_explicit(orch, LOADOUT))
     assert orch._runner.calls == [("llm_model", "haiku"), ("effort", "max")]
     assert options[0]["currentValue"] == "haiku"
 
@@ -197,7 +202,7 @@ async def test_saved_custom_model_id_is_applied_before_the_loadout_effort(tmp_pa
     options[0]["id"] = "model_choice"
     orch = _orchestrator(tmp_path, options, saved={"model_choice": "haiku"})
     loadout = SimpleNamespace(name="claude-code", model="", effort="max")
-    notices = await orch._restore_options(loadout)
+    notices = await orch._restore_options(_explicit(orch, loadout))
     assert orch._runner.calls == [("model_choice", "haiku"), ("effort", "max")]
     assert notices == []
 
@@ -246,7 +251,7 @@ async def test_saved_custom_model_then_max_keeps_max(tmp_path):
     options[1]["id"] = "reasoning_budget"
     orch = _orchestrator(tmp_path, options, saved={"model_choice": "haiku"})
     loadout = SimpleNamespace(name="claude-code", model="", effort="max")
-    notices = await orch._restore_options(loadout)
+    notices = await orch._restore_options(_explicit(orch, loadout))
     assert orch._runner.calls == [("model_choice", "haiku"), ("reasoning_budget", "max")]
     assert options[1]["currentValue"] == "max"
     assert notices == []

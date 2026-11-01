@@ -658,9 +658,18 @@ class LocalStateService(StateService):
         snapshot = self._profile_to_snapshot(active, is_active=True)
         harness_model = self._acp_harness_model()
         if harness_model:
-            # A harness picks its own model (/model sets it there): report that
-            # one, not the profile's, which the harness does not read.
+            # The harness is authoritative for its active options.
             snapshot.model = harness_model
+        try:
+            acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
+            if acp is not None and getattr(acp, "active", False) is True:
+                effort = next((o for o in acp.advertised_config_options()
+                               if o.get("id") == "effort"
+                               or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
+                if effort and effort.get("currentValue") is not None:
+                    snapshot.effort = str(effort["currentValue"])
+        except Exception:
+            logger.debug("ACP harness effort unavailable", exc_info=True)
         return snapshot
 
     def _acp_harness_model(self) -> str:
@@ -1316,7 +1325,7 @@ class LocalStateService(StateService):
 
         option = next((o for o in orchestrator.advertised_config_options()
                        if o.get("id") == "effort"
-                       or str(o.get("category") or "").lower() == "thought_level"), None)
+                       or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
         offered = option_values(option)
         if option is None or effort not in offered:
             raise ValueError(
@@ -1324,7 +1333,7 @@ class LocalStateService(StateService):
                 f"available: {', '.join(offered) or 'none'}"
             )
         try:
-            options = await orchestrator.set_config_option(str(option["id"]), effort)
+            options = await orchestrator.set_config_option(str(option["id"]), effort, persist=False)
         except Exception as exc:
             raise ValueError(f"ACP harness rejected effort {effort!r}: {exc}") from None
         reported = next((o.get("currentValue") for o in options or [] if o.get("id") == option["id"]), None)
@@ -1430,6 +1439,7 @@ class LocalStateService(StateService):
                 )
                 prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
                 prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
+                prior_loadout = getattr(orchestrator, "_loadout_override", None)
                 try:
                     await orchestrator.close()
                     await orchestrator.start(target_profile)
@@ -1450,6 +1460,7 @@ class LocalStateService(StateService):
                         # A rejected effort changes nothing: restore the previous harness.
                         await orchestrator.close()
                         if previous is not None:
+                            orchestrator._loadout_override = prior_loadout
                             if prior_binding is not None and prior_conversation:
                                 orchestrator.save_binding_for(prior_conversation, prior_binding)
                             try:
@@ -1493,7 +1504,7 @@ class LocalStateService(StateService):
         # before the provider reinitialize below so the next turn uses them,
         # and never written to config -- a launch flag must not rewrite the
         # user's saved profile (spec R3 / invariant I5).
-        if model or effort:
+        if (model or effort) and str(target_provider).lower() != "acp":
             overrides: dict[str, Any] = {"save_to_config": False}
             if model:
                 overrides["model"] = model

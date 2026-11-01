@@ -309,6 +309,7 @@ class TerminalLLMChat:
         # Pass cli_profile so auto-detection is skipped when --llm is used
         self.profile_manager = ProfileManager(self.config, cli_profile=profile_name)
         self.acp_orchestrator = None
+        self._startup_acp_loadout: tuple[str, str, str] | None = None
 
         # Apply a persisted loadout default when no explicit --llm override was given.
         if not profile_name:
@@ -329,18 +330,15 @@ class TerminalLLMChat:
                         else None
                     )
                     if loadout and getattr(loadout_profile, "provider", "") == "acp":
-                        # ACP owns model/effort/temperature inside its harness;
-                        # do not synthesize native model settings at startup.
-                        # The loadout's model and effort stay on the profile in memory;
-                        # the harness receives them at start (ACPOrchestrator._restore_options).
-                        applied = self.profile_manager.update_profile(
-                            loadout.provider_profile,
-                            model=loadout.model,
-                            effort=loadout.effort or None,
-                            save_to_config=False,
-                        ) and self.profile_manager.set_active_profile(
+                        # Keep loadout provenance separate from the profile's
+                        # ordinary defaults and the shared ACP pick store.
+                        applied = self.profile_manager.set_active_profile(
                             loadout.provider_profile, persist=False
                         )
+                        if applied:
+                            self._startup_acp_loadout = (
+                                loadout.provider_profile, loadout.model, loadout.effort,
+                            )
                     elif loadout:
                         update_kwargs = {
                             "model": loadout.model,
@@ -398,16 +396,8 @@ class TerminalLLMChat:
                     if not is_acp_loadout and loadout.max_tokens is not None:
                         update_kwargs["max_tokens"] = loadout.max_tokens
 
-                    # ACP keeps model and effort on the profile in memory; the
-                    # harness gets them at start (ACPOrchestrator._restore_options).
                     activated = (
-                        self.profile_manager.update_profile(
-                            loadout.provider_profile,
-                            model=loadout.model,
-                            effort=loadout.effort or None,
-                            save_to_config=False,
-                        )
-                        and self.profile_manager.set_active_profile(
+                        self.profile_manager.set_active_profile(
                             loadout.provider_profile, persist=False
                         )
                         if is_acp_loadout
@@ -419,6 +409,10 @@ class TerminalLLMChat:
                         )
                     )
                     if activated:
+                        if is_acp_loadout:
+                            self._startup_acp_loadout = (
+                                loadout.provider_profile, loadout.model, loadout.effort,
+                            )
                         activated_via_loadout = True
                         logger.info(
                             f"Resolved '{profile_name}' as loadout -> "
@@ -1465,7 +1459,11 @@ class TerminalLLMChat:
             self.acp_orchestrator = orchestrator
             return
         try:
-            await orchestrator.start(profile)
+            loadout = getattr(self, "_startup_acp_loadout", None)
+            if loadout and loadout[0] == profile.name:
+                await orchestrator.start(profile, loadout=(loadout[1], loadout[2]))
+            else:
+                await orchestrator.start(profile)
         except BaseException:
             # Startup is transactional: a partially spawned child/session must
             # be closed and its Hub binding revoked before the error escapes.
