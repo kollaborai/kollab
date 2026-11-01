@@ -672,10 +672,15 @@ class QueueProcessor:
         a chat message in it would wait with its stream open, so it ends now (#551)."""
         queue = getattr(self, "processing_queue", None)
         for item in [i for i in getattr(queue, "_queue", ()) if isinstance(i, TaggedInput)]:
-            queue._queue.remove(item)
-            queue.task_done()
-            queue._wakeup_next(queue._putters)
-            self._end_dropped(item, "Stopped before this message ran. Send it again.")
+            self._end_queued(item)
+
+    def _end_queued(self, item: Any) -> None:
+        """Take a chat message out of the queue unrun, and end its stream."""
+        queue = self.processing_queue
+        queue._queue.remove(item)
+        queue.task_done()
+        queue._wakeup_next(queue._putters)
+        self._end_dropped(item, "Stopped before this message ran. Send it again.")
 
     def clear_remote_task_cancellation(self, generation: int) -> bool:
         """Clear an idle relay cancellation only if no newer request replaced it."""
@@ -819,6 +824,7 @@ class QueueProcessor:
             pass
 
         strategy = self.task_config.queue.overflow_strategy
+        generation = getattr(self, "_cancel_generation", 0)
 
         try:
             if strategy == "drop_oldest":
@@ -832,6 +838,14 @@ class QueueProcessor:
         except RuntimeError:
             self._end_dropped(message)  # refused: it never runs, so its stream ends now
             raise
+        if (
+            getattr(self, "_cancel_generation", 0) != generation
+            and isinstance(message, TaggedInput)
+            and message in self.processing_queue._queue
+        ):
+            # A Stop swept the queue while this waited for room: no drain runs it
+            # until the next message, so it ends as the swept ones did.
+            self._end_queued(message)
 
     def _end_dropped(
         self,
@@ -843,6 +857,17 @@ class QueueProcessor:
             ids = list(item.request_ids)
             publish_semantic(self.renderer, "error", request_ids=ids, message=why)
             publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
+
+    def _end_requests(self, why: str) -> None:
+        """A chain stopped short of its turn's completion still ends the requests
+        it answers: their streams wait for one, and the next turn would name them."""
+        if not self.active_request_ids:
+            return
+        ids = list(self.active_request_ids)
+        publish_semantic(self.renderer, "error", request_ids=ids, message=why)
+        publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
+        self.active_request_ids = ()
+        self._stamp_turn(None)
 
     async def _drop_oldest_strategy(self, message: MessageContent) -> None:
         """Drop oldest task to make room."""
@@ -1057,12 +1082,13 @@ class QueueProcessor:
                             f"({MAX_CONTINUATION_TURNS}) without completing — "
                             f"stopping runaway chain"
                         )
-                        self.message_display_service.display_error_message(
-                            f"Continuation stopped after "
-                            f"{MAX_CONTINUATION_TURNS} turns without "
+                        why = (
+                            f"Continuation stopped after {MAX_CONTINUATION_TURNS} turns without "
                             f"completing. This is a safety backstop."
                         )
+                        self.message_display_service.display_error_message(why)
                         self.turn_completed = True
+                        self._end_requests(why)
                         break
 
                     try:
@@ -1082,11 +1108,10 @@ class QueueProcessor:
                                 f"Circuit breaker: {stuck.count} identical "
                                 f"tool errors in a row, breaking loop"
                             )
-                            self.message_display_service.display_error_message(
-                                f"Stuck loop detected: same tool error repeated "
-                                f"{stuck.count} times. Breaking."
-                            )
+                            why = f"Stuck loop detected: same tool error repeated {stuck.count} times. Breaking."
+                            self.message_display_service.display_error_message(why)
                             self.turn_completed = True
+                            self._end_requests(why)
                             break
 
                     except Exception as e:
@@ -1100,6 +1125,7 @@ class QueueProcessor:
                             f"conversation failed on turn {turn_count}: {e}"
                         )
                         self.turn_completed = True
+                        self._end_requests(self.last_turn_error)
                         break
 
                 # Done, cancelled or cut off by new input: no round of it is left.

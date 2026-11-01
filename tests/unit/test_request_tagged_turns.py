@@ -148,6 +148,61 @@ async def test_a_tagged_chat_message_overflows_like_any_typed_message():
 
 
 @pytest.mark.asyncio
+async def test_a_stop_ends_a_message_still_waiting_for_room():
+    # Variscite on #554 round 4: B waited for room when Stop swept the queue, went
+    # in after the sweep, and waited there with its stream open.
+    for strategy in ("block", "drop_oldest"):
+        processor = QueueProcessor.__new__(QueueProcessor)
+        processor.renderer = DisplayTap()
+        events = processor.renderer.subscribe("test")
+        processor.mark_progress = lambda: None
+        processor._cancel_generation = 0
+        processor.processing_queue = asyncio.Queue(maxsize=1)
+        processor.max_queue_size = 1
+        processor.dropped_messages = 0
+        processor._queue_metrics = {"total_enqueue_attempts": 0, "total_enqueue_successes": 0,
+                                    "drop_oldest_count": 0, "block_count": 0, "block_timeout_count": 0}
+        processor.task_config = SimpleNamespace(
+            queue=SimpleNamespace(overflow_strategy=strategy, block_timeout=5, log_queue_events=False)
+        )
+        processor.processing_queue.put_nowait(TaggedInput("a", ("A",)))
+        admitting = asyncio.ensure_future(processor.enqueue(TaggedInput("b", ("B",))))
+        await asyncio.sleep(0)  # B waits for room, or in the pause after A was dropped
+        processor.request_cancellation(origin="human")
+        await admitting
+        assert processor.processing_queue.empty(), strategy
+        ended = [e["request_ids"] for e in _drain(events) if e["type"] == "turn_complete"]
+        assert sorted(ended) == [["A"], ["B"]], strategy
+
+
+@pytest.mark.asyncio
+async def test_a_chain_a_safety_exit_stops_ends_its_requests(monkeypatch):
+    # Variscite on #554 round 4: the turn cap, the stuck-loop breaker and a
+    # continuation error ended a chain with no completion naming its request,
+    # and the next turn named that request as well.
+    import kollabor_agent.queue_processor as module
+
+    monkeypatch.setattr(module, "MAX_CONTINUATION_TURNS", 0)
+    processor = _turn_processor()
+    processor.renderer = DisplayTap()
+    events = processor.renderer.subscribe("test")
+    processor.processing_queue = asyncio.Queue()
+    processor.processing_queue.put_nowait(TaggedInput("a", ("A",)))
+    processor.turn_completed = False
+    processor._last_tool_error_sig = None
+    processor._open_voice_turn = None
+    processor.message_display_service = MagicMock()
+
+    async def batch(messages):
+        processor.active_request_ids = ("A",)  # the turn began and is still continuing
+
+    await processor._drain_queue(None, batch, AsyncMock())
+    done = [e for e in _drain(events) if e["type"] == "turn_complete"]
+    assert [(e["request_ids"], e["stop_reason"]) for e in done] == [(["A"], "error")]
+    assert processor.active_request_ids == ()
+
+
+@pytest.mark.asyncio
 async def test_a_stop_ends_a_queued_chat_message_and_keeps_typed_input():
     # Chrysoprase on #554 round 3: a Stop left X queued and no drain ran it, so
     # X's stream waited for whatever message came next.

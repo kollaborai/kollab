@@ -465,6 +465,24 @@ def test_a_tagged_request_ends_only_on_a_completion_naming_it():
     )
 
 
+def test_a_stream_gets_none_of_another_requests_output():
+    # Variscite on #554 round 4: a message sent while turn A ran streamed A's
+    # text, tool cards and permission prompt as its own.
+    from kollabor_engine.daemon_pool import _normalize_event
+    from kollabor_engine.routes.messages import _foreign_output
+
+    mine = {"B"}
+    assert _foreign_output({"type": "token", "request_ids": ["A"]}, mine)
+    assert _foreign_output({"type": "tool_start", "request_ids": ["A"]}, mine)
+    assert not _foreign_output({"type": "token", "request_ids": ["A", "B"]}, mine)  # one batch answers both
+    assert not _foreign_output({"type": "token"}, mine)  # session-wide, or a daemon that tags nothing
+    assert not _foreign_output({"type": "token", "request_ids": ["A"]}, set())  # a stream with no id
+    prompt = _normalize_event(
+        {"type": "permission_request", "request_ids": ["A"], "details": {"tool_name": "terminal"}}
+    )
+    assert prompt["request_ids"] == ["A"] and _foreign_output(prompt, mine)
+
+
 def test_only_this_requests_completion_ends_its_stream():
     # Kyanite on #543 round 2: an earlier turn's turn_complete, missed during
     # the outage, arrived after the reattach with a higher seq and ended the

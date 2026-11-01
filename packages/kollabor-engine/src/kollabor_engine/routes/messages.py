@@ -72,6 +72,14 @@ def _foreign_error(event: Dict[str, Any], request_ids: set[str]) -> bool:
     return bool(named and request_ids) and not named & request_ids
 
 
+def _foreign_output(event: Dict[str, Any], request_ids: set[str]) -> bool:
+    """An event a turn names for other requests only is theirs: a message sent
+    while another turn runs gets none of that turn's text, tool cards or
+    permission prompts (#551). Unnamed events (session-wide, older daemons) pass."""
+    named = {str(i) for i in event.get("request_ids") or ()}
+    return bool(named and request_ids) and not named & request_ids
+
+
 def _contains_reserved_voice_origin(value: Any) -> bool:
     if isinstance(value, dict):
         origin_context = value.get("origin_context")
@@ -155,7 +163,7 @@ async def send_message(session_id: str, body: MessageRequest):
                 event.setdefault("session_id", session_id)
                 if _foreign_completion(event, request_ids, tagged):
                     continue
-                if _foreign_error(event, request_ids):
+                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids):
                     continue
 
                 if event.get("type") == "daemon_closed":
@@ -983,7 +991,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                 event_type = str(event.get("type") or "")
                 if _foreign_completion(event, request_ids, bool(request_ids) and not untagged):
                     continue
-                if _foreign_error(event, request_ids):
+                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids):
                     continue
 
                 if event_type == "token":

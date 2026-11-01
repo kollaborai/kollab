@@ -187,7 +187,7 @@ def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
         "risk_reason": details.get("risk_reason", ""),
         "details": details,
     }
-    for key in ("ts", "session_id", "request_id", "turn_id", "input_source", "generation"):
+    for key in ("ts", "session_id", "request_id", "request_ids", "turn_id", "input_source", "generation"):
         if key in event:
             flat[key] = event[key]
     return flat
