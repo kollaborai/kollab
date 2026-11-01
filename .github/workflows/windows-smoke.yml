@@ -13,6 +13,7 @@ on:
       - scripts/windows_import_smoke.py
       - scripts/windows_relay_halt_smoke.py
       - tests/unit/test_windows_relay_halt_smoke.py
+      - tests/unit/test_secure_session.py
       - scripts/windows_relay_serve_smoke.py
       - .github/workflows/windows-smoke.yml
   workflow_dispatch:
@@ -51,6 +52,10 @@ jobs:
       # The kill switch's Windows process readers, private files and local IPC (kollab #268).
       - name: Kill switch
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_halt_windows.py tests/unit/test_halt_runtime_windows.py tests/unit/test_hub_bridge_waiter_line.py tests/unit/test_relay_state_windows.py tests/unit/test_halt_listener_windows.py tests/unit/test_relay_owner_windows.py tests/unit/test_relay_runtime_windows.py tests/unit/test_relay_selfhost_windows.py tests/unit/test_relay_conversations_windows.py tests/unit/test_local_directory_windows.py tests/unit/test_discovery_publish_windows.py
+
+      # Exercise native Windows ACL checks and TLS identity loading.
+      - name: Secure peer TLS
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_secure_session.py
 
       # Every module imports on Windows, so a Unix-only import never ships unseen (kollab #268).
       - name: Every module imports
