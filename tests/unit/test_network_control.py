@@ -6,6 +6,7 @@ tmp_path, so counting sees separate machines. Nothing touches the real HOME.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import stat
@@ -279,6 +280,154 @@ async def test_a_halt_reaches_a_member_and_needs_two_machines_to_lift(three):
     assert lifted == [order["hash"]]
     await link.syncs[f.client.public_key].tick()
     assert not b.halt_book().active() and swept == [b.network_id()] * 2
+
+
+@pytest.mark.asyncio
+async def test_proposal_created_during_exchange_is_sent_after_the_inflight_reply(three):
+    """An in-flight old book must not acknowledge a later local resume proposal."""
+    founder, bootstrap, third = three
+    link = syncs(founder, bootstrap, third)
+    halt = founder.halt_act("halt", {"reason": "stop"})
+    await link.syncs[founder.client.public_key].tick()
+
+    sync = link.syncs[bootstrap.client.public_key]
+    real_transport = sync._transport
+    started = asyncio.Queue()
+    releases = [asyncio.Event(), asyncio.Event()]
+
+    class DelayedTransport:
+        async def request(self, key, method, payload, *, timeout):
+            if key == founder.client.public_key and releases:
+                release = releases.pop(0)
+                await started.put(release)
+                await release.wait()
+            return await real_transport.request(key, method, payload, timeout=timeout)
+
+    sync._transport = DelayedTransport()
+    inflight = asyncio.create_task(sync.tick())
+    first_release = await asyncio.wait_for(started.get(), 5)
+    first = bootstrap.halt_act("propose_resume")
+    # HaltLink.hub_halt_act invalidates its current delivery bookkeeping.
+    sync._delivered.clear()
+    sync._retry_at.clear()
+    first_release.set()
+    await asyncio.wait_for(inflight, 5)
+    inflight = asyncio.create_task(sync.tick())
+    second_release = await asyncio.wait_for(started.get(), 5)
+    bootstrap.halt_act("withdraw", {"hash": first["hash"]})
+    proposal = bootstrap.halt_act("propose_resume")
+    sync._delivered.clear()
+    sync._retry_at.clear()
+    second_release.set()
+    await asyncio.wait_for(inflight, 5)
+    await sync.tick()
+    result = founder.halt_act("confirm_resume", {"hash": proposal["hash"]})
+    assert result["lifted"] == [halt["hash"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["exception", "invalid_reply", "empty_reply", "error_reply", "empty_book"])
+async def test_failed_exchange_retries_the_pending_proposal(three, failure):
+    founder, bootstrap, third = three
+    link = syncs(founder, bootstrap, third)
+    halt = founder.halt_act("halt", {"reason": "stop"})
+    await link.syncs[founder.client.public_key].tick()
+    proposal = bootstrap.halt_act("propose_resume")
+    sync = link.syncs[bootstrap.client.public_key]
+    real_transport = sync._transport
+    failed = False
+
+    class FailsOnce:
+        async def request(self, key, method, payload, *, timeout):
+            nonlocal failed
+            if key == founder.client.public_key and not failed:
+                failed = True
+                if failure == "exception":
+                    raise RelayError("offline")
+                if failure == "empty_reply":
+                    return {}
+                if failure == "error_reply":
+                    return {"error": "not accepted"}
+                if failure == "empty_book":
+                    return {"halts": [], "proposals": [], "resumes": [], "heads": {}}
+                return None  # no valid acknowledgement
+            return await real_transport.request(key, method, payload, timeout=timeout)
+
+    sync._transport = FailsOnce()
+    await sync.tick()
+    with pytest.raises(nh.HaltError, match="no single open proposal"):
+        founder.halt_act("confirm_resume", {"hash": proposal["hash"]})
+    assert founder.client.public_key in sync._failures
+    sync._retry_at.clear()  # advance past the retry delay
+    await sync.tick()
+    assert founder.halt_act("confirm_resume", {"hash": proposal["hash"]})["lifted"] == [halt["hash"]]
+
+
+@pytest.mark.asyncio
+async def test_unacknowledged_halt_is_retried(three):
+    founder, bootstrap, third = three
+    link = syncs(founder, bootstrap, third)
+    halt = founder.halt_act("halt", {"reason": "stop"})
+    sync = link.syncs[founder.client.public_key]
+    real_transport = sync._transport
+    failed = False
+
+    class EmptyOnce:
+        async def request(self, key, method, payload, *, timeout):
+            nonlocal failed
+            if key == bootstrap.client.public_key and not failed:
+                failed = True
+                return {"halts": [], "proposals": [], "resumes": [], "heads": {}}
+            return await real_transport.request(key, method, payload, timeout=timeout)
+
+    sync._transport = EmptyOnce()
+    await sync.tick()
+    assert not bootstrap.halt_book().active()
+    assert bootstrap.client.public_key in sync._failures
+    sync._retry_at.clear()
+    await sync.tick()
+    assert list(bootstrap.halt_book().active()) == [halt["hash"]]
+
+
+@pytest.mark.asyncio
+async def test_effective_resume_acknowledges_an_older_active_halt(three):
+    founder, bootstrap, third = three
+    link = syncs(founder, bootstrap, third)
+    founder.halt_act("halt", {"reason": "stop"})
+    await link.syncs[founder.client.public_key].tick()
+    proposal = bootstrap.halt_act("propose_resume")
+    await link.syncs[bootstrap.client.public_key].tick()
+    founder.halt_act("confirm_resume", {"hash": proposal["hash"]})
+    sync = link.syncs[bootstrap.client.public_key]
+    sync._delivered.clear()  # emulate a new peer session
+    await sync.tick()
+    assert not bootstrap.halt_book().active()
+    assert founder.client.public_key not in sync._failures
+
+
+def test_proposal_acknowledgement_includes_sent_confirmations(three):
+    founder, bootstrap, third = three
+    halt = founder.halt_act("halt", {"reason": "stop"})
+    bootstrap.halt_merge(founder.halt_payload())
+    proposal = bootstrap.halt_act("propose_resume")
+    sent = bootstrap.halt_payload()
+    confirmation = nh.resume_confirmation(third.client.folder, third.machine, proposal["hash"])
+    sent["proposals"][0]["confirmations"] = [confirmation]
+    reply = {**sent, "proposals": [{**sent["proposals"][0], "confirmations": []}]}
+    assert not HaltSync._active_orders_acknowledged(sent, reply, bootstrap)
+    assert HaltSync._active_orders_acknowledged(sent, sent, bootstrap)
+    assert list(bootstrap.halt_book().active()) == [halt["hash"]]
+
+
+def test_unconfirmed_resume_cannot_acknowledge_a_proposal(three):
+    founder, bootstrap, _third = three
+    founder.halt_act("halt", {"reason": "stop"})
+    bootstrap.halt_merge(founder.halt_payload())
+    bootstrap.halt_act("propose_resume")
+    sent = bootstrap.halt_payload()
+    reply = {**sent, "proposals": [], "resumes": list(sent["proposals"])}
+    bootstrap.halt_merge(reply)
+    assert not HaltSync._active_orders_acknowledged(sent, reply, bootstrap)
 
 
 @pytest.mark.asyncio

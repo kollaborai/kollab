@@ -656,12 +656,18 @@ for the same resume hash.
 - New secure method `network_halt` (added to the set at `relay_agent.py:2040`).
   Payload: the machine's active halts, open resume proposals with their
   confirmations, effective resumes, and each issuer's chain head. Reply: the
-  receiver's. Two machines converge in one exchange.
+  receiver's. Without concurrent changes, two machines converge in one exchange.
 
 ### Reaching Offline Devices (R7)
 
 - The issuer sends the order to every member online and retries each until it
   acks (10 s doubling to 5 minutes, like `config_sync_service.py`).
+- An acknowledgement applies to the exact book sent, not a later local change.
+  A reply must include each sent active halt and open proposal with its sent
+  confirmations, or a verified effective resume that covers it; an invalid
+  or incomplete reply is retried. Changes made during an exchange are sent
+  in a later exchange. Older effective resumes and revocations retain their
+  existing exchange behavior.
 - Member lists go to each member once per relay session and again when the
   list changes (`network_members.py:176`; `tick()` skips an unchanged digest).
   Active halt hashes, open proposal hashes with their confirmation count,

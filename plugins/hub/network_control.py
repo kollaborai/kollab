@@ -982,6 +982,39 @@ class HaltSync:
     def retry_delay(self, failures: int) -> float:
         return min(HALT_RETRY_MAX, HALT_RETRY_START * 2 ** (failures - 1))
 
+    @staticmethod
+    def _active_orders_acknowledged(sent: dict, reply: dict, control) -> bool:
+        """A peer must return active halts and proposals, or their effective resumes."""
+        received = {
+            nh.order_hash(order): order
+            for order in reply["proposals"]
+            if isinstance(order, dict)
+        }
+        accepted_resumes = control.halt_book().resumes if reply["resumes"] else {}
+        for order in reply["resumes"]:
+            if isinstance(order, dict) and nh.order_hash(order) in accepted_resumes:
+                received[nh.order_hash(order)] = accepted_resumes[nh.order_hash(order)]
+        if sent["halts"]:
+            held = {nh.order_hash(order) for order in reply["halts"] if isinstance(order, dict)}
+            missing = {nh.order_hash(order) for order in sent["halts"]} - held
+            if missing:
+                lifted = {
+                    halt
+                    for order in reply["resumes"]
+                    if isinstance(order, dict) and nh.order_hash(order) in accepted_resumes
+                    for halt in accepted_resumes[nh.order_hash(order)]["lifts"]
+                }
+                if missing - lifted:
+                    return False
+        for order in sent["proposals"]:
+            peer_order = received.get(nh.order_hash(order))
+            if peer_order is None:
+                return False
+            peer_confirmations = {nh.canonical(item) for item in peer_order.get("confirmations", [])}
+            if not {nh.canonical(item) for item in order.get("confirmations", [])} <= peer_confirmations:
+                return False
+        return True
+
     async def tick(self) -> None:
         control = self._client.control
         try:  # F15a: a revocation applies once two counting machines signed it, also while halted
@@ -992,7 +1025,8 @@ class HaltSync:
         control.note_online(online)
         for key in self._client.members():
             session = online.get(key)
-            digest = hashlib.sha256(nh.canonical(control.halt_payload())).hexdigest()
+            payload = control.halt_payload()
+            digest = hashlib.sha256(nh.canonical(payload)).hexdigest()
             if (
                 session is None
                 or self._delivered.get(key) == (session, digest)
@@ -1001,15 +1035,24 @@ class HaltSync:
                 continue
             try:
                 reply = await self._transport.request(
-                    key, HALT_METHOD, control.halt_payload(), timeout=REQUEST_SECONDS
+                    key, HALT_METHOD, payload, timeout=REQUEST_SECONDS
                 )
+                if not (
+                    isinstance(reply, dict)
+                    and all(isinstance(reply.get(field), list) for field in ("halts", "proposals", "resumes"))
+                    and isinstance(reply.get("heads"), dict)
+                ):
+                    raise RelayError("invalid halt exchange response")
                 control.halt_merge(reply)
+                if not self._active_orders_acknowledged(payload, reply, control):
+                    raise RelayError("peer did not acknowledge active halt orders")
             except Exception:
                 failures = self._failures.get(key, 0) + 1
                 self._failures[key] = failures
                 self._retry_at[key] = time.monotonic() + self.retry_delay(failures)
                 continue
-            digest = hashlib.sha256(nh.canonical(control.halt_payload())).hexdigest()
+            # Only the snapshot sent above was acknowledged. A local action
+            # may have changed the book while the request was in flight.
             self._delivered[key] = (session, digest)
             self._failures.pop(key, None)
             self._retry_at.pop(key, None)
