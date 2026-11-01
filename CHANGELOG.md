@@ -131,6 +131,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Hub membership updates now send to every peer in a tick together, so one
   slow or failing peer no longer delays the peers listed after it (#603).
+- Membership fan-out now stays inside the relay's pending budget: surplus
+  sends wait on a semaphore instead of being rejected for capacity, a relay
+  capacity reject is backpressure rather than a peer failure, retry backoff
+  saturates instead of overflowing after ~1024 consecutive failures (both
+  membership and config sync), and a peer's send bookkeeping is pruned when
+  it leaves the list (#603).
 - ACP: attaching with `--llm` no longer closes the running harness before the
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness
