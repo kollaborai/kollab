@@ -636,7 +636,7 @@ def main() -> int:
         homes[name] = home
         envs[name] = smoke_env(HOME=str(home), USERPROFILE=str(home))
         if name != "r":
-            projects[name] = home / "project"
+            projects[name] = home / f"project-{name}"  # distinct folders: the device name is hostname + folder
             projects[name].mkdir()
             logs[name] = home / "detached.log"
 
