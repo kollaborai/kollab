@@ -664,7 +664,18 @@ class QueueProcessor:
         self._cancel_generation += 1
         self._cancel_processing = True
         self._cancel_origin = origin
+        self._end_queued_chat()
         return self._cancel_generation
+
+    def _end_queued_chat(self) -> None:
+        """A cancel stops the drain, and the queue waits for the next message:
+        a chat message in it would wait with its stream open, so it ends now (#551)."""
+        queue = getattr(self, "processing_queue", None)
+        for item in [i for i in getattr(queue, "_queue", ()) if isinstance(i, TaggedInput)]:
+            queue._queue.remove(item)
+            queue.task_done()
+            queue._wakeup_next(queue._putters)
+            self._end_dropped(item, "Stopped before this message ran. Send it again.")
 
     def clear_remote_task_cancellation(self, generation: int) -> bool:
         """Clear an idle relay cancellation only if no newer request replaced it."""
@@ -809,23 +820,28 @@ class QueueProcessor:
 
         strategy = self.task_config.queue.overflow_strategy
 
-        if strategy == "drop_oldest":
-            await self._drop_oldest_strategy(message)
-        elif strategy == "drop_newest":
-            self._drop_newest_strategy()
-        elif strategy == "block":
-            await self._block_strategy(message)
-        else:
-            self._unknown_strategy(message)
+        try:
+            if strategy == "drop_oldest":
+                await self._drop_oldest_strategy(message)
+            elif strategy == "drop_newest":
+                self._drop_newest_strategy()
+            elif strategy == "block":
+                await self._block_strategy(message)
+            else:
+                self._unknown_strategy(message)
+        except RuntimeError:
+            self._end_dropped(message)  # refused: it never runs, so its stream ends now
+            raise
 
-    def _end_dropped(self, item: Any) -> None:
-        """A chat message the full queue drops never runs: its stream ends, saying so (#551)."""
+    def _end_dropped(
+        self,
+        item: Any,
+        why: str = "The agent's queue was full, so this message was dropped. Send it again.",
+    ) -> None:
+        """A chat message that never runs: its stream ends, saying why (#551)."""
         if isinstance(item, TaggedInput):
             ids = list(item.request_ids)
-            publish_semantic(
-                self.renderer, "error", request_ids=ids,
-                message="The agent's queue was full, so this message was dropped. Send it again.",
-            )
+            publish_semantic(self.renderer, "error", request_ids=ids, message=why)
             publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
 
     async def _drop_oldest_strategy(self, message: MessageContent) -> None:
@@ -1367,6 +1383,17 @@ class QueueProcessor:
                 # call) kills its chain, whichever driver then swallows it.
                 if not self.cancel_processing:
                     self.last_turn_error = str(exc) or type(exc).__name__
+                if self.active_request_ids:
+                    # It died before its body could answer them: their streams
+                    # end on this turn, not on whichever turn runs next (#551).
+                    if self.last_turn_error:
+                        publish_semantic(self.renderer, "error", message=self.last_turn_error)
+                    publish_semantic(
+                        self.renderer, "turn_complete",
+                        stop_reason="error" if self.last_turn_error else "end_turn",
+                    )
+                    self.active_request_ids = ()
+                    self._stamp_turn(None)
                 if self._after_turn:  # queued while this round ran: lands once the lock is free
                     self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
                 raise

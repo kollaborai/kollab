@@ -128,7 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Its stream used to end on the completion of the turn already running, and
   the reply never streamed. The engine now sends a request id with every chat
   message, and the agent names it on every event of the turn that answers it
-  (#551).
+  (#551). A message still waiting when you press Stop ends at once, asking
+  you to send it again.
 - An agent whose socket directory in /tmp was deleted makes it again on its next heartbeat; before, it stayed unreachable until another agent started (#542).
 - A chat with a live agent no longer stays stuck on "daemon unreachable: client closed" after the agent drops the engine: the engine keeps trying to attach again for as long as the agent runs (quick tries, then every 5 s) instead of giving up after 10 s (#541).
 - After it attaches again, a chat gets each update once and in order, a reply ends only on its own turn's completion, and an update too big for the engine shows as an error instead of vanishing (#541).

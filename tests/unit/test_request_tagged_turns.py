@@ -15,7 +15,7 @@ import pytest
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 from kollabor.user_input_source import UserInputSource
-from kollabor_agent.queue_processor import QueueProcessor, TaggedInput, batch_request_ids
+from kollabor_agent.queue_processor import QueuedInput, QueueProcessor, TaggedInput, batch_request_ids
 from kollabor_events import EventBus, EventType, Hook, HookPriority
 from kollabor_tui.display_tap import DisplayTap, publish_semantic
 from kollabor_tui.turn_context import current_turn
@@ -128,6 +128,43 @@ async def test_a_tagged_chat_message_overflows_like_any_typed_message():
     error, done = _drain(events)
     assert (error["type"], error["request_ids"], done["request_ids"]) == ("error", ["r3"], ["r3"])
 
+    # Chrysoprase on #554 round 3: drop_newest, and drop_oldest with admitted
+    # voice in the queue, refuse the new message by raising, and it never ended.
+    processor.processing_queue.put_nowait("typed here")
+    processor.task_config.queue = SimpleNamespace(overflow_strategy="drop_newest", log_queue_events=False)
+    processor._queue_metrics["drop_newest_count"] = 0
+    with pytest.raises(RuntimeError):
+        await processor.enqueue(TaggedInput("d", ("r4",)))
+    error, done = _drain(events)
+    assert (error["type"], error["request_ids"], done["request_ids"]) == ("error", ["r4"], ["r4"])
+    processor.processing_queue.get_nowait()
+    processor.processing_queue.put_nowait(QueuedInput("spoken", {}))
+    processor.task_config.queue.overflow_strategy = "drop_oldest"
+    with pytest.raises(RuntimeError):
+        await processor.enqueue(TaggedInput("e", ("r5",)))
+    error, done = _drain(events)
+    assert (error["type"], error["request_ids"], done["request_ids"]) == ("error", ["r5"], ["r5"])
+    assert processor.processing_queue.get_nowait() == QueuedInput("spoken", {})
+
+
+@pytest.mark.asyncio
+async def test_a_stop_ends_a_queued_chat_message_and_keeps_typed_input():
+    # Chrysoprase on #554 round 3: a Stop left X queued and no drain ran it, so
+    # X's stream waited for whatever message came next.
+    processor = QueueProcessor.__new__(QueueProcessor)
+    processor.renderer = DisplayTap()
+    events = processor.renderer.subscribe("test")
+    processor._cancel_generation = 0
+    processor.processing_queue = asyncio.Queue(maxsize=10)
+    for item in ("typed here", TaggedInput("x", ("X",)), QueuedInput("spoken", {})):
+        processor.processing_queue.put_nowait(item)
+    processor.request_cancellation(origin="human")
+    kept = [processor.processing_queue.get_nowait() for _ in range(processor.processing_queue.qsize())]
+    assert kept == ["typed here", QueuedInput("spoken", {})]  # these still run with the next message
+    error, done = _drain(events)
+    assert (error["type"], error["request_ids"]) == ("error", ["X"]) and "Stopped" in error["message"]
+    assert (done["type"], done["request_ids"]) == ("turn_complete", ["X"])
+
 
 def _turn_processor():
     """Turns through the real lock and stamping, with the model call replaced."""
@@ -183,3 +220,32 @@ async def test_a_turn_ending_while_a_batch_waits_keeps_the_batchs_request():
     release.set()
     await asyncio.gather(hub, batch)
     assert seen == [None, ["B"]]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_dies_before_its_body_ends_its_requests_on_that_turn():
+    # Chrysoprase on #554 round 3: a pre-request hook that cancelled X's turn
+    # left X unanswered, and the next message's turn named X as well.
+    processor = _turn_processor()
+    processor.renderer = DisplayTap()
+    events = processor.renderer.subscribe("test")
+
+    async def denied(*args, **kwargs):
+        raise asyncio.CancelledError("Model request denied by pre-request hook")
+
+    processor._execute_llm_turn_inner = denied
+    with pytest.raises(asyncio.CancelledError):
+        await processor.process_message_batch([TaggedInput("x", ("X",))], "p0")
+    error, done = _drain(events)
+    assert (error["type"], error["request_ids"]) == ("error", ["X"]) and "denied" in error["message"]
+    assert (done["type"], done["request_ids"], done["stop_reason"]) == ("turn_complete", ["X"], "error")
+
+    seen = []
+
+    async def model_call(*args, **kwargs):
+        seen.append(current_turn.get().get("request_ids"))
+        return "parent"
+
+    processor._execute_llm_turn_inner = model_call
+    await processor.process_message_batch([TaggedInput("y", ("Y",))], "p0")
+    assert seen == [["Y"]]
