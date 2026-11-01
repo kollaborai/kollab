@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import anyio
-from fastapi import APIRouter, HTTPException  # type: ignore[import-not-found]
+from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not-found]
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import-not-found]
 
@@ -30,9 +30,32 @@ from kollabor_ai.message_content import (
 
 from .. import sse
 from ..server import get_session_registry
+from ..session_context import (
+    PHONE_STREAM_REVOKED,
+    SESSION_READ_CONTEXT_SCOPE_KEY,
+    SessionReadContext,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["messages"])
+
+
+
+def _request_read_context(request: Request | None) -> SessionReadContext | None:
+    """Read only the typed identity installed in the server-owned ASGI scope."""
+    if request is None:
+        return None
+    state = request.scope.get("state")
+    if not isinstance(state, dict):
+        return None
+    context = state.get(SESSION_READ_CONTEXT_SCOPE_KEY)
+    return context if isinstance(context, SessionReadContext) else None
+
+
+def _subscribe(session, context: SessionReadContext | None):
+    if context is None:
+        return session.subscribe()
+    return session.subscribe(context=context)
 
 # A turn can legitimately run for a long time (big builds, long tool chains).
 # This only bounds silence: any event from the daemon resets it.
@@ -167,7 +190,9 @@ class MessageRequest(BaseModel):
 
 
 @router.post("/{session_id}/message")
-async def send_message(session_id: str, body: MessageRequest):
+async def send_message(
+    session_id: str, body: MessageRequest, request: Request = None
+):
     if _contains_reserved_voice_origin(
         {"origin_context": body.origin_context, "content": body.content}
     ):
@@ -184,7 +209,7 @@ async def send_message(session_id: str, body: MessageRequest):
         raise HTTPException(status_code=409, detail="Session daemon is not running")
 
     # Subscribe before submitting so no event can land in the gap.
-    queue = session.subscribe()
+    queue = _subscribe(session, _request_read_context(request))
     # Always an id: a daemon that echoes it stamps this turn with it (#551).
     request_id = body.request_id or uuid.uuid4().hex
 
@@ -238,6 +263,8 @@ async def send_message(session_id: str, body: MessageRequest):
                     }
                     return
 
+                if event is PHONE_STREAM_REVOKED:
+                    return
                 event.setdefault("session_id", session_id)
                 if _foreign_completion(event, request_ids, tagged):
                     continue
@@ -267,7 +294,7 @@ async def send_message(session_id: str, body: MessageRequest):
 
 
 @router.get("/{session_id}/events")
-async def stream_events(session_id: str):
+async def stream_events(session_id: str, request: Request = None):
     """Follow a session's event stream without submitting a turn.
 
     A client that reloads mid-turn loses the POST /message stream, but the
@@ -287,7 +314,7 @@ async def stream_events(session_id: str):
     if not session.alive:
         raise HTTPException(status_code=409, detail="Session daemon is not running")
 
-    queue = session.subscribe()
+    queue = _subscribe(session, _request_read_context(request))
 
     async def event_generator():
         try:
@@ -299,6 +326,8 @@ async def stream_events(session_id: str):
                 except asyncio.TimeoutError:
                     return
 
+                if event is PHONE_STREAM_REVOKED:
+                    return
                 event.setdefault("session_id", session_id)
                 if event.get("type") == "daemon_closed":
                     yield {
@@ -412,7 +441,8 @@ async def _assistant_next_event(queue, controller, timeout=None):
         if event_task not in done:
             return {}
         cancel_task.cancel()
-        return event_task.result()
+        event = event_task.result()
+        return None if event is PHONE_STREAM_REVOKED else event
     finally:
         for task in (event_task, cancel_task):
             if not task.done():
@@ -877,7 +907,9 @@ async def _assistant_protocol_stream(stream, completion: Dict[str, Any]):
 
 
 @router.post("/{session_id}/assistant")
-async def assistant_transport(session_id: str, body: AssistantRequest):
+async def assistant_transport(
+    session_id: str, body: AssistantRequest, request: Request = None
+):
     """Serve one assistant-ui assistant-transport run for a session.
 
     The daemon remains the source of truth.  This adapter translates its
@@ -891,6 +923,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
     if not session.alive:
         raise HTTPException(status_code=409, detail="Session daemon is not running")
 
+    read_context = _request_read_context(request)
+
     try:
         from assistant_stream import RunController, create_run
         from assistant_stream.serialization import AssistantTransportResponse
@@ -903,7 +937,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
     completion: Dict[str, Any] = {"completed": False}
 
     async def run_callback(controller: RunController):
-        shared_queue = session.subscribe()
+        shared_queue = _subscribe(session, read_context)
         queue = shared_queue
         goal_pump = None
         tool_controllers: Dict[str, Any] = {}

@@ -4,7 +4,7 @@ Reads agent presence from disk and queries agent unix sockets
 to expose hub state through the engine REST API.
 
 Presence files: ~/.kollab/projects/<encoded>/hub/presence/{agent_id}.json
-Agent sockets:  /tmp/kollabor-hub/<project-hash>/<identity>.sock  (from socket_path field)
+Agent endpoints: <platform socket root>/<project-hash>/<identity>.sock
 """
 
 import asyncio
@@ -21,6 +21,7 @@ from kollabor_config.config_utils import (
     get_config_directory_candidates,
     get_project_data_dir_candidates,
 )
+from kollabor_config.hub_paths import hub_socket_root
 
 logger = logging.getLogger(__name__)
 
@@ -261,8 +262,14 @@ class HubBridge:
         # Fallback: identity-named socket in the project socket dir
         identity = agent_data.get("identity")
         if identity:
-            # Try to infer project hash from existing sockets
-            socks = _glob.glob(f"/tmp/kollabor-hub/**/{identity}.sock", recursive=True)
+            # Try to infer the project hash from existing endpoints. Escape
+            # literal path characters such as brackets in a Windows username.
+            pattern = os.path.join(
+                _glob.escape(str(hub_socket_root())),
+                "**",
+                _glob.escape(str(identity)) + ".sock",
+            )
+            socks = _glob.glob(pattern, recursive=True)
             if socks:
                 return Path(socks[0])
         return None

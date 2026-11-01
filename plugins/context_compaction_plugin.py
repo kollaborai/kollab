@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import time
+import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,8 @@ def _append_jsonl_durable(target: str, record: Dict[str, Any]) -> Optional[str]:
         try:
             with open(target, "a") as f:
                 f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
             return None
         except Exception as exc:
             if attempt == 0:
@@ -53,6 +56,8 @@ def _append_jsonl_durable(target: str, record: Dict[str, Any]) -> Optional[str]:
     sidecar = str(target) + ".compaction-recovery.jsonl"
     with open(sidecar, "a") as f:
         f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
     logger.error(
         f"Compaction record could not be appended to {target} after retry; "
         f"recovered to {sidecar}; merge it before the live tail on resume"
