@@ -1000,6 +1000,9 @@ class TerminalLLMChat:
             widget_context.runtime_mode = "daemon"
         else:
             widget_context.runtime_mode = "local"
+        # The layout_manager service carries the same mode for gates that run
+        # outside the renderer (detached first-turn revival, #453).
+        self.layout_manager.runtime_mode = widget_context.runtime_mode
         self.layout_renderer.set_context(widget_context)
         # Store reference for plugin widget access
         self._widget_context = widget_context
