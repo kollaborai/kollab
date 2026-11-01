@@ -12,7 +12,9 @@ Implements LLMProvider interface for OpenAI API with:
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from ..message_content import serialize_openai_chat_content
+from ..goal_image_scope import safe_goal_error_cause
+
+from ..message_content import redact_error_media, serialize_openai_chat_content
 from .base import LLMProvider
 from .errors import map_openai_error
 from .message_sanitizer import strip_local_message_metadata
@@ -133,10 +135,10 @@ class OpenAIProvider(LLMProvider):
         except ImportError as e:
             raise ImportError(
                 "OpenAI SDK not installed. Install with: pip install openai"
-            ) from e
+            ) from safe_goal_error_cause(e)
         except Exception as e:
-            logger.error(f"Failed to initialize OpenAI client: {e}")
-            raise map_openai_error(e, "openai") from e
+            logger.error(f"Failed to initialize OpenAI client: {redact_error_media(str(e))}")
+            raise map_openai_error(e, "openai") from safe_goal_error_cause(e)
 
     async def call(
         self,
@@ -191,15 +193,15 @@ class OpenAIProvider(LLMProvider):
             return unified_response
 
         except Exception as e:
-            logger.error(f"OpenAI call failed: {type(e).__name__}: {e}")
+            logger.error(f"OpenAI call failed: {type(e).__name__}: {redact_error_media(str(e))}")
             response = getattr(e, "response", None)
             if response is not None:
                 logger.debug(
                     "OpenAI error response: status=%s body=%s",
                     getattr(response, "status_code", "unknown"),
-                    getattr(response, "text", ""),
+                    redact_error_media(getattr(response, "text", "")),
                 )
-            raise map_openai_error(e, "openai") from e
+            raise map_openai_error(e, "openai") from safe_goal_error_cause(e)
         finally:
             await self._track_request_end()
 
@@ -278,8 +280,8 @@ class OpenAIProvider(LLMProvider):
 
         except Exception as e:
             # Not an error yet: api_communication_service retries it and logs the final failure.
-            logger.warning(f"OpenAI stream failed: {e}")
-            raise map_openai_error(e, "openai") from e
+            logger.warning(f"OpenAI stream failed: {redact_error_media(str(e))}")
+            raise map_openai_error(e, "openai") from safe_goal_error_cause(e)
         finally:
             # Reset tool accumulator
             if self._tool_accumulator:
