@@ -134,9 +134,15 @@ def _frame_field(head: bytes, tail: bytes, key: str) -> Any:
 
 
 def _frame_request(head: bytes, tail: bytes) -> Dict[str, Any]:
-    """The request an oversized frame names, as the fields to tag what replaces it with."""
+    """The requests an oversized frame names, as the fields to tag what replaces it with."""
+    named: Dict[str, Any] = {}
     request_id = _frame_field(head, tail, "request_id")
-    return {"request_id": request_id} if isinstance(request_id, str) and request_id else {}
+    if isinstance(request_id, str) and request_id:
+        named["request_id"] = request_id
+    request_ids = _frame_field(head, tail, "request_ids")  # a chat turn's (#551)
+    if isinstance(request_ids, list) and request_ids:
+        named["request_ids"] = request_ids
+    return named
 
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,7 +187,7 @@ def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
         "risk_reason": details.get("risk_reason", ""),
         "details": details,
     }
-    for key in ("ts", "session_id", "request_id", "turn_id", "input_source", "generation"):
+    for key in ("ts", "session_id", "request_id", "request_ids", "turn_id", "input_source", "generation"):
         if key in event:
             flat[key] = event[key]
     return flat
