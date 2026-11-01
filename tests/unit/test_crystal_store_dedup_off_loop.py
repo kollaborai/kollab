@@ -171,36 +171,39 @@ def test_a_first_load_never_erases_a_write_saved_during_it(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_dreaming_pass_loads_the_vault_off_the_loop():
-    # Jadeite on #547 round 7: a 2,608-entry vault's first load took 57-114 ms
-    # on the event loop.
+async def test_the_dreaming_pass_loads_the_vault_on_the_loop():
+    # Howlite on #547 round 8: loaded in a worker thread, the vault kept a
+    # reader on the loop waiting behind the load's lock for about 100 ms.
     store, loaded_on = CrystalStore(_vault(_CHAIN)), []
     parse = store._parse_file
     store._parse_file = lambda: (loaded_on.append(threading.current_thread()), parse())[1]
     assert await store.deduplicate_in_slices() == 1
-    assert loaded_on and loaded_on[0] is not threading.current_thread()
+    assert loaded_on == [threading.current_thread()]
 
 
-def test_dreaming_writes_its_insights_off_the_loop_in_order():
-    # Jadeite on #547 round 7: dreaming's 3-5 writes, each saving the whole
-    # vault, ran on the event loop before the sliced pass: 80-119 ms with no turn.
+def _dreaming_plugin(add_entry):
+    """A hub plugin whose dream writes three insights through ``add_entry``."""
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
 
     from plugins.hub.plugin import HubPlugin
 
     insights = [f"Insight {n}: the relay hands each peer its messages in the order they were sent." for n in range(3)]
-    writes = []
     plugin = HubPlugin.__new__(HubPlugin)
     plugin._identity = SimpleNamespace(identity="lapis", state="idle", current_task=None)
     plugin._vault = MagicMock()
     plugin._presence = None
-    plugin._crystal_store = SimpleNamespace(
-        add_entry=lambda text: writes.append((text, threading.current_thread())),
-        deduplicate_in_slices=AsyncMock(return_value=0),
-    )
+    plugin._crystal_store = SimpleNamespace(add_entry=add_entry, deduplicate_in_slices=AsyncMock(return_value=0))
     plugin._build_dreaming_prompt = lambda entries: "prompt"
     plugin._dreaming_llm_call = AsyncMock(return_value="\n\n".join(insights))
+    return plugin, insights
+
+
+def test_dreaming_writes_its_insights_on_the_loop_in_order():
+    # Howlite on #547 round 8: written in a worker thread, they raced the
+    # vault's readers on the loop, and a new store read the file half written.
+    writes = []
+    plugin, insights = _dreaming_plugin(lambda text: writes.append((text, threading.current_thread())))
 
     async def dream():
         await plugin._dream([])
@@ -208,7 +211,34 @@ def test_dreaming_writes_its_insights_off_the_loop_in_order():
 
     loop_thread = asyncio.run(dream())
     assert [text for text, _ in writes] == insights
-    assert all(thread is not loop_thread for _, thread in writes)
+    assert all(thread is loop_thread for _, thread in writes)
+
+
+def test_a_dream_cancelled_during_its_writes_writes_nothing_after_it_ends():
+    # Howlite on #547 round 8: shutdown cancelled a dream whose writes ran in a
+    # worker thread, and the worker went on writing after the dream had ended,
+    # over a write saved meanwhile.
+    import time
+
+    writes = []
+
+    async def main():
+        loop = asyncio.get_running_loop()
+
+        def add_entry(text):
+            if not writes:
+                loop.call_soon_threadsafe(dream.cancel)  # shutdown, as the first write runs
+            time.sleep(0.05)
+            writes.append(text)
+
+        plugin, _ = _dreaming_plugin(add_entry)
+        dream = asyncio.ensure_future(plugin._dream([]))
+        await asyncio.gather(dream, return_exceptions=True)
+        ended = len(writes)
+        await asyncio.sleep(0.3)  # a write still running would land here
+        return ended
+
+    assert asyncio.run(main()) == len(writes)
 
 
 def test_a_chain_merges_in_list_order():

@@ -496,8 +496,7 @@ class CrystalStore:
         leaves the entries as they are until the next cycle. A store unchanged
         since a pass found nothing to merge skips it: it would find nothing again.
         """
-        if not self._loaded:
-            await asyncio.to_thread(self._ensure_loaded)  # 57-114 ms for 2,608 entries
+        self._ensure_loaded()
         if self._dedup_clean == self._revision:
             return 0
         for _ in range(attempts):

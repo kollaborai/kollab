@@ -129,8 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loop (105 s for 2,608 entries), so it answered nothing and peers deleted its
   socket as dead. The pass now compares only entries that share a word or
   keyword, after a write only those with an entry it changed, and gives the
-  loop back every few milliseconds. The cycle's writes and the vault's first
-  load also run off the loop (#546).
+  loop back every few milliseconds (#546).
 - ACP: an oversized agent reply no longer breaks history paging with a
   413 error. A page that is too large slims its message metadata so the
   older messages still load, and the original message is preserved
