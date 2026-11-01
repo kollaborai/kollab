@@ -94,6 +94,53 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
 
 
 @pytest.mark.asyncio
+async def test_a_restart_hands_the_new_harness_what_the_old_one_never_heard(tmp_path, monkeypatch):
+    # Prehnite on #549 round 4: a peer's message arrived while a failed turn
+    # ended; the fallback switch restarted the harness, and start() dropped it.
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    monkeypatch.setattr(mod, "publish_semantic", lambda bus, name, *args, **fields: None)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    llm = SimpleNamespace(
+        conversation_manager=ConversationManager(configuration, conversation_logger),
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        old = orchestrator.runner
+        old.is_processing = True  # the failed turn has not ended
+        orchestrator.observe_notification(
+            HubMessage(
+                action="message",
+                from_agent="peer-id-1",
+                from_identity="peer-1",
+                to="*",
+                content="HEARD_WHILE_FAILING",
+                thread_id=None,
+                reply_to="",
+            )
+        )
+        await orchestrator.start(LLMProfile(name="fallback", provider="acp", command=("fake",)))
+        await asyncio.gather(*orchestrator._completion_tasks)
+        assert old.closed and orchestrator.runner is not old
+        assert not any("HEARD_WHILE_FAILING" in update["text"] for update in old._updates)
+        assert [u for u in orchestrator.runner._updates if "HEARD_WHILE_FAILING" in u["text"]]
+        assert len([m for m in llm.conversation_history if m.role == "user"]) == 1  # written once
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
 async def test_busy_observation_is_written_on_arrival_and_sent_once(
     tmp_path, monkeypatch
 ):

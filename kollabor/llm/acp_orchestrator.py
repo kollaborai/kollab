@@ -175,10 +175,14 @@ class ACPOrchestrator:
         self._closed = False
         self.startup_error = None
         self._terminal_session_id = None
-        self._observations.clear()
-        self._observation_count = 0
-        self._observation_rows.clear()
-        self._unwritten_observations.clear()
+        if resume_conversation:
+            # Another conversation: the messages this one heard are not its.
+            self._observations.clear()
+            self._observation_count = 0
+            self._observation_rows.clear()
+            self._unwritten_observations.clear()
+        # Otherwise a peer message the old harness never heard stays for the
+        # new one: a fallback switch restarts it while the failed turn ends (#548).
         self._selected_profile = profile
         self.hub_plugin = self.event_bus.get_service("hub_plugin") or self.hub_plugin
         if not getattr(self.hub_plugin, "enabled", True):
@@ -224,6 +228,8 @@ class ACPOrchestrator:
             await self._restore_options(profile)
             self.event_bus.register_service("acp_orchestrator", self)
             self._save_binding()
+            if not self.is_processing:
+                self._flush_observations()  # what the harness it replaced never heard
         except BaseException as exc:
             self.startup_error = str(exc) or type(exc).__name__
             try:

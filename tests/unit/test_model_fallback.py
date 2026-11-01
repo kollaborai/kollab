@@ -236,6 +236,20 @@ async def test_a_switch_the_harness_was_busy_for_runs_once_its_last_prompt_ends(
 
 
 @pytest.mark.asyncio
+async def test_a_switch_waits_only_for_the_harness_that_failed(monkeypatch):
+    # Prehnite on #549 round 4: a profile picked by hand while a switch waited
+    # was switched away at its next good turn, under the old harness's error.
+    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    bus.register_service("acp_orchestrator", _Harness("running"))
+    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
+    assert _Loadouts.activated == []  # busy: the switch waits
+    bus.register_service("acp_orchestrator", _Harness())  # the operator's pick, a new harness
+    tap.publish({"type": "turn_complete"})  # its turn succeeded
+    await _settle(plugin)
+    assert _Loadouts.activated == [] and plugin._pending is None
+
+
+@pytest.mark.asyncio
 async def test_no_prompt_is_taken_between_the_idle_check_and_the_switch(monkeypatch):
     # Labradorite on #549 round 3: the idle check was a snapshot, so a prompt
     # taken after it failed with "ACP runner closed" when the switch closed

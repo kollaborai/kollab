@@ -17,7 +17,7 @@ Nor is a turn an ACP harness ran: it has ended before the switch.
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from kollabor.llm.usage_limits import REASONS, failure_kind
 from kollabor_events.models import EventType, Hook, HookPriority
@@ -41,8 +41,10 @@ class ModelFallbackPlugin(BasePlugin):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tap: Any = None
         self._failed_message: Optional[str] = None  # the ACP turn's, until it completes
-        # An ACP failure the harness was busy for: it switches once that work ends.
-        self._pending: Optional[str] = None
+        self._failed_runner: Any = None  # the harness runner that turn ran on
+        # An ACP failure the harness was busy for, with the runner that failed:
+        # it switches once that runner's work ends.
+        self._pending: Optional[Tuple[str, Any]] = None
         self._task: Optional[asyncio.Task] = None
 
     @staticmethod
@@ -178,14 +180,20 @@ class ModelFallbackPlugin(BasePlugin):
             # falls back inside itself (_on_request_error).
             if "generation" in event:
                 self._failed_message = str(event.get("message") or "")
+                self._failed_runner = self._harness_runner()
         elif kind == "turn_complete":
             message, self._failed_message = self._failed_message, None
+            runner, self._failed_runner = self._failed_runner, None
             if message is not None and failure_kind(message) and self.choice():
-                self._pending = message
+                self._pending = (message, runner)
             # Every completion checks again: a switch the harness was busy for
             # runs once its last prompt ends, whatever that prompt's outcome.
             if self._pending is not None and self._loop is not None:
                 self._loop.call_soon_threadsafe(self._start)
+
+    def _harness_runner(self) -> Any:
+        acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
+        return getattr(acp, "runner", None)
 
     def _start(self) -> None:
         if self._pending is not None and (self._task is None or self._task.done()):
@@ -203,9 +211,16 @@ class ModelFallbackPlugin(BasePlugin):
             # it ("ACP runner closed"): the switch waits for that prompt's end.
             logger.info("model fallback: the harness has other prompts in flight; switching once they end")
             return
-        message, self._pending = self._pending, None
-        if message is not None:
-            await self.fall_back(message, harness=acp)
+        pending, self._pending = self._pending, None
+        if pending is None:
+            return
+        message, failed = pending
+        if failed is not getattr(acp, "runner", None):
+            # The operator picked another profile in the meantime: that error
+            # was the old harness's, and this one is not switched for it.
+            logger.info("model fallback: the harness that failed was replaced; not switching")
+            return
+        await self.fall_back(message, harness=acp)
 
     # -- switching ------------------------------------------------------------
 
