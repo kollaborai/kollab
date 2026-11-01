@@ -36,6 +36,7 @@ def test_a_refused_agent_connect_goes_through_local_ipc_with_the_read_limit(
         attach = NetworkAttach(
             request=None,
             guarded_request=guarded_request,
+            capture_peer_guard=lambda _: lambda: True,
             target=target,
             peer_name=lambda key: "mac",
             notice=lambda text: None,

@@ -964,6 +964,7 @@ class RelayAgentBridge:
             self.network_attach = NetworkAttach(
                 request=self.secure_transport.request,
                 guarded_request=self.secure_transport.request,
+                capture_peer_guard=self.secure_transport.capture_peer_guard,
                 target=self.attach_target,
                 peer_name=self._peer_name,
                 notice=self._config_notice,

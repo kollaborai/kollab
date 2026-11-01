@@ -89,6 +89,9 @@ class SecureConversationTransport:
             f"secure-carrying-session-{id(self)}", default=None
         )
         self._request_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        # Tokens survive individual TLS sessions but not peer revocation or
+        # reconnect. A captured channel cannot revive after reapproval.
+        self._peer_guard_tokens: dict[str, object] = {}
         self._remove_listener = client.add_peer_session_listener(
             self._on_peer_session_event
         )
@@ -644,6 +647,21 @@ class SecureConversationTransport:
         ):
             raise SecureSessionError("relay registration changed during TLS session")
 
+    def capture_peer_guard(self, peer_key: str) -> Callable[[], bool]:
+        """Capture the approved peer generation before an attach can wait."""
+        binding = self._current_binding(peer_key)
+        token = self._peer_guard_tokens.setdefault(peer_key, object())
+
+        def current() -> bool:
+            if self._peer_guard_tokens.get(peer_key) is not token:
+                return False
+            try:
+                return self._current_binding(peer_key) == binding
+            except (RelayError, SecureSessionError):
+                return False
+
+        return current
+
     def _room_scope(self) -> bytes:
         room = self._client.state.room
         if not isinstance(room, str) or not re.fullmatch(r"[0-9a-f]{64}", room):
@@ -654,6 +672,7 @@ class SecureConversationTransport:
         if event.kind == "local_disconnected":
             self._clear_sessions()
         elif event.peer_key is not None:
+            self._peer_guard_tokens.pop(event.peer_key, None)
             self._discard_peer(event.peer_key)
 
     def _make_room(self, peer_key: str, *, inbound: bool) -> None:
@@ -715,6 +734,7 @@ class SecureConversationTransport:
                 self._request_locks.pop(key, None)
 
     def _clear_sessions(self) -> None:
+        self._peer_guard_tokens.clear()
         for key in tuple(self._outbound):
             self._discard_outbound(key)
         for key in tuple(self._inbound):

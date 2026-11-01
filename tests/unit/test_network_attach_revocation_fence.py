@@ -51,6 +51,7 @@ class Pair:
         )
         self.device = na.NetworkAttach(
             request=request, guarded_request=request, target=target,
+            capture_peer_guard=lambda _: lambda: True,
             peer_name=lambda _: "requester", notice=lambda _: None,
         )
         self.requester_channel = na._Channel(
@@ -108,7 +109,8 @@ async def test_request_only_carrier_refuses_protected_output(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_request_only_carrier_refuses_both_open_directions():
+@pytest.mark.parametrize("guarded_carrier", [False, True])
+async def test_carrier_without_peer_generation_refuses_both_open_directions(guarded_carrier):
     calls = []
 
     async def request(*args, **kwargs):
@@ -120,7 +122,8 @@ async def test_request_only_carrier_refuses_both_open_directions():
         return "/unused"
 
     attach = na.NetworkAttach(
-        request=request, target=target, peer_name=lambda _: "device", notice=lambda _: None
+        request=request, guarded_request=request if guarded_carrier else None,
+        target=target, peer_name=lambda _: "device", notice=lambda _: None,
     )
     with pytest.raises(na.AttachRefused, match="unavailable"):
         await attach.open(SERVER, "agent-1", "agent")
@@ -326,6 +329,7 @@ async def test_withdrawal_during_local_connect_refuses_the_pending_open(monkeypa
     monkeypatch.setattr(na.local_ipc, "connect", connect)
     device = na.NetworkAttach(
         request=send, guarded_request=send, target=target,
+        capture_peer_guard=lambda _: lambda: True,
         peer_name=lambda _: "requester", notice=lambda _: None,
     )
     opening = asyncio.create_task(
@@ -377,6 +381,7 @@ async def test_halt_during_remote_open_closes_the_new_channel(monkeypatch):
     monkeypatch.setattr(na.local_ipc, "serve", no_local_server)
     requester = na.NetworkAttach(
         request=request, guarded_request=request, target=target,
+        capture_peer_guard=lambda _: lambda: True,
         peer_name=lambda _: "device", notice=lambda _: None,
         halt_active=lambda: halted,
     )
@@ -433,6 +438,7 @@ async def test_halt_during_local_listener_start_retires_late_listener(monkeypatc
     monkeypatch.setattr(na.local_ipc, "serve", serve)
     requester = na.NetworkAttach(
         request=request, guarded_request=request, target=target,
+        capture_peer_guard=lambda _: lambda: True,
         peer_name=lambda _: "device", notice=lambda _: None,
         halt_active=lambda: halted,
     )

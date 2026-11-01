@@ -31,6 +31,7 @@ async def devices(bridges):
         bridge.network_attach = NetworkAttach(
             request=bridge.secure_transport.request,
             guarded_request=bridge.secure_transport.request,
+            capture_peer_guard=bridge.secure_transport.capture_peer_guard,
             target=bridge.attach_target,
             peer_name=bridge._peer_name,
             notice=notices.append,
@@ -302,10 +303,11 @@ async def test_unforced_withdrawal_fences_output_waiting_for_relay_send_lock(dev
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reapprove", [False, True])
+@pytest.mark.parametrize("wait_at", ["relay", "pacer"])
 async def test_requester_revoke_fences_input_waiting_for_relay_send_lock(
-    devices, monkeypatch, reapprove,
+    devices, monkeypatch, reapprove, wait_at,
 ):
-    """Locally revoking the peer stops input still waiting to leave the relay."""
+    """Locally revoking the peer stops input waiting at either carrier boundary."""
     monkeypatch.setattr(network_attach, "FLUSH_SECONDS", 0)
     left, right, _ = devices
     opened = await _open(left, right)
@@ -328,7 +330,8 @@ async def test_requester_revoke_fences_input_waiting_for_relay_send_lock(
             original_writer.close()
 
     channel.writer = RecordingWriter()
-    lock = left.commands.client._send_lock
+    lock = (left.commands.client._send_lock if wait_at == "relay"
+            else left.network_attach._pacer.lock)
     await lock.acquire()
     held = True
     try:
@@ -356,12 +359,51 @@ async def test_requester_revoke_fences_input_waiting_for_relay_send_lock(
 
 
 @pytest.mark.asyncio
+async def test_reapproval_during_device_rule_check_cannot_revive_output(devices):
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    target = right.network_attach._target
+    checking, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_target(*args):
+        path = await target(*args)
+        checking.set()
+        await release.wait()
+        return path
+
+    right.network_attach._target = delayed_target
+    sending = asyncio.create_task(right.network_attach._send_data(channel, b"synthetic private output\n"))
+    try:
+        await asyncio.wait_for(checking.wait(), 5)
+        peer = left.commands.client.public_key
+        right.commands.client.revoke(peer)
+        right.commands.client.approve(peer)
+        release.set()
+        with pytest.raises(SendGuardRevoked):
+            await asyncio.wait_for(sending, 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.read(1), 1)
+    finally:
+        release.set()
+        writer.close()
+        if not sending.done():
+            sending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await sending
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("withdrawal", ["revoke", "reapprove", "halt", "shutdown"])
-async def test_pending_open_is_fenced_before_relay_submission(devices, withdrawal):
+@pytest.mark.parametrize("wait_at", ["relay", "pacer"])
+async def test_pending_open_is_fenced_before_relay_submission(devices, withdrawal, wait_at):
     left, right, notices = devices
     await handle(left, right)  # Warm the secure session before holding its carrier.
     peer = right.commands.client.public_key
-    lock = left.commands.client._send_lock
+    lock = (left.commands.client._send_lock if wait_at == "relay"
+            else left.network_attach._pacer.lock)
     await lock.acquire()
     task = asyncio.create_task(left.network_attach.open(peer, right.identity.agent_id, "sapphire"))
     try:

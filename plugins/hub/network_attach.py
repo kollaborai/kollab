@@ -95,6 +95,7 @@ class _Channel:
     peer: str
     name: str
     requester: bool
+    peer_guard: Callable[[], bool] | None = None
     agent_id: str = ""
     reader: asyncio.StreamReader | None = None
     writer: asyncio.StreamWriter | None = None
@@ -186,9 +187,11 @@ class NetworkAttach:
         notice: Callable[[str], None],
         halt_active: Callable[[], bool] | None = None,
         guarded_request: Request | None = None,
+        capture_peer_guard: Callable[[str], Callable[[], bool]] | None = None,
     ):
         self._request_fn = request
         self._guarded_request_fn = guarded_request
+        self._capture_peer_guard = capture_peer_guard
         self._target = target
         self._peer_name = peer_name
         self._notice = notice
@@ -209,7 +212,7 @@ class NetworkAttach:
         """
         if self._closed:
             raise RelayError("network attach is closed")
-        if self._guarded_request_fn is None:
+        if self._guarded_request_fn is None or self._capture_peer_guard is None:
             raise AttachRefused("opening agents from the network is unavailable")
         if len(self._channels) >= MAX_CHANNELS:
             raise RelayError("too many open agents on other computers; close one first")
@@ -221,7 +224,13 @@ class NetworkAttach:
                 "this device's network is halted: no attach channels while the "
                 "halt holds (lift it with /connect resume)"
             )
-        channel = _Channel(id=secrets.token_hex(16), peer=peer, name=name, requester=True)
+        try:
+            peer_guard = self._capture_peer_guard(peer)
+        except RelayError as exc:
+            raise AttachRefused("network access is unavailable for this device") from exc
+        channel = _Channel(
+            id=secrets.token_hex(16), peer=peer, name=name, requester=True, peer_guard=peer_guard
+        )
         request = {"channel": channel.id, "agent_id": agent_id, "name": name}
         if quiet:
             request["quiet"] = True
@@ -234,7 +243,9 @@ class NetworkAttach:
             raise AttachRefused(refused[:500])
         if response.get("open") is not True:
             raise RelayError(f"{self._peer_name(peer)} did not open {name}")
-        if self._closed or (self._halt_active is not None and self._halt_active()):
+        if self._closed or not peer_guard() or (
+            self._halt_active is not None and self._halt_active()
+        ):
             # A halt or shutdown may have landed while the remote open was
             # in flight, before this channel existed for recheck().
             with contextlib.suppress(Exception):
@@ -242,7 +253,7 @@ class NetworkAttach:
                     self._send(peer, ATTACH_CLOSE, {"channel": channel.id}, timeout=CLOSE_SECONDS),
                     CLOSE_SECONDS + 1,
                 )
-            raise AttachRefused("this device's network is halted or shutting down")
+            raise AttachRefused("network access changed, is halted, or is shutting down")
         self._channels[(peer, channel.id)] = channel
         try:
             channel.path = self._socket_path(channel.id)
@@ -250,7 +261,7 @@ class NetworkAttach:
                 lambda reader, writer: self._connected(channel, reader, writer),
                 channel.path,
             )
-            if channel.closed or self._closed or (
+            if channel.closed or self._closed or not peer_guard() or (
                 self._halt_active is not None and self._halt_active()
             ):
                 # A recheck can retire the path while serve() is still
@@ -348,14 +359,20 @@ class NetworkAttach:
             raise RelayError("attach channel already open")
         if self._closed:
             return {"refused": "this computer is shutting down its network"}
-        if self._guarded_request_fn is None:
+        if self._guarded_request_fn is None or self._capture_peer_guard is None:
             return {"refused": "opening agents from this computer is unavailable"}
+        try:
+            peer_guard = self._capture_peer_guard(peer)
+        except RelayError:
+            return {"refused": "network access is unavailable for this device"}
         # Only the agents that device holds open here count against its share.
         held = sum(1 for (key, _), ch in self._channels.items() if key == peer and not ch.requester)
         if len(self._channels) >= MAX_CHANNELS or held >= MAX_CHANNELS_PER_PEER:
             return {"refused": "too many of this computer's agents are open from there"}
         try:
             socket_path = await self._target(peer, agent_id, name)
+            if not peer_guard():
+                raise AttachRefused("network access changed while opening the agent")
             reader, writer = await asyncio.wait_for(
                 local_ipc.connect(socket_path, limit=4 * READ_BYTES), 10.0
             )
@@ -368,6 +385,8 @@ class NetworkAttach:
         # earlier check, and close the just-opened socket on every refusal.
         try:
             current_path = await self._target(peer, agent_id, name)
+            if not peer_guard():
+                raise AttachRefused("network access changed while opening the agent")
             if current_path != socket_path:
                 raise AttachRefused(f"{name} changed while it was opening")
             if self._closed:
@@ -394,6 +413,7 @@ class NetworkAttach:
             peer=peer,
             name=name,
             requester=False,
+            peer_guard=peer_guard,
             agent_id=agent_id,
             reader=reader,
             writer=writer,
@@ -409,6 +429,8 @@ class NetworkAttach:
 
     async def _allowed(self, channel: _Channel) -> bool:
         """Ask the current rules (trust, grants, membership) without a cache."""
+        if channel.peer_guard is not None and not channel.peer_guard():
+            return False
         if channel.requester:
             # F19 requester side: a local halt withdraws this device's
             # outbound channels too, checked here on every frame.
@@ -425,7 +447,7 @@ class NetworkAttach:
         except Exception as exc:  # AttachRefused, or rules that cannot be read: closed either way
             logger.info("network attach %s for %s withdrawn: %s", channel.name, channel.peer[:12], exc)
             return False
-        return True
+        return channel.peer_guard is None or channel.peer_guard()
 
     # -- both ends ------------------------------------------------------
 

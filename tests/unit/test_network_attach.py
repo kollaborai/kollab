@@ -40,6 +40,7 @@ class Pair:
         self.mac = NetworkAttach(
             request=mac_request,
             guarded_request=mac_request,
+            capture_peer_guard=lambda _: lambda: True,
             target=self._agent_socket if mac_runs_agent else self._no_agents,
             peer_name=lambda key: "server" if key == SERVER else "mac",
             notice=self.notices.append,
@@ -47,6 +48,7 @@ class Pair:
         self.server = NetworkAttach(
             request=server_request,
             guarded_request=server_request,
+            capture_peer_guard=lambda _: lambda: True,
             target=target or self._agent_socket,
             peer_name=lambda key: "mac" if key == MAC else "server",
             notice=self.notices.append,
