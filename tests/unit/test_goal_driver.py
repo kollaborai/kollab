@@ -22,6 +22,7 @@ from kollabor.goals.service import (
     TurnOutcome,
 )
 from kollabor.state.goal_store import GoalStore
+from kollabor_ai.message_content import EphemeralImageStore
 
 
 class FakeQueueProcessor:
@@ -50,6 +51,8 @@ class FakeCoordinator:
         )
         self.renderer = SimpleNamespace(pipe_mode=pipe_mode)
         self._queue_processor = FakeQueueProcessor()
+        self._image_store = EphemeralImageStore()
+        self.supports_image_input = lambda: True
         self.on_tool_batch_hook: Any = None
         # HUD queue: inject_system_message queues; _continue_conversation
         # drains it into the turn (mirrors llm_coordinator's real contract)

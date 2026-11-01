@@ -74,7 +74,11 @@ import {
   loadLatestHistoryPage,
   loadOlderHistoryPage,
   mergeOlderHistoryPage,
+  retainVerifiedOlderWindow,
   UnusableHistoryCursorError,
+  restoreSlimmedHistoryMetadata,
+  storeHistoryPageIfCurrent,
+  clearHistoryPagesIfCurrent,
 } from "./history-cache";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
@@ -449,6 +453,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // the chat that was open, so the reason shows under the row clicked.
   const [opening, setOpening] = useState<{ id: string; error?: string } | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
+  const initialStateRef = useRef(initialState);
+  initialStateRef.current = initialState;
 
   const [historyStatus, setHistoryStatus] = useState<{
     sessionId: string;
@@ -456,6 +462,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     message: string;
   } | null>(null);
   const historyPagesRef = useRef(new Map<string, HistoryPage>());
+  const historyRefreshVersion = useRef(0);
   type PendingPermissions = NonNullable<Parameters<typeof buildInitialState>[3]>;
   const historyContextRef = useRef(new Map<string, {
     sessions: Session[];
@@ -472,6 +479,16 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [supervisorEvents, setSupervisorEvents] = useState<StreamEvent[]>([]);
   // Bumped to remount the runtime: it reads its initial state only on mount.
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
+  const updateOpenHistory = useCallback((sessionId: string, nextState: EngineState, forceRemount = false) => {
+    const shown = initialStateRef.current;
+    const switched = shown?.sessionId === sessionId && shown.conversationUid
+      && nextState.conversationUid && shown.conversationUid !== nextState.conversationUid;
+    initialStateRef.current = nextState;
+    setInitialState(nextState);
+    // Unmounting aborts an old stream before it can render in the newly
+    // selected conversation, even when both histories contain the same text.
+    if (forceRemount || switched) setRuntimeEpoch((epoch) => epoch + 1);
+  }, []);
   // Live-turn events flow from followEvents into the open thread's runtime;
   // the runtime registers its handler through this ref on mount.
   const liveEventsRef = useRef<((event: SessionEvent) => void) | null>(null);
@@ -605,21 +622,31 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   }, [workspacePath]);
 
   const loadState = useCallback(
-    async (sessionId: string, nextSessions: Session[], quiet = false) => {
+    async (sessionId: string, nextSessions: Session[], quiet = false, stillCurrent: () => boolean = () => true) => {
       // A halt waiter has no history and runs no turn: the chat shows its line only.
       if (nextSessions.find((item) => item.session_id === sessionId)?.halted) {
-        setHistoryStatus(null);
+        if (stillCurrent()) setHistoryStatus(null);
         return buildInitialState(sessionId, nextSessions, [], [], null, 0);
       }
       // A refresh of an open chat shows no banner: the thread is already there.
-      if (!quiet) setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
+      if (!quiet && stillCurrent()) setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
       try {
+        const shown = initialStateRef.current;
+        const expectedUid = shown?.sessionId === sessionId ? shown.conversationUid ?? null : null;
         const [loaded, permissions] = await Promise.all([
-          loadLatestHistoryPage(sessionId, api, historyPageCache),
+          loadLatestHistoryPage(sessionId, api, historyPageCache, stillCurrent, expectedUid),
           api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
         ]);
-        const page = loaded.page;
+        let page = loaded.page;
+        page.history = await restoreSlimmedHistoryMetadata(sessionId, api, page.history);
         const pendingPermissions = permissions.pending_prompts || [];
+        if (!stillCurrent()) return buildInitialState(sessionId, nextSessions, page.history,
+          pendingPermissions, page.last_turn_error ?? null, page.start_index, page.conversation_uid ?? null);
+        page = retainVerifiedOlderWindow(
+          shown?.sessionId === sessionId ? historyPagesRef.current.get(sessionId) : undefined,
+          page,
+          loaded.validatedPrefixCursor,
+        );
         historyPagesRef.current.set(sessionId, page);
         historyContextRef.current.set(sessionId, { sessions: nextSessions, pendingPermissions });
         if (loaded.error) {
@@ -651,16 +678,19 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           pendingPermissions,
           page.last_turn_error ?? null,
           page.start_index,
+          page.conversation_uid ?? null,
           // A cache-fallback page (fresh sync failed/timed out) can't prove
           // that rows missing from it were deleted upstream.
           !loaded.fromCache,
         );
       } catch (reason) {
-        setHistoryStatus({
-          sessionId,
-          kind: "error",
-          message: "Couldn't load conversation history. Check the connection and retry.",
-        });
+        if (stillCurrent()) {
+          setHistoryStatus({
+            sessionId,
+            kind: "error",
+            message: "Couldn't load conversation history. Check the connection and retry.",
+          });
+        }
         throw reason;
       }
     },
@@ -669,9 +699,16 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const loadStateRef = useRef(loadState);
   loadStateRef.current = loadState;
 
-  // Resolves true when the call (or a queued continuation of it) actually
-  // extends the window, so the thread can drop a scroll anchor that a
-  // no-op load would otherwise leave dangling.
+  // Opening a session and refreshing its current history can overlap. An old
+  // open must not overwrite a newer refresh, even before its caller renders.
+  const guardHistoryOpen = useCallback((sessionId: string, operation: number) => {
+    const openingCurrent = activeIdRef.current === sessionId;
+    const version = ++historyRefreshVersion.current;
+    return () => operation === operationRef.current &&
+      (!openingCurrent || historyRefreshVersion.current === version);
+  }, []);
+
+  // The result reports whether this load actually extended the window.
   const loadOlderHistory = useCallback(async (sessionId: string, prefetch = false): Promise<boolean> => {
     if (olderLoadRef.current.has(sessionId)) {
       if (prefetch) return true; // an in-flight load is already extending this window
@@ -686,6 +723,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     }
     const current = historyPagesRef.current.get(sessionId);
     if (!current || !current.has_more_older) return false;
+    let ownedPage = current;
+    const stillCurrent = () => {
+      const latest = historyPagesRef.current.get(sessionId);
+      return activeIdRef.current === sessionId && latest === ownedPage &&
+        (latest.conversation_uid ?? null) === (current.conversation_uid ?? null);
+    };
     olderLoadRef.current.add(sessionId);
     if (!prefetch && activeIdRef.current === sessionId) {
       setHistoryStatus({ sessionId, kind: "loading-older", message: "Loading older messages…" });
@@ -696,24 +739,27 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         current,
         api,
         historyPageCache,
+        stillCurrent,
       );
       // A refresh replaced this window while the page-down was in flight;
       // applying the merge now would resurrect stale pages.
-      if (historyPagesRef.current.get(sessionId) !== current) {
-        return false;
-      }
+      if (!stillCurrent()) return false;
       if (!older) {
         throw new Error("History paging cursor is missing. Retry loading the conversation.");
       }
       if (!older.history.length) {
-        const exhausted = { ...current, has_more_older: false, older_cursor: null };
+        const latest = historyPagesRef.current.get(sessionId) ?? current;
+        const exhausted = { ...latest, has_more_older: false, older_cursor: null };
+        ++historyRefreshVersion.current;
         historyPagesRef.current.set(sessionId, exhausted);
         if (!prefetch && activeIdRef.current === sessionId) setHistoryStatus(null);
         return false;
       }
       if (prefetch) return false;
 
-      const updated = mergeOlderHistoryPage(current, older);
+      const restored = await restoreSlimmedHistoryMetadata(sessionId, api, older.history);
+      if (!stillCurrent()) return false;
+      const updated = mergeOlderHistoryPage(current, { ...older, history: restored });
       if (updated.start_index >= current.start_index) {
         // The page overlapped what the window already holds — e.g. the
         // carried cursor was re-requested after a capped cache fragment
@@ -730,21 +776,28 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             has_more_older: older.has_more_older,
             older_cursor: older.older_cursor,
           };
+          ++historyRefreshVersion.current;
           historyPagesRef.current.set(sessionId, adopted);
           if (activeIdRef.current === sessionId) setHistoryStatus(null);
           return false;
         }
         throw new Error("The engine returned no older history messages.");
       }
+      // A refresh that started before this page was applied must not later
+      // overwrite the newly extended window. Starting a refresh alone does
+      // not cancel paging: a slow request must still be able to finish.
+      ++historyRefreshVersion.current;
       historyPagesRef.current.set(sessionId, updated);
+      ownedPage = updated;
       try {
-        await historyPageCache.store(sessionId, updated);
+        await storeHistoryPageIfCurrent(sessionId, updated, historyPageCache, stillCurrent);
       } catch (reason) {
         // A deeply merged window can exceed the page cache byte cap. The
         // in-memory window is already updated, so the UI stays correct and
         // only persistence is skipped.
         console.warn("Skipping history page cache for oversized window", reason);
       }
+      if (!stillCurrent()) return false;
       const context = historyContextRef.current.get(sessionId);
       if (context && activeIdRef.current === sessionId) {
         const nextState = buildInitialState(
@@ -754,6 +807,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           context.pendingPermissions,
           updated.last_turn_error ?? null,
           updated.start_index,
+          updated.conversation_uid ?? null,
           // The extend publish is an older-focused window, not a
           // latest-history claim: rows newer than its end still exist.
           false,
@@ -765,6 +819,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       if (activeIdRef.current === sessionId) setHistoryStatus(null);
       return true;
     } catch (error) {
+      if (!stillCurrent()) return false;
       if (error instanceof UnusableHistoryCursorError) {
         // The engine rejected the cursor (409 stale / 400 invalid): the
         // history this window paged against changed underneath it, and no
@@ -772,10 +827,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         // pages and rebuild the window from a fresh fetch instead of a
         // dead-end banner.
         console.warn("Rebuilding history window after cursor rejection", error);
+        const recoveryVersion = ++historyRefreshVersion.current;
+        const recovering = () => activeIdRef.current === sessionId &&
+          historyRefreshVersion.current === recoveryVersion;
         try {
           // Drop the stale pages before the rebuild reads the cache, so the
           // recovered window cannot resurrect the rejected cursor's pages.
-          await historyPageCache.clear(sessionId);
+          await clearHistoryPagesIfCurrent(sessionId, historyPageCache, recovering);
         } catch (clearError) {
           console.warn("Failed to drop stale history pages", clearError);
         }
@@ -786,12 +844,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               sessionId,
               context.sessions,
               prefetch,
+              recovering,
             );
-            if (activeIdRef.current === sessionId) {
-              setInitialState((previous) =>
-                previous?.sessionId === sessionId ? nextState : previous,
-              );
-            }
+            if (recovering()) updateOpenHistory(sessionId, nextState);
           } catch {
             // loadState already surfaced the failure through historyStatus.
           }
@@ -801,7 +856,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         return false;
       }
       console.warn("Failed to load older history", error);
-      if (!prefetch && activeIdRef.current === sessionId) {
+      if (!prefetch && activeIdRef.current === sessionId && stillCurrent()) {
         setHistoryStatus({
           sessionId,
           kind: "error",
@@ -828,16 +883,18 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         }
       }
     }
-  }, []);
+  }, [updateOpenHistory]);
   loadOlderHistoryRef.current = loadOlderHistory;
 
   const retryHistory = useCallback(() => {
     const sessionId = activeIdRef.current;
     if (!sessionId) return;
-    void loadState(sessionId, sessions).then((nextState) => {
-      if (activeIdRef.current === sessionId) setInitialState(nextState);
+    const version = ++historyRefreshVersion.current;
+    const stillCurrent = () => activeIdRef.current === sessionId && historyRefreshVersion.current === version;
+    void loadState(sessionId, sessions, false, stillCurrent).then((nextState) => {
+      if (stillCurrent()) updateOpenHistory(sessionId, nextState);
     }).catch(() => {});
-  }, [loadState, sessions]);
+  }, [loadState, sessions, updateOpenHistory]);
 
 
   useEffect(() => {
@@ -858,18 +915,20 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     const controller = new AbortController();
     const retryTimerRef = { current: null as number | null };
     const refreshActiveState = async (sessionId: string) => {
+      const version = ++historyRefreshVersion.current;
+      const stillCurrent = () => !controller.signal.aborted && activeId === sessionId
+        && historyRefreshVersion.current === version;
       try {
         // A thread built from the engine's disk seed is no prefix of the
         // daemon's history, so the daemon's answer replaces it whole.
         const seeded = staleHistoryRef.current.has(sessionId);
         const nextSessions = await loadSessions();
-        if (controller.signal.aborted || activeId !== sessionId) return;
-        const nextState = await loadState(sessionId, nextSessions, true);
-        if (controller.signal.aborted || activeId !== sessionId) return;
+        if (!stillCurrent()) return;
+        const nextState = await loadState(sessionId, nextSessions, true, stillCurrent);
+        if (!stillCurrent()) return;
         // Still the seed: the daemon's answer comes as history_updated.
         if (seeded && staleHistoryRef.current.has(sessionId)) return;
-        setInitialState(nextState);
-        if (seeded) setRuntimeEpoch((epoch) => epoch + 1);
+        updateOpenHistory(sessionId, nextState, seeded);
         refreshSignalRef.current += 1;
         setRefreshSignal(refreshSignalRef.current);
       } catch {
@@ -926,7 +985,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       controller.abort();
       if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
     };
-  }, [activeId, loadSessions, loadState]);
+  }, [activeId, loadSessions, loadState, updateOpenHistory]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1043,8 +1102,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       const first = chatToRestore(result, openedRef.current);
       if (first) {
         setBusyMessage("Restoring session…");
-        const firstState = await loadState(first.session_id, result);
-        if (!mounted || operation !== operationRef.current || openedRef.current) return;
+        const current = guardHistoryOpen(first.session_id, operation);
+        const firstState = await loadState(first.session_id, result, false,
+          () => mounted && !openedRef.current && current());
+        if (!mounted || !current() || openedRef.current) return;
         openedRef.current = true;
         setActiveId(first.session_id);
         setInitialState(firstState);
@@ -1066,7 +1127,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     return () => {
       mounted = false;
     };
-  }, [loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
+  }, [guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
 
   /** New Session's picks, or an offline agent's own (`pick`). Resolves true once its chat is open. */
   const createSession = async (pick: { identity?: string; agent?: string; workspace?: string } = {}): Promise<boolean> => {
@@ -1096,8 +1157,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       const result = await loadSessions();
       await refreshAgentPool();
       if (operation !== operationRef.current) return false;
-      const nextState = await loadState(session.session_id, result);
-      if (operation !== operationRef.current) return false;
+      const current = guardHistoryOpen(session.session_id, operation);
+      const nextState = await loadState(session.session_id, result, false, current);
+      if (!current()) return false;
       setActiveId(session.session_id);
       setInitialState(nextState);
       recoverPendingTurn(session.session_id, hasPendingPermission(nextState));
@@ -1184,8 +1246,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         // If the active session was removed, select the most recent remaining
         // session. Deleting any other session must not unexpectedly navigate
         // away from the conversation the user is currently viewing.
-        const nextState = await loadState(next.session_id, result);
-        if (operation !== operationRef.current) return;
+        const current = guardHistoryOpen(next.session_id, operation);
+        const nextState = await loadState(next.session_id, result, false, current);
+        if (!current()) return;
         setActiveId(next.session_id);
         setInitialState(nextState);
         recoverPendingTurn(next.session_id, hasPendingPermission(nextState));
@@ -1223,8 +1286,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       const nextSessions = sessions.some((item) => item.session_id === sessionId)
         ? sessions
         : [...sessions, await api.getSession(sessionId)];
-      const nextState = await loadState(sessionId, nextSessions);
-      if (operation !== operationRef.current) return false;
+      const current = guardHistoryOpen(sessionId, operation);
+      const nextState = await loadState(sessionId, nextSessions, false, current);
+      if (!current()) {
+        if (operation === operationRef.current) setOpening(null);
+        return operation === operationRef.current && activeIdRef.current === sessionId;
+      }
       setSessions(nextSessions);
       setActiveId(sessionId);
       setInitialState(nextState);
@@ -1246,11 +1313,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   // The engine already emptied the conversation; reload it and remount the
   // runtime so the open thread resets in place.
-  const resetThread = async (sessionId: string) => {
+  const resetThread = async (sessionId: string, stillCurrent?: () => boolean) => {
     const operation = ++operationRef.current;
+    const version = ++historyRefreshVersion.current;
+    const latest = () => operation === operationRef.current && historyRefreshVersion.current === version
+      && activeIdRef.current === sessionId && (!stillCurrent || stillCurrent());
     const result = await loadSessions();
-    const nextState = await loadState(sessionId, result);
-    if (operation !== operationRef.current) return;
+    const nextState = await loadState(sessionId, result, false, latest);
+    if (!latest()) return;
     setInitialState(nextState);
     setRuntimeEpoch((epoch) => epoch + 1);
     refreshSignalRef.current += 1;
@@ -1487,7 +1557,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 api={api}
                 sessionId={activeSession.session_id}
                 initialState={initialState}
-                onStale={() => void resetThread(activeSession.session_id)}
+                onStale={(stillCurrent) => resetThread(activeSession.session_id, stillCurrent)}
                 liveEvents={liveEventsRef}
               >
                 <RuntimeShell

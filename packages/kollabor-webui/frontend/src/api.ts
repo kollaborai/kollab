@@ -126,6 +126,7 @@ export const HISTORY_MAX_PAGE_BYTES = Number.isInteger(configuredHistoryPageByte
 
 export type HistoryPage = {
   history: HistoryMessage[];
+  conversation_uid?: string | null;
   start_index: number;
   end_index: number;
   has_more_older: boolean;
@@ -1181,6 +1182,13 @@ export class EngineApi {
     const query = new URLSearchParams({ ref: reference });
     return this.json<{ session_id: string; content: unknown }>(
       `/sessions/${encodeURIComponent(sessionId)}/history/output?${query}`,
+    );
+  }
+
+  getHistoryMetadata(sessionId: string, reference: string) {
+    const query = new URLSearchParams({ ref: reference });
+    return this.json<{ session_id: string; metadata: Record<string, unknown> }>(
+      `/sessions/${encodeURIComponent(sessionId)}/history/metadata?${query}`,
     );
   }
 

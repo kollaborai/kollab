@@ -33,6 +33,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import subprocess
 import time
@@ -41,8 +42,10 @@ from typing import Any, Dict, List, Optional, Set
 
 import psutil
 
+from . import sse
 from .folders import agents_in_folder
 from .hub_bridge import HubBridge
+from .session_context import PHONE_STREAM_REVOKED, SessionReadContext
 
 
 def _pid_start_time(pid: int) -> Optional[float]:
@@ -85,6 +88,62 @@ SPAWN_TIMEOUT_SECONDS = 45.0
 # data. Web clients cannot use them, and forwarding them would double every
 # message, so the pool drops them at the boundary.
 _RENDERED_EVENT_TYPES = frozenset({"output", "active_area", "heartbeat", "clear"})
+
+# The start of an ``rpc_reply`` frame as the daemon writes it (RpcResponse.to_wire).
+_REPLY_HEAD = re.compile(rb'\{"action":\s*"rpc_reply",\s*"request_id":\s*"([^"\\]+)"')
+# The start of a display event: the tap publishes "type" as its first key.
+_TYPE_HEAD = re.compile(rb'\{"type":\s*"([^"\\]+)"')
+# DisplayTap adds seq last, so an oversized frame's seq is in its tail.
+_SEQ_FIELD = re.compile(rb'"seq":\s*(\d+)')
+
+
+def _open_brackets(text: str) -> int:
+    """Brackets opened minus closed in JSON text, outside its strings."""
+    level, i = 0, 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif c in "{[":
+            level += 1
+        elif c in "}]":
+            level -= 1
+        i += 1
+    return level
+
+
+def _frame_field(head: bytes, tail: bytes, key: str) -> Any:
+    """A top-level field of an oversized frame from its head or tail; None when neither holds it whole.
+
+    A tool's input or output can hold a key of the same name (#543). The head
+    starts the frame and the tail ends it, so a top-level field has one bracket
+    open before it in the head, or one more closed than opened after it in the tail.
+    """
+    for chunk, at_start in ((head, True), (tail, False)):
+        text = chunk.decode(errors="replace")
+        for found in re.finditer(f'"{key}":\\s*', text):
+            try:  # the JSON value as written: an escaped 'old\"id' stays whole
+                value, end = json.JSONDecoder().raw_decode(text, found.end())
+            except ValueError:
+                continue  # cut off at the 4 KB edge
+            if (_open_brackets(text[:found.start()]) == 1 if at_start
+                    else _open_brackets(text[end:]) == -1):
+                return value
+    return None
+
+
+def _frame_request(head: bytes, tail: bytes) -> Dict[str, Any]:
+    """The requests an oversized frame names, as the fields to tag what replaces it with."""
+    named: Dict[str, Any] = {}
+    request_id = _frame_field(head, tail, "request_id")
+    if isinstance(request_id, str) and request_id:
+        named["request_id"] = request_id
+    request_ids = _frame_field(head, tail, "request_ids")  # a chat turn's (#551)
+    if isinstance(request_ids, list) and request_ids:
+        named["request_ids"] = request_ids
+    return named
 
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -129,7 +188,7 @@ def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
         "risk_reason": details.get("risk_reason", ""),
         "details": details,
     }
-    for key in ("ts", "session_id", "request_id", "turn_id", "input_source", "generation"):
+    for key in ("ts", "session_id", "request_id", "request_ids", "turn_id", "input_source", "generation"):
         if key in event:
             flat[key] = event[key]
     return flat
@@ -169,8 +228,15 @@ class DaemonHandle:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._read_task: Optional[asyncio.Task] = None
         self._subscribers: Set[asyncio.Queue] = set()
+
+        self._subscriber_contexts: Dict[asyncio.Queue, SessionReadContext] = {}
         self._closed = False
         self.startup_error: str = ""
+        # The daemon replays its recent events on every attach. After a reattach
+        # the ones already passed on are dropped by their seq, or the last turn's
+        # turn_complete would end the stream of the turn now running (#541). A
+        # daemon process has one tap, so seq only grows while its pid lives.
+        self._last_seq: Optional[int] = None
         # A cancelled turn's tool may ignore the stop signal and report
         # afterwards. Its late result still flows (the transcript mirror
         # follows it) but carries `cancelled: true`, so no gem reads it as a
@@ -253,7 +319,7 @@ class DaemonHandle:
         assert self._reader is not None
         try:
             while True:
-                line = await self._reader.readline()
+                line = await self._read_line()
                 if not line:
                     break
                 try:
@@ -266,6 +332,12 @@ class DaemonHandle:
                         self.rpc.on_reply(message)
                     continue
 
+                seq = message.get("seq")
+                if isinstance(seq, int):
+                    if self._last_seq is not None and seq <= self._last_seq:
+                        continue  # replayed on a reattach, already passed on
+                    self._last_seq = seq
+
                 if message.get("type") in _RENDERED_EVENT_TYPES:
                     continue
 
@@ -275,8 +347,10 @@ class DaemonHandle:
         except asyncio.CancelledError:
             self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
             raise
-        except (ConnectionError, OSError) as e:
+        except Exception as e:  # any read failure takes the reattach path below
             logger.info("daemon %s stream closed: %s", self.identity, e)
+        else:
+            logger.info("daemon %s closed the stream", self.identity)
         # A live local daemon that dropped us (its hub socket was re-created) takes
         # us back on the same path; without this every later call is a
         # BrokenPipeError until the engine restarts.
@@ -286,8 +360,96 @@ class DaemonHandle:
         # Wake every SSE consumer so requests don't hang on a dead daemon.
         self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
 
-    async def _reattach(self, attempts: int = 20, delay: float = 0.5) -> bool:
-        """Attach again to the same socket. True once a new read loop runs."""
+    async def _read_line(self) -> bytes:
+        """The next line from the daemon; ``b""`` once the stream ends.
+
+        A line over the reader's limit (the daemon allows larger ones) is
+        skipped and the session stays: reattaching would only meet it again.
+        An ``rpc_reply`` among them fails its call now with that reason,
+        rather than a timeout with no cause (#541, #544).
+        """
+        assert self._reader is not None
+        while True:
+            try:
+                return await self._reader.readuntil(b"\n")
+            except asyncio.IncompleteReadError as e:
+                return e.partial
+            except asyncio.LimitOverrunError as e:
+                head = await self._reader.readexactly(min(e.consumed, 4096))
+                skipped, tail = await self._skip_rest_of_line()
+                size = len(head) + skipped
+                reply = _REPLY_HEAD.match(head)
+                if reply is None or self.rpc is None:
+                    kind = _TYPE_HEAD.match(head)
+                    etype = kind.group(1).decode(errors="replace") if kind else "unknown"
+                    logger.warning(
+                        "dropped an oversized %s frame (%d bytes) from daemon %s",
+                        etype, size, self.identity,
+                    )
+                    if self._replayed(tail) or etype in _RENDERED_EVENT_TYPES:
+                        continue  # passed on before a reattach, or terminal-only
+                    # Say so in the chat (a silently missing tool result reads as
+                    # a complete reply), to the request the frame names: an old
+                    # turn's frame replayed on reattach must fail no other (#543).
+                    named = _frame_request(head, tail)
+                    self._fan_out({**sse.error(
+                        self.session_id,
+                        "frame_too_large",
+                        "The agent's turn ended, but its last update was over the engine's frame"
+                        " limit and was dropped." if etype == "turn_complete" else
+                        "An update from the agent was over the engine's frame limit and was"
+                        " dropped; this reply is incomplete.",
+                    ), **named})
+                    if etype == "turn_complete":
+                        # The turn did end: without a completion its chat waits for good.
+                        self._fan_out({"type": "turn_complete", "stop_reason": "error", **named})
+                    continue
+                logger.warning(
+                    "dropped an oversized rpc reply (%d bytes) from daemon %s", size, self.identity,
+                )
+                self.rpc.on_reply({
+                    "action": "rpc_reply",
+                    "request_id": reply.group(1).decode(errors="replace"),
+                    "error": "reply over the engine's frame limit",
+                })
+
+    async def _skip_rest_of_line(self) -> tuple[int, bytes]:
+        """Read past the rest of an oversized line: the bytes skipped and their last 4 KB."""
+        assert self._reader is not None
+        skipped, tail = 0, b""
+        while True:
+            try:
+                chunk = await self._reader.readuntil(b"\n")
+            except asyncio.LimitOverrunError as e:
+                chunk = await self._reader.readexactly(e.consumed)
+                skipped, tail = skipped + len(chunk), (tail + chunk)[-4096:]
+                continue
+            except asyncio.IncompleteReadError as e:
+                chunk = e.partial  # the stream ended inside the frame; the next read sees it
+            return skipped + len(chunk), (tail + chunk)[-4096:]
+
+    def _replayed(self, tail: bytes) -> bool:
+        """The seq fence for a dropped frame: True if a reattach sent it again (#543)."""
+        found = list(_SEQ_FIELD.finditer(tail))
+        if not found:
+            return False
+        seq = int(found[-1].group(1))
+        if self._last_seq is not None and seq <= self._last_seq:
+            return True
+        self._last_seq = seq
+        return False
+
+    async def _reattach(
+        self, attempts: int = 20, delay: float = 0.5, slow_delay: float = 5.0
+    ) -> bool:
+        """Attach again to the same socket. True once a new read loop runs.
+
+        A daemon that stays alive is retried for as long as it lives: ``attempts``
+        quick tries, then one every ``slow_delay`` seconds. Giving up while it
+        lived left a handle whose every call failed "client closed" until the
+        engine restarted (#541). False only once the handle closes or the
+        daemon dies.
+        """
         if self.rpc is not None:
             self.rpc.close()  # pending calls fail now instead of hanging
         if self._writer is not None:
@@ -295,18 +457,29 @@ class DaemonHandle:
                 self._writer.close()
             except Exception:
                 pass
-        for _ in range(attempts):
-            await asyncio.sleep(delay)
+        tries = 0
+        while True:
+            await asyncio.sleep(delay if tries < attempts else slow_delay)
+            tries += 1
             if self._closed or not self.alive:
                 return False
             try:
                 await self.connect(self.socket_path)
-            except (OSError, RuntimeError, ValueError, asyncio.TimeoutError) as e:
-                logger.debug("daemon %s reattach failed: %s", self.identity, e)
+            except Exception as e:
+                if tries == attempts:
+                    logger.warning(
+                        "daemon %s (pid %s) is alive but not taking the engine back; "
+                        "retrying every %ss: %s",
+                        self.identity,
+                        self.pid,
+                        slow_delay,
+                        e,
+                    )
+                else:
+                    logger.debug("daemon %s reattach failed: %s", self.identity, e)
                 continue
             logger.info("engine session %s reattached to daemon %s", self.session_id, self.identity)
             return True
-        return False
 
     def _fan_out(self, event: Dict[str, Any]) -> None:
         event.setdefault("session_id", self.session_id)
@@ -336,13 +509,33 @@ class DaemonHandle:
         """Engine-generated event to every SSE subscriber of this session."""
         self._fan_out(event)
 
-    def subscribe(self) -> asyncio.Queue:
+    def subscribe(self, context: SessionReadContext | None = None) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        if context is not None and context.revoked:
+            queue.put_nowait(PHONE_STREAM_REVOKED)
+            return queue
         self._subscribers.add(queue)
+        if context is not None:
+            self._subscriber_contexts[queue] = context
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
         self._subscribers.discard(queue)
+        self._subscriber_contexts.pop(queue, None)
+
+    def close_streams_for_context(self, context: SessionReadContext) -> int:
+        """Synchronously close and remove every SSE queue owned by a revoked pairing."""
+        closed = 0
+        for queue, subscribed_context in tuple(self._subscriber_contexts.items()):
+            if subscribed_context is not context:
+                continue
+            self._subscriber_contexts.pop(queue, None)
+            self._subscribers.discard(queue)
+            while not queue.empty():
+                queue.get_nowait()
+            queue.put_nowait(PHONE_STREAM_REVOKED)
+            closed += 1
+        return closed
 
     @property
     def alive(self) -> bool:
@@ -590,6 +783,13 @@ class DaemonPool:
 
     def all(self) -> List[DaemonHandle]:
         return list(self._daemons.values())
+
+
+    def close_streams_for_context(self, context: SessionReadContext) -> int:
+        """Close a revoked PhoneLink pairing's queues across active session daemons."""
+        return sum(
+            handle.close_streams_for_context(context) for handle in self.all()
+        )
 
     def starting_folders(self) -> List[str]:
         """Folders with an agent being launched by this engine."""

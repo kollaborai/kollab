@@ -198,6 +198,9 @@ class MessageHandler:
                 ),
             )
 
+        request_id = data.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            origin_kwargs["request_id"] = request_id  # the client follows the turn by it (#551)
         result = await self._coordinator.process_user_input(
             message, pre_displayed=pre_displayed, **origin_kwargs
         )

@@ -5,6 +5,38 @@ const historyIndex = (id: unknown): number | null => {
   return index === undefined ? null : Number(index);
 };
 
+/** Insert newly reached history rows without dropping previously shown rows. */
+export function mergeMissingHistoryMessages<T extends Message>(
+  shown: ReadonlyArray<T>,
+  loaded: ReadonlyArray<T>,
+): { messages: T[]; added: T[] } {
+  const present = new Set(shown.map((message) => message.id));
+  const order = new Map(loaded.map((message, index) => [message.id, index]));
+  const added = loaded.filter((message) => {
+    if (historyIndex(message.id) === null || present.has(message.id)) return false;
+    present.add(message.id);
+    return true;
+  });
+  const messages: T[] = [];
+  let nextAdded = 0;
+  for (const existing of shown) {
+    const existingIndex = historyIndex(existing.id) ?? Infinity;
+    while (nextAdded < added.length) {
+      const candidate = added[nextAdded];
+      const candidateIndex = historyIndex(candidate.id)!;
+      if (candidateIndex > existingIndex || (
+        candidateIndex === existingIndex &&
+        (order.get(candidate.id) ?? Infinity) > (order.get(existing.id) ?? Infinity)
+      )) break;
+      messages.push(candidate);
+      nextAdded += 1;
+    }
+    messages.push(existing);
+  }
+  while (nextAdded < added.length) messages.push(added[nextAdded++]);
+  return { messages, added };
+}
+
 /**
  * True when a message the thread already shows reads differently in the
  * reloaded history, or is gone from it. A tool call imported mid-turn gets its

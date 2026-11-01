@@ -231,11 +231,12 @@ const ThreadRoot: FC<{
     ) {
       return;
     }
-    scrollAnchorRef.current = {
+    const anchor = {
       height: viewport.scrollHeight,
       top: viewport.scrollTop,
       start: historyStartIndex,
     };
+    scrollAnchorRef.current = anchor;
     void onLoadOlder()
       .then((merged) => {
         // A load that did not extend this window — a no-op because no older
@@ -245,10 +246,20 @@ const ThreadRoot: FC<{
         // stranding the view at the top of a window whose older history
         // becomes available again (e.g. a byte-capped refresh replacing an
         // exhausted window with one that has older pages).
-        if (!merged) scrollAnchorRef.current = null;
+        if (!merged) {
+          if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
+        } else {
+          // A concurrent refresh can replace the extended window before
+          // React publishes its start index. In that case the layout effect
+          // cannot consume the anchor; release it so the next up gesture
+          // can retry instead of leaving paging blocked indefinitely.
+          window.setTimeout(() => {
+            if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
+          }, 600);
+        }
       })
       .catch(() => {
-        scrollAnchorRef.current = null;
+        if (scrollAnchorRef.current === anchor) scrollAnchorRef.current = null;
       })
       .finally(() => {
         userScrollRef.current = false;

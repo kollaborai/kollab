@@ -26,6 +26,7 @@ from ..history_paging import (
     InvalidHistoryCursor,
     StaleHistoryCursor,
     build_history_page,
+    resolve_history_metadata,
     resolve_history_output,
 )
 from ..hub_bridge import HubBridge, network_daemons
@@ -794,12 +795,22 @@ async def get_session_state(session_id: str):
             logger.debug("Session %s state %s failed: %s", session_id, method_name, exc)
             return fallback
 
-    profile, agent, system, hub, processing = await asyncio.gather(
+    (
+        profile,
+        agent,
+        system,
+        hub,
+        processing,
+        session_stats,
+        context_compaction,
+    ) = await asyncio.gather(
         read("get_active_profile"),
         read("get_active_agent"),
         read("get_system_info"),
         read("get_hub_state"),
         read("get_processing_state"),
+        read("get_session_stats"),
+        read("get_context_compaction_snapshot"),
     )
     return {
         "session_id": session_id,
@@ -808,6 +819,8 @@ async def get_session_state(session_id: str):
         "system": system,
         "hub": hub,
         "processing": processing,
+        "session_stats": session_stats,
+        "context_compaction": context_compaction,
     }
 
 
@@ -1160,6 +1173,26 @@ async def get_history_output(session_id: str, ref: str):
     except InvalidHistoryCursor as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"session_id": session_id, "content": content}
+
+
+@router.get("/{session_id}/history/metadata")
+async def get_history_metadata(session_id: str, ref: str):
+    """Serve a slimmed history entry's full metadata (issue #522)."""
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = await session.get_history_nonblocking()
+    try:
+        metadata = resolve_history_metadata(
+            session_id, snapshot.get("history", []), ref
+        )
+    except StaleHistoryCursor as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InvalidHistoryCursor as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"session_id": session_id, "metadata": metadata}
 
 
 @router.delete("/{session_id}/history")

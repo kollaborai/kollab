@@ -172,7 +172,9 @@ const openThread = async (page, marker) => {
 };
 
 let browser;
+const onlyScenarios = new Set((process.env.HISTORY_PROOF_SCENARIOS ?? "").split(",").filter(Boolean));
 const scenario = async (name, buildState, run) => {
+  if (onlyScenarios.size && !onlyScenarios.has(name)) return;
   console.log(`scenario ${name}`);
   const context = await browser.newContext({ viewport: { width: 820, height: 1180 } });
   await context.addInitScript(() =>
@@ -193,7 +195,11 @@ const scenario = async (name, buildState, run) => {
     const url = new URL(request.url());
     const engine = ["7433", "8080"].includes(url.port);
     if ((engine || url.origin === base) && url.pathname.endsWith("/events")) {
-      return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+      // A stream that closes immediately on every request reconnects in a
+      // tight loop and masks the paging schedules these cases exercise.
+      return new Promise((resolve) => setTimeout(resolve, 300)).then(() =>
+        route.fulfill({ status: 200, contentType: "text/event-stream", body: "" }).catch(() => {}),
+      );
     }
     if (
       engine ||
@@ -508,6 +514,7 @@ try {
     () => ({
       releaseCapped() {
         e.issuedCursors.add("before-156");
+        e.holding = false;
         e.release({
           status: 200,
           body: mkPage(156, 160, {
@@ -524,6 +531,8 @@ try {
         // Hold every after-cursor poll refresh at the route layer until the
         // scenario parks the view at the top, then release one capped page.
         if (options.after && !options.before) {
+          if (options.after === "after-160") return { status: 200, body: mkPage(160, 160) };
+          if (options.after !== "after-121") return { status: 400, body: { error: "unissued cursor" } };
           if (e.holding) {
             return new Promise((resolve) => {
               e.held.push({ resolve });
@@ -666,6 +675,18 @@ try {
       } else {
         ok("E-capped-top-uponly", "up-only wheeling paged to the oldest message");
       }
+      const shown = await viewport.evaluate((node) =>
+        [...node.querySelectorAll('[data-slot="aui_user-message-root"]')]
+          .map((row) => /\bmessage-(\d+)/.exec(row.textContent ?? ""))
+          .filter(Boolean).map((match) => Number(match[1])),
+      );
+      const missing = Array.from({ length: 156 }, (_, index) => index).filter((index) => !shown.includes(index));
+      const ordered = shown.every((index, offset) => offset === 0 || shown[offset - 1] <= index);
+      if (missing.length || !ordered) {
+        fail("E-capped-top-uponly", `history gap or disorder: missing=${missing.join(",")} ordered=${ordered}`);
+      } else {
+        ok("E-capped-top-uponly", "all 156 intervening rows are present in order");
+      }
       const olderLoads = beforeCount();
       if (olderLoads === 0) {
         fail("E-capped-top-uponly", "no before-cursor load was ever made");
@@ -677,6 +698,81 @@ try {
         fail("E-capped-top-uponly", "an error banner is showing after up-only paging");
       } else {
         ok("E-capped-top-uponly", "no error banner after up-only paging");
+      }
+    },
+  );
+
+  // H: a capped refresh jumps past the prior window while its first bridging
+  // page is held. A user scrolls up behind that prefetch, then the page is
+  // released after several refresh intervals. Neither the queued gesture nor
+  // the rows inside the gap may disappear.
+  const h = { after: [], before: [], released: false, bridgeHeld: false, issued: new Set(["before-128"]) };
+  const hPage = () => mkPage(128, 132, { older_cursor: "before-128", has_more_older: true });
+  await scenario(
+    "H-delayed-gap",
+    () => ({
+      releaseCapped() {
+        for (const resolve of h.after.splice(0)) resolve({ status: 200, body: hPage() });
+        h.released = true;
+      },
+      releaseBridge() {
+        const page = mkPage(78, 128);
+        h.issued.add(page.older_cursor);
+        for (const resolve of h.before.splice(0)) resolve({ status: 200, body: page });
+      },
+      resolve(options) {
+        if (options.after && !options.before) {
+          if (options.after === "after-132") return { status: 200, body: mkPage(132, 132) };
+          if (options.after !== "after-121") return { status: 400, body: { error: "unissued cursor" } };
+          if (!h.released) return new Promise((resolve) => h.after.push(resolve));
+          return { status: 200, body: hPage() };
+        }
+        if (options.before) {
+          if (!h.issued.has(options.before)) return { status: 400, body: { error: "unissued cursor" } };
+          if (options.before === "before-128" && !h.bridgeHeld) {
+            h.bridgeHeld = true;
+            return new Promise((resolve) => h.before.push(resolve));
+          }
+          const end = Number(options.before.replace(/^before-/, ""));
+          const page = mkPage(Math.max(0, end - 50), end);
+          if (page.older_cursor) h.issued.add(page.older_cursor);
+          return { status: 200, body: page };
+        }
+        return { status: 200, body: mkPage(71, 121, { has_more_older: false, older_cursor: null }) };
+      },
+    }),
+    async (page, requests) => {
+      await openThread(page, "message-120");
+      await page.waitForTimeout(1000);
+      history.releaseCapped();
+      await page.getByText("message-131", { exact: true }).first().waitFor({ timeout: 10000 });
+      for (let i = 0; i < 100 && !h.before.length; i++) await page.waitForTimeout(100);
+      if (!h.before.length) throw new Error("bridging prefetch was not held");
+      const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+      await viewport.hover();
+      for (let i = 0; i < 5; i++) {
+        await page.mouse.wheel(0, -25000);
+        await page.waitForTimeout(250);
+      }
+      await page.waitForTimeout(3500);
+      history.releaseBridge();
+      for (let i = 0; i < 60; i++) {
+        await page.mouse.wheel(0, -25000);
+        await page.waitForTimeout(300);
+        if (await page.getByText("message-0", { exact: true }).count()) break;
+      }
+      const shown = await viewport.evaluate((node) =>
+        [...node.querySelectorAll('[data-slot="aui_user-message-root"]')]
+          .map((row) => /\bmessage-(\d+)/.exec(row.textContent ?? ""))
+          .filter(Boolean).map((match) => Number(match[1])),
+      );
+      const missing = Array.from({ length: 132 }, (_, index) => index).filter((index) => !shown.includes(index));
+      const ordered = shown.every((index, offset) => offset === 0 || shown[offset - 1] <= index);
+      const alert = await page.locator('[data-slot="history-status"][role="alert"]').count();
+      if (missing.length || !ordered || alert) {
+        fail("H-delayed-gap", `missing=${missing.join(",")} ordered=${ordered} alerts=${alert} before=${requests.filter((r) => r.before).map((r) => r.before).join(",")}`);
+      } else {
+        ok("H-delayed-gap", "delayed bridge and queued scroll recovered every row in order");
       }
     },
   );
