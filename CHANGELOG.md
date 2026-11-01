@@ -130,6 +130,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness
   to the loadout's provider profile (#594).
+- The enrollment pending-request test fails fast with the issuer task's
+  outcome when the task has stopped, instead of burning a 5-second generic
+  timeout; a suppressed task error still reports as a clean exit, and the
+  original CI failure remains under investigation (#574).
 - ACP restart, resume and web history clear no longer report success while a
   competing profile change leaves the old harness conversation active.
 - ACP profile and loadout changes no longer replace a harness while another
