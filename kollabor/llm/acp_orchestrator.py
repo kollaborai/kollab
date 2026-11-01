@@ -92,6 +92,9 @@ class ACPOrchestrator:
         # (request_id, turn_id) pairs whose response usage already
         # settled; replays of terminal events must not double count (#495).
         self._settled_usage_turns: set[tuple[str, int]] = set()
+        # Only the current display's validated payload is needed on a replay;
+        # retaining every turn's full usage would grow for the whole session.
+        self._display_usage_payload: tuple[tuple[str, int], dict[str, Any]] | None = None
         # A later prompt may start while the previous turn is still writing
         # history. Its delayed settlement must not populate the new display.
         self._usage_display_turn: tuple[str, int] | None = None
@@ -181,6 +184,7 @@ class ACPOrchestrator:
         self._observations.clear()
         self._observation_count = 0
         self._settled_usage_turns.clear()
+        self._display_usage_payload = None
         self._usage_display_turn = None
         self._observation_rows.clear()
         self._unwritten_observations.clear()
@@ -509,8 +513,10 @@ class ACPOrchestrator:
         llm = self.event_bus.get_service("llm_service")
         stats = getattr(llm, "session_stats", None)
         if not isinstance(usage, dict) or not usage:
-            if current_display and isinstance(stats, dict):
-                stats.pop("acp_turn_usage", None)
+            if current_display:
+                self._display_usage_payload = None
+                if isinstance(stats, dict):
+                    stats.pop("acp_turn_usage", None)
             return None
         try:
             raw_input = int(usage.get("input_tokens", 0) or 0)
@@ -526,9 +532,13 @@ class ACPOrchestrator:
                 or reported_total < 0 or min(raw_input, cache_read, cache_write, output_total) < 0
                 or input_total + output_total != reported_total):
             logger.warning("ACP prompt usage breakdown does not match its total; not settling")
-            if current_display and isinstance(stats, dict):
-                stats.pop("acp_turn_usage", None)
+            if current_display:
+                self._display_usage_payload = None
+                if isinstance(stats, dict):
+                    stats.pop("acp_turn_usage", None)
             return None
+        if current_display:
+            self._display_usage_payload = (key, dict(usage))
         if isinstance(stats, dict):
             stats["total_input_tokens"] = int(stats.get("total_input_tokens", 0)) + input_total
             stats["total_output_tokens"] = int(stats.get("total_output_tokens", 0)) + output_total
@@ -546,8 +556,12 @@ class ACPOrchestrator:
 
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
         result: ACPResult | None = None
+        settled_usage: dict[str, Any] | None = None
         try:
             result = await admission.future
+            # Once the adapter returned, its usage was incurred even if any
+            # later binding or history operation fails or is cancelled.
+            settled_usage = self._settle_turn_usage(result)
             user_history = self._user_history_tasks.get(admission.request_id)
             if user_history is not None:
                 await user_history
@@ -556,6 +570,17 @@ class ACPOrchestrator:
         except BaseException as exc:
             # Admission is immediately acknowledged, so every admitted request
             # must still receive one correlated terminal event on close/failure.
+            if result is None and admission.future.done() and not admission.future.cancelled():
+                # Cancellation can win the scheduling race after the future
+                # already received its result but before this task resumed.
+                try:
+                    received = admission.future.result()
+                except BaseException:
+                    pass
+                else:
+                    if isinstance(received, ACPResult):
+                        result = received
+                        settled_usage = self._settle_turn_usage(result)
             observed = self._observed_turns.get((admission.request_id, admission.turn_id))
             if (result is None and observed is not None and not observed.finished.is_set()
                     and not isinstance(exc, asyncio.CancelledError)):
@@ -586,6 +611,12 @@ class ACPOrchestrator:
                 "stopReason": stop_reason, "error": str(exc) or type(exc).__name__,
                 "outcome": "failed",
             }
+            event_usage = ((settled_usage or {}).get("usage") if result is not None else None)
+            if (event_usage is None and result is not None and self._display_usage_payload is not None
+                    and self._display_usage_payload[0] == (result.request_id, result.turn_id)):
+                event_usage = self._display_usage_payload[1]
+            if event_usage is not None:
+                end_frame["acp_turn_usage"] = dict(event_usage)
             error_code = getattr(exc, "code", None)
             if error_code is not None:
                 end_frame["code"] = error_code
@@ -619,6 +650,11 @@ class ACPOrchestrator:
                     session_id=session_id, generation=generation,
                     input_source=admission.source, thread_id=admission.thread_id,
                 )
+            usage_fields = ({
+                "input_tokens": (settled_usage or {}).get("input_total", 0),
+                "output_tokens": (settled_usage or {}).get("output_total", 0),
+                "turn_usage": dict(event_usage),
+            } if event_usage is not None else {})
             publish_semantic(
                 self.event_bus, "turn_complete", request_id=admission.request_id,
                 session_id=session_id, generation=generation,
@@ -626,6 +662,7 @@ class ACPOrchestrator:
                 input_source=admission.source, thread_id=admission.thread_id,
                 error=str(exc) or type(exc).__name__,
                 code=error_code,
+                **usage_fields,
             )
             publish_semantic(
                 self.event_bus, "turn_end", **end_frame, hidden=True,
@@ -646,7 +683,10 @@ class ACPOrchestrator:
             self._parents.pop(admission.request_id, None)
             self._user_history_tasks.pop(admission.request_id, None)
             self._observed_turns.pop((admission.request_id, admission.turn_id), None)
-        settled_usage = self._settle_turn_usage(result)
+        event_usage = (settled_usage or {}).get("usage")
+        if (event_usage is None and self._display_usage_payload is not None
+                and self._display_usage_payload[0] == (result.request_id, result.turn_id)):
+            event_usage = self._display_usage_payload[1]
         publish_semantic(
             self.event_bus, "turn_complete", request_id=result.request_id,
             session_id=result.session_id, generation=result.generation,
@@ -654,7 +694,7 @@ class ACPOrchestrator:
             input_source=result.source, thread_id=result.thread_id,
             input_tokens=(settled_usage or {}).get("input_total", 0),
             output_tokens=(settled_usage or {}).get("output_total", 0),
-            turn_usage=(settled_usage or {}).get("usage"),
+            turn_usage=dict(event_usage) if event_usage is not None else None,
         )
         end_frame = dict(result.end_frame)
         end_frame.setdefault(
@@ -762,6 +802,7 @@ class ACPOrchestrator:
         observed = self._observed_turns.get(key)
         if kind == "turn_start":
             self._usage_display_turn = key
+            self._display_usage_payload = None
             observed = self._observed_turns[key] = _ObservedTurn(
                 str(getattr(self._runner, "session_id", None) or ""), int(update["generation"]),
             )
@@ -978,6 +1019,7 @@ class ACPOrchestrator:
             stats.pop("acp_usage", None)
             stats.pop("acp_turn_usage", None)
         self._usage_display_turn = None
+        self._display_usage_payload = None
         if self.hub_plugin is not None and self.hub_plugin._identity is not None:
             self.hub_plugin._identity.tags.pop("harness", None)
             self.hub_plugin._identity.tags.pop("provider", None)

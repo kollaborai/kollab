@@ -355,6 +355,9 @@ reported prompt total; when there is no usable total, label the context sample
 as the last request. Clear a previous total at the next turn start and when
 the harness changes or closes. A delayed older turn may still contribute to
 cumulative accounting but cannot replace the current display.
+Settle a received result before binding or history persistence: a subsequent
+write failure or cancellation must carry its usage on the failed completion.
+If no result was received, no prompt usage is inferred.
 
 None of it is a tool kollab runs.
 
