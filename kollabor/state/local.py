@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, Callable, List
@@ -36,7 +37,13 @@ from kollabor_ai.profile_manager import redact_profile_endpoint
 
 from .context import ContextListSnapshot, ConversationContext
 from .context_registry import ContextRegistry
-from .interface import StateService, enrollment_result, offer_failure
+from .interface import (
+    ACP_CONVERSATION_BUSY,
+    ACP_HARNESS_UNAVAILABLE,
+    StateService,
+    enrollment_result,
+    offer_failure,
+)
 from .snapshots import (
     ActiveOperationSnapshot,
     AgentListSnapshot,
@@ -1355,6 +1362,8 @@ class LocalStateService(StateService):
         orchestrator = bus.get_service("acp_orchestrator") if bus else None
         transition = getattr(orchestrator, "transition", None)
         if callable(transition):
+            if getattr(orchestrator, "conversation_transitioning", False) is True:
+                raise ValueError("ACP conversation change is in progress; retry when ready")
             if (getattr(orchestrator, "transitioning", False) is True
                     and getattr(orchestrator, "transition_owned_by_current_task", False) is not True):
                 raise ValueError("ACP startup or profile change is in progress; retry when ready")
@@ -2400,7 +2409,69 @@ class LocalStateService(StateService):
 
     # === Session management (phase 4.5 step 7) ===
 
+    def _active_acp_profile(self) -> Any:
+        pm = self._profile_manager
+        current = pm.get_active_profile() if pm is not None else None
+        provider = (current.get_provider() if hasattr(current, "get_provider")
+                    else getattr(current, "provider", ""))
+        return current if str(provider).lower() == "acp" else None
+
+    def _conversation_uses_acp(self, acp: Any) -> bool:
+        return bool(acp is not None and (getattr(acp, "active", False) is True or self._active_acp_profile()))
+
+    async def _restore_conversation_acp(self, acp: Any, conversation_id: str | None = None) -> None:
+        current = self._active_acp_profile()
+        selected = getattr(acp, "_selected_profile", None)
+        if current is not None and (selected is None or selected.name != current.name):
+            await acp.start(current, resume_conversation=conversation_id)
+        elif conversation_id is None:
+            await acp.restore()
+        else:
+            await acp.restore(conversation_id)
+        if getattr(acp, "active", False) is not True:
+            raise ValueError("ACP harness did not reopen; retry the conversation change")
+
+    @asynccontextmanager
+    async def _conversation_ownership(self, action: str):
+        bus = getattr(self, "_event_bus", None)
+        acp = bus.get_service("acp_orchestrator") if bus else None
+        transition = getattr(acp, "transition", None)
+        if acp is None and self._active_acp_profile() is not None:
+            raise ValueError(ACP_HARNESS_UNAVAILABLE)
+        if callable(transition) and getattr(acp, "transitioning", False) is True:
+            raise ValueError(ACP_CONVERSATION_BUSY)
+        changed = False
+
+        def mark_changed() -> None:
+            nonlocal changed
+            changed = True
+
+        with transition() if callable(transition) else nullcontext():
+            uses_acp = self._conversation_uses_acp(acp)
+            if callable(transition):
+                acp._conversation_transition = True
+            try:
+                yield acp, uses_acp, mark_changed
+            except BaseException:
+                if changed and uses_acp:
+                    try:
+                        await acp.close()
+                    except BaseException as cleanup_exc:
+                        logger.warning("ACP conversation cleanup failed (%s)", type(cleanup_exc).__name__)
+                    if hasattr(acp, "startup_error"):
+                        acp.startup_error = f"Conversation {action} did not complete; retry."
+                raise
+            finally:
+                if callable(transition):
+                    acp._conversation_transition = False
+
     async def restart_session(self) -> ConversationSnapshot:
+        async with self._conversation_ownership("restart") as (acp, uses_acp, mark_changed):
+            return await self._restart_session_owned(acp, uses_acp, mark_changed)
+
+    async def _restart_session_owned(
+        self, acp: Any, uses_acp: bool, mark_changed: Callable[[], None]
+    ) -> ConversationSnapshot:
         """Clear the live conversation and rebuild the system prompt.
 
         Mirrors kollabor/commands/system_commands/handlers/system.py
@@ -2415,19 +2486,21 @@ class LocalStateService(StateService):
         llm = self._llm_service
         if llm is None:
             raise ValueError("llm service not available")
-        acp = self._event_bus.get_service("acp_orchestrator")
-
         # Best-effort: save current conversation before clearing.
         conv_mgr = getattr(llm, "conversation_manager", None)
         if conv_mgr is not None:
+            mark_changed()
             try:
                 conv_mgr.clear_conversation()
             except Exception as e:
+                if uses_acp:
+                    raise ValueError(f"could not clear conversation: {e}") from e
                 logger.debug(f"restart_session: clear_conversation error: {e}")
 
         # Re-initialize conversation (clears history, rebuilds system prompt).
         # The method is async in llm_coordinator.
         if hasattr(llm, "_initialize_conversation"):
+            mark_changed()
             try:
                 import asyncio as _aio
                 import inspect as _inspect
@@ -2438,11 +2511,13 @@ class LocalStateService(StateService):
                 elif _aio.isfuture(result):
                     await result
             except Exception as e:
+                if uses_acp:
+                    raise ValueError(f"could not initialize conversation: {e}") from e
                 logger.warning(f"restart_session: _initialize_conversation failed: {e}")
 
         # Return a fresh conversation snapshot.
-        if acp is not None and acp.active:
-            await acp.restore()
+        if uses_acp:
+            await self._restore_conversation_acp(acp)
         return await self.get_conversation()
 
     # === MCP writes (phase 4.5 step 7) ===
@@ -3732,6 +3807,12 @@ class LocalStateService(StateService):
     # === Resume (phase 4.5 step 7) ===
 
     async def resume_conversation(self, session_id: str) -> dict[str, Any]:
+        async with self._conversation_ownership("resume") as (acp, uses_acp, mark_changed):
+            return await self._resume_conversation_owned(session_id, acp, uses_acp, mark_changed)
+
+    async def _resume_conversation_owned(
+        self, session_id: str, acp: Any, uses_acp: bool, mark_changed: Callable[[], None]
+    ) -> dict[str, Any]:
         """Load a saved session and swap it into the live conversation.
 
         Phase 4.5 step 7: daemon-side resume. Mirrors the legacy
@@ -3764,15 +3845,22 @@ class LocalStateService(StateService):
             logger.debug(f"resume: auto-save error (non-fatal): {e}")
 
         # Load the target session.
+        previous_messages = getattr(conv_mgr, "messages", None)
         try:
             loaded = conv_mgr.load_session(session_id)
         except Exception as e:
+            if (getattr(conv_mgr, "current_session_id", "") != old_session_id
+                    or getattr(conv_mgr, "messages", None) is not previous_messages):
+                mark_changed()
             raise ValueError(f"failed to load session {session_id!r}: {e}")
         if not loaded:
+            if (getattr(conv_mgr, "current_session_id", "") != old_session_id
+                    or getattr(conv_mgr, "messages", None) is not previous_messages):
+                mark_changed()
             raise ValueError(f"failed to load session {session_id!r}")
+        mark_changed()
 
         raw_messages = getattr(conv_mgr, "messages", None) or []
-        acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
 
         # Generate a fresh session id for the resumed conversation, then move the
         # session id across all three subsystems in lockstep (#26 cause B):
@@ -3873,10 +3961,10 @@ class LocalStateService(StateService):
         if not conv_mgr.save_session(new_session_id):
             raise ValueError(f"failed to persist resumed session {new_session_id!r}")
 
-        if acp is not None and acp.active:
+        if uses_acp:
             # Read the original harness binding, but open/save the continued
             # session only after all native conversation owners have its new ID.
-            await acp.restore(session_id)
+            await self._restore_conversation_acp(acp, session_id)
 
         header = f"--- Resumed: {session_id[:20]}... as {new_session_id} ---"
         success_message = f"[ok] Resumed: {new_session_id}. Continue below."

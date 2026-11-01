@@ -716,7 +716,12 @@ A clean transcript is the bar on every live run.
   profile. One task owns an ACP profile/loadout transition through its full
   application or rollback; competing changes are refused, an older runner's
   cleanup cannot retire a successor, and readiness is published only after the
-  transition completes.
+  transition completes. Restart, resume and web history clear hold the same
+  ownership across conversation mutation and harness replacement. Competing
+  changes fail before mutation. If cancellation or failure follows mutation,
+  the harness is stopped and the caller must retry; local history may already
+  have changed. Inbound ACP load/resume reports a retryable failure for a busy
+  daemon, reserving resource-not-found for a missing saved session.
 - Notices: when an SDK release carries `session.notices`, advertise them
   outbound and send mesh-started turns to attached clients. They stay live
   only: never history, never replayed by load or resume, never in a harness

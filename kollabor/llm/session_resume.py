@@ -48,17 +48,8 @@ def _selected_session_id(browser: Any) -> Optional[str]:
     return resume_session.get("session_id")
 
 
-def _render_resume_result(renderer: Any, result: dict) -> bool:
-    """Render the daemon's resume result via the message coordinator.
-
-    Returns True if it was rendered, False if no usable renderer was available
-    (pipe mode / tests). Mirrors the /resume command's render path so all three
-    surfaces show resumed conversations identically.
-    """
-    coordinator = getattr(renderer, "message_coordinator", None) if renderer else None
-    if coordinator is None:
-        return False
-
+def resume_display_sequence(result: dict) -> List[Tuple[str, str, dict]]:
+    """Build the shared sequence for a completed daemon-owned resume."""
     header = result.get("header", "--- Resumed ---")
     success_msg = result.get("success_message", "[ok] Resumed. Continue below.")
     messages = result.get("messages", [])
@@ -72,6 +63,21 @@ def _render_resume_result(renderer: Any, result: dict) -> bool:
         if role in ("user", "assistant"):
             display_sequence.append((role, content, {}))
     display_sequence.append(("system", success_msg, {}))
+    return display_sequence
+
+
+def _render_resume_result(renderer: Any, result: dict) -> bool:
+    """Render the daemon's resume result via the message coordinator.
+
+    Returns True if it was rendered, False if no usable renderer was available
+    (pipe mode / tests). Mirrors the /resume command's render path so all three
+    surfaces show resumed conversations identically.
+    """
+    coordinator = getattr(renderer, "message_coordinator", None) if renderer else None
+    if coordinator is None:
+        return False
+
+    display_sequence = resume_display_sequence(result)
     coordinator.display_message_sequence(display_sequence)
     return True
 

@@ -563,6 +563,8 @@ class LoadoutManager:
                         if event_bus and hasattr(event_bus, "get_service") else None)
         transition = getattr(orchestrator, "transition", None)
         if callable(transition):
+            if getattr(orchestrator, "conversation_transitioning", False) is True:
+                raise ValueError("ACP conversation change is in progress; retry when ready")
             if (getattr(orchestrator, "transitioning", False) is True
                     and getattr(orchestrator, "transition_owned_by_current_task", False) is not True):
                 raise ValueError("ACP startup or profile change is in progress; retry when ready")

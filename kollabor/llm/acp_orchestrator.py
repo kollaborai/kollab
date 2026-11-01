@@ -91,6 +91,7 @@ class ACPOrchestrator:
         self._pending_ready_runner: ACPRunner | None = None
         self._transition_owner: asyncio.Task[Any] | None = None
         self._transition_depth = 0
+        self._conversation_transition = False
         self._completion_tasks: set[asyncio.Task[Any]] = set()
         self._delivery_tasks: set[asyncio.Task[Any]] = set()
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
@@ -140,6 +141,10 @@ class ACPOrchestrator:
     @property
     def transitioning(self) -> bool:
         return getattr(self, "_transition_owner", None) is not None
+
+    @property
+    def conversation_transitioning(self) -> bool:
+        return getattr(self, "_conversation_transition", False)
 
     @property
     def transition_owned_by_current_task(self) -> bool:

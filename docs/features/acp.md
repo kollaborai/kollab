@@ -139,6 +139,10 @@ A model or effort pick belongs to the ACP session it was made in:
   refused with a retry message. The new harness is ready only after its model
   and effort are applied; a refused or cancelled change restores the previous
   harness when one was active.
+- Restart, resume and web history clear share that ownership. A competing
+  change is refused before the conversation changes. If a reset or resume is
+  interrupted after changing local state, the harness is stopped and the
+  operation must be retried; local history may already have changed.
 - After a model change, the effort you picked is re-applied. If the new model
   does not offer it, the highest effort the model offers is used, and a notice
   says so. If the harness refuses the effort, the notice says that instead.
