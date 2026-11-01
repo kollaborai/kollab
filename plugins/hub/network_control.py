@@ -15,6 +15,7 @@ import contextlib
 import dataclasses
 import hashlib
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -55,6 +56,8 @@ MAX_PICKS_PER_ADMITTER = 2  # F6 (S4): one machine's picks cannot fill every slo
 NO_COUNT_REFUSAL = "This network needs a second machine that counts before this one can stop counting."
 HALT_RETRY_START = 10.0
 HALT_RETRY_MAX = 300.0
+# Once the delay reaches its cap, further failures need no larger counter.
+HALT_RETRY_MAX_FAILURES = max(1, 1 + math.ceil(math.log2(HALT_RETRY_MAX / HALT_RETRY_START)))
 REQUEST_SECONDS = 15.0
 JOIN_BIND_DOMAIN = b"kollab-join-bind-v1\n"
 ROW_FIELDS = ("folder", "name", "machine", "folder_sig", "admission", "bind_sig")
@@ -980,6 +983,8 @@ class HaltSync:
             await self._sleep(self._poll)
 
     def retry_delay(self, failures: int) -> float:
+        if failures >= HALT_RETRY_MAX_FAILURES:
+            return HALT_RETRY_MAX
         return min(HALT_RETRY_MAX, HALT_RETRY_START * 2 ** (failures - 1))
 
     def acked(self) -> list[str]:
@@ -1114,7 +1119,7 @@ class HaltSync:
                 # An older acknowledgement must not appear current after a
                 # failed exchange for a changed halt book.
                 self._delivered.pop(key, None)
-                failures = self._failures.get(key, 0) + 1
+                failures = min(self._failures.get(key, 0), HALT_RETRY_MAX_FAILURES - 1) + 1
                 self._failures[key] = failures
                 self._retry_at[key] = time.monotonic() + self.retry_delay(failures)
                 continue

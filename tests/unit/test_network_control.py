@@ -562,6 +562,78 @@ async def test_legacy_compacted_receiver_without_receipt_stays_unacknowledged(th
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("previous_failures", [5, 6, 1023, 1024, 4096])
+@pytest.mark.parametrize("new_halt", [False, True], ids=["resume", "new_halt"])
+async def test_legacy_compacted_peer_repeated_retry_does_not_block_later_peer(
+    three, monkeypatch, previous_failures, new_halt
+):
+    founder, bootstrap, link, sender, halt = await _pending_effective_resume(three)
+    third = three[2]
+    save, transport = bootstrap.save_halt_book, sender._transport
+    calls = []
+
+    def save_compacted(book):
+        book.resumes.clear()
+        save(book)
+
+    class LegacyCompacted:
+        strip_ack = True
+
+        async def request(self, key, method, payload, *, timeout):
+            calls.append(key)
+            reply = await transport.request(key, method, payload, timeout=timeout)
+            if key == bootstrap.client.public_key and self.strip_ack:
+                reply.pop("resume_ack", None)
+            return reply
+
+    if new_halt:
+        await transport.request(third.client.public_key, HALT_METHOD, founder.halt_payload(), timeout=15)
+        assert not third.halt_book().active()
+        next_halt = founder.halt_act("halt", {"reason": "new safety stop"})
+        assert next_halt["hash"] not in third.halt_book().active()
+
+    monkeypatch.setattr(bootstrap, "save_halt_book", save_compacted)
+    legacy = LegacyCompacted()
+    sender._transport = legacy
+    sender._delivered.clear()
+    sender._retry_at.clear()
+    sender._failures[bootstrap.client.public_key] = previous_failures
+    assert sender._client.members() == [bootstrap.client.public_key, third.client.public_key]
+    if not new_halt:
+        assert third.halt_book().active()
+    await sender.tick()
+    assert calls == [bootstrap.client.public_key, third.client.public_key]
+    assert sender._failures[bootstrap.client.public_key] == 6
+    assert bootstrap.client.public_key in sender._retry_at
+    assert bootstrap.client.public_key not in sender._delivered
+    assert halt["hash"] in bootstrap.halt_book().lifted
+    if new_halt:
+        assert next_halt["hash"] in third.halt_book().active()
+    else:
+        assert not third.halt_book().active()
+    assert third.client.public_key in sender._delivered
+    if previous_failures == 1024 and new_halt:
+        for index in range(2):
+            sender._retry_at.clear()
+            subsequent = founder.halt_act("halt", {"reason": f"subsequent safety stop {index}"})
+            assert subsequent["hash"] not in third.halt_book().active()
+            await sender.tick()
+            assert calls[-2:] == [bootstrap.client.public_key, third.client.public_key]
+            assert sender._failures[bootstrap.client.public_key] == 6
+            assert subsequent["hash"] in third.halt_book().active()
+        legacy.strip_ack = False
+        sender._retry_at.clear()
+        await sender.tick()
+        assert bootstrap.client.public_key not in sender._failures
+        assert bootstrap.client.public_key in sender._delivered
+        sender._delivered.clear()
+        sender._retry_at.clear()
+        link.down = True
+        await sender.tick()
+        assert sender._failures[bootstrap.client.public_key] == 1
+
+
+@pytest.mark.asyncio
 async def test_legacy_echo_and_new_reply_interoperate(three):
     founder, bootstrap, link, sender, _halt = await _pending_effective_resume(three)
     real_transport = sender._transport
@@ -734,7 +806,9 @@ async def test_an_unacked_member_is_retried_10s_doubling_to_5_minutes(three):
     f, b, c = three
     link = syncs(f, b, c)
     sync = link.syncs[f.client.public_key]
-    assert [sync.retry_delay(n) for n in (1, 2, 3, 6, 9)] == [10, 20, 40, 300, 300]
+    assert [sync.retry_delay(n) for n in (1, 2, 3, 4, 5, 6, 7, 1024, 1025, 10**100)] == [
+        10, 20, 40, 80, 160, 300, 300, 300, 300, 300
+    ]
     link.down = True
     await sync.tick()
     assert sync._failures == {b.client.public_key: 1, c.client.public_key: 1}

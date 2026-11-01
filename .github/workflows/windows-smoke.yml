@@ -16,6 +16,7 @@ on:
       - scripts/windows_halt_smoke.py
       - scripts/build_binary.py
       - tests/unit/test_windows_project_state_recovery.py
+      - tests/unit/test_network_control.py
       - tests/unit/test_windows_halt_smoke_diagnostics.py
       - tests/unit/test_windows_relay_halt_smoke.py
       - tests/unit/test_secure_session.py
@@ -69,7 +70,7 @@ jobs:
       - name: Halt exchange race
         run: >-
           uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_network_control.py -k
-          "proposal_created_during_exchange or failed_exchange_retries or unacknowledged_halt or effective_resume_acknowledges or proposal_acknowledgement or unconfirmed_resume or effective_resume_needs_a_matching_ack or compacted_receiver or legacy_echo or failed_resume_persistence or restarted_peer_retries or invalid_confirmation_cannot_generate or resume_receipt_requires or recorded_effective_resume"
+          "proposal_created_during_exchange or failed_exchange_retries or unacknowledged_halt or effective_resume_acknowledges or proposal_acknowledgement or unconfirmed_resume or effective_resume_needs_a_matching_ack or compacted_receiver or legacy_compacted_peer_repeated_retry or legacy_echo or failed_resume_persistence or restarted_peer_retries or invalid_confirmation_cannot_generate or resume_receipt_requires or recorded_effective_resume or an_unacked_member_is_retried"
 
       - name: Detached startup diagnostics
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_halt_smoke_diagnostics.py
