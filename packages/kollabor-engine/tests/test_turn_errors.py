@@ -78,6 +78,32 @@ async def test_the_last_failed_turn_is_remembered_until_a_turn_succeeds(session)
 
 
 @pytest.mark.asyncio
+async def test_acp_usage_follows_current_turn_and_ignores_late_completion(session):
+    tracker = asyncio.create_task(session._track_events())
+    session.events.put_nowait({"type": "turn_start", "request_id": "old", "turn_id": 1, "generation": 1})
+    session.events.put_nowait({"type": "turn_complete", "request_id": "old", "turn_id": 1,
+                               "turn_usage": {"total_tokens": 100}})
+    await asyncio.sleep(0.05)
+    assert session.to_dict()["acp_turn_usage"] == {"total_tokens": 100}
+
+    session.events.put_nowait({"type": "turn_start", "request_id": "new", "turn_id": 2, "generation": 1})
+    session.events.put_nowait({"type": "turn_complete", "request_id": "old", "turn_id": 1,
+                               "turn_usage": {"total_tokens": 999}, "input_tokens": 3})
+    await asyncio.sleep(0.05)
+    assert session.to_dict()["acp_turn_usage"] == {}
+    assert session.total_input_tokens == 3
+
+    session.events.put_nowait({"type": "turn_complete", "request_id": "new", "turn_id": 2,
+                               "turn_usage": {"total_tokens": 200}})
+    await asyncio.sleep(0.05)
+    assert session.to_dict()["acp_turn_usage"] == {"total_tokens": 200}
+    session.events.put_nowait({"type": "acp_session", "state": "closed"})
+    session.events.put_nowait({"type": "daemon_closed"})
+    await asyncio.wait_for(tracker, 1)
+    assert session.to_dict()["acp_turn_usage"] == {}
+
+
+@pytest.mark.asyncio
 async def test_history_returns_the_turn_error_in_place(client, session):
     session.last_turn_error = {"message": "provider down", "history_length": 3}
 
