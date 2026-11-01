@@ -297,7 +297,8 @@ class LocalStateService(StateService):
     # === Conversation ===
 
     async def get_conversation(
-        self, since: int | None = None, anchor: str | None = None
+        self, since: int | None = None, anchor: str | None = None,
+        expected_conversation_uid: str | None = None,
     ) -> ConversationSnapshot:
         """Return a snapshot of the current conversation.
 
@@ -306,6 +307,7 @@ class LocalStateService(StateService):
         ``since``/``anchor``: only what a reader's copy lacks
         (ConversationSnapshot.tail).
         """
+        uid = self.get_conversation_uid()
         history = getattr(self._llm_service, "conversation_history", None) or []
 
         def _wire(m: Any) -> dict[str, Any]:
@@ -332,6 +334,7 @@ class LocalStateService(StateService):
         want = (
             since
             if isinstance(since, int) and not isinstance(since, bool) and since > 0
+            and (expected_conversation_uid is None or expected_conversation_uid == uid)
             else None
         )
         digest = ""
@@ -377,6 +380,8 @@ class LocalStateService(StateService):
             conv_meta = getattr(conv_mgr, "conversation_metadata", None) or {}
             started_at = conv_meta.get("started_at", "") or ""
             metadata = dict(conv_meta)
+        if uid:
+            metadata["conversation_uid"] = uid
 
         snapshot = ConversationSnapshot(
             messages=messages,
@@ -2877,6 +2882,9 @@ class LocalStateService(StateService):
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: dict[str, Any] | None = None,
+        private_goal_reply: bool = False,
+        private_goal_reply_id: str | None = None,
+        goal_conversation_uid: str | None = None,
     ) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 
@@ -2919,7 +2927,9 @@ class LocalStateService(StateService):
         # processing, and image-bearing /goal input must still reach
         # command parsing with its attachments promoted durably.
         goal_handled = None if is_voice_origin else self._try_goal_command(
-            text, message, client_request_id=request_id or metadata.get("request_id")
+            text, message, client_request_id=request_id or metadata.get("request_id"),
+            private_reply=private_goal_reply, reply_id=private_goal_reply_id,
+            expected_uid=goal_conversation_uid,
         )
         if goal_handled is not None:
             return goal_handled
@@ -3055,7 +3065,11 @@ class LocalStateService(StateService):
             raise ValueError("no goal image was provided")
         return refs
 
-    def _try_goal_command(self, text: str, message, *, client_request_id: str | None = None) -> dict[str, Any] | None:
+    def _try_goal_command(
+        self, text: str, message, *, client_request_id: str | None = None,
+        private_reply: bool = False, reply_id: str | None = None,
+        expected_uid: str | None = None,
+    ) -> dict[str, Any] | None:
         """Route /goal input ahead of the is_processing gate.
 
         Control subcommands (show/pause/resume/clear/history and bare
@@ -3091,7 +3105,20 @@ class LocalStateService(StateService):
         uid = self.get_conversation_uid()
         if not uid:
             return {"accepted": False, "reason": "no conversation identity available; open a session first"}
+        if private_reply and (not expected_uid or expected_uid != uid):
+            return {
+                "accepted": False,
+                "reason": "Conversation changed or is still syncing; refresh it and retry the goal.",
+            }
+        # A replay does not reserve a mailbox, but a supplied reply id still
+        # has to satisfy the same wire contract as a new private command.
+        if private_reply and reply_id:
+            from kollabor.state.goal_replies import GOAL_REPLY_PATTERN
+
+            if not isinstance(reply_id, str) or GOAL_REPLY_PATTERN.fullmatch(reply_id) is None:
+                return {"accepted": False, "reason": "Goal reply is unavailable; retry with a new request."}
         request_id = None
+        svc = None
         if has_images:
             from kollabor.state.goal_store import GoalSubmissionConflict
 
@@ -3113,17 +3140,51 @@ class LocalStateService(StateService):
                         "request_id": request, "goal_request_id": request,
                         "goal_id": goal, "message": notice}
 
-            try:
-                svc = self._goal_service()
-                if svc is None:
-                    raise RuntimeError("goal storage unavailable")
-                if client_request_id is not None:
+            # A retry owns a response-local receipt, not the original command's
+            # mailbox. Check it before reserving the supplied reply id, which
+            # can still belong to the in-flight original request.
+            if client_request_id is not None:
+                try:
+                    svc = self._goal_service()
+                    if svc is None:
+                        raise RuntimeError("goal storage unavailable")
                     from kollabor.goals.submission import submission_identity
 
                     key, fingerprint = submission_identity(client_request_id, text, message)
                     existing = svc.attachment_submission(key, uid, fingerprint)
                     if existing is not None:
                         return replay_result(existing)
+                except GoalSubmissionConflict:
+                    return {
+                        "accepted": False,
+                        "reason": "Goal submission conflict; use a new request for different input or conversation.",
+                    }
+                except Exception as exc:
+                    logger.warning("goal image admission failed (%s)", type(exc).__name__)
+                    return {
+                        "accepted": False,
+                        "reason": "goal images could not be saved; check the images and resubmit them",
+                    }
+
+        if private_reply:
+            from kollabor.state.goal_replies import GoalReplyCancelled, GoalReplyMailbox
+
+            mailbox = getattr(self, "_goal_reply_mailbox", None)
+            if mailbox is None:
+                mailbox = self._goal_reply_mailbox = GoalReplyMailbox()
+            try:
+                reply_id = mailbox.prepare(reply_id)
+            except GoalReplyCancelled:
+                return {"accepted": False, "reason": "Goal command was cancelled before admission."}
+            except (ValueError, RuntimeError):
+                return {"accepted": False, "reason": "Goal reply is unavailable; retry with a new request."}
+
+        if has_images:
+            try:
+                if svc is None:
+                    svc = self._goal_service()
+                if svc is None:
+                    raise RuntimeError("goal storage unavailable")
                 refs = self._stage_goal_attachments(message)
                 if client_request_id is None:
                     request_id = svc.stage_attachment_request(uid, text, refs)
@@ -3174,7 +3235,8 @@ class LocalStateService(StateService):
             self._goal_command_in_flight = owner
         create_task = getattr(llm, "create_background_task", None)
         command_coro = self._execute_slash_command(
-            text, parser, executor, goal_origin_uid=uid, goal_request_id=request_id
+            text, parser, executor, goal_origin_uid=uid, goal_request_id=request_id,
+            private_goal_reply=private_reply,
         )
         try:
             task = (
@@ -3186,14 +3248,21 @@ class LocalStateService(StateService):
                 if owner is not None and getattr(self, "_goal_command_in_flight", None) is owner:
                     self._goal_command_in_flight = None
             task.add_done_callback(release)
+            if private_reply:
+                reply_id = mailbox.register(uid, task, reply_id)
         except Exception:
-            command_coro.close()
+            if "task" in locals():
+                task.cancel()
+            else:
+                command_coro.close()
             if owner is not None:
                 self._goal_command_in_flight = None
             return retained("Goal command could not be started.")
         accepted = {"accepted": True, "reason": "goal command"}
         if request_id:
             accepted["goal_request_id"] = request_id
+        if private_reply:
+            accepted["goal_reply_id"] = reply_id
         return accepted
 
     async def _execute_hub_message(self, text: str, target: str, content: str) -> None:
@@ -3285,7 +3354,8 @@ class LocalStateService(StateService):
     async def _execute_slash_command(
         self, text: str, parser: Any, executor: Any, *,
         goal_origin_uid: str | None = None, goal_request_id: str | None = None,
-    ) -> None:
+        private_goal_reply: bool = False,
+    ) -> dict[str, Any] | None:
         """Run a parsed slash command and publish its result as a web turn."""
         from kollabor_tui.display_tap import publish_semantic
 
@@ -3367,8 +3437,17 @@ class LocalStateService(StateService):
             }
             add_message = getattr(self._llm_service, "_add_conversation_message", None)
             if callable(add_message):
-                add_message("user", recorded, metadata={"slash_command": recorded})
+                if private_goal_reply:
+                    add_message("user", recorded, metadata={"slash_command": recorded}, publish_user_event=False)
+                else:
+                    add_message("user", recorded, metadata={"slash_command": recorded})
                 add_message("assistant", output, metadata=metadata)
+            if private_goal_reply:
+                return {
+                    "success": bool(getattr(result, "success", False)),
+                    "message": output,
+                    "history_recorded": callable(add_message),
+                }
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(
                 self._event_bus,
@@ -3382,11 +3461,18 @@ class LocalStateService(StateService):
             if goal_origin_uid is not None:
                 logger.warning("goal command execution failed (%s)", type(exc).__name__)
                 if self.get_conversation_uid() != goal_origin_uid:
-                    return
+                    if private_goal_reply:
+                        return {
+                            "success": False,
+                            "message": "Conversation changed; check the goal in its original conversation.",
+                        }
+                    return None
                 message = "Goal command could not complete in its original conversation; use /goal requests there to check it."
             else:
                 logger.exception("slash command execution failed for web transport")
                 message = str(exc)
+            if private_goal_reply:
+                return {"success": False, "message": message}
             publish_semantic(self._event_bus, "error", message=message)
             publish_semantic(
                 self._event_bus,

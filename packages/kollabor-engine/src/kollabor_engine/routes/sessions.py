@@ -26,6 +26,7 @@ from ..history_paging import (
     InvalidHistoryCursor,
     StaleHistoryCursor,
     build_history_page,
+    resolve_history_metadata,
     resolve_history_output,
 )
 from ..hub_bridge import HubBridge, network_daemons
@@ -1172,6 +1173,26 @@ async def get_history_output(session_id: str, ref: str):
     except InvalidHistoryCursor as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"session_id": session_id, "content": content}
+
+
+@router.get("/{session_id}/history/metadata")
+async def get_history_metadata(session_id: str, ref: str):
+    """Serve a slimmed history entry's full metadata (issue #522)."""
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = await session.get_history_nonblocking()
+    try:
+        metadata = resolve_history_metadata(
+            session_id, snapshot.get("history", []), ref
+        )
+    except StaleHistoryCursor as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InvalidHistoryCursor as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"session_id": session_id, "metadata": metadata}
 
 
 @router.delete("/{session_id}/history")

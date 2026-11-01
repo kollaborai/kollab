@@ -510,9 +510,8 @@ class TestHubFeedSocket:
         """Switch the pytest-only bypass off and give validate_token a known token."""
         monkeypatch.delenv("KOLLAB_ENGINE_BYPASS_AUTH", raising=False)
         monkeypatch.setattr(engine_auth, "_current_token", "good-token")
-        monkeypatch.setattr(engine_auth, "_TOKEN_FILE", tmp_path / "engine.token")
         monkeypatch.setattr(
-            engine_auth, "resolve_global_path", lambda name: tmp_path / "global" / name
+            engine_auth, "_token_file", lambda: tmp_path / "engine.token"
         )
 
     @pytest.mark.parametrize("query", ["", "?token=", "?token=wrong", "?token=%C3%A9"])
