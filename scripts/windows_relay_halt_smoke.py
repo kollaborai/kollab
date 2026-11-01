@@ -527,11 +527,12 @@ def relay_halt_smoke(
         raise SystemExit(
             f"the network lists fewer than two machines: {json.dumps(members)[:400]}"
         )
+    # rows carry device names, not "win-b": the machine that is not the founder is win-b
     other = next(
         (
             row.get("machine")
             for row in members
-            if row.get("name") == "win-b" and row.get("machine")
+            if not row.get("founder") and row.get("machine")
         ),
         None,
     )
