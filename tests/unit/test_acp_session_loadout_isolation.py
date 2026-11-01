@@ -179,6 +179,60 @@ async def test_refused_loadout_restores_previous_harness(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('model,extra', [
+    ('unknown-model', {}),
+    ('haiku', {'temperature': 0.2}),
+    ('haiku', {'max_tokens': 123}),
+])
+async def test_invalid_in_app_loadout_preserves_previous_harness(tmp_path, monkeypatch, model, extra):
+    from kollabor_ai.loadout_manager import Loadout
+
+    manager, pm, bus, orch = await _loadout_fixture(tmp_path, monkeypatch)
+    loadout = Loadout('invalid', 'claude-code', model, effort='max', **extra)
+    try:
+        assert await manager.activate(loadout, bus) is None
+        assert orch.active and pm.get_active_profile().name == 'claude-code'
+        assert [o['currentValue'] for o in orch.advertised_config_options()] == ['sonnet', 'xhigh']
+        assert not orch._options_path.exists()
+    finally:
+        await orch.close()
+
+
+@pytest.mark.asyncio
+async def test_in_app_cancellation_during_partial_start_restores_previous_harness(tmp_path, monkeypatch):
+    import asyncio
+
+    from kollabor.llm import acp_orchestrator as mod
+
+    manager, pm, bus, orch = await _loadout_fixture(tmp_path, monkeypatch)
+    runner_class = mod.ACPRunner
+    entered = asyncio.Event()
+
+    class DelayedRunner(runner_class):
+        async def set_config_option(self, config_id, value):
+            if config_id == 'effort':
+                entered.set()
+                await asyncio.Event().wait()
+            return await super().set_config_option(config_id, value)
+
+    monkeypatch.setattr(mod, 'ACPRunner', DelayedRunner)
+    try:
+        task = asyncio.create_task(manager.activate(manager.get('haiku-max'), bus))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        partial = orch.runner
+        assert not orch.active
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert partial.closed and orch.active
+        assert pm.get_active_profile().name == 'claude-code'
+        assert [o['currentValue'] for o in orch.advertised_config_options()] == ['sonnet', 'xhigh']
+        assert not orch._options_path.exists()
+    finally:
+        await orch.close()
+
+
+@pytest.mark.asyncio
 async def test_implicit_acp_harness_entry_does_not_treat_adapter_as_model(tmp_path, monkeypatch):
     manager, _pm, bus, orch = await _loadout_fixture(tmp_path, monkeypatch)
     try:

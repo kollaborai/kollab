@@ -705,7 +705,11 @@ A clean transcript is the bar on every live run.
   through `session/set_config_option`; unadvertised options are refused. Confirmed
   Model-panel picks are saved per profile and override ordinary profile defaults.
   Explicit startup loadouts take precedence over those saved picks without
-  rewriting them. Session-tab effort is scoped to the current daemon, survives
+  rewriting them, and must be confirmed by the harness before readiness; a
+  refused model or effort closes the partial runner. ACP loadouts reject
+  native-only temperature and max-token settings at startup and in-app.
+  Unavailable saved picks without an explicit loadout remain nonfatal notices.
+  Session-tab effort is scoped to the current daemon, survives
   its harness restart, and never changes another daemon's saved options. An
   in-app ACP loadout applies its advertised model and effort before saving the
   confirmed picks; a refused value restores the previous active profile.

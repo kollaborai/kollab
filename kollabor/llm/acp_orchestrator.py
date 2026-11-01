@@ -86,6 +86,8 @@ class ACPOrchestrator:
         self._runner: ACPRunner | None = None
         self._profile_name: str | None = None
         self._closed = False
+        self._starting = False
+        self._pending_ready_runner: ACPRunner | None = None
         self._completion_tasks: set[asyncio.Task[Any]] = set()
         self._delivery_tasks: set[asyncio.Task[Any]] = set()
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
@@ -129,7 +131,7 @@ class ACPOrchestrator:
 
     @property
     def active(self) -> bool:
-        return self._runner is not None and not self._closed
+        return self._runner is not None and not self._closed and not getattr(self, "_starting", False)
 
     @property
     def runner(self) -> ACPRunner | None:
@@ -151,7 +153,7 @@ class ACPOrchestrator:
     ) -> list[dict[str, Any]]:
         """Set a confirmed ACP option, optionally for this daemon only."""
         runner = self._runner
-        if runner is None or self._closed:
+        if runner is None or self._closed or getattr(self, "_starting", False):
             raise ACPError("ACP session is not active")
         category = next((str(o.get("category") or "") for o in runner.advertised_config_options()
                          if o.get("id") == config_id), "")
@@ -375,17 +377,21 @@ class ACPOrchestrator:
             raise ValueError(f"profile {profile.name!r} is not an ACP profile")
         if not profile.command:
             raise ValueError(f"ACP profile {profile.name!r} has no command")
-        if loadout is not None:
-            self._loadout_override = (profile.name, loadout[0], loadout[1])
-            self._session_options.pop(profile.name, None)
-        elif self._loadout_override and self._loadout_override[0] != profile.name:
-            self._loadout_override = None
         binding = self._bindings.load(resume_conversation) if resume_conversation else None
         if self._runner is not None:
             # A restart is transactional: retire the old child/session before
             # acquiring a replacement, without creating a second owner.
             await self.close()
+        previous_override = self._loadout_override
+        previous_session = dict(self._session_options.get(profile.name, {}))
+        if loadout is not None:
+            self._loadout_override = (profile.name, loadout[0], loadout[1])
+            self._session_options.pop(profile.name, None)
+        elif self._loadout_override and self._loadout_override[0] != profile.name:
+            self._loadout_override = None
         self._closed = False
+        self._starting = True
+        self._pending_ready_runner = None
         self._forget_session_picks()
         self.startup_error = None
         self._terminal_session_id = None
@@ -436,8 +442,27 @@ class ACPOrchestrator:
             self._binding_conversation_id = self._conversation_id()
             await self._runner.start(binding=binding)
             self.restore_notices = await self._restore_options(profile)
+            if loadout is not None:
+                options = self.advertised_config_options()
+                model = next((o for o in options if str(o.get("category") or "").lower() == "model"
+                              or o.get("id") == "model"), None)
+                effort = self._effort_option()
+                for label, value, option in (("model", loadout[0], model),
+                                             ("effort", loadout[1], effort)):
+                    unadvertised = (option is not None and option.get("type") == "select"
+                                    and value not in option_values(option))
+                    if value and (option is None or option.get("currentValue") != value or unadvertised):
+                        reported = option.get("currentValue") if option else None
+                        raise ValueError(
+                            f"ACP loadout {label} {value!r} was not applied "
+                            f"(harness reports {reported!r})"
+                        )
             self._announce_restore_notices()
             self.event_bus.register_service("acp_orchestrator", self)
+            self._starting = False
+            if self._pending_ready_runner is not None:
+                await self._runner_lifecycle("ready", self._pending_ready_runner)
+                self._pending_ready_runner = None
             self._save_binding()
         except BaseException as exc:
             self.startup_error = str(exc) or type(exc).__name__
@@ -449,7 +474,16 @@ class ACPOrchestrator:
             self._binding = None
             self._profile_name = None
             self._closed = True
+            if loadout is not None:
+                self._loadout_override = previous_override
+                if previous_session:
+                    self._session_options[profile.name] = previous_session
+                else:
+                    self._session_options.pop(profile.name, None)
             raise
+        finally:
+            self._starting = False
+            self._pending_ready_runner = None
 
     async def _runner_lifecycle(self, state: str, runner: ACPRunner) -> None:
         if state == "starting" and self.hub_plugin is not None:
@@ -467,6 +501,9 @@ class ACPOrchestrator:
                         "KOLLAB_ACP_HUB_SOCKET": str(socket_path)},
             },))
         if state == "ready":
+            if self._starting:
+                self._pending_ready_runner = runner
+                return
             self._save_binding()
             profile = self._selected_profile
             publish_semantic(self.event_bus, "acp_session",
@@ -486,7 +523,7 @@ class ACPOrchestrator:
         record: bool = True,
         images: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
-        if self._runner is None or self._closed:
+        if self._runner is None or self._closed or getattr(self, "_starting", False):
             raise ACPError(self.startup_error or "ACP runner is not active")
         if source == "agent" and (origin or {}).get("sender"):
             text = f"Message from {origin['sender']} [thread:{thread_id or ''}]\n{text}"
@@ -1100,7 +1137,8 @@ class ACPOrchestrator:
         close_error: BaseException | None = None
         runner = self._runner
         try:
-            self._save_binding()
+            if not self._starting:
+                self._save_binding()
         except BaseException as exc:
             # A failed disk write must not leave the owned adapter running.
             close_error = exc

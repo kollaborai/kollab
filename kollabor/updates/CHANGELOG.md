@@ -126,6 +126,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- ACP startup loadouts now stop with an error when the harness does not confirm
+  the requested model or effort, or when native-only temperature or max-token
+  settings are supplied.
 - ACP Session tab: effort set with Apply now sticks. Apply max, then switch
   model, and the effort stays max (before, it could drop back to xhigh). A
   model that does not offer the effort uses the highest level it offers and

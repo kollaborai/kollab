@@ -38,7 +38,7 @@ if sys.platform == "win32":
 # Import from the same directory
 from kollabor_ai.profile_manager import EFFORT_LEVELS
 
-from .application import TerminalLLMChat, UnknownLLMError
+from .application import InvalidACPLoadoutError, TerminalLLMChat, UnknownLLMError
 from .hub_env import hub_disabled_by_env
 from .logging import setup_bootstrap_logging
 from .version import __version__, get_build_provenance
@@ -1240,7 +1240,7 @@ async def async_main() -> None:
     except KeyboardInterrupt:
         # print("\n\nApplication interrupted by user")
         logger.info("Application interrupted by user")
-    except UnknownLLMError as e:
+    except (UnknownLLMError, InvalidACPLoadoutError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
     except Exception as e:

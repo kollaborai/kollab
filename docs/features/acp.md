@@ -123,6 +123,10 @@ A model or effort pick belongs to the ACP session it was made in:
 - A restart restores confirmed Model-panel picks ahead of ordinary profile
   defaults. An explicit loadout model or effort takes precedence over those
   saved picks without changing the saved file at launch.
+- A named or default ACP loadout starts only when its requested model and
+  effort are confirmed by the harness. Unsupported values, `temperature`,
+  and `max_tokens` stop startup with an error; an unavailable old saved pick
+  on its own remains a notice rather than a startup failure.
 - The Session tab's effort applies only to that daemon. It survives a harness
   restart in that daemon and does not rewrite the shared Model-panel picks or
   change another daemon using the same profile.

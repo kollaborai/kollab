@@ -67,6 +67,28 @@ class Loadout:
     implicit: bool = False  # synthesized from model registry, not saved in config
 
 
+class InvalidACPLoadoutError(ValueError):
+    """An ACP loadout contains settings the harness cannot apply."""
+
+
+def validate_acp_loadout(loadout: Loadout) -> None:
+    unsupported = [name for name in ("temperature", "max_tokens")
+                   if getattr(loadout, name) is not None]
+    if unsupported:
+        raise InvalidACPLoadoutError(
+            f"ACP loadout {loadout.name!r} cannot set {', '.join(unsupported)}"
+        )
+
+
+def acp_loadout_model(loadout: Loadout, profile: Any) -> str:
+    """An implicit harness entry names an executable, not a model."""
+    command = tuple(getattr(profile, "command", ()) or ())
+    if (loadout.implicit and loadout.name == profile.name
+            and command and loadout.model == command[0]):
+        return ""
+    return loadout.model
+
+
 class LoadoutManager:
     """Resolves, persists, and activates loadouts on top of a ProfileManager."""
 
@@ -557,8 +579,10 @@ class LoadoutManager:
             else getattr(current_profile, "provider", "")
         )
         if str(selected_provider).lower() == "acp":
-            if loadout.temperature is not None or loadout.max_tokens is not None:
-                logger.error("ACP loadout '%s' cannot override native model parameters", loadout.name)
+            try:
+                validate_acp_loadout(loadout)
+            except InvalidACPLoadoutError as exc:
+                logger.error("%s", exc)
                 return None
             if orchestrator is None:
                 state_service = (
@@ -575,10 +599,8 @@ class LoadoutManager:
                         logger.error("Remote ACP loadout activation failed (%s)", type(exc).__name__)
                 return None
 
-            command = tuple(getattr(selected_profile, "command", ()) or ())
-            harness_entry = bool(loadout.implicit and loadout.name == selected_profile.name
-                                 and command and loadout.model == command[0])
-            model_value = "" if harness_entry else loadout.model
+            model_value = acp_loadout_model(loadout, selected_profile)
+            harness_entry = bool(loadout.implicit and not model_value)
             previous = current_profile if str(current_provider).lower() == "acp" else None
             prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
             prior_conversation = orchestrator.binding_conversation_id if previous is not None else None

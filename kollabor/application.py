@@ -15,6 +15,7 @@ from kollabor_agent import AgentManager
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_ai import KollaborConversationLogger, ProfileManager
+from kollabor_ai.loadout_manager import InvalidACPLoadoutError, acp_loadout_model, validate_acp_loadout
 from kollabor_config import ConfigService, local_ipc
 from kollabor_events import EventBus
 from kollabor_events.dict_utils import deep_merge
@@ -330,6 +331,7 @@ class TerminalLLMChat:
                         else None
                     )
                     if loadout and getattr(loadout_profile, "provider", "") == "acp":
+                        validate_acp_loadout(loadout)
                         # Keep loadout provenance separate from the profile's
                         # ordinary defaults and the shared ACP pick store.
                         applied = self.profile_manager.set_active_profile(
@@ -337,7 +339,8 @@ class TerminalLLMChat:
                         )
                         if applied:
                             self._startup_acp_loadout = (
-                                loadout.provider_profile, loadout.model, loadout.effort,
+                                loadout.provider_profile,
+                                acp_loadout_model(loadout, loadout_profile), loadout.effort,
                             )
                     elif loadout:
                         update_kwargs = {
@@ -360,6 +363,8 @@ class TerminalLLMChat:
                             loadout.provider_profile, persist=False
                         )
                         logger.info("Applied default loadout '%s'", loadout.name)
+            except InvalidACPLoadoutError:
+                raise
             except Exception as exc:
                 logger.warning("Could not apply default loadout: %s", exc)
 
@@ -388,6 +393,8 @@ class TerminalLLMChat:
                         loadout.provider_profile
                     )
                     is_acp_loadout = getattr(loadout_profile, "provider", "") == "acp"
+                    if is_acp_loadout:
+                        validate_acp_loadout(loadout)
                     update_kwargs = {"model": loadout.model, "save_to_config": False}
                     if not is_acp_loadout and loadout.temperature is not None:
                         update_kwargs["temperature"] = loadout.temperature
@@ -411,7 +418,8 @@ class TerminalLLMChat:
                     if activated:
                         if is_acp_loadout:
                             self._startup_acp_loadout = (
-                                loadout.provider_profile, loadout.model, loadout.effort,
+                                loadout.provider_profile,
+                                acp_loadout_model(loadout, loadout_profile), loadout.effort,
                             )
                         activated_via_loadout = True
                         logger.info(
