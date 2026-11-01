@@ -19,12 +19,11 @@ Entries are separated by blank lines between the body and the next ---.
 import asyncio
 import logging
 import re
-import sys
 import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 from .text_utils import (
     extract_keywords,
@@ -63,44 +62,8 @@ DEDUP_THRESHOLD = 0.45
 # short summaries that share common words like "insight" or "about".
 SUMMARY_DEDUP_THRESHOLD = 0.40
 
-# The GIL switch interval while the dedup pass runs in its worker thread. At
-# CPython's default 5 ms, each syscall the agent's event loop makes waits for
-# the pass to give the GIL back: a handler that takes 1 ms alone took 1.4 s,
-# and the koordinator's command catalog RPC timed out at 10 s (#546).
-_PASS_SWITCH_INTERVAL = 0.0002
-_switch_lock = threading.Lock()
-_switch_passes = 0  # passes running in worker threads
-_switch_before = 0.0  # the interval before the first of them
-
-
-def _run_pass(merge_pass, *args) -> int:
-    """Run a dedup pass in this worker thread at ``_PASS_SWITCH_INTERVAL``.
-
-    The interval is process-wide: the first of overlapping passes lowers it and
-    the last puts it back. The worker thread does both, so a cancelled dreaming
-    task never restores it while its pass still runs.
-    """
-    global _switch_passes, _switch_before
-    with _switch_lock:
-        if _switch_passes == 0:
-            _switch_before = sys.getswitchinterval()
-            sys.setswitchinterval(min(_switch_before, _PASS_SWITCH_INTERVAL))
-        _switch_passes += 1
-    try:
-        return merge_pass(*args)
-    finally:
-        with _switch_lock:
-            _switch_passes -= 1
-            if _switch_passes == 0:
-                sys.setswitchinterval(_switch_before)
-
 # Minimum relevance score for nudge results
 NUDGE_MIN_SCORE = 1.0
-
-# Regex for parsing structured entries (header + body)
-def _signature(entry: "CrystalEntry") -> tuple:
-    return entry.id, entry.date, entry.summary, entry.body, tuple(entry.keywords)
-
 
 def _jaccard(a: frozenset, b: frozenset) -> float:
     """text_utils.keyword_overlap on prebuilt keyword sets."""
@@ -109,6 +72,7 @@ def _jaccard(a: frozenset, b: frozenset) -> float:
     return len(a & b) / len(a | b)
 
 
+# Regex for parsing structured entries (header + body)
 _ENTRY_RE = re.compile(
     r"---\n"
     r"id:\s*(\S+)\n"
@@ -162,8 +126,10 @@ class CrystalStore:
         self._entries: List[CrystalEntry] = []
         self._next_id: int = 1
         self._loaded = False
-        # Entries that changed while the last off-loop pass ran: they sit out the next.
-        self._dedup_changed: set = set()
+        # Counts writes, so a dedup pass that gave the loop back sees one (#546),
+        # and the count at which a pass last found nothing to merge.
+        self._revision = 0
+        self._dedup_clean = -1
         # Stemmed summary words, by summary text: stemming every pair again
         # made a pass over thousands of entries take minutes (#546).
         self._summary_words: dict = {}
@@ -228,6 +194,7 @@ class CrystalStore:
 
     def _save_to_disk(self) -> None:
         """Write all entries back to crystallized.md."""
+        self._revision += 1
         try:
             content = "\n".join(e.to_block() for e in self._entries)
             with self._lock:
@@ -480,86 +447,78 @@ class CrystalStore:
             logger.info("crystal_store: deduplicated %d entries", merged_count)
         return merged_count
 
-    async def deduplicate_off_loop(self) -> int:
-        """deduplicate() in a worker thread, for the dreaming cycle.
+    async def deduplicate_in_slices(self, slice_s: float = 0.005, attempts: int = 3) -> int:
+        """deduplicate() for the dreaming cycle, on the event loop a few ms at a time.
 
         A pass compares every pair: 105 s for the koordinator's 2,608 entries
-        when it ran on the agent's event loop, which then answered nothing and
-        peers deleted its socket as dead (#546). The worker merges copies and
-        records each merge; back on the loop the merges replay on the live
-        entries, in order. The first merge touching an entry that changed
-        meanwhile waits for the next pass with every merge after it, since each
-        merge depends on the ones before it; new entries hold back nothing. An
-        entry that changed during a pass sits out the next one, as a new one
-        would: a memory rewritten during every pass would otherwise hold back
-        every merge after its own for good.
+        run whole on the agent's event loop, which then answered nothing, and
+        peers deleted its socket as dead (#546). This pass merges copies and
+        gives the loop back every ``slice_s``. A write to the store meanwhile
+        starts it over on the entries as they now are, so its merges are always
+        those of one full ordered pass. After ``attempts`` interrupted passes it
+        leaves the entries as they are until the next cycle. A store unchanged
+        since a pass found nothing to merge skips it: it would find nothing again.
         """
         self._ensure_loaded()
-        snapshot = [_signature(e) for e in self._entries]
-        before = {sig[0]: sig for sig in snapshot}
-        repeated = len(before) < len(snapshot)  # repeated ids: merges cannot be matched to entries
-        out = set() if repeated else self._dedup_changed
-        copies = [replace(e, keywords=list(e.keywords)) for e in self._entries if e.id not in out]
-        merges: List[Tuple[str, str]] = []
-        found = await asyncio.to_thread(_run_pass, self._merge_pass, copies, merges)
-        self._dedup_changed = set() if repeated else {
-            e.id for e in self._entries if e.id in before and _signature(e) != before[e.id]
-        }
-        if not found:
+        if self._dedup_clean == self._revision:
             return 0
-        waiting = 0
-        if repeated:
-            if [_signature(e) for e in self._entries] != snapshot:
-                return 0
-            self._entries = copies
-        else:
-            live = {e.id: e for e in self._entries}
-            done = []
-            for keep_id, drop_id in merges:
-                keep, drop = live.get(keep_id), live.get(drop_id)
-                if (keep is None or drop is None
-                        or _signature(keep) != before[keep_id]
-                        or _signature(drop) != before[drop_id]):
-                    waiting = len(merges) - len(done)
+        for _ in range(attempts):
+            revision = self._revision
+            copies = [replace(e, keywords=list(e.keywords)) for e in self._entries]
+            merged, deadline = 0, time.monotonic() + slice_s
+            for merged in self._merge_steps(copies):
+                if time.monotonic() < deadline:
+                    continue
+                await asyncio.sleep(0)
+                if self._revision != revision:
                     break
-                self._merge_into(keep, drop)
-                before[keep_id] = _signature(keep)
-                del live[drop_id]
-                done.append(drop_id)
-            self._entries = [e for e in self._entries if e.id in live]
-            merges = done
-        if waiting:
-            logger.info("crystal_store: an entry changed during dedup, %d merges wait for the next pass",
-                        waiting)
-        if merges:
-            self._save_to_disk()
-            logger.info("crystal_store: deduplicated %d entries", len(merges))
-        return len(merges)
+                deadline = time.monotonic() + slice_s
+            else:
+                # Nothing awaited since the last check, so nothing wrote meanwhile.
+                if merged:
+                    self._entries = copies
+                    self._save_to_disk()
+                    logger.info("crystal_store: deduplicated %d entries", merged)
+                else:
+                    self._dedup_clean = self._revision
+                return merged
+        logger.info("crystal_store: written to during %d dedup passes; the next cycle tries again", attempts)
+        return 0
 
-    def _merge_pass(
-        self, entries: List[CrystalEntry], merges: Optional[List[Tuple[str, str]]] = None
-    ) -> int:
-        """Merge duplicates in ``entries`` in place, each into the earliest match.
+    def _merge_pass(self, entries: List[CrystalEntry]) -> int:
+        """Merge duplicates in ``entries`` in place, each into the earliest match."""
+        merged = 0
+        for merged in self._merge_steps(entries):
+            pass
+        return merged
+
+    def _merge_steps(self, entries: List[CrystalEntry]) -> Iterator[int]:
+        """_merge_pass, yielding its merge count every 64 entries it reads, every 512
+        comparisons and once at the end.
 
         The words and keyword sets are built once per entry, not once per pair.
-        Each merge is appended to ``merges`` as ``(kept id, merged id)``.
         """
-        # ponytail: every pair, about 11 s for 2,608 entries in the worker
-        # thread; index entries by word if vaults grow to tens of thousands.
-        words = [self._words(e.summary) if e.summary else frozenset() for e in entries]
-        keyword_sets = [frozenset(e.keywords) for e in entries]
-        merged_count = 0
+        # ponytail: every pair, about 20 s for 2,628 entries; index entries by
+        # word if vaults grow to tens of thousands.
+        words, keyword_sets = [], []
+        for n, entry in enumerate(entries, 1):
+            words.append(self._words(entry.summary) if entry.summary else frozenset())
+            keyword_sets.append(frozenset(entry.keywords))
+            if n % 64 == 0:  # stemming a summary the cache has not seen is slow
+                yield 0
+        merged_count = compared = 0
         i = 0
         while i < len(entries):
             j = i + 1
             while j < len(entries):
+                compared += 1
+                if compared % 512 == 0:
+                    yield merged_count
                 if token_overlap(words[i], words[j]) > SUMMARY_DEDUP_THRESHOLD or (
                     _jaccard(keyword_sets[i], keyword_sets[j]) > DEDUP_THRESHOLD
                 ):
                     target, source = entries[i], entries.pop(j)
                     self._merge_into(target, source)
-                    if merges is not None:
-                        merges.append((target.id, source.id))
                     words.pop(j)
                     keyword_sets.pop(j)
                     words[i] = self._words(target.summary) if target.summary else frozenset()
@@ -568,7 +527,7 @@ class CrystalStore:
                 else:
                     j += 1
             i += 1
-        return merged_count
+        yield merged_count
 
     @staticmethod
     def _merge_into(target: CrystalEntry, source: CrystalEntry) -> None:
