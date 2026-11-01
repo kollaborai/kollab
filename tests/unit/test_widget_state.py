@@ -78,7 +78,8 @@ class TestFromFlatDict:
         d = {"messages": 3, "input_tokens": 100}
         state = WidgetState.from_flat_dict(d)
 
-        assert len(WidgetState.state_fields()) == 34
+        assert "acp_turn_usage" in WidgetState.state_fields()
+        assert state.acp_turn_usage == {}
         assert state.messages == 3
         assert state.input_tokens == 100
         assert state.output_tokens == 0  # default

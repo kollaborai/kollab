@@ -24,6 +24,7 @@ import logging
 import re
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
@@ -64,6 +65,10 @@ DEDUP_THRESHOLD = 0.45
 # 0.40 catches semantic duplicates while avoiding false merges on
 # short summaries that share common words like "insight" or "about".
 SUMMARY_DEDUP_THRESHOLD = 0.40
+
+# Minimum room for tokenized summaries. Larger stores grow the cache with
+# their live entries so sequential scans do not evict the whole working set.
+SUMMARY_WORD_CACHE_MIN_SIZE = 8192
 
 # Minimum relevance score for nudge results
 NUDGE_MIN_SCORE = 1.0
@@ -149,9 +154,28 @@ class CrystalStore:
         # The ids of entries changed since the last dedup pass: only pairs with
         # one of them can match. None: unknown, so every entry (#546).
         self._changed: Optional[set] = None
-        # Stemmed summary words, by summary text: stemming every pair again
-        # made a pass over thousands of entries take minutes (#546).
-        self._summary_words: dict = {}
+        # Sliced dedup reads this cache outside the store lock while a writer
+        # can resize it. The cache lock protects only its data and size limit.
+        self._summary_words: OrderedDict[str, frozenset] = OrderedDict()
+        self._summary_words_lock = threading.Lock()
+        self._summary_words_limit = SUMMARY_WORD_CACHE_MIN_SIZE
+        self._summary_words_high_water = SUMMARY_WORD_CACHE_MIN_SIZE
+
+    def _resize_summary_cache(self) -> None:
+        """Resize in place, retaining the most recently used summaries."""
+        size = max(SUMMARY_WORD_CACHE_MIN_SIZE, 1 << (max(1, 2 * len(self._entries)) - 1).bit_length())
+        with self._summary_words_lock:
+            self._summary_words_limit = size
+            while len(self._summary_words) > size:
+                self._summary_words.popitem(last=False)
+            # Eviction alone can leave the OrderedDict's backing table at its
+            # historical peak. Compact after a 4x drop in capacity; tracking
+            # the last high water avoids copying on every boundary crossing.
+            if 4 * size <= self._summary_words_high_water:
+                self._summary_words = OrderedDict(self._summary_words)
+                self._summary_words_high_water = size
+            else:
+                self._summary_words_high_water = max(self._summary_words_high_water, size)
 
     def _ensure_loaded(self) -> None:
         """Lazy-load entries from disk on first access, under the lock: a load
@@ -163,6 +187,7 @@ class CrystalStore:
             if self._loaded:
                 return
             self._entries = self._parse_file()
+            self._resize_summary_cache()
             if self._entries:
                 # Set next ID from highest existing
                 max_num = 0
@@ -220,6 +245,7 @@ class CrystalStore:
     def _save_to_disk(self) -> None:
         """Write all entries back to crystallized.md."""
         with self._lock:
+            self._resize_summary_cache()
             self._revision += 1
             try:
                 self._path.write_text("\n".join(e.to_block() for e in self._entries))
@@ -347,9 +373,24 @@ class CrystalStore:
         return token_overlap(self._words(summary_a), self._words(summary_b))
 
     def _words(self, summary: str) -> frozenset:
-        words = self._summary_words.get(summary)
-        if words is None:
-            words = self._summary_words[summary] = summary_tokens(summary)
+        with self._summary_words_lock:
+            words = self._summary_words.get(summary)
+            if words is not None:
+                self._summary_words.move_to_end(summary)
+                return words
+
+        # Tokenization is pure and can be expensive. Do it outside the lock so
+        # an overlapping sliced pass and writer can keep making progress.
+        words = summary_tokens(summary)
+        with self._summary_words_lock:
+            cached = self._summary_words.get(summary)
+            if cached is None:
+                self._summary_words[summary] = words
+                if len(self._summary_words) > self._summary_words_limit:
+                    self._summary_words.popitem(last=False)
+            else:
+                words = cached
+                self._summary_words.move_to_end(summary)
         return words
 
     def _find_merge_target(

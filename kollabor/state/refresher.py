@@ -208,6 +208,7 @@ class WidgetStateRefresher:
             flat["cost_usd"] = stats.cost_usd
             flat["total_cost_usd"] = stats.total_cost_usd
             flat["acp_usage"] = dict(stats.acp_usage)
+            flat["acp_turn_usage"] = dict(stats.acp_turn_usage)
             flat["session"] = stats.session_id
         except Exception as e:
             degraded = True
