@@ -32,7 +32,7 @@ class OrgPickerAltView(AltView):
 
     def __init__(
         self,
-        teams: Sequence[Team],
+        teams: Sequence[Team] = (),
         *,
         team: Team | None = None,
         mission: str = "",

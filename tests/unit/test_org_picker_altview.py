@@ -42,6 +42,16 @@ def _team(name: str = "example") -> Team:
     )
 
 
+def test_no_argument_metadata_probe_starts_with_empty_team_picker():
+    view = OrgPickerAltView()
+
+    assert view.metadata.plugin_type == "hub-org-picker"
+    assert view.teams == []
+    assert view.team is None
+    assert view.phase == "teams"
+    assert view._message == "No teams are available in this folder."
+
+
 def _key(name: str, char: str | None = None) -> KeyPress:
     return KeyPress(name=name, code=ord(char) if char else 0, char=char)
 
