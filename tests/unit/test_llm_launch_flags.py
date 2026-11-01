@@ -160,6 +160,16 @@ class TestAttachFlagPlumbing(unittest.TestCase):
                 self.assertIn(f'update_kwargs["{field}"] = loadout.{field}', block)
         self.assertIn("loadout.provider_profile, **update_kwargs", block)
 
+    def test_cli_loadout_probe_suppresses_missing_profile_error(self):
+        import inspect
+
+        from kollabor import application
+
+        source = inspect.getsource(application.TerminalLLMChat.__init__)
+        start = source.index("if profile_name:")
+        end = source.index("elif save_profile or make_default_profile", start)
+        block = source[start:end]
+        self.assertIn("log_not_found=False", block)
 
     def test_application_stashes_both_for_attach(self):
         import inspect
