@@ -469,3 +469,17 @@ def resolve_history_output(
     """Fetch one deferred tool result after checking its snapshot reference."""
     index, _ = _decode_cursor(reference, session_id, "output", history)
     return copy.deepcopy(history[index].get("content"))
+
+
+def resolve_history_metadata(
+    session_id: str, history: list[dict[str, Any]], reference: str
+) -> dict[str, Any]:
+    """Fetch one message's full metadata after checking its snapshot reference.
+
+    Page slimming drops heavy metadata lists (acp_updates, tool_calls, ...)
+    from the served page, but the slimmed entry keeps its signed reference so
+    a client can load the original metadata on demand (issue #522).
+    """
+    index, _ = _decode_cursor(reference, session_id, "output", history)
+    metadata = history[index].get("metadata")
+    return copy.deepcopy(metadata) if isinstance(metadata, dict) else {}

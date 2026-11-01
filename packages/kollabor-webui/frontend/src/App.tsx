@@ -72,6 +72,7 @@ import { VoiceRoomProvider } from "./voice/voice-room";
 import {
   historyPageCache,
   loadLatestHistoryPage,
+  restoreSlimmedHistoryMetadata,
 
   loadOlderHistoryPage,
   mergeOlderHistoryPage,
@@ -633,6 +634,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
         ]);
         const page = loaded.page;
+        page.history = await restoreSlimmedHistoryMetadata(sessionId, api, page.history);
         const pendingPermissions = permissions.pending_prompts || [];
         if (!stillCurrent()) return buildInitialState(sessionId, nextSessions, page.history,
           pendingPermissions, page.last_turn_error ?? null, page.start_index, page.conversation_uid ?? null);
@@ -728,8 +730,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       }
       if (prefetch) return;
 
+      const restored = await restoreSlimmedHistoryMetadata(sessionId, api, older.history);
+      if (!stillCurrent()) return;
       const latest = historyPagesRef.current.get(sessionId) ?? current;
-      const updated = mergeOlderHistoryPage(latest, older);
+      const updated = mergeOlderHistoryPage(latest, { ...older, history: restored });
       if (updated.start_index >= latest.start_index) {
         throw new Error("The engine returned no older history messages.");
       }

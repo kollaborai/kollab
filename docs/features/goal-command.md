@@ -63,8 +63,9 @@ Web goal replies are private to the submitting request. The legacy
 `POST /sessions/{session_id}/message` API must include the `conversation_uid`
 returned by that session's `/history`; the daemon refuses a goal if the
 conversation changed before admission. The assistant transport carries the
-same identity in its state. Clients connected to a daemon without private
-goal replies must update before submitting a goal.
+same identity in its state. Revoking a phone closes its in-flight private
+goal streams as well as its ordinary event streams. Clients connected to a
+daemon without private goal replies must update before submitting a goal.
 `--` is the end-of-options delimiter for objectives beginning with `--`.
 
 ## How it works

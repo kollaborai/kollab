@@ -168,6 +168,15 @@ async def _pump_goal_reply(session, reply_id: str, queue: asyncio.Queue) -> None
     await queue.put({"type": "turn_complete", "stop_reason": "error", "request_id": reply_id})
 
 
+async def _forward_goal_revocation(shared_queue: asyncio.Queue, private_queue: asyncio.Queue) -> None:
+    """Forward a revoked phone's subscriber signal while ignoring shared output."""
+    while True:
+        event = await shared_queue.get()
+        if event is PHONE_STREAM_REVOKED:
+            await private_queue.put(PHONE_STREAM_REVOKED)
+            return
+
+
 def _contains_reserved_voice_origin(value: Any) -> bool:
     if isinstance(value, dict):
         origin_context = value.get("origin_context")
@@ -209,7 +218,8 @@ async def send_message(
         raise HTTPException(status_code=409, detail="Session daemon is not running")
 
     # Subscribe before submitting so no event can land in the gap.
-    queue = _subscribe(session, _request_read_context(request))
+    read_context = _request_read_context(request)
+    queue = _subscribe(session, read_context)
     # Always an id: a daemon that echoes it stamps this turn with it (#551).
     request_id = body.request_id or uuid.uuid4().hex
 
@@ -244,6 +254,10 @@ async def send_message(
     async def event_generator():
         private_queue = asyncio.Queue() if reply_id else None
         pump = asyncio.create_task(_pump_goal_reply(session, str(reply_id), private_queue)) if reply_id else None
+        revocation_watch = (
+            asyncio.create_task(_forward_goal_revocation(queue, private_queue))
+            if private_queue is not None and read_context is not None else None
+        )
         try:
             while True:
                 try:
@@ -263,7 +277,7 @@ async def send_message(
                     }
                     return
 
-                if event is PHONE_STREAM_REVOKED:
+                if event is PHONE_STREAM_REVOKED or (read_context and read_context.revoked):
                     return
                 event.setdefault("session_id", session_id)
                 if _foreign_completion(event, request_ids, tagged):
@@ -284,9 +298,11 @@ async def send_message(
                 if event.get("type") == "turn_complete":
                     return
         finally:
-            if pump is not None:
-                pump.cancel()
-                await asyncio.gather(pump, return_exceptions=True)
+            tasks = [task for task in (pump, revocation_watch) if task is not None]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             session.unsubscribe(queue)
 
     headers = {"X-Kollab-Goal-Reply": str(reply_id)} if reply_id else None
@@ -940,6 +956,7 @@ async def assistant_transport(
         shared_queue = _subscribe(session, read_context)
         queue = shared_queue
         goal_pump = None
+        revocation_watch = None
         tool_controllers: Dict[str, Any] = {}
         permission_controllers: Dict[str, Any] = {}
         permission_tool_ids: Dict[str, str] = {}
@@ -1053,6 +1070,8 @@ async def assistant_transport(
                         request_ids.add(str(reply_id))
                         queue = asyncio.Queue()
                         goal_pump = asyncio.create_task(_pump_goal_reply(session, str(reply_id), queue))
+                        if read_context is not None:
+                            revocation_watch = asyncio.create_task(_forward_goal_revocation(shared_queue, queue))
                     if isinstance(body.state, dict) and body.state.get("error"):
                         # Cancellation belongs to its previous turn. A new
                         # admitted input must not keep that error as its status.
@@ -1123,7 +1142,7 @@ async def assistant_transport(
                 event = await _assistant_next_event(
                     queue, controller, timeout=held_text_due()
                 )
-                if event is None:
+                if event is None or (read_context and read_context.revoked):
                     return
                 if not event:
                     # The daemon went quiet after streaming (e.g. before
@@ -1378,9 +1397,11 @@ async def assistant_transport(
             logger.exception("assistant transport failed for %s", session_id)
             controller.add_error(str(exc))
         finally:
-            if goal_pump is not None:
-                goal_pump.cancel()
-                await asyncio.gather(goal_pump, return_exceptions=True)
+            tasks = [task for task in (goal_pump, revocation_watch) if task is not None]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             session.unsubscribe(shared_queue)
 
     stream = create_run(run_callback, state=body.state)
