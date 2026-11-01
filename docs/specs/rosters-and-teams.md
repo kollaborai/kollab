@@ -226,7 +226,10 @@ Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `Agen
   pointer, including a secondary touchscreen, these touch targets measure at least
   44 by 44 CSS pixels. Footer actions wrap in order when needed, keeping their
   labels and controls accessible; Save persists the look rather than the preview activity.
-  When the introduction overflows, it scrolls and becomes keyboard focusable.
+  Long Reset names may be visually shortened, but retain the full accessible name
+  and tooltip. When the introduction or action area overflows, it scrolls and
+  becomes keyboard focusable. Save errors are announced and their beginning is
+  revealed, including when a long error must scroll.
 - **Avatar.** One component draws every agent picture: kind `gem` (or none) is the 3D
   gem; `image`, `emoji` and `initials` are a flat tile on the persona's color. Image
   files are fetched with the bearer token into blob URLs; a file that fails keeps the

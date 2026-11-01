@@ -23,8 +23,11 @@ const textScale = Number(process.env.GEM_STUDIO_TEXT_SCALE || 1);
 const enableReset = process.env.GEM_STUDIO_ENABLE_RESET === "1";
 const simulateSaveError = process.env.GEM_STUDIO_SAVE_ERROR === "1";
 const displayName = process.env.GEM_STUDIO_TEST_NAME || "Sapphire";
+const errorText = process.env.GEM_STUDIO_ERROR_TEXT || "TemporarySaveFailureWithoutAnySpacesToExerciseWrapping0123456789";
+const viewportHeight = process.env.GEM_STUDIO_VIEWPORT_HEIGHT ? Number(process.env.GEM_STUDIO_VIEWPORT_HEIGHT) : null;
 const recheckResize = process.env.GEM_STUDIO_RECHECK_RESIZE === "1";
 if (!Number.isFinite(textScale) || textScale < 1 || textScale > 3) throw new Error("Text scale must be between 1 and 3.");
+if (viewportHeight !== null && (!Number.isInteger(viewportHeight) || viewportHeight < 250)) throw new Error("Viewport height must be at least 250 CSS pixels.");
 fs.mkdirSync(out, { recursive: true });
 
 // Build identity: which head and which built artifact produced every shot.
@@ -39,7 +42,9 @@ fs.writeFileSync(
     `text_scale ${textScale}`,
     `enable_reset ${enableReset}`,
     `simulate_save_error ${simulateSaveError}`,
+    `error_text_length ${errorText.length}`,
     `test_name ${JSON.stringify(displayName)}`,
+    `viewport_height ${viewportHeight ?? "default"}`,
     `recheck_resize ${recheckResize}`,
     `git_status ${JSON.stringify(execSync("git status --porcelain --untracked-files=no", { cwd: path.resolve(here, "../..") }).toString().trim())}`,
     `GemStudio.tsx ${sha256(path.join(here, "../src/components/gems/GemStudio.tsx"))}`,
@@ -193,7 +198,7 @@ const makeContext = async (browser, width, height, theme, extra = {}, simulateHy
     }
     if (simulateSaveError && request.method() === "PUT" && url.pathname.endsWith("/agents/appearance")) {
       return route.fulfill({ status: 503, contentType: "application/json",
-        body: JSON.stringify({ detail: "TemporarySaveFailureWithoutAnySpacesToExerciseWrapping0123456789" }) });
+        body: JSON.stringify({ detail: errorText }) });
     }
     if (engine || (url.origin === base && ["fetch", "xhr"].includes(request.resourceType()))) {
       return route.fulfill({
@@ -291,14 +296,17 @@ const verifyHeaderScroll = async (page, dialog, label) => {
     if (!(await header.evaluate((node) => document.activeElement === node)))
       failures.push(`${label}/header: the scrollable introduction is not in keyboard tab order`);
     await page.keyboard.press("End");
-    await page.waitForTimeout(150);
+    await page.waitForFunction((node) => node.scrollTop >= node.scrollHeight - node.clientHeight - 1,
+      await header.elementHandle(), { timeout: 3000 }).catch(() => {});
     const bottom = await header.evaluate((node) => ({ focused: document.activeElement === node,
       visible: node.matches(":focus-visible"), shadow: getComputedStyle(node).boxShadow,
       top: node.scrollTop, max: node.scrollHeight - node.clientHeight }));
     if (!bottom.focused || !bottom.visible || !bottom.shadow.includes("inset") || bottom.top < bottom.max - 1)
       failures.push(`${label}/header: keyboard cannot visibly focus and scroll the introduction ${JSON.stringify(bottom)}`);
+    await page.waitForTimeout(300); // Let the browser finish its End-key scroll before reversing it.
     await page.keyboard.press("Home");
-    await page.waitForTimeout(150);
+    await page.waitForFunction((node) => node.scrollTop <= 1,
+      await header.elementHandle(), { timeout: 3000 }).catch(() => {});
     if ((await header.evaluate((node) => node.scrollTop)) > 1)
       failures.push(`${label}/header: keyboard cannot scroll the introduction back to the top`);
     console.log(`${label}/header-scroll`, JSON.stringify({ before, bottom }));
@@ -349,6 +357,8 @@ const recordInitialFocus = async (page, dialog, label) => {
 };
 const verifyFooter = async (page, dialog, label, { error = false } = {}) => {
   const footer = dialog.locator('[data-slot="dialog-footer"]');
+  // The region becomes a tab stop only after ResizeObserver sees overflow.
+  await page.waitForFunction((node) => (node.tabIndex === 0) === (node.scrollHeight > node.clientHeight + 1), await footer.elementHandle());
   const info = await footer.evaluate((node) => {
     const rect = (element) => {
       const r = element.getBoundingClientRect();
@@ -359,13 +369,20 @@ const verifyFooter = async (page, dialog, label, { error = false } = {}) => {
       const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
       const range = document.createRange();
       range.selectNodeContents(button);
-      return { text: button.textContent.trim().replace(/\s+/g, " "), disabled: button.disabled,
+      const resetLabel = button.querySelector("span.line-clamp-2");
+      const contentRects = resetLabel ? [...button.children].map(rect) :
+        [...range.getClientRects()].filter((item) => item.width && item.height)
+          .map((item) => ({ left: item.left, right: item.right, top: item.top, bottom: item.bottom }));
+      return { text: button.textContent.trim().replace(/\s+/g, " "), disabled: button.disabled, title: button.title,
+        resetLabel: resetLabel ? { clamp: getComputedStyle(resetLabel).webkitLineClamp,
+          overflow: getComputedStyle(resetLabel).overflow, clientHeight: resetLabel.clientHeight,
+          scrollHeight: resetLabel.scrollHeight } : null,
         rect: rect(button), centerReceivesHit: button.contains(hit),
-        contentRects: [...range.getClientRects()].filter((item) => item.width && item.height)
-          .map((item) => ({ left: item.left, right: item.right, top: item.top, bottom: item.bottom })) };
+        contentRects };
     });
     const error = node.querySelector("p");
     return { footer: rect(node), dialog: rect(node.closest('[role="dialog"]')), buttons,
+      scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, tabIndex: node.tabIndex,
       error: error ? { text: error.textContent, rect: rect(error), scrollWidth: error.scrollWidth, clientWidth: error.clientWidth } : null,
       viewport: { left: 0, top: 0, right: innerWidth, bottom: innerHeight } };
   });
@@ -375,15 +392,22 @@ const verifyFooter = async (page, dialog, label, { error = false } = {}) => {
   if (info.buttons.length !== expected.length || info.buttons.some((button, index) =>
     index === 0 && !error ? !button.text.startsWith(expected[index]) : button.text !== expected[index]))
     failures.push(`${label}/footer: unexpected action order ${JSON.stringify(info.buttons.map((b) => b.text))}`);
-  if (error && (!info.error || !inside(info.error.rect, info.footer) || !inside(info.error.rect, info.dialog) ||
-      info.error.scrollWidth > info.error.clientWidth + 1))
+  const scrollable = info.scrollHeight > info.clientHeight + 1;
+  if (error && (!info.error || info.error.scrollWidth > info.error.clientWidth + 1 ||
+      info.error.rect.left < info.footer.left - 0.75 || info.error.rect.right > info.footer.right + 0.75))
     failures.push(`${label}/footer: save error is clipped`);
+  if (!error) {
+    const reset = info.buttons[0];
+    if (reset?.title !== reset?.text || reset?.resetLabel?.clamp !== "2" || reset?.resetLabel?.overflow !== "hidden" ||
+        (await footer.getByRole("button", { name: `Reset ${displayName}`, exact: true }).count()) !== 1)
+      failures.push(`${label}/footer: Reset does not expose the complete name and bounded label`);
+  }
   for (const button of info.buttons) {
-    if (!inside(button.rect, info.footer) || !inside(button.rect, info.dialog) || !inside(button.rect, info.viewport))
+    if (!scrollable && (!inside(button.rect, info.footer) || !inside(button.rect, info.dialog) || !inside(button.rect, info.viewport)))
       failures.push(`${label}/footer: ${button.text} is clipped or outside the dialog`);
     if (button.contentRects.some((content) => !inside(content, button.rect)))
       failures.push(`${label}/footer: ${button.text} content is clipped`);
-    if (!button.disabled && !button.centerReceivesHit)
+    if (!scrollable && !button.disabled && !button.centerReceivesHit)
       failures.push(`${label}/footer: ${button.text} center does not hit its button`);
   }
   for (let i = 0; i < info.buttons.length; i++) {
@@ -395,6 +419,96 @@ const verifyFooter = async (page, dialog, label, { error = false } = {}) => {
     }
   }
   console.log(`${label}/footer`, JSON.stringify(info));
+  if (scrollable) {
+    await footer.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("End");
+    await page.waitForFunction((node) => node.scrollTop >= node.scrollHeight - node.clientHeight - 1,
+      await footer.elementHandle(), { timeout: 3000 }).catch(() => {});
+    const bottom = await footer.evaluate((node) => ({ focused: document.activeElement === node,
+      visible: node.matches(":focus-visible"), shadow: getComputedStyle(node).boxShadow,
+      top: node.scrollTop, max: node.scrollHeight - node.clientHeight }));
+    if (!bottom.focused || !bottom.visible || !bottom.shadow.includes("inset") || bottom.top < bottom.max - 1)
+      failures.push(`${label}/footer: keyboard cannot visibly focus and scroll the actions ${JSON.stringify(bottom)}`);
+    await page.waitForTimeout(300); // Let the browser finish its End-key scroll before reversing it.
+    await page.keyboard.press("Home");
+    await page.waitForFunction((node) => node.scrollTop <= 1,
+      await footer.elementHandle(), { timeout: 3000 }).catch(() => {});
+    const top = await footer.evaluate((node) => node.scrollTop);
+    if (top > 1) failures.push(`${label}/footer: keyboard cannot return to the top of the actions (${top}px)`);
+    console.log(`${label}/footer-scroll`, JSON.stringify(bottom));
+    for (let i = 0; i < info.buttons.length; i++) {
+      const button = footer.locator("button").nth(i);
+      await button.evaluate((node) => {
+        const region = node.closest('[data-slot="dialog-footer"]');
+        const r = node.getBoundingClientRect(), f = region.getBoundingClientRect();
+        region.scrollTop += (r.top + r.bottom - f.top - f.bottom) / 2;
+      });
+      const visible = await button.evaluate((node) => {
+        const r = node.getBoundingClientRect(), region = node.closest('[data-slot="dialog-footer"]').getBoundingClientRect();
+        const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        return { contained: r.left >= region.left - 0.75 && r.right <= region.right + 0.75 &&
+            r.top >= region.top - 0.75 && r.bottom <= region.bottom + 0.75,
+          centerReceivesHit: node.contains(hit) };
+      });
+      if (!visible.contained || (!info.buttons[i].disabled && !visible.centerReceivesHit))
+        failures.push(`${label}/footer: ${info.buttons[i].text} cannot be revealed and hit ${JSON.stringify(visible)}`);
+    }
+  }
+  if (error) {
+    const text = await footer.evaluate((node) => {
+      const paragraph = node.querySelector("p");
+      const textNode = paragraph.firstChild;
+      const range = document.createRange();
+      range.selectNodeContents(textNode);
+      const lineCount = range.getClientRects().length;
+      let visibleLines = 0;
+      for (let i = 0; i < lineCount; i++) {
+        let region = node.getBoundingClientRect();
+        let line = range.getClientRects()[i];
+        node.scrollTop += (line.top + line.bottom - region.top - region.bottom) / 2;
+        region = node.getBoundingClientRect();
+        line = range.getClientRects()[i];
+        if (line.left >= region.left - 0.75 && line.right <= region.right + 0.75 &&
+            line.top >= region.top - 0.75 && line.bottom <= region.bottom + 0.75) visibleLines++;
+      }
+      return { lineCount, visibleLines };
+    });
+    if (!text.lineCount || text.visibleLines !== text.lineCount)
+      failures.push(`${label}/footer: not every error line can be read by scrolling ${JSON.stringify(text)}`);
+    console.log(`${label}/footer-error-lines`, JSON.stringify(text));
+    const cancel = footer.getByRole("button", { name: "Cancel" });
+    const save = footer.getByRole("button", { name: "Save" });
+    if (scrollable) {
+      await footer.focus();
+      await page.keyboard.press("Tab");
+    } else {
+      await cancel.focus();
+      await page.keyboard.press("Shift+Tab");
+      await page.keyboard.press("Tab");
+    }
+    const focusState = (button) => button.evaluate((node) => {
+      const r = node.getBoundingClientRect(), region = node.closest('[data-slot="dialog-footer"]').getBoundingClientRect();
+      return { focused: document.activeElement === node && node.matches(":focus-visible"),
+        shadow: getComputedStyle(node).boxShadow,
+        roomForRing: r.left - 3 >= region.left && r.right + 3 <= region.right &&
+          r.top - 3 >= region.top && r.bottom + 3 <= region.bottom };
+    });
+    await page.waitForTimeout(250);
+    const cancelFocus = await focusState(cancel);
+    const cancelError = await footer.getByRole("alert").textContent();
+    await page.keyboard.press("Tab");
+    await page.waitForTimeout(250);
+    const saveFocus = await focusState(save);
+    const saveError = await footer.getByRole("alert").textContent();
+    if (!cancelFocus.focused || !cancelFocus.shadow.includes("3px") || !cancelFocus.roomForRing ||
+        !saveFocus.focused || !saveFocus.shadow.includes("3px") || !saveFocus.roomForRing ||
+        cancelError !== info.error?.text || saveError !== info.error?.text)
+      failures.push(`${label}/footer: Cancel or Save cannot receive focus while the error remains`);
+    console.log(`${label}/footer-error-focus`, JSON.stringify({ cancelFocus, saveFocus,
+      alertRetained: cancelError === info.error?.text && saveError === info.error?.text }));
+  }
   if (enableReset && !error) {
     const reset = footer.getByRole("button", { name: /^Reset / });
     const cancel = footer.getByRole("button", { name: "Cancel" });
@@ -618,6 +732,7 @@ const capture = async (browser, name, width, height, theme, surface, pointer) =>
     if (overflow) failures.push(`${label}: document has horizontal overflow`);
     const save = dialog.getByRole("button", { name: /^Save$/ });
     await save.waitFor({ state: "visible", timeout: 8000 });
+    await save.scrollIntoViewIfNeeded();
     // Enlarging text can move Save beneath the previous click position.
     // Measure its default highlight state, not the separate hover state.
     await page.mouse.move(0, 0);
@@ -664,9 +779,41 @@ const capture = async (browser, name, width, height, theme, surface, pointer) =>
       await randomLook.click();
       await dialog.getByRole("button", { name: "Save" }).click();
       if (simulateSaveError) {
-        await dialog.locator('[data-slot="dialog-footer"] p').waitFor({ state: "visible", timeout: 4000 });
+        await dialog.getByRole("alert").waitFor({ state: "visible", timeout: 4000 });
+        const initialError = await dialog.locator('[data-slot="dialog-footer"]').evaluate((node) => {
+          const paragraph = node.querySelector('p[role="alert"]');
+          const range = document.createRange();
+          range.selectNodeContents(paragraph.firstChild);
+          const first = range.getClientRects()[0], region = node.getBoundingClientRect();
+          return { firstVisible: first && first.top >= region.top - 0.75 && first.bottom <= region.bottom + 0.75,
+            focused: document.activeElement === node, overflow: node.scrollHeight > node.clientHeight + 1 };
+        });
+        if (!initialError.firstVisible || (initialError.overflow && !initialError.focused))
+          failures.push(`${label}/footer: the beginning of the save error was not revealed and focused ${JSON.stringify(initialError)}`);
+        console.log(`${label}/save-error-initial`, JSON.stringify(initialError));
         await verifyFooter(page, dialog, `${label}/save-error`, { error: true });
         await page.screenshot({ path: path.join(out, `footer-error-${label.replaceAll("/", "-")}.png`) });
+        if (initialError.overflow) {
+          const footer = dialog.locator('[data-slot="dialog-footer"]');
+          await footer.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+          await Promise.all([
+            page.waitForResponse((response) => response.status() === 503 &&
+              response.request().method() === "PUT" && new URL(response.url()).pathname.endsWith("/agents/appearance"), { timeout: 5000 }),
+            dialog.getByRole("button", { name: "Save" }).click(),
+          ]);
+          const revealedAgain = await page.waitForFunction(() => {
+            const node = document.querySelector('[role="dialog"][data-state="open"] [data-slot="dialog-footer"]');
+            const paragraph = node?.querySelector('p[role="alert"]');
+            if (!paragraph) return false;
+            const range = document.createRange();
+            range.selectNodeContents(paragraph.firstChild);
+            const first = range.getClientRects()[0], region = node.getBoundingClientRect();
+            return first && first.top >= region.top - 0.75 && first.bottom <= region.bottom + 0.75 &&
+              document.activeElement === node;
+          }, null, { timeout: 4000 }).then(() => true).catch(() => false);
+          if (!revealedAgain) failures.push(`${label}/footer: retrying the same failure did not reveal it again`);
+          console.log(`${label}/save-error-retry`, JSON.stringify({ revealedAgain }));
+        }
         await dialog.getByRole("button", { name: "Cancel" }).click();
       }
       if (!(await dialog.waitFor({ state: "hidden", timeout: 4000 }).then(() => true).catch(() => false)))
@@ -689,7 +836,7 @@ const captureNonGem = async (browser, pointer) => {
   const oldAvatar = pool.agents[0].avatar;
   pool.agents[0].avatar = { kind: "initials" };
   const extra = touch ? { isMobile: true, hasTouch: true, deviceScaleFactor: 2 } : {};
-  const { context, page } = await makeContext(browser, 390, 844, "dark", extra, hybrid);
+  const { context, page } = await makeContext(browser, 390, viewportHeight ?? 844, "dark", extra, hybrid);
   try {
     const media = await page.evaluate(() => ({
       coarse: matchMedia("(pointer: coarse)").matches,
@@ -721,9 +868,10 @@ const captureNonGem = async (browser, pointer) => {
 let browser;
 try {
   browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined });
-  for (const [name, width, height] of [
+  for (const [name, width, defaultHeight] of [
     ["390", 390, 844], ["820", 820, 1180], ["1440", 1440, 900],
   ].filter(([name]) => !only || name === only)) {
+    const height = viewportHeight ?? defaultHeight;
     for (const theme of ["dark", "light"]) {
       for (const pointer of ["fine", "coarse", "hybrid"]) {
         for (const surface of ["global", "properties"]) {

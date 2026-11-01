@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ChangeEvent, type FocusEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type FocusEvent, type ReactNode } from "react";
 import { Dices, Loader2, RotateCcw } from "lucide-react";
 import { RadioGroup } from "radix-ui";
 import type { AgentPoolEntry, AvatarSpec, GemAppearance, GemLook, LookColor, Session } from "@/api";
@@ -64,6 +64,22 @@ const fromHex = (hex: string): Rgb => [
 ];
 const sameColor = (a?: readonly number[], b?: readonly number[]) =>
   Boolean(a && b && a.length === b.length && a.every((channel, i) => channel === b[i]));
+
+function useScrollRegion() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [scrollable, setScrollable] = useState(false);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => setScrollable(element.scrollHeight > element.clientHeight + 1);
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    for (const child of element.children) observer.observe(child);
+    measure();
+    return () => observer.disconnect();
+  }, []);
+  return { ref, scrollable };
+}
 
 function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
@@ -155,22 +171,18 @@ function StudioBody({
   const [selected, setSelected] = useState(focus?.gem ?? "");
   const [activity, setActivity] = useState<Activity>("idle");
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const headerRef = useRef<HTMLDivElement>(null);
-  const [headerScrollable, setHeaderScrollable] = useState(false);
+  const [error, setError] = useState<{ message: string } | null>(null);
+  const { ref: headerRef, scrollable: headerScrollable } = useScrollRegion();
+  const { ref: footerRef, scrollable: footerScrollable } = useScrollRegion();
   const chat = focus?.chat;
   const [hub, setHub] = useState(chat?.hub ?? true);
 
-  useEffect(() => {
-    const header = headerRef.current;
-    if (!header) return;
-    const measure = () => setHeaderScrollable(header.scrollHeight > header.clientHeight + 1);
-    const observer = new ResizeObserver(measure);
-    observer.observe(header);
-    for (const child of header.children) observer.observe(child);
-    measure();
-    return () => observer.disconnect();
-  }, []);
+  useLayoutEffect(() => {
+    const footer = footerRef.current;
+    if (!error || !footer) return;
+    footer.scrollTop = 0;
+    if (footer.scrollHeight > footer.clientHeight + 1) footer.focus({ preventScroll: true });
+  }, [error, footerRef]);
 
   const current: AgentPoolEntry | undefined =
     pinned ?? agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
@@ -198,13 +210,13 @@ function StudioBody({
   const save = async () => {
     if (!studio) return;
     setSaving(true);
-    setError("");
+    setError(null);
     try {
       await studio.save(draft);
       if (chat && chat.hub !== null && hub !== chat.hub) await chat.setHub(hub);
       onDone();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError({ message: err instanceof Error ? err.message : String(err) });
     } finally {
       setSaving(false);
     }
@@ -588,10 +600,16 @@ function StudioBody({
         </div>
       </GemAppearancePreview>
 
-      <DialogFooter className="bg-muted/30 flex-row flex-wrap items-center gap-2 px-5 py-3 sm:justify-between">
+      <DialogFooter
+        ref={footerRef}
+        tabIndex={footerScrollable ? 0 : -1}
+        role="region"
+        aria-label="Gem Studio actions"
+        className="bg-muted/30 max-h-[40vh] shrink-0 flex-row flex-wrap items-center gap-2 overflow-y-auto scroll-py-[4px] px-5 py-3 outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset sm:justify-between"
+      >
         <div className="min-w-0 max-w-full flex-[1_0_auto]">
           {error ? (
-            <p className="text-destructive break-words text-xs">{error}</p>
+            <p role="alert" className="text-destructive break-words text-xs">{error.message}</p>
           ) : current ? (
             <Button
               type="button"
@@ -605,10 +623,12 @@ function StudioBody({
                 })
               }
               disabled={!draft.gems?.[key]}
+              aria-label={`Reset ${name}`}
+              title={`Reset ${name}`}
               className="h-auto min-h-8 max-w-full whitespace-normal text-left"
             >
               <RotateCcw className="size-4" />
-              <span className="min-w-0 break-words">Reset {name}</span>
+              <span className="line-clamp-2 min-w-0 break-words">Reset {name}</span>
             </Button>
           ) : null}
         </div>
