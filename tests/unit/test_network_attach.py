@@ -35,23 +35,29 @@ class Pair:
         self.agent_path = str(self.dir / "agent.sock")
         self.agent_lines = []
         self.agent_writers = []
+        mac_request = self._to(SERVER, MAC)
+        server_request = self._to(MAC, SERVER)
         self.mac = NetworkAttach(
-            request=self._to(SERVER, MAC),
+            request=mac_request,
+            guarded_request=mac_request,
             target=self._agent_socket if mac_runs_agent else self._no_agents,
             peer_name=lambda key: "server" if key == SERVER else "mac",
             notice=self.notices.append,
         )
         self.server = NetworkAttach(
-            request=self._to(MAC, SERVER),
+            request=server_request,
+            guarded_request=server_request,
             target=target or self._agent_socket,
             peer_name=lambda key: "mac" if key == MAC else "server",
             notice=self.notices.append,
         )
 
     def _to(self, peer, sender):
-        async def request(to, method, payload, timeout):
+        async def request(to, method, payload, timeout, before_send=None):
             assert to == peer
             await asyncio.sleep(self.latency)
+            if before_send is not None:
+                await before_send()
             side = self.server if peer == SERVER else self.mac
             return await side.receive(sender, method, payload)
 

@@ -209,6 +209,8 @@ class NetworkAttach:
         """
         if self._closed:
             raise RelayError("network attach is closed")
+        if self._guarded_request_fn is None:
+            raise AttachRefused("opening agents from the network is unavailable")
         if len(self._channels) >= MAX_CHANNELS:
             raise RelayError("too many open agents on other computers; close one first")
         # F19 requester side: a halted network admits no new attach channels
@@ -343,6 +345,8 @@ class NetworkAttach:
             raise RelayError("attach channel already open")
         if self._closed:
             return {"refused": "this computer is shutting down its network"}
+        if self._guarded_request_fn is None:
+            return {"refused": "opening agents from this computer is unavailable"}
         # Only the agents that device holds open here count against its share.
         held = sum(1 for (key, _), ch in self._channels.items() if key == peer and not ch.requester)
         if len(self._channels) >= MAX_CHANNELS or held >= MAX_CHANNELS_PER_PEER:
@@ -499,6 +503,10 @@ class NetworkAttach:
     async def _send_data(self, channel: _Channel, data: bytes) -> None:
         if channel.closed:
             raise _PeerClosed("the channel closed")
+        if self._guarded_request_fn is None:
+            # A request-only carrier cannot recheck after its own waits.
+            # Never hand channel data to one without a commit guard.
+            raise RelayError("protected attach transport is unavailable")
         payload = {"channel": channel.id, "seq": channel.send_seq, "data": _pack(data)}
         for attempt in range(2):
             try:
@@ -516,6 +524,8 @@ class NetworkAttach:
         self, peer: str, method: str, payload: dict, timeout: float = REQUEST_SECONDS,
         *, channel: _Channel | None = None,
     ) -> dict:
+        if channel is not None and self._guarded_request_fn is None:
+            raise RelayError("protected attach transport is unavailable")
         await self._pacer.take(_frames(len(payload.get("data", ""))))
         # A send may have waited behind pacing or a retry since the pump last
         # checked. Reauthorize each attempt immediately before handing data to

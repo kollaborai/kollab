@@ -50,7 +50,8 @@ class Pair:
             request=unused, target=target, peer_name=lambda _: "device", notice=lambda _: None
         )
         self.device = na.NetworkAttach(
-            request=request, target=target, peer_name=lambda _: "requester", notice=lambda _: None
+            request=request, guarded_request=request, target=target,
+            peer_name=lambda _: "requester", notice=lambda _: None,
         )
         self.requester_channel = na._Channel(
             id=CHANNEL, peer=SERVER, name="agent", requester=True, writer=self.sink
@@ -67,8 +68,10 @@ class Pair:
         self.stream.feed_data(SYNTHETIC_OUTPUT)
         self.stream.feed_eof()
 
-    async def receive(self, peer, method, payload, timeout):
+    async def receive(self, peer, method, payload, timeout, before_send=None):
         assert peer == MAC
+        if before_send is not None:
+            await before_send()
         return await self.requester.receive(SERVER, method, payload)
 
     async def finish(self):
@@ -78,6 +81,54 @@ class Pair:
         if pump is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await pump
+
+
+@pytest.mark.asyncio
+async def test_request_only_carrier_refuses_protected_output(monkeypatch):
+    """A carrier without a final-send guard must never receive channel bytes."""
+    monkeypatch.setattr(na, "FLUSH_SECONDS", 0)
+    data_calls = 0
+    pair = None
+
+    async def send(peer, method, payload, timeout):
+        nonlocal data_calls
+        if method == na.ATTACH_DATA:
+            data_calls += 1
+        return await pair.receive(peer, method, payload, timeout)
+
+    pair = Pair(send)
+    pair.device._guarded_request_fn = None
+    try:
+        pair.start_output()
+        await asyncio.wait_for(pair.sink.closed.wait(), 3)
+        assert data_calls == 0
+        assert pair.sink.data == b""
+    finally:
+        await pair.finish()
+
+
+@pytest.mark.asyncio
+async def test_request_only_carrier_refuses_both_open_directions():
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append("request")
+        return {"open": True}
+
+    async def target(*args):
+        calls.append("target")
+        return "/unused"
+
+    attach = na.NetworkAttach(
+        request=request, target=target, peer_name=lambda _: "device", notice=lambda _: None
+    )
+    with pytest.raises(na.AttachRefused, match="unavailable"):
+        await attach.open(SERVER, "agent-1", "agent")
+    result = await attach.receive(MAC, na.ATTACH_OPEN, {
+        "channel": CHANNEL, "agent_id": "agent-1", "name": "agent"
+    })
+    assert "refused" in result
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -124,14 +175,14 @@ async def test_withdrawal_between_failed_send_and_retry_does_not_send_output(mon
     attempts = 0
     pair = None
 
-    async def send(peer, method, payload, timeout):
+    async def send(peer, method, payload, timeout, before_send=None):
         nonlocal attempts
         if method == na.ATTACH_DATA:
             attempts += 1
             if attempts == 1:
                 first_failed.set()
                 raise na.RelayError("synthetic failure before delivery")
-        return await pair.receive(peer, method, payload, timeout)
+        return await pair.receive(peer, method, payload, timeout, before_send=before_send)
 
     pair = Pair(send)
     try:
@@ -153,7 +204,7 @@ async def test_forced_withdrawal_cancels_send_waiting_inside_transport(monkeypat
     release = asyncio.Event()
     pair = None
 
-    async def send(peer, method, payload, timeout):
+    async def send(peer, method, payload, timeout, before_send=None):
         if method == na.ATTACH_DATA:
             started.set()
             try:
@@ -161,7 +212,7 @@ async def test_forced_withdrawal_cancels_send_waiting_inside_transport(monkeypat
             except asyncio.CancelledError:
                 cancelled.set()
                 raise
-        return await pair.receive(peer, method, payload, timeout)
+        return await pair.receive(peer, method, payload, timeout, before_send=before_send)
 
     pair = Pair(send)
     try:
@@ -274,7 +325,8 @@ async def test_withdrawal_during_local_connect_refuses_the_pending_open(monkeypa
 
     monkeypatch.setattr(na.local_ipc, "connect", connect)
     device = na.NetworkAttach(
-        request=send, target=target, peer_name=lambda _: "requester", notice=lambda _: None
+        request=send, guarded_request=send, target=target,
+        peer_name=lambda _: "requester", notice=lambda _: None,
     )
     opening = asyncio.create_task(
         device.receive(MAC, na.ATTACH_OPEN, {
@@ -322,7 +374,8 @@ async def test_halt_during_remote_open_closes_the_new_channel(monkeypatch):
 
     monkeypatch.setattr(na.local_ipc, "serve", no_local_server)
     requester = na.NetworkAttach(
-        request=request, target=target, peer_name=lambda _: "device", notice=lambda _: None,
+        request=request, guarded_request=request, target=target,
+        peer_name=lambda _: "device", notice=lambda _: None,
         halt_active=lambda: halted,
     )
     opening = asyncio.create_task(requester.open(SERVER, "agent-1", "agent"))
@@ -375,7 +428,8 @@ async def test_halt_during_local_listener_start_retires_late_listener(monkeypatc
 
     monkeypatch.setattr(na.local_ipc, "serve", serve)
     requester = na.NetworkAttach(
-        request=request, target=target, peer_name=lambda _: "device", notice=lambda _: None,
+        request=request, guarded_request=request, target=target,
+        peer_name=lambda _: "device", notice=lambda _: None,
         halt_active=lambda: halted,
     )
     opening = asyncio.create_task(requester.open(SERVER, "agent-1", "agent"))
