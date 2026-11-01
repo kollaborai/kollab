@@ -355,7 +355,12 @@ PRINTABLE = {"nginx": nginx_config, "caddy": caddy_config, "systemd": systemd_un
 
 def _lock(state_dir: Path) -> int:
     """One process per state directory; the descriptor is held until exit."""
-    fd = os.open(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    if os.name == "nt":  # no O_NOFOLLOW on Windows: private_fs.open_nofollow opens the lock file instead
+        from kollabor_config import private_fs
+
+        fd = private_fs.open_nofollow(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    else:
+        fd = os.open(state_dir / "serve.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     if not file_lock.try_lock(fd):
         os.close(fd)
         raise RuntimeConfigError(f"{state_dir} is already served by another kollab relay serve")
@@ -464,8 +469,14 @@ async def serve(settings: Settings, *, created: bool) -> None:
             raise RuntimeConfigError(f"cannot listen: {exc.strerror or exc}") from None
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, stop.set)
+        if os.name == "nt":
+            # Windows: loop.add_signal_handler raises NotImplementedError
+            # (ProactorEventLoop). The process is stopped by console events
+            # or termination instead of POSIX signal handlers.
+            pass
+        else:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, stop.set)
         say(setup_text(settings, created=created))
         payload = await publish_once(app)
         advertised = bool(payload["discovery"]["roles"])

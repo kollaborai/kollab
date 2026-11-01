@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Hub status flags an idle agent that still holds an open task as
+  stalled after 15 minutes (#533).
 - Windows: agent commands run in Git Bash when Git for Windows is installed,
   else in PowerShell (never cmd.exe); `KOLLAB_SHELL` picks another shell.
 - PhoneLink works from every engine on the computer: an engine that does not hold PhoneLink forwards the call to the one that does, and the "managing PhoneLink" message names that engine's port, process, start time and folder (#443).
@@ -124,6 +126,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Detached agents no longer idle after a first turn that ends without work:
+  if the reply stops on an unfinished tool tag or announces the next step but
+  makes no tool call, one automatic continue is queued telling the agent what
+  to finish. The nudge applies only to unattended daemon runs and never
+  re-arms itself (#453).
 - Web UI: a message sent while a native agent is busy streams its own reply.
   Its stream used to end on the completion of the turn already running, and
   the reply never streamed. The engine now sends a request id with every chat
@@ -136,6 +143,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An agent whose socket directory in /tmp was deleted makes it again on its next heartbeat; before, it stayed unreachable until another agent started (#542).
 - A chat with a live agent no longer stays stuck on "daemon unreachable: client closed" after the agent drops the engine: the engine keeps trying to attach again for as long as the agent runs (quick tries, then every 5 s) instead of giving up after 10 s (#541).
 - After it attaches again, a chat gets each update once and in order, a reply ends only on its own turn's completion, and an update too big for the engine shows as an error instead of vanishing (#541).
+- A hub agent no longer freezes for about two minutes after each dreaming
+  cycle. Its memory dedup compared every pair of entries on the agent's event
+  loop (105 s for 2,608 entries), so it answered nothing and peers deleted its
+  socket as dead. The pass now compares only entries that share a word or
+  keyword, after a write only those with an entry it changed, and gives the
+  loop back every few milliseconds (#546).
 - ACP: an oversized agent reply no longer breaks history paging with a
   413 error. A page that is too large slims its message metadata so the
   older messages still load, and the original message is preserved
