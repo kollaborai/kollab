@@ -1,4 +1,5 @@
 import json
+import logging
 from unittest.mock import patch
 
 from kollabor_ai.profile_manager import ProfileManager
@@ -156,3 +157,22 @@ def test_saved_anthropic_auto_profile_heals_from_auth_token_aliases(
         keyring_set.assert_not_called()
     assert profile.model == "glm-4.7"
     assert profile.base_url == "https://api.z.ai/api/anthropic"
+
+
+def test_missing_profile_probe_can_suppress_error(monkeypatch, tmp_path, caplog):
+    _clear_provider_env(monkeypatch)
+    manager = _isolated_profile_manager(monkeypatch, tmp_path)
+    caplog.set_level(logging.ERROR, logger="kollabor_ai.profile_manager")
+
+    assert not manager.set_active_profile(
+        "missing", persist=False, log_not_found=False
+    )
+    assert not any(
+        record.message == "Profile not found: missing" for record in caplog.records
+    )
+
+    caplog.clear()
+    assert not manager.set_active_profile("missing", persist=False)
+    assert any(
+        record.message == "Profile not found: missing" for record in caplog.records
+    )
