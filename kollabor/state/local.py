@@ -653,9 +653,9 @@ class LocalStateService(StateService):
         snapshot = self._profile_to_snapshot(active, is_active=True)
         if self._acp_active():
             # A harness picks its own model and effort (/model sets them there):
-            # report those, not the profile's, which the harness does not read,
-            # though it may name no model.
-            snapshot.model = self._acp_harness_model() or snapshot.model
+            # report those, blank when it names none, never the profile's, which
+            # the harness does not read.
+            snapshot.model = self._acp_harness_model()
             snapshot.effort = self._acp_harness_effort()
         return snapshot
 
@@ -674,9 +674,10 @@ class LocalStateService(StateService):
             acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
             if acp is None or getattr(acp, "active", False) is not True:
                 return ""
-            for option in acp.advertised_config_options():
-                if str(option.get("category") or option.get("id") or "").lower() == "model":
-                    return str(option.get("currentValue") or "")
+            from kollabor_ai.acp_options import find_option
+
+            option = find_option(acp.advertised_config_options(), "model")
+            return str((option or {}).get("currentValue") or "")
         except Exception:
             logger.debug("ACP harness model unavailable", exc_info=True)
         return ""
@@ -1454,11 +1455,12 @@ class LocalStateService(StateService):
         # before the provider reinitialize below so the next turn uses them,
         # and never written to config -- a launch flag must not rewrite the
         # user's saved profile (spec R3 / invariant I5).
-        if model or effort:
+        if model or effort is not None:
             overrides: dict[str, Any] = {"save_to_config": False}
             if model:
                 overrides["model"] = model
-            if effort:
+            if effort is not None:
+                # "" is the model's own default: it clears an earlier pick.
                 overrides["effort"] = effort
             try:
                 if not self._profile_manager.update_profile(name, **overrides):

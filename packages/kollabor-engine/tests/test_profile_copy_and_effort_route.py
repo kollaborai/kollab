@@ -162,7 +162,7 @@ async def test_copy_keeps_saved_key_and_unshown_settings(client, manager):
         json={
             "name": "pinned-copy",
             "provider": "anthropic",
-            "model": "claude-y",
+            "model": "claude-opus-4-6",
             "effort": "",
             "copy_from": "pinned",
         },
@@ -175,7 +175,7 @@ async def test_copy_keeps_saved_key_and_unshown_settings(client, manager):
     assert copy.api_key == "test-key"
     assert copy.auth_type == "api_key"
     assert (copy.timeout, copy.extra_headers) == (600, {"x-team": "a"})
-    assert (copy.model, copy.effort) == ("claude-y", "")
+    assert (copy.model, copy.effort) == ("claude-opus-4-6", "")
     assert "pinned-copy" in manager.persisted_profiles
     assert manager.get_profile("pinned").model == "claude-opus-5-5"
 
@@ -208,7 +208,7 @@ async def test_copy_rejects_unknown_effort_with_422(client, manager):
         json={
             "name": "invalid-copy",
             "provider": "anthropic",
-            "model": "claude-y",
+            "model": "claude-opus-4-6",
             "effort": "turbo",
             "copy_from": "pinned",
         },
@@ -267,7 +267,7 @@ async def test_copy_does_not_inherit_source_specific_effort_env(
         json={
             "name": "team-anthro",
             "provider": "anthropic",
-            "model": "claude-y",
+            "model": "claude-opus-4-6",
             "effort": "low",
             "copy_from": "anthropic",
         },

@@ -21,10 +21,10 @@ export async function applyModelChoice(
       session.session_id,
       choice.profile,
       choice.model || undefined,
-      choice.effort || undefined,
+      choice.effort || "", // "" is the model's own default: it clears an earlier pick
     );
     // An environment variable outranks a pick: say so rather than show it as applied.
-    if ((choice.model && next.model !== choice.model) || (choice.effort && next.effort !== choice.effort)) {
+    if ((choice.model && next.model !== choice.model) || (next.effort || "") !== (choice.effort || "")) {
       const env = choice.profile.trim().replace(/[^a-zA-Z0-9]/g, "_").toUpperCase();
       throw new Error(
         `${choice.profile} kept ${[next.model, next.effort].filter(Boolean).join(" · ")}. ` +

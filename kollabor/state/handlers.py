@@ -185,7 +185,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         persist_local = bool(params.get("persist_local", False))
         reload_profile = bool(params.get("reload_profile", False))
         model = params.get("model") or None
-        effort = params.get("effort") or None
+        effort = params.get("effort")  # "" is the model's own default: it clears an earlier pick
         try:
             snapshot = await state_service.set_active_profile(
                 name.strip(),
@@ -193,7 +193,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
                 persist_local=persist_local,
                 reload_profile=reload_profile,
                 model=str(model) if model else None,
-                effort=str(effort) if effort else None,
+                effort=None if effort is None else str(effort),
             )
         except ValueError as e:
             return {"error": str(e)}

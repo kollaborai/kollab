@@ -37,6 +37,18 @@ test("a native pick is one switch that carries the model and effort", async () =
   assert.deepEqual(calls, [["profile", "s1", "openai-oauth", "gpt-6-luna", "high"]]);
 });
 
+test("a default pick sends an empty effort, which clears an earlier level", async () => {
+  // Kunzite on #553 round 4: an empty effort was dropped, so the earlier level stayed.
+  const { api, calls } = fakeApi();
+  await applyModelChoice(api, { session_id: "s1", profile: "openai-oauth" }, oauthLuna);
+  assert.deepEqual(calls, [["profile", "s1", "openai-oauth", "gpt-6-luna", ""]]);
+  const env = fakeApi({}, { model: "gpt-6-luna", effort: "max" });
+  await assert.rejects(
+    applyModelChoice(env.api, { session_id: "s1", profile: "openai-oauth" }, oauthLuna),
+    /kept gpt-6-luna · max/,
+  );
+});
+
 test("a native pick an environment variable outranks is an error, not a pick shown as applied", async () => {
   const { api } = fakeApi({}, { model: "gpt-5.4", effort: "low" });
   await assert.rejects(

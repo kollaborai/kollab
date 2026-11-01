@@ -43,10 +43,10 @@ def _manager(*profiles, loadouts=None):
     return LoadoutManager(pm, config=_Config({"kollabor.llm.loadouts": loadouts or {}}))
 
 
-def test_each_model_comes_at_every_level_its_catalog_names_and_never_blank(monkeypatch):
+def test_each_model_comes_at_its_default_and_every_level_its_catalog_names(monkeypatch):
     # Marco's ask: "codex luna max" is one pick. Sodalite on #553: no level a request
-    # would 400 on (gpt-6-luna stops at max), and no blank row, which would keep an
-    # earlier pick instead of the default.
+    # would 400 on (gpt-6-luna stops at max). Kunzite on #553 round 4: the blank row
+    # is the model's own default, and picking it clears an earlier level.
     manager = _manager(_Profile("openai-oauth", "openai_responses", "gpt-6-luna"))
     monkeypatch.setattr(manager, "models_for_profile", lambda p: ["gpt-6-luna", "gpt-6.1-terra", "gpt-6-sol"])
     # Levels come from the catalog however old it is: the 1 h list cache would drop them.
@@ -57,9 +57,9 @@ def test_each_model_comes_at_every_level_its_catalog_names_and_never_blank(monke
     levels = {m: [r["effort"] for r in manager.list_choices() if r["model"] == m]
               for m in ("gpt-6-luna", "gpt-6.1-terra", "gpt-6-sol")}
     assert levels == {
-        "gpt-6-luna": ["low", "medium", "high", "xhigh", "max"],
-        "gpt-6.1-terra": ["low", "ultra"],
-        "gpt-6-sol": ["low", "medium", "high"],  # not in the catalog: what every OpenAI-style API takes
+        "gpt-6-luna": ["", "low", "medium", "high", "xhigh", "max"],
+        "gpt-6.1-terra": ["", "low", "ultra"],
+        "gpt-6-sol": ["", "low", "medium", "high"],  # not in the catalog: what every OpenAI-style API takes
     }
 
 
@@ -78,10 +78,12 @@ def test_a_model_without_catalog_levels_offers_the_registrys(monkeypatch):
         ["claude-opus-5-5", "claude-haiku-4-5-20251001", "claude-opus-4-5"] if p.name == "claude" else []))
     monkeypatch.setattr(manager, "_cached_catalog", lambda p, **_: [])
     levels = _levels(manager.list_choices())
-    assert levels[("claude", "claude-opus-4-6")] == ["low", "medium", "high", "max"]  # no xhigh before 4.7
-    assert levels[("claude", "claude-opus-5-5")] == ["low", "medium", "high", "xhigh", "max"]
+    assert levels[("claude", "claude-opus-4-6")] == ["", "low", "medium", "high", "max"]  # no xhigh before 4.7
+    assert levels[("claude", "claude-opus-5-5")] == ["", "low", "medium", "high", "xhigh", "max"]
     assert levels[("claude", "claude-haiku-4-5-20251001")] == [""]
-    assert levels[("claude", "claude-opus-4-5")] == ["low", "medium", "high"]  # unlisted: what every effort API takes
+    # Kunzite on #553 round 4: some Claude models take no effort (Sonnet 4.5), so
+    # one the registry does not list runs at its own default.
+    assert levels[("claude", "claude-opus-4-5")] == [""]
     assert levels[("box", "llama")] == [""]  # its provider sends no effort
 
 
@@ -146,8 +148,8 @@ def test_one_catalog_says_nothing_about_another_endpoint_or_harness(monkeypatch)
     reported = {"pi": {"models": ["gpt-6-luna", "other"], "efforts_by_model": {"other": ["low"]}},
                 "codex-cli": {"models": ["gpt-6-luna"], "efforts_by_model": {}}}
     levels = _levels(manager.list_choices(reported))
-    assert levels[("openai-oauth", "gpt-6-luna")] == ["low", "ultra"]
-    assert levels[("router", "gpt-6-luna")] == ["low", "medium", "high"]  # its own catalog has none
+    assert levels[("openai-oauth", "gpt-6-luna")] == ["", "low", "ultra"]
+    assert levels[("router", "gpt-6-luna")] == ["", "low", "medium", "high"]  # its own catalog has none
     assert levels[("pi", "gpt-6-luna")] == [""]  # never run there, and its backend is unknown
     assert levels[("pi", "other")] == ["low"]
     assert levels[("codex-cli", "gpt-6-luna")] == ["low", "ultra"]  # the adapter, wherever it is installed
@@ -221,7 +223,9 @@ def test_a_level_the_model_does_not_take_is_never_sent(monkeypatch):
     # Iolite on #553 round 3: an unlisted Claude model got max (a 400 on Opus 4.5),
     # and a provider that sends no effort reported the saved one.
     assert effort("anthropic", "claude-opus-4-5", "max") == ""
-    assert effort("anthropic", "claude-opus-4-5", "high") == "high"
+    # Kunzite on #553 round 4: an unlisted Claude model may take none (Sonnet 4.5).
+    assert effort("anthropic", "claude-opus-4-5", "high") == ""
+    assert effort("anthropic", "claude-sonnet-4-5-20250929", "high") == ""
     assert effort("gemini", "gemini-2.5-pro", "high") == ""
     assert effort("acp", "", "high") == ""  # a harness keeps its own
 
@@ -282,7 +286,7 @@ async def test_an_acp_session_reports_the_harness_effort(monkeypatch):
     state._event_bus = SimpleNamespace(get_service=lambda name: acp if name == "acp_orchestrator" else None)
     state._profile_manager = SimpleNamespace(get_active_profile=lambda: SimpleNamespace(name="codex-cli"))
     def profile_snapshot(profile, is_active=False):
-        return SimpleNamespace(model="", effort="high")  # what the profile says
+        return SimpleNamespace(model="saved-model", effort="high")  # what the profile says
 
     monkeypatch.setattr(state, "_profile_to_snapshot", profile_snapshot)
     snapshot = await state.get_active_profile()
@@ -293,7 +297,72 @@ async def test_an_acp_session_reports_the_harness_effort(monkeypatch):
     # Iolite on #553 round 3: one that names no model still reports its effort.
     options[:] = [{"id": "thought_level", "category": "thought_level", "currentValue": "ultra"}]
     snapshot = await state.get_active_profile()
-    assert (snapshot.model, snapshot.effort) == ("", "ultra")
+    assert (snapshot.model, snapshot.effort) == ("", "ultra")  # Kunzite on round 4: never the saved model
+    # Kunzite on #553 round 4: an option found by its id, whatever its category.
+    options[:] = [{"id": "model", "category": "_custom", "currentValue": "actual-harness-model"}]
+    snapshot = await state.get_active_profile()
+    assert (snapshot.model, snapshot.effort) == ("actual-harness-model", "")
     acp.active = False  # a native turn: the profile's own
     snapshot = await state.get_active_profile()
-    assert (snapshot.model, snapshot.effort) == ("", "high")
+    assert (snapshot.model, snapshot.effort) == ("saved-model", "high")
+
+
+def test_codex_borrows_a_level_only_when_every_chatgpt_login_agrees(monkeypatch):
+    # Kunzite on #553 round 4: two logins listed gpt-6-luna at different levels,
+    # and their order decided which one Codex CLI offered. Its own login is either.
+    def choices(catalogs):
+        manager = _manager(*[_Profile(name, "openai_responses", "gpt-6-luna") for name in catalogs],
+                           _Profile("codex-cli", "acp", command=("codex-acp",)))
+        monkeypatch.setattr(manager, "models_for_profile", lambda p: [])
+        monkeypatch.setattr(manager, "_cached_catalog", lambda p, **_: (
+            [{"id": "gpt-6-luna", "efforts": catalogs[p.name]}] if p.name in catalogs else []))
+        reported = {"codex-cli": {"models": ["gpt-6-luna"], "efforts_by_model": {}}}
+        return _levels(manager.list_choices(reported))[("codex-cli", "gpt-6-luna")]
+
+    assert choices({"a": ["low"], "b": ["ultra"]}) == [""]
+    assert choices({"b": ["ultra"], "a": ["low"]}) == [""]
+    assert choices({"a": ["low", "max"], "b": ["low", "max"]}) == ["low", "max"]
+
+
+def test_a_catalog_that_lists_no_levels_means_none_and_no_row_offers_one_a_request_drops(monkeypatch):
+    # Kunzite on #553 round 4: an empty catalog list read as "unknown" and got
+    # low/medium/high, and "none" was offered, then dropped before the request.
+    manager = _manager(_Profile("openai-oauth", "openai_responses", "gpt-5.1"))
+    monkeypatch.setattr(manager, "models_for_profile", lambda p: ["gpt-5.2"])
+    monkeypatch.setattr(manager, "_cached_catalog", lambda p, **_: [
+        {"id": "gpt-5.1", "efforts": []}, {"id": "gpt-5.2", "efforts": ["none", "minimal", "high"]}])
+    levels = _levels(manager.list_choices())
+    assert levels[("openai-oauth", "gpt-5.1")] == [""]
+    assert levels[("openai-oauth", "gpt-5.2")] == ["", "high"]
+
+
+@pytest.mark.asyncio
+async def test_a_default_pick_reaches_the_daemon_as_a_reset():
+    # Kunzite on #553 round 4: the client dropped an empty effort, and so did the
+    # daemon's handler, so a pick of the default kept the earlier level.
+    from kollabor.state.handlers import register_state_handlers
+    from kollabor.state.remote import RemoteStateService
+
+    sent = []
+
+    async def call(method, payload, timeout=None):
+        sent.append(payload)
+        return {"name": payload["name"]}
+
+    remote = RemoteStateService.__new__(RemoteStateService)
+    remote._rpc, remote._timeout = SimpleNamespace(call=call), 1.0
+    await remote.set_active_profile("claude", effort="")
+    await remote.set_active_profile("claude")
+    assert [p.get("effort", "omitted") for p in sent] == ["", "omitted"]
+
+    handlers, got = {}, []
+
+    async def set_active_profile(name, **kwargs):
+        got.append(kwargs["effort"])
+        return SimpleNamespace(to_dict=lambda: {"name": name})
+
+    register_state_handlers(SimpleNamespace(register=lambda method, handler: handlers.setdefault(method, handler)),
+                            SimpleNamespace(set_active_profile=set_active_profile))
+    await handlers["state.set_active_profile"]({"name": "claude", "effort": ""})
+    await handlers["state.set_active_profile"]({"name": "claude"})
+    assert got == ["", None]

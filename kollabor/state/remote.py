@@ -373,8 +373,8 @@ class RemoteStateService(StateService):
         # profiles instead of failing outright.
         if model:
             payload["model"] = model
-        if effort:
-            payload["effort"] = effort
+        if effort is not None:
+            payload["effort"] = effort  # "" is the model's own default: it clears an earlier pick
         result = await self._rpc.call(
             "state.set_active_profile",
             payload,

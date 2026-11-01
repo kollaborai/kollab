@@ -50,13 +50,14 @@ _REGISTRY_PROVIDER_ALIASES = {"openai_responses": "openai"}
 _NOTE_EFFORTS = re.compile(r"effort: ([a-z/]+)")
 
 
-def _catalog_efforts(entry: Dict[str, Any]) -> List[str]:
-    """The levels a catalog entry names (older caches keep them only in its note)."""
+def _catalog_efforts(entry: Dict[str, Any]) -> Optional[List[str]]:
+    """The levels a catalog entry names (older caches keep them only in its note):
+    ``[]`` when it lists none, None when it does not say."""
     efforts = entry.get("efforts")
     if isinstance(efforts, list):
         return [str(e) for e in efforts]
     match = _NOTE_EFFORTS.search(str(entry.get("note") or ""))
-    return match.group(1).split("/") if match else []
+    return match.group(1).split("/") if match else None
 
 
 @dataclass
@@ -282,41 +283,43 @@ class LoadoutManager:
         """Every provider profile x model x effort a session can start on, for
         the web UI's searchable model picker.
 
-        Each configured profile's models, each at every effort it takes, so a
-        row says what runs: a blank effort is offered only for a model that
-        takes none (a blank sends nothing, so an earlier pick would stay).
-
-        A model's levels are its own: what its profile's live catalog lists for
-        it (Codex publishes them per model), else the registry's, else (native
-        only) what every effort API takes; one endpoint's catalog says nothing
-        about another's. An ACP harness offers the models its sessions last
-        reported (``acp_options[profile name]``), each at the levels it reported
-        for that model. A model it has not run takes its backend's levels for
-        the two adapters whose backend is known (Codex CLI serves the ChatGPT
-        login's models, Claude Code Anthropic's), and none for any other
-        harness, which could refuse a guess after switching models. Saved
-        loadouts are not rows: one saves to its provider profile, which every
-        session on it shares, and a pick changes one session.
+        Each configured profile's models, each at its own default (a blank
+        effort: picking it clears an earlier level) and at every level it
+        takes. A model's levels are its own, and only ones a request can carry
+        (``EFFORT_LEVELS``): what its profile's live catalog lists for it (Codex
+        publishes them per model; an empty list is none), else the registry's,
+        else (native only) what every effort API takes, except on Claude, which
+        answers a level a model lacks with a 400 and has models that take none,
+        so an unlisted Claude model takes none. One endpoint's catalog says
+        nothing about another's. An ACP harness offers the models its sessions
+        last reported (``acp_options[profile name]``), each at the levels it
+        reported for that model; it keeps its own default, so it gets a blank
+        row only when it reports no levels. A model it has not run takes its
+        backend's levels for the two adapters whose backend is known: Codex CLI
+        the ChatGPT logins', when every such catalog agrees (the harness's own
+        login could be any of them), Claude Code the registry's; any other
+        harness, none, since it could refuse a guess. Saved loadouts are not
+        rows: one saves to its provider profile, which every session on it
+        shares, and a pick changes one session.
         """
         from kollabor_ai.model_registry import DEFAULT_EFFORT_LEVELS, effort_levels
+        from kollabor_ai.profile_manager import EFFORT_LEVELS
         from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
         profiles = self.provider_profiles()
         # A model's levels barely change: an old catalog still names them.
-        catalogs = {
-            profile.name: {
-                str(entry["id"]): _catalog_efforts(entry)
-                for entry in self._cached_catalog(profile, max_age=float("inf"))
-                if entry.get("id") and _catalog_efforts(entry)
-            }
-            for profile in profiles
-        }
-        codex = {  # the ChatGPT login's catalog: the Codex backend's levels
-            model: levels
-            for profile in profiles
-            if (profile.get_provider() or "").lower() == "openai_responses"
-            for model, levels in catalogs[profile.name].items()
-        }
+        catalogs: Dict[str, Dict[str, List[str]]] = {}
+        for profile in profiles:
+            catalogs[profile.name] = {}
+            for entry in self._cached_catalog(profile, max_age=float("inf")):
+                said = _catalog_efforts(entry)
+                if entry.get("id") and said is not None:
+                    catalogs[profile.name][str(entry["id"])] = said
+        codex: Dict[str, Optional[List[str]]] = {}  # the ChatGPT logins' levels, where they agree
+        for profile in profiles:
+            if (profile.get_provider() or "").lower() == "openai_responses":
+                for model, said in catalogs[profile.name].items():
+                    codex[model] = said if codex.get(model, said) == said else None
 
         def registry(model: str, fallback: List[str]) -> List[str]:
             levels = effort_levels(model)
@@ -324,7 +327,7 @@ class LoadoutManager:
 
         def untried(adapter: str, model: str) -> List[str]:
             if adapter == "codex-acp":
-                return codex.get(model, [])
+                return codex.get(model) or []
             if adapter == "claude-agent-acp":
                 return registry(model, [])
             return []
@@ -342,14 +345,19 @@ class LoadoutManager:
             else:
                 own = [profile.get_model()] if profile.get_model() else []
                 models = list(dict.fromkeys(own + self.models_for_profile(profile)))
-                takes_effort = provider in EFFORT_SUPPORTED_PROVIDERS
                 found = catalogs[profile.name]
+                fallback = [] if provider == "anthropic" else list(DEFAULT_EFFORT_LEVELS)
                 levels = {
-                    m: (found.get(m) or registry(m, list(DEFAULT_EFFORT_LEVELS))) if takes_effort else []
+                    m: [e for e in (found[m] if m in found else registry(m, fallback)) if e in EFFORT_LEVELS]
+                    if provider in EFFORT_SUPPORTED_PROVIDERS
+                    else []
                     for m in models
                 }
             for model in models:
-                for effort in levels[model] or [""]:
+                efforts = levels[model]
+                if provider != "acp" or not efforts:
+                    efforts = [""] + efforts
+                for effort in efforts:
                     rows.append({"profile": profile.name, "provider": provider, "model": model, "effort": effort})
         return rows
 
