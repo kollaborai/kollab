@@ -11,6 +11,9 @@ from email.utils import parsedate_to_datetime
 from math import isfinite
 from typing import Any, Dict, Mapping, Optional
 
+from ..goal_image_scope import goal_image_diagnostics_active, safe_goal_error_cause
+from ..message_content import redact_error_media, safe_provider_error_code
+
 
 class ProviderError(Exception):
     """
@@ -45,11 +48,22 @@ class ProviderError(Exception):
             original_error: Original exception
             safe_message: User-safe message (defaults to sanitized message)
         """
+        raw_message = str(message)
+        if goal_image_diagnostics_active() and any(
+            phrase in raw_message.lower()
+            for phrase in (
+                "context window", "context_window", "context_length",
+                "maximum context length", "too many tokens", "prompt is too long",
+            )
+        ):
+            error_code = "context_window_exceeded"
+        message = redact_error_media(raw_message)
+        safe_message = redact_error_media(str(safe_message)) if safe_message else safe_message
         super().__init__(message)
         self.message = message
         self.provider = provider
-        self.error_code = error_code
-        self.original_error = original_error
+        self.error_code = safe_provider_error_code(error_code)
+        self.original_error = safe_goal_error_cause(original_error)
         self.safe_message = safe_message or self._sanitize_message(message)
 
     def _sanitize_message(self, message: str) -> str:

@@ -99,6 +99,22 @@ class UnfinishedGoalExists(GoalStoreError):
         self.goal_id = goal_id
 
 
+class GoalAttachmentRequestNotFound(GoalStoreError):
+    """The request is absent, already consumed, or belongs to another conversation."""
+
+
+class GoalAttachmentRequestCommitted(GoalStoreError):
+    """A previous attempt committed this exact request."""
+
+    def __init__(self, goal_id: str):
+        super().__init__("attachment request already created a goal")
+        self.goal_id = goal_id
+
+
+class GoalAttachmentRequestConflict(GoalStoreError):
+    """The request already created a goal with different inputs."""
+
+
 class LeaseHeld(GoalStoreError):
     """Another live daemon holds an unexpired lease."""
 
@@ -302,6 +318,16 @@ CREATE TABLE IF NOT EXISTS goal_evidence (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_goal_evidence_goal ON goal_evidence(goal_id);
+CREATE TABLE IF NOT EXISTS goal_attachment_requests (
+    request_id TEXT PRIMARY KEY,
+    conversation_uid TEXT NOT NULL,
+    command_preview TEXT NOT NULL,
+    attachment_refs TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    goal_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_goal_attachment_requests_conversation
+    ON goal_attachment_requests(conversation_uid, created_at);
 """
 
 # Record fields a caller may update through transition()/update_fields().
@@ -505,6 +531,7 @@ class GoalStore:
         attachment_refs: Optional[List[Dict[str, Any]]] = None,
         task_ids: Optional[List[str]] = None,
         scope_snapshot: Optional[Dict[str, Any]] = None,
+        attachment_request_id: Optional[str] = None,
     ) -> GoalRecord:
         """Atomically create one goal. One `BEGIN IMMEDIATE` transaction.
 
@@ -531,6 +558,25 @@ class GoalStore:
         with self._lock:
             self._begin()
             try:
+                if attachment_request_id:
+                    if attachment_refs:
+                        raise GoalStoreError("cannot combine request and direct attachments")
+                    row = self._conn.execute(
+                        "SELECT attachment_refs, goal_id FROM goal_attachment_requests "
+                        "WHERE request_id = ? AND conversation_uid = ?",
+                        (attachment_request_id, conversation_uid),
+                    ).fetchone()
+                    if row is None:
+                        raise GoalAttachmentRequestNotFound("attachment request not found")
+                    if row["goal_id"]:
+                        previous = self._conn.execute(
+                            "SELECT objective, token_budget FROM goals WHERE goal_id = ?",
+                            (row["goal_id"],),
+                        ).fetchone()
+                        if previous and previous["objective"] == objective and previous["token_budget"] == token_budget:
+                            raise GoalAttachmentRequestCommitted(row["goal_id"])
+                        raise GoalAttachmentRequestConflict("attachment request already created a different goal")
+                    record.attachment_refs = json.loads(row["attachment_refs"])
                 self._conn.execute(
                     """INSERT INTO goals
                        (goal_id, conversation_uid, objective, status, project_root,
@@ -562,6 +608,12 @@ class GoalStore:
                     status_after="active",
                     task_ids=record.task_ids,
                 )
+                if attachment_request_id:
+                    self._conn.execute(
+                        "UPDATE goal_attachment_requests SET goal_id = ?, attachment_refs = '[]' "
+                        "WHERE request_id = ? AND conversation_uid = ?",
+                        (record.goal_id, attachment_request_id, conversation_uid),
+                    )
                 self._commit()
             except sqlite3.IntegrityError as exc:
                 self._rollback()
@@ -573,6 +625,61 @@ class GoalStore:
                 self._rollback()
                 raise
         return record
+
+    def stage_attachment_request(self, conversation_uid: str, command_text: str, refs: List[Dict[str, Any]]) -> str:
+        """Persist references for one input; no image bytes enter the database."""
+        if not conversation_uid or not refs:
+            raise GoalStoreError("attachment request requires a conversation and images")
+        request_id = uuid.uuid4().hex
+        # A short text-only preview lets users identify cancelled requests after
+        # restart without retaining an unbounded copy of their command.
+        preview = " ".join(command_text.split())
+        if "data:image/" in preview.lower() or "base64" in preview.lower():
+            preview = "[command text hidden]"
+        preview = preview[:160]
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO goal_attachment_requests "
+                "(request_id, conversation_uid, command_preview, attachment_refs, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (request_id, conversation_uid, preview, json.dumps(refs), self._now()),
+            )
+        return request_id
+
+    def pending_attachment_requests(self, conversation_uid: str) -> List[Dict[str, str]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT request_id, command_preview FROM goal_attachment_requests "
+                "WHERE conversation_uid = ? AND goal_id IS NULL ORDER BY created_at, request_id",
+                (conversation_uid,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def attachment_requests(self, conversation_uid: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT request_id, command_preview, goal_id FROM goal_attachment_requests "
+                "WHERE conversation_uid = ? ORDER BY created_at, request_id",
+                (conversation_uid,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def attachment_request(self, conversation_uid: str, request_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT request_id, goal_id FROM goal_attachment_requests "
+                "WHERE conversation_uid = ? AND request_id = ?",
+                (conversation_uid, request_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def discard_attachment_request(self, conversation_uid: str, request_id: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM goal_attachment_requests WHERE request_id = ? AND conversation_uid = ? AND goal_id IS NULL",
+                (request_id, conversation_uid),
+            )
+        return cursor.rowcount == 1
 
     def get(self, goal_id: str) -> GoalRecord:
         cur = self._conn.execute("SELECT * FROM goals WHERE goal_id = ?", (goal_id,))
@@ -1082,9 +1189,7 @@ class GoalStore:
 
 
 # "complete","cleared" placeholders built once (fixed tuple, SQL-injection safe)
-UNFINISHED_EXCLUDE_PLACEHOLDER = (
-    "(" + ",".join(f"'{s}'" for s in UNFINISHED_EXCLUDE) + ")"
-)
+UNFINISHED_EXCLUDE_PLACEHOLDER = "(" + ",".join(f"'{s}'" for s in UNFINISHED_EXCLUDE) + ")"
 
 
 def get_goals_dir() -> Path:

@@ -124,6 +124,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Web UI: a message sent while a native agent is busy streams its own reply.
+  Its stream used to end on the completion of the turn already running, and
+  the reply never streamed. The engine now sends a request id with every chat
+  message, and the agent names it on every event of the turn that answers it
+  (#551); the running turn's text, tool cards and permission prompts stay out
+  of it, while an answer to a permission card still closes the card, whichever
+  message showed it. A message still waiting when you press Stop ends at once,
+  asking you to send it again, and one that fails before its turn starts ends
+  with that error.
+- An agent whose socket directory in /tmp was deleted makes it again on its next heartbeat; before, it stayed unreachable until another agent started (#542).
+- A chat with a live agent no longer stays stuck on "daemon unreachable: client closed" after the agent drops the engine: the engine keeps trying to attach again for as long as the agent runs (quick tries, then every 5 s) instead of giving up after 10 s (#541).
+- After it attaches again, a chat gets each update once and in order, a reply ends only on its own turn's completion, and an update too big for the engine shows as an error instead of vanishing (#541).
+- ACP: an oversized agent reply no longer breaks history paging with a
+  413 error. A page that is too large slims its message metadata so the
+  older messages still load, and the original message is preserved
+  unchanged outside the page view (#482).
 - PhoneLink: the phone link no longer falls into a reconnect loop on every
   relay blip. The engine now rejects malformed peers and error frames without
   dropping its relay socket (only the requests they concern fail), the phone
@@ -139,6 +155,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agents: a detached agent no longer stops when different commands fail the same
   way (for example several searches that find nothing); only the same failing
   call three turns in a row counts as stuck (#452).
+- Agents: a provider timeout no longer ends a detached agent's turn in
+  silence. The identical request is retried once (partial output is never
+  committed on that failure), and a turn that still fails reports
+  stop_reason "error" instead of a normal end turn (#452).
 - Windows: voice setup and the voice service restart check whether a process
   is still running without sending it a signal (#460).
 - Web UI: chat history and Trajectory load again for chats with a very large

@@ -27,6 +27,11 @@ sent — providers answer a bad level with a 400.
 /model effort default      # clear it -- back to the model's own default
 ```
 
+For an ACP harness, `/model effort` and Settings → Model show only the levels
+advertised by that harness for its current model. A selection applies to the
+current harness session; Kollab also attempts to remember it per project and
+profile for later sessions. The harness applies it.
+
 Or per profile / environment:
 
 ```json

@@ -15,7 +15,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -90,6 +90,31 @@ class TestCompactionSummaryPersists(unittest.TestCase):
             rec = json.loads(sf.read_text().splitlines()[0])
             self.assertNotIn("content", rec)
             self.assertNotIn("subtype", rec)
+
+
+    def test_record_loss_logs_and_does_not_raise(self):
+        # Even a total loss (append and recovery sidecar both fail) must
+        # not raise out of _log_compaction_event: by the time it is
+        # called, callers have already marked the compaction applied, and
+        # the record is lost either way. Loud log, no exception.
+        with TemporaryDirectory() as d:
+            sf = Path(d) / "session_2609-test.jsonl"
+            p = _plugin(sf)
+            with patch(
+                "plugins.context_compaction_plugin._append_jsonl_durable",
+                side_effect=OSError("disk gone"),
+            ), patch("plugins.context_compaction_plugin.logger") as log:
+                asyncio.run(
+                    p._log_compaction_event(
+                        messages_summarized=40,
+                        messages_kept=12,
+                        summary_length=500,
+                        pre_count=52,
+                        post_count=13,
+                    )
+                )
+            log.exception.assert_called_once()
+            self.assertFalse(sf.exists())
 
 
 class TestLoaderReplaysCompaction(unittest.TestCase):
