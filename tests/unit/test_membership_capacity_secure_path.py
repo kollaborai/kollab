@@ -18,6 +18,7 @@ and MembershipSync built exactly like relay_agent.make_membership_sync.
 import asyncio
 import json
 import secrets
+import time
 
 import pytest
 import pytest_asyncio
@@ -25,7 +26,10 @@ import pytest_asyncio
 from plugins.hub.network_members import MembershipSync
 from plugins.hub.relay_client import MAX_PENDING, RelayClient, _ApplicationPending
 from plugins.hub.relay_state import RelayError
-from plugins.hub.secure_conversation import SecureConversationTransport
+from plugins.hub.secure_conversation import (
+    MAX_SECURE_IDLE_SECONDS,
+    SecureConversationTransport,
+)
 
 
 class RelayWire:
@@ -167,3 +171,160 @@ async def test_capacity_rejection_after_handshake_is_backpressure(pair):
     _fill_budget(origin)
     await membership.tick()
     _assert_backpressure(membership, dest.public_key)
+
+
+@pytest_asyncio.fixture
+async def multi_peer_mesh(tmp_path):
+    """Real relay and secure-transport wiring for several approved peers."""
+    wire = RelayWire()
+    origin = RelayClient(tmp_path / "origin", state_dir=tmp_path / "state-origin")
+    wire.add(origin)
+    origin_secure = SecureConversationTransport(origin, origin._store.key.encode())
+    peers = []
+    peer_count = 5
+
+    for index in range(peer_count):
+        peer = RelayClient(
+            tmp_path / f"peer-{index}", state_dir=tmp_path / f"state-peer-{index}"
+        )
+        peer.state.room = origin.state.room
+        wire.add(peer)
+        origin.approve(peer.public_key)
+        peer.approve(origin.public_key)
+        origin._peers[peer.public_key] = peer._session_id
+        peer._peers[origin.public_key] = origin._session_id
+
+        if index == peer_count - 1:
+            peer_secure = SecureConversationTransport(peer, peer._store.key.encode())
+
+            async def destination_dispatch(peer_key, method, payload):
+                return {}
+
+            async def destination_application(peer_key, method, payload):
+                if method == "secure_identity":
+                    return peer_secure.identity_response(peer_key, payload)
+                if method == "secure_packet":
+                    return await peer_secure.handle_packet(
+                        peer_key, payload, destination_dispatch
+                    )
+                raise RelayError("unexpected relay application in test")
+
+            peer.set_request_handler(destination_application)
+
+        peers.append(peer)
+
+    yield wire, origin, origin_secure, peers
+    await wire.close()
+
+
+@pytest.mark.asyncio
+async def test_many_capacity_rejections_release_request_locks(
+    multi_peer_mesh, monkeypatch
+):
+    """Rejected bindings do not exhaust the secure-lock budget permanently."""
+    import plugins.hub.secure_conversation as secure_conversation_module
+
+    _, origin, origin_secure, peers = multi_peer_mesh
+    monkeypatch.setattr(secure_conversation_module, "MAX_SECURE_SESSIONS", 2)
+    membership = MembershipSync(
+        client=origin,
+        transport=origin_secure,
+        online=lambda: {peer.public_key: peer._session_id for peer in peers},
+    )
+    _fill_budget(origin)
+
+    await membership.tick()
+
+    for peer in peers:
+        _assert_backpressure(membership, peer.public_key)
+    assert origin_secure._request_locks == {}
+
+    # Once the relay budget is available, a later peer can complete a real TLS
+    # handshake rather than being rejected by stale per-binding lock entries.
+    for pending in tuple(origin._application_pending.values()):
+        pending.future.set_result({})
+    origin._application_pending.clear()
+    await origin_secure.ensure_session(peers[-1].public_key)
+    assert len(origin_secure._outbound) == 1
+    assert origin_secure._request_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_peer_cleanup_preserves_request_lock_for_active_waiter(pair):
+    """Peer/session cleanup must not split concurrent calls across locks."""
+    _, _, dest, origin_secure = pair
+    key = origin_secure._current_binding(dest.public_key)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+    shared_locks = []
+
+    async def first_request():
+        async with origin_secure._request_guard(key):
+            shared_locks.append(origin_secure._request_locks[key])
+            first_started.set()
+            await release_first.wait()
+
+    async def second_request():
+        await first_started.wait()
+        async with origin_secure._request_guard(key):
+            assert origin_secure._request_locks[key] is shared_locks[0]
+            second_started.set()
+
+    first = asyncio.create_task(first_request())
+    await first_started.wait()
+    second = asyncio.create_task(second_request())
+    await asyncio.sleep(0)
+    assert origin_secure._request_lock_users[key] == 2
+
+    origin_secure._discard_peer(dest.public_key)
+    assert origin_secure._request_locks[key] is shared_locks[0]
+    origin_secure._clear_sessions()
+    assert origin_secure._request_locks[key] is shared_locks[0]
+
+    release_first.set()
+    await asyncio.gather(first, second)
+    assert second_started.is_set()
+    assert key not in origin_secure._request_locks
+    assert key not in origin_secure._request_lock_users
+
+
+@pytest.mark.asyncio
+async def test_idle_session_pruning_discards_idle_request_lock(pair):
+    """Pruning keeps active locks safe, then clears idle session and lock state."""
+    _, _, dest, origin_secure = pair
+    await origin_secure.ensure_session(dest.public_key)
+    key = origin_secure._current_binding(dest.public_key)
+    state = origin_secure._outbound[key]
+    state.last_used = time.monotonic() - MAX_SECURE_IDLE_SECONDS - 1
+
+    request_started = asyncio.Event()
+    release_request = asyncio.Event()
+
+    async def hold_request_lock():
+        async with origin_secure._request_guard(key):
+            request_started.set()
+            await release_request.wait()
+
+    active_request = asyncio.create_task(hold_request_lock())
+    await request_started.wait()
+    request_lock = origin_secure._request_locks[key]
+
+    origin_secure._prune_expired()
+
+    assert origin_secure._outbound[key] is state
+    assert origin_secure._request_locks[key] is request_lock
+    assert origin_secure._request_lock_users[key] == 1
+
+    release_request.set()
+    await active_request
+    assert key not in origin_secure._request_locks
+    assert key not in origin_secure._request_lock_users
+
+    # Model an idle lock retained with the session; pruning must remove both.
+    origin_secure._request_locks[key] = asyncio.Lock()
+    origin_secure._prune_expired()
+
+    assert key not in origin_secure._outbound
+    assert key not in origin_secure._request_locks
+    assert key not in origin_secure._request_lock_users
