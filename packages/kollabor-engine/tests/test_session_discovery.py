@@ -38,6 +38,26 @@ def test_discover_sessions_lists_every_live_agent_with_a_socket(tmp_path, monkey
     assert found[0]["source"] == "hub_presence"
 
 
+def test_an_agent_that_has_not_published_its_socket_is_not_listed(tmp_path, monkeypatch):
+    # #555: an agent's first presence record (#38) has no socket_path. Guessing
+    # from its name found a same-named agent's socket in another folder, so a
+    # new chat attached to that agent.
+    import glob
+
+    other = tmp_path / "other-folder" / "lapis.sock"
+    other.parent.mkdir()
+    other.touch()
+    real = glob.glob
+    monkeypatch.setattr(glob, "glob", lambda pattern, **kw: (
+        [str(other)] if pattern.endswith("lapis.sock") else real(pattern, **kw)))
+    bridge = HubBridge()
+    starting = {"agent_id": "b1", "identity": "lapis", "pid": 14, "project": "/w/new"}
+    monkeypatch.setattr(bridge, "get_agents", lambda use_cache=False: [starting])
+
+    assert bridge._socket_path_for_agent(starting) is None
+    assert bridge.discover_sessions(use_cache=False) == []
+
+
 def test_discover_sessions_carries_what_the_agent_publishes(tmp_path, monkeypatch):
     # The row reads the same before the engine opens the agent as after:
     # EngineSession.to_dict answers profile and model, so presence must too.

@@ -250,22 +250,14 @@ class HubBridge:
         return None
 
     def _socket_path_for_agent(self, agent_data: Dict[str, Any]) -> Optional[Path]:
-        """Return socket path for an agent from its presence data.
+        """Return the socket path an agent published in its presence record.
 
-        Prefers the socket_path field (written by the agent itself) over
-        any derived path — avoids the agent_id vs identity naming mismatch.
+        None until its socket server is up: its first record, written when it
+        picks its identity (#38), has none. A socket found by its name could
+        be a same-named agent's in another folder (#555).
         """
         sp = agent_data.get("socket_path")
-        if sp:
-            return Path(sp)
-        # Fallback: identity-named socket in the project socket dir
-        identity = agent_data.get("identity")
-        if identity:
-            # Try to infer project hash from existing sockets
-            socks = _glob.glob(f"/tmp/kollabor-hub/**/{identity}.sock", recursive=True)
-            if socks:
-                return Path(socks[0])
-        return None
+        return Path(sp) if sp else None
 
     async def query_socket(
         self,
