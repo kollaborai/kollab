@@ -63,6 +63,8 @@ class ACPProfile:
         "codex-cli": {
             "command": ["codex-acp"],
             "managed_dir": "codex-2.5.0",
+            # Existing device-local installs may still only have this adapter.
+            "previous_managed_dirs": ("codex-2.1.1",),
             "install": (
                 "npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.5.0 --no-save "
                 "@agentclientprotocol/codex-acp@2.5.0"
@@ -148,6 +150,42 @@ class ACPProfile:
             / builtin["managed_dir"] / "node_modules" / ".bin" / self.command[0]
         )
 
+    def _previous_managed_adapter_paths(self) -> tuple[str, ...]:
+        builtin = self.BUILTIN_PROFILES.get(self.name)
+        if not builtin or self.command[0] != builtin["command"][0]:
+            return ()
+        root = Path.home() / ".local" / "share" / "kollab" / "acp-adapters"
+        return tuple(
+            str(root / directory / "node_modules" / ".bin" / self.command[0])
+            for directory in builtin.get("previous_managed_dirs", ())
+        )
+
+    def _retargets_previous_binding(
+        self, binding: ACPBinding, cwd: str, command: tuple[str, ...]
+    ) -> bool:
+        """Identify an old managed Codex binding whose executable changed."""
+        if (self.name != "codex-cli" or binding.profile != self.name
+                or binding.workspace != os.path.realpath(cwd)
+                or not binding.command or not command
+                or binding.command[1:] != command[1:]):
+            return False
+        def normalize(path: str) -> str:
+            return os.path.normcase(os.path.abspath(path))
+        return (
+            normalize(binding.command[0]) in {normalize(path) for path in self._previous_managed_adapter_paths()}
+            and normalize(command[0]) != normalize(binding.command[0])
+        )
+
+    def _matches_managed_upgrade(
+        self, binding: ACPBinding, cwd: str, command: tuple[str, ...]
+    ) -> bool:
+        """Allow only identified Codex adapters to try the old session."""
+        return (self._retargets_previous_binding(binding, cwd, command)
+                and _adapter_package_identity(command[0]) in {
+                    ("@agentclientprotocol/codex-acp", "2.1.1"),
+                    ("@agentclientprotocol/codex-acp", "2.5.0"),
+                })
+
     def resolve(self) -> tuple[tuple[str, ...], dict[str, str], str]:
         cache_path = self._cache_path()
         cache: dict[str, Any] = {}
@@ -160,6 +198,20 @@ class ACPProfile:
         cached = cache.get(self.name)
         executable = str(cached.get("path", "")) if isinstance(cached, dict) else ""
         cached_command = cached.get("command") if isinstance(cached, dict) else None
+        previous_managed = self._previous_managed_adapter_paths()
+        preferred_managed = self._managed_adapter_path()
+        # A cached path to the formerly managed pin is not an explicit custom
+        # command. Adopt the new pin when present, but honor a shell/PATH
+        # selection first. Paths cached outside our managed directory stay put.
+        if (cached_command == self.command[0] and executable
+                and os.path.normcase(os.path.abspath(executable)) in {
+                    os.path.normcase(os.path.abspath(path)) for path in previous_managed
+                } and self._is_executable_file(preferred_managed)):
+            executable = next(
+                (candidate for candidate in (self._login_shell_path(), shutil.which(self.command[0]) or "")
+                 if self._is_executable_file(candidate)),
+                preferred_managed,
+            )
         if (
             cached_command != self.command[0]
             or not executable
@@ -171,7 +223,8 @@ class ACPProfile:
                     for candidate in (
                         self._login_shell_path(),
                         shutil.which(self.command[0]) or "",
-                        self._managed_adapter_path(),
+                        preferred_managed,
+                        *previous_managed,
                     )
                     if self._is_executable_file(candidate)
                 ),
@@ -354,9 +407,9 @@ class ACPAdmission:
 def _turn_usage_payload(usage: Any) -> dict[str, int] | None:
     """Normalize a prompt-response Usage object into snake_case token totals.
 
-    A response may include adapter-reported prompt usage (codex-acp >= 2.3.0);
-    older adapters may omit it. The adapter determines the coverage of its
-    report, which is not necessarily all sidechain or subagent usage (#495).
+    A response may include adapter-reported prompt usage. The adapter determines
+    the coverage of its report, which is not necessarily all sidechain or
+    subagent usage (#495).
     """
     if usage is None:
         return None
@@ -369,6 +422,51 @@ def _turn_usage_payload(usage: Any) -> dict[str, int] | None:
         if value is not None:
             payload[name] = int(value)
     return payload or None
+
+
+def _adapter_package_identity(executable: str) -> tuple[str, str] | None:
+    """Read the resolved executable's own declared package identity, if present."""
+    try:
+        resolved = Path(executable).resolve(strict=True)
+        directory = resolved.parent
+        for _ in range(4):
+            manifest = directory / "package.json"
+            if manifest.is_file():
+                if manifest.stat().st_size > 65536:
+                    return None
+                data = json.loads(manifest.read_text())
+                if not isinstance(data, dict):
+                    return None
+                name, version = data.get("name"), data.get("version")
+                binary = data.get("bin")
+                binary_name = {
+                    "@agentclientprotocol/codex-acp": "codex-acp",
+                    "@agentclientprotocol/claude-agent-acp": "claude-agent-acp",
+                }.get(name) if isinstance(name, str) else None
+                target = binary.get(binary_name) if isinstance(binary, dict) else binary
+                if (not isinstance(name, str) or not isinstance(version, str)
+                        or not isinstance(target, str) or Path(target).is_absolute()
+                        or not resolved.is_relative_to(directory.resolve(strict=True))
+                        or (directory / target).resolve(strict=True) != resolved):
+                    return None
+                return name, version
+            directory = directory.parent
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return None
+
+
+def _known_prompt_usage(executable: str) -> bool:
+    """Trust only installed adapter versions whose prompt usage was checked.
+
+    Read package metadata beside the resolved executable, without executing a
+    command or guessing from a profile name. An unknown wrapper or version may
+    report only its last request and is therefore not a verified turn total.
+    """
+    return _adapter_package_identity(executable) in {
+        ("@agentclientprotocol/codex-acp", "2.5.0"),
+        ("@agentclientprotocol/claude-agent-acp", "0.89.0"),
+    }
 
 
 @dataclass(frozen=True)
@@ -456,6 +554,7 @@ class ACPRunner:
         # options without coupling UI code to the ACP schema classes.
         self.config_options: list[dict[str, Any]] = []
         self.resolved_command: tuple[str, ...] = ()
+        self._prompt_usage_supported = False
         self.workspace = ""
         self.resume_mode = "fresh"
         self._resume_binding: ACPBinding | None = None
@@ -530,6 +629,7 @@ class ACPRunner:
             await self.lifecycle_callback("starting", self)
         command, env, cwd = self.profile.resolve()
         self.resolved_command = tuple(command)
+        self._prompt_usage_supported = _known_prompt_usage(command[0])
         self.workspace = cwd
         # An inherited run marker also identifies children that fork, detach
         # and lose their parent wholly between tree observations. It is not
@@ -580,7 +680,14 @@ class ACPRunner:
         binding = self._resume_binding
         self.resume_mode = "fresh"
         session_caps = self.capabilities.get("sessionCapabilities") or {}
-        if binding is not None and binding.matches(cwd, self.profile.name, tuple(command)):
+        managed_upgrade = bool(binding and self.profile._matches_managed_upgrade(binding, cwd, tuple(command)))
+        if (binding is not None and not managed_upgrade
+                and self.profile._retargets_previous_binding(binding, cwd, tuple(command))):
+            raise ACPError(
+                "The selected Codex adapter could not be identified for this saved session. "
+                "The existing binding was kept; select the previous adapter or start a new session."
+            )
+        if binding is not None and (binding.matches(cwd, self.profile.name, tuple(command)) or managed_upgrade):
             self.session_id = binding.session_id
             self._replaying = True
             try:
@@ -598,7 +705,21 @@ class ACPRunner:
                     ), timeout=60)
                     self.config_options = self._wire_config_options(loaded)
                     self.resume_mode = "loaded"
-            except Exception:
+                elif managed_upgrade:
+                    raise ACPError("the updated Codex adapter does not offer session resume or load")
+            except BaseException as exc:
+                if managed_upgrade:
+                    # Do not replace the saved binding with a new session on an
+                    # upgrade failure, including during orchestrator cleanup.
+                    self.session_id = None
+                    if not isinstance(exc, Exception):
+                        raise
+                    raise ACPError(
+                        "The updated Codex adapter could not resume the saved session. "
+                        "The existing binding was kept; select the previous adapter or start a new session."
+                    ) from exc
+                if not isinstance(exc, Exception):
+                    raise
                 # A vanished session or changed login is recoverable with new
                 # context. No prompt is replayed or retried.
                 self.resume_mode = "fresh"
@@ -889,7 +1010,8 @@ class ACPRunner:
             )
             await asyncio.sleep(0)
             stop_reason = str(response.stopReason) if response else None
-            turn_usage = _turn_usage_payload(getattr(response, "usage", None))
+            turn_usage = (_turn_usage_payload(getattr(response, "usage", None))
+                          if self._prompt_usage_supported else None)
             answer = self._select_answer(self._updates)
             return ACPResult(
                 generation=generation,

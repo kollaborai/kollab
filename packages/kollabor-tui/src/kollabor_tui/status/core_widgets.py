@@ -524,7 +524,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
                     context += " | " + price
             if acp_turn_usage:
                 # Per-turn totals the adapter reported on the prompt response
-                # (codex-acp >= 2.3.0), settled once into session totals.
+                # from a recognized adapter, settled once into session totals.
                 # Report coverage depends on the adapter; context fill is a
                 # separate context indicator, never the reported turn total.
                 turn_total = _fmt_short(int(acp_turn_usage.get("total_tokens", 0) or 0))

@@ -46,6 +46,9 @@ def _usage():
 @pytest.mark.asyncio
 async def test_prompt_response_usage_lands_on_result_and_end_frame(tmp_path):
     runner = ACPRunner(ACPProfile.builtin("codex-cli", cwd=str(tmp_path)))
+    # This test isolates response parsing; real launches set this from the
+    # resolved adapter's recognized package identity and version.
+    runner._prompt_usage_supported = True
     runner.session_id = "s1"
     runner.generation = 1
     runner._process = SimpleNamespace(returncode=None)

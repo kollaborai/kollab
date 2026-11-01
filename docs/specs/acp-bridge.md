@@ -83,8 +83,10 @@ brain, and ACP is the only wire between them.
 
 Each device that runs a harness agent needs the harness's own CLI, to log in,
 and its ACP adapter. These pinned versions are the qualification targets. The
-current qualification pass has run all three: Claude Code and Codex's model,
-tool, permission, cancel, steering, resume and missing-login gates pass;
+previous qualification pass covered Claude Code and an earlier Codex adapter's
+model, tool, permission, cancel, steering, resume and missing-login gates;
+Codex adapter 2.5.0 has a focused live multi-tool usage check, but its full
+qualification matrix has not yet been rerun. Earlier testing also found that
 Gemini rejects the configured consumer Google
 authentication. Gemini's empty-auth startup preserves `-32000` and its
 missing-API-key reason, and the runner closes cleanly; the positive
@@ -94,7 +96,7 @@ live runs for these versions and for any later update.
 | Profile | Log in with | ACP adapter |
 |---|---|---|
 | `claude-code` | `npm install -g @anthropic-ai/claude-code`, then `claude` and `/login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0` |
-| `codex-cli` | `npm install -g @openai/codex`, then `codex login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1` |
+| `codex-cli` | `npm install -g @openai/codex`, then `codex login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.5.0 --no-save @agentclientprotocol/codex-acp@2.5.0` |
 
 Gemini CLI is not a built-in profile: Google retired it on June 18, 2026. A
 user-defined ACP profile can still run any ACP command.
@@ -120,7 +122,17 @@ can't be found fails the turn naming it.
 The two canonical profiles also check the managed adapter directories above
 when shell resolution fails. This lets a Web UI or service launch find a pinned
 adapter without changing the user's global npm installation. A custom command
-is resolved as configured; its executable is never replaced by a built-in one.
+or cached global executable stays selected. For the built-in Codex command, a
+cached managed 2.1.1 path is reconsidered when managed 2.5.0 is present: an
+explicit shell/PATH selection wins, otherwise the new managed pin is used. If
+only the existing managed 2.1.1 is available, it remains usable, including on
+a cold cache. Version 2.1.1 reports only its last request even on the prompt
+response, so kollab does not treat that response as a turn total; its context
+sample is labeled `last req`. Kollab does not install an adapter in the background.
+When an existing managed 2.1.1 session moves to an identified Codex adapter,
+kollab attempts to resume the same session. If the selected adapter cannot be
+identified or resume fails, startup reports the problem and retains the saved
+binding instead of silently replacing it with a fresh session.
 
 **Environment.** The child gets your environment minus provider keys
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
@@ -344,11 +356,14 @@ claude@home-server` and `hub_ask` settle on it.
 | `user_message_chunk` | only inside a load replay, which is swallowed |
 | the rest | logged |
 
-When a prompt response includes usage, settle it once and carry it through the
-session snapshot to local and attached status widgets. The bundled Codex and
-Claude adapters report cache counters separately from input and include
-reasoning in output; settle only when input, cache and output reconcile with
-the adapter's reported total, rather than guessing at other adapter breakdowns.
+For recognized installed Codex 2.5.0 and Claude 0.89.0 adapter packages, settle
+their prompt-response usage once and carry it through the session snapshot to
+local and attached status widgets. Recognition reads the resolved executable's
+package name and version, without running it for detection. Unknown versions,
+wrappers and custom adapters still run, but their response usage is not treated
+as a verified turn total. These two recognized adapters report cache counters
+separately from input and include reasoning in output; settle only when input,
+cache and output reconcile with the reported total.
 The reported scope is adapter-dependent: Claude prompt usage excludes
 subagent and sidechain costs. Show context samples separately from the
 reported prompt total; when there is no usable total, label the context sample
