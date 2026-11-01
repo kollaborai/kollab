@@ -639,6 +639,27 @@ async def test_failed_resume_persistence_never_produces_an_ack(three, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_restarted_peer_retries_resume_after_its_state_rolls_back(three):
+    founder, bootstrap, _link, sender, _halt = await _pending_effective_resume(three)
+    before_resume = bootstrap.halt_book()
+    await sender.tick()
+    assert not bootstrap.halt_book().active()
+    assert bootstrap.client.public_key in sender.acked()
+    # Model a peer losing the replacement during a crash and reconnecting with
+    # the new relay session that RelayClient creates on reconnect.
+    bootstrap.save_halt_book(before_resume)
+    assert bootstrap.halt_book().active()
+    sender._online = lambda: {
+        key: "restarted" if key == bootstrap.client.public_key else "s1"
+        for key in founder.client.members()
+    }
+    assert bootstrap.client.public_key not in sender.acked()
+    await sender.tick()
+    assert not bootstrap.halt_book().active()
+    assert bootstrap.client.public_key in sender.acked()
+
+
+@pytest.mark.asyncio
 async def test_invalid_confirmation_cannot_generate_a_durable_receipt(three):
     founder, bootstrap, link, sender, _halt = await _pending_effective_resume(three)
     await sender.tick()
