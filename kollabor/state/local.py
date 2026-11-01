@@ -664,6 +664,29 @@ class LocalStateService(StateService):
         if active is None:
             return ProfileSnapshot(name="", is_active=False)
         snapshot = self._profile_to_snapshot(active, is_active=True)
+        return self._overlay_acp_harness_state(snapshot)
+
+    def _acp_harness_model(self) -> str:
+        """The active ACP harness's current model option, or "" when there is none."""
+        try:
+            acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
+            if acp is None or getattr(acp, "active", False) is not True:
+                return ""
+            for option in acp.advertised_config_options():
+                if str(option.get("category") or option.get("id") or "").lower() == "model":
+                    return str(option.get("currentValue") or "")
+        except Exception:
+            logger.debug("ACP harness model unavailable", exc_info=True)
+        return ""
+
+    def _overlay_acp_harness_state(self, snapshot: ProfileSnapshot) -> ProfileSnapshot:
+        """Overlay the live ACP harness's model/effort onto a snapshot.
+
+        The provider profile object keeps its saved fields; a running
+        harness is authoritative for the active options, so every
+        snapshot that leaves the daemon reports what the harness runs,
+        not the profile's stored blanks (#605).
+        """
         harness_model = self._acp_harness_model()
         if harness_model:
             # The harness is authoritative for its active options.
@@ -679,19 +702,6 @@ class LocalStateService(StateService):
         except Exception:
             logger.debug("ACP harness effort unavailable", exc_info=True)
         return snapshot
-
-    def _acp_harness_model(self) -> str:
-        """The active ACP harness's current model option, or "" when there is none."""
-        try:
-            acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
-            if acp is None or getattr(acp, "active", False) is not True:
-                return ""
-            for option in acp.advertised_config_options():
-                if str(option.get("category") or option.get("id") or "").lower() == "model":
-                    return str(option.get("currentValue") or "")
-        except Exception:
-            logger.debug("ACP harness model unavailable", exc_info=True)
-        return ""
 
     async def list_profiles(self) -> ProfileListSnapshot:
         """Return the full profile registry with the active one marked."""
@@ -1755,7 +1765,9 @@ class LocalStateService(StateService):
                 except Exception as e:
                     logger.debug(f"reload_native_tools background task error: {e}")
 
-        snapshot = self._profile_to_snapshot(profile, is_active=True)
+        snapshot = self._overlay_acp_harness_state(
+            self._profile_to_snapshot(profile, is_active=True)
+        )
         from kollabor_tui.display_tap import publish_semantic
         publish_semantic(self._event_bus, "profile_changed", profile=snapshot.to_dict())
         return snapshot

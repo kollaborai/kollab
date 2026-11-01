@@ -128,6 +128,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- ACP: switching a session's profile or loadout now reports the resolved
+  provider profile with the harness's model and effort in session state and
+  the engine API, instead of a blank model/effort readout and an unresolved
+  loadout name (#605).
 - ACP: attaching with `--llm` no longer closes the running harness before the
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness
