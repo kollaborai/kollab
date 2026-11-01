@@ -53,7 +53,8 @@ class _Session:
 
     async def send_message(self, content, **_):  # the engine also names the request (#551)
         self.inputs.append(content)
-        self.emit(type="token", text="fixture-stream-token")
+        # As a daemon that echoes the id does: its turn's events name it (#551).
+        self.emit(type="token", text="fixture-stream-token", request_ids=["fixture-owner"])
         return {"accepted": True, "request_id": "fixture-owner"}
 
     def cancel_turn(self):
@@ -371,7 +372,7 @@ async def test_stream_loss_releases_real_assistant_callback_without_stopping_wor
     # The browser can leave while downstream send is backpressured, between
     # generator yields. A test that only cancels an idle producer misses this.
     for _ in range(64):
-        probe.session.emit(type="token", text="fixture-burst-token")
+        probe.session.emit(type="token", text="fixture-burst-token", request_ids=["fixture-owner"])
     await until(exchange.events.full)
     if not buffered:
         while not exchange.events.empty() or exchange.pending is not None:

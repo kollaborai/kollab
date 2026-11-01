@@ -863,11 +863,14 @@ class QueueProcessor:
         it answers: their streams wait for one, and the next turn would name them."""
         if not self.active_request_ids:
             return
-        ids = list(self.active_request_ids)
-        publish_semantic(self.renderer, "error", request_ids=ids, message=why)
-        publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
+        self._publish_ended(self.active_request_ids, why)
         self.active_request_ids = ()
         self._stamp_turn(None)
+
+    def _publish_ended(self, request_ids: tuple[str, ...], why: str) -> None:
+        ids = list(request_ids)
+        publish_semantic(self.renderer, "error", request_ids=ids, message=why)
+        publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
 
     async def _drop_oldest_strategy(self, message: MessageContent) -> None:
         """Drop oldest task to make room."""
@@ -1225,58 +1228,65 @@ class QueueProcessor:
         # read it as its own continuation and skip blocking.
         self._stop_hook_continuations = 0
         self._stop_hook_active = False
-        voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
-        self.active_voice = voice_inputs[-1].voice if voice_inputs else None
-        merged_origin_context = merge_voice_origin_contexts(messages)
-        previous_origin_context = self.active_origin_context
-        if (
-            is_voice_origin(previous_origin_context)
-            and (
-                not isinstance(merged_origin_context, dict)
-                or merged_origin_context.get("admission_capability")
-                != previous_origin_context.get("admission_capability")
-            )
-        ):
-            revoke_voice_admission_context(previous_origin_context)
-            if isinstance(merged_origin_context, dict):
-                revoke_voice_admission_context(merged_origin_context)
-            # Its reply goes to the voice turn in it, else to the one it cut off.
-            turn_id = _voice_turn_id(merged_origin_context) or _voice_turn_id(previous_origin_context)
-            merged_origin_context = (
-                _invalid_voice_context(turn_id)
-                if turn_id or previous_origin_context.get("source") != DEVICE_VOICE_SOURCE
-                else _invalid_device_voice_context()
-            )
-        self.active_origin_context = merged_origin_context
-        self._open_voice_turn = _voice_turn_id(merged_origin_context)
         # Taken up once this batch's turn holds the lock (#551): a turn still
         # running clears what it answered as it ends, never these.
         batch_ids = batch_request_ids(messages) if request_ids is None else request_ids
-        combined_message = combine_message_contents(
-            [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
-        )
-        if self.active_voice:
-            from kollabor_voice.voice_context import voice_preamble
-
-            combined_message = prepend_text(
-                voice_preamble(
-                    self.active_voice, self._voice_rules_in_context(self.active_voice)
-                ),
-                combined_message,
+        try:
+            voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
+            self.active_voice = voice_inputs[-1].voice if voice_inputs else None
+            merged_origin_context = merge_voice_origin_contexts(messages)
+            previous_origin_context = self.active_origin_context
+            if (
+                is_voice_origin(previous_origin_context)
+                and (
+                    not isinstance(merged_origin_context, dict)
+                    or merged_origin_context.get("admission_capability")
+                    != previous_origin_context.get("admission_capability")
+                )
+            ):
+                revoke_voice_admission_context(previous_origin_context)
+                if isinstance(merged_origin_context, dict):
+                    revoke_voice_admission_context(merged_origin_context)
+                # Its reply goes to the voice turn in it, else to the one it cut off.
+                turn_id = _voice_turn_id(merged_origin_context) or _voice_turn_id(previous_origin_context)
+                merged_origin_context = (
+                    _invalid_voice_context(turn_id)
+                    if turn_id or previous_origin_context.get("source") != DEVICE_VOICE_SOURCE
+                    else _invalid_device_voice_context()
+                )
+            self.active_origin_context = merged_origin_context
+            self._open_voice_turn = _voice_turn_id(merged_origin_context)
+            combined_message = combine_message_contents(
+                [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
+            if self.active_voice:
+                from kollabor_voice.voice_context import voice_preamble
 
-        metadata: dict[str, Any] = (
-            {"source": "voice", "voice": self.active_voice} if self.active_voice else {}
-        )
-        approvals = getattr(self.tool_executor, "yes_approvals", None)
-        if isinstance(approvals, YesApprovals) and (note := approvals.take_note()):
-            metadata["injected_context"] = note  # what the user's yes approved, model-only
+                combined_message = prepend_text(
+                    voice_preamble(
+                        self.active_voice, self._voice_rules_in_context(self.active_voice)
+                    ),
+                    combined_message,
+                )
 
-        # Add user message to conversation history
-        self._add_message_fn(
-            ConversationMessage(role="user", content=combined_message, metadata=metadata),
-            parent_uuid=current_parent_uuid,
-        )
+            metadata: dict[str, Any] = (
+                {"source": "voice", "voice": self.active_voice} if self.active_voice else {}
+            )
+            approvals = getattr(self.tool_executor, "yes_approvals", None)
+            if isinstance(approvals, YesApprovals) and (note := approvals.take_note()):
+                metadata["injected_context"] = note  # what the user's yes approved, model-only
+
+            # Add user message to conversation history
+            self._add_message_fn(
+                ConversationMessage(role="user", content=combined_message, metadata=metadata),
+                parent_uuid=current_parent_uuid,
+            )
+        except Exception as exc:
+            # No turn took its requests up: they end here, or their streams
+            # wait for a completion that never comes (#551).
+            if batch_ids:
+                self._publish_ended(batch_ids, str(exc) or type(exc).__name__)
+            raise
 
         # Execute LLM turn with user message
         if self.active_origin_context is not None:

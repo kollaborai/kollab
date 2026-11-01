@@ -72,11 +72,25 @@ def _foreign_error(event: Dict[str, Any], request_ids: set[str]) -> bool:
     return bool(named and request_ids) and not named & request_ids
 
 
-def _foreign_output(event: Dict[str, Any], request_ids: set[str]) -> bool:
+# What a turn streams as its reply. A voice or ACP turn names its request by
+# request_id alone; a turn typed in the terminal names none.
+_TURN_OUTPUT = frozenset(
+    {"token", "response", "thinking", "acp_update", "tool_start", "tool_result", "permission_request"}
+)
+
+
+def _foreign_output(event: Dict[str, Any], request_ids: set[str], tagged: bool = False) -> bool:
     """An event a turn names for other requests only is theirs: a message sent
     while another turn runs gets none of that turn's text, tool cards or
-    permission prompts (#551). Unnamed events (session-wide, older daemons) pass."""
+    permission prompts (#551). With ``tagged`` this request's turn names it, so
+    reply output naming none is another turn's too. Other unnamed events
+    (session-wide, older daemons) pass, and so do permission answers: they
+    close a card by its tool id, whichever run showed it."""
     named = {str(i) for i in event.get("request_ids") or ()}
+    if event.get("type") in _TURN_OUTPUT:
+        named |= {str(event.get("request_id") or "")} - {""}
+        if not named:
+            return tagged
     return bool(named and request_ids) and not named & request_ids
 
 
@@ -163,7 +177,7 @@ async def send_message(session_id: str, body: MessageRequest):
                 event.setdefault("session_id", session_id)
                 if _foreign_completion(event, request_ids, tagged):
                     continue
-                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids):
+                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids, tagged):
                     continue
 
                 if event.get("type") == "daemon_closed":
@@ -989,9 +1003,10 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     publish_progress()
                     continue
                 event_type = str(event.get("type") or "")
-                if _foreign_completion(event, request_ids, bool(request_ids) and not untagged):
+                tagged = bool(request_ids) and not untagged
+                if _foreign_completion(event, request_ids, tagged):
                     continue
-                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids):
+                if _foreign_error(event, request_ids) or _foreign_output(event, request_ids, tagged):
                     continue
 
                 if event_type == "token":

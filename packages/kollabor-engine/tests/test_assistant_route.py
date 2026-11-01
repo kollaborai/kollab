@@ -1194,6 +1194,44 @@ async def test_assistant_transport_streams_its_own_reply_behind_a_running_turn(m
 
 
 @pytest.mark.asyncio
+async def test_assistant_transport_shows_none_of_a_running_turn_typed_in_the_terminal(monkeypatch):
+    """Chalcedony on #554 round 5: a turn typed in the terminal names no
+    request, and its text and permission prompt became this message's."""
+    session = _FakeSession([])
+
+    def admit(content, request_id=None):
+        for event in (
+            {"type": "token", "text": "THEIRS"},
+            {"type": "permission_request", "tool_id": "their-tool", "tool_name": "terminal",
+             "input": {"command": "echo hi"}},
+            {"type": "turn_complete", "stop_reason": "end_turn"},
+            {"type": "token", "text": "B-OK", "request_ids": [request_id]},
+            {"type": "turn_complete", "stop_reason": "end_turn", "request_ids": [request_id]},
+        ):
+            session._events.put_nowait(event)
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=admit)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "hello"}],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    controller = captured["controller"]
+    assert controller.text == ["B-OK"] and controller.tool_calls == []
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_fails_the_run_when_no_state_carries_the_error(
     monkeypatch,
 ):

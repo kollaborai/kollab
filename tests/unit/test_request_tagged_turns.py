@@ -278,6 +278,28 @@ async def test_a_turn_ending_while_a_batch_waits_keeps_the_batchs_request():
 
 
 @pytest.mark.asyncio
+async def test_a_batch_that_fails_before_its_turn_starts_ends_its_requests():
+    # Chalcedony on #554 round 5: a batch whose message could not be saved
+    # raised before any turn took its requests up, and their streams waited
+    # for a completion that never came.
+    processor = _turn_processor()
+    processor.renderer = DisplayTap()
+    events = processor.renderer.subscribe("test")
+
+    def unsaved(*args, **kwargs):
+        raise OSError("conversation storage unavailable")
+
+    processor._add_message_fn = unsaved
+    with pytest.raises(OSError):
+        await processor.process_message_batch([TaggedInput("x", ("X",))], "p0")
+    error, done = _drain(events)
+    assert (error["type"], error["request_ids"]) == ("error", ["X"])
+    assert error["message"] == "conversation storage unavailable"
+    assert (done["type"], done["request_ids"], done["stop_reason"]) == ("turn_complete", ["X"], "error")
+    assert processor.active_request_ids == ()  # the next turn names none of them
+
+
+@pytest.mark.asyncio
 async def test_a_turn_that_dies_before_its_body_ends_its_requests_on_that_turn():
     # Chrysoprase on #554 round 3: a pre-request hook that cancelled X's turn
     # left X unanswered, and the next message's turn named X as well.
