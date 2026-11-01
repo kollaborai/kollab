@@ -22,6 +22,8 @@ HOST_PROCESS_SCAN_TESTS = {
             "test_close_after_started_worker_releases_queue_and_is_repeatable",
             "test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_process",
             "test_startup_failure_recovers_orphan_after_root_exited_before_ownership_read",
+            "test_orphan_fixture_cleans_up_when_runner_close_raises",
+            "test_startup_orphan_fixture_cleans_up_when_product_cleanup_is_broken",
             "test_queued_turn_after_cancel_rebases_generation",
             "test_queued_turn_keeps_first_generation_updates",
             "test_compliant_cancel_preserves_process_session_and_single_consumer",
@@ -31,17 +33,31 @@ HOST_PROCESS_SCAN_TESTS = {
             "test_prepare_cancel_holds_queue_for_delayed_owner",
         }
     ),
+    "unit/test_acp_orchestrator.py": frozenset(
+        {
+            "test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_replacement_updates",
+            "test_history_error_after_assistant_write_does_not_retry_or_duplicate_terminal",
+        }
+    ),
     "unit/test_halt_runtime_review_f2.py": frozenset(
         {"test_sweep_reaches_a_tool_child_with_no_kollab_in_its_command_line"}
     ),
     "unit/test_kill_switch_f6.py": frozenset(
         {"test_b3_the_sweep_walks_the_tree_to_a_tool_with_an_unreadable_environment"}
     ),
+    "unit/test_kill_switch_f10.py": frozenset(
+        {
+            "test_new_1_hub_path_refuses_roster_and_count_acts_by_the_callers_chain",
+            "test_new_1_nc_with_an_empty_env_under_an_agent_cannot_lift_a_halt",
+        }
+    ),
     "unit/test_kill_switch_f11.py": frozenset(
         {
             "test_backgrounded_jobs_of_an_exited_tool_shell_are_swept",
             "test_unrelated_groups_sessions_and_a_private_tmux_server_are_not_swept",
             "test_pid_reuse_guard",
+            "test_new_3_a_caller_chain_that_cannot_be_read_is_refused",
+            "test_new_3_an_unreadable_process_of_this_user_in_the_chain_is_refused",
         }
     ),
     "unit/test_kill_switch_f12.py": frozenset(
@@ -56,6 +72,9 @@ HOST_PROCESS_SCAN_TESTS = {
             "test_real_shell_executor_leftovers_are_swept_even_with_hidden_env",
             "test_shell_fixture_cleans_up_if_launch_or_sweep_raises",
         }
+    ),
+    "integration/test_acp_conversation_ownership.py": frozenset(
+        {"test_real_sdk_child_retries_clear_and_resume_without_old_context"}
     ),
     "integration/test_acp_inbound_stdio.py": frozenset(
         {
@@ -76,6 +95,10 @@ HOST_PROCESS_SCAN_TESTS = {
             "test_real_stdio_startup_error_has_guidance_and_no_owned_daemon",
             "test_real_sdk_harness_expired_login_fails_prompt_without_output",
         }
+    ),
+    "integration/test_acp_startup_loadouts.py": frozenset({"test_real_acp_child_confirms_or_cleans_up_startup"}),
+    "integration/test_acp_startup_ownership.py": frozenset(
+        {"test_real_acp_child_overlap_refuses_rpc_then_successor_handles_turn"}
     ),
     "integration/test_acp_parent_drop.py": frozenset(
         {"test_owner_drop_retires_daemon_and_sdk_without_affecting_detached_agent"}

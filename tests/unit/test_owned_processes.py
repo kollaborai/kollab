@@ -80,8 +80,13 @@ def test_pidfile_cleanup_rejects_invalid_data(tmp_path):
 def test_watchdog_startup_failure_reports_where_to_find_details(tmp_path, monkeypatch):
     ready = tmp_path / "guard.json"
     monkeypatch.setattr(owned, "_WATCHDOG", "raise SystemExit('intentional guard failure')")
-    result = subprocess.run(["/bin/sh", "-c", owned.watchdog_command(ready)],
-                            capture_output=True, text=True, timeout=10, start_new_session=True)
+    result = subprocess.run(
+        ["/bin/sh", "-c", owned.watchdog_command(ready)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        start_new_session=True,
+    )
     assert result.returncode != 0
     assert "test watchdog failed" in result.stderr
     assert str(ready) + ".stderr" in result.stderr
@@ -90,7 +95,7 @@ def test_watchdog_startup_failure_reports_where_to_find_details(tmp_path, monkey
 
 def test_bounded_child_exits_when_its_owner_is_killed(tmp_path):
     identity_file = tmp_path / "child.json"
-    driver_code = r'''
+    driver_code = r"""
 import json, os, signal, subprocess, sys, time
 import psutil
 from tests.unit._owned_processes import bounded_child_command
@@ -107,10 +112,13 @@ try:
         time.sleep(0.1)
 except psutil.Error:
     pass
-'''
-    driver = subprocess.Popen([sys.executable, "-c", driver_code, str(identity_file),
-                               str(os.getpid()), str(psutil.Process().create_time())],
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+"""
+    driver = subprocess.Popen(
+        [sys.executable, "-c", driver_code, str(identity_file), str(os.getpid()), str(psutil.Process().create_time())],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
     child = None
     try:
         _wait_for(lambda: identity_file.exists() or driver.poll() is not None)
@@ -128,7 +136,6 @@ except psutil.Error:
         owned.cleanup_pidfile(identity_file)
         if driver.stderr:
             driver.stderr.close()
-
 
 
 def test_group_cleanup_refuses_an_unrelated_watchdog(tmp_path, monkeypatch):
@@ -176,7 +183,7 @@ def test_watchdog_stops_its_group_after_owner_death_or_deadline(tmp_path, exit_m
     """An interrupted pytest or a hard deadline stops the private group."""
     ready = tmp_path / "guard.json"
     sleeper_file = tmp_path / "sleeper.pid"
-    driver_code = r'''
+    driver_code = r"""
 import shlex, signal, subprocess, sys, time
 from pathlib import Path
 import psutil
@@ -195,10 +202,22 @@ try:
         time.sleep(0.1)
 except psutil.Error:
     pass
-'''
-    driver = subprocess.Popen([sys.executable, "-c", driver_code, str(ready), str(sleeper_file), exit_mode,
-                               str(os.getpid()), str(psutil.Process().create_time())],
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+"""
+    driver = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            driver_code,
+            str(ready),
+            str(sleeper_file),
+            exit_mode,
+            str(os.getpid()),
+            str(psutil.Process().create_time()),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
     sleeper = guard = None
     pgid = None
     try:
@@ -239,7 +258,7 @@ except psutil.Error:
 def test_detached_acp_child_exits_after_test_owner_is_killed(tmp_path, exit_mode):
     """The fast-fork fixture has its own parent-death and time bound."""
     child_file = tmp_path / "orphan.json"
-    driver_code = r'''
+    driver_code = r"""
 import os, signal, subprocess, sys, time
 import psutil
 from tests.unit.test_acp_bridge import FAST_ORPHAN_ADAPTER
@@ -255,10 +274,13 @@ try:
         time.sleep(0.1)
 except psutil.Error:
     pass
-'''
-    driver = subprocess.Popen([sys.executable, "-c", driver_code, str(child_file),
-                               str(os.getpid()), str(psutil.Process().create_time())],
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+"""
+    driver = subprocess.Popen(
+        [sys.executable, "-c", driver_code, str(child_file), str(os.getpid()), str(psutil.Process().create_time())],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
     child = None
     try:
         _wait_for(lambda: child_file.exists() or driver.poll() is not None)

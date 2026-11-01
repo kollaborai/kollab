@@ -22,7 +22,7 @@ import psutil
 WATCHDOG_SECONDS = 60
 
 # A non-detached test child still needs to exit if pytest itself is killed.
-_BOUNDED_CHILD = r'''
+_BOUNDED_CHILD = r"""
 import signal, sys, time
 import psutil
 
@@ -35,7 +35,7 @@ try:
         time.sleep(0.1)
 except psutil.Error:
     pass
-'''
+"""
 
 
 def bounded_child_command() -> list[str]:
@@ -47,7 +47,7 @@ def bounded_child_command() -> list[str]:
 # any test workload. Its handshake is atomic; the shell waits for it before
 # starting a workload. If pytest is killed, the watchdog sees its owner's
 # death; if that check fails for any reason, its hard deadline still expires.
-_WATCHDOG = r'''
+_WATCHDOG = r"""
 import json, os, signal, sys, time
 from pathlib import Path
 import psutil
@@ -77,23 +77,31 @@ try:
     os.killpg(group, signal.SIGKILL)
 except ProcessLookupError:
     pass
-'''
+"""
 
 
 def watchdog_command(ready: Path) -> str:
     """Shell prefix that starts a private-group watchdog and waits for readiness."""
     owner = psutil.Process()
-    args = [sys.executable, "-c", _WATCHDOG, str(os.getpid()), str(owner.create_time()),
-            str(os.getpgrp()), str(ready), str(WATCHDOG_SECONDS)]
+    args = [
+        sys.executable,
+        "-c",
+        _WATCHDOG,
+        str(os.getpid()),
+        str(owner.create_time()),
+        str(os.getpgrp()),
+        str(ready),
+        str(WATCHDOG_SECONDS),
+    ]
     guard = " ".join(shlex.quote(arg) for arg in args)
     path = shlex.quote(str(ready))
     error_file = shlex.quote(str(ready) + ".stderr")
     return (
         f"{guard} </dev/null >/dev/null 2>{error_file} &\n"
         "_test_guard_pid=$!; _test_guard_tries=0\n"
-        f"while [ ! -s {path} ] && kill -0 \"$_test_guard_pid\" 2>/dev/null "
+        f'while [ ! -s {path} ] && kill -0 "$_test_guard_pid" 2>/dev/null '
         '&& [ "$_test_guard_tries" -lt 250 ]; do '
-        '_test_guard_tries=$((_test_guard_tries + 1)); sleep 0.02; done\n'
+        "_test_guard_tries=$((_test_guard_tries + 1)); sleep 0.02; done\n"
         f"if [ ! -s {path} ]; then printf 'test watchdog failed; see %s\\n' {error_file} >&2; exit 1; fi\n"
     )
 
@@ -154,17 +162,21 @@ def cleanup_group(pgid: int, ready: Path, *, anchors=()) -> None:
         return
     try:
         guard = psutil.Process(data["pid"])
-        if (guard.create_time() == data["birth"] and str(ready) in guard.cmdline()
-                and os.getpgid(guard.pid) == pgid):
+        if guard.create_time() == data["birth"] and str(ready) in guard.cmdline() and os.getpgid(guard.pid) == pgid:
             os.killpg(pgid, signal.SIGKILL)
             return
-    except (psutil.NoSuchProcess, ProcessLookupError):
+    except psutil.NoSuchProcess, ProcessLookupError:
         pass
     for process, birth in anchors:
         try:
-            if (process.pid != os.getpid() and process.is_running() and process.create_time() == birth
-                    and process.status() != psutil.STATUS_ZOMBIE and os.getpgid(process.pid) == pgid):
+            if (
+                process.pid != os.getpid()
+                and process.is_running()
+                and process.create_time() == birth
+                and process.status() != psutil.STATUS_ZOMBIE
+                and os.getpgid(process.pid) == pgid
+            ):
                 os.killpg(pgid, signal.SIGKILL)
                 return
-        except (psutil.NoSuchProcess, ProcessLookupError):
+        except psutil.NoSuchProcess, ProcessLookupError:
             pass

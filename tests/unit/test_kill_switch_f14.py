@@ -29,16 +29,17 @@ from tests.unit._owned_processes import bounded_child_command, cleanup_group, wa
 from tests.unit.test_kill_switch_f12 import _four, _recount
 from tests.unit.test_kill_switch_f13 import KOLLAB_ARGV, P1, _book, _no_link
 
-posix_only = pytest.mark.skipif(sys.platform != "darwin" and not sys.platform.startswith("linux"),
-                                reason="needs real process groups")
+posix_only = pytest.mark.skipif(
+    sys.platform != "darwin" and not sys.platform.startswith("linux"), reason="needs real process groups"
+)
 
 
 def _group_members(groups: set[int]) -> dict[int, int]:
     """Snapshot PIDs in our private groups, independent of the sweep under test."""
-    out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,pgid="], capture_output=True,
-                         text=True, check=True, timeout=5).stdout
-    return {int(pid): int(group) for pid, group in (line.split() for line in out.splitlines())
-            if int(group) in groups}
+    out = subprocess.run(
+        ["/bin/ps", "-A", "-o", "pid=,pgid="], capture_output=True, text=True, check=True, timeout=5
+    ).stdout
+    return {int(pid): int(group) for pid, group in (line.split() for line in out.splitlines()) if int(group) in groups}
 
 
 # ------------------------------------------------------------------ 1. the overnight orphan, for real
@@ -70,8 +71,12 @@ def test_real_shell_executor_leftovers_are_swept_even_with_hidden_env(tmp_path):
         try:
             data = json.loads(ready.read_text())
             guard = psutil.Process(data["pid"])
-            if (data["pgid"] != pgid or guard.create_time() != data["birth"]
-                    or str(ready) not in guard.cmdline() or os.getpgid(guard.pid) != pgid):
+            if (
+                data["pgid"] != pgid
+                or guard.create_time() != data["birth"]
+                or str(ready) not in guard.cmdline()
+                or os.getpgid(guard.pid) != pgid
+            ):
                 return
             candidates = []
             for pid in _group_members({pgid}):
@@ -82,7 +87,7 @@ def test_real_shell_executor_leftovers_are_swept_even_with_hidden_env(tmp_path):
                     pass
             if guard.is_running() and guard.create_time() == data["birth"] and os.getpgid(guard.pid) == pgid:
                 owned_members.setdefault(pgid, []).extend(candidates)
-        except (FileNotFoundError, psutil.NoSuchProcess, ProcessLookupError):
+        except FileNotFoundError, psutil.NoSuchProcess, ProcessLookupError:
             pass
 
     class CapturingExecutor(se.ShellExecutor):
@@ -144,7 +149,7 @@ def test_real_shell_executor_leftovers_are_swept_even_with_hidden_env(tmp_path):
                         leader.kill()
                     elif process.returncode is None:
                         process.kill()  # retained direct child handle
-                except (psutil.NoSuchProcess, ProcessLookupError):
+                except psutil.NoSuchProcess, ProcessLookupError:
                     pass
                 deadline = time.monotonic() + 1
                 while not ready.exists() and time.monotonic() < deadline:
@@ -226,7 +231,6 @@ def test_shell_fixture_cleans_up_if_launch_or_sweep_raises(tmp_path, monkeypatch
         outsider.wait(timeout=5)
 
 
-
 # ------------------------------------------------------------------ 2. fallback_stop
 
 
@@ -251,8 +255,9 @@ def test_fallback_scope_comes_from_the_process_not_presence(tmp_path):
     me = nh.Proc(other.pid, os.getpid(), KOLLAB_ARGV, {}, "/elsewhere")
     forged = [{"identity": "lapis", "pid": other.pid, "project": "/in-scope"}]
     try:
-        got = asyncio.run(hr.fallback_stop([["/in-scope"]], forged, [me], set(), grace=0.2,
-                                           identify=lambda pid: 1000.0))
+        got = asyncio.run(
+            hr.fallback_stop([["/in-scope"]], forged, [me], set(), grace=0.2, identify=lambda pid: 1000.0)
+        )
         time.sleep(0.2)
         assert got == [] and other.poll() is None
     finally:
