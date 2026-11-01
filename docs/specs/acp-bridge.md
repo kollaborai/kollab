@@ -740,7 +740,26 @@ A clean transcript is the bar on every live run.
 
 - Model choice and reasoning effort: when an agent advertises ACP `model` or
   `thought_level` config options, `/model` and the Model panel list and set them
-  through `session/set_config_option`; unadvertised options are refused.
+  through `session/set_config_option`; unadvertised options are refused. Confirmed
+  Model-panel picks are saved per profile and override ordinary profile defaults.
+  Explicit startup loadouts take precedence over those saved picks without
+  rewriting them, and must be confirmed by the harness before readiness; a
+  refused model or effort closes the partial runner. ACP loadouts reject
+  native-only temperature and max-token settings at startup and in-app.
+  Unavailable saved picks without an explicit loadout remain nonfatal notices.
+  Session-tab effort is scoped to the current daemon, survives
+  its harness restart, and never changes another daemon's saved options. An
+  in-app ACP loadout applies its advertised model and effort before saving the
+  confirmed picks; a refused or cancelled value restores the previous active
+  profile. One task owns an ACP profile/loadout transition through its full
+  application or rollback; competing changes are refused, an older runner's
+  cleanup cannot retire a successor, and readiness is published only after the
+  transition completes. Restart, resume and web history clear hold the same
+  ownership across conversation mutation and harness replacement. Competing
+  changes fail before mutation. If cancellation or failure follows mutation,
+  the harness is stopped and the caller must retry; local history may already
+  have changed. Inbound ACP load/resume reports a retryable failure for a busy
+  daemon, reserving resource-not-found for a missing saved session.
 - Notices: when an SDK release carries `session.notices`, advertise them
   outbound and send mesh-started turns to attached clients. They stay live
   only: never history, never replayed by load or resume, never in a harness

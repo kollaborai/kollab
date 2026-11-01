@@ -33,6 +33,8 @@ from .snapshots import (
 )
 
 OFFER_FAILED = "connect offer could not be created"
+ACP_CONVERSATION_BUSY = "ACP startup or profile change is in progress; retry when ready"
+ACP_HARNESS_UNAVAILABLE = "ACP harness unavailable; retry when ready"
 
 
 def offer_failure(result: Any = None) -> dict[str, str]:
