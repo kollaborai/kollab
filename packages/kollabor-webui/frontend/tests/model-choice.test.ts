@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyModelChoice, matchesChoice, PickError } from "../src/components/shell/model-choice.ts";
+import { applyModelChoice, choiceLabel, matchesChoice, PickError } from "../src/components/shell/model-choice.ts";
 
 const codexLunaMax = { profile: "codex-cli", provider: "acp", model: "gpt-6-luna", effort: "max" };
 const oauthLuna = { profile: "openai-oauth", provider: "openai_responses", model: "gpt-6-luna", effort: "" };
@@ -41,6 +41,51 @@ function fakeApi(
   };
   return { api: api as never, calls };
 }
+
+test("the label never names a model an ACP harness has not reported", () => {
+  // Petalite on #553 round 8: with no model reported, the toolbar showed the profile's saved model.
+  const harness = { provider: "acp", model: "opus" };
+  assert.deepEqual(choiceLabel({ profile: "claude-code", model: "", effort: "high" }, harness), ["claude-code", "high", ""]);
+  assert.deepEqual(choiceLabel({ ...codexLunaMax }, harness), ["gpt-6-luna", "max", "codex-cli"]);
+  // A native profile runs its saved model, so it names that one.
+  const native = { provider: "openai_responses", model: "gpt-6.1-terra" };
+  assert.deepEqual(choiceLabel({ profile: "openai-oauth", model: "", effort: "" }, native), ["gpt-6.1-terra", "", "openai-oauth"]);
+});
+
+test("a pick never lays its model over a profile switched elsewhere meanwhile", async () => {
+  // Petalite on #553 round 8: the session was switched while the pick ran, and
+  // the result showed the new profile with the old pick's model and level.
+  const record = { profile: "openai-oauth", model: "gpt-6.1-terra", effort: "low" };
+  const { api } = fakeApi({}, undefined, record);
+  assert.deepEqual(await applyModelChoice(api, { session_id: "s1", profile: "codex-cli" }, codexLunaMax), { session_id: "s1", ...record });
+  const refused = fakeApi({ "effort:max": { ok: false, message: "max is not offered" } }, undefined, record);
+  const running = { session_id: "s1", profile: "codex-cli", model: "gpt-6-sol", effort: "high" };
+  const error = await applyModelChoice(refused.api, running, codexLunaMax).catch((e) => e);
+  assert.ok(error instanceof PickError);
+  assert.deepEqual(error.session, { session_id: "s1", ...record }); // the rollback reports it as it is too
+});
+
+test("a switch whose answer is lost says what runs, and the panel shows it", async () => {
+  // Petalite on #553 round 8: the request failed after the daemon switched, and
+  // the panel kept the old profile until a later poll.
+  const calls: unknown[][] = [];
+  const now = { profile: "openai-oauth", model: "gpt-6-luna", effort: "high" };
+  const api = {
+    setSessionProfile: async (...args: unknown[]) => {
+      calls.push(["profile", ...args]);
+      throw new Error("502: daemon unreachable");
+    },
+    panelAction: async () => ({ ok: true }),
+    getSession: async (id: string) => (calls.push(["get", id]), { session_id: id, ...now }),
+  } as never;
+  for (const choice of [{ ...oauthLuna, effort: "high" }, codexLunaMax]) {
+    const error = await applyModelChoice(api, { session_id: "s1", profile: "claude-code" }, choice).catch((e) => e);
+    assert.ok(error instanceof PickError);
+    assert.equal(error.message, "502: daemon unreachable. It now runs openai-oauth · gpt-6-luna · high.");
+    assert.deepEqual(error.session, { session_id: "s1", ...now });
+  }
+  assert.equal(calls.filter(([kind]) => kind === "get").length, 2);
+});
 
 test("a native pick is one switch that carries the model and effort", async () => {
   const { api, calls } = fakeApi();

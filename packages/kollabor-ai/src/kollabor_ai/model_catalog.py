@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -138,6 +139,11 @@ def _login_of(profile: Any) -> Optional[str]:
     return stored_account_id("openai", None if name in ("", "openai-oauth") else name)
 
 
+# The account a ChatGPT login fetch asked as, which its tokens name: the stored
+# login can change between reading it and loading them (#553).
+_ASKED_AS: ContextVar[Optional[List[str]]] = ContextVar("model_catalog_asked_as", default=None)
+
+
 def cached_provider_models(
     profile: Any, max_age: float = CACHE_TTL_SECONDS
 ) -> List[Dict[str, Any]]:
@@ -197,10 +203,15 @@ async def get_provider_models(
     if cached:
         return cached
 
-    login = _login_of(profile)  # the account this fetch asks as
-    models = await list_provider_models(profile, timeout=timeout)
-    if _login_of(profile) != login:
-        # Another account signed in while it ran: the list may be the old one's.
+    asked: List[str] = []
+    reset = _ASKED_AS.set(asked)
+    try:
+        models = await list_provider_models(profile, timeout=timeout)
+    finally:
+        _ASKED_AS.reset(reset)
+    login = _login_of(profile)  # the account signed in now
+    if login is not None and asked != [login]:
+        # It asked as another account, or with no tokens: the list may be another login's.
         return cached_provider_models(profile, max_age=float("inf"))
     if models:
         _store(profile, models, login)
@@ -278,6 +289,9 @@ async def _openai_oauth_models(profile: Any = None) -> List[Dict[str, Any]]:
     )
     if not tokens:
         return []
+    asked = _ASKED_AS.get()
+    if asked is not None:  # get_provider_models keeps the list only for this account
+        asked.append(tokens.account_id or "")
 
     details = await query_codex_model_details(tokens.access_token, tokens.account_id)
 

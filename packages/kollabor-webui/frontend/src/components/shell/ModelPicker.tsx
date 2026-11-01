@@ -3,7 +3,7 @@ import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type { EngineApi, ModelChoice, Profile } from "@/api";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { matchesChoice, sameChoice } from "@/components/shell/model-choice";
+import { choiceLabel, matchesChoice, sameChoice } from "@/components/shell/model-choice";
 import { cn } from "@/lib/utils";
 
 /** "gpt-6-luna · max · codex-cli": the parts after the first in muted text. */
@@ -120,9 +120,7 @@ export function ModelPicker({
             className,
           )}
         >
-          <ChoiceLabel
-            parts={[value.model || current?.model || value.profile, value.effort, value.model || current?.model ? value.profile : ""]}
-          />
+          <ChoiceLabel parts={choiceLabel(value, current)} />
           <ChevronDownIcon className="size-4 shrink-0 opacity-50" />
         </button>
       </PopoverTrigger>

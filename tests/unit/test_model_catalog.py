@@ -362,7 +362,23 @@ def _signed_in(tmp_path, monkeypatch, login_data):
     monkeypatch.setattr(token_storage, "get_config_directory_candidates", lambda: [tmp_path])
     monkeypatch.setattr(model_catalog, "_cache_file", lambda: tmp_path / "model_catalog.cache")
     model_catalog._MEMORY_CACHE.clear()
-    return {"name": "openai-oauth", "provider": "openai_responses", "auth_type": "oauth"}, login
+    return SimpleNamespace(name="openai-oauth", provider="openai_responses", auth_type="oauth"), login
+
+
+def _asks_as(monkeypatch, account_id, while_asking=None):
+    """The ChatGPT fetch loads tokens naming ``account_id``; ``while_asking`` runs during its request."""
+
+    async def load_tokens(provider, auto_refresh=True, profile_name=None):
+        return SimpleNamespace(access_token="tok", account_id=account_id)
+
+    async def details(access_token, account_id=None):
+        if while_asking:
+            while_asking()
+        return [{"slug": f"model-of-{account_id or 'nobody'}"}]
+
+    storage = SimpleNamespace(load_tokens=load_tokens)
+    monkeypatch.setattr("kollabor_ai.oauth.OAuthTokenStorage", lambda: storage, raising=False)
+    monkeypatch.setattr("kollabor_ai.oauth.openai_oauth.query_codex_model_details", details, raising=False)
 
 
 @pytest.mark.asyncio
@@ -370,14 +386,23 @@ async def test_a_catalog_fetched_while_another_account_signs_in_is_not_kept(tmp_
     # Fluorite on #553 round 7: a fetch asked as account A, B signed in before
     # it answered, and A's models were kept and shown as B's.
     chatgpt, login = _signed_in(tmp_path, monkeypatch, {"account_id": "acct-a"})
-
-    async def answered_after_b_signed_in(profile, timeout=None):
-        login.write_text(json.dumps({"account_id": "acct-b"}), encoding="utf-8")
-        return [{"id": "a-only"}]
-
-    monkeypatch.setattr(model_catalog, "list_provider_models", answered_after_b_signed_in)
+    _asks_as(monkeypatch, "acct-a", lambda: login.write_text(json.dumps({"account_id": "acct-b"}), encoding="utf-8"))
     assert await model_catalog.get_provider_models(chatgpt) == []
     assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_fetched_with_another_accounts_tokens_is_not_kept(tmp_path, monkeypatch):
+    # Petalite on #553 round 8: A was signed in before and after the fetch, but
+    # B signed in and out as it loaded its tokens, so it asked as B, and B's
+    # models were kept as A's.
+    chatgpt, _ = _signed_in(tmp_path, monkeypatch, {"account_id": "acct-a"})
+    _asks_as(monkeypatch, "acct-b")
+    assert await model_catalog.get_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []
+    _asks_as(monkeypatch, "acct-a")  # asked as the account signed in: kept
+    assert [m["id"] for m in await model_catalog.get_provider_models(chatgpt)] == ["model-of-acct-a"]
+    assert [m["id"] for m in model_catalog.cached_provider_models(chatgpt)] == ["model-of-acct-a"]
 
 
 @pytest.mark.asyncio
@@ -385,12 +410,8 @@ async def test_a_login_with_no_account_id_keeps_no_catalog(tmp_path, monkeypatch
     # Fluorite on #553 round 7: such a login and no login at all named the same
     # account, "", so its list stayed after signing out, or in as another one.
     chatgpt, login = _signed_in(tmp_path, monkeypatch, {"access_token": "token"})
-
-    async def live(profile, timeout=None):
-        return [{"id": "live-model"}]
-
-    monkeypatch.setattr(model_catalog, "list_provider_models", live)
-    assert await model_catalog.get_provider_models(chatgpt) == [{"id": "live-model"}]  # shown
+    _asks_as(monkeypatch, None)
+    assert [m["id"] for m in await model_catalog.get_provider_models(chatgpt)] == ["model-of-nobody"]  # shown
     assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []  # never kept
     login.unlink()  # signed out
     assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []

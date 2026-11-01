@@ -21,6 +21,35 @@ export class PickError extends Error {
 const label = (state?: { model?: string; effort?: string }) =>
   [state?.model, state?.effort].filter(Boolean).join(" · ");
 
+/**
+ * The picker's label: the model a session runs, its level and its profile. An ACP harness owns its
+ * model, so one it has not reported stays unnamed rather than showing the profile's saved one.
+ */
+export function choiceLabel(
+  value: Pick<ModelChoice, "profile" | "model" | "effort">,
+  profile?: { model?: string | null; provider?: string | null },
+): string[] {
+  const model = value.model || (profile?.provider === "acp" ? "" : profile?.model || "");
+  return [model || value.profile, value.effort, model ? value.profile : ""];
+}
+
+/** The session the engine reports, with the pick laid over a record that can lag behind the harness,
+ * unless its profile was switched elsewhere meanwhile: then it is the engine's as it is. */
+const ours = (state: Session, profile: string | undefined, fields: { model?: string; effort?: string }): Session =>
+  state.profile && state.profile !== profile ? state : { ...state, ...fields };
+
+/** A switch whose answer is lost (a 502, a dropped connection) may still have applied: say what runs. */
+async function switchProfile(api: EngineApi, ...args: Parameters<EngineApi["setSessionProfile"]>): Promise<Session> {
+  try {
+    return await api.setSessionProfile(...args);
+  } catch (error) {
+    const now = await api.getSession(args[0]).catch(() => undefined);
+    if (!now) throw error;
+    const failed = (error instanceof Error ? error.message : String(error)).replace(/\.?$/, ".");
+    throw new PickError(`${failed} It now runs ${[now.profile, label(now)].filter(Boolean).join(" · ")}.`, now);
+  }
+}
+
 /** Put the harness back on its earlier model and level: a model switch can move the level too. */
 async function restore(api: EngineApi, id: string, before: { model: string; effort: string }): Promise<boolean> {
   try {
@@ -42,7 +71,8 @@ export async function applyModelChoice(
   choice: ModelChoice,
 ): Promise<Session> {
   if (choice.provider !== "acp") {
-    const next = await api.setSessionProfile(
+    const next = await switchProfile(
+      api,
       session.session_id,
       choice.profile,
       choice.model || undefined,
@@ -60,7 +90,7 @@ export async function applyModelChoice(
     return next;
   }
   const switched = session.profile !== choice.profile;
-  if (switched) await api.setSessionProfile(session.session_id, choice.profile);
+  if (switched) await switchProfile(api, session.session_id, choice.profile);
   const steps: [string, Record<string, string>][] = [];
   if (choice.model) steps.push(["select", { model: choice.model }]);
   if (choice.effort) steps.push(["effort", { level: choice.effort }]);
@@ -80,7 +110,7 @@ export async function applyModelChoice(
     // refuses puts the model and level back, so the pick never half-applies.
     const before = switched ? undefined : { model: session.model || "", effort: session.effort || "" };
     if (before?.model && (await restore(api, session.session_id, before))) {
-      throw new PickError(`${failed} It stays on ${label(before)}.`, { ...(await api.getSession(session.session_id)), ...before });
+      throw new PickError(`${failed} It stays on ${label(before)}.`, ours(await api.getSession(session.session_id), session.profile, before));
     }
     // The switch applied even if no option did: say which harness runs now.
     const now = await api.getSession(session.session_id);
@@ -89,7 +119,7 @@ export async function applyModelChoice(
   }
   // The harness took both; the session record can lag behind it.
   const next = await api.getSession(session.session_id);
-  return { ...next, model: choice.model || next.model, effort: choice.effort || next.effort };
+  return ours(next, choice.profile, { model: choice.model || next.model, effort: choice.effort || next.effort });
 }
 
 export const sameChoice = (a: Partial<ModelChoice>, b: Partial<ModelChoice>) =>
