@@ -44,6 +44,7 @@ class TestEncodeProjectPathWindows(unittest.TestCase):
         project = _ResolvedProject(Path("/home/user/dev/x"))
         self.assertEqual(encode_project_path(project), "home_user_dev_x")
 
+    @unittest.skipIf(sys.platform == "win32", "real POSIX paths only")
     def test_posix_real_paths_stay_byte_identical(self):
         # POSIX paths have an empty drive, so the output must equal the
         # previous transformation of str(resolve()) on real paths too.
