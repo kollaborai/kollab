@@ -38,6 +38,7 @@ class WidgetState:
     total_cost_usd: float = 0.0
     session: str = ""
     acp_usage: dict[str, Any] = field(default_factory=dict)
+    acp_turn_usage: dict[str, Any] = field(default_factory=dict)
 
     # --- Processing ---
     is_processing: bool = False
