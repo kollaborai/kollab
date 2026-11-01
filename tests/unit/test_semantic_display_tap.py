@@ -79,6 +79,21 @@ class TestEventShape:
         assert events[1]["stop_reason"] == "end_turn"
         assert all("ts" in e for e in events)
 
+    def test_a_failed_turns_text_is_capped(self):
+        # A harness error with its whole output went past the engine's 16 MB
+        # frame limit, so its turn_complete was dropped and the chat waited (#543).
+        tap = DisplayTap()
+        q = tap.subscribe("test")
+        huge = "a" * 10000 + "b" * 9990 + "usage limit"  # a log whose last line says why
+        publish_semantic(tap, "turn_complete", stop_reason="error", error=huge)
+        publish_semantic(tap, "error", message=huge)
+        publish_semantic(tap, "tool_result", output=huge)
+        done, error, tool = _drain(q)
+        assert done["error"] == "a" * 4096 + " … (20,001 characters) … " + ("b" * 9990 + "usage limit")[-4096:]
+        assert done["error"].endswith("usage limit")
+        assert error["message"] == done["error"]
+        assert tool["output"] == huge  # only a failure's text is capped
+
 
 class TestToolExecutorEmitsEvents:
     """Every tool path funnels through ToolExecutor.execute_tool - XML tools from
@@ -473,3 +488,39 @@ class TestUserMessageEvent:
         service._add_conversation_message("assistant", "pong")
 
         assert _drain(q) == []
+
+
+def test_concurrent_publishers_reach_a_subscriber_in_seq_order():
+    # Kyanite on #543 round 2: seq was assigned under one lock and delivered
+    # under another, so a second thread could deliver seq 2 before seq 1, and
+    # an engine that drops what it has seen by seq then dropped seq 1.
+    import threading
+
+    from kollabor_tui.display_tap import DisplayTap
+
+    tap = DisplayTap()
+    received = tap.subscribe("engine")
+    lock, paused, release = tap._lock, threading.Event(), threading.Event()
+
+    class PauseAfterFirstRelease:
+        done = False
+
+        def __enter__(self):
+            lock.acquire()
+
+        def __exit__(self, *exc):
+            lock.release()
+            if threading.current_thread().name == "first" and not self.done:
+                self.done = True
+                paused.set()
+                release.wait(5)
+
+    tap._lock = PauseAfterFirstRelease()
+    first = threading.Thread(target=tap.publish, args=({"type": "turn_complete"},), name="first")
+    first.start()
+    assert paused.wait(5)
+    tap.publish({"type": "output", "text": "from the render thread"})
+    release.set()
+    first.join(5)
+    seqs = [received.get_nowait()["seq"] for _ in range(2)]
+    assert seqs == sorted(seqs)
