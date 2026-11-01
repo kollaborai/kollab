@@ -228,10 +228,15 @@ class MembershipSync:
                 async with sem:
                     await self._send(key, session, listed, revoked, issued_at)
             except RelayError as error:
-                if "pending application request capacity reached" in str(error):
+                if getattr(error, "code", None) == "capacity" or (
+                    "pending application request capacity reached" in str(error)
+                ):
                     # The relay's process-wide pending budget is full; the send
-                    # never reached the peer. This is backpressure, not a peer
-                    # failure: stay eligible and try again next tick.
+                    # never reached the peer. The typed code survives the
+                    # secure transport boundary; the string fallback covers
+                    # callers on unwrapped RelayClient paths. This is
+                    # backpressure, not a peer failure: stay eligible and try
+                    # again next tick.
                     return
                 self._note_failure(key)
                 return

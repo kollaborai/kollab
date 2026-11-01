@@ -138,7 +138,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slow or failing peer no longer delays the peers listed after it (#603).
 - Membership fan-out now stays inside the relay's pending budget: surplus
   sends wait on a semaphore instead of being rejected for capacity, a relay
-  capacity reject is backpressure rather than a peer failure, retry backoff
+  capacity reject is backpressure rather than a peer failure — the reject is
+  now typed ("capacity") and the typed signal survives the secure conversation
+  transport, so the live relay path honors backpressure too — retry backoff
   saturates instead of overflowing after ~1024 consecutive failures (both
   membership and config sync), and a peer's send bookkeeping is pruned when
   it leaves the list (#603).
