@@ -143,7 +143,23 @@ class TestAction:
     ):
         session = make_session()
         await client.post("/sessions/sess_panels/panels/model/actions/select", json={})
-        mirror.assert_called_once_with(session, "opus", "opus-5", "high")
+        snapshot = session.state.get_active_profile.return_value
+        mirror.assert_called_once_with(session, "opus", "opus-5", "high", snapshot=snapshot)
+
+    @pytest.mark.asyncio
+    async def test_a_profile_change_made_during_the_read_is_kept(
+        self, client, make_session, mirror
+    ):
+        # Fluorite on #553 round 7: a switch landed while the refresh read the
+        # profile, and the older read then put the old profile back.
+        async def read_overtaken():
+            session._profile_revision = 1  # a switch's profile event, meanwhile
+            return SimpleNamespace(name="old", model="old-model", effort="")
+
+        session = make_session(get_active_profile=AsyncMock(side_effect=read_overtaken))
+        session._profile_revision = 0
+        await client.post("/sessions/sess_panels/panels/model/actions/select", json={})
+        mirror.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_mirror_failure_does_not_fail_the_action(

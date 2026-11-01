@@ -19,7 +19,7 @@ test("every typed word must match: 'codex luna max' finds Codex CLI's luna at ma
 function fakeApi(
   results: Record<string, { ok: boolean; message?: string } | Error> = {},
   running?: { model: string; effort: string },
-  record: { model: string; effort: string } = { model: "old-model", effort: "" },
+  record: { model: string; effort: string; profile?: string } = { model: "old-model", effort: "" },
 ) {
   const calls: unknown[][] = [];
   const api = {
@@ -113,6 +113,20 @@ test("a request that fails after the model moved puts it back too", async () => 
   const before = { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra", effort: "" };
   await assert.rejects(applyModelChoice(api, before, codexLunaMax), /502: daemon unreachable\. It stays on gpt-6\.1-terra\./);
   assert.deepEqual(calls[2], ["panel", "s1", "model", "select", { model: "gpt-6.1-terra" }]);
+});
+
+test("a harness that refuses its first option after the switch says the switch applied", async () => {
+  // Fluorite on #553 round 7: it said nothing changed, and the panel kept the old profile.
+  const { api } = fakeApi({ select: { ok: false, message: "gpt-6-luna is not offered" } }, undefined, {
+    profile: "codex-cli",
+    model: "gpt-6.1-terra",
+    effort: "high",
+  });
+  const before = { session_id: "s1", profile: "openai-oauth", model: "gpt-6-luna", effort: "" };
+  const error = await applyModelChoice(api, before, codexLunaMax).catch((e) => e);
+  assert.ok(error instanceof PickError);
+  assert.match(error.message, /gpt-6-luna is not offered\. It now runs codex-cli · gpt-6\.1-terra · high\./);
+  assert.equal(error.session.profile, "codex-cli");
 });
 
 test("a pick with no earlier model to go back to says what the session now runs", async () => {

@@ -120,7 +120,9 @@ def _fresh(entry: Any, max_age: float) -> bool:
 def _login_of(profile: Any) -> Optional[str]:
     """The account a ChatGPT login profile is signed in as: two logins can serve
     different models, so a cached catalog is used only while the account it was
-    fetched with is still the one signed in (#553). None for other profiles."""
+    fetched with is still the one signed in (#553). "" when it names none (no
+    login, or one with no account id): nothing is kept for it. None for other
+    profiles."""
     if profile is None:
         return None
     get = profile.get if isinstance(profile, dict) else (lambda key, default=None: getattr(profile, key, default))
@@ -149,6 +151,8 @@ def cached_provider_models(
         return []
 
     login = _login_of(profile)
+    if login == "":
+        return []  # no account named: no list is known to be this login's
 
     def usable(entry: Any) -> bool:
         return _fresh(entry, max_age) and entry.get("login") == login
@@ -163,12 +167,13 @@ def cached_provider_models(
     return list(entry.get("models", []))  # type: ignore[union-attr]
 
 
-def _store(profile: Any, models: List[Dict[str, Any]]) -> None:
-    """Record a fetched catalog in both the memory and disk caches."""
+def _store(profile: Any, models: List[Dict[str, Any]], login: Optional[str]) -> None:
+    """Record a catalog fetched as ``login`` (_login_of) in both the memory and
+    disk caches."""
     key = _profile_key(profile)
-    if not key:
+    if not key or login == "":
         return
-    entry = {"timestamp": time.time(), "models": models, "login": _login_of(profile)}
+    entry = {"timestamp": time.time(), "models": models, "login": login}
     _MEMORY_CACHE[key] = entry
     entries = _load_disk_cache()
     entries[key] = entry
@@ -192,9 +197,13 @@ async def get_provider_models(
     if cached:
         return cached
 
+    login = _login_of(profile)  # the account this fetch asks as
     models = await list_provider_models(profile, timeout=timeout)
+    if _login_of(profile) != login:
+        # Another account signed in while it ran: the list may be the old one's.
+        return cached_provider_models(profile, max_age=float("inf"))
     if models:
-        _store(profile, models)
+        _store(profile, models, login)
         return models
 
     # Fetch failed or returned nothing -- serve a stale entry if we have one.

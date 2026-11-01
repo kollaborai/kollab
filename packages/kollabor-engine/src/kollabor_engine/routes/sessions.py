@@ -854,18 +854,23 @@ def apply_profile_mirror(
     name: str,
     model: Optional[str] = None,
     effort: Optional[str] = None,
+    snapshot: Any = None,
 ) -> None:
     """Keep the engine list response in sync with the daemon's active profile.
 
     The profile manager here is only a redacted mirror; the daemon remains the
     authority for the active provider/model. Shared by ``POST /profile`` and the
     panel routes, so a model change made in a panel never leaves the toolbar or
-    the session list stale. Never raises.
+    the session list stale. A profile only the daemon has (its folder's own,
+    another computer's) mirrors the daemon's redacted ``snapshot`` (#553).
+    Never raises.
     """
     try:
         from kollabor_ai import ProfileManager
 
         selected = ProfileManager().get_profile(name)
+        if selected is None and getattr(snapshot, "name", None):
+            selected = snapshot
         if selected is not None:
             session.profile = selected
             session._profile_revision = getattr(session, "_profile_revision", 0) + 1
@@ -910,6 +915,7 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
         body.name,
         _live_model(snapshot, body.model),
         getattr(snapshot, "effort", None),
+        snapshot=snapshot,
     )
 
     result = getattr(snapshot, "to_dict", None)

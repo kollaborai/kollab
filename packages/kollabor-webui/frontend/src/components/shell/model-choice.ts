@@ -75,15 +75,17 @@ export async function applyModelChoice(
       continue;
     }
     const failed = (result.message || `${choice.profile} refused ${Object.values(payload)[0]}`).replace(/\.?$/, ".");
-    if (!moved && !result.unsure) throw new Error(failed); // nothing changed
+    if (!moved && !result.unsure && !switched) throw new Error(failed); // nothing changed
     // A model it has not run is offered at the levels of its last one: one it
     // refuses puts the model and level back, so the pick never half-applies.
     const before = switched ? undefined : { model: session.model || "", effort: session.effort || "" };
     if (before?.model && (await restore(api, session.session_id, before))) {
       throw new PickError(`${failed} It stays on ${label(before)}.`, { ...(await api.getSession(session.session_id)), ...before });
     }
+    // The switch applied even if no option did: say which harness runs now.
     const now = await api.getSession(session.session_id);
-    throw new PickError(`${failed} It now runs ${label(now) || "with no model named"}.`, now);
+    const runs = [switched ? now.profile : "", label(now)].filter(Boolean).join(" · ");
+    throw new PickError(`${failed} It now runs ${runs || "with no model named"}.`, now);
   }
   // The harness took both; the session record can lag behind it.
   const next = await api.getSession(session.session_id);

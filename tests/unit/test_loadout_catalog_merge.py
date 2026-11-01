@@ -58,15 +58,20 @@ class _ProfileManager:
 
 @pytest.fixture(autouse=True)
 def _isolated_cache(tmp_path):
-    """Keep every test off the real ~/.kollab cache."""
+    """Keep every test off the real ~/.kollab cache, signed in to ChatGPT: a
+    ChatGPT login's list is kept only while its account is signed in (#553)."""
+    from kollabor_ai.oauth import token_storage
+
     mc._MEMORY_CACHE.clear()
-    with patch.object(mc, "_cache_file", lambda: tmp_path / "model_catalog.cache"):
+    with patch.object(mc, "_cache_file", lambda: tmp_path / "model_catalog.cache"), patch.object(
+        token_storage, "stored_account_id", lambda provider, profile_name=None: "acct-test"
+    ):
         yield
     mc._MEMORY_CACHE.clear()
 
 
 def _seed(profile, models):
-    mc._store(profile, [{"id": m, "note": ""} for m in models])
+    mc._store(profile, [{"id": m, "note": ""} for m in models], mc._login_of(profile))
 
 
 # -- the original bug -------------------------------------------------------
