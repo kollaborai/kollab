@@ -541,20 +541,20 @@ def relay_halt_smoke(
             f"win-a's member list names no win-b machine: {json.dumps(members)[:400]}"
         )
     print(
-        f"step 7: confirming win-b's machine {other[:12]} (a halt needs two counting machines)"
+        f"step 7: naming win-b's machine as bootstrap {other[:12]} (a halt needs two counting machines)"
     )
     confirmed = asyncio.run(
         halt_act(
             homes["a"],
             projects["a"],
-            "confirm_machine",
+            "make_bootstrap",  # the founder names the second counting machine; it cannot confirm its own admittee
             {"confirmed": True, "machine": other},
         )
     )
     if confirmed.get("halt_error") or confirmed.get("error"):
-        raise SystemExit(f"confirm_machine refused: {json.dumps(confirmed)[:400]}")
+        raise SystemExit(f"make_bootstrap refused: {json.dumps(confirmed)[:400]}")
     counted = asyncio.run(halt_members(homes["a"], projects["a"]))
-    counted_b = any(row.get("name") == "win-b" and row.get("counts") for row in counted)
+    counted_b = any(row.get("machine") == other and row.get("counts") for row in counted)
     assert counted_b, f"win-b still does not count: {json.dumps(counted)[:400]}"
 
     halted_a = asyncio.run(
