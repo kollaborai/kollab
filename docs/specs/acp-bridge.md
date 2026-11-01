@@ -712,7 +712,11 @@ A clean transcript is the bar on every live run.
   Session-tab effort is scoped to the current daemon, survives
   its harness restart, and never changes another daemon's saved options. An
   in-app ACP loadout applies its advertised model and effort before saving the
-  confirmed picks; a refused value restores the previous active profile.
+  confirmed picks; a refused or cancelled value restores the previous active
+  profile. One task owns an ACP profile/loadout transition through its full
+  application or rollback; competing changes are refused, an older runner's
+  cleanup cannot retire a successor, and readiness is published only after the
+  transition completes.
 - Notices: when an SDK release carries `session.notices`, advertise them
   outbound and send mesh-started turns to attached clients. They stay live
   only: never history, never replayed by load or resume, never in a harness

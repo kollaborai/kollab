@@ -3742,7 +3742,11 @@ class TerminalLLMChat:
             await client_turn_broker.close()
         if acp_orchestrator is not None:
             try:
-                await acp_orchestrator.close()
+                shutdown = getattr(acp_orchestrator, "shutdown", None)
+                if callable(shutdown):
+                    await shutdown()
+                else:
+                    await acp_orchestrator.close()
             except BaseException as exc:
                 logger.warning("ACP runner cleanup failed: %s", exc)
             self.acp_orchestrator = None

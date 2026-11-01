@@ -126,6 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- ACP profile and loadout changes no longer replace a harness while another
+  startup or rollback owns it. Competing changes can be retried after it ends.
 - ACP startup loadouts now stop with an error when the harness does not confirm
   the requested model or effort, or when native-only temperature or max-token
   settings are supplied.

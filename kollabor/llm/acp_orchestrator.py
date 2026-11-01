@@ -12,6 +12,7 @@ import logging
 import sys
 import uuid
 from collections import deque
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -88,6 +89,8 @@ class ACPOrchestrator:
         self._closed = False
         self._starting = False
         self._pending_ready_runner: ACPRunner | None = None
+        self._transition_owner: asyncio.Task[Any] | None = None
+        self._transition_depth = 0
         self._completion_tasks: set[asyncio.Task[Any]] = set()
         self._delivery_tasks: set[asyncio.Task[Any]] = set()
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
@@ -131,7 +134,43 @@ class ACPOrchestrator:
 
     @property
     def active(self) -> bool:
-        return self._runner is not None and not self._closed and not getattr(self, "_starting", False)
+        return (self._runner is not None and not self._closed and not getattr(self, "_starting", False)
+                and (not self.transitioning or self.transition_owned_by_current_task))
+
+    @property
+    def transitioning(self) -> bool:
+        return getattr(self, "_transition_owner", None) is not None
+
+    @property
+    def transition_owned_by_current_task(self) -> bool:
+        try:
+            owner = getattr(self, "_transition_owner", None)
+            return owner is not None and owner is asyncio.current_task()
+        except RuntimeError:
+            return False
+
+    @contextmanager
+    def transition(self):
+        """Keep startup, profile activation and rollback under one task owner."""
+        task = asyncio.current_task()
+        if self._transition_owner is not None and self._transition_owner is not task:
+            raise ACPError("ACP startup or profile change is in progress; retry when ready")
+        if task is None:
+            raise ACPError("ACP transition requires an asyncio task")
+        self._transition_owner = task
+        self._transition_depth += 1
+        try:
+            yield
+        finally:
+            self._transition_depth -= 1
+            if self._transition_depth == 0:
+                self._transition_owner = None
+                pending, self._pending_ready_runner = self._pending_ready_runner, None
+                if pending is not None and pending is self._runner and not self._closed and not self._starting:
+                    try:
+                        self._publish_runner_ready(pending)
+                    except Exception as exc:
+                        logger.warning("ACP ready notice failed (%s)", type(exc).__name__)
 
     @property
     def runner(self) -> ACPRunner | None:
@@ -153,7 +192,8 @@ class ACPOrchestrator:
     ) -> list[dict[str, Any]]:
         """Set a confirmed ACP option, optionally for this daemon only."""
         runner = self._runner
-        if runner is None or self._closed or getattr(self, "_starting", False):
+        if (runner is None or self._closed or getattr(self, "_starting", False)
+                or (self.transitioning and not self.transition_owned_by_current_task)):
             raise ACPError("ACP session is not active")
         category = next((str(o.get("category") or "") for o in runner.advertised_config_options()
                          if o.get("id") == config_id), "")
@@ -373,6 +413,13 @@ class ACPOrchestrator:
         self, profile: LLMProfile, *, resume_conversation: str | None = None,
         loadout: tuple[str, str] | None = None,
     ) -> None:
+        with self.transition():
+            await self._start_owned(profile, resume_conversation=resume_conversation, loadout=loadout)
+
+    async def _start_owned(
+        self, profile: LLMProfile, *, resume_conversation: str | None = None,
+        loadout: tuple[str, str] | None = None,
+    ) -> None:
         if profile.provider != "acp":
             raise ValueError(f"profile {profile.name!r} is not an ACP profile")
         if not profile.command:
@@ -404,6 +451,7 @@ class ACPOrchestrator:
         if not getattr(self.hub_plugin, "enabled", True):
             self.hub_plugin = None  # hub off (pipe mode, KOLLAB_NO_HUB): a harness with no mesh tools
 
+        owned_runner = None
         try:
             command = tuple(profile.command)
             acp_profile = ACPProfile(
@@ -415,12 +463,13 @@ class ACPOrchestrator:
                 env=profile.env,
             )
             permission_bridge = ACPPermissionBridge(self.permission_decider)
-            self._runner = ACPRunner(
+            owned_runner = ACPRunner(
                 acp_profile,
                 permission_bridge=permission_bridge,
                 update_callback=self._on_runner_update,
                 lifecycle_callback=self._runner_lifecycle,
             )
+            self._runner = owned_runner
             self._runner.stderr_callback = self._on_runner_stderr
             self._profile_name = profile.name
             llm = self.event_bus.get_service("llm_service")
@@ -460,11 +509,21 @@ class ACPOrchestrator:
             self._announce_restore_notices()
             self.event_bus.register_service("acp_orchestrator", self)
             self._starting = False
-            if self._pending_ready_runner is not None:
-                await self._runner_lifecycle("ready", self._pending_ready_runner)
-                self._pending_ready_runner = None
-            self._save_binding()
+            if self._pending_ready_runner is not None and self._transition_depth == 1:
+                pending, self._pending_ready_runner = self._pending_ready_runner, None
+                await self._runner_lifecycle("ready", pending)
+            else:
+                self._save_binding()
         except BaseException as exc:
+            if self._runner is not owned_runner:
+                # A stale attempt may retire only its own child, never a
+                # successor installed by another lifecycle owner.
+                if owned_runner is not None:
+                    try:
+                        await owned_runner.close()
+                    except BaseException as cleanup_exc:
+                        logger.warning("Stale ACP runner cleanup failed: %s", cleanup_exc)
+                raise
             self.startup_error = str(exc) or type(exc).__name__
             try:
                 await self.close()
@@ -482,10 +541,14 @@ class ACPOrchestrator:
                     self._session_options.pop(profile.name, None)
             raise
         finally:
-            self._starting = False
-            self._pending_ready_runner = None
+            if self._runner is None or self._runner is owned_runner:
+                self._starting = False
+                if self._transition_depth == 1:
+                    self._pending_ready_runner = None
 
     async def _runner_lifecycle(self, state: str, runner: ACPRunner) -> None:
+        if runner is not self._runner:
+            return
         if state == "starting" and self.hub_plugin is not None:
             token, generation = self.hub_plugin.rotate_acp_hub_binding()
             self._binding = (token, generation)
@@ -501,21 +564,24 @@ class ACPOrchestrator:
                         "KOLLAB_ACP_HUB_SOCKET": str(socket_path)},
             },))
         if state == "ready":
-            if self._starting:
+            if self._starting or self._transition_depth > 1:
                 self._pending_ready_runner = runner
                 return
-            self._save_binding()
-            profile = self._selected_profile
-            publish_semantic(self.event_bus, "acp_session",
-                             harness=profile.description or profile.name if profile else self._profile_name,
-                             profile=self._profile_name, state=runner.state, context=runner.resume_mode,
-                             supports_vision=getattr(runner, "supports_image_input", False) is True)
-            llm = self.event_bus.get_service("llm_service")
-            display = getattr(llm, "message_display_service", None)
-            if display is not None:
-                line = (f"{self.identity} resumed its session" if runner.resume_mode in {"resumed", "loaded"}
-                        else f"{self.identity} starts with fresh context")
-                display.display_system_message(line)
+            self._publish_runner_ready(runner)
+
+    def _publish_runner_ready(self, runner: ACPRunner) -> None:
+        self._save_binding()
+        profile = self._selected_profile
+        publish_semantic(self.event_bus, "acp_session",
+                         harness=profile.description or profile.name if profile else self._profile_name,
+                         profile=self._profile_name, state=runner.state, context=runner.resume_mode,
+                         supports_vision=getattr(runner, "supports_image_input", False) is True)
+        llm = self.event_bus.get_service("llm_service")
+        display = getattr(llm, "message_display_service", None)
+        if display is not None:
+            line = (f"{self.identity} resumed its session" if runner.resume_mode in {"resumed", "loaded"}
+                    else f"{self.identity} starts with fresh context")
+            display.display_system_message(line)
 
     def admit(
         self, text: str, *, request_id: str, source: str, thread_id: str | None = None,
@@ -523,7 +589,8 @@ class ACPOrchestrator:
         record: bool = True,
         images: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
-        if self._runner is None or self._closed or getattr(self, "_starting", False):
+        if (self._runner is None or self._closed or getattr(self, "_starting", False)
+                or (self.transitioning and not self.transition_owned_by_current_task)):
             raise ACPError(self.startup_error or "ACP runner is not active")
         if source == "agent" and (origin or {}).get("sender"):
             text = f"Message from {origin['sender']} [thread:{thread_id or ''}]\n{text}"
@@ -1130,12 +1197,26 @@ class ACPOrchestrator:
         task.add_done_callback(self._cancel_tasks.discard)
         return True
 
+    async def shutdown(self) -> None:
+        """Cancel an in-flight transition before shutting down its runner."""
+        owner = self._transition_owner
+        if owner is not None and owner is not asyncio.current_task():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        await self.close()
+
     async def close(self) -> None:
+        with self.transition():
+            await self._close_owned()
+
+    async def _close_owned(self) -> None:
         if self._closed and self._runner is None:
             return
         self._closed = True
         close_error: BaseException | None = None
         runner = self._runner
+        if self._pending_ready_runner is runner:
+            self._pending_ready_runner = None
         try:
             if not self._starting:
                 self._save_binding()
@@ -1162,7 +1243,8 @@ class ACPOrchestrator:
                 else:
                     logger.warning("ACP runner teardown also failed (%s)", type(exc).__name__)
             else:
-                self._runner = None
+                if self._runner is runner:
+                    self._runner = None
         if self._cancel_tasks:
             pending = tuple(self._cancel_tasks)
             for task in pending:

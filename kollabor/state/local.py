@@ -1350,6 +1350,44 @@ class LocalStateService(StateService):
         model: str | None = None,
         effort: str | None = None,
     ) -> ProfileSnapshot:
+        """Keep ACP profile activation and rollback with one lifecycle owner."""
+        bus = getattr(self, "_event_bus", None)
+        orchestrator = bus.get_service("acp_orchestrator") if bus else None
+        transition = getattr(orchestrator, "transition", None)
+        if callable(transition):
+            if (getattr(orchestrator, "transitioning", False) is True
+                    and getattr(orchestrator, "transition_owned_by_current_task", False) is not True):
+                raise ValueError("ACP startup or profile change is in progress; retry when ready")
+            pm = self._profile_manager
+            current = pm.get_active_profile() if pm is not None else None
+            target = pm.get_profile(name) if pm is not None else None
+
+            def is_acp(profile: Any) -> bool:
+                provider = (profile.get_provider() if hasattr(profile, "get_provider")
+                            else getattr(profile, "provider", ""))
+                return str(provider).lower() == "acp"
+
+            if is_acp(current) or is_acp(target) or (target is None and reload_profile):
+                with transition():
+                    return await self._set_active_profile_owned(
+                        name, persist=persist, persist_local=persist_local,
+                        reload_profile=reload_profile, model=model, effort=effort,
+                    )
+        return await self._set_active_profile_owned(
+            name, persist=persist, persist_local=persist_local,
+            reload_profile=reload_profile, model=model, effort=effort,
+        )
+
+    async def _set_active_profile_owned(
+        self,
+        name: str,
+        *,
+        persist: bool = False,
+        persist_local: bool = False,
+        reload_profile: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> ProfileSnapshot:
         """Switch the active LLM profile and trigger a provider reinitialize.
 
         Mirrors the legacy `/profile set` behavior from the old system command
@@ -1440,10 +1478,28 @@ class LocalStateService(StateService):
                 prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
                 prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
                 prior_loadout = getattr(orchestrator, "_loadout_override", None)
+
+                async def restore_previous() -> None:
+                    try:
+                        await orchestrator.close()
+                        if previous is not None:
+                            orchestrator._loadout_override = prior_loadout
+                            if prior_binding is not None and prior_conversation:
+                                orchestrator.save_binding_for(prior_conversation, prior_binding)
+                            await orchestrator.start(
+                                previous,
+                                resume_conversation=prior_conversation if prior_binding is not None else None,
+                            )
+                    except Exception:
+                        logger.error("previous ACP profile did not restart after a rejected activation")
+
                 try:
                     await orchestrator.close()
                     await orchestrator.start(target_profile)
-                except Exception as exc:
+                except BaseException as exc:
+                    await restore_previous()
+                    if not isinstance(exc, Exception):
+                        raise
                     logger.error(
                         "ACP profile activation failed for %r (%s)",
                         name,
@@ -1456,20 +1512,9 @@ class LocalStateService(StateService):
                 if effort:
                     try:
                         await self._apply_acp_effort(orchestrator, effort)
-                    except ValueError:
-                        # A rejected effort changes nothing: restore the previous harness.
-                        await orchestrator.close()
-                        if previous is not None:
-                            orchestrator._loadout_override = prior_loadout
-                            if prior_binding is not None and prior_conversation:
-                                orchestrator.save_binding_for(prior_conversation, prior_binding)
-                            try:
-                                await orchestrator.start(
-                                    previous,
-                                    resume_conversation=prior_conversation if prior_binding is not None else None,
-                                )
-                            except Exception:
-                                logger.error("previous ACP profile did not restart after a rejected effort")
+                    except BaseException:
+                        # A rejected or cancelled effort restores the previous harness.
+                        await restore_previous()
                         raise
                 ok = bool(self._profile_manager.set_active_profile(name))
         else:

@@ -135,6 +135,10 @@ A model or effort pick belongs to the ACP session it was made in:
 - Selecting an ACP loadout inside the app applies its advertised model and
   effort through the active harness, then saves those confirmed picks like the
   Model panel. Unsupported model or effort values are refused.
+- While an ACP profile or loadout change is running, competing changes are
+  refused with a retry message. The new harness is ready only after its model
+  and effort are applied; a refused or cancelled change restores the previous
+  harness when one was active.
 - After a model change, the effort you picked is re-applied. If the new model
   does not offer it, the highest effort the model offers is used, and a notice
   says so. If the harness refuses the effort, the notice says that instead.

@@ -552,8 +552,36 @@ class LoadoutManager:
 
         Returns:
             The resolved Loadout, or None if resolution or the profile
-            update failed.
+            update failed. A concurrent ACP transition raises ValueError so
+            callers can ask the user to retry.
         """
+        loadout = (self.resolve(loadout_or_name)[0]
+                   if isinstance(loadout_or_name, str) else loadout_or_name)
+        if loadout is None:
+            return None
+        orchestrator = (event_bus.get_service("acp_orchestrator")
+                        if event_bus and hasattr(event_bus, "get_service") else None)
+        transition = getattr(orchestrator, "transition", None)
+        if callable(transition):
+            if (getattr(orchestrator, "transitioning", False) is True
+                    and getattr(orchestrator, "transition_owned_by_current_task", False) is not True):
+                raise ValueError("ACP startup or profile change is in progress; retry when ready")
+            current = self.profile_manager.get_active_profile()
+            selected = self.profile_manager.get_profile(loadout.provider_profile)
+
+            def is_acp(profile: Any) -> bool:
+                provider = (profile.get_provider() if hasattr(profile, "get_provider")
+                            else getattr(profile, "provider", ""))
+                return str(provider).lower() == "acp"
+
+            if is_acp(current) or is_acp(selected):
+                with transition():
+                    return await self._activate_owned(loadout, event_bus)
+        return await self._activate_owned(loadout, event_bus)
+
+    async def _activate_owned(
+        self, loadout_or_name: Any, event_bus: Optional[Any] = None
+    ) -> Optional[Loadout]:
         if isinstance(loadout_or_name, str):
             loadout, _suggestions = self.resolve(loadout_or_name)
         else:
