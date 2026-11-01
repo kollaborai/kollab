@@ -3040,7 +3040,8 @@ class LocalStateService(StateService):
         # processing, and image-bearing /goal input must still reach
         # command parsing with its attachments promoted durably.
         goal_handled = None if is_voice_origin else self._try_goal_command(
-            text, message, private_reply=private_goal_reply, reply_id=private_goal_reply_id,
+            text, message, client_request_id=request_id or metadata.get("request_id"),
+            private_reply=private_goal_reply, reply_id=private_goal_reply_id,
             expected_uid=goal_conversation_uid,
         )
         if goal_handled is not None:
@@ -3177,8 +3178,11 @@ class LocalStateService(StateService):
             raise ValueError("no goal image was provided")
         return refs
 
-    def _try_goal_command(self, text: str, message, *, private_reply: bool = False,
-                          reply_id: str | None = None, expected_uid: str | None = None) -> dict[str, Any] | None:
+    def _try_goal_command(
+        self, text: str, message, *, client_request_id: str | None = None,
+        private_reply: bool = False, reply_id: str | None = None,
+        expected_uid: str | None = None,
+    ) -> dict[str, Any] | None:
         """Route /goal input ahead of the is_processing gate.
 
         Control subcommands (show/pause/resume/clear/history and bare
@@ -3219,6 +3223,62 @@ class LocalStateService(StateService):
                 "accepted": False,
                 "reason": "Conversation changed or is still syncing; refresh it and retry the goal.",
             }
+        # A replay does not reserve a mailbox, but a supplied reply id still
+        # has to satisfy the same wire contract as a new private command.
+        if private_reply and reply_id:
+            from kollabor.state.goal_replies import GOAL_REPLY_PATTERN
+
+            if not isinstance(reply_id, str) or GOAL_REPLY_PATTERN.fullmatch(reply_id) is None:
+                return {"accepted": False, "reason": "Goal reply is unavailable; retry with a new request."}
+        request_id = None
+        svc = None
+        if has_images:
+            from kollabor.state.goal_store import GoalSubmissionConflict
+
+            def replay_result(saved: dict[str, Any]) -> dict[str, Any]:
+                if saved["discarded"]:
+                    return {
+                        "accepted": False,
+                        "reason": "This submission was discarded; use a new request to submit again.",
+                    }
+                request = saved["request_id"]
+                goal = saved["goal_id"]
+                notice = (
+                    f"This submission already created goal {goal}."
+                    if goal else
+                    f"Images remain saved as {request}; use /goal retry {request} <objective> "
+                    f"or /goal discard {request}."
+                )
+                return {"accepted": True, "completed": True, "replayed": True,
+                        "request_id": request, "goal_request_id": request,
+                        "goal_id": goal, "message": notice}
+
+            # A retry owns a response-local receipt, not the original command's
+            # mailbox. Check it before reserving the supplied reply id, which
+            # can still belong to the in-flight original request.
+            if client_request_id is not None:
+                try:
+                    svc = self._goal_service()
+                    if svc is None:
+                        raise RuntimeError("goal storage unavailable")
+                    from kollabor.goals.submission import submission_identity
+
+                    key, fingerprint = submission_identity(client_request_id, text, message)
+                    existing = svc.attachment_submission(key, uid, fingerprint)
+                    if existing is not None:
+                        return replay_result(existing)
+                except GoalSubmissionConflict:
+                    return {
+                        "accepted": False,
+                        "reason": "Goal submission conflict; use a new request for different input or conversation.",
+                    }
+                except Exception as exc:
+                    logger.warning("goal image admission failed (%s)", type(exc).__name__)
+                    return {
+                        "accepted": False,
+                        "reason": "goal images could not be saved; check the images and resubmit them",
+                    }
+
         if private_reply:
             from kollabor.state.goal_replies import GoalReplyCancelled, GoalReplyMailbox
 
@@ -3231,14 +3291,26 @@ class LocalStateService(StateService):
                 return {"accepted": False, "reason": "Goal command was cancelled before admission."}
             except (ValueError, RuntimeError):
                 return {"accepted": False, "reason": "Goal reply is unavailable; retry with a new request."}
-        request_id = None
+
         if has_images:
             try:
-                refs = self._stage_goal_attachments(message)
-                svc = self._goal_service()
+                if svc is None:
+                    svc = self._goal_service()
                 if svc is None:
                     raise RuntimeError("goal storage unavailable")
-                request_id = svc.stage_attachment_request(uid, text, refs)
+                refs = self._stage_goal_attachments(message)
+                if client_request_id is None:
+                    request_id = svc.stage_attachment_request(uid, text, refs)
+                else:
+                    saved = svc.stage_attachment_submission(key, uid, fingerprint, text, refs)
+                    if not saved["created"]:
+                        return replay_result(saved)
+                    request_id = saved["request_id"]
+            except GoalSubmissionConflict:
+                return {
+                    "accepted": False,
+                    "reason": "Goal submission conflict; use a new request for different input or conversation.",
+                }
             except Exception as exc:
                 logger.warning("goal image admission failed (%s)", type(exc).__name__)
                 return {
@@ -3300,6 +3372,8 @@ class LocalStateService(StateService):
                 self._goal_command_in_flight = None
             return retained("Goal command could not be started.")
         accepted = {"accepted": True, "reason": "goal command"}
+        if request_id:
+            accepted["goal_request_id"] = request_id
         if private_reply:
             accepted["goal_reply_id"] = reply_id
         return accepted
