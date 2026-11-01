@@ -141,6 +141,71 @@ async def test_a_restart_hands_the_new_harness_what_the_old_one_never_heard(tmp_
 
 
 @pytest.mark.asyncio
+async def test_a_switch_hands_its_harness_the_peer_messages_the_failing_one_took(tmp_path, monkeypatch):
+    # Tanzanite on #549 round 5: a peer message flushed onto the failing harness
+    # was gone once that turn hit the limit too, and one kept while the switch
+    # waited was sent by nothing once the switch's fence came down.
+    class LimitRunner(FakeRunner):
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None):
+            self._updates.append({"kind": "text", "text": text, "request_id": request_id})
+            future = asyncio.get_running_loop().create_future()
+            future.set_exception(mod.ACPError("claude-code: Claude AI usage limit reached", code=-32603))
+            return mod.ACPAdmission(request_id, source, thread_id, 1, 1, text, future, origin or {})
+
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    llm = SimpleNamespace(
+        conversation_manager=ConversationManager(configuration, conversation_logger),
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+
+    def publish(event_bus, name, *args, **fields):
+        if name == "turn_complete" and fields.get("error"):
+            orchestrator.hold_observations()  # the fallback plugin, as its switch becomes pending
+
+    def peer(content):
+        return HubMessage(
+            action="message", from_agent="peer-id-1", from_identity="peer-1",
+            to="*", content=content, thread_id=None, reply_to="",
+        )
+
+    monkeypatch.setattr(mod, "publish_semantic", publish)
+    monkeypatch.setattr(mod, "ACPRunner", LimitRunner)
+    await orchestrator.start(LLMProfile(name="claude-code", provider="acp", command=("fake",)))
+    try:
+        failing = orchestrator.runner
+        orchestrator.observe_notification(peer("TAKEN_AND_FAILED"))  # idle: it goes now, and fails
+        await asyncio.gather(*orchestrator._completion_tasks)
+        assert [u for u in failing._updates if "TAKEN_AND_FAILED" in u["text"]]
+        orchestrator.observe_notification(peer("SENT_WHILE_IT_WAITS"))  # kept: the switch is pending
+        assert not [u for u in failing._updates if "SENT_WHILE_IT_WAITS" in u["text"]]
+
+        monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+        orchestrator.closing_reason = "Switching to codex."  # the switch's fence
+        await orchestrator.start(LLMProfile(name="codex", provider="acp", command=("fake",)))
+        fallback = orchestrator.runner
+        assert fallback is not failing and fallback._updates == []  # its start ran behind the fence
+        orchestrator.closing_reason = ""
+        orchestrator.release_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+        sent = "\n".join(u["text"] for u in fallback._updates)
+        assert "TAKEN_AND_FAILED" in sent and "SENT_WHILE_IT_WAITS" in sent
+        assert len([m for m in llm.conversation_history if m.role == "user"]) == 2  # each written once
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
 async def test_busy_observation_is_written_on_arrival_and_sent_once(
     tmp_path, monkeypatch
 ):

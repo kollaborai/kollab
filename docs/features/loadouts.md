@@ -120,8 +120,9 @@ An ACP harness still running or holding other messages is not switched yet:
 switching closes it, which would fail them too. It switches once the last of
 them ends, however that one ends. From then until the switch is done, a new
 message is refused with a line asking you to send it again. A message from
-another agent that the old harness never got reaches the new one. If you
-pick another profile before the switch, the switch is dropped.
+another agent that the old harness never got, or got and failed, reaches the
+new one. If you pick another profile before the switch, the switch is
+dropped, and that profile gets those messages.
 
 - `/llm fallback` shows the choice; `/llm fallback off` turns it off.
 - In the web UI: Settings → Loadouts → Fallback Model, a dropdown of every

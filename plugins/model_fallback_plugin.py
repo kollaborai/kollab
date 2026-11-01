@@ -45,6 +45,7 @@ class ModelFallbackPlugin(BasePlugin):
         # An ACP failure the harness was busy for, with the runner that failed:
         # it switches once that runner's work ends.
         self._pending: Optional[Tuple[str, Any]] = None
+        self._held: Any = None  # the orchestrator keeping peer messages for it
         self._task: Optional[asyncio.Task] = None
 
     @staticmethod
@@ -94,6 +95,9 @@ class ModelFallbackPlugin(BasePlugin):
         if self._tap is not None:
             self._tap.remove_listener(self._on_tap_event)
             self._tap = None
+        held, self._held = self._held, None
+        if held is not None:
+            held.release_observations()  # no switch comes for what it kept
 
     # -- the setting ----------------------------------------------------------
 
@@ -186,6 +190,12 @@ class ModelFallbackPlugin(BasePlugin):
             runner, self._failed_runner = self._failed_runner, None
             if message is not None and failure_kind(message) and self.choice():
                 self._pending = (message, runner)
+                acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
+                if acp is not None and self._held is None:
+                    # A peer's message from now on is for the harness the switch
+                    # starts: the failing one would take it and fail it too (#548).
+                    acp.hold_observations()
+                    self._held = acp
             # Every completion checks again: a switch the harness was busy for
             # runs once its last prompt ends, whatever that prompt's outcome.
             if self._pending is not None and self._loop is not None:
@@ -215,12 +225,19 @@ class ModelFallbackPlugin(BasePlugin):
         if pending is None:
             return
         message, failed = pending
-        if failed is not getattr(acp, "runner", None):
-            # The operator picked another profile in the meantime: that error
-            # was the old harness's, and this one is not switched for it.
-            logger.info("model fallback: the harness that failed was replaced; not switching")
-            return
-        await self.fall_back(message, harness=acp)
+        try:
+            if failed is not getattr(acp, "runner", None):
+                # The operator picked another profile in the meantime: that error
+                # was the old harness's, and this one is not switched for it.
+                logger.info("model fallback: the harness that failed was replaced; not switching")
+                return
+            await self.fall_back(message, harness=acp)
+        finally:
+            # The fence is down: the harness that runs now gets the peer messages
+            # kept while the switch waited. Its start could not take them (#548).
+            held, self._held = self._held, None
+            if held is not None:
+                held.release_observations()
 
     # -- switching ------------------------------------------------------------
 

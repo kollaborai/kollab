@@ -72,6 +72,12 @@ class ACPOrchestrator:
         # Set while the model fallback switches away from this runner: new
         # prompts are refused with it, since the switch closes the runner.
         self.closing_reason = ""
+        # Set while a fallback switch for this runner's failure waits: peer
+        # messages are kept for the harness the switch starts (#548).
+        self.observations_held = False
+        # Each observation turn's messages and their count, by request id, until
+        # it ends: one that fails while they are held gets them back.
+        self._sent_observations: dict[str, tuple[list[AgentHudEntry], int]] = {}
         self._parents: dict[str, str] = {}
         self._history_tasks: set[asyncio.Task] = set()
         self._user_history_tasks: dict[str, asyncio.Task] = {}
@@ -304,6 +310,28 @@ class ACPOrchestrator:
                 self._runner.cancel_queued(request_id)
         return admission
 
+    def hold_observations(self) -> None:
+        """Keep peer messages for the harness a pending fallback switch starts:
+        the failing one would take them and fail them too (#548)."""
+        self.observations_held = True
+
+    def release_observations(self) -> None:
+        """The switch is over: the harness that runs now gets what was kept."""
+        self.observations_held = False
+        if not self.is_processing:
+            self._flush_observations()
+
+    def _requeue_observations(self, request_id: str) -> None:
+        """An observation turn failed while a switch waits on that failure: the
+        harness the switch starts gets its messages, under their written row."""
+        sent = self._sent_observations.pop(request_id, None)
+        if sent is None or not self.observations_held:
+            return
+        entries, count = sent
+        self._observations = deque([*entries, *self._observations], maxlen=self._observations.maxlen)
+        self._observation_count += count
+        self._observation_rows.insert(0, request_id)
+
     def observe_notification(self, message: Any) -> None:
         thread = f" [thread:{message.thread_id}]" if message.thread_id else ""
         reply = f" [reply-to:{message.reply_to}]" if message.reply_to else ""
@@ -342,7 +370,7 @@ class ACPOrchestrator:
             self._flush_observations()
 
     def _flush_observations(self) -> None:
-        if not self._observations or self._closed or self._runner is None:
+        if not self._observations or self._closed or self._runner is None or self.observations_held:
             return
         discarded = self._observation_count - len(self._observations)
         entries = list(self._observations)
@@ -385,6 +413,7 @@ class ACPOrchestrator:
         for stale in rows[:-1]:
             self._parents.pop(stale, None)
             self._user_history_tasks.pop(stale, None)
+        self._sent_observations[request_id] = (list(self._observations), self._observation_count)
         self._observations.clear()
         self._observation_count = 0
 
@@ -585,6 +614,7 @@ class ACPOrchestrator:
                 thread_id=admission.thread_id, source=admission.source,
                 text="", end_frame=end_frame, failed=True,
             )
+            self._requeue_observations(admission.request_id)
             self._flush_observations()
             return {"text": "", "session_id": session_id,
                     "generation": generation, "turn_id": admission.turn_id,
@@ -594,6 +624,7 @@ class ACPOrchestrator:
             self._parents.pop(admission.request_id, None)
             self._user_history_tasks.pop(admission.request_id, None)
             self._observed_turns.pop((admission.request_id, admission.turn_id), None)
+            self._sent_observations.pop(admission.request_id, None)
         publish_semantic(
             self.event_bus, "turn_complete", request_id=result.request_id,
             session_id=result.session_id, generation=result.generation,

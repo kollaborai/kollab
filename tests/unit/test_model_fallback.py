@@ -203,10 +203,18 @@ class _Harness:
 
     def __init__(self, *prompts):
         self.closing_reason, self.prompts, self.runner = "", list(prompts), self
+        self.held, self.released = False, []
 
     @property
     def busy(self):
         return bool(self.prompts)
+
+    def hold_observations(self):
+        self.held = True
+
+    def release_observations(self):
+        self.held = False
+        self.released.append(self.closing_reason)  # the fence as the release saw it
 
     def admit(self, text):
         if self.closing_reason:
@@ -236,6 +244,23 @@ async def test_a_switch_the_harness_was_busy_for_runs_once_its_last_prompt_ends(
 
 
 @pytest.mark.asyncio
+async def test_a_switch_keeps_peer_messages_for_the_harness_it_starts(monkeypatch):
+    # Tanzanite on #549 round 5: the queued prompt's completion handed a peer
+    # message to the failing harness, and the new harness's start tried to send
+    # it behind the switch's fence; nothing sent it once the fence came down.
+    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
+    harness = _Harness("running")
+    bus.register_service("acp_orchestrator", harness)
+    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
+    assert harness.held and _Loadouts.activated == []  # busy: the switch waits, and keeps them
+    harness.prompts.pop(0)
+    tap.publish({"type": "turn_complete"})  # the queued prompt succeeded
+    await _settle(plugin)
+    assert _Loadouts.activated == ["codex"]
+    assert not harness.held and harness.released == [""]  # once, after the fence came down
+
+
+@pytest.mark.asyncio
 async def test_a_switch_waits_only_for_the_harness_that_failed(monkeypatch):
     # Prehnite on #549 round 4: a profile picked by hand while a switch waited
     # was switched away at its next good turn, under the old harness's error.
@@ -243,10 +268,12 @@ async def test_a_switch_waits_only_for_the_harness_that_failed(monkeypatch):
     bus.register_service("acp_orchestrator", _Harness("running"))
     await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
     assert _Loadouts.activated == []  # busy: the switch waits
+    failed = bus.services["acp_orchestrator"]
     bus.register_service("acp_orchestrator", _Harness())  # the operator's pick, a new harness
     tap.publish({"type": "turn_complete"})  # its turn succeeded
     await _settle(plugin)
     assert _Loadouts.activated == [] and plugin._pending is None
+    assert not failed.held and failed.released == [""]  # what it kept goes on
 
 
 @pytest.mark.asyncio
