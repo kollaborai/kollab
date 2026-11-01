@@ -9,6 +9,7 @@ only on CI.
 
 import argparse
 import asyncio
+import contextlib
 import datetime
 import ipaddress
 import json
@@ -215,15 +216,32 @@ async def halt_act(home: Path, project: Path, action: str, payload: dict) -> dic
     """One halt op for `project` through its halt listener when one runs, else its live owner."""
     from plugins.hub.halt_context import HaltContext
 
-    return await HaltContext(str(project), home / ".kollab").hub_halt_act(
-        action, payload
-    )
+    with as_home(home):
+        return await HaltContext(str(project), home / ".kollab").hub_halt_act(
+            action, payload
+        )
+
+
+@contextlib.contextmanager
+def as_home(home: Path):
+    """Run in-process halt calls as the machine at ``home``: the relay owner record is found through it."""
+    saved = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+    os.environ["HOME"] = os.environ["USERPROFILE"] = str(home)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 async def halt_members(home: Path, project: Path) -> list:
     from plugins.hub.halt_context import HaltContext
 
-    return await HaltContext(str(project), home / ".kollab").hub_halt_members()
+    with as_home(home):
+        return await HaltContext(str(project), home / ".kollab").hub_halt_members()
 
 
 def start_listener(kollab: str, project: Path, env: dict[str, str]) -> None:
