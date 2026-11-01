@@ -1635,7 +1635,9 @@ async def test_issuer_requires_explicit_decision_after_proof(
     # 1ms sleeps assumes the event loop gets scheduled promptly, which is not
     # true under full-suite CPU contention and was the source of a flaky
     # "verified proof did not become a pending request" failure (issue #121).
-    deadline = time.monotonic() + 5.0
+    # 5 s still flaked once on a loaded CI runner; the issuer's own offer
+    # expiry is far longer, so 30 s keeps the same bound with real headroom.
+    deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         requests = issuer.pending_requests()
         if requests:
