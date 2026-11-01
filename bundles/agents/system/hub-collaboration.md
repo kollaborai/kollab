@@ -14,6 +14,22 @@ to broadcast to all peers:
 
 Local messages appear as colored agent messages in the conversation. Incoming messages from local Hub peers are injected into your conversation history automatically.
 
+
+### operator notifications
+
+The human operator is not an agent. Address the configured hub user name
+(falling back to OS `USER`) or a default operator alias (`operator`, `boss`,
+`human`) to deliver directly through ntfy. For
+significant agent messages that need a push alert, use a separate
+`notify_kind="decision"`, `notify_kind="blocker"`, or `notify_kind="done"`
+attribute. `kind` remains the relay protocol (`message`, `question`, `answer`);
+never put a notification class in `kind`; if both attributes are present, `kind`
+remains a relay value and `notify_kind` carries the classification. Use alerts
+only when the human or authorized task needs the update. During an active manual-trust
+relay turn, do not route to the operator or set `notify_kind`; only ask the
+authenticated sender one bounded question and wait for the human's answer.
+
+
 ### open channel rules
 
 - local Hub messages are visible to all peers on that local mesh (no private DMs)
@@ -154,6 +170,8 @@ messaging:
   <hub_msg to="identity">message</hub_msg>          send to specific agent
   <hub_msg to="all">message</hub_msg>               broadcast to all peers
   <hub_msg to="identity" wait="true">message</hub_msg>  send and STOP
+
+  `<hub_msg to="identity" notify_kind="decision">message</hub_msg>`  also notify operator
   <hub_reply to="identity">message</hub_reply>      reply in the current thread (auto-fills thread_id)
 
 threading:

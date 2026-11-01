@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
 from kollabor.user_input_source import UserInputSource
@@ -71,7 +72,7 @@ from .models import (
     MessageScope,
     desired_bundle_for_identity,
 )
-from .notifier import HubNotifier
+from .notifier import HubNotifier, NtfyNotifier, load_ntfy_settings
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir, pid_alive
 from .rosters import (
@@ -135,6 +136,9 @@ except ImportError as _dns_import_err:
     )
 
 logger = logging.getLogger(__name__)
+
+_OPERATOR_NOTIFY_KINDS = frozenset({"decision", "blocker", "done"})
+_DEFAULT_OPERATOR_ALIASES = frozenset({"boss", "human", "operator"})
 
 STOP_GRACE_SECONDS = 1.5
 STOP_TERM_SECONDS = 1.0
@@ -666,6 +670,12 @@ class HubPlugin(BasePlugin):
         self._dreaming_task: Optional[asyncio.Task] = None
         self._notify_task: Optional[asyncio.Task] = None
         self._notifier: Optional[HubNotifier] = None
+
+        self._operator_notifier: Optional[NtfyNotifier] = None
+        self._operator_notifier_signature: Optional[bytes] = None
+
+        self._operator_ntfy_click_template = ""
+        self._operator_notify_tasks: set[asyncio.Task] = set()
         self._cron_task: Optional[asyncio.Task] = None
         self._autosave_task: Optional[asyncio.Task] = None
         self._presence_sweep_task: Optional[asyncio.Task] = None
@@ -771,6 +781,21 @@ class HubPlugin(BasePlugin):
                     "supervisor_handoff_resend": False,
                     "notify_enabled": False,
                     "notify_channel": "",
+                    "notify": {
+                        "ntfy": {
+                            "server": "",
+                            "topic": "",
+                            "token": "",
+                            "priority_map": {
+                                "message": 3,
+                                "decision": 4,
+                                "blocker": 5,
+                                "done": 2,
+                            },
+                            "webui_agent_url_template": "",
+                            "aliases": ["operator", "boss", "human"],
+                        }
+                    },
                     "notify_url": "",
                     "notify_idle_threshold": 300,
                     "notify_telegram_token": "",
@@ -1345,6 +1370,7 @@ class HubPlugin(BasePlugin):
                 "thread_id": (attrs.get("thread_id") or attrs.get("thread") or "").strip(),
                 "reply_to": attrs.get("reply_to", "").strip(),
                 "kind": attrs.get("kind", "").strip().lower(),
+                "notify_kind": attrs.get("notify_kind", "").strip().lower(),
                 "task_id": attrs.get("task_id", "").strip(),
                 "content": m.group(2).strip(),
             }
@@ -3245,6 +3271,55 @@ class HubPlugin(BasePlugin):
             getattr(self, "_cli_waiter_acp_outcomes", {})[thread_id] = True
         waiter.put_nowait(("end", end["replies"], end["failed"], text))
 
+    def _is_operator_target(self, target: str) -> bool:
+        """Return whether target names the human operator, not an agent."""
+        aliases = set(_DEFAULT_OPERATOR_ALIASES)
+        config = self.config
+        user_name = os.environ.get("USER", "")
+        if config is not None:
+            try:
+                configured_user_name = config.get("plugins.hub.user_name", "")
+            except (AttributeError, TypeError):
+                configured_user_name = ""
+            if not configured_user_name:
+                try:
+                    hub_cfg = config.get("plugins", {}).get("hub", {})
+                    configured_user_name = hub_cfg.get("user_name", "")
+                except (AttributeError, TypeError):
+                    configured_user_name = ""
+            user_name = configured_user_name or user_name
+
+            try:
+                configured_aliases = config.get(
+                    "plugins.hub.notify.ntfy.aliases", None
+                )
+            except (AttributeError, TypeError):
+                configured_aliases = None
+            if configured_aliases is None:
+                try:
+                    configured_aliases = (
+                        config.get("plugins", {})
+                        .get("hub", {})
+                        .get("notify", {})
+                        .get("ntfy", {})
+                        .get("aliases", [])
+                    )
+                except (AttributeError, TypeError):
+                    configured_aliases = []
+            if isinstance(configured_aliases, str):
+                configured_aliases = configured_aliases.split(",")
+            if isinstance(configured_aliases, (list, tuple, set, frozenset)):
+                aliases.update(
+                    str(alias).strip().casefold()
+                    for alias in configured_aliases
+                    if str(alias).strip()
+                )
+
+        if user_name:
+            aliases.add(str(user_name).strip().casefold())
+        return str(target or "").strip().casefold() in aliases
+
+
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
         from kollabor_agent.tool_executor import ToolExecutionResult
@@ -3262,6 +3337,7 @@ class HubPlugin(BasePlugin):
         wait_attr = tool_data.get("wait", tool_data.get("wait_attr", ""))
         force_attr = tool_data.get("force", tool_data.get("force_attr", ""))
         relay_kind = str(tool_data.get("kind", "") or "").strip().lower()
+        notify_kind = str(tool_data.get("notify_kind", "") or "").strip().lower()
         thread_id = str(tool_data.get("thread_id", "") or "").strip()
         reply_to = str(tool_data.get("reply_to", "") or "").strip()
         content = tool_data.get("message", tool_data.get("content", ""))
@@ -3332,7 +3408,8 @@ class HubPlugin(BasePlugin):
         # It runs before the answer checks, or a receiver's kind="answer" gets
         # only their error, retries it and trips the stuck-loop breaker.
         relay = getattr(self, "_relay_agent", None)
-        if relay is not None and relay._turn.get() is not None and relay_kind != "question":
+        relay_turn_active = relay is not None and relay._turn.get() is not None
+        if relay_turn_active and relay_kind != "question":
             active = relay.active
             sender = active.record["payload"]["from"] if active else "the sender"
             error = (
@@ -3347,6 +3424,69 @@ class HubPlugin(BasePlugin):
                 output=error,
                 error=error,
             )
+
+        if notify_kind and notify_kind not in _OPERATOR_NOTIFY_KINDS:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_msg",
+                success=False,
+                error=(
+                    "hub_msg notify_kind must be decision, blocker, or done; "
+                    "use kind only for message, question, or answer relay semantics"
+                ),
+            )
+
+        # Operator names are not agent identities. Direct delivery deliberately
+        # stays outside the relay-turn path: an active manual-trust question
+        # must still be addressed to its authenticated sender by _asker_handle.
+        if self._is_operator_target(target) and not relay_turn_active:
+            if relay_kind == "answer":
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=False,
+                    error=(
+                        'hub_msg kind="answer" is reserved for relay replies; '
+                        'use kind="message" to notify the operator'
+                    ),
+                )
+
+            operator_wait = str(wait_attr).strip().lower() in ("true", "yes", "1")
+            if not operator_wait:
+                content_lower = content.lower().strip().rstrip(".")
+                idle_phrases = (
+                    "standing by",
+                    "waiting for",
+                    "going quiet",
+                    "staying quiet",
+                )
+                operator_wait = len(content_lower.split()) <= self._ACK_MAX_WORDS and any(
+                    phrase in content_lower for phrase in idle_phrases
+                )
+
+            sent = await self._deliver_operator_notification(
+                content, notify_kind or "message"
+            )
+            if not sent:
+                error = (
+                    "operator notification could not be delivered via ntfy; "
+                    "check ntfy configuration and application logs"
+                )
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=False,
+                    output=error,
+                    error=error,
+                )
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_msg",
+                success=True,
+                output="sent to operator via ntfy",
+                metadata={"end_turn": True} if operator_wait else None,
+            )
+
 
         # A turn handling an agent's request replies to it on that request's
         # thread (below), whatever device name the model typed for the asker.
@@ -3579,6 +3719,8 @@ class HubPlugin(BasePlugin):
             except Exception as e:
                 logger.debug("failed to record expected hub reply: %s", e)
         rejections = await self._route_message(msg)
+        if notify_kind and not relay_turn_active and not rejections:
+            self._queue_operator_notification(content, notify_kind)
         self._display_outgoing_message(target, content)
 
         # Bridge forward
@@ -9252,6 +9394,19 @@ class HubPlugin(BasePlugin):
             "a remote agent runs your message with its own tools on its own machine "
             "and answers with the same tag."
         )
+        lines.append(
+            'to notify the human operator, address the configured hub user name '
+            '(falling back to OS USER) or an alias such as '
+            '<hub_msg to="operator">status</hub_msg>; it routes via ntfy, not an agent.'
+        )
+        lines.append(
+            'for an operator push on an agent message, use notify_kind="decision", '
+            '"blocker", or "done"; kind remains message/question/answer relay semantics.'
+        )
+        lines.append(
+            "do not route to the operator or set notify_kind during an active "
+            "manual-trust relay turn."
+        )
         lines.append("")
         lines.append(
             "IMPORTANT: when asked to delegate, coordinate, or assign tasks "
@@ -10214,6 +10369,78 @@ class HubPlugin(BasePlugin):
             except Exception:
                 logger.debug("supervisor alert publish failed", exc_info=True)
 
+    def _get_operator_ntfy_notifier(self) -> Optional[NtfyNotifier]:
+        """Return a cached ntfy backend, refreshing when config changes."""
+        config = self.config if self.config is not None else {}
+        settings = load_ntfy_settings(config)
+        signature = hashlib.sha256(
+            json.dumps(settings, sort_keys=True, default=str).encode("utf-8")
+        ).digest()
+        if signature != getattr(self, "_operator_notifier_signature", None):
+            self._operator_notifier_signature = signature
+            self._operator_ntfy_click_template = str(
+                settings.get("webui_agent_url_template") or ""
+            )
+            self._operator_notifier = NtfyNotifier.from_settings(settings)
+        return getattr(self, "_operator_notifier", None)
+
+    async def _deliver_operator_notification(self, message: str, kind: str) -> bool:
+        """Deliver an operator notification without leaking ntfy credentials."""
+        body = str(message or "").strip()
+        if not body:
+            return False
+        notify_kind = str(kind or "message").strip().lower()
+        if notify_kind != "message" and notify_kind not in _OPERATOR_NOTIFY_KINDS:
+            return False
+
+        try:
+            backend = self._get_operator_ntfy_notifier()
+            if backend is None:
+                logger.warning(
+                    "operator ntfy notification not sent: server/topic not configured"
+                )
+                return False
+            sender = self._identity.identity if self._identity else "unknown"
+            payload = {"sender": sender, "notify_kind": notify_kind}
+            template = getattr(self, "_operator_ntfy_click_template", "")
+            if template:
+                encoded_identity = quote(sender, safe="")
+                try:
+                    payload["click_url"] = template.format(
+                        agent=encoded_identity,
+                        identity=encoded_identity,
+                    )
+                except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        "invalid ntfy Web UI click template (%s)",
+                        type(exc).__name__,
+                    )
+            await backend.send(body, payload)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Do not include exception text: HTTP errors may contain request URLs.
+            logger.warning("operator ntfy delivery failed (%s)", type(exc).__name__)
+            return False
+
+    def _queue_operator_notification(self, message: str, kind: str) -> None:
+        """Schedule a best-effort operator alert from synchronous failure paths."""
+        if not str(message or "").strip():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("operator ntfy notification skipped outside event loop")
+            return
+
+        tasks = getattr(self, "_operator_notify_tasks", None)
+        if tasks is None:
+            tasks = self._operator_notify_tasks = set()
+        task = loop.create_task(self._deliver_operator_notification(message, kind))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
     def _record_dispatch_failure(
         self, target: str, reason: str, queued: bool = False
     ) -> None:
@@ -10230,6 +10457,20 @@ class HubPlugin(BasePlugin):
         logger.warning("hub dispatch failed: %s: %s", target, reason)
         if queued:
             return  # the mailbox delivers it later; only a lost message gets a banner
+
+        # A manual-trust relay worker may only question its authenticated sender;
+        # dispatch failures from that turn must not escape to the operator.
+        relay = getattr(self, "_relay_agent", None)
+        if relay is not None:
+            try:
+                if relay._turn.get() is not None:
+                    return
+            except (AttributeError, RuntimeError):
+                pass
+        self._queue_operator_notification(
+            f"Hub dispatch to {target} failed: {reason}", "blocker"
+        )
+
         alerted = getattr(self, "_dispatch_alerted", None)
         if alerted is None:
             alerted = self._dispatch_alerted = {}
@@ -14176,7 +14417,7 @@ class HubPlugin(BasePlugin):
                 "usage: /hub notify enable|disable|channel|url|threshold|test|status\n"
                 "  enable          enable notifications\n"
                 "  disable         disable notifications\n"
-                "  channel <name>  set channel (webhook, telegram)\n"
+                "  channel <name>  set channel (webhook, telegram, ntfy)\n"
                 "  url <url>       set webhook url\n"
                 "  threshold <sec> set idle threshold in seconds\n"
                 "  test            send a test notification\n"
@@ -14217,9 +14458,9 @@ class HubPlugin(BasePlugin):
     def _notify_set_channel(self, channel: str) -> str:
         """Set the notification channel."""
         if not channel:
-            return "usage: /hub notify channel <webhook|telegram>"
-        if channel not in ("webhook", "telegram"):
-            return f"unknown channel '{channel}'. use: webhook, telegram"
+            return "usage: /hub notify channel <webhook|telegram|ntfy>"
+        if channel not in ("webhook", "telegram", "ntfy"):
+            return f"unknown channel '{channel}'. use: webhook, telegram, ntfy"
 
         if not self.config:
             return "config not available"
@@ -14286,7 +14527,10 @@ class HubPlugin(BasePlugin):
                 "no notification channel detected. configure credentials:\n"
                 "  telegram: /config plugins.hub.notify_telegram_token <token>\n"
                 "            /config plugins.hub.notify_telegram_chat_id <chat_id>\n"
-                "  webhook:  /hub notify url <url>"
+                "  webhook:  /hub notify url <url>\n"
+                "  ntfy:     /config plugins.hub.notify.ntfy.server <server>\n"
+                "            /config plugins.hub.notify.ntfy.topic <topic>\n"
+                "            (or use Marco Notify ntfy_server/ntfy_topic fallback)"
             )
 
         # Build a temporary backend for testing
@@ -14308,6 +14552,14 @@ class HubPlugin(BasePlugin):
             from .notifier import TelegramNotifier
 
             backend = TelegramNotifier(token, chat_id)
+        elif channel == "ntfy":
+            backend = NtfyNotifier.from_config(self.config)
+            if backend is None:
+                return (
+                    "ntfy server/topic not configured. set "
+                    "plugins.hub.notify.ntfy.server and topic, or provide "
+                    "ntfy_server and ntfy_topic in the Marco Notify config"
+                )
 
         if not backend:
             return "no notification backend configured"
@@ -14316,10 +14568,13 @@ class HubPlugin(BasePlugin):
         try:
             await backend.send(
                 f"[test] agent '{identity}' notification test",
-                {"test": True, "identity": identity},
+                {"test": True, "identity": identity, "notify_kind": "message"},
             )
             return f"test notification sent via {channel}"
         except Exception as e:
+            if channel == "ntfy":
+                logger.warning("ntfy test notification failed (%s)", type(e).__name__)
+                return f"test notification failed via ntfy ({type(e).__name__})"
             return f"test notification failed: {e}"
 
     def _notify_status(self) -> str:
@@ -14361,11 +14616,17 @@ class HubPlugin(BasePlugin):
 
         loop_status = "running" if self._notify_task else "stopped"
         url_display = url[:50] + "..." if len(url) > 50 else (url or "(not set)")
+        operator_route = (
+            "ntfy configured"
+            if self._get_operator_ntfy_notifier() is not None
+            else "ntfy not configured"
+        )
 
         return (
             f"notifications: {'enabled' if enabled else 'disabled'}\n"
             f"  loop: {loop_status}\n"
             f"  channel: {channel_display}\n"
+            f"  operator route: {operator_route}\n"
             f"  backend: {backend_status}\n"
             f"  url: {url_display}\n"
             f"  idle threshold: {self._format_seconds(threshold)}\n"
@@ -16248,6 +16509,15 @@ class HubPlugin(BasePlugin):
                 await self._notify_task
             except asyncio.CancelledError:
                 pass
+
+        pending_operator_notifications = tuple(self._operator_notify_tasks)
+        for task in pending_operator_notifications:
+            task.cancel()
+        if pending_operator_notifications:
+            await asyncio.gather(
+                *pending_operator_notifications, return_exceptions=True
+            )
+        self._operator_notify_tasks.clear()
 
         if self._cron_task:
             self._cron_task.cancel()
