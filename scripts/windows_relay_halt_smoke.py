@@ -200,7 +200,8 @@ async def rpc(path: str, method: str, params: dict, timeout: float = 90) -> dict
     await writer.drain()
     reply = json.loads(await asyncio.wait_for(reader.readline(), timeout + 10))
     writer.close()
-    return reply
+    # the payload is under "result"; keep the envelope when the daemon answered an error
+    return reply["result"] if reply.get("result") is not None else reply
 
 
 async def cproxy(path: str, op: str, args: dict, timeout: float = 40) -> dict:
