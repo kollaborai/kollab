@@ -1095,8 +1095,8 @@ class ProfileManager:
             "description": "Codex over ACP",
             "install_guidance": (
                 "Install with: npm install --prefix "
-                "~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save "
-                "@agentclientprotocol/codex-acp@2.1.1"
+                "~/.local/share/kollab/acp-adapters/codex-2.5.0 --no-save "
+                "@agentclientprotocol/codex-acp@2.5.0"
             ),
         },
     }
@@ -1789,7 +1789,13 @@ class ProfileManager:
                 )
         return profile
 
-    def set_active_profile(self, name: str, persist: bool = True) -> bool:
+    def set_active_profile(
+        self,
+        name: str,
+        persist: bool = True,
+        *,
+        log_not_found: bool = True,
+    ) -> bool:
         """
         Set the active profile.
 
@@ -1802,6 +1808,7 @@ class ProfileManager:
         Args:
             name: Profile name to activate
             persist: If True, save the selection to config for next startup
+            log_not_found: If False, suppress the missing-profile error log
 
         Returns:
             True if successful, False if profile not found and can't be created
@@ -1814,7 +1821,8 @@ class ProfileManager:
         elif self._try_create_profile_from_env(name):
             logger.info(f"Profile '{name}' loaded from environment variables")
         elif name not in self._profiles:
-            logger.error(f"Profile not found: {name}")
+            if log_not_found:
+                logger.error(f"Profile not found: {name}")
             return False
 
         old_profile = self._active_profile_name

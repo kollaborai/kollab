@@ -199,6 +199,130 @@ def test_hand_off_records_scope_sweeps_and_opens_the_link(tmp_path, monkeypatch)
     assert log == [("open", FOLDER)] and "net1" in listener.links
 
 
+def test_listener_retries_the_link_when_the_old_owner_releases_it(tmp_path, monkeypatch):
+    """A busy owner on the first hand-off must not strand a halted network offline."""
+    h = "ab" * 32
+    nh.HaltFile(tmp_path).write({
+        "scopes": {"net1": [FOLDER]},
+        "folders": {"net1": [FOLDER]},
+        "networks": {"net1": {"halts": {h: {"hash": h, "kind": "halt", "machine": "m" * 64, "issued_at": 1}}}},
+    })
+    attempts = []
+    link = FakeLink([])
+
+    async def open_link(folder, state_dir):
+        attempts.append(folder)
+        return None if len(attempts) == 1 else link
+
+    monkeypatch.setattr(hr, "_state_dir_for", lambda folder, net: Path(folder))
+    listener = hr.HaltListener(tmp_path, open_link=open_link)
+    listener.folders["net1"] = {FOLDER}
+
+    async def exercise():
+        await listener.open_links("net1")
+        assert "net1" not in listener.links
+        await listener.tick()
+
+    asyncio.run(exercise())
+    assert attempts == [FOLDER, FOLDER]
+    assert listener.links["net1"] is link
+
+
+def test_simultaneous_link_opens_acquire_one_owner(tmp_path, monkeypatch):
+    nh.HaltFile(tmp_path).write({"scopes": {"net1": [FOLDER]}, "networks": {}})
+    attempts = []
+    link = FakeLink([])
+
+    async def open_link(folder, state_dir):
+        attempts.append(folder)
+        await asyncio.sleep(0)
+        return link
+
+    monkeypatch.setattr(hr, "_state_dir_for", lambda folder, net: Path(folder))
+    listener = hr.HaltListener(tmp_path, open_link=open_link)
+    listener.folders["net1"] = {FOLDER}
+
+    async def exercise():
+        await asyncio.gather(listener.open_links("net1"), listener.open_links("net1"))
+
+    asyncio.run(exercise())
+    assert attempts == [FOLDER]
+    assert listener.links["net1"] is link
+
+
+def test_failed_link_retry_does_not_block_other_halted_networks(tmp_path, monkeypatch):
+    h = "ab" * 32
+    book = {"halts": {h: {"hash": h, "kind": "halt", "machine": "m" * 64, "issued_at": 1}}}
+    nh.HaltFile(tmp_path).write({
+        "scopes": {"net1": ["/work/a"], "net2": ["/work/b"]},
+        "networks": {"net1": book, "net2": book},
+    })
+    link = FakeLink([])
+
+    async def open_link(folder, state_dir):
+        if folder == "/work/a":
+            raise OSError("busy")
+        return link
+
+    monkeypatch.setattr(hr, "_state_dir_for", lambda folder, net: Path(folder))
+    listener = hr.HaltListener(tmp_path, open_link=open_link)
+    listener.folders = {"net1": {"/work/a"}, "net2": {"/work/b"}}
+    asyncio.run(listener.tick())
+
+    assert "net1" not in listener.links
+    assert listener.links["net2"] is link
+    assert set(hr.read_halt(tmp_path)["scopes"]) == {"net1", "net2"}
+
+
+def test_reopening_links_after_restart_survives_one_failure(tmp_path, monkeypatch):
+    nh.HaltFile(tmp_path).write({
+        "scopes": {"net1": ["/work/a"], "net2": ["/work/b"]},
+        "networks": {},
+    })
+    link = FakeLink([])
+
+    async def open_link(folder, state_dir):
+        if folder == "/work/a":
+            raise OSError("busy")
+        return link
+
+    monkeypatch.setattr(hr, "_state_dir_for", lambda folder, net: Path(folder))
+    listener = hr.HaltListener(tmp_path, open_link=open_link)
+    asyncio.run(listener._reopen_links())
+
+    assert listener.held == {"net1": ["/work/a"], "net2": ["/work/b"]}
+    assert "net1" not in listener.links
+    assert listener.links["net2"] is link
+
+
+def test_hand_back_waits_for_in_flight_link_open(tmp_path, monkeypatch):
+    nh.HaltFile(tmp_path).write({"scopes": {"net1": [FOLDER]}, "networks": {}})
+    log = []
+
+    async def exercise():
+        opened, release = asyncio.Event(), asyncio.Event()
+
+        async def open_link(folder, state_dir):
+            opened.set()
+            await release.wait()
+            return FakeLink(log)
+
+        monkeypatch.setattr(hr, "_state_dir_for", lambda folder, net: Path(folder))
+        listener = hr.HaltListener(tmp_path, open_link=open_link)
+        listener.folders["net1"] = {FOLDER}
+        opening = asyncio.create_task(listener.open_links("net1"))
+        await opened.wait()
+        closing = asyncio.create_task(listener.hand_back("net1"))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(opening, closing)
+        assert "net1" not in listener.links
+        assert not hr.read_halt(tmp_path).get("scopes")
+
+    asyncio.run(exercise())
+    assert log == ["link closed"]
+
+
 def test_protect_set_never_shields_a_peer_that_is_a_live_agent(tmp_path, monkeypatch):
     """F17/#363: a halt.sock peer that IS itself a live agent — the daemon handing off a
     listener-learned halt — is not spared by the sweep, even though the F10 guard clears it
@@ -409,6 +533,13 @@ def _link(client, transport):
             return {}
 
     link.sync = Sync()
+
+    class Membership:
+        async def receive(self, peer, payload):
+            transport.reached.append(("network_members", peer))
+            return {}
+
+    link.membership = Membership()
     return link
 
 
@@ -417,11 +548,13 @@ def _link(client, transport):
     [
         ("member", "secure_identity", None, True),
         ("member", "secure_packet", "network_halt", True),
+        ("member", "secure_packet", "network_members", True),
         ("member", "secure_packet", "message", False),
         ("member", "secure_packet", "config_sync", False),
         ("member", "relay.send", None, False),
         ("stranger", "secure_identity", None, False),
         ("stranger", "secure_packet", "network_halt", False),
+        ("stranger", "secure_packet", "network_members", False),
         ("nobody", "secure_packet", "network_halt", False),
     ],
 )
@@ -437,7 +570,7 @@ def test_listener_allowlist_runs_before_dispatch(peer, method, inner, allowed):
     else:
         with pytest.raises(RelayError, match="halted"):
             asyncio.run(link.receive(peer, method, {}))
-        assert not [r for r in transport.reached if r[0] == "network_halt"]
+        assert not [r for r in transport.reached if r[0] in {"network_halt", "network_members"}]
 
 
 # ------------------------------------------------------------------ sweep

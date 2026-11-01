@@ -303,6 +303,13 @@ def agent_smoke(binary: Path, timeout: float = 120.0) -> None:
         (home / ".kollab").mkdir(parents=True)
         (home / ".kollab" / "config.json").write_text(json.dumps({"application": {"setup_completed": True}}))
         env = smoke_env(HOME=str(home), USERPROFILE=str(home))
+        child_stderr = None
+        if os.name == "nt":
+            if __package__:
+                from .windows_halt_smoke import enable_child_diagnostics
+            else:
+                from windows_halt_smoke import enable_child_diagnostics
+            child_stderr = enable_child_diagnostics(home, env)
 
         def kollab(*args: str, **kwargs) -> subprocess.CompletedProcess:
             return subprocess.run([str(binary), *args], cwd=project, env=env, text=True, timeout=60, **kwargs)
@@ -337,10 +344,11 @@ def agent_smoke(binary: Path, timeout: float = 120.0) -> None:
                 kollab("--hub", "stop", online["name"], capture_output=True)
         if not online:
             shown = status.stdout + status.stderr[-2000:] if status else ""
+            early = child_stderr.read_text(errors="replace")[-4000:] if child_stderr and child_stderr.exists() else ""
             raise SystemExit(
                 f"{binary.name} --detached started no agent that answers `--hub status` within {timeout:.0f}s\n"
                 f"--detached: exit {started.returncode}\n{log.read_text(errors='replace')[-2000:]}\n"
-                f"--hub status:\n{shown}\n{agent_log_errors(home)}"
+                f"--hub status:\n{shown}\n{agent_log_errors(home)}\ndetached child stderr:\n{early or '(empty)'}"
             )
         deadline = time.monotonic() + 30
         while AGENT_ONLINE.search(kollab("--hub", "status", capture_output=True).stdout):

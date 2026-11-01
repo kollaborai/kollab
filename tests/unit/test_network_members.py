@@ -30,6 +30,133 @@ pytestmark = pytest.mark.usefixtures("unthrottled_relay")
 NAMES = {"mac": "lapis", "srv-b": "koordinator", "srv-c": "peridot", "srv-d": "ruby", "odd": "sapphire"}
 
 
+@pytest.mark.asyncio
+async def test_halted_listener_delivers_bootstrap_before_halt_to_an_unsynced_member(tmp_path):
+    """An immediate halt still reaches a member that has not heard the bootstrap pick."""
+    from plugins.hub import halt_runtime
+    from plugins.hub import network_halt as nh
+    from plugins.hub.network_control import NetworkControl
+
+    wire, nodes = await make_net(tmp_path, "mac", "srv-b")
+    a, b = nodes
+    try:
+        for node in nodes:
+            node.client.state.room = a.client.state.room
+            node.client._network_control = NetworkControl(
+                node.client, machine=SigningKey.generate(), root=tmp_path / f"machine-{node.name}"
+            )
+        a.client.control.found()
+        joined(a, b)
+        b.client.control.take_join(
+            a.client.control.join_decision_fields(
+                b.client.control.join_proof("offer", b.key),
+                offer_id="offer", round_id=b.key, folder=b.key,
+            )["network_control"],
+            anchor=nh.join_anchor(a.client.control.network_id()),
+        )
+        await sync(nodes, rounds=3)
+        assert len(b.client.control.view().counting) == 1
+
+        a.client.control.halt_act("make_bootstrap", {"machine": b.client.control.machine_hex})
+        a.client.control.halt_act("halt", {})
+        assert len(a.client.control.view().counting) == 2
+        assert len(b.client.control.view().counting) == 1
+        b.client.control.halt_merge(a.client.control.halt_payload())
+        assert not b.client.control.halt_book().active()
+
+        link = halt_runtime.HaltLink(
+            tmp_path / "mac", tmp_path / "machine-mac", None,
+            SimpleNamespace(client=a.client), a.bridge.secure_transport,
+        )
+        link.membership._poll = 0
+        await link.membership.tick()
+        assert len(b.client.control.view().counting) == 2
+        await link.sync.tick()
+        assert b.client.control.halt_book().active()
+    finally:
+        await close_net(wire, nodes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receiver_mode", ["legacy_echo", "new_compacted"])
+async def test_resume_ack_interoperates_over_authenticated_relay(tmp_path, monkeypatch, receiver_mode):
+    """Real encrypted peer requests carry both the old echo and the new compacted receipt."""
+    from plugins.hub import network_halt as nh
+    from plugins.hub.network_control import HaltSync, NetworkControl
+
+    wire, nodes = await make_net(tmp_path, "mac", "srv-b")
+    a, b = nodes
+    try:
+        for node in nodes:
+            node.client.state.room = a.client.state.room
+            node.client._network_control = NetworkControl(
+                node.client, machine=SigningKey.generate(), root=tmp_path / f"machine-{node.name}"
+            )
+        a.client.control.found()
+        joined(a, b)
+        b.client.control.take_join(
+            a.client.control.join_decision_fields(
+                b.client.control.join_proof("offer", b.key),
+                offer_id="offer", round_id=b.key, folder=b.key,
+            )["network_control"],
+            anchor=nh.join_anchor(a.client.control.network_id()),
+        )
+        await sync(nodes, rounds=3)
+        a.client.control.halt_act("make_bootstrap", {"machine": b.client.control.machine_hex})
+        await sync(nodes, rounds=3)
+        assert len(b.client.control.view().counting) == 2
+
+        a_sync, b_sync = a.bridge.make_halt_sync(), b.bridge.make_halt_sync()
+        a.client.control.on_halt_change = b.client.control.on_halt_change = None
+        a_sync._online = lambda: {b.key: "b-session"}
+        b_sync._online = lambda: {a.key: "a-session"}
+        halt = a.client.control.halt_act("halt", {})
+        await a_sync.tick()
+        assert b.client.control.halt_book().active()
+        proposal = b.client.control.halt_act("propose_resume")
+        await b_sync.tick()
+        a.client.control.halt_act("confirm_resume", {"hash": proposal["hash"]})
+        assert not a.client.control.halt_book().active() and b.client.control.halt_book().active()
+
+        if receiver_mode == "legacy_echo":
+            async def legacy_receive(peer, payload):
+                assert peer in b.client.members()
+                b.client.control.halt_merge(payload)
+                return b.client.control.halt_payload()
+
+            monkeypatch.setattr(b_sync, "receive", legacy_receive)
+        else:
+            save = b.client.control.save_halt_book
+
+            def save_compacted(book):
+                book.resumes.clear()
+                save(book)
+
+            monkeypatch.setattr(b.client.control, "save_halt_book", save_compacted)
+
+        transport, exchange = a_sync._transport, {}
+
+        class InspectTransport:
+            async def request(self, key, method, payload, *, timeout):
+                reply = await transport.request(key, method, payload, timeout=timeout)
+                exchange.update(payload=payload, reply=reply)
+                return reply
+
+        a_sync._transport = InspectTransport()
+        await a_sync.tick()
+        assert halt["hash"] in b.client.control.halt_book().lifted
+        assert b.key in a_sync._delivered and b.key not in a_sync._failures
+        if receiver_mode == "legacy_echo":
+            assert "resume_ack" not in exchange["reply"] and exchange["reply"]["resumes"]
+        else:
+            assert not exchange["reply"]["resumes"]
+            assert exchange["reply"]["resume_ack"] == HaltSync._resume_batch_digest(exchange["payload"], b.key)
+            # Older senders merge the ordinary book and ignore unknown fields.
+            a.client.control.halt_merge(exchange["reply"])
+    finally:
+        await close_net(wire, nodes)
+
+
 async def make_net(tmp_path, *names):
     wire = RelayWire()
     nodes = {n: await make_node(tmp_path, n, designation=NAMES[n]) for n in names}

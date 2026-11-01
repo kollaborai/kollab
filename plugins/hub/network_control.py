@@ -15,6 +15,7 @@ import contextlib
 import dataclasses
 import hashlib
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -55,6 +56,8 @@ MAX_PICKS_PER_ADMITTER = 2  # F6 (S4): one machine's picks cannot fill every slo
 NO_COUNT_REFUSAL = "This network needs a second machine that counts before this one can stop counting."
 HALT_RETRY_START = 10.0
 HALT_RETRY_MAX = 300.0
+# Once the delay reaches its cap, further failures need no larger counter.
+HALT_RETRY_MAX_FAILURES = max(1, 1 + math.ceil(math.log2(HALT_RETRY_MAX / HALT_RETRY_START)))
 REQUEST_SECONDS = 15.0
 JOIN_BIND_DOMAIN = b"kollab-join-bind-v1\n"
 ROW_FIELDS = ("folder", "name", "machine", "folder_sig", "admission", "bind_sig")
@@ -680,8 +683,8 @@ class NetworkControl:
         return key == self.client.public_key or key in self.client.members()
 
     def halt_payload(self) -> dict[str, Any]:
-        # D6: revocation records ride the halt exchange too. A halted machine trades no
-        # member lists, so without them a revocation could never reach two signatures.
+        # D6: revocation records ride the halt exchange too, so their confirmation
+        # does not depend on a separate membership exchange completing first.
         records = self._fresh().get("revocations", [])
         return {**self.halt_book().exchange_payload(), "revocations": records[:MAX_RECORDS]}
 
@@ -980,7 +983,106 @@ class HaltSync:
             await self._sleep(self._poll)
 
     def retry_delay(self, failures: int) -> float:
+        if failures >= HALT_RETRY_MAX_FAILURES:
+            return HALT_RETRY_MAX
         return min(HALT_RETRY_MAX, HALT_RETRY_START * 2 ** (failures - 1))
+
+    def acked(self) -> list[str]:
+        """Report acknowledgements only for the current book and relay sessions."""
+        digest = hashlib.sha256(nh.canonical(self._client.control.halt_payload())).hexdigest()
+        online = self._online()
+        members = set(self._client.members())
+        return sorted(
+            key for key, (session, sent_digest) in self._delivered.items()
+            if key in members and online.get(key) == session and sent_digest == digest
+        )
+
+    @staticmethod
+    def _resume_batch_digest(payload: dict, recipient: str) -> str:
+        """A bounded receipt for this exact batch and the receiving device."""
+        digest = b"kollab-halt-resume-ack-v1\0" + nh.canonical(
+            {"recipient": recipient, "resumes": payload["resumes"]}
+        )
+        return hashlib.sha256(digest).hexdigest()
+
+    @staticmethod
+    def _effective_resume(order: Any, control, book, view) -> bool:
+        if not nh.order_ok(order, view.network) or order.get("action") != "resume":
+            return False
+        lifts = order.get("lifts")
+        if not lifts or not all(isinstance(h, str) and KEY.fullmatch(h) for h in lifts):
+            return False
+        # A previously accepted, persisted resume remains effective after a
+        # signer leaves the current counting set. Trust only the exact record
+        # already saved here, together with its saved lifts.
+        saved = book.resumes.get(nh.order_hash(order))
+        if saved is not None and nh.canonical(saved) == nh.canonical(order) and set(lifts) <= book.lifted:
+            return True
+        return not book.issuer_refusal(order, view, control._is_member) and nh.resume_effective(order, view)
+
+    @classmethod
+    def _durable_resume_ack(cls, payload: dict, control) -> str:
+        """Acknowledge only verified resumes whose lifts survived a fresh disk read."""
+        resumes = payload.get("resumes")
+        if not isinstance(resumes, list) or not resumes:
+            return ""
+        book, view = control.halt_book(), control.view()
+        if all(
+            cls._effective_resume(order, control, book, view) and set(order["lifts"]) <= book.lifted
+            for order in resumes
+        ):
+            return cls._resume_batch_digest(payload, control.client.public_key)
+        return ""
+
+    @staticmethod
+    def _active_orders_acknowledged(sent: dict, reply: dict, control, recipient: str) -> bool:
+        """A peer must acknowledge active orders and every sent effective resume."""
+        book, view = control.halt_book(), control.view()
+        received = {
+            nh.order_hash(order): order
+            for order in reply["proposals"]
+            if nh.order_ok(order, view.network) and order.get("action") == "resume"
+        }
+        effective = {
+            nh.order_hash(order): order
+            for order in reply["resumes"]
+            if HaltSync._effective_resume(order, control, book, view)
+        }
+        received.update(effective)
+        if sent["halts"]:
+            held = {
+                nh.order_hash(order)
+                for order in reply["halts"]
+                if nh.order_ok(order, view.network) and order.get("action") == "halt"
+            }
+            missing = {nh.order_hash(order) for order in sent["halts"]} - held
+            if missing:
+                lifted = {
+                    halt
+                    for order in effective.values()
+                    for halt in order["lifts"]
+                }
+                if missing - lifted:
+                    return False
+        for order in sent["proposals"]:
+            peer_order = received.get(nh.order_hash(order))
+            if peer_order is None:
+                return False
+            if nh.order_hash(order) in effective:
+                continue  # a verified effective resume supersedes an open proposal
+            peer_confirmations = {nh.canonical(item) for item in peer_order.get("confirmations", [])}
+            if not {nh.canonical(item) for item in order.get("confirmations", [])} <= peer_confirmations:
+                return False
+        if sent["resumes"]:
+            if not all(HaltSync._effective_resume(order, control, book, view) for order in sent["resumes"]):
+                return False
+            receipt = reply.get("resume_ack")
+            if receipt != HaltSync._resume_batch_digest(sent, recipient):
+                # Older peers omit the receipt; their verified signed echo is
+                # sufficient while the resume remains in their book.
+                if any(nh.order_hash(order) not in effective for order in sent["resumes"]):
+                    return False
+        return True
 
     async def tick(self) -> None:
         control = self._client.control
@@ -992,7 +1094,8 @@ class HaltSync:
         control.note_online(online)
         for key in self._client.members():
             session = online.get(key)
-            digest = hashlib.sha256(nh.canonical(control.halt_payload())).hexdigest()
+            payload = control.halt_payload()
+            digest = hashlib.sha256(nh.canonical(payload)).hexdigest()
             if (
                 session is None
                 or self._delivered.get(key) == (session, digest)
@@ -1001,15 +1104,27 @@ class HaltSync:
                 continue
             try:
                 reply = await self._transport.request(
-                    key, HALT_METHOD, control.halt_payload(), timeout=REQUEST_SECONDS
+                    key, HALT_METHOD, payload, timeout=REQUEST_SECONDS
                 )
+                if not (
+                    isinstance(reply, dict)
+                    and all(isinstance(reply.get(field), list) for field in ("halts", "proposals", "resumes"))
+                    and isinstance(reply.get("heads"), dict)
+                ):
+                    raise RelayError("invalid halt exchange response")
                 control.halt_merge(reply)
+                if not self._active_orders_acknowledged(payload, reply, control, key):
+                    raise RelayError("peer did not acknowledge active halt orders")
             except Exception:
-                failures = self._failures.get(key, 0) + 1
+                # An older acknowledgement must not appear current after a
+                # failed exchange for a changed halt book.
+                self._delivered.pop(key, None)
+                failures = min(self._failures.get(key, 0), HALT_RETRY_MAX_FAILURES - 1) + 1
                 self._failures[key] = failures
                 self._retry_at[key] = time.monotonic() + self.retry_delay(failures)
                 continue
-            digest = hashlib.sha256(nh.canonical(control.halt_payload())).hexdigest()
+            # Only the snapshot sent above was acknowledged. A local action
+            # may have changed the book while the request was in flight.
             self._delivered[key] = (session, digest)
             self._failures.pop(key, None)
             self._retry_at.pop(key, None)
@@ -1019,4 +1134,8 @@ class HaltSync:
         if peer not in self._client.members():
             raise RelayError("peer is not part of this network")
         control.halt_merge(payload)
-        return control.halt_payload()
+        reply = control.halt_payload()
+        receipt = self._durable_resume_ack(payload, control)
+        if receipt:
+            reply["resume_ack"] = receipt
+        return reply

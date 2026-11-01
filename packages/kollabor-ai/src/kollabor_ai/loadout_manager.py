@@ -80,6 +80,28 @@ class Loadout:
     implicit: bool = False  # synthesized from model registry, not saved in config
 
 
+class InvalidACPLoadoutError(ValueError):
+    """An ACP loadout contains settings the harness cannot apply."""
+
+
+def validate_acp_loadout(loadout: Loadout) -> None:
+    unsupported = [name for name in ("temperature", "max_tokens")
+                   if getattr(loadout, name) is not None]
+    if unsupported:
+        raise InvalidACPLoadoutError(
+            f"ACP loadout {loadout.name!r} cannot set {', '.join(unsupported)}"
+        )
+
+
+def acp_loadout_model(loadout: Loadout, profile: Any) -> str:
+    """An implicit harness entry names an executable, not a model."""
+    command = tuple(getattr(profile, "command", ()) or ())
+    if (loadout.implicit and loadout.name == profile.name
+            and command and loadout.model == command[0]):
+        return ""
+    return loadout.model
+
+
 class LoadoutManager:
     """Resolves, persists, and activates loadouts on top of a ProfileManager."""
 
@@ -571,7 +593,7 @@ class LoadoutManager:
             get_provider = getattr(profile, "get_provider", None)
             get_model = getattr(profile, "get_model", None)
             provider = (get_provider() if callable(get_provider) else "") or "unknown"
-            model = (
+            model = loadout.model if provider == "acp" else (
                 get_model() if callable(get_model) else getattr(profile, "model", "")
             ) or loadout.model
             await announce(
@@ -606,8 +628,38 @@ class LoadoutManager:
 
         Returns:
             The resolved Loadout, or None if resolution or the profile
-            update failed.
+            update failed. A concurrent ACP transition raises ValueError so
+            callers can ask the user to retry.
         """
+        loadout = (self.resolve(loadout_or_name)[0]
+                   if isinstance(loadout_or_name, str) else loadout_or_name)
+        if loadout is None:
+            return None
+        orchestrator = (event_bus.get_service("acp_orchestrator")
+                        if event_bus and hasattr(event_bus, "get_service") else None)
+        transition = getattr(orchestrator, "transition", None)
+        if callable(transition):
+            if getattr(orchestrator, "conversation_transitioning", False) is True:
+                raise ValueError("ACP conversation change is in progress; retry when ready")
+            if (getattr(orchestrator, "transitioning", False) is True
+                    and getattr(orchestrator, "transition_owned_by_current_task", False) is not True):
+                raise ValueError("ACP startup or profile change is in progress; retry when ready")
+            current = self.profile_manager.get_active_profile()
+            selected = self.profile_manager.get_profile(loadout.provider_profile)
+
+            def is_acp(profile: Any) -> bool:
+                provider = (profile.get_provider() if hasattr(profile, "get_provider")
+                            else getattr(profile, "provider", ""))
+                return str(provider).lower() == "acp"
+
+            if is_acp(current) or is_acp(selected):
+                with transition():
+                    return await self._activate_owned(loadout, event_bus)
+        return await self._activate_owned(loadout, event_bus)
+
+    async def _activate_owned(
+        self, loadout_or_name: Any, event_bus: Optional[Any] = None
+    ) -> Optional[Loadout]:
         if isinstance(loadout_or_name, str):
             loadout, _suggestions = self.resolve(loadout_or_name)
         else:
@@ -633,46 +685,80 @@ class LoadoutManager:
             else getattr(current_profile, "provider", "")
         )
         if str(selected_provider).lower() == "acp":
-            if (
-                loadout.temperature is not None
-                or loadout.effort
-                or loadout.max_tokens is not None
-            ):
-                logger.error(
-                    "ACP loadout '%s' cannot override native model parameters",
-                    loadout.name,
-                )
+            try:
+                validate_acp_loadout(loadout)
+            except InvalidACPLoadoutError as exc:
+                logger.error("%s", exc)
                 return None
             if orchestrator is None:
                 state_service = (
                     event_bus.get_service("state_service")
-                    if event_bus and hasattr(event_bus, "get_service")
-                    else None
+                    if event_bus and hasattr(event_bus, "get_service") else None
                 )
-                if state_service is not None and hasattr(state_service, "set_active_profile"):
+                # An attached terminal delegates the named loadout to the
+                # daemon's own panel, where the real ACP runner is owned.
+                if getattr(state_service, "_rpc", None) is not None:
                     try:
-                        await state_service.set_active_profile(loadout.provider_profile, reload_profile=True)
-                        return loadout
+                        outcome = await state_service.panel_action("llm", "activate", {"name": loadout.name})
+                        return loadout if outcome.get("ok") is True else None
                     except Exception as exc:
-                        logger.error(
-                            "Remote ACP activation failed for %r (%s)",
-                            loadout.name,
-                            type(exc).__name__,
-                        )
-                logger.error("ACP loadout '%s' unavailable: no ACP orchestrator", loadout.name)
+                        logger.error("Remote ACP loadout activation failed (%s)", type(exc).__name__)
                 return None
+
+            model_value = acp_loadout_model(loadout, selected_profile)
+            harness_entry = bool(loadout.implicit and not model_value)
+            previous = current_profile if str(current_provider).lower() == "acp" else None
+            prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
+            prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
+            previous_loadout = getattr(orchestrator, "_loadout_override", None)
+            previous_sessions = {
+                name: dict(picks) for name, picks in getattr(orchestrator, "_session_options", {}).items()
+            }
             try:
-                await orchestrator.close()
-                await orchestrator.start(selected_profile)
+                if harness_entry:
+                    orchestrator._loadout_override = None
+                    await orchestrator.start(selected_profile)
+                else:
+                    await orchestrator.start(selected_profile, loadout=(model_value, loadout.effort))
+                options = orchestrator.advertised_config_options()
+                model = next((o for o in options if str(o.get("category") or "").lower() == "model"
+                              or o.get("id") == "model"), None)
+                effort = next((o for o in options if str(o.get("category") or "").lower() in {"thought_level", "effort"}
+                               or o.get("id") == "effort"), None)
+                if model_value and (not model or model.get("currentValue") != model_value):
+                    raise ValueError("ACP harness did not apply the loadout model")
+                if loadout.effort and (not effort or effort.get("currentValue") != loadout.effort):
+                    raise ValueError("ACP harness did not apply the loadout effort")
                 if not self.profile_manager.set_active_profile(loadout.provider_profile):
+                    raise ValueError("ACP profile is no longer available")
+                # Save only after the harness confirmed the complete loadout,
+                # so a rejected effort cannot leave a half-saved model.
+                picks = {}
+                if model_value:
+                    picks["model"] = model_value
+                if loadout.effort:
+                    picks["effort"] = loadout.effort
+                if picks:
+                    orchestrator._save_confirmed_options(picks)
+            except BaseException as exc:
+                logger.error("ACP loadout %r failed (%s)", loadout.name, type(exc).__name__)
+                try:
                     await orchestrator.close()
-                    return None
-            except Exception as exc:
-                logger.error(
-                    "ACP loadout %r failed to start (%s)",
-                    loadout.name,
-                    type(exc).__name__,
-                )
+                    orchestrator._loadout_override = previous_loadout
+                    orchestrator._session_options = previous_sessions
+                    if current_profile is not None:
+                        self.profile_manager.set_active_profile(current_profile.name)
+                    if previous is not None:
+                        if prior_binding is not None and prior_conversation:
+                            orchestrator.save_binding_for(prior_conversation, prior_binding)
+                        await orchestrator.start(
+                            previous,
+                            resume_conversation=prior_conversation if prior_binding is not None else None,
+                        )
+                except Exception as restore_exc:
+                    logger.error("Could not restore previous ACP session (%s)", type(restore_exc).__name__)
+                if not isinstance(exc, Exception):
+                    raise
                 return None
             await self._announce_model_switch(event_bus, loadout, None)
             return loadout

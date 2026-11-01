@@ -13,8 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codex luna max` finds Codex CLI's gpt-6-luna at max. A pick changes only
   that session. Settings → Loadouts → Manage Profiles opens the profile
   editor (#552).
+- Hub tests now cover short AF_UNIX hub-state socket paths, so long
+  socket paths cannot silently regress the hub state client (#582).
 - Hub status flags an idle agent that still holds an open task as
   stalled after 15 minutes (#533).
+- Windows: a halt taken on a Windows machine now reaches the other machines of its network; the relay owner runs on Windows over local IPC (#439).
 - Windows: agent commands run in Git Bash when Git for Windows is installed,
   else in PowerShell (never cmd.exe); `KOLLAB_SHELL` picks another shell.
 - PhoneLink works from every engine on the computer: an engine that does not hold PhoneLink forwards the call to the one that does, and the "managing PhoneLink" message names that engine's port, process, start time and folder (#443).
@@ -131,6 +134,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
+  `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
+  internal agent message-tool syntax (#622).
+- Gem Studio keeps preview activity choices on one scrollable row with touch-sized targets and visible keyboard focus, makes Save the primary action, and keeps footer actions and save errors usable with enlarged text and long names (#465).
+- ACP: switching a session's profile or loadout now reports the resolved
+  provider profile with the harness's model and effort in session state and
+  the engine API, instead of a blank model/effort readout and an unresolved
+  loadout name (#605).
+- ACP: attaching with `--llm` no longer closes the running harness before the
+  name lookup finishes. An unknown profile or loadout name reports its error
+  and leaves the harness untouched; a valid loadout name switches the harness
+  to the loadout's provider profile, with the loadout's model and effort (#594).
+- The enrollment pending-request test fails fast with the issuer task's
+  outcome when the task has stopped, instead of burning a 5-second generic
+  timeout; a suppressed task error still reports as a clean exit, and the
+  original CI failure remains under investigation (#574).
+- ACP restart, resume and web history clear no longer report success while a
+  competing profile change leaves the old harness conversation active.
+- ACP profile and loadout changes no longer replace a harness while another
+  startup or rollback owns it. Competing changes can be retried after it ends.
+- ACP startup loadouts now stop with an error when the harness does not confirm
+  the requested model or effort, or when native-only temperature or max-token
+  settings are supplied.
+- ACP Session tab: effort set with Apply now sticks. Apply max, then switch
+  model, and the effort stays max (before, it could drop back to xhigh). A
+  model that does not offer the effort uses the highest level it offers and
+  shows a notice saying so.
+- ACP: a model change keeps the effort you picked, falls back to the highest
+  effort the new model offers, or shows a notice saying why it could not.
+  Behavior change: a restart into another ACP profile no longer keeps the
+  previous profile's model and effort picks; a restart of the same profile
+  still restores its saved picks, except where an explicit loadout sets the
+  value, and the explicit loadout wins.
+- CLI: `--llm` loadout names no longer emit a misleading profile-not-found error during profile probing before loadout resolution (#563).
+- ACP: Codex multi-tool turns now report prompt token usage matching the harness
+  ledger. Reconciled prompt-response totals settle once into session stats and
+  appear in the status line. Coverage depends on the adapter: Claude's prompt
+  usage excludes subagent and sidechain costs. When a usable total is absent,
+  the last-request context sample is labeled "· last req". An existing managed
+  Codex 2.1.1 remains usable; install the managed 2.5.0 adapter to get its
+  verified prompt totals. Known npm Windows launchers retain their adapter
+  identity and saved sessions; unknown wrappers remain unverified. Completed
+  turn accounting no longer retains a key for every turn (#495).
 - A hub agent that is busy for a while keeps its socket: peers no longer delete a live agent's presence
   and socket after a 15 s late heartbeat, which cut every connection to it; they wait 10 min (#545).
 - History: expanding an old slimmed history entry loads its full metadata
@@ -141,6 +187,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes no tool call, one automatic continue is queued telling the agent what
   to finish. The nudge applies only to unattended daemon runs and never
   re-arms itself (#453).
+- Hub: a peer message to a busy ACP agent is held instead of refused. A full
+  ACP prompt queue now parks the message and retries the head at each turn
+  boundary, admitting parked messages while freed slots last; each still-full
+  boundary ages every parked entry (up to 64 parked, 8 boundaries), and turns
+  end busy at budget exhaustion, the five-minute park TTL, or agent shutdown,
+  or unavailable when the asking peer departs, and the hub shows ACP agents as
+  working while a harness turn runs, from the same display lifecycle a native
+  turn uses (#483).
 - Web UI: a message sent while a native agent is busy streams its own reply.
   Its stream used to end on the completion of the turn already running, and
   the reply never streamed. The engine now sends a request id with every chat
