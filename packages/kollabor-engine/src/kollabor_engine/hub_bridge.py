@@ -295,20 +295,17 @@ class HubBridge:
         timeout: float = 5.0,
     ) -> Optional[Dict[str, Any]]:
         """Send a JSON action to an agent identified by its identity string."""
-        # The cache can predate the agent or its socket: an agent's first record has none (#555).
-        # A cached record is read again by its own id: a name repeats across folders.
+        # A cached record can predate its socket: an agent's first record has none (#555). It is read
+        # again by its own id, and a name the cache lacks is refused: a name repeats across folders,
+        # so a fresh lookup by name could find another folder's agent (#556).
         agent_data = self.get_agent_by_identity(identity)
-        sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
-        if sock_path is None or not sock_path.exists():
-            agent_data = (
-                self.get_agent(str(agent_data.get("agent_id") or ""), use_cache=False)
-                if agent_data is not None
-                else self.get_agent_by_identity(identity, use_cache=False)
-            )
-            sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if agent_data is None:
             logger.debug(f"No presence data for identity {identity}")
             return None
+        sock_path = self._socket_path_for_agent(agent_data)
+        if sock_path is None or not sock_path.exists():
+            agent_data = self.get_agent(str(agent_data.get("agent_id") or ""), use_cache=False)
+            sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if sock_path is None or not sock_path.exists():
             logger.debug(f"Socket not found for identity {identity}: {sock_path}")
             return None

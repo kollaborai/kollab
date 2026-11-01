@@ -135,8 +135,7 @@ async def test_a_record_read_again_is_the_same_agent_never_a_namesake_elsewhere(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("by_identity", [False, True])
-async def test_a_message_reaches_an_agent_that_started_after_the_cache(tmp_path, monkeypatch, by_identity):
+async def test_a_message_for_an_agent_id_reaches_an_agent_that_started_after_the_cache(tmp_path, monkeypatch):
     # Hiddenite on #556 round 2: an agent missing from a cache taken before it
     # started stayed unreachable for up to five seconds, its socket published.
     import json
@@ -150,11 +149,28 @@ async def test_a_message_reaches_an_agent_that_started_after_the_cache(tmp_path,
     send = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(bridge, "_query_socket_path", send)
 
-    if by_identity:
-        assert await bridge.query_socket_by_identity("lapis", "ping") == {"ok": True}
-    else:
-        assert await bridge.query_socket("c1", "ping") == {"ok": True}
+    assert await bridge.query_socket("c1", "ping") == {"ok": True}
     assert send.await_args.args[0] == str(socket)
+
+
+@pytest.mark.asyncio
+async def test_a_name_the_cache_lacks_is_refused_never_found_in_another_folder(tmp_path, monkeypatch):
+    # Tsavorite on #556 round 3: this folder's lapis had left a cached roster, a
+    # fresh lookup by name found another folder's lapis, and the message went there.
+    import json
+    from unittest.mock import AsyncMock
+
+    bridge, presence = _presence_bridge(tmp_path, monkeypatch, _record("x1", "ruby", project="/w/here"))
+    assert [agent["agent_id"] for agent in bridge.get_agents()] == ["x1"]  # a cache with no lapis
+    socket = tmp_path / "lapis.sock"
+    socket.touch()
+    namesake = _record("b1", "lapis", project="/w/elsewhere", socket_path=str(socket))
+    (presence / "b1.json").write_text(json.dumps(namesake))
+    send = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(bridge, "_query_socket_path", send)
+
+    assert await bridge.query_socket_by_identity("lapis", "ping") is None
+    send.assert_not_awaited()
 
 
 def test_discover_sessions_carries_what_the_agent_publishes(tmp_path, monkeypatch):
