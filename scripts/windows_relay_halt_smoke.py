@@ -134,6 +134,15 @@ def wait_until(check, timeout: float, what: str, why=None) -> None:
         time.sleep(2)
 
 
+def relay_port_open() -> bool:
+    """A refused connection means the newly started relay is not ready yet."""
+    try:
+        with socket.create_connection(("127.0.0.1", RELAY_PORT), 3):
+            return True
+    except OSError:
+        return False
+
+
 def _presence_line(record: Path) -> str:
     try:
         data = json.loads(record.read_text())
@@ -799,15 +808,8 @@ def main() -> int:
         stdout=relay_log,
         stderr=relay_log,
     )
-    front = threading.Thread(
-        target=asyncio.run, args=(_tls_front(certs, address),), daemon=True
-    )
+    front = threading.Thread(target=lambda: asyncio.run(_tls_front(certs, address)), daemon=True)
     try:
-
-        def relay_port_open() -> bool:
-            with socket.create_connection(("127.0.0.1", RELAY_PORT), 3):
-                return True
-
         wait_until(relay_port_open, 60, "the relay's plain HTTP port")
         front.start()
         relay_halt_smoke(kollabs, homes, projects, envs, logs)  # steps 4-9

@@ -38,6 +38,15 @@ def test_discovery_address_rejects_unexpected_dns(monkeypatch):
         smoke.discovery_address()
 
 
+def test_relay_readiness_retries_a_refused_connection(monkeypatch):
+    connect = MagicMock(side_effect=[ConnectionRefusedError("starting"), MagicMock()])
+    monkeypatch.setattr(smoke.socket, "create_connection", connect)
+
+    assert not smoke.relay_port_open()
+    assert smoke.relay_port_open()
+    assert connect.call_count == 2
+
+
 def test_smoke_rejects_roles_using_the_same_installation(monkeypatch):
     run = MagicMock()
     run.side_effect = [
