@@ -12,6 +12,8 @@ on:
       - uv.lock
       - scripts/windows_import_smoke.py
       - scripts/windows_relay_halt_smoke.py
+      - scripts/windows_project_upgrade_smoke.py
+      - tests/unit/test_windows_project_state_recovery.py
       - tests/unit/test_windows_relay_halt_smoke.py
       - tests/unit/test_secure_session.py
       - scripts/windows_relay_serve_smoke.py
@@ -49,6 +51,9 @@ jobs:
       - name: Hub endpoint discovery
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_hub_socket_paths.py
 
+      - name: Windows project state recovery
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_project_state_recovery.py tests/unit/test_encode_project_path_windows.py
+
       - name: Process stop, locks and launch
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_cli_webui_windows_stop.py tests/unit/test_network_attach_local_ipc.py tests/unit/test_process_manager_windows_stop.py tests/unit/test_shell_executor_windows_alive.py tests/unit/test_token_storage_lock.py tests/unit/test_cli_windows_no_fork.py tests/unit/test_desktop_release_checksum_lf.py
 
@@ -70,6 +75,9 @@ jobs:
       # The #268 gate: a detached agent starts, shows online in `kollab --hub status`, and stops.
       - name: Agent smoke
         run: uv run python scripts/build_binary.py --agent-smoke .venv/Scripts/kollab.exe
+
+      - name: Project upgrade state smoke
+        run: uv run python scripts/windows_project_upgrade_smoke.py --kollab .venv/Scripts/kollab.exe
 
       # A real halt on the runner: the agent stops, a launch waits, resume restarts it (kollab #268).
       - name: Kill switch smoke

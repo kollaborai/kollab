@@ -113,6 +113,57 @@ to the release notes.
 
 ## Port work (follow-up, in order)
 
+### Project state after the Windows path encoding change
+
+The previous encoder could produce a drive-relative name such as `D:_work_demo`.
+The current encoder uses a safe directory name such as `D_work_demo`, but either
+name can describe more than one workspace. For a new project, Kollab creates
+the state directory and atomically records its exact project path. A marked
+directory is reused only for that project. Kollab does not move or merge old
+and current directories. If an existing directory has no trustworthy ownership
+marker, if a marker is unreadable or names another project, or if both locations
+exist, Kollab stops with an error rather than guessing. This also applies to
+headless starts.
+
+Close older Kollab instances before opening a project after the update. An older
+process does not honor the ownership marker and could create or write its old
+drive-relative state location after the updated process checks for it.
+
+After inspecting the directories and deciding which project state to use, set
+both environment variables for the Kollab process to the project's absolute
+path and the chosen existing state directory's absolute path:
+
+```powershell
+$env:KOLLAB_PROJECT_DATA_PROJECT = 'C:\work\demo'
+$env:KOLLAB_PROJECT_DATA_DIR = 'C:\Users\me\.kollab\projects\_work_demo'
+kollab
+```
+
+The selection applies only to that project, and must be supplied again on later
+starts that use the unmarked directory. Keep both directories until their
+contents have been reviewed and backed up; the selection does not reconcile
+them. A fresh cross-drive project with no old state uses its new directory.
+For an old cross-drive project, the old location depended on the process's
+then-current directory on that drive. Kollab checks the current drive-relative
+resolution, the project directory, and the drive root; another historical
+directory cannot be inferred or found without a search. If saved state is
+missing, locate it on that drive and select it explicitly. An existing unmarked
+directory is reported for inspection instead of being adopted automatically.
+
+Very old nested vaults used the same drive-relative encoding. On a cross-drive
+project the old name could drop the identity's parent path, so even a discovered
+nested vault is ambiguous. To use an inspected existing nested vault directory,
+set `KOLLAB_VAULT_DATA_PROJECT`, `KOLLAB_VAULT_DATA_IDENTITY`, and
+`KOLLAB_VAULT_DATA_DIR` for that process. If flat and nested vault records both
+exist, Kollab reports the conflict. Inspect and back up both, then use that
+same selection to name the directory containing the desired records: the
+identity directory for the flat record, or the nested directory for the older
+record. Unset these variables for subsequent sessions that do not need the choice.
+
+The upgrade smoke in `windows-smoke` seeds old-format state into isolated homes
+and exercises the live startup and readers. A physical Windows/macOS network
+is a separate verification.
+
 1. **Detached start without fork.** `kollab --detached` is done (`daemon.spawn_detached_child`, through
    `proc_ctl.start_child`; proven by the agent smoke). Still forking: `fork_daemon`, the attached
    window's own daemon, and its ready pipe; on Windows a bare `kollab` skips it and runs in-process

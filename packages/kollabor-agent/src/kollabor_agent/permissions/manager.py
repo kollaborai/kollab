@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from kollabor_agent.file_operations_executor import PathAccessMode
 from kollabor_agent.yes_approval import NEEDS_YES, YesApprovals, call_approval
+from kollabor_config.config_utils import ProjectStateLocationError
 from kollabor_events.dict_utils import safe_get
 from kollabor_events.models import EventType
 from kollabor_events.permissions_models import (
@@ -784,6 +785,8 @@ class PermissionManager:
                 self._project_approvals = set()
                 self._acp_project_grants = set()
                 self._acp_project_grant_metadata = {}
+        except ProjectStateLocationError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to load project approvals: {e}")
             self._project_approvals = set()
@@ -807,6 +810,8 @@ class PermissionManager:
             logger.info(
                 f"Saved {len(self._project_approvals)} project approvals to {approvals_file}"
             )
+        except ProjectStateLocationError:
+            raise
         except Exception as e:
             logger.error(f"Failed to save project approvals: {e}")
 

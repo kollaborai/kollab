@@ -29,7 +29,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
 
-from kollabor_config.config_utils import encode_project_path, get_config_directory
+from kollabor_config.config_utils import (
+    ProjectStateLocationError,
+    _windows_project_state_dir,
+    encode_project_path,
+    get_config_directory,
+)
 
 from .device_names import default_device_name
 
@@ -256,8 +261,24 @@ class LocalAgentDirectory:
             raise LocalDirectoryError("invalid local machine identity")
         return value
 
-    def _presence_dirs(self, root: int, workspace: Path | None) -> Iterator[tuple[int, str | None]]:
+    def _presence_dirs(
+        self, root: int | Path, workspace: Path | None
+    ) -> Iterator[tuple[int | Path, str | None, Path | None]]:
         """Yield open directory descriptors, never following runtime symlinks."""
+        if workspace is None and os.name == "nt":
+            # A pre-upgrade cross-drive state directory can be outside the
+            # projects tree; include this process's workspace in machine views.
+            from .project_scope import resolve_project_root
+
+            current_workspace = resolve_project_root()
+        else:
+            current_workspace = workspace
+        selected = (
+            _windows_project_state_dir(current_workspace, self.config_dir, create_new=False)
+            if current_workspace is not None and os.name == "nt"
+            else None
+        )
+        external = selected is not None and selected.parent.resolve() != (self.config_dir / "projects").resolve()
         try:
             projects = _directory_fd("projects", parent=root)
         except (OSError, LocalDirectoryError):
@@ -266,7 +287,9 @@ class LocalAgentDirectory:
             try:
                 with ExitStack() as stack:
                     if workspace is not None:
-                        names = iter([encode_project_path(workspace)])
+                        names = iter(
+                            [] if external else [selected.name if selected else encode_project_path(workspace)]
+                        )
                     else:
                         entries = stack.enter_context(os.scandir(projects))
                         names = (entry.name for entry in entries)
@@ -274,13 +297,22 @@ class LocalAgentDirectory:
                         if number >= self.max_projects:
                             self.truncated = True
                             break
-                        yield from self._presence_path(projects, (name, "hub", "presence"), name)
+                        for directory, project_name in self._presence_path(projects, (name, "hub", "presence"), name):
+                            yield directory, project_name, None
             finally:
                 if os.name != "nt":  # nt keeps a path, not a descriptor
                     os.close(projects)
+        if external:
+            try:
+                external_root = _directory_fd(selected)
+                for directory, _ in self._presence_path(external_root, ("hub", "presence"), None):
+                    yield directory, None, current_workspace
+            except (OSError, LocalDirectoryError):
+                pass
         # The configured global-Hub mode uses the same payloads; still filter
         # each payload by its exact workspace when publishing remotely.
-        yield from self._presence_path(root, ("hub", "presence"), None)
+        for directory, project_name in self._presence_path(root, ("hub", "presence"), None):
+            yield directory, project_name, None
 
     @staticmethod
     def _presence_path(parent: int, parts: tuple[str, ...], project_name: str | None):
@@ -410,8 +442,18 @@ class LocalAgentDirectory:
         actual_workspace = Path(project).resolve()
         if workspace is not None and actual_workspace != workspace:
             return None
-        if project_name is not None and encode_project_path(actual_workspace) != project_name:
-            return None
+        if project_name is not None:
+            if os.name == "nt":
+                try:
+                    state = _windows_project_state_dir(actual_workspace, self.config_dir, create_new=False)
+                except ProjectStateLocationError:
+                    # A machine-wide scan must not publish an unclaimed or
+                    # ambiguously owned presence record from another project.
+                    return None
+                if state.parent.resolve() != (self.config_dir / "projects").resolve() or state.name != project_name:
+                    return None
+            elif encode_project_path(actual_workspace) != project_name:
+                return None
         if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C there (#268)
             from kollabor_config import proc_ctl
 
@@ -465,7 +507,7 @@ class LocalAgentDirectory:
         scanned = 0
         now = time.time()
         try:
-            for directory, project_name in self._presence_dirs(root, selected):
+            for directory, project_name, source_workspace in self._presence_dirs(root, selected):
                 with os.scandir(directory) as entries:
                     for entry in entries:
                         scanned += 1
@@ -476,7 +518,8 @@ class LocalAgentDirectory:
                             continue
                         try:
                             row = self._record(
-                                root, _json_file(directory, entry.name), entry.name, project_name, selected, now
+                                root, _json_file(directory, entry.name), entry.name, project_name,
+                                selected or source_workspace, now,
                             )
                         except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
                             continue
