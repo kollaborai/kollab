@@ -60,7 +60,10 @@ export const LEARN_TOPICS = [
     howTo: [
       "Open Agents to see the rosters and teams available in the selected workspace.",
       "Choose a single agent for a focused task, or a team when the work needs parallel roles.",
-
+      "On a team's card, choose Configure & Launch to open the launch sheet.",
+      "Choose a workspace and profile, include members, then set a lead and optional mission.",
+      "Review the effective reporting tree, then choose Launch Team.",
+      "Choices are saved per team and workspace folder; use Reset to restore defaults.",
       "Agents created from the Web UI stay running through Web UI or engine restarts and return with their conversation. Use Delete in the Web UI or send /quit to the agent to stop it.",
       "Give the agent a concrete result to produce and how you will verify it.",
       "Drag an agent row to reorder it within its workspace. Rows move aside while you drag; drop to save. The order is saved by this Kollab instance and restored on refresh.",
