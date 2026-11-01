@@ -2225,11 +2225,34 @@ class LLMService:
         except Exception:
             return False, True
 
+    def _manual_relay_origin_authorized(self, origin: Mapping[str, Any]) -> bool:
+        """Fail closed when a manual relay grant expires before ACP delivery."""
+        if not origin.get("relay_turn_id"):
+            return True
+        event_bus = getattr(self, "event_bus", None)
+        get_service = getattr(event_bus, "get_service", None)
+        if not callable(get_service):
+            return False
+        try:
+            hub_plugin = get_service("hub_plugin")
+            validate = getattr(hub_plugin, "_manual_relay_origin_authorized", None)
+            return callable(validate) and validate(origin) is True
+        except Exception:
+            logger.warning(
+                "manual relay ACP admission authority check failed", exc_info=True
+            )
+            return False
+
     async def _admit_acp(self, acp, data: Dict[str, Any], source: str) -> Dict[str, Any]:
         """The one ACP admission: steer a running turn or queue a new one."""
         request_id = data.get("request_id") or uuid.uuid4().hex
         origin = dict(data.get("origin_context") or {})
         origin.setdefault("operator", source != "agent")
+        if not self._manual_relay_origin_authorized(origin):
+            return {
+                "status": "rejected",
+                "reason": "remote conversation authority is no longer valid",
+            }
         content = data["message"]
         images: tuple[dict[str, str], ...] = ()
         if not isinstance(content, str):
@@ -2299,6 +2322,14 @@ class LLMService:
                 raise
             if steered:
                 return {"status": "injected", "request_id": request_id}
+        # `steer` above can await while a relay is revoked; re-check at the
+        # actual queue-admission boundary before sending anything to ACP.
+        if not self._manual_relay_origin_authorized(origin):
+            return {
+                "status": "rejected",
+                "reason": "remote conversation authority is no longer valid",
+            }
+
         try:
             admission = acp.admit(
                 message, request_id=request_id, source=source,

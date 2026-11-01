@@ -173,6 +173,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes no tool call, one automatic continue is queued telling the agent what
   to finish. The nudge applies only to unattended daemon runs and never
   re-arms itself (#453).
+- Hub: a peer message to a busy ACP agent is held instead of refused. A full
+  ACP prompt queue now parks the message and retries the head at each turn
+  boundary, admitting parked messages while freed slots last; each still-full
+  boundary ages every parked entry (up to 64 parked, 8 boundaries), and turns
+  end busy at budget exhaustion, the five-minute park TTL, or agent shutdown,
+  or unavailable when the asking peer departs, and the hub shows ACP agents as
+  working while a harness turn runs, from the same display lifecycle a native
+  turn uses (#483).
 - Web UI: a message sent while a native agent is busy streams its own reply.
   Its stream used to end on the completion of the turn already running, and
   the reply never streamed. The engine now sends a request id with every chat
