@@ -128,6 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Hub membership updates now send to every peer in a tick together, so one
+  slow or failing peer no longer delays the peers listed after it (#603).
 - ACP: attaching with `--llm` no longer closes the running harness before the
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness

@@ -199,6 +199,24 @@ class MembershipSync:
             json.dumps([members, revoked, client.control.digest()], sort_keys=True).encode()
         ).hexdigest()
         online = self._online()
+
+        async def _send_one(key, session, listed, issued_at):
+            try:
+                await self._send(key, session, listed, revoked, issued_at)
+            except Exception:
+                # The far side may not have approved this device yet; it will
+                # once the list that names us reaches it. Try again later.
+                failures = self._failures.get(key, 0) + 1
+                self._failures[key] = failures
+                self._retry_at[key] = time.monotonic() + min(
+                    MAX_RETRY_SECONDS, self._poll * 2 ** (failures - 1)
+                )
+                return
+            self._delivered[key] = (session, digest)
+            self._failures.pop(key, None)
+            self._retry_at.pop(key, None)
+
+        sends = []
         issued_at = 0
         for key in client.members():
             session = online.get(key)
@@ -210,20 +228,12 @@ class MembershipSync:
                 continue
             listed = [entry for entry in members if entry[0] != key]
             issued_at = issued_at or self._stamp()  # one a tick, above every earlier one
-            try:
-                await self._send(key, session, listed, revoked, issued_at)
-            except Exception:
-                # The far side may not have approved this device yet; it will
-                # once the list that names us reaches it. Try again later.
-                failures = self._failures.get(key, 0) + 1
-                self._failures[key] = failures
-                self._retry_at[key] = time.monotonic() + min(
-                    MAX_RETRY_SECONDS, self._poll * 2 ** (failures - 1)
-                )
-                continue
-            self._delivered[key] = (session, digest)
-            self._failures.pop(key, None)
-            self._retry_at.pop(key, None)
+            sends.append(_send_one(key, session, listed, issued_at))
+
+        # All eligible peers send in the same tick together: a slow or failing
+        # peer no longer delays the peers listed after it (head-of-line).
+        if sends:
+            await asyncio.gather(*sends, return_exceptions=True)
 
     async def _send(
         self,
