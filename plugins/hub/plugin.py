@@ -6210,6 +6210,9 @@ class HubPlugin(BasePlugin):
                             logger.debug("dreaming: filtered preamble paragraph")
                             continue
                         paragraphs.append(p_stripped)
+                    # On the loop, like every reader of the vault: in a worker
+                    # thread a write outlived a cancelled dream and raced the
+                    # readers (#546).
                     for paragraph in paragraphs:
                         self._crystal_store.add_entry(paragraph)
                     added = len(paragraphs)
@@ -6242,9 +6245,10 @@ class HubPlugin(BasePlugin):
 
                 # Deduplicate vault entries after writing new insights.
                 # Merges entries with >55% keyword overlap, keeping the
-                # longer body and union of keywords.
+                # longer body and union of keywords. A pass over thousands of
+                # entries takes seconds: it gives the loop back as it goes (#546).
                 if self._crystal_store:
-                    merged = self._crystal_store.deduplicate()
+                    merged = await self._crystal_store.deduplicate_in_slices()
                     if merged:
                         logger.info(
                             "dreaming: deduplicated %d vault entries",
