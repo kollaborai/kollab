@@ -1,10 +1,10 @@
 """A network halt end to end on the Windows runner: two homes over a local relay.
 
 Two throwaway homes (win-a, win-b) join a local relay (``kollab relay serve`` behind a
-throwaway-CA TLS front). A counting-machine confirmation lets either machine halt the
-network; a halt run from win-a stops win-b's agents too, and a resume win-b proposes and
-win-a confirms restarts both. The halt stops every kollab of the install, so this runs
-only on CI.
+throwaway-CA TLS front). Separate installations prevent a machine-wide process sweep
+from stopping the other home or relay before the halt reaches them over the network.
+A halt from win-a stops win-b's agent, and a resume win-b proposes and win-a confirms
+restarts launches held during the halt. This runs only on CI.
 """
 
 import argparse
@@ -43,6 +43,52 @@ def smoke_env(**extra: str) -> dict[str, str]:
     }
     env["KOLLAB_NO_KEYRING"] = "1"
     return {**env, **extra}
+
+
+def isolated_kollab(venv: Path) -> str:
+    """Install the workspace in its own environment so another install's halt cannot sweep it."""
+    uv = shutil.which("uv")
+    if not uv:
+        raise RuntimeError("uv is required to create the isolated smoke environments")
+    env = smoke_env(UV_PROJECT_ENVIRONMENT=str(venv))
+    env.pop("VIRTUAL_ENV", None)
+    subprocess.run(
+        [uv, "sync", "--frozen", "--all-packages"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        timeout=600,
+    )
+    executable = venv / "Scripts" / "kollab.exe"
+    if not executable.is_file():
+        raise RuntimeError(f"isolated kollab executable was not installed: {executable}")
+    return str(executable)
+
+
+def assert_distinct_installs(kollabs: dict[str, str]) -> None:
+    """Verify each role's actual interpreter prefix before any destructive smoke step."""
+    prefixes = {}
+    for name, kollab in kollabs.items():
+        python = Path(kollab).parent / "python.exe"
+        result = subprocess.run(
+            [str(python), "-c", "import sys; print(sys.prefix)"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        prefixes[name] = os.path.normcase(os.path.realpath(result.stdout.strip()))
+    if len(set(prefixes.values())) != len(prefixes):
+        raise RuntimeError(f"smoke roles must use distinct installations: {prefixes}")
+    print(f"isolated installation prefixes: {json.dumps(prefixes)}")
+
+
+def waiter_records(home: Path) -> list[Path]:
+    """Find halted launches in the global or project-scoped presence directory."""
+    root = home / ".kollab"
+    return list((root / "hub" / "presence").glob("halted-*.json")) + list(
+        (root / "projects").glob("*/hub/presence/halted-*.json")
+    )
 
 
 def status_online(kollab: str, project: Path, env: dict[str, str]) -> bool:
@@ -478,21 +524,23 @@ async def join_networks(
 
 
 def relay_halt_smoke(
-    kollab: str, homes: dict, projects: dict, envs: dict, logs: dict
+    kollabs: dict[str, str], homes: dict, projects: dict, envs: dict, logs: dict
 ) -> None:
     """Steps 4-9: join, halt the network from win-a, resume it win-b to win-a's confirmation."""
 
     def online(name: str) -> bool:
-        return status_online(kollab, projects[name], envs[name])
+        return status_online(kollabs[name], projects[name], envs[name])
 
     def halted(name: str) -> list[Path]:
-        return list(
-            (homes[name] / ".kollab" / "hub" / "presence").glob("halted-*.json")
-        )
+        return waiter_records(homes[name])
 
-    print(
-        f"step 4: win-a --detached: exit {start_agent(kollab, projects['a'], envs['a'], logs['a']).wait(timeout=60)}"
-    )
+    def held(name: str) -> bool:
+        from plugins.hub.halt_runtime import read_halt
+
+        return bool(read_halt(homes[name] / ".kollab").get("scopes"))
+
+    launch_a = start_agent(kollabs["a"], projects["a"], envs["a"], logs["a"])
+    print(f"step 4: win-a --detached: exit {launch_a.wait(timeout=60)}")
     wait_until(
         lambda: folder_socket(homes["a"], projects["a"]) is not None,
         90,
@@ -503,7 +551,7 @@ def relay_halt_smoke(
     wait_until(lambda: online("a"), 90, "win-a's agent online in `kollab --hub status`")
 
     print("step 5: win-b --detached (its hub socket carries the enrollment)")
-    start_agent(kollab, projects["b"], envs["b"], logs["b"]).wait(timeout=60)
+    start_agent(kollabs["b"], projects["b"], envs["b"], logs["b"]).wait(timeout=60)
     wait_until(
         lambda: folder_socket(homes["b"], projects["b"]) is not None,
         90,
@@ -568,18 +616,23 @@ def relay_halt_smoke(
     print(f"step 7: win-a halted the network: {json.dumps(halted_a)[:200]}")
     if halted_a.get("halt_error") or halted_a.get("error"):
         raise SystemExit(f"the network halt was refused: {json.dumps(halted_a)[:400]}")
-    wait_until(lambda: not online("b"), 90, "win-b's agents stopped by win-a's halt")
+    wait_until(lambda: held("b"), 120, "win-b recorded the halt received from win-a")
     wait_until(
-        lambda: not online("a") and halted("a") and halted("b"),
+        lambda: not online("a") and not online("b"),
         90,
-        "both machines halted with waiters",
+        "both machines' agents stopped after the halt",
     )
+    # Existing agents are stopped; a waiter appears only when a new launch meets a halt.
+    for name in ("a", "b"):
+        start_agent(kollabs[name], projects[name], envs[name], logs[name]).wait(timeout=60)
+        wait_until(lambda: bool(halted(name)), 60, f"win-{name}'s halted launch waiter")
+        assert not online(name), f"win-{name}'s launch ran while halted"
 
     print(
         "step 8: resume proposed from win-b, confirmed by win-a, both through their halt listeners"
     )
-    start_listener(kollab, projects["b"], envs["b"])
-    start_listener(kollab, projects["a"], envs["a"])
+    start_listener(kollabs["b"], projects["b"], envs["b"])
+    start_listener(kollabs["a"], projects["a"], envs["a"])
     wait_until(
         lambda: (homes["b"] / ".kollab" / "private" / "halt.sock").exists(),
         60,
@@ -667,6 +720,15 @@ def main() -> int:
             projects[name].mkdir()
             logs[name] = home / "detached.log"
 
+    # A machine-wide halt sweeps every process of its installation. Keep the second
+    # home and the relay in different installations so only relay delivery can halt b.
+    kollabs = {
+        "a": args.kollab,
+        "b": isolated_kollab(homes["b"] / "venv"),
+        "r": isolated_kollab(homes["r"] / "venv"),
+    }
+    assert_distinct_installs(kollabs)
+
     certs = base / "certs"
     make_certs(DOMAIN, certs)  # the relay speaks plain HTTP; discovery dials https only
     for name in (
@@ -694,7 +756,7 @@ def main() -> int:
 
     relay_log = (base / "relay.log").open("wb")
     relay = subprocess.Popen(  # step 2: `kollab relay serve` on a plain loopback port
-        [args.kollab, "relay", "serve", "--domain", DOMAIN, "--port", str(RELAY_PORT)],
+        [kollabs["r"], "relay", "serve", "--domain", DOMAIN, "--port", str(RELAY_PORT)],
         cwd=base,
         env=envs["r"],
         stdin=subprocess.DEVNULL,
@@ -712,7 +774,7 @@ def main() -> int:
 
         wait_until(relay_port_open, 60, "the relay's plain HTTP port")
         front.start()
-        relay_halt_smoke(args.kollab, homes, projects, envs, logs)  # steps 4-9
+        relay_halt_smoke(kollabs, homes, projects, envs, logs)  # steps 4-9
     except BaseException:
         error = sys.exc_info()[1]
         print(f"--- smoke step raised {type(error).__name__}: {error}")
@@ -729,7 +791,7 @@ def main() -> int:
     finally:
         for name in ("a", "b"):  # every home's kollabs, then the homes themselves
             try:
-                stop = [args.kollab, "--hub", "stop", "all"]
+                stop = [kollabs[name], "--hub", "stop", "all"]
                 subprocess.run(
                     stop,
                     cwd=projects[name],
