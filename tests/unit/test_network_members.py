@@ -30,6 +30,53 @@ pytestmark = pytest.mark.usefixtures("unthrottled_relay")
 NAMES = {"mac": "lapis", "srv-b": "koordinator", "srv-c": "peridot", "srv-d": "ruby", "odd": "sapphire"}
 
 
+@pytest.mark.asyncio
+async def test_halted_listener_delivers_bootstrap_before_halt_to_an_unsynced_member(tmp_path):
+    """An immediate halt still reaches a member that has not heard the bootstrap pick."""
+    from plugins.hub import halt_runtime
+    from plugins.hub import network_halt as nh
+    from plugins.hub.network_control import NetworkControl
+
+    wire, nodes = await make_net(tmp_path, "mac", "srv-b")
+    a, b = nodes
+    try:
+        for node in nodes:
+            node.client.state.room = a.client.state.room
+            node.client._network_control = NetworkControl(
+                node.client, machine=SigningKey.generate(), root=tmp_path / f"machine-{node.name}"
+            )
+        a.client.control.found()
+        joined(a, b)
+        b.client.control.take_join(
+            a.client.control.join_decision_fields(
+                b.client.control.join_proof("offer", b.key),
+                offer_id="offer", round_id=b.key, folder=b.key,
+            )["network_control"],
+            anchor=nh.join_anchor(a.client.control.network_id()),
+        )
+        await sync(nodes, rounds=3)
+        assert len(b.client.control.view().counting) == 1
+
+        a.client.control.halt_act("make_bootstrap", {"machine": b.client.control.machine_hex})
+        a.client.control.halt_act("halt", {})
+        assert len(a.client.control.view().counting) == 2
+        assert len(b.client.control.view().counting) == 1
+        b.client.control.halt_merge(a.client.control.halt_payload())
+        assert not b.client.control.halt_book().active()
+
+        link = halt_runtime.HaltLink(
+            tmp_path / "mac", tmp_path / "machine-mac", None,
+            SimpleNamespace(client=a.client), a.bridge.secure_transport,
+        )
+        link.membership._poll = 0
+        await link.membership.tick()
+        assert len(b.client.control.view().counting) == 2
+        await link.sync.tick()
+        assert b.client.control.halt_book().active()
+    finally:
+        await close_net(wire, nodes)
+
+
 async def make_net(tmp_path, *names):
     wire = RelayWire()
     nodes = {n: await make_node(tmp_path, n, designation=NAMES[n]) for n in names}

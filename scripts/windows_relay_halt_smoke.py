@@ -290,6 +290,29 @@ async def halt_members(home: Path, project: Path) -> list:
         return await HaltContext(str(project), home / ".kollab").hub_halt_members()
 
 
+def halt_diagnostics(home: Path, project: Path) -> str:
+    """Report whether the listener owns a live link without printing private state."""
+    from plugins.hub.halt_runtime import read_halt, sock_call
+
+    root = home / ".kollab"
+    try:
+        scopes = len(read_halt(root).get("scopes") or {})
+    except Exception as exc:  # diagnostics must not hide the smoke's original failure
+        scopes = type(exc).__name__
+    try:
+        reply = asyncio.run(sock_call({"op": "status", "folder": str(project)}, root, timeout=5))
+        status = {
+            "ok": reply.get("ok"),
+            "no_link": reply.get("no_link"),
+            "error": reply.get("error"),
+            "online": len(reply.get("online") or []),
+            "acked": len(reply.get("acked") or []),
+        }
+    except Exception as exc:
+        status = {"error_type": type(exc).__name__}
+    return json.dumps({"scopes": scopes, "listener": status})
+
+
 def start_listener(kollab: str, project: Path, env: dict[str, str]) -> None:
     """Run `kollab --halt-listener` for this home; a halted machine's halt ops go through it."""
     subprocess.Popen(
@@ -616,7 +639,13 @@ def relay_halt_smoke(
     print(f"step 7: win-a halted the network: {json.dumps(halted_a)[:200]}")
     if halted_a.get("halt_error") or halted_a.get("error"):
         raise SystemExit(f"the network halt was refused: {json.dumps(halted_a)[:400]}")
-    wait_until(lambda: held("b"), 120, "win-b recorded the halt received from win-a")
+    wait_until(
+        lambda: held("b"),
+        120,
+        "win-b recorded the halt received from win-a",
+        why=lambda: f"win-a: {halt_diagnostics(homes['a'], projects['a'])}; "
+        f"win-b: {halt_diagnostics(homes['b'], projects['b'])}",
+    )
     wait_until(
         lambda: not online("a") and not online("b"),
         90,

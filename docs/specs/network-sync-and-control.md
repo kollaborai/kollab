@@ -458,7 +458,10 @@ keys, the managed-config record or MCP settings.
   relay-owner lock (`relay_owner.py:228`) of that network's lexicographically
   first folder in scope, once the sweep has stopped that folder's owner, and
   opens its relay link with that folder's state dir. Networks with no folder
-  in scope keep their own owners.
+  in scope keep their own owners. If the old owner still holds the lock or a
+  link attempt fails, the listener retries while the halt remains active.
+  The listener also sends signed membership and counting records so a newly
+  admitted machine can validate a halt issued immediately after bootstrap.
 - Dispatch is an allowlist (R3-F13): before anything else, the listener drops
   every call from a stranger link and every method other than
   `secure_identity`, `secure_packet`, and inside the secure session

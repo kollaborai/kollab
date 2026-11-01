@@ -680,8 +680,8 @@ class NetworkControl:
         return key == self.client.public_key or key in self.client.members()
 
     def halt_payload(self) -> dict[str, Any]:
-        # D6: revocation records ride the halt exchange too. A halted machine trades no
-        # member lists, so without them a revocation could never reach two signatures.
+        # D6: revocation records ride the halt exchange too, so their confirmation
+        # does not depend on a separate membership exchange completing first.
         records = self._fresh().get("revocations", [])
         return {**self.halt_book().exchange_payload(), "revocations": records[:MAX_RECORDS]}
 
