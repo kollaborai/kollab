@@ -36,6 +36,7 @@ import type {
   TurnError,
 } from "./api";
 import { isToolOutputBatch } from "./api";
+import { GoalCancellationTracker } from "./utils/goal-cancel";
 import { shownMessagesChanged } from "./history-merge";
 import {
   apartFromLive,
@@ -60,6 +61,7 @@ import { VoiceModeProvider } from "./voice-mode";
 
 export type EngineState = {
   sessionId: string;
+  conversationUid?: string | null;
   sessions: Session[];
   messages: ThreadMessageLike[];
   /**
@@ -68,6 +70,8 @@ export type EngineState = {
    * page ran ends; a later reload appends only what lies past it.
    */
   synced?: { history: number; messages: number; start?: number };
+  /** A private goal result may have interleaved with another history write. */
+  goalHistoryReloadRequired?: boolean;
   error?: string;
   usage?: {
     inputTokens: number;
@@ -691,8 +695,8 @@ export function EngineRuntimeProvider({
   api: EngineApi;
   sessionId: string;
   initialState: EngineState;
-  /** Reload the thread whole: the prompt it waits on closed in another window. */
-  onStale?: () => void;
+  /** Reload the thread whole, optionally only while a caller's guard holds. */
+  onStale?: (stillCurrent?: () => boolean) => void | Promise<void>;
   /** Session-stream events, fed by App's followEvents loop. */
   liveEvents?: { current: ((event: SessionEvent) => void) | null };
   children: ReactNode;
@@ -700,7 +704,11 @@ export function EngineRuntimeProvider({
   const turnRef = useRef<TurnClock>(newTurnClock());
   const runStartRef = useRef(0);
   const cancellingPermission = useRef(false);
+  const goalCancellation = useRef(new GoalCancellationTracker());
   const mounted = useRef(true);
+  const runVersion = useRef(0);
+  const reloadRequestedAt = useRef<number | null>(null);
+  const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
 
   useEffect(() => {
@@ -726,12 +734,14 @@ export function EngineRuntimeProvider({
       return headers;
     },
     prepareSendCommandsRequest: (body) => {
+      runVersion.current += 1;
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
         turnRef.current = newTurnClock();
       }
       runStartRef.current = performance.now();
-      return { ...body, sessionId };
+      const goalReplyId = goalCancellation.current.prepare(body.commands);
+      return { ...body, sessionId, ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}) };
     },
     onResponse: (response) => {
       if (response.status === 401) {
@@ -755,17 +765,47 @@ export function EngineRuntimeProvider({
     onError: async (error, { updateState }) => {
       updateState((state) => ({ ...state, error: error.message }));
     },
-    onCancel: ({ updateState, error }) => {
+    onCancel: ({ commands, updateState, error }) => {
       // A failed request lands here too, after onError: keep the error it
       // set, and leave the daemon's turn alone (a dropped phone connection
       // must not stop the agent's work).
       if (error) return;
-      // The transport aborts its request, but the daemon is independent of
-      // that HTTP stream. Explicitly cancel its active turn as well.
-      void api.cancel(sessionId).catch(() => undefined);
+      // A goal control can run while a different model turn is active. Stop
+      // only the request that this transport owns.
+      const goal = goalCancellation.current.cancel(commands);
+      if (goal.goal) {
+        if (goal.id) void api.cancelOwned(sessionId, goal.id).catch(() => undefined);
+      } else {
+        void api.cancel(sessionId).catch(() => undefined);
+      }
       updateState((state) => ({ ...state, error: "Run cancelled" }));
     },
+    onFinish: () => {
+      goalCancellation.current.finish();
+      setSettledRuns((count) => count + 1);
+    },
   });
+
+  useEffect(() => {
+    // A goal's result is private to its requesting stream, but its history can
+    // interleave with another client. Do not call that history synchronized
+    // until it has actually been reloaded. Defer until any queued run starts,
+    // and recheck after the load so a later user turn is never unmounted.
+    const version = runVersion.current;
+    const stillCurrent = () => mounted.current && runVersion.current === version
+      && !runtime.thread.getState().isRunning;
+    const timer = window.setTimeout(() => {
+      const thread = runtime.thread.getState();
+      const state = (thread.extras as { state?: EngineState } | undefined)?.state;
+      if (!stillCurrent() || !state?.goalHistoryReloadRequired || !onStale
+          || reloadRequestedAt.current === version) return;
+      reloadRequestedAt.current = version;
+      void Promise.resolve(onStale(stillCurrent)).catch(() => undefined).finally(() => {
+        if (reloadRequestedAt.current === version) reloadRequestedAt.current = null;
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [settledRuns, runtime, onStale]);
 
   const cancelPermission = useCallback(async (expected: readonly PendingPermission[]) => {
     const current = () => mounted.current && !runtime.thread.getState().isRunning
@@ -823,6 +863,17 @@ export function EngineRuntimeProvider({
     };
     liveEvents.current = (event: SessionEvent) => {
       const thread = runtime.thread.getState();
+      if (thread.isRunning && goalCancellation.current.isActive()
+          && event.type === "history_updated"
+          && typeof event.conversation_uid === "string"
+          && initialState.conversationUid
+          && event.conversation_uid !== initialState.conversationUid) {
+        // A terminal switched this daemon's conversation while the goal was
+        // in flight. Abort this page's stream now; Stop is still scoped to the
+        // goal handle, and the ensuing history refresh remounts the new one.
+        runtime.thread.cancelRun();
+        return;
+      }
       if (thread.isRunning) return;
       const previous = liveTurn.current;
       const next = applyLiveEvent(previous, event);
@@ -854,7 +905,7 @@ export function EngineRuntimeProvider({
       }
     };
     return () => { liveEvents.current = null; clearTimeout(settleTimer.current); };
-  }, [runtime, liveEvents]);
+  }, [runtime, liveEvents, initialState.conversationUid]);
 
   // Turns this page did not run (a hub message that woke the agent, a turn
   // typed in the terminal) reach the open thread when App reloads the history
@@ -974,6 +1025,7 @@ export function buildInitialState(
   pendingPermissions: PermissionPrompt[] = [],
   lastTurnError: TurnError | null = null,
   historyStartIndex = 0,
+  conversationUid: string | null = null,
 ): EngineState {
   const messages = historyToMessages(
     history,
@@ -984,6 +1036,7 @@ export function buildInitialState(
   );
   return {
     sessionId,
+    conversationUid,
     sessions,
     messages,
     synced: {

@@ -10,6 +10,7 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import AsyncExitStack
@@ -120,6 +121,62 @@ def _foreign_output(event: Dict[str, Any], request_ids: set[str], tagged: bool =
     return bool(named and request_ids) and not named & request_ids
 
 
+def _is_goal_message(content: Any) -> bool:
+    """Recognize authored goal text without synthetic image placeholders."""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "\n".join(
+            part["text"] for part in content
+            if isinstance(part, dict)
+            and str(part.get("type") or "").strip().lower() == "text"
+            and isinstance(part.get("text"), str)
+        )
+    else:
+        return False
+    return re.match(r"^\s*/(?:goal|goals)(?:\s+|$)", text, re.IGNORECASE) is not None
+
+
+async def _pump_goal_reply(session, reply_id: str, queue: asyncio.Queue) -> None:
+    """Deliver a private goal reply only to its initiating response stream."""
+    deadline = time.monotonic() + EVENT_IDLE_TIMEOUT_SECONDS
+    try:
+        while time.monotonic() < deadline:
+            reply = await session.poll_goal_reply(reply_id)
+            if reply.get("status") == "pending":
+                await asyncio.sleep(0.1)
+                continue
+            message = str(reply.get("message") or "Goal reply unavailable.")
+            meta = {
+                "request_id": reply_id,
+                "conversation_uid": reply.get("conversation_uid"),
+                "history_recorded": reply.get("history_recorded") is True,
+            }
+            success = reply.get("status") == "complete" and reply.get("success") is True
+            if success:
+                await queue.put({"type": "token", "text": message, **meta})
+            else:
+                await queue.put({"type": "error", "message": message, **meta})
+            await queue.put({"type": "turn_complete", "stop_reason": "end_turn" if success else "error", **meta})
+            return
+        message = "Goal reply timed out; check its status before retrying."
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        message = "Goal reply unavailable; check its status before retrying."
+    await queue.put({"type": "error", "message": message, "request_id": reply_id})
+    await queue.put({"type": "turn_complete", "stop_reason": "error", "request_id": reply_id})
+
+
+async def _forward_goal_revocation(shared_queue: asyncio.Queue, private_queue: asyncio.Queue) -> None:
+    """Forward a revoked phone's subscriber signal while ignoring shared output."""
+    while True:
+        event = await shared_queue.get()
+        if event is PHONE_STREAM_REVOKED:
+            await private_queue.put(PHONE_STREAM_REVOKED)
+            return
+
+
 def _contains_reserved_voice_origin(value: Any) -> bool:
     if isinstance(value, dict):
         origin_context = value.get("origin_context")
@@ -137,6 +194,8 @@ class MessageRequest(BaseModel):
     request_id: str | None = None
     thread_id: str | None = None
     origin_context: dict[str, Any] | None = None
+    goal_reply_id: str | None = None
+    conversation_uid: str | None = None
 
 
 @router.post("/{session_id}/message")
@@ -159,17 +218,20 @@ async def send_message(
         raise HTTPException(status_code=409, detail="Session daemon is not running")
 
     # Subscribe before submitting so no event can land in the gap.
-    queue = _subscribe(session, _request_read_context(request))
+    read_context = _request_read_context(request)
+    queue = _subscribe(session, read_context)
     # Always an id: a daemon that echoes it stamps this turn with it (#551).
     request_id = body.request_id or uuid.uuid4().hex
 
     try:
-        accepted = await session.send_message(
-            body.content,
-            request_id=request_id,
-            thread_id=body.thread_id,
-            origin_context=body.origin_context,
-        )
+        private_goal = _is_goal_message(body.content)
+        kwargs = {"request_id": request_id, "thread_id": body.thread_id, "origin_context": body.origin_context}
+        if private_goal:
+            kwargs["private_goal_reply"] = True
+            kwargs["goal_conversation_uid"] = body.conversation_uid
+            if body.goal_reply_id is not None:
+                kwargs["private_goal_reply_id"] = body.goal_reply_id
+        accepted = await session.send_message(body.content, **kwargs)
     except Exception as e:
         session.unsubscribe(queue)
         logger.error("send_message failed for %s: %s", session_id, e)
@@ -180,15 +242,28 @@ async def send_message(
         reason = accepted.get("reason", "rejected")
         status = 409 if "in flight" in reason else 400
         raise HTTPException(status_code=status, detail=accepted.get("message") or reason)
+    reply_id = accepted.get("goal_reply_id") if private_goal else None
+    if private_goal and not reply_id:
+        session.unsubscribe(queue)
+        raise HTTPException(status_code=502, detail="daemon did not provide a private goal reply")
     tagged = bool(accepted.get("request_id"))
     request_ids = {str(accepted.get("request_id") or request_id)}
+    if reply_id:
+        request_ids.add(str(reply_id))  # the private reply's events name it
 
     async def event_generator():
+        private_queue = asyncio.Queue() if reply_id else None
+        pump = asyncio.create_task(_pump_goal_reply(session, str(reply_id), private_queue)) if reply_id else None
+        revocation_watch = (
+            asyncio.create_task(_forward_goal_revocation(queue, private_queue))
+            if private_queue is not None and read_context is not None else None
+        )
         try:
             while True:
                 try:
                     event = await asyncio.wait_for(
-                        queue.get(), timeout=EVENT_IDLE_TIMEOUT_SECONDS
+                        (private_queue if private_queue is not None else queue).get(),
+                        timeout=EVENT_IDLE_TIMEOUT_SECONDS,
                     )
                 except asyncio.TimeoutError:
                     yield {
@@ -202,7 +277,7 @@ async def send_message(
                     }
                     return
 
-                if event is PHONE_STREAM_REVOKED:
+                if event is PHONE_STREAM_REVOKED or (read_context and read_context.revoked):
                     return
                 event.setdefault("session_id", session_id)
                 if _foreign_completion(event, request_ids, tagged):
@@ -223,9 +298,15 @@ async def send_message(
                 if event.get("type") == "turn_complete":
                     return
         finally:
+            tasks = [task for task in (pump, revocation_watch) if task is not None]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             session.unsubscribe(queue)
 
-    return EventSourceResponse(event_generator())
+    headers = {"X-Kollab-Goal-Reply": str(reply_id)} if reply_id else None
+    return EventSourceResponse(event_generator(), headers=headers)
 
 
 @router.get("/{session_id}/events")
@@ -291,6 +372,7 @@ class AssistantRequest(BaseModel):
     state: Optional[Any] = None
     tools: Optional[Dict[str, Any]] = None
     system: Optional[Any] = None
+    goal_reply_id: Optional[str] = None
 
 
 def _assistant_command_type(command: Dict[str, Any]) -> str:
@@ -871,7 +953,10 @@ async def assistant_transport(
     completion: Dict[str, Any] = {"completed": False}
 
     async def run_callback(controller: RunController):
-        queue = _subscribe(session, read_context)
+        shared_queue = _subscribe(session, read_context)
+        queue = shared_queue
+        goal_pump = None
+        revocation_watch = None
         tool_controllers: Dict[str, Any] = {}
         permission_controllers: Dict[str, Any] = {}
         permission_tool_ids: Dict[str, str] = {}
@@ -948,6 +1033,13 @@ async def assistant_transport(
             return max(0.0, last_publish + STREAM_PUBLISH_INTERVAL - time.monotonic())
 
         try:
+            if len(body.commands) > 1 and any(
+                _assistant_command_type(command) == "add-message"
+                and _is_goal_message(_assistant_message_content(command))
+                for command in body.commands
+            ):
+                controller.add_error("Send a goal command on its own.")
+                return
             for command in body.commands:
                 command_type = _assistant_command_type(command)
                 if command_type == "add-message":
@@ -955,13 +1047,31 @@ async def assistant_transport(
                     if not content_to_text(message_content).strip():
                         controller.add_error("add-message command has no text")
                         return
-                    accepted = await session.send_message(message_content, request_id=uuid.uuid4().hex)
+                    private_goal = _is_goal_message(message_content)
+                    if private_goal:
+                        uid = body.state.get("conversationUid") if isinstance(body.state, dict) else None
+                        kwargs = {"private_goal_reply": True, "goal_conversation_uid": uid}
+                        if body.goal_reply_id is not None:
+                            kwargs["private_goal_reply_id"] = body.goal_reply_id
+                        accepted = await session.send_message(message_content, **kwargs)
+                    else:
+                        accepted = await session.send_message(message_content, request_id=uuid.uuid4().hex)
                     saw_action = True
                     if not accepted.get("accepted"):
                         controller.add_error(
                             str(accepted.get("message") or accepted.get("reason", "message rejected"))
                         )
                         return
+                    if private_goal:
+                        reply_id = accepted.get("goal_reply_id")
+                        if not reply_id:
+                            controller.add_error("daemon did not provide a private goal reply")
+                            return
+                        request_ids.add(str(reply_id))
+                        queue = asyncio.Queue()
+                        goal_pump = asyncio.create_task(_pump_goal_reply(session, str(reply_id), queue))
+                        if read_context is not None:
+                            revocation_watch = asyncio.create_task(_forward_goal_revocation(shared_queue, queue))
                     if isinstance(body.state, dict) and body.state.get("error"):
                         # Cancellation belongs to its previous turn. A new
                         # admitted input must not keep that error as its status.
@@ -1032,7 +1142,7 @@ async def assistant_transport(
                 event = await _assistant_next_event(
                     queue, controller, timeout=held_text_due()
                 )
-                if event is None:
+                if event is None or (read_context and read_context.revoked):
                     return
                 if not event:
                     # The daemon went quiet after streaming (e.g. before
@@ -1265,9 +1375,19 @@ async def assistant_transport(
                     )
                     if persist_message_state:
                         _assistant_set_messages(controller, state_messages)
-                        await _assistant_set_synced(
-                            controller, session, len(state_messages)
-                        )
+                        if goal_pump is not None:
+                            # Other goal commands may have reached history in
+                            # between this page's request and its result. A
+                            # total history count is not a prefix of the rows
+                            # this stream rendered. Ask the page to reload the
+                            # canonical history once it is idle instead.
+                            controller.state["synced"] = None
+                            if event.get("history_recorded"):
+                                controller.state["goalHistoryReloadRequired"] = True
+                        else:
+                            await _assistant_set_synced(
+                                controller, session, len(state_messages)
+                            )
                     _assistant_set_usage(controller, completion["usage"])
                     return
                 elif event_type == "daemon_closed":
@@ -1277,7 +1397,12 @@ async def assistant_transport(
             logger.exception("assistant transport failed for %s", session_id)
             controller.add_error(str(exc))
         finally:
-            session.unsubscribe(queue)
+            tasks = [task for task in (goal_pump, revocation_watch) if task is not None]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            session.unsubscribe(shared_queue)
 
     stream = create_run(run_callback, state=body.state)
     protocol_stream = _assistant_protocol_stream(stream, completion)
