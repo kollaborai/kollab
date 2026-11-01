@@ -89,7 +89,7 @@ class ACPOrchestrator:
         self._observation_rows: list[str] = []
         self._unwritten_observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_count = 0
-        # (request_id, turn_id) pairs whose authoritative usage already
+        # (request_id, turn_id) pairs whose response usage already
         # settled; replays of terminal events must not double count (#495).
         self._settled_usage_turns: set[tuple[str, int]] = set()
         # A later prompt may start while the previous turn is still writing
@@ -491,13 +491,14 @@ class ACPOrchestrator:
             logger.exception("ACP Hub completion callback failed")
 
     def _settle_turn_usage(self, result: ACPResult) -> dict[str, Any] | None:
-        """Fold one turn's authoritative token totals into session stats.
+        """Fold one prompt response's reconciled token totals into session stats.
 
-        Harnesses that report usage on the prompt response (codex-acp
-        >= 2.3.0) describe the whole turn; older ones leave it unset and the
-        last-request context sample stays the only signal. Each (request,
-        turn) settles at most once, so replayed terminal events never double
-        count. Cost is never invented: adapters send no price data (#495).
+        The bundled Codex and Claude adapters report cache counters separately
+        from input, with reasoning included in output. Other adapters may use
+        different breakdowns; require these components to reconcile with their
+        reported total instead of guessing. The reported scope belongs to the
+        adapter: Claude's prompt usage excludes subagent/sidechain costs.
+        Each (request, turn) settles once. Cost is never invented (#495).
         """
         key = (result.request_id, result.turn_id)
         if key in self._settled_usage_turns:
@@ -511,18 +512,33 @@ class ACPOrchestrator:
             if current_display and isinstance(stats, dict):
                 stats.pop("acp_turn_usage", None)
             return None
-        input_total = (
-            int(usage.get("input_tokens", 0) or 0)
-            + int(usage.get("cached_read_tokens", 0) or 0)
-            + int(usage.get("cached_write_tokens", 0) or 0)
-        )
-        output_total = int(usage.get("output_tokens", 0) or 0) + int(usage.get("thought_tokens", 0) or 0)
+        try:
+            raw_input = int(usage.get("input_tokens", 0) or 0)
+            cache_read = int(usage.get("cached_read_tokens", 0) or 0)
+            cache_write = int(usage.get("cached_write_tokens", 0) or 0)
+            output_total = int(usage.get("output_tokens", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            raw_input = cache_read = cache_write = output_total = -1
+        input_total = raw_input + cache_read + cache_write
+        reported_total = usage.get("total_tokens")
+        if (any(usage.get(name) is None for name in ("total_tokens", "input_tokens", "output_tokens"))
+                or not isinstance(reported_total, int) or isinstance(reported_total, bool)
+                or reported_total < 0 or min(raw_input, cache_read, cache_write, output_total) < 0
+                or input_total + output_total != reported_total):
+            logger.warning("ACP prompt usage breakdown does not match its total; not settling")
+            if current_display and isinstance(stats, dict):
+                stats.pop("acp_turn_usage", None)
+            return None
         if isinstance(stats, dict):
             stats["total_input_tokens"] = int(stats.get("total_input_tokens", 0)) + input_total
             stats["total_output_tokens"] = int(stats.get("total_output_tokens", 0)) + output_total
-            if usage.get("cached_read_tokens"):
+            if cache_read:
                 stats["total_cache_read_tokens"] = (
-                    int(stats.get("total_cache_read_tokens", 0)) + int(usage["cached_read_tokens"])
+                    int(stats.get("total_cache_read_tokens", 0)) + cache_read
+                )
+            if cache_write:
+                stats["total_cache_creation_tokens"] = (
+                    int(stats.get("total_cache_creation_tokens", 0)) + cache_write
                 )
             if current_display:
                 stats["acp_turn_usage"] = dict(usage)

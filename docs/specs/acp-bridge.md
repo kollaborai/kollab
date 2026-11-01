@@ -344,13 +344,17 @@ claude@home-server` and `hub_ask` settle on it.
 | `user_message_chunk` | only inside a load replay, which is swallowed |
 | the rest | logged |
 
-When the prompt response includes authoritative whole-turn usage, settle it
-once per turn and carry it through the session snapshot to local and attached
-status widgets. Show context samples separately from turn totals; adapters
-without turn totals label the context sample as the last request. Clear a
-previous turn's total at the next turn start and when the harness changes or
-closes, so it cannot be mistaken for the current turn. A delayed older turn may
-still contribute to cumulative accounting but cannot replace the current display.
+When a prompt response includes usage, settle it once and carry it through the
+session snapshot to local and attached status widgets. The bundled Codex and
+Claude adapters report cache counters separately from input and include
+reasoning in output; settle only when input, cache and output reconcile with
+the adapter's reported total, rather than guessing at other adapter breakdowns.
+The reported scope is adapter-dependent: Claude prompt usage excludes
+subagent and sidechain costs. Show context samples separately from the
+reported prompt total; when there is no usable total, label the context sample
+as the last request. Clear a previous total at the next turn start and when
+the harness changes or closes. A delayed older turn may still contribute to
+cumulative accounting but cannot replace the current display.
 
 None of it is a tool kollab runs.
 

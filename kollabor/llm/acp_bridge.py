@@ -354,9 +354,9 @@ class ACPAdmission:
 def _turn_usage_payload(usage: Any) -> dict[str, int] | None:
     """Normalize a prompt-response Usage object into snake_case token totals.
 
-    Adapters that report per-prompt usage (codex-acp >= 2.3.0) send the whole
-    turn's totals on the prompt response; older adapters leave response.usage
-    unset and callers fall back to last-request context samples (#495).
+    A response may include adapter-reported prompt usage (codex-acp >= 2.3.0);
+    older adapters may omit it. The adapter determines the coverage of its
+    report, which is not necessarily all sidechain or subagent usage (#495).
     """
     if usage is None:
         return None

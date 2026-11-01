@@ -126,13 +126,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
-- ACP: Codex turns now report their real per-turn token spend. Adapters that
-  report usage on the prompt response (codex-acp >= 2.3.0; the bundled pin is
-  now 2.5.0) have each turn's totals settled once into the session token
-  totals, so budgets and stats match the harness ledger on multi-tool turns,
-  and the status line shows the turn total for them. Older adapters keep their
-  last-request context sample, now labeled "· last req" so it can never read
-  as turn spend (#495).
+- ACP: Codex multi-tool turns now report prompt token usage matching the harness
+  ledger. Reconciled prompt-response totals settle once into session stats and
+  appear in the status line. Coverage depends on the adapter: Claude's prompt
+  usage excludes subagent and sidechain costs. When a usable total is absent,
+  the last-request context sample is labeled "· last req" (#495).
 - A hub agent that is busy for a while keeps its socket: peers no longer delete a live agent's presence
   and socket after a 15 s late heartbeat, which cut every connection to it; they wait 10 min (#545).
 - History: expanding an old slimmed history entry loads its full metadata

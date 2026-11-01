@@ -1058,8 +1058,8 @@ class EngineSession:
                     self.total_turns += 1
                     self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
                     self.total_output_tokens += int(event.get("output_tokens", 0) or 0)
-                    # Authoritative per-turn totals when the adapter reports
-                    # them on the prompt response; cleared each turn so a
+                    # Reconciled per-prompt totals when the adapter reports
+                    # them on the response; cleared each turn so a
                     # stale total never lingers on adapters without it (#495).
                     usage_turn = (str(event.get("request_id") or ""), int(event.get("turn_id") or 0))
                     if self._acp_usage_display_turn in (None, usage_turn):
