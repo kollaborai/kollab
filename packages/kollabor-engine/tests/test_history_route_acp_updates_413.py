@@ -13,7 +13,6 @@ import pathlib
 from types import SimpleNamespace
 
 import pytest
-
 from kollabor_engine.history_paging import HISTORY_MAX_PAGE_BYTES
 from kollabor_engine.routes import sessions as sessions_route
 from kollabor_engine.server import get_session_registry
