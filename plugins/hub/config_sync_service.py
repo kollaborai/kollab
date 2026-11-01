@@ -246,7 +246,10 @@ class ConfigSyncService:
             raise
         except Exception as error:
             failures = self._failures[key] = self._failures.get(key, 0) + 1
-            delay = min(MAX_BACKOFF_SECONDS, 10.0 * 2 ** (failures - 1))
+            # Saturate the exponent: 2 ** 1023 is out of float range, so a
+            # device failing for ~1024 consecutive pushes would crash this
+            # push instead of backing off. 16 parks the delay at the cap.
+            delay = min(MAX_BACKOFF_SECONDS, 10.0 * 2 ** min(failures - 1, 16))
             self._retry_at[key] = time.monotonic() + delay
             logger.warning(
                 "config sync: a device did not take the settings (%s), retry in %ds",

@@ -137,6 +137,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider profile with the harness's model and effort in session state and
   the engine API, instead of a blank model/effort readout and an unresolved
   loadout name (#605).
+- Hub membership updates now send to every peer in a tick together, so one
+  slow or failing peer no longer delays the peers listed after it (#603).
+- Membership fan-out now stays inside the relay's pending budget: surplus
+  sends wait on a semaphore instead of being rejected for capacity, a relay
+  capacity reject is backpressure rather than a peer failure — the reject is
+  now typed ("capacity") and the typed signal survives the secure conversation
+  transport, so the live relay path honors backpressure too — retry backoff
+  saturates instead of overflowing after ~1024 consecutive failures (both
+  membership and config sync), and a peer's send bookkeeping is pruned when
+  it leaves the list (#603).
 - ACP: attaching with `--llm` no longer closes the running harness before the
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness
