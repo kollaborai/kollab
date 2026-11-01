@@ -313,6 +313,28 @@ def halt_diagnostics(home: Path, project: Path) -> str:
     return json.dumps({"scopes": scopes, "listener": status})
 
 
+def confirm_resume_when_visible(home: Path, project: Path, order: str, *, timeout: float = 120) -> dict:
+    """Wait for the peer's proposal to reach this listener, then confirm it once."""
+    from plugins.hub.halt_context import HaltUnavailable
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            result = asyncio.run(
+                halt_act(home, project, "confirm_resume", {"confirmed": True, "hash": order})
+            )
+        except HaltUnavailable as exc:
+            if str(exc) != "no single open proposal matches that hash":
+                raise
+            if time.monotonic() > deadline:
+                raise SystemExit("resume proposal did not reach win-a before the deadline") from exc
+            time.sleep(2)
+            continue
+        if result.get("halt_error") or result.get("error"):
+            raise SystemExit(f"resume confirmation refused: {json.dumps(result)[:400]}")
+        return result
+
+
 def start_listener(kollab: str, project: Path, env: dict[str, str]) -> None:
     """Run `kollab --halt-listener` for this home; a halted machine's halt ops go through it."""
     subprocess.Popen(
@@ -682,22 +704,7 @@ def relay_halt_smoke(
             f"win-b's resume proposal carries no hash: {json.dumps(proposal)[:400]}"
         )
 
-    deadline = time.monotonic() + 120
-    while True:
-        confirmed = asyncio.run(
-            halt_act(
-                homes["a"],
-                projects["a"],
-                "confirm_resume",
-                {"confirmed": True, "hash": order},
-            )
-        )
-        if (
-            not (confirmed.get("halt_error") or confirmed.get("error"))
-            or time.monotonic() > deadline
-        ):
-            break
-        time.sleep(2)
+    confirmed = confirm_resume_when_visible(homes["a"], projects["a"], order)
     print(f"step 8: win-a confirmed the resume: {json.dumps(confirmed)[:200]}")
 
     wait_until(

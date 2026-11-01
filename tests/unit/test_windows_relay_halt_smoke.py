@@ -69,3 +69,44 @@ def test_waiter_records_include_global_and_project_presence(tmp_path):
     (global_record.parent / "agent.json").write_text("{}")
 
     assert set(smoke.waiter_records(tmp_path)) == {global_record, project_record}
+
+
+def test_resume_confirmation_waits_for_the_proposal(monkeypatch, tmp_path):
+    from plugins.hub.halt_context import HaltUnavailable
+
+    attempts = []
+    sleeps = []
+
+    async def act(home, project, action, payload):
+        attempts.append((action, payload))
+        if len(attempts) == 1:
+            raise HaltUnavailable("no single open proposal matches that hash")
+        return {"lifted": True}
+
+    monkeypatch.setattr(smoke, "halt_act", act)
+    monkeypatch.setattr(smoke.time, "sleep", sleeps.append)
+    assert smoke.confirm_resume_when_visible(tmp_path, tmp_path, "abc") == {"lifted": True}
+    assert attempts == [("confirm_resume", {"confirmed": True, "hash": "abc"})] * 2
+    assert sleeps == [2]
+
+
+def test_resume_confirmation_does_not_hide_other_errors(monkeypatch, tmp_path):
+    from plugins.hub.halt_context import HaltUnavailable
+
+    async def act(*args):
+        raise HaltUnavailable("the halt listener refused")
+
+    monkeypatch.setattr(smoke, "halt_act", act)
+    with pytest.raises(HaltUnavailable, match="listener refused"):
+        smoke.confirm_resume_when_visible(tmp_path, tmp_path, "abc")
+
+
+def test_resume_confirmation_stops_waiting_at_deadline(monkeypatch, tmp_path):
+    from plugins.hub.halt_context import HaltUnavailable
+
+    async def act(*args):
+        raise HaltUnavailable("no single open proposal matches that hash")
+
+    monkeypatch.setattr(smoke, "halt_act", act)
+    with pytest.raises(SystemExit, match="did not reach win-a"):
+        smoke.confirm_resume_when_visible(tmp_path, tmp_path, "abc", timeout=0)
