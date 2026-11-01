@@ -113,7 +113,7 @@ const answer = (url, method) => {
 const failures = [];
 const rowRects = async (tabs) =>
   tabs.evaluateAll((nodes) => {
-    const list = nodes[0]?.closest("[role='tablist']");
+    const list = nodes[0]?.closest("[role='tablist'], [role='radiogroup']");
     return {
       oneRow: nodes
         .map((n) => Math.round(n.getBoundingClientRect().bottom))
@@ -128,7 +128,7 @@ const rowRects = async (tabs) =>
   });
 const assertGlobalTabs = async (page, label, { maxListHeight }) => {
   const dialog = page.getByRole("dialog", { name: "Gem Studio" });
-  const tabs = dialog.getByRole("tablist", { name: "Preview activity" }).getByRole("tab");
+  const tabs = dialog.getByRole("radiogroup", { name: "Preview activity" }).getByRole("radio");
   await tabs.first().waitFor({ timeout: 8000 });
   const count = await tabs.count();
   if (count !== 7) failures.push(`${label}: expected 7 activity tabs, got ${count}`);
@@ -196,8 +196,8 @@ const openStudio = async (page, label) => {
   // window, and start each retry from a clean (Escape) state.
   const tabs = page
     .getByRole("dialog", { name: "Gem Studio" })
-    .getByRole("tablist", { name: "Preview activity" })
-    .getByRole("tab");
+    .getByRole("radiogroup", { name: "Preview activity" })
+    .getByRole("radio");
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       if (!(await ensureSidebar(page))) throw new Error("sidebar did not open");
@@ -246,8 +246,27 @@ const openProperties = async (page, label) => {
   return null;
 };
 const verifyTabBar = async (page, dialog, barName, expectedCount, label, touch) => {
-  const list = dialog.getByRole("tablist", { name: barName });
-  const tabs = list.getByRole("tab");
+  const activity = barName === "Preview activity";
+  const list = dialog.getByRole(activity ? "radiogroup" : "tablist", { name: barName });
+  const tabs = list.getByRole(activity ? "radio" : "tab");
+  const selectedAttribute = activity ? "aria-checked" : "aria-selected";
+  const assertRelationship = async () => {
+    const info = await list.evaluate((node, isActivity) => {
+      const items = [...node.querySelectorAll(isActivity ? '[role="radio"]' : '[role="tab"]')];
+      const selected = items.filter((item) => item.getAttribute(isActivity ? "aria-checked" : "aria-selected") === "true");
+      if (isActivity) return { selectedCount: selected.length, orphanedControls: items.filter((item) => {
+        const id = item.getAttribute("aria-controls");
+        return id && !document.getElementById(id);
+      }).length, tabCount: node.querySelectorAll('[role="tab"]').length };
+      const item = selected[0];
+      const panel = item && document.getElementById(item.getAttribute("aria-controls"));
+      return { selectedCount: selected.length, role: panel?.getAttribute("role"),
+        labelledBy: panel?.getAttribute("aria-labelledby"), itemId: item?.id, hidden: panel?.hidden };
+    }, activity);
+    if (info.selectedCount !== 1 || (activity && (info.orphanedControls || info.tabCount)) ||
+        (!activity && (info.role !== "tabpanel" || info.labelledBy !== info.itemId || info.hidden)))
+      failures.push(`${label}/${barName}: invalid selected control relationship ${JSON.stringify(info)}`);
+  };
   await tabs.first().waitFor({ state: "visible", timeout: 8000 });
   if (await tabs.count() !== expectedCount) {
     failures.push(`${label}/${barName}: expected ${expectedCount} tabs, got ${await tabs.count()}`);
@@ -264,7 +283,7 @@ const verifyTabBar = async (page, dialog, barName, expectedCount, label, touch) 
   const measure = () => list.evaluate((node) => {
     const listRect = node.getBoundingClientRect();
     const dialogRect = node.closest('[role="dialog"]').getBoundingClientRect();
-    const children = [...node.querySelectorAll('[role="tab"]')];
+    const children = [...node.querySelectorAll('[role="tab"], [role="radio"]')];
     const rect = (item) => {
       const r = item.getBoundingClientRect();
       return { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
@@ -308,27 +327,31 @@ const verifyTabBar = async (page, dialog, barName, expectedCount, label, touch) 
     failures.push(`${label}/${barName}: overflowing tablist did not scroll`);
   if (touch) await tabs.last().tap();
   else await tabs.last().click();
-  if (await tabs.last().getAttribute("aria-selected") !== "true")
+  if (await tabs.last().getAttribute(selectedAttribute) !== "true")
     failures.push(`${label}/${barName}: last tab was not selected by ${touch ? "tap" : "click"}`);
+  await assertRelationship();
   await list.evaluate((node) => { node.scrollLeft = 0; });
   if (touch) await tabs.first().tap();
   else await tabs.first().click();
-  if (await tabs.first().getAttribute("aria-selected") !== "true")
+  if (await tabs.first().getAttribute(selectedAttribute) !== "true")
     failures.push(`${label}/${barName}: first tab was not selected by ${touch ? "tap" : "click"}`);
+  await assertRelationship();
   await tabs.first().focus();
   await page.waitForTimeout(100);
   await page.keyboard.press("End");
   await page.waitForTimeout(150); // Radix schedules keyboard focus after the key handler.
   const focusedLast = await tabs.last().evaluate((node) => document.activeElement === node);
   if (!focusedLast) failures.push(`${label}/${barName}: End did not focus the last tab`);
-  if (await tabs.last().getAttribute("aria-selected") !== "true")
+  if (await tabs.last().getAttribute(selectedAttribute) !== "true")
     failures.push(`${label}/${barName}: End did not select the last tab`);
+  await assertRelationship();
   await page.keyboard.press("Home");
   await page.waitForTimeout(150);
   const focusedFirst = await tabs.first().evaluate((node) => document.activeElement === node);
   if (!focusedFirst) failures.push(`${label}/${barName}: Home did not focus the first tab`);
-  if (await tabs.first().getAttribute("aria-selected") !== "true")
+  if (await tabs.first().getAttribute(selectedAttribute) !== "true")
     failures.push(`${label}/${barName}: Home did not select the first tab`);
+  await assertRelationship();
   await page.keyboard.press("Shift+Tab");
   await page.waitForTimeout(120);
   const previousFocus = await page.evaluate(() => ({ tag: document.activeElement?.tagName, text: document.activeElement?.textContent?.trim().slice(0, 60), label: document.activeElement?.getAttribute("aria-label") }));
@@ -336,10 +359,36 @@ const verifyTabBar = async (page, dialog, barName, expectedCount, label, touch) 
   await page.waitForTimeout(80);
   const tabFocus = await tabs.first().evaluate((node) => document.activeElement === node);
   if (!tabFocus) failures.push(`${label}/${barName}: Tab did not return focus to the selected tab`);
-  const focusRing = await tabs.first().evaluate((node) => getComputedStyle(node).outlineStyle !== "none" || getComputedStyle(node).boxShadow !== "none");
-  if (!focusRing) failures.push(`${label}/${barName}: keyboard focus has no visible ring`);
+  const focusRings = [];
+  for (const [position, index] of [["first", 0], ["middle", Math.floor(expectedCount / 2)], ["last", expectedCount - 1]]) {
+    await page.keyboard.press("Home");
+    await page.waitForTimeout(120);
+    for (let step = 0; step < index; step++) {
+      await page.keyboard.press("ArrowRight");
+      await page.waitForTimeout(40);
+    }
+    await page.waitForTimeout(120);
+    const focus = await tabs.nth(index).evaluate((node) => {
+      const group = node.closest('[role="tablist"], [role="radiogroup"]');
+      const item = node.getBoundingClientRect();
+      const clip = group.getBoundingClientRect();
+      return { focused: document.activeElement === node, focusVisible: node.matches(":focus-visible"),
+        shadow: getComputedStyle(node).boxShadow,
+        item: { left: item.left, right: item.right, top: item.top, bottom: item.bottom },
+        clip: { left: clip.left, right: clip.right, top: clip.top, bottom: clip.bottom },
+        contained: item.left >= clip.left - 1 && item.right <= clip.right + 1 &&
+          item.top >= clip.top - 1 && item.bottom <= clip.bottom + 1 };
+    });
+    if (!focus.focused || !focus.focusVisible || !focus.shadow.includes("inset") || !focus.contained)
+      failures.push(`${label}/${barName}: ${position} focus indicator is missing or clipped ${JSON.stringify(focus)}`);
+    if (await tabs.nth(index).getAttribute(selectedAttribute) !== "true")
+      failures.push(`${label}/${barName}: ${position} keyboard focus did not select its control`);
+    await assertRelationship();
+    focusRings.push({ position, ...focus });
+    if (!touch) await list.screenshot({ path: path.join(out, `focus-${label.replaceAll("/", "-")}-${barName.replaceAll(" ", "-")}-${position}.png`) });
+  }
   await list.evaluate((node) => { node.scrollLeft = 0; });
-  console.log(`${label}/${barName}`, JSON.stringify({ boxes: rows.boxes, first, last, focusedFirst, focusedLast, previousFocus, tabFocus, focusRing }));
+  console.log(`${label}/${barName}`, JSON.stringify({ boxes: rows.boxes, first, last, focusedFirst, focusedLast, previousFocus, tabFocus, focusRings }));
 };
 
 const capture = async (browser, name, width, height, theme, surface, touch) => {
@@ -370,7 +419,7 @@ const capture = async (browser, name, width, height, theme, surface, touch) => {
     if (saveBg !== await highlightOf(page)) failures.push(`${label}: Save does not use the highlight token`);
     await page.screenshot({ path: path.join(out, `gem-studio-${name}-${theme}-${pointer}-${surface}.png`) });
     if (width === 390) {
-      const scroll = await dialog.getByRole("tablist", { name: "Preview activity" }).evaluate((node) => {
+      const scroll = await dialog.getByRole("radiogroup", { name: "Preview activity" }).evaluate((node) => {
         let parent = node.parentElement;
         while (parent && getComputedStyle(parent).overflowY !== "auto") parent = parent.parentElement;
         if (!parent) return null;
@@ -386,7 +435,7 @@ const capture = async (browser, name, width, height, theme, surface, touch) => {
     }
     await verifyTabBar(page, dialog, "Preview activity", 7, label, touch);
     if (width === 390) {
-      const activity = dialog.getByRole("tablist", { name: "Preview activity" });
+      const activity = dialog.getByRole("radiogroup", { name: "Preview activity" });
       await activity.evaluate((node) => { node.scrollLeft = node.scrollWidth; });
       await page.waitForTimeout(100);
       await page.screenshot({ path: path.join(out, `gem-studio-${name}-${theme}-${pointer}-${surface}-last.png`) });
@@ -414,7 +463,7 @@ const captureNonGem = async (browser) => {
     const result = await openProperties(page, label);
     if (!result) throw new Error("Properties did not open");
     await page.waitForTimeout(900);
-    if (await result.dialog.getByRole("tablist", { name: "Preview activity" }).count())
+    if (await result.dialog.getByRole("radiogroup", { name: "Preview activity" }).count())
       failures.push(`${label}: a non-gem unexpectedly has an activity row`);
     await page.screenshot({ path: path.join(out, "gem-studio-390-dark-coarse-non-gem.png") });
     await verifyTabBar(page, result.dialog, "Look", 3, label, true);

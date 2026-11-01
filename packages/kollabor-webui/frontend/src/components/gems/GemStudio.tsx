@@ -1,5 +1,6 @@
-import { Fragment, useState, type ChangeEvent, type ReactNode } from "react";
+import { Fragment, useState, type ChangeEvent, type FocusEvent, type ReactNode } from "react";
 import { Dices, Loader2, RotateCcw } from "lucide-react";
+import { RadioGroup } from "radix-ui";
 import type { AgentPoolEntry, AvatarSpec, GemAppearance, GemLook, LookColor, Session } from "@/api";
 import { Avatar } from "@/components/agents/Avatar";
 import { isGemAvatar } from "@/components/agents/avatar-model";
@@ -52,6 +53,7 @@ type Rgb = [number, number, number];
 
 const STAGE_ACTIVITIES: Activity[] = ["idle", "thinking", "typing", "speaking", "dance", "error", "dreaming"];
 const HAT_GROUPS = [...new Set(HAT_STYLES.map((hat) => hat.group))];
+const SCROLL_TAB = "pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5 focus-visible:ring-inset";
 
 const toHex = (rgb: readonly number[]) =>
   `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
@@ -176,6 +178,9 @@ function StudioBody({
   const pick = (pool: readonly string[]) => pool[Math.floor(Math.random() * pool.length)];
   const season = draft.season ?? "auto";
   const phone = useIsMobile();
+  const revealFocused = (event: FocusEvent<HTMLDivElement>) => {
+    if (event.target instanceof HTMLElement) event.target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  };
 
   const save = async () => {
     if (!studio) return;
@@ -266,21 +271,30 @@ function StudioBody({
             </div>
             {!dressGem ? null : (
               <>
-                {/* Keep the row scrollable on touch without adding a second tab stop
-                    around the selected trigger inside the dialog's focus loop. */}
-                <Tabs value={activity} onValueChange={(value) => setActivity(value as Activity)} className="w-full min-w-0 max-w-max">
-                  <TabsList
-                    aria-label="Preview activity"
-                    tabIndex={-1}
-                    className="pointer-coarse:h-11 w-full min-w-0 max-w-full justify-start overflow-x-auto"
-                  >
-                    {STAGE_ACTIVITIES.map((option) => (
-                      <TabsTrigger key={option} value={option} className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5 text-xs">
-                        {titleCase(option)}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
-                </Tabs>
+                <RadioGroup.Root
+                  aria-label="Preview activity"
+                  value={activity}
+                  onValueChange={(value) => setActivity(value as Activity)}
+                  onFocus={revealFocused}
+                  orientation="horizontal"
+                  tabIndex={-1}
+                  className="pointer-coarse:h-11 inline-flex h-9 w-full min-w-0 max-w-max items-center justify-start gap-1 overflow-x-auto text-muted-foreground"
+                >
+                  {STAGE_ACTIVITIES.map((option) => (
+                    <RadioGroup.Item
+                      key={option}
+                      value={option}
+                      onFocus={() => setActivity(option)}
+                      className={cn(
+                        SCROLL_TAB,
+                        "inline-flex h-full items-center justify-center border-b-2 py-1 text-xs font-medium whitespace-nowrap transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none",
+                        activity === option ? "border-highlight text-foreground" : "border-transparent hover:text-foreground/80",
+                      )}
+                    >
+                      {titleCase(option)}
+                    </RadioGroup.Item>
+                  ))}
+                </RadioGroup.Root>
                 <Button
                   type="button"
                   variant="outline"
@@ -301,15 +315,15 @@ function StudioBody({
                 defaultValue={focus?.tab ?? (focus && !dressGem ? "avatar" : "eyes")}
                 className="flex min-w-0 flex-col gap-0 lg:min-h-0 lg:flex-1"
               >
-                <TabsList aria-label="Look" tabIndex={-1} className="pointer-coarse:h-11 mx-3 mt-3 w-auto shrink-0 justify-start overflow-x-auto">
-                  {focus ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="avatar">Avatar</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="shape">Shape</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="eyes">Eyes</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="hair">Hair</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="hat">Hat</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="aura">Aura</TabsTrigger> : null}
-                  <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="color">Color</TabsTrigger>
-                  {chat ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="chat">Chat</TabsTrigger> : null}
+                <TabsList aria-label="Look" tabIndex={-1} onFocus={revealFocused} className="pointer-coarse:h-11 mx-3 mt-3 w-auto shrink-0 justify-start overflow-x-auto">
+                  {focus ? <TabsTrigger className={SCROLL_TAB} value="avatar">Avatar</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="shape">Shape</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="eyes">Eyes</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="hair">Hair</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="hat">Hat</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="aura">Aura</TabsTrigger> : null}
+                  <TabsTrigger className={SCROLL_TAB} value="color">Color</TabsTrigger>
+                  {chat ? <TabsTrigger className={SCROLL_TAB} value="chat">Chat</TabsTrigger> : null}
                 </TabsList>
 
                 {focus && current ? (
