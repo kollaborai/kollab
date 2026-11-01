@@ -659,10 +659,11 @@ again while an agent stays open: a `/connect` command that withdraws it
 the local channel and waits for its blocked output send to stop before the
 command completes. The peer-close notice is best effort. Bytes already
 submitted to the network before withdrawal may still arrive; they cannot be
-recalled. If a permission is withdrawn and restored while a frame or open is
-waiting, that old operation remains withdrawn; a permitted connection can be
-opened again. For rule changes outside a `/connect` command, the owner checks on
-input delivery, after pacing, after securing the peer session, and immediately
+recalled. If the owner observes a permission being withdrawn and it is then
+restored while a frame or open is waiting, that old operation remains withdrawn;
+a permitted connection can be opened again. For rule changes outside a
+`/connect` command, the owner checks on input delivery, after pacing, after
+securing the peer session, and immediately
 before each relay or direct-peer network write; an idle channel checks at
 least every five seconds. A device enforces its own rules once it learns a
 change; an offline peer cannot enforce changes it has not yet received.
