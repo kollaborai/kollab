@@ -16510,14 +16510,17 @@ class HubPlugin(BasePlugin):
             except asyncio.CancelledError:
                 pass
 
-        pending_operator_notifications = tuple(self._operator_notify_tasks)
+        operator_notify_tasks = getattr(self, "_operator_notify_tasks", None)
+        if operator_notify_tasks is None:
+            operator_notify_tasks = self._operator_notify_tasks = set()
+        pending_operator_notifications = tuple(operator_notify_tasks)
         for task in pending_operator_notifications:
             task.cancel()
         if pending_operator_notifications:
             await asyncio.gather(
                 *pending_operator_notifications, return_exceptions=True
             )
-        self._operator_notify_tasks.clear()
+        operator_notify_tasks.clear()
 
         if self._cron_task:
             self._cron_task.cancel()
