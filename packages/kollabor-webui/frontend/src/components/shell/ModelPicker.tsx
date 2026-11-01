@@ -15,7 +15,7 @@ function ChoiceLabel({ parts }: { parts: string[] }) {
   const [first, level, ...rest] = parts;
   const profile = rest.filter(Boolean).join(" · ");
   return (
-    <span className="flex min-w-0 flex-1 overflow-hidden" title={parts.filter(Boolean).join(" · ")}>
+    <span className="flex min-w-0 flex-1 overflow-hidden text-left" title={parts.filter(Boolean).join(" · ")}>
       <span data-part="model" className="truncate">{first}</span>
       {level ? <span data-part="level" className="text-muted-foreground shrink-0 whitespace-pre"> · {level}</span> : null}
       {profile ? (
