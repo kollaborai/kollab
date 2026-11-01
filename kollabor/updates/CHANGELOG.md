@@ -126,6 +126,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- ACP: attaching with `--llm` no longer closes the running harness before the
+  name lookup finishes. An unknown profile or loadout name reports its error
+  and leaves the harness untouched; a valid loadout name switches the harness
+  to the loadout's provider profile (#594).
 - ACP: Codex multi-tool turns now report prompt token usage matching the harness
   ledger. Reconciled prompt-response totals settle once into session stats and
   appear in the status line. Coverage depends on the adapter: Claude's prompt
