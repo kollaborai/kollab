@@ -9,6 +9,7 @@ Spec: docs/specs/llm-loadout-live-catalog.md (CLI surface, rules R1-R5).
 
 import json
 import logging
+import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -231,6 +232,12 @@ def test_cli_loadout_startup_resolves_without_profile_error(
     monkeypatch.chdir(project)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("KOLLAB_NO_AUTO_DETECT", "1")
+    # TerminalLLMChat's project context writes these process-global keys; track
+    # their pre-test state so this real-startup regression cannot leak it.
+    for env_name in ("KOLLAB_ROOT_SOCKET", "KOLLAB_HUB_PROJECT_SCOPED"):
+        # setenv records even an initially absent key, so teardown removes
+        # values that the real constructor creates.
+        monkeypatch.setenv(env_name, os.environ.get(env_name, ""))
     caplog.set_level(logging.INFO)
 
     with patch.object(

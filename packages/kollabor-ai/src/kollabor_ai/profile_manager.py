@@ -1068,8 +1068,8 @@ class ProfileManager:
             "description": "Codex over ACP",
             "install_guidance": (
                 "Install with: npm install --prefix "
-                "~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save "
-                "@agentclientprotocol/codex-acp@2.1.1"
+                "~/.local/share/kollab/acp-adapters/codex-2.5.0 --no-save "
+                "@agentclientprotocol/codex-acp@2.5.0"
             ),
         },
     }
