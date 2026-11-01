@@ -183,6 +183,10 @@ class StatusLayoutManager:
         )
         self._layout: Optional[StatusLayout] = None
         self._dirty = False
+        # Mirror of widget_context.runtime_mode ("attach"/"daemon"/"local"),
+        # set by application wiring. Read by the unattended-runtime gate so a
+        # detached daemon can be told apart from an interactive session (#453).
+        self.runtime_mode: str = "local"
         logger.info("StatusLayoutManager initialized")
 
     def set_config_manager(self, config_manager: Any) -> None:
