@@ -986,9 +986,10 @@ class HaltSync:
         """Report acknowledgements only for the current book and relay sessions."""
         digest = hashlib.sha256(nh.canonical(self._client.control.halt_payload())).hexdigest()
         online = self._online()
+        members = set(self._client.members())
         return sorted(
             key for key, (session, sent_digest) in self._delivered.items()
-            if online.get(key) == session and sent_digest == digest
+            if key in members and online.get(key) == session and sent_digest == digest
         )
 
     @staticmethod

@@ -329,6 +329,10 @@ async def test_proposal_created_during_exchange_is_sent_after_the_inflight_reply
     sync._online = lambda: {founder.client.public_key: "a-new-session"}
     assert founder.client.public_key not in sync.acked()
     sync._online = previous_online
+    previous_members = sync._client.members
+    sync._client.members = lambda: [third.client.public_key]
+    assert founder.client.public_key not in sync.acked()
+    sync._client.members = previous_members
     result = founder.halt_act("confirm_resume", {"hash": proposal["hash"]})
     assert result["lifted"] == [halt["hash"]]
 
