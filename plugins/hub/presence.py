@@ -11,18 +11,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from kollabor_agent.runtime import AgentRuntime
+from kollabor_config.hub_paths import hub_socket_root
 
 logger = logging.getLogger(__name__)
 
-# Shared /tmp path space for hub sockets (short paths for the unix socket
-# limit). Never relocated: existing installs keep their sockets here.
-# Windows has no /tmp and no socket path limit: its endpoint files live in the
-# user's profile, which private_fs requires (#268).
-SOCKET_DIR_ROOT = (
-    Path.home() / ".kollab" / "hub-sockets"
-    if os.name == "nt"
-    else Path("/tmp/kollabor-hub")
-)
+# The same per-platform root is used by the engine's discovery fallback.
+SOCKET_DIR_ROOT = hub_socket_root()
 
 
 def secure_socket_dir(path: Path, *, create: bool = True) -> Path:
@@ -102,7 +96,7 @@ def get_messages_dir() -> Path:
 
 
 def get_socket_dir() -> Path:
-    """Get the socket directory in /tmp (short paths for unix sockets).
+    """Get the platform's Hub endpoint directory.
 
     When project-scoped, sockets live under a per-project subdir keyed
     by a short hash of the project id (full project id would blow the
@@ -151,15 +145,48 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
+STALL_AFTER_SECONDS = 15 * 60
+"""An idle agent holding an open task is flagged stalled after this long."""
+
+_STALL_IDLE_STATES = {"idle", "ready"}
+"""Lifecycle states that count as idle for stall detection. ``waiting`` is a
+deliberate park state (peer reply, question, scheduled wait) and is excluded."""
+
+
+def stall_status(data: dict, *, now: Optional[float] = None, threshold: float = STALL_AFTER_SECONDS) -> Optional[str]:
+    """Stall marker for one presence record, or None when it looks healthy.
+
+    Fires only when the agent is idle-class, holds a non-empty current task,
+    and its ``state_changed_at`` timestamp is older than ``threshold``
+    seconds. Anything missing, fresh, working, or waiting is not stalled.
+    """
+    task = data.get("current_task")
+    if not isinstance(task, str) or not task.strip():
+        return None
+    state = str(data.get("state") or "").lower()
+    if state not in _STALL_IDLE_STATES:
+        return None
+    changed = data.get("state_changed_at")
+    if not isinstance(changed, (int, float)) or changed <= 0:
+        return None
+    if now is None:
+        now = time.time()
+    idle_for = now - changed
+    if idle_for <= threshold:
+        return None
+    return f"stalled (idle {int(idle_for // 60)}m with open task)"
+
+
 def live_agents_on_machine() -> List[tuple[Path, dict]]:
     """``(hub_dir, presence record)`` for every live agent on this machine.
 
     Searches every project's hub dir and the global one, so a caller outside
     an agent's project (an ssh session, say) still finds it. Read-only: no
     directory is created. A record counts only while its pid is alive and its
-    socket file exists.
+    endpoint exists and is a suitable local IPC endpoint.
     """
     from kollabor_config.config_utils import get_config_directory
+    from kollabor_config.local_ipc import is_local_endpoint
 
     base = get_config_directory()
     found: List[tuple[Path, dict]] = []
@@ -168,7 +195,7 @@ def live_agents_on_machine() -> List[tuple[Path, dict]]:
             try:
                 data = json.loads(pf.read_text())
                 sock = Path(data.get("socket_path") or "")
-                live = sock.is_absolute() and sock.is_socket()
+                live = sock.is_absolute() and is_local_endpoint(sock)
                 if live and pid_alive(data.get("pid", 0)):
                     found.append((hub_dir, data))
             except Exception:
@@ -219,6 +246,11 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 class PresenceManager:
     """Manages this agent's presence file and discovers other agents."""
+
+    # A live pid whose socket does not answer is busy, not dead, until its
+    # heartbeat is this old. Deleting its files sooner cut every connection to
+    # an agent that was only stuck for a couple of minutes (#545).
+    LIVE_PID_GRACE_SECONDS = 600
 
     def __init__(self, identity: "AgentRuntime"):
         self.identity = identity
@@ -297,6 +329,8 @@ class PresenceManager:
 
                 # Stale heartbeat -- verify socket is actually responding
                 if agent.socket_path and not self._socket_responds(agent.socket_path):
+                    if heartbeat_age < self.LIVE_PID_GRACE_SECONDS:
+                        continue  # busy: not a peer right now, its files stay
                     logger.info(
                         f"Cleaning stale agent: {f.stem} (pid alive but socket dead)"
                     )
@@ -342,6 +376,8 @@ class PresenceManager:
                 # Stale heartbeat -- async socket check (non-blocking)
                 if agent.socket_path:
                     alive = await self._socket_responds_async(agent.socket_path)
+                    if not alive and heartbeat_age < self.LIVE_PID_GRACE_SECONDS:
+                        continue  # busy: not a peer right now, its files stay
                     if not alive:
                         logger.info(
                             f"Cleaning stale agent: {f.stem} "
@@ -479,7 +515,7 @@ class PresenceManager:
 
                 # Also check socket for stale heartbeats
                 heartbeat_age = time.time() - (agent.last_heartbeat or 0)
-                if heartbeat_age > 15 and agent.socket_path:
+                if heartbeat_age > self.LIVE_PID_GRACE_SECONDS and agent.socket_path:
                     if not self._socket_responds(agent.socket_path):
                         logger.info(
                             f"Startup cleanup: stale agent {f.stem} "

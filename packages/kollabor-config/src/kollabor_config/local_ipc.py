@@ -280,6 +280,23 @@ def _checked_endpoint(path: Path) -> tuple[int, bytes]:
     return port, key
 
 
+def is_local_endpoint(endpoint: str | os.PathLike[str]) -> bool:
+    """Check a local endpoint without connecting or creating anything.
+
+    Windows endpoint files must pass the same privacy and record checks as a
+    connection. As with a Unix socket file, this does not prove a server will
+    answer; the authenticated connection remains the final liveness check.
+    """
+    path = Path(endpoint)
+    if os.name != "nt":
+        return path.is_socket()
+    try:
+        _checked_endpoint(path)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
 def _write_endpoint(path: Path, record: dict[str, Any]) -> None:
     """Windows: write the endpoint file to a temporary name, then replace the endpoint with it."""
     tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
