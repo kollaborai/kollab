@@ -151,6 +151,38 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
+STALL_AFTER_SECONDS = 15 * 60
+"""An idle agent holding an open task is flagged stalled after this long."""
+
+_STALL_IDLE_STATES = {"idle", "ready"}
+"""Lifecycle states that count as idle for stall detection. ``waiting`` is a
+deliberate park state (peer reply, question, scheduled wait) and is excluded."""
+
+
+def stall_status(data: dict, *, now: Optional[float] = None, threshold: float = STALL_AFTER_SECONDS) -> Optional[str]:
+    """Stall marker for one presence record, or None when it looks healthy.
+
+    Fires only when the agent is idle-class, holds a non-empty current task,
+    and its ``state_changed_at`` timestamp is older than ``threshold``
+    seconds. Anything missing, fresh, working, or waiting is not stalled.
+    """
+    task = data.get("current_task")
+    if not isinstance(task, str) or not task.strip():
+        return None
+    state = str(data.get("state") or "").lower()
+    if state not in _STALL_IDLE_STATES:
+        return None
+    changed = data.get("state_changed_at")
+    if not isinstance(changed, (int, float)) or changed <= 0:
+        return None
+    if now is None:
+        now = time.time()
+    idle_for = now - changed
+    if idle_for <= threshold:
+        return None
+    return f"stalled (idle {int(idle_for // 60)}m with open task)"
+
+
 def live_agents_on_machine() -> List[tuple[Path, dict]]:
     """``(hub_dir, presence record)`` for every live agent on this machine.
 

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Hub status flags an idle agent that still holds an open task as
+  stalled after 15 minutes (#533).
 - Windows: agent commands run in Git Bash when Git for Windows is installed,
   else in PowerShell (never cmd.exe); `KOLLAB_SHELL` picks another shell.
 - PhoneLink works from every engine on the computer: an engine that does not hold PhoneLink forwards the call to the one that does, and the "managing PhoneLink" message names that engine's port, process, start time and folder (#443).
