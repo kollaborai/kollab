@@ -64,9 +64,14 @@ class _FakeProfileManager:
 class _FakeOrchestrator:
     """ACP harness stand-in; close/start are awaited, never run anything."""
 
-    def __init__(self):
+    def __init__(self, advertised_options=None):
         self.close = AsyncMock()
         self.start = AsyncMock()
+        self._advertised = list(advertised_options or [])
+        self._loadout_override = None
+
+    def advertised_config_options(self):
+        return list(self._advertised)
 
 
 def _state(pm, orch=None):
@@ -99,7 +104,11 @@ async def test_unknown_name_does_not_close_running_harness():
 async def test_named_acp_loadout_switches_harness():
     acp_target = _profile("claude-acp", "acp")
     pm = _FakeProfileManager([acp_target, _profile("default", "anthropic")], "default")
-    orch = _FakeOrchestrator()
+    orch = _FakeOrchestrator(
+        advertised_options=[
+            {"id": "model", "category": "model", "currentValue": "claude-x"}
+        ]
+    )
     state = _state(pm, orch)
     loadout = Loadout(
         name="review-acp", provider_profile="claude-acp", model="claude-x"
@@ -109,7 +118,7 @@ async def test_named_acp_loadout_switches_harness():
         snap = await state.set_active_profile("review-acp")
     assert snap.name == "claude-acp"
     orch.close.assert_awaited_once()
-    orch.start.assert_awaited_once_with(acp_target)
+    orch.start.assert_awaited_once_with(acp_target, loadout=("claude-x", ""))
     assert pm.set_calls and pm.set_calls[-1][0] == "claude-acp"
     assert pm.active_name == "claude-acp"
     # An ACP loadout owns model/effort: nothing may be layered onto the
@@ -118,6 +127,49 @@ async def test_named_acp_loadout_switches_harness():
         name == "claude-acp" and "model" in kwargs
         for name, kwargs in pm.update_calls
     )
+
+
+@pytest.mark.asyncio
+async def test_acp_loadout_rejected_when_harness_ignores_model():
+    acp_target = _profile("claude-acp", "acp")
+    pm = _FakeProfileManager([acp_target, _profile("default", "anthropic")], "default")
+    orch = _FakeOrchestrator(
+        advertised_options=[
+            {"id": "model", "category": "model", "currentValue": "something-else"}
+        ]
+    )
+    state = _state(pm, orch)
+    loadout = Loadout(
+        name="review-acp", provider_profile="claude-acp", model="claude-x"
+    )
+    with patch("kollabor_ai.loadout_manager.LoadoutManager") as lm_cls:
+        lm_cls.return_value.resolve.return_value = (loadout, [])
+        with pytest.raises(ValueError, match="did not apply the loadout model"):
+            await state.set_active_profile("review-acp")
+    # A rejected switch rolls back and never persists the provider profile.
+    assert pm.set_calls == []
+    orch.close.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_implicit_acp_loadout_starts_bare_and_clears_override():
+    # The loadout name must not collide with a profile name, or the daemon
+    # never reaches loadout resolution at all.
+    acp_target = _profile("acp-entry", "acp")
+    pm = _FakeProfileManager([acp_target, _profile("default", "anthropic")], "default")
+    orch = _FakeOrchestrator()
+    orch._loadout_override = "stale"
+    state = _state(pm, orch)
+    loadout = Loadout(
+        name="entry-loadout", provider_profile="acp-entry", model="", implicit=True
+    )
+    with patch("kollabor_ai.loadout_manager.LoadoutManager") as lm_cls:
+        lm_cls.return_value.resolve.return_value = (loadout, [])
+        snap = await state.set_active_profile("entry-loadout")
+    assert snap.name == "acp-entry"
+    orch.start.assert_awaited_once_with(acp_target)
+    # The implicit harness entry must not inherit a stale loadout override.
+    assert orch._loadout_override is None
 
 
 @pytest.mark.asyncio
