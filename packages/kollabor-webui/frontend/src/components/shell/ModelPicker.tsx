@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type { EngineApi, ModelChoice, Profile } from "@/api";
 import { Input } from "@/components/ui/input";
@@ -6,13 +6,18 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { choiceLabel, matchesChoice, sameChoice } from "@/components/shell/model-choice";
 import { cn } from "@/lib/utils";
 
-/** "gpt-6-luna · max · codex-cli": the parts after the first in muted text. */
+/**
+ * "gpt-6-luna · max · codex-cli": the parts after the first in muted text. A long first part is cut
+ * short, never the level after it, and the whole label shows on hover.
+ */
 function ChoiceLabel({ parts }: { parts: string[] }) {
   const [first, ...rest] = parts.filter(Boolean);
   return (
-    <span className="min-w-0 truncate">
-      {first}
-      {rest.length ? <span className="text-muted-foreground"> · {rest.join(" · ")}</span> : null}
+    <span className="flex min-w-0 overflow-hidden" title={[first, ...rest].join(" · ")}>
+      <span className="truncate">{first}</span>
+      {rest.length ? (
+        <span className="text-muted-foreground shrink-0 whitespace-pre"> · {rest.join(" · ")}</span>
+      ) : null}
     </span>
   );
 }
@@ -45,16 +50,18 @@ export function ModelPicker({
   const [active, setActive] = useState(0);
   const [loaded, setLoaded] = useState<ModelChoice[] | null>(null);
   const list = useRef<HTMLDivElement>(null);
+  const listId = useId();
 
   useEffect(() => {
     if (!open) return;
     let live = true;
     api.listModelChoices().then(
       (result) => live && setLoaded(result.choices),
-      () => undefined, // an engine without the list keeps the profile rows
+      () => undefined, // an engine without the list, or a failed refresh, keeps the profile rows
     );
     return () => {
       live = false;
+      setLoaded(null); // each opening asks again: a list fetched as an earlier login never shows
     };
   }, [open, api]);
 
@@ -139,9 +146,14 @@ export function ModelPicker({
           onKeyDown={onKeyDown}
           placeholder="Search: codex luna max"
           aria-label="Search models"
+          role="combobox"
+          aria-expanded={open}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={shown[active] ? `${listId}-${active}` : undefined}
           className="h-9 rounded-none border-0 border-b bg-transparent shadow-none focus-visible:ring-0 dark:bg-transparent"
         />
-        <div ref={list} role="listbox" aria-label="Models" className="max-h-72 overflow-y-auto p-1">
+        <div ref={list} id={listId} role="listbox" aria-label="Models" className="max-h-72 overflow-y-auto p-1">
           {groups.length ? (
             groups.map(([label, rows]) => (
               <div key={label} role="group" aria-label={label}>
@@ -149,8 +161,10 @@ export function ModelPicker({
                 {rows.map(({ choice, index }) => (
                   <button
                     key={`${choice.profile}\u0000${choice.model}\u0000${choice.effort}`}
+                    id={`${listId}-${index}`}
                     type="button"
                     role="option"
+                    tabIndex={-1}
                     data-index={index}
                     aria-selected={index === active}
                     onMouseEnter={() => setActive(index)}
@@ -161,7 +175,12 @@ export function ModelPicker({
                     )}
                   >
                     <ChoiceLabel parts={[choice.model || "Default Model", choice.effort]} />
-                    {sameChoice(choice, value) ? <CheckIcon className="absolute right-2 size-4" /> : null}
+                    {sameChoice(choice, value) ? (
+                      <>
+                        <CheckIcon className="absolute right-2 size-4" />
+                        <span className="sr-only">, current</span>
+                      </>
+                    ) : null}
                   </button>
                 ))}
               </div>

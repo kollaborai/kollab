@@ -28,7 +28,7 @@ function fakeApi(
       calls.push(["profile", ...args]),
       { session_id: "s1", model: running?.model ?? args[2], effort: running?.effort ?? args[3] }
     ),
-    // A result for "effort:max" answers only that level; one for "effort", every level.
+    // A result for "pick:gpt-6-luna" answers only that model's pick; one for "pick", every pick.
     panelAction: async (...args: unknown[]) => {
       calls.push(["panel", ...args]);
       const value = Object.values(args[3] as Record<string, string>)[0];
@@ -58,11 +58,11 @@ test("a pick never lays its model over a profile switched elsewhere meanwhile", 
   const record = { profile: "openai-oauth", model: "gpt-6.1-terra", effort: "low" };
   const { api } = fakeApi({}, undefined, record);
   assert.deepEqual(await applyModelChoice(api, { session_id: "s1", profile: "codex-cli" }, codexLunaMax), { session_id: "s1", ...record });
-  const refused = fakeApi({ "effort:max": { ok: false, message: "max is not offered" } }, undefined, record);
+  const refused = fakeApi({ pick: { ok: false, message: "max is not offered" } }, undefined, record);
   const running = { session_id: "s1", profile: "codex-cli", model: "gpt-6-sol", effort: "high" };
   const error = await applyModelChoice(refused.api, running, codexLunaMax).catch((e) => e);
   assert.ok(error instanceof PickError);
-  assert.deepEqual(error.session, { session_id: "s1", ...record }); // the rollback reports it as it is too
+  assert.deepEqual(error.session, { session_id: "s1", ...record }); // a refused pick reports it as it is too
 });
 
 test("a switch whose answer is lost says what runs, and the panel shows it", async () => {
@@ -117,15 +117,15 @@ test("a native pick an environment variable outranks is an error, not a pick sho
   assert.deepEqual([error.session.model, error.session.effort], ["gpt-5.4", "low"]);
 });
 
-test("an ACP pick switches the harness, then sets its own model and effort options", async () => {
-  // The engine reads the harness's options back before each action answers.
+test("an ACP pick switches the harness, then sets its model and level in one action", async () => {
+  // The engine reads the harness's options back before an action answers. Ametrine on #553 round 10: a
+  // model action and a level action let a pick made in another window land between them.
   const { api, calls } = fakeApi({}, undefined, { profile: "codex-cli", model: "gpt-6-luna", effort: "max" });
   const shown = await applyModelChoice(api, { session_id: "s1", profile: "openai-oauth" }, codexLunaMax);
   assert.deepEqual([shown.model, shown.effort], ["gpt-6-luna", "max"]);
   assert.deepEqual(calls, [
     ["profile", "s1", "codex-cli"],
-    ["panel", "s1", "model", "select", { model: "gpt-6-luna", profile: "codex-cli" }],
-    ["panel", "s1", "model", "effort", { level: "max", profile: "codex-cli" }],
+    ["panel", "s1", "model", "pick", { model: "gpt-6-luna", level: "max", profile: "codex-cli" }],
     ["get", "s1"],
   ]);
 });
@@ -140,64 +140,56 @@ test("a pick shows what the engine reads back, so a newer one made elsewhere on 
   assert.deepEqual(shown, { session_id: "s1", ...newer });
 });
 
-test("every option a pick sets names its profile, its rollback included", async () => {
+test("a pick names its profile, so a switch made elsewhere never gets it", async () => {
   // Rutile on #553 round 9: the session moved to a native profile after the pick's model applied, and the
   // rollback then saved the ACP pick's old model to that native profile.
   const moved = "The session now runs openai-oauth, not codex-cli.";
   const now = { profile: "openai-oauth", model: "gpt-6-sol", effort: "low" };
-  const { api, calls } = fakeApi(
-    { "effort:max": { ok: false, message: moved }, "select:gpt-6.1-terra": { ok: false, message: moved } },
-    undefined,
-    now,
-  );
+  const { api, calls } = fakeApi({ pick: { ok: false, message: moved } }, undefined, now);
   const before = { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra", effort: "high" };
   const error = await applyModelChoice(api, before, codexLunaMax).catch((e) => e);
   assert.ok(error instanceof PickError);
   assert.equal(error.message, `${moved} It now runs gpt-6-sol · low.`);
   assert.deepEqual(error.session, { session_id: "s1", ...now });
   const sent = calls.filter(([kind]) => kind === "panel").map((call) => call[4]);
-  assert.deepEqual(sent, [
-    { model: "gpt-6-luna", profile: "codex-cli" },
-    { level: "max", profile: "codex-cli" },
-    { model: "gpt-6.1-terra", profile: "codex-cli" }, // the refused rollback: nothing else is sent
-  ]);
+  assert.deepEqual(sent, [{ model: "gpt-6-luna", level: "max", profile: "codex-cli" }]); // one action, nothing after
 });
 
-test("an ACP pick on the harness already running skips the switch; a refused option is an error", async () => {
-  const { api, calls } = fakeApi({ effort: { ok: false, message: "max is not offered" } });
+test("an ACP pick on the harness already running skips the switch; a refused pick says what runs", async () => {
+  const { api, calls } = fakeApi({ pick: { ok: false, message: "max is not offered" } });
   await assert.rejects(
     applyModelChoice(api, { session_id: "s1", profile: "codex-cli" }, codexLunaMax),
-    /max is not offered/,
+    /max is not offered\. It now runs old-model\./,
   );
   assert.equal(calls[0][0], "panel");
 });
 
-test("a level the harness refuses puts its model and level back, so a pick never half-applies", async () => {
-  // Aragonite on #553 round 5: the harness took the model, refused the level, and stayed on the new model.
-  // Amazonite on round 6: the model switch had moved its level too, and only the model went back.
-  const restored = { profile: "codex-cli", model: "gpt-6.1-terra", effort: "high" }; // as the engine reads it back
-  const { api, calls } = fakeApi({ "effort:max": { ok: false, message: "max is not offered" } }, undefined, restored);
-  const before = { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra", effort: "high" };
-  const error = await applyModelChoice(api, before, codexLunaMax).catch((e) => e);
-  assert.match(error.message, /max is not offered\. It stays on gpt-6\.1-terra · high\./);
-  assert.deepEqual(calls.slice(2, 4), [
-    ["panel", "s1", "model", "select", { model: "gpt-6.1-terra", profile: "codex-cli" }],
-    ["panel", "s1", "model", "effort", { level: "high", profile: "codex-cli" }],
-  ]);
+test("a level the harness refuses leaves the model and level it had, as the engine reads them back", async () => {
+  // Aragonite on #553 round 5 and Amazonite on round 6: the level was refused and the new model stayed.
+  // The agent now puts both back inside the pick (test_acp_model_config_options); the picker shows them.
+  const restored = { profile: "codex-cli", model: "gpt-6.1-terra", effort: "high" };
+  const { api, calls } = fakeApi({ pick: { ok: false, message: "max is not offered" } }, undefined, restored);
+  const error = await applyModelChoice(api, { session_id: "s1", ...restored }, codexLunaMax).catch((e) => e);
+  assert.match(error.message, /max is not offered\. It now runs gpt-6\.1-terra · high\./);
   assert.deepEqual([error.session.model, error.session.effort], ["gpt-6.1-terra", "high"]);
+  assert.deepEqual(calls.map(([kind]) => kind), ["panel", "get"]);
 });
 
-test("a request that fails after the model moved puts it back too", async () => {
-  // Amazonite on #553 round 6: a 502 on the level left the new model running, with no rollback.
-  const { api, calls } = fakeApi({ "effort:max": new Error("502: daemon unreachable") });
+test("a pick whose answer is lost says what runs and sends nothing more", async () => {
+  // Amazonite on #553 round 6: a 502 on the level left the new model running. The agent applies a pick or
+  // puts it back as one change, so a lost answer needs only the session read back.
+  const { api, calls } = fakeApi({ pick: new Error("502: daemon unreachable") }, undefined, {
+    model: "gpt-6.1-terra",
+    effort: "",
+  });
   const before = { session_id: "s1", profile: "codex-cli", model: "gpt-6.1-terra", effort: "" };
-  await assert.rejects(applyModelChoice(api, before, codexLunaMax), /502: daemon unreachable\. It stays on gpt-6\.1-terra\./);
-  assert.deepEqual(calls[2], ["panel", "s1", "model", "select", { model: "gpt-6.1-terra", profile: "codex-cli" }]);
+  await assert.rejects(applyModelChoice(api, before, codexLunaMax), /502: daemon unreachable\. It now runs gpt-6\.1-terra\./);
+  assert.deepEqual(calls.map(([kind]) => kind), ["panel", "get"]);
 });
 
-test("a harness that refuses its first option after the switch says the switch applied", async () => {
+test("a harness that refuses a pick after the switch says the switch applied", async () => {
   // Fluorite on #553 round 7: it said nothing changed, and the panel kept the old profile.
-  const { api } = fakeApi({ select: { ok: false, message: "gpt-6-luna is not offered" } }, undefined, {
+  const { api } = fakeApi({ pick: { ok: false, message: "gpt-6-luna is not offered" } }, undefined, {
     profile: "codex-cli",
     model: "gpt-6.1-terra",
     effort: "high",
@@ -209,12 +201,12 @@ test("a harness that refuses its first option after the switch says the switch a
   assert.equal(error.session.profile, "codex-cli");
 });
 
-test("a pick with no earlier model to go back to says what the session now runs", async () => {
+test("a refused pick with no message names what it asked for and what the session now runs", async () => {
   // It moved to another harness: the error names what that harness reports, and carries it.
-  const moved = fakeApi({ effort: { ok: false } }, undefined, { model: "gpt-6-luna", effort: "medium" });
+  const moved = fakeApi({ pick: { ok: false } }, undefined, { model: "gpt-6-luna", effort: "medium" });
   const error = await applyModelChoice(moved.api, { session_id: "s1", profile: "openai-oauth" }, codexLunaMax).catch(
     (e) => e,
   );
-  assert.match(error.message, /codex-cli refused max\. It now runs gpt-6-luna · medium\./);
+  assert.match(error.message, /codex-cli refused gpt-6-luna · max\. It now runs gpt-6-luna · medium\./);
   assert.deepEqual([error.session.model, error.session.effort], ["gpt-6-luna", "medium"]);
 });

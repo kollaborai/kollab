@@ -365,11 +365,11 @@ def _signed_in(tmp_path, monkeypatch, login_data):
     return SimpleNamespace(name="openai-oauth", provider="openai_responses", auth_type="oauth"), login
 
 
-def _asks_as(monkeypatch, account_id, while_asking=None):
+def _asks_as(monkeypatch, account_id, while_asking=None, refresh_token=None):
     """The ChatGPT fetch loads tokens naming ``account_id``; ``while_asking`` runs during its request."""
 
     async def load_tokens(provider, auto_refresh=True, profile_name=None):
-        return SimpleNamespace(access_token="tok", account_id=account_id)
+        return SimpleNamespace(access_token="tok", refresh_token=refresh_token, account_id=account_id)
 
     async def details(access_token, account_id=None):
         if while_asking:
@@ -406,13 +406,20 @@ async def test_a_catalog_fetched_with_another_accounts_tokens_is_not_kept(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_a_login_with_no_account_id_keeps_no_catalog(tmp_path, monkeypatch):
+async def test_a_login_with_no_account_id_keeps_its_catalog_in_memory_for_itself_only(tmp_path, monkeypatch):
     # Fluorite on #553 round 7: such a login and no login at all named the same
     # account, "", so its list stayed after signing out, or in as another one.
-    chatgpt, login = _signed_in(tmp_path, monkeypatch, {"access_token": "token"})
-    _asks_as(monkeypatch, None)
-    assert [m["id"] for m in await model_catalog.get_provider_models(chatgpt)] == ["model-of-nobody"]  # shown
-    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []  # never kept
+    # Rutile on round 9: none was kept then, so the picker lost it. Ametrine on
+    # round 10: the list the loadout manager carried instead reached the next
+    # login. Such a login is now known by a digest of its token.
+    chatgpt, login = _signed_in(tmp_path, monkeypatch, {"access_token": "tok", "refresh_token": "first"})
+    _asks_as(monkeypatch, None, refresh_token="first")
+    assert [m["id"] for m in await model_catalog.get_provider_models(chatgpt)] == ["model-of-nobody"]
+    assert [m["id"] for m in model_catalog.cached_provider_models(chatgpt)] == ["model-of-nobody"]  # kept
+    cache = tmp_path / "model_catalog.cache"
+    assert "token:" not in (cache.read_text(encoding="utf-8") if cache.exists() else "")  # never on disk
+    login.write_text(json.dumps({"access_token": "tok2", "refresh_token": "second"}), encoding="utf-8")
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []  # another login
     login.unlink()  # signed out
     assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []
 

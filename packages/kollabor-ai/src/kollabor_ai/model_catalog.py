@@ -119,11 +119,10 @@ def _fresh(entry: Any, max_age: float) -> bool:
 
 
 def _login_of(profile: Any) -> Optional[str]:
-    """The account a ChatGPT login profile is signed in as: two logins can serve
-    different models, so a cached catalog is used only while the account it was
-    fetched with is still the one signed in (#553). "" when it names none (no
-    login, or one with no account id): nothing is kept for it. None for other
-    profiles."""
+    """Who a ChatGPT login profile is signed in as (token_storage.login_mark):
+    two logins can serve different models, so a cached catalog is used only
+    while the login it was fetched with is still the one signed in (#553). ""
+    when none is: nothing is kept for it. None for other profiles."""
     if profile is None:
         return None
     get = profile.get if isinstance(profile, dict) else (lambda key, default=None: getattr(profile, key, default))
@@ -133,13 +132,13 @@ def _login_of(profile: Any) -> Optional[str]:
         provider = str(get("provider", "") or "").lower()
     if str(get("auth_type", "") or "").lower() != "oauth" and provider != "openai_responses":
         return None
-    from kollabor_ai.oauth.token_storage import stored_account_id
+    from kollabor_ai.oauth.token_storage import stored_login_mark
 
     name = str(get("name", "") or "")
-    return stored_account_id("openai", None if name in ("", "openai-oauth") else name)
+    return stored_login_mark("openai", None if name in ("", "openai-oauth") else name)
 
 
-# The account a ChatGPT login fetch asked as, which its tokens name: the stored
+# The login a ChatGPT login fetch asked as, which its tokens name: the stored
 # login can change between reading it and loading them (#553).
 _ASKED_AS: ContextVar[Optional[List[str]]] = ContextVar("model_catalog_asked_as", default=None)
 
@@ -158,7 +157,7 @@ def cached_provider_models(
 
     login = _login_of(profile)
     if login == "":
-        return []  # no account named: no list is known to be this login's
+        return []  # no login: no list is known to be its
 
     def usable(entry: Any) -> bool:
         return _fresh(entry, max_age) and entry.get("login") == login
@@ -181,6 +180,8 @@ def _store(profile: Any, models: List[Dict[str, Any]], login: Optional[str]) -> 
         return
     entry = {"timestamp": time.time(), "models": models, "login": login}
     _MEMORY_CACHE[key] = entry
+    if (login or "").startswith("token:"):
+        return  # a digest of a token stays in this process: the cache file never holds one
     entries = _load_disk_cache()
     entries[key] = entry
     _save_disk_cache(entries)
@@ -211,7 +212,7 @@ async def get_provider_models(
         _ASKED_AS.reset(reset)
     login = _login_of(profile)  # the account signed in now
     if login is not None and asked != [login]:
-        # It asked as another account, or with no tokens: the list may be another login's.
+        # It asked as another login, or with no tokens: the list may be another login's.
         return cached_provider_models(profile, max_age=float("inf"))
     if models:
         _store(profile, models, login)
@@ -281,6 +282,7 @@ async def _openai_oauth_models(profile: Any = None) -> List[Dict[str, Any]]:
     """
     from kollabor_ai.oauth import OAuthTokenStorage
     from kollabor_ai.oauth.openai_oauth import query_codex_model_details
+    from kollabor_ai.oauth.token_storage import login_mark
 
     storage = OAuthTokenStorage()
     name = str(getattr(profile, "name", "") or "")
@@ -290,8 +292,9 @@ async def _openai_oauth_models(profile: Any = None) -> List[Dict[str, Any]]:
     if not tokens:
         return []
     asked = _ASKED_AS.get()
-    if asked is not None:  # get_provider_models keeps the list only for this account
-        asked.append(tokens.account_id or "")
+    if asked is not None:  # get_provider_models keeps the list only for this login
+        fields = ("account_id", "refresh_token", "access_token")
+        asked.append(login_mark({key: getattr(tokens, key, None) for key in fields}))
 
     details = await query_codex_model_details(tokens.access_token, tokens.account_id)
 

@@ -9,7 +9,10 @@ and max_tokens).
 
 A payload's ``profile`` names the profile a change is for: an action that
 finds another one active is refused, so a pick from one window never lands on
-a profile another window switched to meanwhile (#553).
+a profile another window switched to meanwhile (#553). Changes run one at a
+time, and ``pick`` sets an ACP harness's model and level as one of them,
+putting the model back when the level is refused, so a pick never
+half-applies or mixes with one made in another window.
 """
 
 from __future__ import annotations
@@ -115,11 +118,25 @@ _acp_option_values = acp_options.option_values
 _acp_option = acp_options.find_option
 
 
+def _level_category(handler: Any) -> str:
+    """The option an ACP harness takes its level in: ``thought_level``, else ``effort``."""
+    return "thought_level" if handler._acp_option(handler._acp_options(), "thought_level") is not None else "effort"
+
+
+def _acp_current(handler: Any, category: str) -> str:
+    """The value an ACP harness reports for an option, "" when it reports none."""
+    option = handler._acp_option(handler._acp_options(), category)
+    return str((option or {}).get("currentValue") or "")
+
+
 class ModelPanel:
     """``/model``: pick the active provider's model; set reasoning effort."""
 
     name = "model"
     kind = "picker"
+
+    def __init__(self) -> None:
+        self._changes = asyncio.Lock()  # one change at a time (#553)
 
     async def describe(self, ctx: Any, params: dict) -> dict:
         pm = getattr(ctx, "_profile_manager", None)
@@ -193,6 +210,10 @@ class ModelPanel:
         return base
 
     async def act(self, ctx: Any, action: str, payload: dict) -> dict:
+        async with self._changes:
+            return await self._act(ctx, action, payload)
+
+    async def _act(self, ctx: Any, action: str, payload: dict) -> dict:
         pm = getattr(ctx, "_profile_manager", None)
         active = pm.get_active_profile() if pm is not None else None
         expected = payload.get("profile")
@@ -215,13 +236,12 @@ class ModelPanel:
                 level = payload.get("level", payload.get("value", payload.get("effort")))
                 if not isinstance(level, str) or not level.strip():
                     raise PanelError("an effort level is required", errors={"level": "Choose a level."})
-                category = "thought_level"
-                if handler._acp_option(handler._acp_options(), category) is None:
-                    category = "effort"
-                outcome = await handler._set_acp_option(category, level.strip())
+                outcome = await handler._set_acp_option(_level_category(handler), level.strip())
                 if not outcome.success:
                     return error_result(_one_line(outcome.message))
                 return ok_result(f"ACP reasoning effort set to {level.strip()}.", panel=await self.describe(ctx, {}))
+            if action == "pick":
+                return await self._pick(ctx, handler, payload)
             return unknown_action(self.name, action)
         if action == "refresh":
             return ok_result("Catalog refreshed.", panel=await self.describe(ctx, {}))
@@ -249,6 +269,28 @@ class ModelPanel:
                 panel=await self.describe(ctx, {}),
             )
         raise unknown_action(self.name, action)
+
+    async def _pick(self, ctx: Any, handler: Any, payload: dict) -> dict:
+        """An ACP harness's model and level as one change: a level it refuses puts
+        back the model it replaced and that model's level (#553)."""
+        model = str(payload.get("model") or "").strip()
+        level = str(payload.get("level") or "").strip()
+        if not model and not level:
+            raise PanelError("a model or level is required", errors={"model": "Choose a model."})
+        category = _level_category(handler)
+        before = (_acp_current(handler, "model"), _acp_current(handler, category))
+        if model:
+            outcome = await handler._set_acp_option("model", model)
+            if not outcome.success:
+                return error_result(_one_line(outcome.message))
+        if level:
+            outcome = await handler._set_acp_option(_level_category(handler), level)
+            if not outcome.success:
+                # A model switch can move the level too, so both go back; the engine reads back what runs.
+                if model and before[0] and (await handler._set_acp_option("model", before[0])).success and before[1]:
+                    await handler._set_acp_option(category, before[1])
+                return error_result(_one_line(outcome.message))
+        return ok_result(f"ACP set to {' · '.join(filter(None, (model, level)))}.", panel=await self.describe(ctx, {}))
 
 
 PANELS = {ModelPanel.name: ModelPanel()}

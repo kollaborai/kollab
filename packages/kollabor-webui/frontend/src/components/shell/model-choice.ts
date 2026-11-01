@@ -45,21 +45,6 @@ async function switchProfile(api: EngineApi, ...args: Parameters<EngineApi["setS
   }
 }
 
-/** Put the harness back on its earlier model and level: a model switch can move the level too. */
-async function restore(
-  api: EngineApi,
-  id: string,
-  profile: string,
-  before: { model: string; effort: string },
-): Promise<boolean> {
-  try {
-    if (!(await api.panelAction(id, "model", "select", { model: before.model, profile })).ok) return false;
-    return !before.effort || (await api.panelAction(id, "model", "effort", { level: before.effort, profile })).ok;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Puts a running session on a picked profile, model and effort, for this session only. A native
  * profile takes them as the session's own override; an ACP harness owns its model and effort, so
@@ -91,35 +76,24 @@ export async function applyModelChoice(
   }
   const switched = session.profile !== choice.profile;
   if (switched) await switchProfile(api, session.session_id, choice.profile);
-  // Each names its profile: the agent refuses one once a switch made elsewhere has moved the session.
-  const steps: [string, Record<string, string>][] = [];
-  if (choice.model) steps.push(["select", { model: choice.model, profile: choice.profile }]);
-  if (choice.effort) steps.push(["effort", { level: choice.effort, profile: choice.profile }]);
-  let moved = false; // the harness took the picked model
-  for (const [action, payload] of steps) {
-    // A request that fails (a 502, a dropped connection) may still have applied.
-    const result: { ok: boolean; message?: string; unsure?: boolean } = await api
-      .panelAction(session.session_id, "model", action, payload)
-      .catch((error: unknown) => ({ ok: false, message: error instanceof Error ? error.message : String(error), unsure: true }));
-    if (result.ok) {
-      moved ||= action === "select";
-      continue;
+  if (choice.model || choice.effort) {
+    // One action: the agent takes the model and level as one change, one change at a time, and puts the
+    // model back when it refuses the level, so a pick never half-applies or mixes with one made in
+    // another window. It names its profile: the agent refuses it once a switch elsewhere moved the session.
+    const pick = { model: choice.model, level: choice.effort, profile: choice.profile };
+    const result: { ok: boolean; message?: string } = await api
+      .panelAction(session.session_id, "model", "pick", pick)
+      .catch((error: unknown) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
+    if (!result.ok) {
+      // A request that fails (a 502, a dropped connection) may still have applied, and a switch did.
+      const failed = (result.message || `${choice.profile} refused ${label(choice)}`).replace(/\.?$/, ".");
+      const now = await api.getSession(session.session_id);
+      const runs = [switched ? now.profile : "", label(now)].filter(Boolean).join(" · ");
+      throw new PickError(`${failed} It now runs ${runs || "with no model named"}.`, now);
     }
-    const failed = (result.message || `${choice.profile} refused ${Object.values(payload)[0]}`).replace(/\.?$/, ".");
-    if (!moved && !result.unsure && !switched) throw new Error(failed); // nothing changed
-    // A model it has not run is offered at the levels of its last one: one it
-    // refuses puts the model and level back, so the pick never half-applies.
-    const before = switched ? undefined : { model: session.model || "", effort: session.effort || "" };
-    if (before?.model && (await restore(api, session.session_id, choice.profile, before))) {
-      throw new PickError(`${failed} It stays on ${label(before)}.`, await api.getSession(session.session_id));
-    }
-    // The switch applied even if no option did: say which harness runs now.
-    const now = await api.getSession(session.session_id);
-    const runs = [switched ? now.profile : "", label(now)].filter(Boolean).join(" · ");
-    throw new PickError(`${failed} It now runs ${runs || "with no model named"}.`, now);
   }
-  // The harness took both. The engine reads its options back before an action answers, so the record
-  // is what runs, a newer pick made elsewhere meanwhile included.
+  // The engine reads the harness's options back before an action answers, so the record is what runs,
+  // a newer pick made elsewhere meanwhile included.
   return api.getSession(session.session_id);
 }
 

@@ -12,6 +12,7 @@ and readers never see a partially written file.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -48,8 +49,18 @@ def _get_oauth_dir() -> Path:
     return base
 
 
-def stored_account_id(provider: str, profile_name: str | None = None) -> str:
-    """The account of the login stored for a provider, or for one profile's own
+def login_mark(tokens: dict) -> str:
+    """Who a login is, to keep what it fetched apart from another login's: its
+    account id, or for one that names none a digest of its refresh token, never
+    the token itself. "" for no login (#553)."""
+    if tokens.get("account_id"):
+        return str(tokens["account_id"])
+    secret = str(tokens.get("refresh_token") or tokens.get("access_token") or "")
+    return "token:" + hashlib.sha256(secret.encode()).hexdigest()[:16] if secret else ""
+
+
+def stored_login_mark(provider: str, profile_name: str | None = None) -> str:
+    """login_mark of the login stored for a provider, or for one profile's own
     login; "" when there is none. Reads only: never refreshes, never raises."""
     try:
         if profile_name is not None:
@@ -60,7 +71,7 @@ def stored_account_id(provider: str, profile_name: str | None = None) -> str:
             paths = [d / "oauth" / f"{provider}.json" for d in get_config_directory_candidates()]
             path = next((p for p in paths if p.exists()), None)
             data = json.loads(path.read_text(encoding="utf-8")) if path else None
-        return str((data or {}).get("account_id") or "")
+        return login_mark(data if isinstance(data, dict) else {})
     except Exception:
         return ""
 

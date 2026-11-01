@@ -427,18 +427,32 @@ async def test_a_default_pick_reaches_the_daemon_as_a_reset():
 
 
 @pytest.mark.asyncio
-async def test_a_login_that_names_no_account_lists_the_models_it_just_fetched(monkeypatch):
-    # Rutile on #553 round 9: no cache keeps such a login's list, so the one
-    # refresh_catalogs fetched never reached the picker, which main showed.
+async def test_a_list_fetched_as_one_login_never_reaches_the_next(tmp_path, monkeypatch):
+    # Ametrine on #553 round 10: account A's fetch had answered, B signed in
+    # while another provider's fetch still ran, and the list the manager kept
+    # for the listing showed A's models as B's. The manager keeps none now.
     from kollabor_ai import model_catalog
+    from kollabor_ai.oauth import token_storage
 
-    manager = _manager(_Profile("openai-oauth", "openai_responses", "gpt-6-luna"))
-    fetch = AsyncMock(return_value=[{"id": "gpt-account-only"}])
+    (tmp_path / "oauth").mkdir()
+    login = tmp_path / "oauth" / "openai.json"
+    login.write_text(json.dumps({"account_id": "acct-a"}), encoding="utf-8")
+    monkeypatch.setattr(token_storage, "get_config_directory_candidates", lambda: [tmp_path])
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: tmp_path / "model_catalog.cache")
+    monkeypatch.setattr(model_catalog, "_MEMORY_CACHE", {})
+    manager = _manager(
+        _Profile("openai-oauth", "openai_responses", "gpt-6-luna"), _Profile("router", "openrouter", "some/model")
+    )
+
+    async def fetch(profile, **_):
+        if profile.name == "router":  # B signs in while this one runs
+            login.write_text(json.dumps({"account_id": "acct-b"}), encoding="utf-8")
+            return []
+        model_catalog._store(profile, [{"id": "a-only"}], "acct-a")
+        return [{"id": "a-only"}]
+
     monkeypatch.setattr(model_catalog, "get_provider_models", fetch)
-    monkeypatch.setattr(model_catalog, "cached_provider_models", lambda profile, max_age=3600: [])
     await manager.refresh_catalogs()
-    assert "gpt-account-only" in {row["model"] for row in manager.list_choices()}
-    assert "gpt-account-only" in {loadout.name for loadout in manager.list_loadouts()}
-    fetch.return_value = []  # signed out since: the next listing drops it
-    await manager.refresh_catalogs()
-    assert "gpt-account-only" not in {row["model"] for row in manager.list_choices()}
+    assert "a-only" not in {row["model"] for row in manager.list_choices()}
+    login.write_text(json.dumps({"account_id": "acct-a"}), encoding="utf-8")  # A signs back in
+    assert "a-only" in {row["model"] for row in manager.list_choices()}

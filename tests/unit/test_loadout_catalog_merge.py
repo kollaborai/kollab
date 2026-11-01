@@ -64,7 +64,7 @@ def _isolated_cache(tmp_path):
 
     mc._MEMORY_CACHE.clear()
     with patch.object(mc, "_cache_file", lambda: tmp_path / "model_catalog.cache"), patch.object(
-        token_storage, "stored_account_id", lambda provider, profile_name=None: "acct-test"
+        token_storage, "stored_login_mark", lambda provider, profile_name=None: "acct-test"
     ):
         yield
     mc._MEMORY_CACHE.clear()

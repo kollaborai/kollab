@@ -141,8 +141,6 @@ class LoadoutManager:
         self.config: Optional[Any] = (
             config if config is not None else getattr(profile_manager, "config", None)
         )
-        # What refresh_catalogs fetched that no cache keeps (_cached_catalog).
-        self._fetched: Dict[str, List[Dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Reading
@@ -337,13 +335,9 @@ class LoadoutManager:
                     rows.append({"profile": profile.name, "provider": provider, "model": model, "effort": effort})
         return rows
 
-    def _cached_catalog(self, profile: Any, max_age: float = 3600) -> List[Dict[str, Any]]:
-        """This profile's cached live catalog, or the one refresh_catalogs just
-        fetched that the cache keeps nothing for: a ChatGPT login that names no
-        account (#553). Empty when cold or unavailable."""
-        fetched = self._fetched.get(getattr(profile, "name", ""))
-        if fetched:
-            return list(fetched)
+    @staticmethod
+    def _cached_catalog(profile: Any, max_age: float = 3600) -> List[Dict[str, Any]]:
+        """This profile's cached live catalog. Empty when cold or unavailable."""
         try:
             from kollabor_ai.model_catalog import cached_provider_models
 
@@ -361,7 +355,7 @@ class LoadoutManager:
         re-read ``list_loadouts()`` afterwards to pick the results up.
         """
         try:
-            from kollabor_ai.model_catalog import cached_provider_models, get_provider_models
+            from kollabor_ai.model_catalog import get_provider_models
         except Exception as exc:  # noqa: BLE001
             logger.warning("model catalog unavailable: %s", exc)
             return {}
@@ -376,16 +370,12 @@ class LoadoutManager:
         )
 
         counts: Dict[str, int] = {}
-        fetched: Dict[str, List[Dict[str, Any]]] = {}
         for profile, models in zip(profiles, results):
             if isinstance(models, BaseException):
                 logger.warning("catalog fetch failed for %s: %s", profile.name, models)
                 counts[profile.name] = 0
             else:
                 counts[profile.name] = len(models)
-                if models and not cached_provider_models(profile, max_age=float("inf")):
-                    fetched[profile.name] = list(models)  # this listing shows it all the same
-        self._fetched = fetched
         logger.info("loadout catalogs refreshed: %s", counts)
         return counts
 
