@@ -814,6 +814,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           // The extend publish is an older-focused window, not a
           // latest-history claim: rows newer than its end still exist.
           false,
+          true,
         );
         setInitialState((previous) =>
           previous?.sessionId === sessionId ? nextState : previous,

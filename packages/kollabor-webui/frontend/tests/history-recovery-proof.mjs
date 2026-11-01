@@ -10,13 +10,15 @@
 //      replaces the window instead of stranding the stale one  [history-cache]
 //   D: an offline reload narrows the cached page but keeps the truncated
 //      prefix reachable from cache, no engine round trip       [history-cache]
+//   I: a tool call and result split across pages reunite without a branch
+//   J: a superseding refresh during a local send preserves the submitted row
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist");
+const root = process.env.HISTORY_PROOF_BUILD ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist");
 const out = process.argv[2] ?? "/tmp/pr472-proof";
 fs.mkdirSync(out, { recursive: true });
 const types = {
@@ -195,6 +197,7 @@ const scenario = async (name, buildState, run) => {
     const url = new URL(request.url());
     const engine = ["7433", "8080"].includes(url.port);
     if ((engine || url.origin === base) && url.pathname.endsWith("/events")) {
+      if (history.events) return history.events(route);
       // A stream that closes immediately on every request reconnects in a
       // tight loop and masks the paging schedules these cases exercise.
       return new Promise((resolve) => setTimeout(resolve, 300)).then(() =>
@@ -205,6 +208,7 @@ const scenario = async (name, buildState, run) => {
       engine ||
       (url.origin === base && ["fetch", "xhr"].includes(request.resourceType()))
     ) {
+      if (url.pathname.endsWith("/assistant") && history.assistant) return history.assistant(route);
       if (url.pathname.endsWith("/history") && !url.pathname.includes("/output")) {
         const options = {
           limit: url.searchParams.get("limit"),
@@ -1017,6 +1021,143 @@ try {
         fail("G-queued-behind-prefetch", "a history banner is still showing after the queued-behind-prefetch paging");
       } else {
         ok("G-queued-behind-prefetch", "no history banner after the queued-behind-prefetch paging");
+      }
+    },
+  );
+
+  // I: a tool result begins a page and its call is on the older page. Once
+  // the older page arrives, one real card replaces the fallback without a
+  // phantom branch. Hold refreshes so the page itself must reconcile it.
+  const iRows = Array.from({ length: 60 }, (_, index) => ({
+    role: index % 2 ? "assistant" : "user", content: `message-${index}`,
+  }));
+  iRows[9] = { role: "assistant", content: "", metadata: {
+    tool_calls: [{ id: "boundary-call", function: { name: "review_probe_tool", arguments: "{}" } }],
+  } };
+  iRows[10] = { role: "tool", content: "SYNTHETIC_TOOL_RESULT", metadata: {
+    tool_call_id: "boundary-call", tool_name: "review_fallback_tool",
+  } };
+  const iPage = (start, end) => mkPage(start, end, { history: iRows.slice(start, end) });
+  const iHeld = [];
+  await scenario(
+    "I-tool-boundary",
+    () => ({
+      resolve(options) {
+        if (options.after) return new Promise((resolve) => iHeld.push(resolve));
+        return { status: 200, body: options.before ? iPage(0, 10) : iPage(10, 60) };
+      },
+    }),
+    async (page) => {
+      try {
+        await openThread(page, "message-59");
+        await page.getByRole("button", { name: "Review Fallback Tool" }).waitFor({ timeout: 8000 });
+        const composer = page.locator(".aui-composer-input");
+        await composer.fill("Draft survives paging");
+        const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+        await viewport.hover();
+        for (let attempt = 0; attempt < 30; attempt++) {
+          await page.mouse.wheel(0, -25000);
+          await page.waitForTimeout(250);
+          if (await page.getByText("message-0", { exact: true }).count()) break;
+        }
+        await page.getByRole("button", { name: "Review Probe Tool" }).waitFor({ timeout: 8000 });
+        await page.getByRole("button", { name: "Review Probe Tool" }).click();
+        const result = await page.getByText("SYNTHETIC_TOOL_RESULT", { exact: false }).count();
+        const fallback = await page.getByRole("button", { name: "Review Fallback Tool" }).count();
+        const branches = await page.getByRole("button", { name: /^(Previous|Next)$/ }).count();
+        const oldest = await page.getByText("message-0", { exact: true }).count();
+        const newest = await page.getByText("message-59", { exact: true }).count();
+        const draft = await composer.inputValue();
+        if (!result || fallback || branches || !oldest || !newest || draft !== "Draft survives paging") {
+          fail("I-tool-boundary", `result=${result} fallback=${fallback} branches=${branches} oldest=${oldest} newest=${newest} draft=${draft}`);
+        } else {
+          ok("I-tool-boundary", "one real tool card and its result, both history edges, and the draft survive without a phantom branch");
+        }
+      } finally {
+        iHeld.splice(0).forEach((resolve) => resolve({ status: 200, body: iPage(60, 60) }));
+      }
+    },
+  );
+
+  // J: an older page arrives during a local send, then a history event
+  // supersedes it while the engine mirror still lacks that send. The next
+  // completed state must keep the local row and reconcile the tool boundary.
+  const j = { before: [], after: [], events: [], assistant: [], refresh: false, refreshed: 0 };
+  await scenario(
+    "J-boundary-during-send",
+    () => ({
+      resolve(options) {
+        if (options.before) return new Promise((resolve) => j.before.push(resolve));
+        if (options.after) {
+          if (!j.refresh) return new Promise((resolve) => j.after.push(resolve));
+          j.refreshed += 1;
+          return { status: 200, body: iPage(60, 60) };
+        }
+        return { status: 200, body: iPage(10, 60) };
+      },
+      events(route) {
+        return new Promise((resolve) => j.events.push((body) =>
+          resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}))));
+      },
+      assistant(route) {
+        const state = route.request().postDataJSON().state;
+        return new Promise((resolve) => j.assistant.push(() => {
+          const messages = [...state.messages,
+            { id: `user-demo-session-${state.messages.length}`, role: "user", content: "CLIENT-TURN" },
+            { id: `assistant-demo-session-${state.messages.length + 1}`, role: "assistant", content: "",
+              status: { type: "complete", reason: "stop" } },
+          ];
+          const update = { type: "update-state", operations: [
+            { type: "set", path: ["messages"], value: messages },
+            { type: "set", path: ["synced"], value: { history: 60, messages: messages.length } },
+          ] };
+          const body = `data: ${JSON.stringify(update)}\n\ndata: ${JSON.stringify({ type: "message-finish", finishReason: "stop" })}\n\ndata: [DONE]\n\n`;
+          resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}));
+        }));
+      },
+    }),
+    async (page) => {
+      try {
+        await openThread(page, "message-59");
+        const composer = page.locator(".aui-composer-input");
+        await composer.fill("CLIENT-TURN");
+        await composer.press("Enter");
+        for (let n = 0; n < 100 && (!j.assistant.length || !j.before.length || !j.events.length); n++) {
+          await page.waitForTimeout(100);
+        }
+        if (!j.assistant.length || !j.before.length || !j.events.length) {
+          throw new Error("send, older page, or event stream was not held");
+        }
+        const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+        await viewport.hover();
+        for (let n = 0; n < 4; n++) {
+          await page.mouse.wheel(0, -25000);
+          await page.waitForTimeout(150);
+        }
+        j.before.splice(0).forEach((resolve) => resolve({ status: 200, body: iPage(0, 10) }));
+        await page.waitForTimeout(500);
+        if (!await page.getByText("CLIENT-TURN", { exact: true }).count()) throw new Error("pending input disappeared");
+        j.refresh = true;
+        j.events.splice(0).forEach((release) => release('data: {"type":"history_updated"}\n\n'));
+        for (let n = 0; n < 100 && !j.refreshed; n++) await page.waitForTimeout(100);
+        if (!j.refreshed) throw new Error("superseding history refresh did not return");
+        await page.waitForTimeout(500);
+        j.assistant.splice(0).forEach((release) => release());
+        await page.getByRole("button", { name: "Review Probe Tool" }).waitFor({ timeout: 10000 });
+        await page.waitForTimeout(800);
+        const sent = await page.getByText("CLIENT-TURN", { exact: true }).count();
+        const fallback = await page.getByRole("button", { name: "Review Fallback Tool" }).count();
+        const branches = await page.getByRole("button", { name: /^(Previous|Next)$/ }).count();
+        if (sent !== 1 || fallback || branches) {
+          fail("J-boundary-during-send", `sent=${sent} fallback=${fallback} branches=${branches}`);
+        } else {
+          ok("J-boundary-during-send", "submitted input and actual tool survive a superseding refresh");
+        }
+      } finally {
+        j.before.splice(0).forEach((resolve) => resolve({ status: 200, body: iPage(0, 10) }));
+        j.after.splice(0).forEach((resolve) => resolve({ status: 200, body: iPage(60, 60) }));
+        j.events.splice(0).forEach((release) => release(""));
+        j.assistant.splice(0).forEach((release) => release());
       }
     },
   );
