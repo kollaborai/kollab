@@ -344,6 +344,14 @@ claude@home-server` and `hub_ask` settle on it.
 | `user_message_chunk` | only inside a load replay, which is swallowed |
 | the rest | logged |
 
+When the prompt response includes authoritative whole-turn usage, settle it
+once per turn and carry it through the session snapshot to local and attached
+status widgets. Show context samples separately from turn totals; adapters
+without turn totals label the context sample as the last request. Clear a
+previous turn's total at the next turn start and when the harness changes or
+closes, so it cannot be mistaken for the current turn. A delayed older turn may
+still contribute to cumulative accounting but cannot replace the current display.
+
 None of it is a tool kollab runs.
 
 ## 5. Permissions

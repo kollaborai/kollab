@@ -92,6 +92,9 @@ class ACPOrchestrator:
         # (request_id, turn_id) pairs whose authoritative usage already
         # settled; replays of terminal events must not double count (#495).
         self._settled_usage_turns: set[tuple[str, int]] = set()
+        # A later prompt may start while the previous turn is still writing
+        # history. Its delayed settlement must not populate the new display.
+        self._usage_display_turn: tuple[str, int] | None = None
 
     @property
     def is_processing(self) -> bool:
@@ -178,6 +181,7 @@ class ACPOrchestrator:
         self._observations.clear()
         self._observation_count = 0
         self._settled_usage_turns.clear()
+        self._usage_display_turn = None
         self._observation_rows.clear()
         self._unwritten_observations.clear()
         self._selected_profile = profile
@@ -208,6 +212,7 @@ class ACPOrchestrator:
             stats = getattr(llm, "session_stats", None)
             if isinstance(stats, dict):
                 stats.pop("acp_usage", None)
+                stats.pop("acp_turn_usage", None)
             if self.hub_plugin is not None and getattr(self.hub_plugin, "_identity", None) is not None:
                 self.hub_plugin._identity.tags["harness"] = profile.description or profile.name
                 self.hub_plugin._identity.tags["provider"] = "acp"
@@ -494,21 +499,24 @@ class ACPOrchestrator:
         turn) settles at most once, so replayed terminal events never double
         count. Cost is never invented: adapters send no price data (#495).
         """
-        usage = getattr(result, "usage", None) or (result.end_frame or {}).get("acp_turn_usage")
-        if not isinstance(usage, dict) or not usage:
-            return None
         key = (result.request_id, result.turn_id)
         if key in self._settled_usage_turns:
             return None
         self._settled_usage_turns.add(key)
+        usage = getattr(result, "usage", None) or (result.end_frame or {}).get("acp_turn_usage")
+        current_display = self._usage_display_turn in (None, key)
+        llm = self.event_bus.get_service("llm_service")
+        stats = getattr(llm, "session_stats", None)
+        if not isinstance(usage, dict) or not usage:
+            if current_display and isinstance(stats, dict):
+                stats.pop("acp_turn_usage", None)
+            return None
         input_total = (
             int(usage.get("input_tokens", 0) or 0)
             + int(usage.get("cached_read_tokens", 0) or 0)
             + int(usage.get("cached_write_tokens", 0) or 0)
         )
         output_total = int(usage.get("output_tokens", 0) or 0) + int(usage.get("thought_tokens", 0) or 0)
-        llm = self.event_bus.get_service("llm_service")
-        stats = getattr(llm, "session_stats", None)
         if isinstance(stats, dict):
             stats["total_input_tokens"] = int(stats.get("total_input_tokens", 0)) + input_total
             stats["total_output_tokens"] = int(stats.get("total_output_tokens", 0)) + output_total
@@ -516,7 +524,8 @@ class ACPOrchestrator:
                 stats["total_cache_read_tokens"] = (
                     int(stats.get("total_cache_read_tokens", 0)) + int(usage["cached_read_tokens"])
                 )
-            stats["acp_turn_usage"] = dict(usage)
+            if current_display:
+                stats["acp_turn_usage"] = dict(usage)
         return {"usage": dict(usage), "input_total": input_total, "output_total": output_total}
 
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
@@ -736,6 +745,7 @@ class ACPOrchestrator:
         key = (str(update.get("request_id") or ""), int(update.get("turn_id") or 0))
         observed = self._observed_turns.get(key)
         if kind == "turn_start":
+            self._usage_display_turn = key
             observed = self._observed_turns[key] = _ObservedTurn(
                 str(getattr(self._runner, "session_id", None) or ""), int(update["generation"]),
             )
@@ -748,6 +758,10 @@ class ACPOrchestrator:
                     observed.text += str(update.get("text") or "")
         payload = update.get("payload") or {}
         llm = self.event_bus.get_service("llm_service")
+        if kind == "turn_start":
+            stats = getattr(llm, "session_stats", None)
+            if isinstance(stats, dict):
+                stats.pop("acp_turn_usage", None)
         display = getattr(llm, "message_display_service", None)
         if display is not None:
             if kind == "turn_start":
@@ -946,6 +960,8 @@ class ACPOrchestrator:
         stats = getattr(llm, "session_stats", None)
         if isinstance(stats, dict):
             stats.pop("acp_usage", None)
+            stats.pop("acp_turn_usage", None)
+        self._usage_display_turn = None
         if self.hub_plugin is not None and self.hub_plugin._identity is not None:
             self.hub_plugin._identity.tags.pop("harness", None)
             self.hub_plugin._identity.tags.pop("provider", None)

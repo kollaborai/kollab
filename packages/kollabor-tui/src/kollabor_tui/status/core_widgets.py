@@ -504,6 +504,13 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
                 return f"${c:.1f}"
             return f"${c:.0f}"
 
+        if acp_turn_usage and not acp_usage:
+            turn_total = _fmt_short(int(acp_turn_usage.get("total_tokens", 0) or 0))
+            for line in (f"{turn_total} tok/turn", f"{turn_total}tok", turn_total):
+                if len(line) <= width:
+                    return _fg(line, T().text_dim)
+            return ""
+
         if acp_usage:
             used = _fmt_short(int(acp_usage.get("used", 0) or 0))
             size = _fmt_short(int(acp_usage.get("size", 0) or 0))

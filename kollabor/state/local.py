@@ -604,6 +604,7 @@ class LocalStateService(StateService):
             total_cost_usd=float(stats.get("total_cost_usd", 0.0) or 0.0),
             session_id=_session_id,
             acp_usage=dict(stats.get("acp_usage") or {}),
+            acp_turn_usage=dict(stats.get("acp_turn_usage") or {}),
         )
 
     # === Profile ===
