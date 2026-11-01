@@ -7,10 +7,11 @@ author: maintainers
 
 > **STALE NOTE** (2026-05-15): This spec remains in draft. Crystal memory XML tags are implemented and in active use — see live code for current tag set rather than this spec.
 
-> **Current implementation:** Each crystal store bounds its deduplication cache
-> to at least 8,192 tokenized summaries, growing with the number of live entries
-> and shrinking when entries leave. Eviction only recomputes tokens; it does not
-> remove persisted memories or change merge matching.
+> **Current implementation:** Each crystal store gives its deduplication cache
+> a capacity of at least 8,192 tokenized summaries, growing with live entries
+> and shrinking when entries leave. Resizing keeps the most recently used tokens,
+> evicting only what exceeds the new limit. Eviction only recomputes tokens; it
+> does not remove persisted memories or change merge matching.
 
 # Crystal Memory XML Tags
 

@@ -24,6 +24,7 @@ import logging
 import re
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
@@ -153,15 +154,19 @@ class CrystalStore:
         # The ids of entries changed since the last dedup pass: only pairs with
         # one of them can match. None: unknown, so every entry (#546).
         self._changed: Optional[set] = None
-        # The cached function is thread-safe and does not retain this store.
-        # It grows with the live vault and shrinks again when entries leave.
-        self._summary_words = functools.lru_cache(maxsize=SUMMARY_WORD_CACHE_MIN_SIZE)(summary_tokens)
+        # Sliced dedup reads this cache outside the store lock while a writer
+        # can resize it. The cache lock protects only its data and size limit.
+        self._summary_words: OrderedDict[str, frozenset] = OrderedDict()
+        self._summary_words_lock = threading.Lock()
+        self._summary_words_limit = SUMMARY_WORD_CACHE_MIN_SIZE
 
     def _resize_summary_cache(self) -> None:
-        """Bound retained summaries while leaving room for the live vault."""
+        """Resize in place, retaining the most recently used summaries."""
         size = max(SUMMARY_WORD_CACHE_MIN_SIZE, 1 << (max(1, 2 * len(self._entries)) - 1).bit_length())
-        if self._summary_words.cache_info().maxsize != size:
-            self._summary_words = functools.lru_cache(maxsize=size)(summary_tokens)
+        with self._summary_words_lock:
+            self._summary_words_limit = size
+            while len(self._summary_words) > size:
+                self._summary_words.popitem(last=False)
 
     def _ensure_loaded(self) -> None:
         """Lazy-load entries from disk on first access, under the lock: a load
@@ -359,7 +364,25 @@ class CrystalStore:
         return token_overlap(self._words(summary_a), self._words(summary_b))
 
     def _words(self, summary: str) -> frozenset:
-        return self._summary_words(summary)
+        with self._summary_words_lock:
+            words = self._summary_words.get(summary)
+            if words is not None:
+                self._summary_words.move_to_end(summary)
+                return words
+
+        # Tokenization is pure and can be expensive. Do it outside the lock so
+        # an overlapping sliced pass and writer can keep making progress.
+        words = summary_tokens(summary)
+        with self._summary_words_lock:
+            cached = self._summary_words.get(summary)
+            if cached is None:
+                self._summary_words[summary] = words
+                if len(self._summary_words) > self._summary_words_limit:
+                    self._summary_words.popitem(last=False)
+            else:
+                words = cached
+                self._summary_words.move_to_end(summary)
+        return words
 
     def _find_merge_target(
         self, new_keywords: List[str], new_summary: str = ""

@@ -1,5 +1,10 @@
 """The crystal summary cache stays bounded as memories change."""
 
+import threading
+from collections import Counter
+
+import pytest
+
 from plugins.hub import crystal_store
 from plugins.hub.text_utils import summary_tokens
 
@@ -89,3 +94,139 @@ def test_large_live_vault_keeps_its_working_set_and_shrinks_after_delete(tmp_pat
     smaller.delete_entry(entries[4096].id)
     assert smaller.count() == 4096
     assert _cached_summary_count(smaller) <= 8192
+
+
+
+def _resize_vault(tmp_path, count):
+    summaries = [
+        "amber zephyr maple", "bamboo cobalt radar", "dandelion vector quartz",
+        "embers orange willow", "indigo mountain planet", "jigsaw satin violet",
+        "krypton magnet thistle", "lantern ocean walnut", "orchid rocket winter",
+    ]
+    entries = [
+        crystal_store.CrystalEntry(
+            id=f"crys-{n + 1:03d}", date="2026-10-01", keywords=[f"unique{n}"],
+            summary=summaries[n], body="body",
+        )
+        for n in range(count)
+    ]
+    (tmp_path / "crystallized.md").write_text("\n".join(entry.to_block() for entry in entries))
+    return entries
+
+
+def _count_tokenizations(monkeypatch):
+    counts = Counter()
+    lock = threading.Lock()
+
+    def counted_tokens(summary):
+        with lock:
+            counts[summary] += 1
+        return summary_tokens(summary)
+
+    monkeypatch.setattr(crystal_store, "summary_tokens", counted_tokens)
+    return counts
+
+
+def test_growth_keeps_the_scanned_live_working_set(tmp_path, monkeypatch):
+    monkeypatch.setattr(crystal_store, "SUMMARY_WORD_CACHE_MIN_SIZE", 8)
+    entries = _resize_vault(tmp_path, 4)
+    counts = _count_tokenizations(monkeypatch)
+    store = crystal_store.CrystalStore(tmp_path)
+
+    # Four entries fit in a limit of 8; adding the fifth grows it to 16.
+    store.add_entry("**quasar tundra nova**")
+    assert store.count() == 5
+    store.add_entry("**porcupine mercury xylophone**")
+    assert store.count() == 6
+    assert [counts[e.summary] for e in entries] == [1] * 4
+    assert crystal_store.CrystalStore(tmp_path).count() == 6
+
+
+def test_repeated_boundary_crossings_do_not_retokenize_live_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(crystal_store, "SUMMARY_WORD_CACHE_MIN_SIZE", 8)
+    entries = _resize_vault(tmp_path, 4)
+    counts = _count_tokenizations(monkeypatch)
+    store = crystal_store.CrystalStore(tmp_path)
+
+    for _ in range(8):
+        added = store.add_entry("**quasar tundra nova**")
+        assert store.count() == 5
+        assert store.delete_entry(added.id) is not None
+        assert store.count() == 4
+    assert [counts[e.summary] for e in entries] == [1] * 4
+    assert [e.id for e in crystal_store.CrystalStore(tmp_path).get_all()] == [e.id for e in entries]
+
+
+def test_sustained_deletions_trim_the_cache_but_keep_recent_live_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(crystal_store, "SUMMARY_WORD_CACHE_MIN_SIZE", 8)
+    entries = _resize_vault(tmp_path, 9)
+    counts = _count_tokenizations(monkeypatch)
+    store = crystal_store.CrystalStore(tmp_path)
+    assert store.count() == 9
+    for n in range(20):
+        store._words(f"retired summary {n}")
+    for entry in entries:
+        store._words(entry.summary)
+    assert _cached_summary_count(store) == 29
+
+    for entry in entries[:6]:
+        assert store.delete_entry(entry.id) is not None
+        # Power-of-two sizing is bounded by four times the live vault,
+        # subject to the minimum allowance for transient summaries.
+        assert _cached_summary_count(store) <= max(8, 4 * store.count())
+    assert store.count() == 3
+    assert _cached_summary_count(store) <= 8
+    for entry in entries[6:]:
+        assert store._words(entry.summary) == summary_tokens(entry.summary)
+        assert counts[entry.summary] == 1
+    assert [e.id for e in crystal_store.CrystalStore(tmp_path).get_all()] == [e.id for e in entries[6:]]
+
+
+@pytest.mark.asyncio
+async def test_sliced_pass_overlaps_a_writer_and_preserves_hot_tokens(tmp_path, monkeypatch):
+    monkeypatch.setattr(crystal_store, "SUMMARY_WORD_CACHE_MIN_SIZE", 8)
+    entries = _resize_vault(tmp_path, 4)
+    entries[0].keywords = ["a", "b", "c"]
+    entries[1].keywords = ["a", "b", "d"]
+    (tmp_path / "crystallized.md").write_text("\n".join(e.to_block() for e in entries))
+
+    counts = Counter()
+    counts_lock = threading.Lock()
+    reading, writer_done = threading.Event(), threading.Event()
+    loop_thread = threading.current_thread()
+
+    def paused_tokens(summary):
+        with counts_lock:
+            counts[summary] += 1
+        if summary == entries[0].summary and threading.current_thread() is loop_thread and not reading.is_set():
+            reading.set()
+            assert writer_done.wait(5), "writer blocked while the pass tokenized"
+        return summary_tokens(summary)
+
+    monkeypatch.setattr(crystal_store, "summary_tokens", paused_tokens)
+    store = crystal_store.CrystalStore(tmp_path)
+    assert store.count() == 4
+    wrote, errors = [], []
+
+    def write_during_pass():
+        try:
+            assert reading.wait(5), "pass did not reach tokenization"
+            wrote.append(store.add_entry("**zulu yankee xray whiskey**"))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            writer_done.set()
+
+    writer = threading.Thread(target=write_during_pass, daemon=True)
+    writer.start()
+    merged = await store.deduplicate_in_slices(slice_s=0)
+    writer.join(5)
+    assert not writer.is_alive()
+    assert errors == []
+    assert merged == 1
+    assert [e.id for e in store.get_all()] == [entries[0].id, entries[2].id, entries[3].id, wrote[0].id]
+    assert [e.id for e in crystal_store.CrystalStore(tmp_path).get_all()] == [e.id for e in store.get_all()]
+    # The first summary has two concurrent misses; all other live summaries
+    # are tokenized just once even though the writer caused growth and a retry.
+    assert counts[entries[0].summary] == 2
+    assert [counts[e.summary] for e in entries[1:]] == [1] * 3
