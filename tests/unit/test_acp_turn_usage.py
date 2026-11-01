@@ -268,6 +268,65 @@ async def test_harness_start_and_close_clear_previous_usage(monkeypatch):
     assert "acp_turn_usage" not in stats
 
 
+@pytest.mark.asyncio
+async def test_pending_usage_settles_before_harness_replacement(monkeypatch):
+    class FakeRunner:
+        def __init__(self, profile, **kwargs):
+            self.binding = None
+            self.session_id = profile.name
+            self.pending = None
+
+        async def start(self, binding=None):
+            pass
+
+        def advertised_config_options(self):
+            return []
+
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None):
+            future = asyncio.get_running_loop().create_future()
+            self.pending = bridge_mod.ACPAdmission(request_id, source, thread_id, 1, 1, text, future)
+            return self.pending
+
+        def finish(self):
+            admission = self.pending
+            admission.future.set_result(bridge_mod.ACPResult(
+                1, self.session_id, "answer", "end_turn", (),
+                {"type": "turn_end", "acp_turn_usage": dict(USAGE)},
+                1, admission.request_id, admission.source, admission.thread_id, dict(USAGE),
+            ))
+
+        async def close(self):
+            if self.pending is not None and not self.pending.future.done():
+                self.finish()
+
+    monkeypatch.setattr(orch_mod, "ACPRunner", FakeRunner)
+    monkeypatch.setattr(orch_mod, "publish_semantic", lambda *args, **kwargs: None)
+    stats = {}
+    orchestrator = _orchestrator(stats)
+    first = LLMProfile(name="first", provider="acp", command=("fake",))
+    second = LLMProfile(name="second", provider="acp", command=("fake",))
+    await orchestrator.start(first)
+    try:
+        old_runner = orchestrator.runner
+        orchestrator.admit("first", request_id="first", source="rpc", record=False)
+        await orchestrator.start(second)
+        assert orchestrator.runner is not old_runner
+        assert stats["total_input_tokens"] == 79798
+        assert stats["total_output_tokens"] == 3777
+        assert "acp_turn_usage" not in stats
+
+        # The replacement starts turn numbering at 1 again; its usage must
+        # still be counted and displayed instead of deduplicated as old work.
+        orchestrator.admit("second", request_id="second", source="rpc", record=False)
+        orchestrator.runner.finish()
+        await asyncio.gather(*tuple(orchestrator._completion_tasks))
+        assert stats["total_input_tokens"] == 2 * 79798
+        assert stats["total_output_tokens"] == 2 * 3777
+        assert stats["acp_turn_usage"] == USAGE
+    finally:
+        await orchestrator.close()
+
+
 def test_settle_without_stats_service_still_reports_totals():
     orchestrator = _orchestrator()
     settled = orchestrator._settle_turn_usage(_result(dict(USAGE)))
