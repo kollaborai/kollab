@@ -137,6 +137,10 @@ def _is_goal_message(content: Any) -> bool:
     return re.match(r"^\s*/(?:goal|goals)(?:\s+|$)", text, re.IGNORECASE) is not None
 
 
+def _is_image_goal(content: Any) -> bool:
+    return isinstance(content, list) and contains_image_content(content) and _is_goal_message(content)
+
+
 async def _pump_goal_reply(session, reply_id: str, queue: asyncio.Queue) -> None:
     """Deliver a private goal reply only to its initiating response stream."""
     deadline = time.monotonic() + EVENT_IDLE_TIMEOUT_SECONDS
@@ -237,19 +241,36 @@ async def send_message(
         logger.error("send_message failed for %s: %s", session_id, e)
         raise HTTPException(status_code=502, detail=f"daemon unreachable: {e}")
 
+    if read_context and read_context.revoked:
+        session.unsubscribe(queue)
+        raise HTTPException(status_code=403, detail="Session access revoked")
     if not accepted.get("accepted"):
         session.unsubscribe(queue)
         reason = accepted.get("reason", "rejected")
         status = 409 if "in flight" in reason else 400
         raise HTTPException(status_code=status, detail=accepted.get("message") or reason)
-    reply_id = accepted.get("goal_reply_id") if private_goal else None
-    if private_goal and not reply_id:
+    replayed = private_goal and accepted.get("completed") is True and accepted.get("replayed") is True
+    reply_id = accepted.get("goal_reply_id") if private_goal and not replayed else None
+    if private_goal and not reply_id and not replayed:
         session.unsubscribe(queue)
         raise HTTPException(status_code=502, detail="daemon did not provide a private goal reply")
     tagged = bool(accepted.get("request_id"))
     request_ids = {str(accepted.get("request_id") or request_id)}
     if reply_id:
         request_ids.add(str(reply_id))  # the private reply's events name it
+
+    # A replay already has a durable pending request or creation receipt. Its
+    # acknowledgement belongs only to this response, never the shared tap.
+    replay_queue = None
+    if replayed:
+        replay_queue = asyncio.Queue()
+        replay_queue.put_nowait({
+            "type": "token", "text": str(accepted.get("message") or "Goal request already processed."),
+            "request_id": next(iter(request_ids)),
+        })
+        replay_queue.put_nowait(
+            {"type": "turn_complete", "stop_reason": "end_turn", "request_id": next(iter(request_ids))}
+        )
 
     async def event_generator():
         private_queue = asyncio.Queue() if reply_id else None
@@ -262,7 +283,8 @@ async def send_message(
             while True:
                 try:
                     event = await asyncio.wait_for(
-                        (private_queue if private_queue is not None else queue).get(),
+                        (replay_queue if replay_queue is not None else
+                         private_queue if private_queue is not None else queue).get(),
                         timeout=EVENT_IDLE_TIMEOUT_SECONDS,
                     )
                 except asyncio.TimeoutError:
@@ -305,7 +327,11 @@ async def send_message(
                 await asyncio.gather(*tasks, return_exceptions=True)
             session.unsubscribe(queue)
 
-    headers = {"X-Kollab-Goal-Reply": str(reply_id)} if reply_id else None
+    headers = {}
+    if accepted.get("goal_request_id"):
+        headers["X-Kollab-Goal-Request"] = str(accepted["goal_request_id"])
+    if reply_id:
+        headers["X-Kollab-Goal-Reply"] = str(reply_id)
     return EventSourceResponse(event_generator(), headers=headers)
 
 
@@ -1047,22 +1073,36 @@ async def assistant_transport(
                     if not content_to_text(message_content).strip():
                         controller.add_error("add-message command has no text")
                         return
+                    message = command.get("message")
+                    client_id = message.get("id") if isinstance(message, dict) else None
+                    request_id = (client_id if _is_image_goal(message_content)
+                                  and isinstance(client_id, str) and client_id else uuid.uuid4().hex)
                     private_goal = _is_goal_message(message_content)
+                    kwargs = {"request_id": request_id}
                     if private_goal:
                         uid = body.state.get("conversationUid") if isinstance(body.state, dict) else None
-                        kwargs = {"private_goal_reply": True, "goal_conversation_uid": uid}
+                        kwargs.update(private_goal_reply=True, goal_conversation_uid=uid)
                         if body.goal_reply_id is not None:
                             kwargs["private_goal_reply_id"] = body.goal_reply_id
-                        accepted = await session.send_message(message_content, **kwargs)
-                    else:
-                        accepted = await session.send_message(message_content, request_id=uuid.uuid4().hex)
+                    accepted = await session.send_message(message_content, **kwargs)
+                    if read_context and read_context.revoked:
+                        return
                     saw_action = True
                     if not accepted.get("accepted"):
                         controller.add_error(
                             str(accepted.get("message") or accepted.get("reason", "message rejected"))
                         )
                         return
-                    if private_goal:
+                    replayed = private_goal and accepted.get("completed") is True and accepted.get("replayed") is True
+                    if replayed:
+                        replay_id = str(accepted.get("request_id") or request_id)
+                        queue = asyncio.Queue()
+                        queue.put_nowait({
+                            "type": "token", "text": str(accepted.get("message") or "Goal request already processed."),
+                            "request_id": replay_id,
+                        })
+                        queue.put_nowait({"type": "turn_complete", "stop_reason": "end_turn", "request_id": replay_id})
+                    elif private_goal:
                         reply_id = accepted.get("goal_reply_id")
                         if not reply_id:
                             controller.add_error("daemon did not provide a private goal reply")
@@ -1072,6 +1112,11 @@ async def assistant_transport(
                         goal_pump = asyncio.create_task(_pump_goal_reply(session, str(reply_id), queue))
                         if read_context is not None:
                             revocation_watch = asyncio.create_task(_forward_goal_revocation(shared_queue, queue))
+                    if accepted.get("goal_request_id") and isinstance(body.state, dict):
+                        controller.state["goalSubmission"] = {
+                            "requestId": str(accepted["goal_request_id"]),
+                            "clientRequestId": client_id,
+                        }
                     if isinstance(body.state, dict) and body.state.get("error"):
                         # Cancellation belongs to its previous turn. A new
                         # admitted input must not keep that error as its status.
