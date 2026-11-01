@@ -982,6 +982,15 @@ class HaltSync:
     def retry_delay(self, failures: int) -> float:
         return min(HALT_RETRY_MAX, HALT_RETRY_START * 2 ** (failures - 1))
 
+    def acked(self) -> list[str]:
+        """Report acknowledgements only for the current book and relay sessions."""
+        digest = hashlib.sha256(nh.canonical(self._client.control.halt_payload())).hexdigest()
+        online = self._online()
+        return sorted(
+            key for key, (session, sent_digest) in self._delivered.items()
+            if online.get(key) == session and sent_digest == digest
+        )
+
     @staticmethod
     def _resume_batch_digest(payload: dict, recipient: str) -> str:
         """A bounded receipt for this exact batch and the receiving device."""
@@ -1026,7 +1035,7 @@ class HaltSync:
         received = {
             nh.order_hash(order): order
             for order in reply["proposals"]
-            if isinstance(order, dict)
+            if nh.order_ok(order, view.network) and order.get("action") == "resume"
         }
         effective = {
             nh.order_hash(order): order
@@ -1035,7 +1044,11 @@ class HaltSync:
         }
         received.update(effective)
         if sent["halts"]:
-            held = {nh.order_hash(order) for order in reply["halts"] if isinstance(order, dict)}
+            held = {
+                nh.order_hash(order)
+                for order in reply["halts"]
+                if nh.order_ok(order, view.network) and order.get("action") == "halt"
+            }
             missing = {nh.order_hash(order) for order in sent["halts"]} - held
             if missing:
                 lifted = {

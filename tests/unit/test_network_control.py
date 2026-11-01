@@ -313,6 +313,7 @@ async def test_proposal_created_during_exchange_is_sent_after_the_inflight_reply
     sync._retry_at.clear()
     first_release.set()
     await asyncio.wait_for(inflight, 5)
+    assert founder.client.public_key not in sync.acked()
     inflight = asyncio.create_task(sync.tick())
     second_release = await asyncio.wait_for(started.get(), 5)
     bootstrap.halt_act("withdraw", {"hash": first["hash"]})
@@ -321,7 +322,13 @@ async def test_proposal_created_during_exchange_is_sent_after_the_inflight_reply
     sync._retry_at.clear()
     second_release.set()
     await asyncio.wait_for(inflight, 5)
+    assert founder.client.public_key not in sync.acked()
     await sync.tick()
+    assert founder.client.public_key in sync.acked()
+    previous_online = sync._online
+    sync._online = lambda: {founder.client.public_key: "a-new-session"}
+    assert founder.client.public_key not in sync.acked()
+    sync._online = previous_online
     result = founder.halt_act("confirm_resume", {"hash": proposal["hash"]})
     assert result["lifted"] == [halt["hash"]]
 
@@ -365,7 +372,8 @@ async def test_failed_exchange_retries_the_pending_proposal(three, failure):
 
 
 @pytest.mark.asyncio
-async def test_unacknowledged_halt_is_retried(three):
+@pytest.mark.parametrize("reply_kind", ["empty", "forged_halt"])
+async def test_unacknowledged_halt_is_retried(three, reply_kind):
     founder, bootstrap, third = three
     link = syncs(founder, bootstrap, third)
     halt = founder.halt_act("halt", {"reason": "stop"})
@@ -378,7 +386,10 @@ async def test_unacknowledged_halt_is_retried(three):
             nonlocal failed
             if key == bootstrap.client.public_key and not failed:
                 failed = True
-                return {"halts": [], "proposals": [], "resumes": [], "heads": {}}
+                reply = {"halts": [], "proposals": [], "resumes": [], "heads": {}}
+                if reply_kind == "forged_halt":
+                    reply["halts"] = [{**payload["halts"][0], "sig": "0" * 128}]
+                return reply
             return await real_transport.request(key, method, payload, timeout=timeout)
 
     sync._transport = EmptyOnce()
@@ -416,6 +427,8 @@ def test_proposal_acknowledgement_includes_sent_confirmations(three):
     sent["proposals"][0]["confirmations"] = [confirmation]
     reply = {**sent, "proposals": [{**sent["proposals"][0], "confirmations": []}]}
     assert not HaltSync._active_orders_acknowledged(sent, reply, bootstrap, founder.client.public_key)
+    forged = {**sent, "proposals": [{**sent["proposals"][0], "sig": "0" * 128}]}
+    assert not HaltSync._active_orders_acknowledged(sent, forged, bootstrap, founder.client.public_key)
     assert HaltSync._active_orders_acknowledged(sent, sent, bootstrap, founder.client.public_key)
     assert list(bootstrap.halt_book().active()) == [halt["hash"]]
 

@@ -1852,7 +1852,7 @@ class HaltLink:
         await self.sync.tick()
 
     def acked(self) -> list[str]:
-        return sorted(self.sync._delivered)
+        return self.sync.acked()
 
     async def hub_halt_snapshot(self) -> dict:
         return self.client.control.halt_snapshot(set(self.online()))
