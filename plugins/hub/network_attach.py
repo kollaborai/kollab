@@ -225,7 +225,10 @@ class NetworkAttach:
         request = {"channel": channel.id, "agent_id": agent_id, "name": name}
         if quiet:
             request["quiet"] = True
-        response = await self._send(peer, ATTACH_OPEN, request)
+        try:
+            response = await self._send(peer, ATTACH_OPEN, request, channel=channel)
+        except SendGuardRevoked as exc:
+            raise AttachRefused("network access changed before the agent could open") from exc
         refused = response.get("refused")
         if isinstance(refused, str) and refused:
             raise AttachRefused(refused[:500])
@@ -409,7 +412,7 @@ class NetworkAttach:
         if channel.requester:
             # F19 requester side: a local halt withdraws this device's
             # outbound channels too, checked here on every frame.
-            if self._halt_active is not None and self._halt_active():
+            if self._closed or (self._halt_active is not None and self._halt_active()):
                 logger.info(
                     "network attach %s to %s withdrawn: this device's network is halted",
                     channel.name,

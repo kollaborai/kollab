@@ -199,6 +199,7 @@ class SecureConversationTransport:
         # timed out while waiting for the lock leaves the holder's session alone.
         held = False
         sent = False
+        request_lock: asyncio.Lock | None = None
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
@@ -209,7 +210,7 @@ class SecureConversationTransport:
                     request_lock = self._request_locks[key] = asyncio.Lock()
                 async with request_lock:
                     held = True
-                    state = await self._open_locked(peer_key, key, binding, deadline)
+                    state = await self._open_locked(peer_key, key, binding, deadline, request_lock)
                     raw = _encode_frame({"v": 1, "method": method, "payload": payload})
                     result = None
                     chunks = [
@@ -229,6 +230,13 @@ class SecureConversationTransport:
                             certificate="",
                             before_send=before_send,
                         )
+                        if (
+                            self._request_locks.get(key) is not request_lock
+                            or self._outbound.get(key) is not state
+                        ):
+                            if before_send is not None:
+                                raise SendGuardRevoked("secure session was withdrawn")
+                            raise RelayError("secure session was superseded")
                         received = self._receive_packets(state, response)
                         if received is not None:
                             if index != len(chunks) - 1 or result is not None:
@@ -244,15 +252,15 @@ class SecureConversationTransport:
         except SendGuardRevoked:
             # Before the first data chunk, the held session is still usable.
             # A partial application frame requires a fresh TLS session.
-            if held and sent:
+            if held and sent and self._request_locks.get(key) is request_lock:
                 self._discard_outbound(key)
             raise
         except asyncio.CancelledError:
-            if held:
+            if held and self._request_locks.get(key) is request_lock:
                 self._discard_outbound(key)
             raise
         except Exception as exc:
-            if held:
+            if held and self._request_locks.get(key) is request_lock:
                 self._discard_outbound(key)
             logger.warning(
                 "secure %s request to %s failed: %s: %s",
@@ -269,16 +277,30 @@ class SecureConversationTransport:
         key: tuple[str, str, str],
         binding: tuple[str, str, str],
         deadline: float,
+        owner_lock: asyncio.Lock,
     ) -> _SessionState:
         """The established outbound session for a binding; the request lock is held."""
+        if self._request_locks.get(key) is not owner_lock:
+            raise RelayError("secure session was superseded")
         state = self._outbound.get(key)
         if state is None:
             self._make_room(peer_key, inbound=False)
             state = await self._new_client_session(binding)
+            try:
+                self._assert_current(state)
+                if self._request_locks.get(key) is not owner_lock or key in self._outbound:
+                    raise RelayError("secure session was superseded")
+            except BaseException:
+                state.tls.close()
+                state.receive_buffer.clear()
+                raise
             self._outbound[key] = state
         self._assert_current(state)
         if not state.tls.established:
             await self._handshake(state, deadline)
+        if self._request_locks.get(key) is not owner_lock or self._outbound.get(key) is not state:
+            raise RelayError("secure session was superseded")
+        self._assert_current(state)
         return state
 
     async def ensure_session(self, peer_key: str, *, timeout: float = 10.0) -> None:
@@ -300,6 +322,7 @@ class SecureConversationTransport:
         # Only a call that held the session may discard it: one cancelled or
         # timed out while waiting for the lock leaves the holder's session alone.
         held = False
+        request_lock: asyncio.Lock | None = None
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
@@ -310,13 +333,13 @@ class SecureConversationTransport:
                     request_lock = self._request_locks[key] = asyncio.Lock()
                 async with request_lock:
                     held = True
-                    await self._open_locked(peer_key, key, binding, deadline)
+                    await self._open_locked(peer_key, key, binding, deadline, request_lock)
         except asyncio.CancelledError:
-            if held:
+            if held and self._request_locks.get(key) is request_lock:
                 self._discard_outbound(key)
             raise
         except Exception as exc:
-            if held:
+            if held and self._request_locks.get(key) is request_lock:
                 self._discard_outbound(key)
             logger.warning(
                 "secure session to %s failed: %s: %s",

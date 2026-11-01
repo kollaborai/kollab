@@ -356,7 +356,9 @@ async def test_halt_during_remote_open_closes_the_new_channel(monkeypatch):
     release = asyncio.Event()
     close_sent = asyncio.Event()
 
-    async def request(peer, method, payload, timeout):
+    async def request(peer, method, payload, timeout, before_send=None):
+        if before_send is not None:
+            await before_send()
         if method == na.ATTACH_OPEN:
             opening_remote.set()
             await release.wait()
@@ -410,7 +412,9 @@ async def test_halt_during_local_listener_start_retires_late_listener(monkeypatc
 
     server = Server()
 
-    async def request(peer, method, payload, timeout):
+    async def request(peer, method, payload, timeout, before_send=None):
+        if before_send is not None:
+            await before_send()
         if method == na.ATTACH_OPEN:
             return {"open": True}
         if method == na.ATTACH_CLOSE:

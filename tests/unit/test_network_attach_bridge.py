@@ -5,6 +5,7 @@ runs a stand-in agent socket; the left device opens it through the network.
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import shutil
@@ -16,7 +17,7 @@ import pytest_asyncio
 
 from plugins.hub import network_attach
 from plugins.hub.network_attach import AttachRefused, NetworkAttach
-from plugins.hub.relay_state import RelayError, RelayStateStore
+from plugins.hub.relay_state import RelayError, RelayStateStore, SendGuardRevoked
 from tests.unit.test_relay_agent_bridge import allow, handle
 
 
@@ -352,6 +353,197 @@ async def test_requester_revoke_fences_input_waiting_for_relay_send_lock(
         if held:
             lock.release()
         writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("withdrawal", ["revoke", "reapprove", "halt", "shutdown"])
+async def test_pending_open_is_fenced_before_relay_submission(devices, withdrawal):
+    left, right, notices = devices
+    await handle(left, right)  # Warm the secure session before holding its carrier.
+    peer = right.commands.client.public_key
+    lock = left.commands.client._send_lock
+    await lock.acquire()
+    task = asyncio.create_task(left.network_attach.open(peer, right.identity.agent_id, "sapphire"))
+    try:
+        for _ in range(500):
+            if any(not waiter.done() for waiter in (lock._waiters or ())):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("open did not reach the relay send lock")
+        if withdrawal in ("revoke", "reapprove"):
+            left.commands.client.revoke(peer)
+            if withdrawal == "reapprove":
+                left.commands.client.approve(peer)
+        elif withdrawal == "halt":
+            left.network_attach._halt_active = lambda: True
+        else:
+            left.network_attach._closed = True
+        lock.release()
+        with pytest.raises(AttachRefused):
+            await asyncio.wait_for(task, 5)
+        await asyncio.sleep(0.1)
+        assert not any(" opened " in notice for notice in notices)
+        assert not right.network_attach._channels
+    finally:
+        if lock.locked():
+            lock.release()
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["withdrawal", "cancel", "failure"])
+async def test_stale_request_cannot_discard_reapproved_secure_session(devices, ending):
+    left, right, _ = devices
+    await handle(left, right)
+    client = left.commands.client
+    peer = right.commands.client.public_key
+    secure = left.secure_transport
+    original = secure._transport_request
+    old_entered, new_entered = asyncio.Event(), asyncio.Event()
+    old_release, new_release = asyncio.Event(), asyncio.Event()
+    guarded_count = 0
+
+    async def held_carrier(key, method, payload, *, timeout, before_send=None):
+        nonlocal guarded_count
+        if before_send is not None:
+            guarded_count += 1
+            if guarded_count == 1:
+                old_entered.set()
+                await old_release.wait()
+                if ending == "failure":
+                    raise RelayError("synthetic old-request failure")
+            elif guarded_count == 2:
+                new_entered.set()
+                await new_release.wait()
+        kwargs = {"before_send": before_send} if before_send is not None else {}
+        return await original(key, method, payload, timeout=timeout, **kwargs)
+
+    async def allow():
+        pass
+
+    secure._transport_request = held_carrier
+    old = asyncio.create_task(secure.request(peer, "directory", {}, timeout=15, before_send=allow))
+    new = None
+    try:
+        await asyncio.wait_for(old_entered.wait(), 5)
+        client.revoke(peer)
+        client.approve(peer)
+        new = asyncio.create_task(secure.request(peer, "directory", {}, timeout=15, before_send=allow))
+        await asyncio.wait_for(new_entered.wait(), 5)
+        binding = secure._current_binding(peer)
+        replacement = secure._outbound[binding]
+        if ending == "cancel":
+            old.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old
+        else:
+            old_release.set()
+            expected = SendGuardRevoked if ending == "withdrawal" else RelayError
+            with pytest.raises(expected):
+                await asyncio.wait_for(old, 5)
+        assert secure._outbound.get(binding) is replacement
+        new_release.set()
+        assert "agents" in await asyncio.wait_for(new, 5)
+    finally:
+        old_release.set()
+        new_release.set()
+        for task in (old, new):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+
+@pytest.mark.asyncio
+async def test_open_response_after_reapproval_cannot_publish_old_channel(devices):
+    left, right, notices = devices
+    await handle(left, right)
+    peer = right.commands.client.public_key
+    client, secure = left.commands.client, left.secure_transport
+    original = secure._transport_request
+    response_received, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_response(key, method, payload, *, timeout, before_send=None):
+        kwargs = {"before_send": before_send} if before_send is not None else {}
+        response = await original(key, method, payload, timeout=timeout, **kwargs)
+        if before_send is not None:
+            response_received.set()
+            await release.wait()
+        return response
+
+    secure._transport_request = delayed_response
+    opening = asyncio.create_task(left.network_attach.open(peer, right.identity.agent_id, "sapphire"))
+    try:
+        await asyncio.wait_for(response_received.wait(), 5)
+        assert any(" opened " in notice for notice in notices)  # Already submitted remotely.
+        client.revoke(peer)
+        client.approve(peer)
+        release.set()
+        with pytest.raises(AttachRefused):
+            await asyncio.wait_for(opening, 5)
+        assert not left.network_attach._channels
+    finally:
+        release.set()
+        if not opening.done():
+            opening.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await opening
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["return", "cancel", "failure"])
+async def test_stale_identity_lookup_cannot_replace_new_secure_session(devices, ending):
+    left, right, _ = devices
+    await handle(left, right)
+    client = left.commands.client
+    peer = right.commands.client.public_key
+    secure = left.secure_transport
+    client.revoke(peer)
+    client.approve(peer)
+    original = secure._new_client_session
+    old_entered, old_release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def delayed_identity(binding):
+        nonlocal calls
+        calls += 1
+        state = await original(binding)
+        if calls == 1:
+            old_entered.set()
+            await old_release.wait()
+            if ending == "failure":
+                raise RelayError("synthetic identity lookup failure")
+        return state
+
+    secure._new_client_session = delayed_identity
+    old = asyncio.create_task(secure.ensure_session(peer, timeout=15))
+    try:
+        await asyncio.wait_for(old_entered.wait(), 5)
+        client.revoke(peer)
+        client.approve(peer)
+        await asyncio.wait_for(secure.ensure_session(peer, timeout=10), 10)
+        binding = secure._current_binding(peer)
+        replacement = secure._outbound[binding]
+        if ending == "cancel":
+            old.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old
+        else:
+            old_release.set()
+            with pytest.raises(RelayError):
+                await asyncio.wait_for(old, 5)
+        assert secure._outbound.get(binding) is replacement
+        assert "agents" in await secure.request(peer, "directory", {}, timeout=5)
+    finally:
+        old_release.set()
+        if not old.done():
+            old.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await old
 
 
 def test_every_relay_method_the_bridge_calls_or_serves_is_allowlisted():
