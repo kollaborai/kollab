@@ -129,6 +129,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
+  `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
+  internal agent message-tool syntax (#622).
 - Gem Studio keeps preview activity choices on one scrollable row with touch-sized targets and visible keyboard focus, makes Save the primary action, and keeps footer actions and save errors usable with enlarged text and long names (#465).
 - ACP: switching a session's profile or loadout now reports the resolved
   provider profile with the harness's model and effort in session state and
