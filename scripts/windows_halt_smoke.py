@@ -31,6 +31,22 @@ def smoke_env(**extra: str) -> dict[str, str]:
     return {**env, **extra}
 
 
+def enable_child_diagnostics(home: Path, env: dict[str, str]) -> Path:
+    """Capture only the throwaway detached child's early stderr, even before logging starts."""
+    hook = home / "smoke-python"
+    hook.mkdir()
+    output = home / "detached-child-stderr.log"
+    (hook / "sitecustomize.py").write_text(
+        "import os, sys\n"
+        "if os.environ.get('KOLLAB_DETACHED_CHILD') == '1':\n"
+        "    sys.stderr = open(os.environ['KOLLAB_SMOKE_CHILD_STDERR'], 'a', buffering=1, encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    env["KOLLAB_SMOKE_CHILD_STDERR"] = str(output)
+    env["PYTHONPATH"] = str(hook) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    return output
+
+
 def status_online(kollab: str, project: Path, env: dict[str, str]) -> bool:
     """Print `kollab --hub status` and say whether an agent is online in it."""
     status = subprocess.run(
@@ -63,6 +79,7 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
     """Start, halt, start again while halted, then resume. Runs after HOME and USERPROFILE are set."""
     from kollabor_config import proc_ctl
     from plugins.hub import halt_runtime, network_halt
+    from plugins.hub.halt_context import HaltUnavailable
     from plugins.hub.presence import get_presence_dir
 
     def online() -> bool:
@@ -77,9 +94,11 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
     network_halt.network_control_refusal = lambda *args, **kwargs: ""  # no console on a runner
     # A network refuses a halt with fewer than two counting machines, since a resume needs a second one to confirm
     # it: logic with no OS code, tested in tests/unit/test_network_halt.py.
-    # This runner is one machine, so this process lets it halt itself: the smoke proves the Windows halt, the
-    # halted launch and the local resume, not that rule. Nothing can own a folder's network on Windows yet (the
-    # relay owner refuses there), so _via_owner always takes the halt in this process, where this applies.
+    # This runner is one machine, so it cannot halt itself under that rule; the smoke proves the Windows halt,
+    # the halted launch and the local resume, not the rule. An owner now runs on Windows too and would take
+    # the halt with the real rule, so the bypass must cover the owner path as well: an owner's single-machine
+    # refusal falls back to this folder's own record, the same copy _via_owner takes when no owner runs.
+    # Test-only, this smoke's process; the rule itself never changes.
     network_halt.halt_allowed = lambda view: True
 
     def traced(call):  # cli_control prints only the error's message; a failed run needs its line
@@ -92,7 +111,18 @@ def halt_smoke(kollab: str, project: Path, env: dict[str, str], log: Path) -> No
 
         return run
 
-    halt_runtime._via_owner = traced(halt_runtime._via_owner)
+    real_via_owner = halt_runtime._via_owner
+
+    async def via_owner_single_machine(folder, control, action, root, payload):
+        """Test-only: an owner's one-machine refusal takes the halt on the folder's own record."""
+        try:
+            return await real_via_owner(folder, control, action, root, payload)
+        except HaltUnavailable as error:
+            if "one machine that can confirm a resume" not in str(error):
+                raise
+            return control.halt_act(action, payload)
+
+    halt_runtime._via_owner = traced(via_owner_single_machine)
     halt_runtime._act = traced(halt_runtime._act)
     code = asyncio.run(halt_runtime.cli_control("halt", ["--here-only", "--reason", "windows smoke"]))
     if code != 0:  # the listener runs detached with no output: run one here so its error shows
@@ -155,6 +185,7 @@ def main() -> int:
     (home / ".kollab" / "config.json").write_text(json.dumps({"application": {"setup_completed": True}}))
     log = home / "detached.log"
     env = smoke_env(HOME=str(home), USERPROFILE=str(home))
+    child_stderr = enable_child_diagnostics(home, env)
     # This process runs the halt itself, so it needs the same home before any kollab import.
     os.environ.clear()
     os.environ.update(env)
@@ -164,10 +195,19 @@ def main() -> int:
     try:
         halt_smoke(args.kollab, project, env, log)
     except BaseException:
-        for path in [*sorted(home.rglob("kollab.log")), log]:
+        from kollabor_config import proc_ctl
+
+        launched = re.findall(r"\[detached\] pid (\d+)", log.read_text(errors="replace") if log.exists() else "")
+        for pid in launched:
+            print(f"detached pid {pid}: alive={proc_ctl.pid_alive(int(pid))}")
+        for path in [*sorted(home.rglob("kollab.log")), log, child_stderr]:
             if path.exists():
+                lines = path.read_text(errors="replace").splitlines()
+                if path.name == "kollab.log":
+                    print(f"--- first 60 lines of {path}")
+                    print("\n".join(lines[:60]))
                 print(f"--- last 60 lines of {path}")
-                print("\n".join(path.read_text(errors="replace").splitlines()[-60:]))
+                print("\n".join(lines[-60:]))
         raise
     finally:
         try:

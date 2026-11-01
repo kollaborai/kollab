@@ -62,6 +62,12 @@ from .relay_backend import (
     validate_backend_url,
 )
 
+try:  # POSIX only: this module is imported on Windows too
+    import grp
+    import resource
+except ImportError:  # Windows has no groups or descriptor limits
+    grp = resource = None
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -1656,7 +1662,7 @@ def _source_ip(
 ) -> str | None:
     transport = request.transport
     sock = transport.get_extra_info("socket") if transport is not None else None
-    if sock is not None and sock.family == socket.AF_UNIX:
+    if sock is not None and sock.family == getattr(socket, "AF_UNIX", None):
         # Only a process allowed to open the listener's socket file (the proxy;
         # see bind_unix_socket) gets here, so its X-Real-IP is the client. No
         # header means a misconfigured proxy: refuse rather than share one bucket.
@@ -1693,6 +1699,8 @@ def raise_fd_limit(max_connections: int) -> int:
         # effectively unbounded, and there is no setrlimit to call.
         return max_connections
     need = max_connections + FD_HEADROOM
+    if resource is None:  # Windows has no descriptor limit to raise
+        return max_connections
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft >= need:
         return max_connections
@@ -1716,6 +1724,8 @@ def bind_unix_socket(path: str, group: str | None = None) -> socket.socket:
     connect in between. A leftover socket from a crash is replaced; a live
     one, any other file, or a directory its group or others can write to is refused.
     """
+    if os.name == "nt":  # no AF_UNIX sockets, uid or grp on Windows
+        raise RelayConfigError("--unix-socket needs Linux or macOS")
     if not os.path.isabs(path) or "\0" in path or len(path.encode()) > UNIX_SOCKET_MAX_BYTES:
         raise RelayConfigError(f"unix socket must be an absolute path of at most {UNIX_SOCKET_MAX_BYTES} bytes")
     parent = os.path.dirname(path)

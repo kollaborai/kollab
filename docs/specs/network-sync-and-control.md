@@ -458,7 +458,10 @@ keys, the managed-config record or MCP settings.
   relay-owner lock (`relay_owner.py:228`) of that network's lexicographically
   first folder in scope, once the sweep has stopped that folder's owner, and
   opens its relay link with that folder's state dir. Networks with no folder
-  in scope keep their own owners.
+  in scope keep their own owners. If the old owner still holds the lock or a
+  link attempt fails, the listener retries while the halt remains active.
+  The listener also sends signed membership and counting records so a newly
+  admitted machine can validate a halt issued immediately after bootstrap.
 - Dispatch is an allowlist (R3-F13): before anything else, the listener drops
   every call from a stranger link and every method other than
   `secure_identity`, `secure_packet`, and inside the secure session
@@ -653,12 +656,23 @@ for the same resume hash.
 - New secure method `network_halt` (added to the set at `relay_agent.py:2040`).
   Payload: the machine's active halts, open resume proposals with their
   confirmations, effective resumes, and each issuer's chain head. Reply: the
-  receiver's. Two machines converge in one exchange.
+  receiver's. Without concurrent changes, two machines converge in one exchange.
 
 ### Reaching Offline Devices (R7)
 
 - The issuer sends the order to every member online and retries each until it
   acks (10 s doubling to 5 minutes, like `config_sync_service.py`).
+- An acknowledgement applies to the exact book sent, not a later local change.
+  A reply must include each sent active halt and open proposal with its sent
+  confirmations, or a verified effective resume that covers it; an invalid
+  or incomplete reply is retried. Changes made during an exchange are sent
+  in a later exchange. For effective resumes, a new peer may return a fixed-size
+  digest of the receiving device and exact sent resume batch, including
+  confirmations, only after verifying the signed orders and rereading the
+  recorded lifts. Older peers
+  may instead return the verified effective signed resumes. An older peer that
+  compacted those resumes and cannot return a receipt remains unacknowledged
+  and is retried; revocations retain their existing exchange behavior.
 - Member lists go to each member once per relay session and again when the
   list changes (`network_members.py:176`; `tick()` skips an unchanged digest).
   Active halt hashes, open proposal hashes with their confirmation count,
