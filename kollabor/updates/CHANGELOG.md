@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
 
 ### Added
+- Scheduled hub cron jobs are readable outside the terminal: each
+  agent's unix socket answers a read-only, local-operator-only
+  `cron_jobs` question, and the engine aggregates the schedules
+  across live agents (web UI view lands once its mockup is approved,
+  issue #612).
 - Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
 - Team launches now support member selection or exclusions across the CLI,
   TUI and Web UI. The launch sheet sets the workspace, profile, lead and

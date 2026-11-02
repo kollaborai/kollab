@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MOCKUP — Hub cron jobs (#612)</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --dim:#8b949e; --accent:#58a6ff; --err:#f85149; --ok:#3fb950; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system, "Segoe UI", sans-serif; padding:16px; }
+  .banner { background:#1f2937; border:1px dashed var(--accent); color:var(--accent); padding:8px 12px; border-radius:6px; margin-bottom:16px; font-size:12px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  h1 { font-size:16px; font-weight:600; }
+  .meta { color:var(--dim); font-size:12px; }
+  button.refresh { background:var(--panel); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:12px; cursor:pointer; }
+  button.refresh:hover { border-color:var(--accent); }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--dim); padding:10px 12px; border-bottom:1px solid var(--border); }
+  td { padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  .agent { color:var(--accent); font-weight:600; white-space:nowrap; }
+  .jobid { color:var(--dim); font-size:12px; font-family:ui-monospace, monospace; }
+  .target { white-space:nowrap; }
+  .msg { max-width:320px; }
+  .next { color:var(--ok); white-space:nowrap; }
+  .err { color:var(--err); max-width:220px; }
+  .mode { color:var(--dim); font-size:12px; }
+  .empty { padding:32px; text-align:center; color:var(--dim); }
+  .empty strong { color:var(--fg); display:block; margin-bottom:4px; }
+  .hint { color:var(--dim); font-size:12px; margin-top:10px; }
+  @media (max-width: 560px) {
+    table, thead, tbody, tr, td { display:block; }
+    thead { display:none; }
+    tr { border-bottom:1px solid var(--border); padding:8px 12px; }
+    td { border:none; padding:3px 0; }
+    td::before { content:attr(data-l); color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.05em; display:block; }
+    .agent::before { content:"agent"; }
+    .msg { max-width:none; }
+    .err { max-width:none; }
+  }
+</style>
+</head>
+<body>
+<div class="banner">MOCKUP — sample data only. Placement: Settings tab, panel "Hub cron jobs". Read-only; delete stays in the owning agent's terminal. No production code until this mockup is approved (issue #612).</div>
+
+<header>
+  <div>
+    <h1>Hub cron jobs</h1>
+    <div class="meta">3 jobs across 3 live agents &middot; synced just now</div>
+  </div>
+  <button class="refresh">Refresh</button>
+</header>
+
+<div class="panel">
+<table>
+  <thead>
+    <tr><th>Agent</th><th>Job</th><th>Schedule</th><th>Target</th><th>Message</th><th>Next fire</th><th>Last error</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="agent" data-l="agent">moonstone <span class="jobid">ab12cd34</span></td>
+      <td class="mode">recurring</td>
+      <td class="mode" data-l="schedule">every 1h</td>
+      <td class="target" data-l="target">lapis</td>
+      <td class="msg" data-l="message">report the pulse</td>
+      <td class="next" data-l="next fire">in 30m</td>
+      <td class="err"></td>
+    </tr>
+    <tr>
+      <td class="agent" data-l="agent">moonstone <span class="jobid">9876fedc</span></td>
+      <td class="mode">one-shot</td>
+      <td class="mode" data-l="schedule">every 1m 30s</td>
+      <td class="target" data-l="target">infra@home-server</td>
+      <td class="msg" data-l="message">check the tunnel</td>
+      <td class="next" data-l="next fire">in 1m 10s</td>
+      <td class="err">peer has no conversation grant for this agent</td>
+    </tr>
+    <tr>
+      <td class="agent" data-l="agent">koordinator <span class="jobid">5a5b5c5d</span></td>
+      <td class="mode">recurring</td>
+      <td class="mode" data-l="schedule">every 6h</td>
+      <td class="target" data-l="target">all</td>
+      <td class="msg" data-l="message">standup: one-line status</td>
+      <td class="next" data-l="next fire">in 2h 14m</td>
+      <td class="err"></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="panel" style="margin-top:16px; display:none;">
+  <div class="empty"><strong>No scheduled jobs</strong>No live agent on this machine has a hub cron job. Schedule one from an agent's terminal: /hub cron add</div>
+</div>
+
+<p class="hint">Rows are read-only. Deleting a job happens in the owning agent's terminal (/hub cron delete) and the row disappears here on refresh.</p>
+</body>
+</html>
