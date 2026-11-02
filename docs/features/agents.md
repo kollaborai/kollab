@@ -213,6 +213,28 @@ Kollab only loads skills that match the [Agent Skills](https://agentskills.io/sp
 5. `metadata` values must all be strings.
 6. After upgrading Kollab, clear stale agent caches if prompts look wrong: remove `~/.kollab/agent_metadata.cache`.
 
+## Project directory lifecycle
+
+Each project gets a session directory under `~/.kollab/projects/`, named with
+an encoded form of the project path. Kollab keeps these directories safe:
+
+- **Reserved names** (`default`, `hub`, `logs`, `voice`, `_trash`) are never swept.
+- **Activity guard**: directories written recently (configurable via
+  `kollabor.projects.sweep_boot_active_window_hours`, default 24) are left alone.
+- **Provenance**: an entry is kept when its slug decodes back to an existing
+  project, its owner marker names a live project, it matches a tmp-path
+  workspace, or a pruned prefix search finds a live project. Entries whose
+  provenance cannot be resolved (lossy encodings make look-alike slugs
+  possible) are only reported, never moved.
+- **Quarantine, not delete**: confirmed orphans and empty shells move to
+  `~/.kollab/projects/_trash` at boot (gated by
+  `kollabor.projects.sweep_boot_enabled`, on by default). Quarantined content
+  is purged after `kollabor.projects.sweep_retention_days` (default 14), and
+  only if no project with that path has reappeared.
+- **Manual sweep**: `kollab --cleanup-projects` prints the plan and changes
+  nothing. Add `--execute` to apply it; `--retention-days N` overrides
+  retention for that run.
+
 ## Built-in Agents
 
 ### default

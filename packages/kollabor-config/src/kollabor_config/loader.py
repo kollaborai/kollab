@@ -488,6 +488,15 @@ class ConfigLoader:
                     "timeout_seconds": 5,
                     "include_prereleases": False,
                 },
+                "projects": {
+                    # Issue #647 orphan sweep: boot-time quarantine of
+                    # project state dirs whose workspace no longer exists.
+                    # Boot never deletes; trash purges need
+                    # kollab --cleanup-projects --execute.
+                    "sweep_boot_enabled": True,
+                    "retention_days": 14,
+                    "active_window_hours": 24,
+                },
                 "llm": {
                     # Note: api_url, api_token, model, temperature, timeout are now in profiles
                     # See kollabor.llm.profiles.* for LLM connection settings

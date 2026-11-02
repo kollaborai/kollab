@@ -708,6 +708,37 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
+        "--cleanup-projects",
+        dest="cleanup_projects",
+        action="store_true",
+        help=(
+            "Sweep orphaned session directories under ~/.kollab/projects "
+            "(issue #647). Dry-run report by default; pair with --execute "
+            "to quarantine orphans, remove empty shells and purge expired "
+            "quarantine trash."
+        ),
+    )
+
+    parser.add_argument(
+        "--execute",
+        dest="cleanup_execute",
+        action="store_true",
+        help="Apply the --cleanup-projects plan (without it: dry run only)",
+    )
+
+    parser.add_argument(
+        "--retention-days",
+        dest="retention_days",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Override the quarantine retention window (default 14) for "
+            "--cleanup-projects --execute"
+        ),
+    )
+
+    parser.add_argument(
         "--update",
         "--upgrade",
         dest="update",
@@ -1116,6 +1147,32 @@ async def async_main() -> None:
         print("Configuration reset complete!")
         print(f"  - Global config: {global_config}")
         print(f"  - Local config:  {local_config}")
+        return
+
+    if args.cleanup_projects:
+        from kollabor_config.projects_sweep import run_projects_sweep
+
+        kwargs: dict = {"mode": "execute" if args.cleanup_execute else "dry-run"}
+        if args.retention_days is not None:
+            kwargs["retention_days"] = float(args.retention_days)
+        plan, report = run_projects_sweep(own_project=Path.cwd(), **kwargs)
+        if report:
+            for line in report:
+                print(line)
+        else:
+            print("No orphaned project directories found.")
+        if kwargs["mode"] == "dry-run":
+            print(
+                "Dry run: nothing was changed. Re-run with --execute to "
+                "quarantine these directories (recoverable for the retention "
+                "window)."
+            )
+        else:
+            print(
+                f"Done: {len(plan.quarantines)} quarantined, "
+                f"{len(plan.empty_shells)} empty shells removed, "
+                f"{len(plan.purges)} expired trash entries purged."
+            )
         return
 
     if args.update:

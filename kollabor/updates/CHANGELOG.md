@@ -122,6 +122,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   locks. A browser that cannot draw gems (no WebGL) shows each gem's saved
   headshot, a PNG taken by a browser that can, instead of a plain blob (#380).
 
+- Startup sweeps `~/.kollab/projects` for session directories orphaned by
+  removed or renamed projects: each entry is proven live by round-trip decode,
+  an owner marker, a tmp-path match or a pruned prefix search; ambiguous
+  look-alike slugs are only reported, never moved. Confirmed orphans and empty
+  shells are quarantined under `projects/_trash` on boot (purged after a
+  14-day retention, never while the project still exists or a session is
+  active). `kollab --cleanup-projects` previews the sweep without touching
+  anything; add `--execute` to apply it, `--retention-days N` to tune
+  retention (#647).
 ### Changed
 - Gems are born furry 85% of the time (hair 10%, bare 5%), the same on every
   device, and fur color is drawn too. Gems recorded bare are dressed once at
