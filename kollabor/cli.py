@@ -595,6 +595,15 @@ Telegram bridge setup (run inside interactive mode):
         help="Open kollab in your browser (http://127.0.0.1:8080)",
     )
     parser.add_argument(
+        "--web-ui-hosts",
+        dest="web_ui_hosts",
+        default=None,
+        metavar="IP[,IP...]",
+        help="With --web-ui: extra interface addresses to serve on, comma "
+        "separated (LAN/VPN opt-in; localhost is always bound, and each "
+        "extra address prints an exposure warning)",
+    )
+    parser.add_argument(
         "--mcp-hub",
         action="store_true",
         default=False,
@@ -1137,7 +1146,7 @@ async def async_main() -> None:
 
     # Handle --web-ui: spawn engine + browser UI and block until Ctrl+C.
     if args.web_ui:
-        await _handle_cli_web_ui(restart=args.restart)
+        await _handle_cli_web_ui(restart=args.restart, hosts=args.web_ui_hosts)
         return
     if args.restart:
         print("Error: --restart works with --web-ui", file=sys.stderr)
@@ -2577,7 +2586,7 @@ def _adopt_login_path() -> None:
         os.environ["PATH"] = os.pathsep.join(dict.fromkeys(login.split(os.pathsep) + current))
 
 
-async def _handle_cli_web_ui(restart: bool = False) -> None:
+async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None) -> None:
     """Handle --web-ui: spawn the engine + browser UI, block until Ctrl+C.
 
     Both pieces already exist as installable console entry points
@@ -2702,6 +2711,10 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     env = dict(os.environ)
     env["KOLLAB_ENGINE_URL"] = engine_url
     env["KOLLAB_WEBUI_PORT"] = str(webui_port)
+    if hosts:
+        # Explicit opt-in per invocation: the flag, not whatever the shell
+        # exports, decides whether the UI is served beyond this machine.
+        env["KOLLAB_WEBUI_HOSTS"] = hosts
     webui_proc = subprocess.Popen(
         [*py, "-c", "from kollabor_webui import main; main()"], env=env, **group_flags
     )
