@@ -114,6 +114,98 @@ def test_seed_preserves_a_reparse_global_config_parent(tmp_path, monkeypatch):
     assert list((config / "agents").iterdir()) == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX home anchor")
+def test_system_link_above_home_does_not_block_safe_seeding(tmp_path, monkeypatch):
+    home = tmp_path / "real-home"
+    home.mkdir()
+    alias = tmp_path / "home-alias"
+    _link(alias, home, directory=True)
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    monkeypatch.setenv("HOME", str(alias))
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled)
+
+    config_utils._copy_seed_agents_to_global(alias / ".kollab" / "agents", alias / "old")
+
+    assert (home / ".kollab" / "agents" / "operator" / "system_prompt.md").read_text() == "bundle"
+
+
+def test_parent_swap_before_staging_never_writes_to_link_target(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    sections = target / "sections"
+    moved_sections = target / "sections-original"
+    outside = tmp_path / "outside"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "header.md").write_text("bundled")
+    sections.mkdir(parents=True)
+    outside.mkdir()
+    (outside / "user-marker.txt").write_text("user")
+    real_open = config_utils.os.open
+    raced = False
+
+    def swap_before_staging(path, flags, *args, **kwargs):
+        nonlocal raced
+        if not raced and ".header.md.seed-" in str(path):
+            raced = True
+            try:
+                sections.rename(moved_sections)
+            except OSError:
+                if sys.platform != "win32":
+                    raise
+                return real_open(path, flags, *args, **kwargs)
+            _link(sections, outside, directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "open", swap_before_staging)
+    try:
+        config_utils._copy_missing_tree_contents(source, target)
+    except OSError:
+        pass
+
+    assert raced
+    assert (outside / "user-marker.txt").read_text() == "user"
+    assert sorted(p.name for p in outside.iterdir()) == ["user-marker.txt"]
+
+
+def test_parent_swap_before_creating_directory_never_writes_outside(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    moved_target = tmp_path / "target-original"
+    outside = tmp_path / "outside"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "header.md").write_text("bundled")
+    target.mkdir()
+    outside.mkdir()
+    (outside / "user-marker.txt").write_text("user")
+    real_mkdir = config_utils.os.mkdir
+    raced = False
+
+    def swap_before_mkdir(path, *args, **kwargs):
+        nonlocal raced
+        if not raced and Path(path).name == "sections":
+            raced = True
+            try:
+                target.rename(moved_target)
+            except OSError:
+                if sys.platform != "win32":
+                    raise
+                return real_mkdir(path, *args, **kwargs)
+            _link(target, outside, directory=True)
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "mkdir", swap_before_mkdir)
+    try:
+        config_utils._copy_missing_tree_contents(source, target)
+    except OSError:
+        pass
+
+    assert raced
+    assert (outside / "user-marker.txt").read_text() == "user"
+    assert sorted(p.name for p in outside.iterdir()) == ["user-marker.txt"]
+
+
 def test_seed_still_copies_missing_and_preserves_existing_files(tmp_path):
     source = tmp_path / "bundled"
     target = tmp_path / "global"
@@ -140,7 +232,7 @@ def test_seed_does_not_clobber_a_concurrently_created_file(tmp_path, monkeypatch
 
     def create_before_link(source_path, target_path, *args, **kwargs):
         nonlocal raced
-        if Path(target_path) == destination and not raced:
+        if Path(target_path).name == destination.name and not raced:
             raced = True
             destination.write_text("concurrent user content")
         return original_link(source_path, target_path, *args, **kwargs)
@@ -204,6 +296,7 @@ def test_no_safe_primitive_leaves_bundle_usable(tmp_path, monkeypatch, caplog, e
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.chdir(project)
     monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
     monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled if name == "agents" else None)
@@ -224,6 +317,38 @@ def test_no_safe_primitive_leaves_bundle_usable(tmp_path, monkeypatch, caplog, e
     assert "Existing files were preserved" in caplog.text
 
 
+def test_seed_failure_does_not_skip_independent_skill_retirement(tmp_path, monkeypatch):
+    import hashlib
+
+    config = tmp_path / ".kollab"
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    skill = config / "skills" / "tool" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(b"known skill")
+    digest = hashlib.sha256(b"known skill").hexdigest()
+    monkeypatch.setattr(config_utils, "get_config_directory", lambda: config)
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(
+        config_utils,
+        "_get_bundled_dir",
+        lambda name: bundled if name == "agents" else None,
+    )
+    monkeypatch.setattr(
+        config_utils, "_load_skill_seed_hashes", lambda: {"tool": {"SKILL.md": {digest}}}
+    )
+
+    def deny_link(*args, **kwargs):
+        raise OSError(errno.ENOTSUP, "hard links unsupported")
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    config_utils.initialize_system_prompt()
+
+    assert not skill.exists()
+    assert (config / "skills" / ".seed-backup" / "tool" / "SKILL.md").read_bytes() == b"known skill"
+
+
 def test_no_safe_primitive_reports_an_existing_global_shadow(tmp_path, monkeypatch, caplog):
     from kollabor_agent import agent_manager
 
@@ -238,6 +363,7 @@ def test_no_safe_primitive_reports_an_existing_global_shadow(tmp_path, monkeypat
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.chdir(project)
     monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
     monkeypatch.setattr(
@@ -273,12 +399,12 @@ def test_windows_rename_fallback_preserves_concurrent_file(tmp_path, monkeypatch
     def deny_link(*args, **kwargs):
         raise PermissionError("hard links denied")
 
-    def windows_rename(src, dst):
+    def windows_rename(src, dst, **kwargs):
         if race:
             target.write_text("user")
-        if Path(dst).exists() or Path(dst).is_symlink():
+        if target.exists() or target.is_symlink():
             raise FileExistsError(str(dst))
-        return real_rename(src, dst)
+        return real_rename(src, dst, **kwargs)
 
     monkeypatch.setattr(config_utils.os, "link", deny_link)
     monkeypatch.setattr(config_utils.os, "rename", windows_rename)
@@ -430,6 +556,20 @@ def test_existing_windows_junction_is_not_traversed(tmp_path):
     assert list(outside.iterdir()) == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows directory handles only")
+def test_windows_seed_directory_blocks_concurrent_parent_rename(tmp_path):
+    directory = tmp_path / "sections"
+    moved = tmp_path / "sections-original"
+    directory.mkdir()
+
+    with config_utils._seed_directory(directory, create=False):
+        with pytest.raises(OSError):
+            directory.rename(moved)
+
+    assert directory.is_dir()
+    assert not moved.exists()
+
+
 def test_seed_skips_linked_global_root_but_agent_resolution_still_works(tmp_path, monkeypatch):
     from kollabor_agent import agent_manager
 
@@ -447,6 +587,7 @@ def test_seed_skips_linked_global_root_but_agent_resolution_still_works(tmp_path
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.chdir(project)
     monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled if name == "agents" else None)
     monkeypatch.setattr(agent_manager, "get_bundled_agents_dir", lambda: bundled)

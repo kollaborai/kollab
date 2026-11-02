@@ -1,5 +1,6 @@
 """Configuration utilities for Kollab."""
 
+import errno
 import hashlib
 import io
 import json
@@ -10,6 +11,7 @@ import stat
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO, Optional
@@ -20,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Platform check
 IS_WINDOWS = sys.platform == "win32"
+_SEED_DIR_FD_SUPPORTED = all(
+    function in os.supports_dir_fd for function in (os.open, os.mkdir, os.link, os.unlink)
+)
 
 # Canonical runtime/config roots for the public Kollab app.
 APP_CONFIG_DIR_NAME = ".kollab"
@@ -780,10 +785,16 @@ def initialize_system_prompt() -> None:
         old_global_prompt_dir = global_config_dir / "system_prompt"
 
         # Ensure global agents directory has all seed agents
-        _copy_seed_agents_to_global(global_agents_dir, old_global_prompt_dir)
+        try:
+            _copy_seed_agents_to_global(global_agents_dir, old_global_prompt_dir)
+        except Exception as e:
+            logger.error("Failed to seed bundled agents: %s", e)
 
         # Skills load from bundles/skills; stale global copies would shadow them
-        _retire_seeded_skills(global_config_dir / "skills")
+        try:
+            _retire_seeded_skills(global_config_dir / "skills")
+        except Exception as e:
+            logger.error("Failed to retire seeded skills: %s", e)
 
     except Exception as e:
         logger.error(f"Failed to initialize system prompt: {e}")
@@ -801,57 +812,159 @@ def _is_link_or_reparse(path: Path) -> bool:
     )
 
 
-def _copy_missing_tree_contents(source_dir: Path, target_dir: Path) -> tuple[int, int]:
-    """Copy only missing files/directories from source tree into target tree.
+@contextmanager
+def _seed_directory(path: Path, *, create: bool):
+    """Pin a destination directory without traversing links or reparse points."""
+    if os.name == "nt":
+        with _windows_seed_directory(path, create=create):
+            yield None
+        return
 
-    Preserves existing user files. Returns a tuple of:
-      (files_or_dirs_copied, existing_entries_preserved)
-    """
+    if not _SEED_DIR_FD_SUPPORTED or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise OSError("safe directory-relative agent seeding is unavailable")
+    absolute = Path(os.path.abspath(path))
+    # The OS-supplied home may itself sit beneath a system link (for example
+    # macOS /var -> /private/var). Treat the resolved home as the trusted
+    # anchor, while still refusing links below it such as ~/.kollab/agents.
+    home = Path(os.path.abspath(Path.home()))
+    try:
+        relative_to_home = absolute.relative_to(home)
+    except ValueError:
+        pass
+    else:
+        absolute = home.resolve() / relative_to_home
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(absolute.anchor, flags)
+    try:
+        for part in absolute.parts[1:]:
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _windows_seed_directory(path: Path, *, create: bool):
+    """Pin each directory against rename while refusing Windows reparse points."""
+    import ctypes
+    from ctypes import wintypes
+
+    class AttributeTagInfo(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_dir = kernel.CreateFileW
+    open_dir.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    open_dir.restype = wintypes.HANDLE
+    get_info = kernel.GetFileInformationByHandleEx
+    get_info.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    get_info.restype = wintypes.BOOL
+    close = kernel.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+    invalid = ctypes.c_void_p(-1).value
+    read_attributes = 0x80
+    share_read_write = 0x1 | 0x2
+    open_existing = 3
+    backup_semantics = 0x02000000
+    open_reparse_point = 0x00200000
+    attribute_tag_info = 9
+    directory_attribute = 0x10
+    reparse_attribute = 0x400
+    absolute = Path(os.path.abspath(path))
+    parents = list(reversed([absolute, *absolute.parents]))
+    handles = []
+    try:
+        for directory in parents[1:]:
+            if _is_link_or_reparse(directory):
+                raise OSError(errno.ELOOP, "refusing linked seed directory", str(directory))
+            if create and not directory.exists():
+                try:
+                    directory.mkdir()
+                except FileExistsError:
+                    pass
+            # FILE_SHARE_DELETE is deliberately omitted, preventing another
+            # process from renaming a checked ancestor before publication.
+            handle = open_dir(
+                str(directory), read_attributes, share_read_write, None,
+                open_existing, backup_semantics | open_reparse_point, None,
+            )
+            if handle == invalid:
+                raise ctypes.WinError(ctypes.get_last_error())
+            handles.append(handle)
+            info = AttributeTagInfo()
+            if not get_info(handle, attribute_tag_info, ctypes.byref(info), ctypes.sizeof(info)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if info.attributes & reparse_attribute or not info.attributes & directory_attribute:
+                raise OSError(errno.ELOOP, "refusing linked seed directory", str(directory))
+        yield
+    finally:
+        for handle in reversed(handles):
+            close(handle)
+
+
+def _copy_missing_tree_contents(source_dir: Path, target_dir: Path) -> tuple[int, int]:
+    """Copy missing seed entries, keeping each destination directory pinned."""
     copied = 0
     preserved = 0
-
-    if not source_dir.exists() or not source_dir.is_dir():
+    if not source_dir.is_dir():
         return copied, preserved
-
-    # A user's agent (or one of its sections) may be a link into another
-    # tree. Seeding must not write through it, including when its target is
-    # missing. Treat the link itself as an existing, user-owned entry.
     if _is_link_or_reparse(target_dir):
         return copied, preserved + 1
 
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    for item in source_dir.iterdir():
-        target = target_dir / item.name
-
-        if _is_link_or_reparse(target):
-            preserved += 1
-            continue
-
-        if item.is_dir():
-            try:
-                target.mkdir()
-                copied += 1
-            except FileExistsError:
-                pass
-            if _is_link_or_reparse(target) or not target.is_dir():
-                preserved += 1
-                continue
-            nested_copied, nested_preserved = _copy_missing_tree_contents(item, target)
-            copied += nested_copied
-            preserved += nested_preserved
-        else:
-            if _copy_file_if_missing(item, target):
-                copied += 1
-            else:
-                preserved += 1
-
+    try:
+        with _seed_directory(target_dir, create=True) as directory_fd:
+            for item in source_dir.iterdir():
+                target = target_dir / item.name
+                if _is_link_or_reparse(target):
+                    preserved += 1
+                    continue
+                if item.is_dir():
+                    try:
+                        if directory_fd is None:
+                            target.mkdir()
+                        else:
+                            os.mkdir(item.name, dir_fd=directory_fd)
+                        copied += 1
+                    except FileExistsError:
+                        pass
+                    if _is_link_or_reparse(target) or not target.is_dir():
+                        preserved += 1
+                        continue
+                    nested_copied, nested_preserved = _copy_missing_tree_contents(item, target)
+                    copied += nested_copied
+                    preserved += nested_preserved
+                elif _copy_file_if_missing(item, target, directory_fd=directory_fd):
+                    copied += 1
+                else:
+                    preserved += 1
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            logger.warning("Preserving linked or replaced agent seed directory: %s", target_dir)
+            return copied, preserved + 1
+        raise
     return copied, preserved
 
 
-def _copy_file_if_missing(source: Path, target: Path) -> bool:
+def _copy_file_if_missing(
+    source: Path, target: Path, *, directory_fd: Optional[int] = None
+) -> bool:
     """Copy a complete seed without replacing a concurrently created target."""
-    if _is_link_or_reparse(target) or target.exists():
+    if _is_link_or_reparse(target):
         return False
     with source.open("rb") as source_file:
         info = os.fstat(source_file.fileno())
@@ -860,6 +973,7 @@ def _copy_file_if_missing(source: Path, target: Path) -> bool:
             target,
             mode=stat.S_IMODE(info.st_mode),
             timestamps=(info.st_atime_ns, info.st_mtime_ns),
+            directory_fd=directory_fd,
         )
 
 
@@ -874,17 +988,41 @@ def _publish_seed_file(
     *,
     mode: int = 0o600,
     timestamps: Optional[tuple[int, int]] = None,
+    directory_fd: Optional[int] = None,
 ) -> bool:
-    """Stage bytes beside the target and publish with atomic create-if-absent.
+    """Stage complete bytes in a pinned directory and publish without replacement."""
+    if directory_fd is not None:
+        return _publish_in_seed_directory(source, target, mode, timestamps, directory_fd)
+    with _seed_directory(target.parent, create=False) as pinned:
+        return _publish_in_seed_directory(source, target, mode, timestamps, pinned)
 
-    Hard links provide publication; Windows can use its no-overwrite rename if
-    they are unavailable. If neither is available, no partial target is
-    installed and an existing entry is not replaced.
-    """
-    if _is_link_or_reparse(target) or target.exists():
-        return False
 
-    fd, staged_path = tempfile.mkstemp(prefix=f".{target.name}.seed-", dir=target.parent)
+def _publish_in_seed_directory(
+    source: BinaryIO,
+    target: Path,
+    mode: int,
+    timestamps: Optional[tuple[int, int]],
+    directory_fd: Optional[int],
+) -> bool:
+    if directory_fd is None:
+        if _is_link_or_reparse(target) or target.exists():
+            return False
+        fd, staged_name = tempfile.mkstemp(prefix=f".{target.name}.seed-", dir=target.parent)
+    else:
+        try:
+            os.stat(target.name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            return False
+        staged_name = f".{target.name}.seed-{os.urandom(16).hex()}"
+        fd = os.open(
+            staged_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+
     try:
         with os.fdopen(fd, "wb") as staged_file:
             shutil.copyfileobj(source, staged_file)
@@ -895,7 +1033,16 @@ def _publish_seed_file(
                 os.utime(staged_file.fileno(), ns=timestamps)
             os.fsync(staged_file.fileno())
         try:
-            os.link(staged_path, target)
+            if directory_fd is None:
+                os.link(staged_name, target)
+            else:
+                os.link(
+                    staged_name,
+                    target.name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
         except FileExistsError:
             return False
         except (OSError, NotImplementedError, AttributeError) as link_error:
@@ -906,10 +1053,16 @@ def _publish_seed_file(
                     "Use a filesystem that supports hard links, or use the bundled "
                     "agent where no local or global override exists."
                 ) from link_error
-            # On Windows, rename fails when the destination already exists.
-            # Never use os.replace: it would overwrite a concurrent user file.
             try:
-                os.rename(staged_path, target)
+                if directory_fd is None:
+                    os.rename(staged_name, target)
+                else:
+                    os.rename(
+                        staged_name,
+                        target.name,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                    )
             except FileExistsError:
                 return False
             except (OSError, NotImplementedError, AttributeError) as rename_error:
@@ -920,7 +1073,13 @@ def _publish_seed_file(
                     "no local or global override exists."
                 ) from rename_error
     finally:
-        Path(staged_path).unlink(missing_ok=True)
+        if directory_fd is None:
+            Path(staged_name).unlink(missing_ok=True)
+        else:
+            try:
+                os.unlink(staged_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
     return True
 
 
@@ -977,8 +1136,6 @@ def _copy_seed_agents_to_global(
                 old_global_default, global_agents_dir / "default"
             )
         return
-
-    global_agents_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy each agent from seed to global without overwriting existing user files
     for agent_dir in seed_agents_dir.iterdir():
@@ -1122,7 +1279,8 @@ def _migrate_old_prompt_to_agent(old_prompt_file: Path, agent_dir: Path) -> None
     if any(_is_link_or_reparse(path) for path in (agent_dir, agent_dir.parent, agent_dir.parent.parent)):
         return
 
-    agent_dir.mkdir(parents=True, exist_ok=True)
+    with _seed_directory(agent_dir, create=True):
+        pass
 
     new_prompt_file = agent_dir / "system_prompt.md"
     if _copy_file_if_missing(old_prompt_file, new_prompt_file):
@@ -1161,7 +1319,8 @@ def _create_agent_from_defaults(agent_dir: Path) -> None:
         logger.info(f"Created agent from seed: {agent_dir}")
     else:
         # Fallback: create minimal agent
-        agent_dir.mkdir(parents=True, exist_ok=True)
+        with _seed_directory(agent_dir, create=True):
+            pass
 
         prompt_file = agent_dir / "system_prompt.md"
         if _write_text_if_missing(prompt_file, get_default_system_prompt()):
