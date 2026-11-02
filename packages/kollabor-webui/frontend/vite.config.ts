@@ -187,6 +187,7 @@ const mainConfig = defineConfig({
       "tests/gem-headshot.test.ts",
       "tests/field-renderer-textarea.test.tsx",
       "src/components/assistant-ui/tool-fallback.test.tsx",
+      "tests/agent-type-glyph.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",
       "tests/trajectory-detail-title.test.ts",

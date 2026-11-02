@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { chromium } from "playwright-core";
 import { createServer } from "vite";
@@ -17,7 +17,7 @@ const topics = [
   { id: "phone-access", title: "PhoneLink" },
 ];
 
-function makeFixtures() {
+export function makeFixtures(options = {}) {
   let createdSession = null;
   let createPayload = null;
   let resolveCreate;
@@ -71,7 +71,10 @@ function makeFixtures() {
     active: false,
     pool: true,
   };
-  const agents = { agents: [localCoder], live: [], active: [], available: ["local-coder"] };
+  const poolEntries = options.poolEntries ?? [localCoder];
+  const initialSessions = options.sessions ?? [];
+  const offlineAgents = options.offline ?? [];
+  const agents = { agents: poolEntries, live: [], active: [], available: poolEntries.map((entry) => entry.name) };
   const profiles = {
     active: "default",
     providers: [],
@@ -94,9 +97,9 @@ function makeFixtures() {
   };
 
   const session = () => ({
-    sessions: createdSession ? [createdSession] : [],
+    sessions: createdSession ? [createdSession] : initialSessions,
     network,
-    offline: [],
+    offline: offlineAgents,
     hidden: [],
   });
   const remoteSession = {
@@ -185,7 +188,7 @@ async function json(route, body, status = 200) {
   return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
-async function openVite() {
+export async function openVite() {
   const server = await createServer({
     configFile: path.join(frontendRoot, "vite.config.ts"),
     root: frontendRoot,
@@ -199,7 +202,7 @@ async function openVite() {
   return { server, baseUrl: `http://127.0.0.1:${address.port}` };
 }
 
-async function openPage(browser, baseUrl, fixtures, options = {}) {
+export async function openPage(browser, baseUrl, fixtures, options = {}) {
   const viewport = options.viewport ?? { width: 1280, height: 900 };
   const context = await browser.newContext({
     viewport,
@@ -402,7 +405,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.stack ?? error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error.stack ?? error);
+    process.exitCode = 1;
+  });
+}
