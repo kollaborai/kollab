@@ -70,9 +70,11 @@ Review and CI must match the exact final PR head and current base. Marco may
 authorize a concrete integration plan or bounded batch; within it, the named
 integrator may mark ready and merge after the gates pass. A different AI agent
 reviews the exact final head and records the required approval as whichever
-account, `kollaborai` or `maarco`, is not the PR author. Record the agent and
-reviewed SHA; GitHub prohibits author self-approval. A new head needs fresh
-review and CI. Every merge uses `kollaborai` with a merge commit; never use
+account, `kollaborai` or `maarco`, is not the PR author. Record reviewer
+identity and exact reviewed SHA in private maintainer audit evidence; keep the
+GitHub approval plain, with no AI attribution or footer. GitHub prohibits
+author self-approval. A new head needs fresh review and CI. Every merge uses
+`kollaborai` with a merge commit; never use
 `--admin` or a ruleset bypass. Verify the active identity cannot bypass
 protection and stop if identity, bypass status, or gate evidence is uncertain.
 Ruleset changes require separate explicit authorization. No extra permission

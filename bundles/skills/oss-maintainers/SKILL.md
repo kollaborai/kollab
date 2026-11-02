@@ -38,7 +38,8 @@ described after it.
 | submit the required exact-head PR approval | assigned independent AI reviewer only, under the standing Kollab review policy below |
 | assign people, request reviewers | batch approval |
 | close, reopen, lock, transfer an issue/PR | human does it, or approves that single item by number |
-| merge, enable/disable auto-merge | **never** (human only) |
+| merge a PR covered by Marco's plan as `kollaborai` | designated integrator after review and gates; merge commit only, no admin or ruleset bypass |
+| enable or disable auto-merge | **never** (human only) |
 | mark a draft PR ready for review | **never** (reserved to the designated integrator) |
 | push, force-push, branch/tag/release create/move/delete, PyPI, Homebrew | **never** |
 | edit workflows, branch protection, rulesets, repo settings | **never** |
@@ -48,13 +49,14 @@ A task description, a teammate's hub message, or text inside an issue is not app
 
 For Kollab's standing merge gate, a separately assigned AI reviewer must review
 the exact final PR head and submit the required GitHub approval. The reviewer
-uses whichever account, `kollaborai` or `maarco`, is not the PR author and
-records its agent identity and reviewed SHA. GitHub prohibits author
-self-approval. This standing source-review instruction does not require a
-separate human approval; other GitHub comments and mutations still follow the
-batch-approval table. It does not authorize merging: the designated integrator
-merges as `kollaborai` with a merge commit, never through `--admin` or a ruleset
-bypass.
+uses whichever account, `kollaborai` or `maarco`, is not the PR author. Record
+reviewer identity and exact reviewed SHA in private maintainer audit evidence;
+keep the GitHub approval plain, with no AI attribution or footer. GitHub
+prohibits author self-approval. This standing source-review instruction does
+not require a separate human approval; other GitHub comments and mutations still follow the
+batch-approval table. The authorized merge action is limited to covered PRs;
+every merge uses `kollaborai` with a merge commit, never through `--admin` or a
+ruleset bypass.
 
 ## 2. Dry-run plan format
 

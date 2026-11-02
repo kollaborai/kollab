@@ -72,8 +72,10 @@ Keep the PR draft while any required evidence or work is outstanding.
 - [ ] The PR remains a draft until its designated integrator marks it ready
   within Marco's authorized integration plan, after a different AI agent
   reviews the exact final head and records approval using whichever account
-  (`kollaborai` or `maarco`) is not the PR author. Record the reviewer agent
-  and SHA; GitHub prohibits author self-approval. Required CI must pass.
+  (`kollaborai` or `maarco`) is not the PR author. Record reviewer identity
+  and exact reviewed SHA in private maintainer audit evidence. Keep the GitHub
+  approval plain, with no AI attribution or footer. GitHub prohibits author
+  self-approval. Required CI must pass.
   Every merge uses `kollaborai` with a merge commit; never use `--admin` or a
   ruleset bypass. Work outside the plan needs new authorization, and release
   tags need separate explicit maintainer instruction.

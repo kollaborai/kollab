@@ -80,7 +80,9 @@ regular local branch when no other writer shares that checkout.
    integration plan; its designated integrator may mark covered PRs ready only
    after a different AI agent reviews the exact final head and records its
    approval as whichever account, `kollaborai` or `maarco`, is not the PR author.
-   Record the reviewer agent and head SHA. GitHub prohibits author self-approval.
+   Record reviewer identity and exact reviewed SHA in private maintainer audit
+   evidence. Keep the GitHub approval plain, with no AI attribution or footer.
+   GitHub prohibits author self-approval.
    A new head requires fresh review and CI.
 7. The designated integrator lands authorized PRs as `kollaborai` with merge
    commits after verifying that identity cannot bypass applicable protection.

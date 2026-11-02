@@ -28,8 +28,10 @@ here for detail.
   different AI agent must review every PR's exact final head
   and record the required GitHub approval with whichever account, `kollaborai`
   or `maarco`, is not the PR author. GitHub prohibits author self-approval.
-  Record the reviewer agent and exact SHA. Every merge is performed as
-  `kollaborai` with a merge commit; no `--admin` or ruleset bypass is allowed.
+  Record reviewer identity and exact reviewed SHA in private maintainer audit
+  evidence. Keep the GitHub approval plain, with no AI attribution or footer.
+  Every merge is performed as `kollaborai` with a merge commit; no `--admin`
+  or ruleset bypass is allowed.
   Scope outside the authorization needs a new decision.
   Record the current integrator, authorization, and checkpoint in a shared,
   discoverable project record. A transfer is effective only after verifiable
@@ -138,10 +140,11 @@ permission request per PR. The designated integrator may mark a covered PR
 ready and merge it with a merge commit after independent source review of its
 exact final head, current base, required CI, and resolved review conversations.
 A different AI agent must submit the required GitHub approval using whichever
-account, `kollaborai` or `maarco`, is not the PR author; include the agent
-identity and reviewed SHA in the review record. GitHub prohibits author
-self-approval. Every merge is performed as `kollaborai` with a merge commit and
-no admin or ruleset bypass. Work outside the authorized scope requires a new
+account, `kollaborai` or `maarco`, is not the PR author. Record reviewer
+identity and exact reviewed SHA in private maintainer audit evidence. Keep the
+GitHub approval plain, with no AI attribution or footer. GitHub prohibits
+author self-approval. Every merge is performed as `kollaborai` with a merge
+commit and no admin or ruleset bypass. Work outside the authorized scope requires a new
 decision. This authority does not cover release tags, which require Marco's
 separate explicit instruction.
 
@@ -160,14 +163,18 @@ current-base status, resolved threads, and only the `merge` method. Its required
 checks are `ci/tests`, `ci/standards-check`, and `ci/security-scan`. The
 `kollaborai` owner readback showed an empty bypass list and
 `current_user_can_bypass=never`. Repository auto-merge is off. Run
-`.github/scripts/setup-branch-protection.sh --check` with an identity that can
-read bypass actors, and recheck the live ruleset and repository settings before
-integration. No admin or ruleset bypass is allowed.
+`.github/scripts/setup-branch-protection.sh --check` with an identity that has
+ruleset write access; GitHub discloses `bypass_actors` only at that access
+level. The check remains read-only and fails closed if the field is hidden.
+Recheck the live ruleset and repository settings before integration. No admin
+or ruleset bypass is allowed.
 
 Approvals are recorded by a different AI agent after reviewing the exact
 final head. The agent uses whichever account, `kollaborai` or `maarco`, is not
-the PR author and records its identity and the reviewed SHA. GitHub prohibits
-authors from approving their own PRs; do not attempt self-approval. A new push
+the PR author. Record reviewer identity and exact reviewed SHA in private
+maintainer audit evidence; keep the GitHub approval plain, with no AI
+attribution or footer. GitHub prohibits authors from approving their own PRs;
+do not attempt self-approval. A new push
 dismisses stale approvals and requires fresh review and CI.
 
 Every merge uses `kollaborai` and a merge commit. Never use `--admin` or a

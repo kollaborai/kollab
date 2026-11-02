@@ -170,7 +170,8 @@ def test_branch_protection_check_requires_one_approval_and_visible_empty_bypass(
     matches_policy = bypass == "empty" and approval_count == 1
     assert (result.returncode == 0) is matches_policy
     if bypass in ("hidden", "null"):
-        assert "Cannot verify bypass actors" in result.stdout
+        assert "bypass_actors" in result.stdout
+        assert "ruleset write access" in result.stdout
     elif not matches_policy:
         assert "Drift on" in result.stdout
     else:

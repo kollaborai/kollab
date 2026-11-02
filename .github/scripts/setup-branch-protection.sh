@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Configure the "main protection" ruleset that guards main (classic branch
 # protection is not used). Applying needs admin access to the repo (the
-# kollaborai account). `--check` is read-only but needs enough administration
-# access to see bypass actors; it exits 1 on drift or insufficient visibility.
+# kollaborai account). `--check` is read-only; GitHub discloses bypass_actors
+# only to users with ruleset write access. It exits 1 on drift or hidden data.
 #
 # Required checks are job names in .github/workflows/ci.yml. Merge commits
 # only: after a squash or rebase merge, `git pull --ff-only origin main` in
@@ -87,7 +87,7 @@ if [[ "${1:-}" == "--check" ]]; then
   fi
   live_ruleset="$(gh api "repos/$repo/rulesets/$id")"
   if ! jq -e 'has("bypass_actors") and (.bypass_actors | type == "array")' <<<"$live_ruleset" >/dev/null; then
-    echo "Cannot verify bypass actors on $repo; use a credential with administration read access."
+    echo "Cannot verify bypass_actors on $repo; GitHub discloses this field only to users with ruleset write access."
     exit 1
   fi
   live="$(jq -S '{name, target, enforcement, bypass_actors, conditions, rules}' <<<"$live_ruleset")"

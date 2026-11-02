@@ -876,8 +876,10 @@ ready and merge them after independent source review of the exact head, current
 base, required CI, and resolved conversations. Do not repeat permission for
 listed steps. A different AI agent must review every PR's exact final head and
 record the GitHub approval as whichever account, `kollaborai` or `maarco`, is
-not the PR author. Record the agent identity and reviewed SHA; GitHub prohibits
-author self-approval. A new head requires fresh review and CI. Every merge uses
+not the PR author. GitHub prohibits author self-approval. Record reviewer
+identity and exact reviewed SHA in private maintainer audit evidence; keep the
+GitHub approval plain, with no AI attribution or footer. A new head requires
+fresh review and CI. Every merge uses
 `kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
 Out-of-scope work needs new authorization, and release tags always need
 separate explicit instruction. Update branches with ordinary merges; never
@@ -915,8 +917,10 @@ checkout source-read-only.
 2. Commit by explicit paths, push normally, and open a DRAFT release PR.
    A different AI agent reviews the exact final head and records the required
    GitHub approval as whichever account, `kollaborai` or `maarco`, is not the
-   PR author. Record the reviewer agent and SHA; GitHub prohibits author
-   self-approval. Required CI, resolved conversations, and current base must
+   PR author. Record reviewer identity and exact reviewed SHA in private
+   maintainer audit evidence; keep the GitHub approval plain, with no AI
+   attribution or footer. GitHub prohibits author self-approval. Required CI,
+   resolved conversations, and current base must
    pass. A Marco-authorized release plan covers its merge; the designated
    integrator merges as `kollaborai` with a merge commit, never with `--admin`
    or a ruleset bypass. Release tags still require Marco's separate explicit

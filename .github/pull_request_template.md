@@ -95,7 +95,9 @@ in `docs/product-ready-checklist.md`.
   within the maintainer-authorized integration plan, after a different AI
   agent reviews the exact final head, records approval as whichever account
   (`kollaborai` or `maarco`) is not the PR author, and required CI passes.
-  Record the reviewer agent and SHA. GitHub prohibits author self-approval.
+  Record reviewer identity and exact reviewed SHA in private maintainer audit
+  evidence. Keep the GitHub approval plain, with no AI attribution or footer.
+  GitHub prohibits author self-approval.
   Every merge uses `kollaborai` with a merge commit; never use `--admin` or a
   ruleset bypass. Work outside the plan needs new authorization, and release
   tags need separate explicit maintainer instruction.

@@ -62,7 +62,9 @@ integration checkout with `origin/main`.
    branch normally and open a DRAFT PR against `main`. A different AI agent
    must review the exact final head and record the required GitHub approval as
    whichever account, `kollaborai` or `maarco`, is not the PR author. Record
-   the reviewer agent and SHA; GitHub prohibits author self-approval. Required
+   reviewer identity and exact reviewed SHA in private maintainer audit
+   evidence; keep the GitHub approval plain, with no AI attribution or footer.
+   GitHub prohibits author self-approval. Required
    CI, resolved conversations, and current-base gates apply. If the base
    advances, merge `origin/main` into the writer branch and push normally;
    never rebase or force-push.
@@ -177,12 +179,19 @@ scripts/docker-runtime.sh smoke
    desktop matrix for a release tag, but check the live workflow state first:
    a manually disabled workflow will not run on the tag. Manual dispatch is a
    rehearsal, not the release build. A run on `release/X.Y.Z` is not proof of
-   the merged source. After synchronizing main at the release merge, run
-   `gh workflow run binaries.yml --ref main` and inspect the resulting workflow
-   run's `head_sha`. Accept it as pre-tag source evidence only if that SHA equals
-   the recorded release merge; if main advanced and the run used another SHA,
-   stop and reconcile the release source before retrying. The tag-triggered
-   run remains the publication build when publish is enabled.
+   the merged source. `gh workflow run --ref` accepts a branch or tag, not a
+   commit SHA. Dispatch `gh workflow run binaries.yml --ref main` only while
+   `main` still points at the recorded release merge, then verify the run's
+   `head_sha`. Record the workflow run ID/URL, source SHA, artifact names, and
+   artifact checksums/provenance with the private release evidence. If `main`
+   has advanced, a dispatch on `main` runs different source and a raw SHA cannot
+   be supplied as `--ref`; stop rather than claiming exact-source proof or
+   promising replay. Exact-source dispatch is possible only through an already
+   authorized immutable branch or tag that points at the release merge. Do not
+   create or move a ref for this purpose; ask Marco to decide any alternate
+   evidence plan. The final tag-triggered run must report the tag target as its
+   `head_sha` and remains the publication build when publish is enabled. Later
+   advancement of `main` does not change the source identified by that tag.
    Each platform stages a hash/version-checked native CLI from
    the same workflow; absent version inputs use `pyproject.toml`, while a
    supplied tag must match it. macOS and Linux desktop asset names therefore

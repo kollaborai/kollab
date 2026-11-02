@@ -169,8 +169,10 @@ message such as `chore: prepare release vX.Y.Z`; do not add attribution footers.
 
 After the release PR is within Marco's authorized plan, a different AI
 agent reviews the exact final head and records the required GitHub approval as
-whichever account, `kollaborai` or `maarco`, is not the PR author. GitHub
-prohibits author self-approval; record the reviewer agent and SHA. Required CI,
+whichever account, `kollaborai` or `maarco`, is not the PR author. Record
+reviewer identity and exact reviewed SHA in private maintainer audit evidence;
+keep the GitHub approval plain, with no AI attribution or footer. GitHub
+prohibits author self-approval. Required CI,
 resolved conversations, and current-base gates must also pass. The integrator
 merges as `kollaborai` with a merge commit; never use `--admin` or a ruleset
 bypass. Verify live policy, then fast-forward the integration checkout and

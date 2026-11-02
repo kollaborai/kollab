@@ -40,9 +40,11 @@ a concrete plan or bounded PR batch; within it, the designated integrator may
 mark ready and merge after its review/base/CI/thread gates pass, without
 repeating permission per listed PR. A different AI agent must review every PR's
 exact final head and record the required GitHub approval as whichever account,
-`kollaborai` or `maarco`, is not the PR author. Record the reviewing agent and
-head SHA with the review. GitHub prohibits authors from approving their own PRs;
-do not attempt self-approval. A new head requires fresh independent review and
+`kollaborai` or `maarco`, is not the PR author. Record reviewer identity and
+exact reviewed SHA in private maintainer audit evidence. Keep the GitHub
+approval plain, with no AI attribution or footer. GitHub prohibits authors
+from approving their own PRs; do not attempt self-approval. A new head
+requires fresh independent review and
 CI. All merges use `kollaborai` only, as merge commits; never use `--admin` or a
 ruleset bypass. Verify that identity cannot bypass applicable protection and
 stop if identity, bypass status, or gate evidence is uncertain. An emergency
