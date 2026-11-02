@@ -467,14 +467,10 @@ class ACPOrchestrator:
         self._forget_session_picks()
         self.startup_error = None
         self._terminal_session_id = None
-        self._observations.clear()
-        self._observation_count = 0
         self._usage_settled_through = 0
         self._usage_settled_ranges.clear()
         self._display_usage_payload = None
         self._usage_display_turn = None
-        self._observation_rows.clear()
-        self._unwritten_observations.clear()
         if resume_conversation:
             # Another conversation: the messages this one heard are not its.
             self._observations.clear()
