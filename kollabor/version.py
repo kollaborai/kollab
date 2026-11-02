@@ -66,4 +66,20 @@ def get_build_provenance() -> BuildProvenance:
     return resolve_build_provenance()
 
 
-__version__ = get_kollabor_version()
+def get_runtime_version() -> str:
+    """Return the PEP 440 runtime identity of this process.
+
+    Release installs keep the exact base version. Source and live checkouts
+    append a local segment (``0.18.5+<sha8>``) so a dev build can never
+    masquerade as a release build. An unresolvable revision reports
+    ``+unknown`` for the same reason.
+    """
+
+    base = get_kollabor_version()
+    if not _is_running_from_source():
+        return base
+    short_sha = get_build_provenance().short_sha
+    return f"{base}+{short_sha}"
+
+
+__version__ = get_runtime_version()

@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
 from .auth import validate_token
 from .daemon_pool import get_daemon_pool
 from .hub_bridge import HubBridge
+from .runtime_version import get_engine_runtime_version
 from .session import EngineSession
 
 logger = logging.getLogger(__name__)
@@ -391,7 +392,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
             except Exception:
                 return "unknown"
 
-        v = safe_ver("kollabor-engine")
+        v = get_engine_runtime_version()
         return {
             "version": v,
             "engine": v,
@@ -403,14 +404,6 @@ def create_app(port: Optional[int] = None) -> FastAPI:
 
     @app.get("/status")
     async def status():
-        from importlib.metadata import version as pkg_version
-
-        def safe_ver(pkg: str) -> str:
-            try:
-                return pkg_version(pkg)
-            except Exception:
-                return "unknown"
-
         # The providers in use. An opened agent's profile is what presence says
         # until its daemon answers. MCP servers belong to each daemon: GET /sessions/{id}/mcp.
         providers = sorted(
@@ -418,7 +411,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         )
 
         return {
-            "version": safe_ver("kollabor-engine"),
+            "version": get_engine_runtime_version(),
             "sessions": len(_sessions),
             "uptime": int(time.time() - _start_time),
             "providers": providers,
