@@ -1,23 +1,23 @@
 # Coordination and continuity
 
-Read when work spans agents, issues, PRs, worktrees, or multiple turns.
+Read when work spans owners, tracked items, change requests, checkouts, or multiple turns.
 
 ## Ownership and checkpoints
 
-For each accepted work item, record its source issue/PR or authorized task, the exact outcome, owner, role/agent actually available, file scope, worktree path and branch, starting SHA, checkpoint cadence, acceptance evidence, and dependencies. A planned assignment is not a claim; an assignee is not an accepted owner until acknowledged. Keep one owner per write path and arrange a handoff before changing ownership.
+For each accepted work item, record its source issue, change request, or authorized task; exact outcome; acknowledged owner and available role; write scope; checkout and ref where applicable; starting revision; checkpoint cadence; acceptance evidence; and dependencies. A planned assignment is not a claim; an assignee is not an accepted owner until acknowledged. Keep one owner per write path and arrange a handoff before changing ownership. A coordinator or integrator is a transferable role, not a global identity.
 
-Delegate independent work only when file/contract boundaries are clear. Give each worker exact paths, source artifacts to inspect, allowed operations, tests/evidence, and a stop condition. Keep source-review ownership separate from implementation. Do not describe a role skill or agent as loaded or a review as passed without session or artifact evidence.
+Delegate only when authorized and file/contract boundaries are clear. Give each worker exact paths, source artifacts to inspect, allowed operations, tests/evidence, and a stop condition. Keep source-review ownership separate from implementation. Do not describe a role skill or agent as loaded or a review as passed without session or artifact evidence.
 
 Honor the requested model and reasoning effort. Verify the running session's actual model from available metadata before agent routing or model-sensitive review; if unavailable, disclose that rather than substituting silently. Keep each checkpoint short and evidence-based: complete, in progress, or blocked with the concrete reason and next owner/action.
 
 ## Safe continuation
 
-Before risky branch, merge, or cleanup operations, record local/remote refs and privately preserve unique commits plus staged, unstaged, and untracked bytes. Verify the refs, binary patches/copies, and hashes before continuing. Never overwrite concurrent work or use broad rollback commands. Existing review worktrees and branches remain until an owner explicitly authorizes exact cleanup targets.
+Before risky branch, merge, or cleanup operations, record local/remote refs and privately preserve unique commits plus staged, unstaged, and untracked bytes where applicable. Verify the refs, binary patches/copies, and hashes before continuing. If exact preservation is uncertain, stop that operation and resolve ownership or preservation first. Never overwrite concurrent work or use broad rollback commands. Existing review checkouts and branches remain until exact cleanup targets are authorized.
 
-For direct task handoffs, include a stable task ID where the task ledger provides one, the exact worktree/path, starting commit, file ownership, authorization, and acceptance check. When resuming, compare the reported commit and dirty-file state with the actual checkout; a worker's summary is evidence to inspect, not verification. Keep incomplete work pending and unverified rather than rewriting its state as done.
+For direct task handoffs and compaction, preserve a stable task ID where one exists, exact checkout/path and starting revision, file ownership, authorization, acceptance check, evidence, next gate, and remaining action in an accessible project record. Identify who takes over the integrator role if it transfers. When resuming, compare reported refs and dirty-file state with the actual checkout and re-read current task and host state; a worker's summary is evidence to inspect, not verification. Keep incomplete work pending and unverified rather than rewriting its state as done.
 
 ## Evidence and communication
 
-Maintain a dated, bounded evidence ledger. Distinguish issue/board state, source review, checks, runtime acceptance, and user authorization. Recompute counts from complete paginated source data, record the query and `as of` time, and refresh after material changes or before writes—not indefinitely. Keep machine-readable state, rendered summaries, and exports consistent; link each material conclusion to the source record or diff.
+Maintain a dated, bounded evidence ledger in the project's available state store. Distinguish task/issue/board state, source review, checks, runtime acceptance, and user authorization. Recompute counts from complete source data, including pagination where applicable; record the query and `as of` time, and refresh after material changes or before writes. Keep machine-readable state, rendered summaries, and exports consistent; link each material conclusion to the source record or diff.
 
 Send progress updates at useful checkpoints: what changed, what was verified, the next gate, and any blocker. Public comments, review submissions, mentions, emails, and other external messages stay as drafts unless the user explicitly authorizes sending. Never put secrets or private security details in public artifacts.

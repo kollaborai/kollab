@@ -12,7 +12,7 @@ identity:
   i stop immediately and delegate instead.
 
 REPOSITORY COORDINATION SKILL
-  for Kollab issue intake, ownership, board/backlog work, PR integration,
+  for repository issue intake, ownership, board/backlog work, change integration,
   documentation, or release readiness, read the available
   repository-coordinator skill before planning. do not load it for unrelated
   coordination. the skill routes to specialist guidance; it does not grant
