@@ -33,32 +33,52 @@ class _Session:
 
     def __init__(self):
         self.queues = []
+        self.subscription_contexts = {}
         self.stops = 0
         self.inputs = []
 
         self.history = []
         self.last_turn_error = None
 
-    def subscribe(self):
+    def subscribe(self, context=None):
         queue = asyncio.Queue()
         self.queues.append(queue)
+        self.subscription_contexts[queue] = context
         return queue
 
     def unsubscribe(self, queue):
-        self.queues.remove(queue)
+        if queue in self.queues:
+            self.queues.remove(queue)
+        self.subscription_contexts.pop(queue, None)
+
+    def close_for_context(self, context):
+        from kollabor_engine.session_context import PHONE_STREAM_REVOKED
+
+        closed = 0
+        for queue, subscribed_context in tuple(self.subscription_contexts.items()):
+            if subscribed_context is not context:
+                continue
+            self.unsubscribe(queue)
+            while not queue.empty():
+                queue.get_nowait()
+            queue.put_nowait(PHONE_STREAM_REVOKED)
+            closed += 1
+        return closed
 
     def emit(self, **event):
         for queue in tuple(self.queues):
             queue.put_nowait(event.copy())
 
-    async def send_message(self, content):
+    async def send_message(self, content, **_):  # the engine also names the request (#551)
         self.inputs.append(content)
-        self.emit(type="token", text="fixture-stream-token")
+        # As a daemon that echoes the id does: its turn's events name it (#551).
+        self.emit(type="token", text="fixture-stream-token", request_ids=["fixture-owner"])
         return {"accepted": True, "request_id": "fixture-owner"}
 
     def cancel_turn(self):
         self.stops += 1
-        self.emit(type="turn_complete")
+        # As a daemon does: the stopped turn's completion names its request (#551).
+        self.emit(type="turn_complete", request_ids=["fixture-owner"])
 
     async def get_history_nonblocking(self):
         return {
@@ -104,12 +124,14 @@ _COALESCED_FIRST_READS = {}
 
 
 
-async def _start(packet, path, body=None):
+async def _start(packet, path, body=None, headers=None):
     identifier = secrets.token_hex(16)
     data = b"" if body is None else json.dumps(body).encode()
     await packet(
         op="start", id=identifier, method="GET" if body is None else "POST",
-        path=path, headers=[["content-type", "application/json"]], size=len(data),
+        path=path,
+        headers=headers if headers is not None else [["content-type", "application/json"]],
+        size=len(data),
     )
     if data:
         await packet(op="write", id=identifier, offset=0, data=base64.b64encode(data).decode())
@@ -343,6 +365,130 @@ async def test_real_history_page_stays_bounded_and_loads_in_three_phone_roundtri
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["events", "message", "assistant"])
+async def test_phone_sse_routes_use_verified_server_scope_context(engine_stream, route):
+    probe = engine_stream
+    observed = []
+    target_path = f"/sessions/{probe.session.session_id}/{route}"
+
+    @probe.manager.app.middleware("http")
+    async def capture_server_scope(request, call_next):
+        if request.url.path == target_path:
+            observed.append(
+                (request.scope.get("state"), request.headers.get("x-kollab-phone-id"))
+            )
+        return await call_next(request)
+
+    headers = [
+        ["content-type", "application/json"],
+        ["x-kollab-phone-id", "attacker-controlled"],
+    ]
+    path = target_path
+    body = None
+    if route == "events":
+        path += "?owner_id=attacker-controlled&phone_id=attacker-controlled"
+    elif route == "message":
+        body = {
+            "content": "disposable fixture",
+            "owner_id": "attacker-controlled",
+            "phone_id": "attacker-controlled",
+        }
+    else:
+        body = {
+            "commands": [{"type": "add-message", "message": {
+                "parts": [{"type": "text", "text": "disposable fixture"}],
+            }}],
+            "state": {"messages": []},
+            "owner_id": "attacker-controlled",
+            "phone_id": "attacker-controlled",
+        }
+
+    stream_id = await _start(probe.packet, path, body=body, headers=headers)
+    await until(lambda: bool(probe.session.subscription_contexts))
+    assert observed and observed[0][1] is None  # arbitrary phone headers are filtered
+    state = observed[0][0]
+    assert isinstance(state, dict)
+    context = state.get("kollabor_engine.session_read_context")
+    assert context is not None
+    assert context.owner_id == "local"
+    assert context.phone_id == probe.link[1]["id"]
+    assert context.phone_id != "attacker-controlled"
+    assert context.revoked is False
+    assert list(probe.session.subscription_contexts.values()) == [context]
+
+    assert probe.session.close_for_context(context) == 1
+    await asyncio.wait_for(_drain(probe.packet, stream_id), timeout=2)
+    assert not probe.session.queues
+
+
+@pytest.mark.asyncio
+async def test_phone_revoke_purges_real_daemon_subscriber(engine_stream, monkeypatch):
+    from kollabor_engine import daemon_pool
+    from kollabor_engine import phone_link as phone_link_module
+    from kollabor_engine.session_context import PHONE_STREAM_REVOKED, SessionReadContext
+
+    probe = engine_stream
+    pool = daemon_pool.DaemonPool()
+    handle = daemon_pool.DaemonHandle(probe.session.session_id, "fixture", None)
+    pool._daemons[handle.session_id] = handle
+    monkeypatch.setattr(phone_link_module, "get_daemon_pool", lambda: pool)
+
+    session = probe.session
+
+    def subscribe(context=None):
+        queue = handle.subscribe(context=context)
+        session.queues.append(queue)
+        session.subscription_contexts[queue] = context
+        return queue
+
+    def unsubscribe(queue):
+        handle.unsubscribe(queue)
+        if queue in session.queues:
+            session.queues.remove(queue)
+        session.subscription_contexts.pop(queue, None)
+
+    session.subscribe = subscribe
+    session.unsubscribe = unsubscribe
+
+    stream_id = await _start(
+        probe.packet, f"/sessions/{session.session_id}/events"
+    )
+    await until(lambda: len(handle._subscribers) == 1)
+    queue = next(iter(handle._subscribers))
+    context = handle._subscriber_contexts[queue]
+    assert context is probe.manager._read_contexts[probe.link[1]["id"]]
+
+    exchange = probe.manager.exchanges[(probe.link[1]["id"], stream_id)]
+    exchange_task = exchange.task
+    assert exchange_task is not None
+
+    other_context = SessionReadContext(owner_id="local", phone_id="other-phone")
+    other_queue = handle.subscribe(context=other_context)
+
+    await probe.manager.revoke(probe.link[1]["id"])
+    await asyncio.gather(exchange_task, return_exceptions=True)
+    await until(
+        lambda: queue not in handle._subscribers
+        and stream_id not in probe.manager.exchanges
+    )
+
+    assert context.revoked is True
+    assert context not in probe.manager._read_contexts.values()
+    assert queue not in handle._subscribers
+    assert other_queue in handle._subscribers
+    assert not session.queues
+
+    handle._fan_out({"type": "token", "text": "after revoke"})
+    assert other_queue.get_nowait()["text"] == "after revoke"
+    remaining = []
+    while not queue.empty():
+        remaining.append(queue.get_nowait())
+    assert all(event is PHONE_STREAM_REVOKED for event in remaining)
+    handle.unsubscribe(other_queue)
+
+
+
+@pytest.mark.asyncio
 async def test_explicit_stop_finishes_assistant_and_event_stream(engine_stream):
     probe = engine_stream
     observer = await _start(probe.packet, f"/sessions/{probe.session.session_id}/events")
@@ -370,7 +516,7 @@ async def test_stream_loss_releases_real_assistant_callback_without_stopping_wor
     # The browser can leave while downstream send is backpressured, between
     # generator yields. A test that only cancels an idle producer misses this.
     for _ in range(64):
-        probe.session.emit(type="token", text="fixture-burst-token")
+        probe.session.emit(type="token", text="fixture-burst-token", request_ids=["fixture-owner"])
     await until(exchange.events.full)
     if not buffered:
         while not exchange.events.empty() or exchange.pending is not None:
@@ -383,3 +529,61 @@ async def test_stream_loss_releases_real_assistant_callback_without_stopping_wor
     await until(lambda: not probe.session.queues and exchange.task.done())
     assert not probe.manager.exchanges
     assert probe.session.stops == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["message", "assistant"])
+@pytest.mark.parametrize("reply_ready", [False, True])
+async def test_phone_revocation_closes_private_goal_reply(engine_stream, route, reply_ready):
+    """Revocation wins over a private reply becoming available at the same time."""
+    probe = engine_stream
+    polling = asyncio.Event()
+    release = asyncio.Event()
+
+    async def send_goal(content, **kwargs):
+        assert kwargs.get("private_goal_reply") is True
+        return {"accepted": True, "goal_reply_id": "a" * 32}
+
+    async def poll_goal(_reply_id):
+        polling.set()
+        await release.wait()
+        return {
+            "status": "complete",
+            "success": True,
+            "message": "private-goal-result-after-revocation",
+            "conversation_uid": "conversation-a",
+        }
+
+    probe.session.send_message = send_goal
+    probe.session.poll_goal_reply = poll_goal
+    if route == "message":
+        body = {"content": "/goal show", "conversation_uid": "conversation-a"}
+    else:
+        body = {
+            "commands": [{"type": "add-message", "message": {
+                "parts": [{"type": "text", "text": "/goal show"}],
+            }}],
+            "state": {"messages": [], "conversationUid": "conversation-a"},
+        }
+    stream_id = await _start(probe.packet, f"/sessions/{probe.session.session_id}/{route}", body)
+    await asyncio.wait_for(polling.wait(), timeout=2)
+    context = next(iter(probe.session.subscription_contexts.values()))
+    assert context is not None
+    exchange = probe.manager.exchanges[(probe.link[1]["id"], stream_id)]
+    assert exchange.task is not None
+    if reply_ready:
+        release.set()  # The reply and revocation become ready in the same loop turn.
+    context.revoked = True
+    assert probe.session.close_for_context(context) == 1
+    try:
+        # The subscriber signal must stop the stream even while the private
+        # reply stays blocked. PhoneLink's outer cancellation is a second fence.
+        await asyncio.wait_for(asyncio.shield(exchange.task), timeout=1)
+        assert release.is_set() is reply_ready
+    finally:
+        release.set()
+        if not exchange.task.done():
+            exchange.task.cancel()
+        await asyncio.gather(exchange.task, return_exceptions=True)
+    assert b"private-goal-result-after-revocation" not in repr(list(exchange.events._queue)).encode()
+    await until(lambda: not probe.session.queues)

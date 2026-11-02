@@ -248,8 +248,16 @@ def summary_similarity(summary_a: str, summary_b: str) -> float:
 
     Returns 0.0 to 1.0.
     """
-    tokens_a = set(stem(t) for t in tokenize(summary_a))
-    tokens_b = set(stem(t) for t in tokenize(summary_b))
+    return token_overlap(summary_tokens(summary_a), summary_tokens(summary_b))
+
+
+def summary_tokens(summary: str) -> frozenset:
+    """The stemmed words of a summary that summary_similarity compares."""
+    return frozenset(stem(t) for t in tokenize(summary))
+
+
+def token_overlap(tokens_a: frozenset, tokens_b: frozenset) -> float:
+    """summary_similarity's score for two ``summary_tokens`` sets."""
     if not tokens_a or not tokens_b:
         return 0.0
     intersection = tokens_a & tokens_b

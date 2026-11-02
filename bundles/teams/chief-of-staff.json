@@ -1,0 +1,32 @@
+{
+  "name": "chief-of-staff",
+  "description": "A personal staff for one person: a chief of staff who runs the day, plus finance, travel, communications, inbox and calendar specialists. Reads freely; drafts every email, payment, booking and calendar change for approval.",
+  "roster": "personal-crew",
+  "lead": "evelyn",
+  "members": [
+    {
+      "persona": "evelyn",
+      "reports_to": null
+    },
+    {
+      "persona": "ivy",
+      "reports_to": "evelyn"
+    },
+    {
+      "persona": "felix",
+      "reports_to": "evelyn"
+    },
+    {
+      "persona": "sam",
+      "reports_to": "evelyn"
+    },
+    {
+      "persona": "ruth",
+      "reports_to": "evelyn"
+    },
+    {
+      "persona": "mateo",
+      "reports_to": "evelyn"
+    }
+  ]
+}

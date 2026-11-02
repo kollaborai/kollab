@@ -26,6 +26,7 @@ from ..history_paging import (
     InvalidHistoryCursor,
     StaleHistoryCursor,
     build_history_page,
+    resolve_history_metadata,
     resolve_history_output,
 )
 from ..hub_bridge import HubBridge, network_daemons
@@ -897,7 +898,10 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
     # its in-memory profile, so mirror what it reports, not just this request.
     apply_profile_mirror(
         session,
-        body.name,
+        # The request may name a loadout, not a profile; mirror the
+        # resolved provider profile so the response's session dict
+        # cannot clobber it with the pre-switch profile (#605).
+        getattr(snapshot, "name", None) or body.name,
         getattr(snapshot, "model", None) or body.model,
         getattr(snapshot, "effort", None),
     )
@@ -1174,6 +1178,26 @@ async def get_history_output(session_id: str, ref: str):
     return {"session_id": session_id, "content": content}
 
 
+@router.get("/{session_id}/history/metadata")
+async def get_history_metadata(session_id: str, ref: str):
+    """Serve a slimmed history entry's full metadata (issue #522)."""
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = await session.get_history_nonblocking()
+    try:
+        metadata = resolve_history_metadata(
+            session_id, snapshot.get("history", []), ref
+        )
+    except StaleHistoryCursor as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InvalidHistoryCursor as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"session_id": session_id, "metadata": metadata}
+
+
 @router.delete("/{session_id}/history")
 async def clear_history(session_id: str):
     registry = get_session_registry()
@@ -1183,7 +1207,10 @@ async def clear_history(session_id: str):
 
     # state.restart_session clears the conversation and rebuilds the system
     # prompt, which is what "clear history but keep the prompt" means here.
-    await session.state.restart_session()
+    try:
+        await session.state.restart_session()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await session.refresh_history()
     session.last_turn_error = None
     return {"ok": True, "session_id": session_id}

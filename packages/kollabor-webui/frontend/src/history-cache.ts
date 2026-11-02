@@ -21,6 +21,51 @@ export interface HistoryPageCache {
   clear(sessionId: string): Promise<void>;
 }
 
+// IndexedDB writes can finish after a newer history request. Serialize each
+// session's mutations and check the requesting operation immediately before
+// its write so an obsolete conversation cannot replace the current cache.
+const pendingMutations = new WeakMap<HistoryPageCache, Map<string, Promise<void>>>();
+
+async function mutateIfCurrent(
+  cache: HistoryPageCache,
+  sessionId: string,
+  stillCurrent: () => boolean,
+  mutate: () => Promise<void>,
+): Promise<void> {
+  let sessions = pendingMutations.get(cache);
+  if (!sessions) {
+    sessions = new Map();
+    pendingMutations.set(cache, sessions);
+  }
+  const previous = sessions.get(sessionId) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(async () => {
+    if (stillCurrent()) await mutate();
+  });
+  sessions.set(sessionId, current);
+  try {
+    await current;
+  } finally {
+    if (sessions.get(sessionId) === current) sessions.delete(sessionId);
+  }
+}
+
+export async function storeHistoryPageIfCurrent(
+  sessionId: string,
+  page: HistoryPage,
+  cache: HistoryPageCache,
+  stillCurrent: () => boolean,
+): Promise<void> {
+  await mutateIfCurrent(cache, sessionId, stillCurrent, () => cache.store(sessionId, page));
+}
+
+export async function clearHistoryPagesIfCurrent(
+  sessionId: string,
+  cache: HistoryPageCache,
+  stillCurrent: () => boolean,
+): Promise<void> {
+  await mutateIfCurrent(cache, sessionId, stillCurrent, () => cache.clear(sessionId));
+}
+
 
 export interface HistoryPageClient {
   getHistoryPage(sessionId: string, options?: { limit?: number; before?: string; after?: string }): Promise<HistoryPage>;
@@ -30,10 +75,16 @@ export type LoadedHistoryPage = {
   page: HistoryPage;
   fromCache: boolean;
   error?: unknown;
+  // The engine accepted this exact after-cursor, validating its history prefix.
+  validatedPrefixCursor?: string;
 };
 
 function pageKey(page: HistoryPage) {
   return `${page.start_index}:${page.end_index}`;
+}
+
+function sameConversation(left: HistoryPage, right: HistoryPage): boolean {
+  return (left.conversation_uid ?? null) === (right.conversation_uid ?? null);
 }
 
 function encodedSize(page: HistoryPage) {
@@ -54,10 +105,34 @@ function validPage(value: unknown): value is HistoryPage {
     (page.newer_cursor === null || typeof page.newer_cursor === "string");
 }
 
+/**
+ * The engine rejected the page-down cursor (409 stale, 400 invalid): the
+ * history the window paged against changed underneath it (compaction,
+ * engine restart, cursor-key rotation). Paging can never succeed from the
+ * current cursor; the caller must drop the cached pages and reload a fresh
+ * window instead of showing a dead-end retry error.
+ */
+export class UnusableHistoryCursorError extends Error {
+  readonly status: number;
+
+  constructor(detail: string, status: number) {
+    super(detail);
+    this.name = "UnusableHistoryCursorError";
+    this.status = status;
+  }
+}
+
+function cursorRejectionStatus(reason: unknown): number | null {
+  if (typeof reason !== "object" || reason === null) return null;
+  const status = (reason as { status?: unknown }).status;
+  return status === 409 || status === 400 ? status : null;
+}
+
 export function mergeRecentHistoryPage(
   cached: HistoryPage,
   updates: HistoryPage,
 ): HistoryPage {
+  if (!sameConversation(cached, updates)) return updates;
   if (!updates.history.length) {
     return {
       ...cached,
@@ -66,6 +141,18 @@ export function mergeRecentHistoryPage(
       newer_cursor: updates.newer_cursor ?? cached.newer_cursor,
       has_more_newer: updates.has_more_newer,
       last_turn_error: updates.last_turn_error ?? cached.last_turn_error,
+    };
+  }
+
+  if (updates.start_index > cached.end_index) {
+    // The refresh page starts beyond the cached window (for example a
+    // byte-capped engine response dropped the leading span). Merging by
+    // index would leave holes, fail validation, and strand the stale
+    // cached page. Serve the contiguous refresh page and keep the missing
+    // span reachable through the signed older cursor instead.
+    return {
+      ...updates,
+      has_more_older: true,
     };
   }
 
@@ -98,7 +185,24 @@ export function mergeRecentHistoryPage(
     last_turn_error: null,
   };
 
-  while (history.length > 1 && encodedSize(merged) > HISTORY_MAX_PAGE_BYTES) {
+  // Cursor floor: the byte-trim below may drop leading messages, but it must
+  // never push start_index above the position an older_cursor was minted at
+  // (cursor position == issuing page's start_index, verified server-side by
+  // an HMAC). Keeping the cursor while trimming past that floor would
+  // desynchronize the window: the next page-down would land entirely above
+  // the cursor position and return an empty merge forever after. When no
+  // cursor is in play the trim may run freely.
+  const cursorFloor = updates.older_cursor
+    ? updates.start_index
+    : cached.older_cursor
+      ? cached.start_index
+      : Number.POSITIVE_INFINITY;
+
+  while (
+    history.length > 1 &&
+    startIndex < cursorFloor &&
+    encodedSize(merged) > HISTORY_MAX_PAGE_BYTES
+  ) {
     history = history.slice(1);
     startIndex += 1;
     merged.history = history;
@@ -122,6 +226,7 @@ export function mergeOlderHistoryPage(
   current: HistoryPage,
   older: HistoryPage,
 ): HistoryPage {
+  if (!sameConversation(current, older)) return current;
   if (older.end_index < current.start_index) return current;
   const byIndex = new Map<number, HistoryMessage>();
   older.history.forEach((message, offset) => {
@@ -151,14 +256,51 @@ export function mergeOlderHistoryPage(
   };
 }
 
+/** Keep an already-open prefix only when the engine validated its cursor. */
+export function retainVerifiedOlderWindow(
+  open: HistoryPage | undefined,
+  refreshed: HistoryPage,
+  validatedPrefixCursor: string | undefined,
+): HistoryPage {
+  if (
+    !open || !validatedPrefixCursor || open.newer_cursor !== validatedPrefixCursor ||
+    !sameConversation(open, refreshed) || open.start_index >= refreshed.start_index ||
+    open.end_index < refreshed.start_index || open.end_index > refreshed.end_index
+  ) return refreshed;
+  const retained = mergeOlderHistoryPage(refreshed, open);
+  return {
+    ...retained,
+    // A successful refresh owns the latest error state. Retaining the
+    // prefix must not revive an error that the engine has cleared.
+    last_turn_error: refreshed.last_turn_error
+      ? {
+          ...refreshed.last_turn_error,
+          history_length: refreshed.start_index - retained.start_index +
+            refreshed.last_turn_error.history_length,
+        }
+      : null,
+  };
+}
+
 
 export async function loadLatestHistoryPage(
   sessionId: string,
   api: HistoryPageClient,
   cache: HistoryPageCache,
+  stillCurrent: () => boolean = () => true,
+  expectedConversationUid: string | null = null,
 ): Promise<LoadedHistoryPage> {
+  // Cache failures must not replace an authoritative network response with
+  // an older conversation's cached history.
+  const store = (page: HistoryPage) =>
+    storeHistoryPageIfCurrent(sessionId, page, cache, stillCurrent).catch(() => {});
+  const clear = () =>
+    mutateIfCurrent(cache, sessionId, stillCurrent, () => cache.clear(sessionId)).catch(() => {});
   const cachedPages = (await cache.load(sessionId))
     .filter((page) => page.history.length > 0)
+    // If a switch was already observed, an unavailable or broken cache must
+    // not revive the prior conversation while the network is offline.
+    .filter((page) => !expectedConversationUid || page.conversation_uid === expectedConversationUid)
     .sort((left, right) =>
       right.end_index - left.end_index ||
       Math.abs(left.history.length - HISTORY_PAGE_SIZE) -
@@ -170,6 +312,9 @@ export async function loadLatestHistoryPage(
         ...newestCached,
         history: newestCached.history.slice(-HISTORY_PAGE_SIZE),
         start_index: newestCached.end_index - HISTORY_PAGE_SIZE,
+        has_more_older:
+          newestCached.has_more_older ||
+          newestCached.start_index < newestCached.end_index - HISTORY_PAGE_SIZE,
         last_turn_error: newestCached.last_turn_error &&
           newestCached.start_index + newestCached.last_turn_error.history_length >=
             newestCached.end_index - HISTORY_PAGE_SIZE
@@ -182,29 +327,38 @@ export async function loadLatestHistoryPage(
           : null,
       }
     : newestCached;
-  const isStaleCursor = (reason: unknown) =>
-    typeof reason === "object" && reason !== null &&
-    "status" in reason && (reason as { status?: unknown }).status === 409;
-
   if (cached?.newer_cursor) {
     try {
       const updates = await api.getHistoryPage(sessionId, {
         limit: HISTORY_PAGE_SIZE,
         after: cached.newer_cursor,
       });
+      if (!sameConversation(cached, updates)) {
+        // A cursor can still match an identical prefix after /resume. Never
+        // join pages across conversations, even when their contents match.
+        await clear();
+        try {
+          const page = await api.getHistoryPage(sessionId, { limit: HISTORY_PAGE_SIZE });
+          await store(page);
+          return { page, fromCache: false };
+        } catch (error) {
+          return { page: updates, fromCache: false, error };
+        }
+      }
       const page = mergeRecentHistoryPage(cached, updates);
-      if (updates.history.length) await cache.store(sessionId, updates);
-      await cache.store(sessionId, page);
-      return { page, fromCache: false };
+      if (updates.history.length) await store(updates);
+      await store(page);
+      return { page, fromCache: false, validatedPrefixCursor: cached.newer_cursor };
     } catch (error) {
-      if (!isStaleCursor(error)) return { page: cached, fromCache: true, error };
-      await cache.clear(sessionId);
+      // 409 = stale cursor, 400 = invalid cursor: both are unusable, drop and refetch.
+      if (cursorRejectionStatus(error) === null) return { page: cached, fromCache: true, error };
+      await clear();
       try {
         const page = await api.getHistoryPage(sessionId, { limit: HISTORY_PAGE_SIZE });
-        await cache.store(sessionId, page);
+        await store(page);
         return { page, fromCache: false };
       } catch (refreshError) {
-        await cache.store(sessionId, cached);
+        await store(cached);
         return { page: cached, fromCache: true, error: refreshError };
       }
     }
@@ -212,7 +366,8 @@ export async function loadLatestHistoryPage(
 
   try {
     const page = await api.getHistoryPage(sessionId, { limit: HISTORY_PAGE_SIZE });
-    await cache.store(sessionId, page);
+    if (cached && !sameConversation(cached, page)) await clear();
+    await store(page);
     return { page, fromCache: false };
   } catch (error) {
     if (!cached) throw error;
@@ -226,16 +381,53 @@ export async function loadOlderHistoryPage(
   current: HistoryPage,
   api: HistoryPageClient,
   cache: HistoryPageCache,
+  stillCurrent: () => boolean = () => true,
 ): Promise<HistoryPage | null> {
   if (!current.has_more_older) return null;
   const cached = await cache.findOlder(sessionId, current.start_index);
-  if (cached) return cached;
+  if (cached && sameConversation(current, cached)) {
+    // A cached page is a snapshot from an earlier window. Its exhaustion
+    // flags can predate the capped refresh that made older history reachable
+    // again (a byte-capped page with start_index > 0 was capped, not
+    // terminal). Carry the current window's engine-issued cursor down so
+    // the window keeps paging; an empty next page marks it exhausted for
+    // real. Never synthesize a cursor — the engine signs its cursors and
+    // rejects unsigned ones with 400 InvalidHistoryCursor.
+    if (cached.start_index === 0) {
+      // The cached fragment already reaches the beginning of history:
+      // nothing older exists, whatever the current window's flags say.
+      return { ...cached, has_more_older: false, older_cursor: null };
+    }
+    if (cached.has_more_older && cached.older_cursor) return cached;
+    return {
+      ...cached,
+      has_more_older: current.has_more_older,
+      older_cursor: current.older_cursor,
+    };
+  }
   if (!current.older_cursor) return null;
-  const older = await api.getHistoryPage(sessionId, {
-    limit: HISTORY_PAGE_SIZE,
-    before: current.older_cursor,
-  });
-  if (older.history.length) await cache.store(sessionId, older);
+  let older: HistoryPage;
+  try {
+    older = await api.getHistoryPage(sessionId, {
+      limit: HISTORY_PAGE_SIZE,
+      before: current.older_cursor,
+    });
+  } catch (error) {
+    const status = cursorRejectionStatus(error);
+    if (status !== null) {
+      throw new UnusableHistoryCursorError(
+        `The engine rejected the history cursor (HTTP ${status}); cached pages may be stale.`,
+        status,
+      );
+    }
+    throw error;
+  }
+  if (!sameConversation(current, older)) throw new Error("Conversation changed while loading history.");
+  if (older.history.length) {
+    await storeHistoryPageIfCurrent(sessionId, older, cache, stillCurrent).catch((reason) => {
+      console.warn("Skipping history page cache", reason);
+    });
+  }
   return older;
 }
 
@@ -244,7 +436,7 @@ function boundedPages(existing: HistoryPage[], incoming: HistoryPage) {
   if (!validPage(incoming) || encodedSize(incoming) > HISTORY_CACHE_MAX_BYTES) {
     throw new Error("Cannot cache an invalid or oversized history page.");
   }
-  const byKey = new Map(existing.filter(validPage).map((page) => [pageKey(page), page]));
+  const byKey = new Map(existing.filter((page) => validPage(page) && sameConversation(page, incoming)).map((page) => [pageKey(page), page]));
   byKey.set(pageKey(incoming), incoming);
   const newestFirst = [...byKey.values()].sort(
     (left, right) =>
@@ -414,3 +606,81 @@ export class IndexedDbHistoryPageCache implements HistoryPageCache {
 }
 
 export const historyPageCache: HistoryPageCache = new IndexedDbHistoryPageCache();
+
+
+/** Slimmed page entries keep a signed reference but lose heavy metadata
+ * lists (acp_updates, tool_calls, ...), so restored tool runs would render
+ * empty. Fetch each marked entry's full metadata once and merge back the
+ * missing keys; entries whose fetch fails stay slimmed. (issue #522) */
+const HISTORY_SLIMMED_MARKERS = [
+  "acp_updates_dropped",
+  "tool_calls_dropped",
+  "xml_tool_calls_dropped",
+  "provider_reasoning_dropped",
+];
+
+export interface HistoryMetadataClient {
+  getHistoryMetadata(
+    sessionId: string,
+    reference: string,
+  ): Promise<{ metadata: Record<string, unknown> }>;
+}
+
+export async function restoreSlimmedHistoryMetadata(
+  sessionId: string,
+  api: HistoryMetadataClient,
+  history: HistoryMessage[],
+): Promise<HistoryMessage[]> {
+  const targets: number[] = [];
+  for (let index = 0; index < history.length; index += 1) {
+    const metadata = history[index]?.metadata;
+    if (!metadata) {
+      continue;
+    }
+    const reference = metadata.history_output_ref;
+    if (
+      typeof reference === "string" &&
+      reference.length > 0 &&
+      HISTORY_SLIMMED_MARKERS.some((marker) => marker in metadata)
+    ) {
+      targets.push(index);
+    }
+  }
+  if (targets.length === 0) {
+    return history;
+  }
+
+  const results = await Promise.allSettled(
+    targets.map((index) =>
+      api.getHistoryMetadata(
+        sessionId,
+        history[index].metadata?.history_output_ref as string,
+      ),
+    ),
+  );
+  const restored = [...history];
+  results.forEach((result, position) => {
+    if (result.status !== "fulfilled") {
+      return;
+    }
+    const index = targets[position];
+    const full = result.value.metadata;
+    if (!full || typeof full !== "object") {
+      return;
+    }
+    const metadata = { ...restored[index].metadata };
+    for (const [key, value] of Object.entries(full)) {
+      if (!(key in metadata)) {
+        metadata[key] = value;
+      }
+    }
+    for (const marker of HISTORY_SLIMMED_MARKERS) {
+      const key = marker.replace(/_dropped$/, "");
+      if (key in metadata) {
+        delete metadata[marker];
+      }
+    }
+    restored[index] = { ...restored[index], metadata };
+  });
+  return restored;
+}

@@ -27,6 +27,14 @@ it with `/goal discard <id>`. A later text-only goal never inherits those images
 If a response is lost, `/goal requests` also lists requests that already
 created a goal. Retrying a committed request reports that goal instead of
 creating another; a different objective or budget is rejected.
+Image submissions carrying a client request ID can also be replayed with the
+same ID and input: they return the original pending request or creation
+receipt. Reusing the ID for different input or another conversation is refused.
+The saved binding survives restart; after a pending request is discarded, a
+replay cannot recreate it, so use a new submission to send those images again.
+A replay's receipt is returned only to that response, without taking over or
+cancelling the original goal's private reply. A new goal checks a pre-admission
+cancellation before saving its images.
 `/goal clear` clears the active goal without discarding other requests. Images
 submitted with a control command are retained as a pending request; the
 control does not run. Resubmit the control without images to execute it.
@@ -59,6 +67,13 @@ record a durable stop intent immediately, applied at the next safe boundary.
 Attach clients execute `/goal` daemon-side through the `state.goal_command`
 RPC — the daemon owns the conversation identity, store, and driver, and
 `goal.state_changed` events stream back over the attach socket.
+Web goal replies are private to the submitting request. The legacy
+`POST /sessions/{session_id}/message` API must include the `conversation_uid`
+returned by that session's `/history`; the daemon refuses a goal if the
+conversation changed before admission. The assistant transport carries the
+same identity in its state. Revoking a phone closes its in-flight private
+goal streams as well as its ordinary event streams. Clients connected to a
+daemon without private goal replies must update before submitting a goal.
 `--` is the end-of-options delimiter for objectives beginning with `--`.
 
 ## How it works
@@ -122,7 +137,9 @@ permissions apply. Prose claiming "done" is never completion.
 
 `~/.kollab/projects/<encoded>/goals/goals.db` (SQLite, WAL) + `artifacts/`.
 Tables: `goals`, `goal_events` (append-only), `goal_attempts`,
-`goal_evidence`, `goal_attachment_requests`. Pending request references are
+`goal_evidence`, `goal_attachment_requests`, `goal_attachment_submissions`.
+Submission keys and input fingerprints are hashed; no image bytes or artifact
+paths enter the submission table. Pending request references are
 consumed and a creation receipt is recorded in the same transaction that
 creates their goal. A partial unique index enforces one unfinished goal per
 conversation at the storage layer.

@@ -191,6 +191,11 @@ const mainConfig = defineConfig({
       "tests/phonelink-app-shell.test.ts",
       "tests/trajectory-detail-title.test.ts",
       "tests/sidebar-breakpoint.test.ts",
+      "tests/session-refresh-gate.test.ts",
+
+      "tests/team-model.test.ts",
+      "tests/team-selection.test.ts",
+      "tests/team-launch-api.test.ts",
     ],
     environment: "node",
   },

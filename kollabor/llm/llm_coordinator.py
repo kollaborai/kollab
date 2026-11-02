@@ -20,6 +20,8 @@ from kollabor_agent.queue_processor import (
     CancellationOrigin,
     QueuedInput,
     QueueProcessor,
+    TaggedInput,
+    batch_request_ids,
     merge_voice_origin_contexts,
 )
 from kollabor_agent.tool_executor import ToolExecutor
@@ -120,7 +122,7 @@ class LLMService:
         )
 
     def _add_conversation_message(
-        self, message_or_role, content=None, parent_uuid=None, metadata=None
+        self, message_or_role, content=None, parent_uuid=None, metadata=None, *, publish_user_event=True
     ) -> str:
         """Add a message to both conversation manager and legacy history.
 
@@ -173,7 +175,7 @@ class LLMService:
         # conversation_manager: adds persistence, UUID tracking, metadata
         # both systems stay synchronized
         self.conversation_history.append(message)
-        if role == "user" and not hidden:
+        if role == "user" and not hidden and publish_user_event:
             # What mirrors this conversation (the engine) follows it by these,
             # so a window opened mid-turn shows the message being answered.
             publish_semantic(
@@ -1725,11 +1727,12 @@ class LLMService:
 
     async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
+        request_ids = batch_request_ids(messages)
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
             merged_origin_context = merge_voice_origin_contexts(messages)
             combined = combine_message_contents(
-                [m.content if isinstance(m, QueuedInput) else m for m in messages]
+                [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
             combined = self.merge_pending_agent_hud(combined)
             messages = [
@@ -1744,6 +1747,7 @@ class LLMService:
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
             current_parent_uuid=self.current_parent_uuid,
+            request_ids=request_ids,
         )
 
     async def _continue_conversation(self):
@@ -1935,6 +1939,7 @@ class LLMService:
         origin_context: dict | None = None,
         may_answer: bool = False,
         native_only: bool = False,
+        request_id: str | None = None,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1951,6 +1956,8 @@ class LLMService:
                 generation prompt, a hub peer, a pipe is never the user's yes.
             native_only: the caller needs the native tool loop (agent/skill
                 generation writes files); refused while ACP owns the chat.
+            request_id: the client follows this turn by it (#551): its events
+                carry it in ``request_ids``, and the result echoes it.
 
         Returns:
             Status information about processing
@@ -2054,6 +2061,8 @@ class LLMService:
         await self._enqueue_with_overflow_strategy(
             QueuedInput(normalized_message, voice or {}, trusted_origin_context)
             if voice or trusted_origin_context
+            else TaggedInput(normalized_message, (request_id,))
+            if request_id
             else normalized_message
         )
 
@@ -2063,6 +2072,8 @@ class LLMService:
                 lambda: self._process_queue(), name="process_queue"
             )
 
+        if request_id and not (voice or trusted_origin_context):
+            return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
 
     def _voice_aside_due(self, origin: dict) -> bool:
@@ -2217,11 +2228,34 @@ class LLMService:
         except Exception:
             return False, True
 
+    def _manual_relay_origin_authorized(self, origin: Mapping[str, Any]) -> bool:
+        """Fail closed when a manual relay grant expires before ACP delivery."""
+        if not origin.get("relay_turn_id"):
+            return True
+        event_bus = getattr(self, "event_bus", None)
+        get_service = getattr(event_bus, "get_service", None)
+        if not callable(get_service):
+            return False
+        try:
+            hub_plugin = get_service("hub_plugin")
+            validate = getattr(hub_plugin, "_manual_relay_origin_authorized", None)
+            return callable(validate) and validate(origin) is True
+        except Exception:
+            logger.warning(
+                "manual relay ACP admission authority check failed", exc_info=True
+            )
+            return False
+
     async def _admit_acp(self, acp, data: Dict[str, Any], source: str) -> Dict[str, Any]:
         """The one ACP admission: steer a running turn or queue a new one."""
         request_id = data.get("request_id") or uuid.uuid4().hex
         origin = dict(data.get("origin_context") or {})
         origin.setdefault("operator", source != "agent")
+        if not self._manual_relay_origin_authorized(origin):
+            return {
+                "status": "rejected",
+                "reason": "remote conversation authority is no longer valid",
+            }
         content = data["message"]
         images: tuple[dict[str, str], ...] = ()
         if not isinstance(content, str):
@@ -2291,6 +2325,14 @@ class LLMService:
                 raise
             if steered:
                 return {"status": "injected", "request_id": request_id}
+        # `steer` above can await while a relay is revoked; re-check at the
+        # actual queue-admission boundary before sending anything to ACP.
+        if not self._manual_relay_origin_authorized(origin):
+            return {
+                "status": "rejected",
+                "reason": "remote conversation authority is no longer valid",
+            }
+
         try:
             admission = acp.admit(
                 message, request_id=request_id, source=source,

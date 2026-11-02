@@ -1,0 +1,24 @@
+{
+  "name": "social-media",
+  "description": "Plans, creates, schedules and measures social content across X, Instagram, TikTok, LinkedIn and YouTube, and runs community replies. Every post and reply is a draft until the human approves it.",
+  "roster": "social-crew",
+  "lead": "aria",
+  "members": [
+    {
+      "persona": "aria",
+      "reports_to": null
+    },
+    {
+      "persona": "leo",
+      "reports_to": "aria"
+    },
+    {
+      "persona": "zara",
+      "reports_to": "aria"
+    },
+    {
+      "persona": "omari",
+      "reports_to": "aria"
+    }
+  ]
+}

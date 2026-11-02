@@ -38,6 +38,14 @@ def resolve_tap(source: Any) -> Optional["DisplayTap"]:
     return getattr(coordinator, "_display_tap", None)
 
 
+# A failed turn's text as clients show it. A provider or harness can fail with
+# its whole output (an HTML page, a log of many MB); past the engine's 16 MB
+# frame limit the turn's completion was dropped and its chat waited (#543).
+# Both ends stay: a harness log often names the cause on its last line, and
+# the model fallback reads it there ("usage limit").
+_ERROR_TEXT_LIMIT = 8192
+
+
 def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
     """Publish a machine-readable turn event alongside the rendered output.
 
@@ -52,6 +60,12 @@ def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
     tap = resolve_tap(source)
     if tap is None:
         return
+    if event_type in ("turn_complete", "error"):
+        for key in ("error", "message"):
+            text = fields.get(key)
+            if isinstance(text, str) and len(text) > _ERROR_TEXT_LIMIT:
+                half = _ERROR_TEXT_LIMIT // 2
+                fields[key] = f"{text[:half]} … ({len(text):,} characters) … {text[-half:]}"
     try:
         tap.publish({"type": event_type, **fields})
     except Exception:
@@ -118,7 +132,8 @@ class DisplayTap:
             self._next_seq += 1
             self._history.append(event)
 
-        with self._lock:
+            # Deliver under the same lock: each subscriber gets events in seq
+            # order, and an attached engine drops what it has seen by seq (#543).
             dead = []
             for client_id, q in self._subscribers.items():
                 try:
