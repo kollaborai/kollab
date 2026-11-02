@@ -172,27 +172,30 @@ class SessionManager:
 
     def set_conversation_context(self):
         """Set dynamic context on conversation logger before logging start."""
-        # Get version
+        # Get the canonical runtime version, including source build provenance.
         try:
-            from importlib.metadata import version
-
-            app_version = version("kollab")
+            from kollabor.version import __version__ as app_version
         except Exception:
             try:
-                from pathlib import Path
+                from importlib.metadata import version
 
-                pyproject = Path(__file__).parent.parent.parent / "pyproject.toml"
-                if pyproject.exists():
-                    for line in pyproject.read_text().split("\n"):
-                        if line.startswith("version ="):
-                            app_version = line.split('"')[1]
-                            break
+                app_version = version("kollab")
+            except Exception:
+                try:
+                    from pathlib import Path
+
+                    pyproject = Path(__file__).parent.parent.parent / "pyproject.toml"
+                    if pyproject.exists():
+                        for line in pyproject.read_text().splitlines():
+                            if line.startswith("version ="):
+                                app_version = line.split('"')[1]
+                                break
+                        else:
+                            app_version = "unknown"
                     else:
                         app_version = "unknown"
-                else:
+                except Exception:
                     app_version = "unknown"
-            except Exception:
-                app_version = "unknown"
 
         # Get active plugins from event bus
         active_plugins = []

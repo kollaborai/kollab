@@ -83,7 +83,7 @@ socket.socket.sendto = forbidden_network
 for module in MODULES:
     importlib.import_module(module)
 from kollabor import __version__
-assert __version__ == tomllib.loads((tree / "pyproject.toml").read_text())["project"]["version"]
+assert __version__.split("+", 1)[0] == tomllib.loads((tree / "pyproject.toml").read_text())["project"]["version"]
 
 def help_for(path, arguments, module=False):
     sys.argv = [path, *arguments]

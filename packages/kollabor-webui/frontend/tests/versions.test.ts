@@ -42,3 +42,26 @@ test("unavailable build values are explicit and never blank", () => {
     ["unknown", "unknown", "unknown", "unknown", "unknown @ unknown"],
   );
 });
+
+test("engine dev version matches only the same known frontend build SHA", async () => {
+  const { runtimeVersionMatchesBuild } = await import("../src/utils/versions.ts");
+
+  assert.equal(
+    runtimeVersionMatchesBuild(
+      "0.18.5",
+      "0.18.5+dev.g01234567",
+      "0123456789abcdef0123456789abcdef01234567",
+    ),
+    true,
+  );
+  assert.equal(
+    runtimeVersionMatchesBuild(
+      "0.18.5",
+      "0.18.5+dev.g89abcdef",
+      "0123456789abcdef0123456789abcdef01234567",
+    ),
+    false,
+  );
+  assert.equal(runtimeVersionMatchesBuild("0.18.5", "0.18.5", "unknown"), true);
+  assert.equal(runtimeVersionMatchesBuild("0.18.5", "0.18.5+dev.gunknown", "unknown"), false);
+});

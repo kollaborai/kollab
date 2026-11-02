@@ -34,3 +34,19 @@ def test_status_answers_while_agents_are_open():
 
     assert response.status_code == 200
     assert response.json()["providers"] == ["openai"]
+
+
+def test_version_endpoints_use_the_canonical_runtime_version(monkeypatch):
+    import kollabor.version as version_module
+    from kollabor.version import __version__
+
+    monkeypatch.setattr(version_module, "get_kollabor_version", lambda: "unexpected")
+    client = TestClient(create_app())
+    version = client.get("/version")
+    status = client.get("/status")
+
+    assert version.status_code == 200
+    assert version.json()["version"] == __version__
+    assert version.json()["engine"] == __version__
+    assert status.status_code == 200
+    assert status.json()["version"] == __version__

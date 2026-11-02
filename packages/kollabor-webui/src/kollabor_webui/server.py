@@ -262,9 +262,12 @@ def create_app(
         except Exception:
             server_version = ""
         try:
-            kollab_version = pkg_version("kollab")
+            from kollabor.version import __version__ as kollab_version
         except Exception:
-            kollab_version = ""
+            try:
+                kollab_version = pkg_version("kollab")
+            except Exception:
+                kollab_version = ""
         return {
             "engine_url": url,
             "token": token,

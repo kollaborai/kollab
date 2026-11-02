@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from kollabor import __version__
 from kollabor.llm.session_manager import SessionManager
 from kollabor_events.data_models import ConversationMessage
 
@@ -216,10 +217,12 @@ class TestSessionManager(unittest.TestCase):
         self.conversation_logger.set_context = MagicMock()
         self.conversation_logger.set_provider = MagicMock()
 
-        with patch("importlib.metadata.version", return_value="1.0.0"):
+        with patch("importlib.metadata.version", return_value="1.0.0"), patch(
+            "kollabor.version.get_kollabor_version", return_value="unexpected"
+        ):
             self.manager.set_conversation_context()
 
-        self.conversation_logger.set_context.assert_called_once_with("1.0.0", [])
+        self.conversation_logger.set_context.assert_called_once_with(__version__, [])
         self.conversation_logger.set_provider.assert_called_once_with("test-provider")
 
     def test_set_conversation_context_with_plugins(self):
@@ -242,7 +245,7 @@ class TestSessionManager(unittest.TestCase):
             self.manager.set_conversation_context()
 
         call_args = self.conversation_logger.set_context.call_args
-        self.assertEqual(call_args[0][0], "2.0.0")
+        self.assertEqual(call_args[0][0], __version__)
         self.assertIn("PluginOne", call_args[0][1])
         self.assertIn("PluginTwo", call_args[0][1])
 

@@ -56,14 +56,20 @@ def _acp_display_metadata(value: Any) -> Dict[str, Any]:
 
 
 def _get_app_version() -> str:
-    """Get application version dynamically.
+    """Get the canonical runtime version, with install metadata fallbacks.
 
-    Tries package metadata first (installed version),
-    then falls back to pyproject.toml (development mode).
+    Source checkouts include their revision; installed releases retain the
+    package version.
 
     Returns:
-        Version string or "unknown" if cannot be determined.
+        Version string or "unknown" if it cannot be determined.
     """
+    try:
+        from kollabor.version import __version__ as runtime_version
+
+        return runtime_version
+    except Exception:
+        pass
     try:
         # Try package metadata (installed version)
         return str(get_version("kollabor"))

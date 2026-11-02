@@ -16,7 +16,10 @@ def _version_lines(
     monkeypatch: pytest.MonkeyPatch, provenance: BuildProvenance | None = None
 ) -> list[str]:
     if provenance is not None:
-        monkeypatch.setattr("kollabor.version._EMBEDDED_PROVENANCE", provenance)
+        monkeypatch.setattr(
+            "kollabor.version.resolve_build_provenance",
+            lambda *_args, **_kwargs: provenance,
+        )
     out = io.StringIO()
     with mock.patch.object(sys, "argv", ["/Users/u/.local/bin/kollab", "--version"]):
         with contextlib.redirect_stdout(out), pytest.raises(SystemExit):

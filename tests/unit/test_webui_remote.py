@@ -15,6 +15,8 @@ from kollabor_webui import build_uvicorn_config
 from kollabor_webui.server import create_app
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from kollabor import __version__
+
 TEST_BIND_HOSTS = ["127.0.0.1", "10.8.0.1"]
 TEST_CLIENT_NETWORKS = (
     ipaddress.ip_network("127.0.0.0/8"),
@@ -49,6 +51,7 @@ def test_uvicorn_client_address_is_not_rewritten_by_proxy_headers():
 @pytest.mark.asyncio
 async def test_a_remote_private_page_gets_proxy_and_localhost_gets_engine(monkeypatch):
     monkeypatch.setattr("kollabor_engine.auth.read_token_from_disk", lambda: "t0ken")
+    monkeypatch.setattr("kollabor.version.get_kollabor_version", lambda: "unexpected")
     engine = httpx.MockTransport(
         lambda request: httpx.Response(200, json={"version": "0.17.0"})
     )
@@ -73,6 +76,8 @@ async def test_a_remote_private_page_gets_proxy_and_localhost_gets_engine(monkey
         "engine_url", "token", "server_version", "engine_version", "kollab_version"
     }
     assert local["engine_url"] == "http://127.0.0.1:7433"
+
+    assert remote["kollab_version"] == __version__
 
 
 @pytest.mark.asyncio

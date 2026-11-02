@@ -38,3 +38,24 @@ export function versionRows(
     },
   ];
 }
+
+const KNOWN_BUILD_SHA = /^[0-9a-f]{8,64}$/i;
+
+/**
+ * Treat the runtime local dev suffix as the same build only when its commit
+ * matches the SHA embedded in this frontend bundle. Unknown provenance never
+ * suppresses a mismatch warning.
+ */
+export function runtimeVersionMatchesBuild(
+  bundleVersion: string,
+  engineVersion: string,
+  buildSha: string,
+): boolean {
+  const bundle = bundleVersion.trim();
+  const engine = engineVersion.trim();
+  if (bundle && engine === bundle) return true;
+
+  const sha = buildSha.trim();
+  if (!bundle || !KNOWN_BUILD_SHA.test(sha)) return false;
+  return engine === `${bundle}+dev.g${sha.slice(0, 8).toLowerCase()}`;
+}

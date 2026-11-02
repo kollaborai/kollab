@@ -129,6 +129,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- CLI, system, Engine, WebUI and telemetry identify non-release source
+  checkouts by Git revision; exact clean tags and installed releases keep clean
+  versions (#630).
 - Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
   `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
   internal agent message-tool syntax (#622).

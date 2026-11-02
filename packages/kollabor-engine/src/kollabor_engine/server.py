@@ -391,7 +391,12 @@ def create_app(port: Optional[int] = None) -> FastAPI:
             except Exception:
                 return "unknown"
 
-        v = safe_ver("kollabor-engine")
+        try:
+            from kollabor.version import __version__
+
+            v = __version__
+        except Exception:
+            v = safe_ver("kollabor-engine")
         return {
             "version": v,
             "engine": v,
@@ -417,8 +422,15 @@ def create_app(port: Optional[int] = None) -> FastAPI:
             {getattr(s.profile, "provider", "") or "" for s in _sessions.values()} - {""}
         )
 
+        try:
+            from kollabor.version import __version__
+
+            runtime_version = __version__
+        except Exception:
+            runtime_version = safe_ver("kollabor-engine")
+
         return {
-            "version": safe_ver("kollabor-engine"),
+            "version": runtime_version,
             "sessions": len(_sessions),
             "uptime": int(time.time() - _start_time),
             "providers": providers,

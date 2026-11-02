@@ -124,3 +124,34 @@ def test_embedded_metadata_reader_rejects_non_generated_code(tmp_path: Path) -> 
     invalid.write_text("raise RuntimeError('do not execute')\n", encoding="utf-8")
 
     assert read_embedded_provenance(invalid) is None
+
+
+def test_exact_clean_release_tag_requires_exact_tag_and_clean_tree(tmp_path):
+    import subprocess
+
+    import kollabor.build_info as build_info
+
+    root = tmp_path
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Kollab Test"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "kollab-test@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    source_file = root / "source.txt"
+    source_file.write_text("source\n", encoding="utf-8")
+    subprocess.run(["git", "add", "source.txt"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "source"], cwd=root, check=True)
+    subprocess.run(["git", "tag", "v0.18.5"], cwd=root, check=True)
+
+    assert build_info.is_exact_clean_release_tag(root, "0.18.5") is True
+    assert build_info.is_exact_clean_release_tag(root, "0.18.6") is False
+
+    untracked_file = root / "untracked.txt"
+    untracked_file.write_text("dirty\n", encoding="utf-8")
+    assert build_info.is_exact_clean_release_tag(root, "0.18.5") is False
+
+    untracked_file.unlink()
+    source_file.write_text("modified\n", encoding="utf-8")
+    assert build_info.is_exact_clean_release_tag(root, "0.18.5") is False

@@ -82,6 +82,32 @@ def _git_output(repo_root: Path, *args: str) -> str | None:
     return output or None
 
 
+def is_exact_clean_release_tag(repo_root: Path, version: str) -> bool:
+    """Return whether HEAD is cleanly tagged with the matching release version."""
+
+    root = Path(repo_root).resolve()
+    git_root = _git_output(root, "rev-parse", "--show-toplevel")
+    if git_root is None or Path(git_root).resolve() != root:
+        return False
+
+    tags = _git_output(root, "tag", "--points-at", "HEAD")
+    if tags is None or f"v{version}" not in tags.splitlines():
+        return False
+
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except OSError, subprocess.SubprocessError:
+        return False
+    return status.returncode == 0 and not status.stdout.strip()
+
+
 def read_embedded_provenance(path: Path) -> BuildProvenance | None:
     """Read the generated metadata module used to carry values through sdists."""
 

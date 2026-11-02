@@ -79,6 +79,7 @@ import {
   storeHistoryPageIfCurrent,
 } from "./history-cache";
 import { agentName, sessionHeading } from "@/utils/session-display";
+import { runtimeVersionMatchesBuild } from "@/utils/versions";
 import { createSessionRefreshGate } from "@/utils/session-refresh";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
@@ -957,7 +958,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         if (!mounted) return;
         const bundle = __APP_VERSION__;
         const engine = (config?.engine_version || "").trim();
-        if (!engine || !bundle || engine === bundle) return;
+        if (
+          !engine ||
+          !bundle ||
+          runtimeVersionMatchesBuild(bundle, engine, __KOLLAB_BUILD_SHA__)
+        ) {
+          return;
+        }
         setVersionMismatch(
           `This page (v${bundle}) does not match the running engine (v${engine}). Reload after the engine finishes updating.`,
         );
