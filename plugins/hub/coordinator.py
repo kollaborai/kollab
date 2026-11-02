@@ -202,10 +202,10 @@ class SweepScheduler:
 
     def __init__(self, interval_secs: float = WORK_QUEUE_SWEEP_INTERVAL_SECS):
         self._interval = interval_secs
-        self._last = 0.0
+        self._last: Optional[float] = None
 
     def due(self, now: float) -> bool:
-        if now - self._last >= self._interval:
+        if self._last is None or now - self._last >= self._interval:
             self._last = now
             return True
         return False
@@ -217,8 +217,9 @@ def github_terminal_state(ref: str) -> Optional[str]:
     Queries ``gh`` (repo inferred from the working directory). Returns
     ``None`` for open items, unknown numbers, and any ``gh`` failure --
     unknown means keep the work item, never retire on a bad answer.
-    Terminal answers are cached for the process lifetime; open answers
-    are re-checked each sweep because they can change.
+    Merged PRs are cached for the process lifetime. Closed issues and
+    unmerged closed PRs are re-checked each sweep because they can reopen;
+    open answers are re-checked because they can change.
     """
     cached = _TERMINAL_CACHE.get(ref)
     if cached is not None:
@@ -245,17 +246,15 @@ def github_terminal_state(ref: str) -> Optional[str]:
         if kind == "pr":
             if state == "MERGED":
                 reason = f"{ref} merged"
-            elif state == "CLOSED":
-                reason = f"{ref} closed"
-            else:
-                return None
-        else:
-            if state != "CLOSED":
-                return None
-            state_reason = data.get("stateReason") or "closed"
-            reason = f"{ref} issue closed ({state_reason})"
-        _TERMINAL_CACHE[ref] = reason
-        return reason
+                _TERMINAL_CACHE[ref] = reason
+                return reason
+            if state == "CLOSED":
+                return f"{ref} closed"
+            return None
+        if state != "CLOSED":
+            return None
+        state_reason = data.get("stateReason") or "closed"
+        return f"{ref} issue closed ({state_reason})"
     return None
 
 

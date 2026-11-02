@@ -391,8 +391,9 @@ hub_queue = ToolDefinition(
     risk_level="low",
     requires_permission=False,
     xml_tag="hub_queue",
-    xml_form="body",
+    xml_form="mixed",
     xml_body_param="description",
+    xml_attributes=["upstream_refs"],
     parameters=[
         ToolParameter(
             name="description",
@@ -400,15 +401,36 @@ hub_queue = ToolDefinition(
             description="Description of the work item",
             required=True,
         ),
+        ToolParameter(
+            name="upstream_refs",
+            type="array",
+            description=(
+                "Explicit GitHub issue/PR refs associated with this work. "
+                "Only these refs drive stale-queue cleanup; never infer them "
+                "from the description."
+            ),
+            required=False,
+            default=[],
+            items={"type": "string"},
+        ),
     ],
     examples=[
         "<hub_queue>refactor plugin loading in hub/plugin.py</hub_queue>",
+        (
+            '<hub_queue upstream_refs="#123,#456">'
+            "implement scoped follow-up work</hub_queue>"
+        ),
     ],
     result_format="Work item ID and confirmation.",
+    error_modes=["upstream_refs must be an array of GitHub refs like '#123'"],
     key_rules=[
         "add work items to the queue for any agent to pick up",
         "use hub_claim to claim a queued item — first come first served",
         "description should be specific enough for any agent to execute",
+        (
+            "include only explicit issue/PR refs in upstream_refs; "
+            "never infer them from description text"
+        ),
     ],
 )
 

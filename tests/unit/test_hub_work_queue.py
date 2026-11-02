@@ -447,3 +447,60 @@ def test_sweep_scheduler_throttles_between_intervals():
     assert sched.due(now=1005.0) is False, "second tick must not re-sweep"
     assert sched.due(now=1899.9) is False
     assert sched.due(now=1900.0) is True, "interval elapsed: sweep again"
+
+
+@pytest.mark.parametrize(
+    "ref, pr_answers, issue_answers, expected_first, expected_second",
+    [
+        (
+            "#219",
+            [(0, '{"state": "CLOSED"}'), (0, '{"state": "OPEN"}')],
+            [],
+            "#219 closed",
+            None,
+        ),
+        (
+            "#220",
+            [(1, ""), (1, "")],
+            [
+                (0, '{"state": "CLOSED", "stateReason": "COMPLETED"}'),
+                (0, '{"state": "OPEN"}'),
+            ],
+            "#220 issue closed (COMPLETED)",
+            None,
+        ),
+    ],
+)
+def test_closed_items_are_rechecked_after_reopen(
+    ref, pr_answers, issue_answers, expected_first, expected_second, monkeypatch
+):
+    """Closed issues and unmerged PRs may reopen; only merged PRs are immutable."""
+    number = ref.lstrip("#")
+    answers = {
+        ("gh", "pr", "view", number): list(pr_answers),
+        ("gh", "issue", "view", number): list(issue_answers),
+    }
+    calls = []
+
+    def fake_run(argv, capture_output, text, timeout):
+        calls.append(list(argv))
+        sequence = answers.get(tuple(argv[:4]), [])
+        if not sequence:
+            return types.SimpleNamespace(returncode=1, stdout="")
+        returncode, stdout = sequence.pop(0)
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout)
+
+    monkeypatch.setattr(coordinator, "subprocess", types.SimpleNamespace(run=fake_run))
+
+    assert coordinator.github_terminal_state(ref) == expected_first
+    assert coordinator.github_terminal_state(ref) == expected_second
+    assert len(calls) == len(pr_answers) + len(issue_answers)
+
+
+@pytest.mark.parametrize("first_now", [0.0, 899.9])
+def test_sweep_scheduler_runs_immediately_on_cold_start(first_now):
+    sched = coordinator.SweepScheduler(interval_secs=900)
+
+    assert sched.due(now=first_now) is True, "first boot tick must sweep immediately"
+    assert sched.due(now=first_now + 899.9) is False
+    assert sched.due(now=first_now + 900.0) is True

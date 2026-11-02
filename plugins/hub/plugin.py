@@ -1829,13 +1829,20 @@ class HubPlugin(BasePlugin):
         )
         tool_executor.register_plugin_handler("hub_spawn", self._handle_hub_spawn_tool)
 
-        # hub_queue
+        # hub_queue: body-only remains valid; refs are explicit attributes.
         def _extract_hub_queue(m):
-            return {"task": m.group(1).strip()}
+            attrs = tag_attrs(m.group(1))
+            refs = attrs.get("upstream_refs", "")
+            return {
+                "task": m.group(2).strip(),
+                "upstream_refs": [
+                    ref.strip() for ref in refs.split(",") if ref.strip()
+                ],
+            }
 
-        queue_pat = _re.compile(
-            r"<hub_queue>(.*?)</hub_queue>",
-            _re.DOTALL | _re.IGNORECASE,
+        queue_pat = tag_pattern(
+            "hub_queue",
+            valid={"upstream_refs": r"#\d+(?:\s*,\s*#\d+)*"},
         )
         response_parser.register_plugin_tag(
             "hub_queue", queue_pat, "hub_queue", _extract_hub_queue
@@ -4824,7 +4831,22 @@ class HubPlugin(BasePlugin):
                 error="task description required",
             )
 
-        result = self._handle_queue_command(task)
+        raw_upstream_refs = tool_data.get("upstream_refs", [])
+        if raw_upstream_refs is None:
+            raw_upstream_refs = []
+        if not isinstance(raw_upstream_refs, list) or any(
+            not isinstance(ref, str) or not re.fullmatch(r"#\d+", ref.strip())
+            for ref in raw_upstream_refs
+        ):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_queue",
+                success=False,
+                error="upstream_refs must be an array of GitHub refs like '#123'",
+            )
+        upstream_refs = [ref.strip() for ref in raw_upstream_refs]
+
+        result = self._handle_queue_command(task, upstream_refs=upstream_refs)
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_queue",
@@ -9530,6 +9552,10 @@ class HubPlugin(BasePlugin):
         )
         lines.append("  <hub_work/>  -- view work queue")
         lines.append("  <hub_queue>task description</hub_queue>  -- add to queue")
+        lines.append(
+            '  <hub_queue upstream_refs="#123,#456">task description</hub_queue>'
+        )
+        lines.append("    -- optional explicit refs; never infer from task text")
         lines.append('  <hub_claim/>  or  <hub_claim id="slot-id"/>  -- claim work')
         lines.append('  <hub_vault name="identity"/>  -- read agent vault summary')
         lines.append("  <hub_vaults/>  -- list all vaults")
@@ -15430,7 +15456,9 @@ class HubPlugin(BasePlugin):
             return "work queue: empty"
         return "\n".join(lines)
 
-    def _handle_queue_command(self, task: str) -> str:
+    def _handle_queue_command(
+        self, task: str, upstream_refs: Optional[List[str]] = None
+    ) -> str:
         if not task:
             return "usage: /hub queue <task description>"
         if not self._work_queue:
@@ -15439,6 +15467,7 @@ class HubPlugin(BasePlugin):
             task=task,
             project=self._identity.project if self._identity else "",
             queued_by=self._identity.identity if self._identity else "",
+            upstream_refs=upstream_refs or [],
         )
         # Dual-write to the durable open ledger queue (issue #211): open
         # cards are what the idle supervisor watches and what survives

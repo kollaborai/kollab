@@ -54,8 +54,14 @@ Quiet reminders while continuing the work:
 Complete a task:
   `<hub_task_complete id="abc123">summary of work done</hub_task_complete>`
 
-Add to queue:
+Add to queue without upstream references (the legacy body-only form):
   `<hub_queue>description of work item</hub_queue>`
+
+Associate explicit GitHub issues or pull requests with the queued work:
+  `<hub_queue upstream_refs="#123,#456">description of work item</hub_queue>`
+
+`upstream_refs` is optional. The queue does not infer references from the
+work description; only explicitly supplied refs are used by stale-queue cleanup.
 
 Claim next item:
   `<hub_claim>item-id</hub_claim>`
