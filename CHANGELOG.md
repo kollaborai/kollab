@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The Profiles dialog keeps profile model details readable on narrow screens:
+  provider, model and effort wrap onto the row instead of truncating to an
+  ellipsis, and the Test/Edit/Copy/Delete actions wrap below the text at phone
+  widths, so no detail needs hover to read (#578).
 - The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
 
 ### Added
