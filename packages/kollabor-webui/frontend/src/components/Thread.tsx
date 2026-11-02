@@ -124,6 +124,7 @@ const HubNoteView: FC<{
   isReply?: boolean;
   children: ReactNode;
   footer?: ReactNode;
+  observed?: boolean;
 }> = ({
   from,
   to,
@@ -132,6 +133,7 @@ const HubNoteView: FC<{
   isReply = false,
   children,
   footer,
+  observed = false,
 }) => {
   const pool = useContext(PoolContext);
   const { remote: remoteAgents } = useContext(ComposerHubContext);
@@ -167,7 +169,8 @@ const HubNoteView: FC<{
         className="mt-0.5 shrink-0"
       />
       <div className="min-w-0 flex-1">
-        <div className="text-muted-foreground mb-1 flex flex-wrap items-center gap-1 text-xs font-medium">
+        {/* Observed notes dim as a whole, so their label takes the body's token: muted text falls under AA at 0.6 (#659). */}
+        <div className={cn("mb-1 flex flex-wrap items-center gap-1 text-xs font-medium", observed ? "text-foreground" : "text-muted-foreground")}>
           <span>{label}</span>
         </div>
         <div className="text-foreground leading-relaxed wrap-break-word pointer-fine:text-sm">{children}</div>
@@ -260,7 +263,7 @@ const HubNoteMessage: FC = () => {
         note?.observed && "opacity-60",
       )}
     >
-      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo}>
+      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo} observed={note?.observed}>
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </HubNoteView>
     </MessagePrimitive.Root>
