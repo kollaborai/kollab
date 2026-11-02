@@ -88,3 +88,139 @@ def test_web_broadcasts_take_the_terminal_path() -> None:
         service.hub_send_msg.assert_not_awaited()
 
     asyncio.run(scenario())
+
+
+def test_hub_mentions_persist_to_the_session_jsonl() -> None:
+    async def scenario() -> None:
+        class FakeLogger:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, object]] = []
+
+            async def log_user_message(self, content, parent_uuid=None):
+                self.calls.append(("user", content, parent_uuid))
+                return "u1"
+
+            async def log_assistant_message(self, content, parent_uuid=None):
+                self.calls.append(("assistant", content, parent_uuid))
+                return "a1"
+
+        class FakeLlm:
+            is_processing = False
+            current_parent_uuid = "root"
+
+            def __init__(self) -> None:
+                self.logger = FakeLogger()
+                self.conversation_logger = self.logger
+                self.task = None
+
+            def create_background_task(self, coro, *, name: str):
+                self.task = asyncio.create_task(coro, name=name)
+                return self.task
+
+            def _add_conversation_message(self, role, content, *, metadata):
+                pass
+
+        llm = FakeLlm()
+        service = LocalStateService(llm, object())
+        service.hub_send_msg = AsyncMock(return_value="sent to lapis")
+
+        await service.send_message("@lapis inspect the queue")
+        await llm.task
+
+        assert [(role, content) for role, content, _ in llm.logger.calls] == [
+            ("user", "@lapis inspect the queue"),
+            ("assistant", "sent to lapis"),
+        ]
+        assert llm.logger.calls[0][2] == "root"
+        assert llm.logger.calls[1][2] == "u1"
+        assert llm.current_parent_uuid == "a1"
+
+    asyncio.run(scenario())
+
+
+def test_broadcasts_persist_to_the_session_jsonl() -> None:
+    async def scenario() -> None:
+        class FakeLogger:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            async def log_user_message(self, content, parent_uuid=None):
+                self.calls.append(("user", content))
+                return "u1"
+
+            async def log_assistant_message(self, content, parent_uuid=None):
+                self.calls.append(("assistant", content))
+                return "a1"
+
+        class FakeLlm:
+            is_processing = False
+            current_parent_uuid = None
+
+            def __init__(self) -> None:
+                self.logger = FakeLogger()
+                self.conversation_logger = self.logger
+                self.task = None
+
+            def create_background_task(self, coro, *, name: str):
+                self.task = asyncio.create_task(coro, name=name)
+                return self.task
+
+            def _add_conversation_message(self, role, content, *, metadata):
+                pass
+
+        llm = FakeLlm()
+        service = LocalStateService(llm, object())
+        service.send_hub_user_message = AsyncMock(return_value="broadcast to 2 agent(s)")
+
+        await service.send_message("@broadcast hi")
+        await llm.task
+
+        assert llm.logger.calls == [
+            ("user", "@broadcast hi"),
+            ("assistant", "broadcast to 2 agent(s)"),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_failed_hub_mention_still_persists_the_typed_turn() -> None:
+    async def scenario() -> None:
+        class FakeLogger:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            async def log_user_message(self, content, parent_uuid=None):
+                self.calls.append(("user", content))
+                return "u1"
+
+            async def log_assistant_message(self, content, parent_uuid=None):
+                self.calls.append(("assistant", content))
+                return "a1"
+
+        class FakeLlm:
+            is_processing = False
+            current_parent_uuid = None
+
+            def __init__(self) -> None:
+                self.logger = FakeLogger()
+                self.conversation_logger = self.logger
+                self.task = None
+
+            def create_background_task(self, coro, *, name: str):
+                self.task = asyncio.create_task(coro, name=name)
+                return self.task
+
+            def _add_conversation_message(self, role, content, *, metadata):
+                pass
+
+        llm = FakeLlm()
+        service = LocalStateService(llm, object())
+        service.hub_send_msg = AsyncMock(side_effect=RuntimeError("socket gone"))
+
+        await service.send_message("@lapis inspect the queue")
+        await llm.task
+
+        assert llm.logger.calls[0] == ("user", "@lapis inspect the queue")
+        assert llm.logger.calls[1][0] == "assistant"
+
+    asyncio.run(scenario())
