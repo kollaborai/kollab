@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Coordinator task assignments survive restarts in a durable dispatch ledger,
+  suppress re-routing delivered work, and keep completion reports unverified
+  until the original assigner verifies a worktree or commit reference (#636).
+- An agent whose code changed on disk after it started no longer fails every turn with an opaque 500: the daemon flags the mismatch, the Engine names the agent and says to restart it (`<agent> could not run the turn: <error>. Its code changed on disk after it started. Restart it.`), and voice turns carry the same explanation to the speaker (#571).
+- The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
+- The hub no longer replays stale pre-reboot inbox messages as current instructions: ordinary messages written before the last restart are dropped at the boot boundary (visible in the offline inbox summary), while durable task controls are still delivered for TaskLedger classification (#639).
+- The hub's crystal summary token cache now scales with the live vault (a power of two of at least twice its entries, minimum 8) instead of a fixed floor of 8,192, so its size tracks the live memories (#567).
+- Agent-facing crystal writes reject bodies over 2,000 characters; crystal-store saves are atomic and verified, and failed writes surface errors without retaining partial mutations (#638).
+
 ### Added
+- Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
 - Team launches now support member selection or exclusions across the CLI,
   TUI and Web UI. The launch sheet sets the workspace, profile, lead and
   mission, validates the effective reporting tree, and saves choices per team
@@ -133,6 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Network: withdrawing access stops queued remote-agent input and output before
+  network submission; bytes already sent may still arrive (#524).
 - Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
   `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
   internal agent message-tool syntax (#622).
