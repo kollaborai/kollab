@@ -46,6 +46,20 @@ missing:
   delete a bad/stale memory
 
 
+## write limits and durability
+
+Agent-facing `vault_write`, `global_vault_write`, and `crystal_edit`
+accept bodies up to 2,000 characters after surrounding whitespace is
+trimmed. Longer bodies return `success=false` with the limit and do not
+change memory or disk; split long notes across entries instead.
+`CrystalStore` remains uncapped for internal callers.
+
+CrystalStore serializes saves to a temporary file, verifies its byte
+length and SHA-256 digest, atomically replaces the durable file, and
+verifies the read-back. Persistence errors are raised to the tool handler
+and the in-memory mutation is rolled back; failed verification is not
+reported as a successful write.
+
 ## design
 
 ### new XML tags
