@@ -1,9 +1,10 @@
 name: Auto-merge
 
-# Automatic arming is disabled: the host rules require zero approvals and do
-# not establish independent review of the current head. The integrator merges
-# manually after the documented gates, using --match-head-commit. Reintroduce
-# automatic arming only with an enforceable independent exact-head review gate.
+# Automatic arming is disabled: the host requires one approval but cannot prove
+# that a separate AI agent reviewed the exact final head. The integrator merges
+# as kollaborai with a merge commit after the documented gates, using
+# --match-head-commit and no admin or ruleset bypass. Reintroduce
+# automatic arming only when the host enforces the complete review requirement.
 # This workflow deliberately has no PR trigger and no write permissions.
 
 on:

@@ -2,7 +2,7 @@
 title: "Release Process"
 doc_type: release-process
 created: 2026-05-04
-modified: 2026-10-26
+modified: 2026-11-02
 status: active
 ---
 # Release Process
@@ -59,18 +59,22 @@ integration checkout with `origin/main`.
    - keep internal debugging notes, generated indexes, credentials, raw
      transcripts, and speculative work out of release notes.
 3. Review the exact release diff and commit only the release scope. Push the
-   branch normally and open a DRAFT PR against `main`. The PR must meet the
-   normal exact-head review, required-CI, conversation-resolution, and current
-   base gates. If the base advances, merge `origin/main` into the writer branch
-   and push normally; never rebase or force-push.
+   branch normally and open a DRAFT PR against `main`. A different AI agent
+   must review the exact final head and record the required GitHub approval as
+   whichever account, `kollaborai` or `maarco`, is not the PR author. Record
+   the reviewer agent and SHA; GitHub prohibits author self-approval. Required
+   CI, resolved conversations, and current-base gates apply. If the base
+   advances, merge `origin/main` into the writer branch and push normally;
+   never rebase or force-push.
 4. The designated integrator merges the release PR only when it is within
-   Marco's authorized release plan and has independent exact-head review,
-   required checks, resolved conversations, and a current `main` base. Use a
-   merge commit. In the integration checkout, run
-   `git pull --ff-only origin main`,
-   then verify its HEAD equals `origin/main` and identifies the release merge
-   commit. If this fast-forward fails or the SHAs differ, stop and report the
-   exact state; never reset, rebase, or force-push.
+   Marco's authorized release plan and all exact-head review, approval, CI,
+   resolved-conversation, and current-base gates pass. Merge as `kollaborai`
+   with a merge commit. Never use `--admin` or a ruleset bypass; stop if
+   identity, bypass, or gate evidence is uncertain. In the integration
+   checkout, run `git pull --ff-only origin main`, then verify its HEAD equals
+   `origin/main` and identifies the release merge commit. If this fast-forward
+   fails or the SHAs differ, stop and report the exact state; never reset,
+   rebase, or force-push.
 5. Only after the release gates below pass and Marco explicitly instructs the
    agent to tag, create the annotated `vX.Y.Z` tag on that exact merged-main
    commit and push that exact tag. Never tag the writer branch or push
@@ -82,9 +86,10 @@ integration checkout with `origin/main`.
 
 The integration checkout must match `origin/main` at the intended merge commit
 before build or tag actions. Classify any other dirty path instead of removing
-or carrying it into release scope. Done means `kollab --version` prints
-`Build: <branch> @ <8-character SHA>` immediately before the unchanged final
-`kollab X.Y.Z` line inside and outside the repo. Build identity comes from the
+or carrying it into release scope. Verify the installed release's `kollab --version`
+prints `Build: <branch> @ <8-character SHA>` immediately before the unchanged
+final `kollab X.Y.Z` line. Report the source-checkout version separately if main
+advances after the tag. Build identity comes from the
 exact checkout used to build the artifact; detached checkouts report branch
 `unknown` while retaining a resolvable short SHA, and each unavailable field
 displays as `unknown`. Running agents keep the code they started with; list them
@@ -168,8 +173,16 @@ scripts/docker-runtime.sh smoke
    (publish.yml calls it) or a manual run; pull requests and branch pushes
    build no packages. The only PR-time binary build is the `ci/binary-smoke`
    CI job (one quick Linux smoke build, no artifacts, not a required merge
-   check); full four-platform binaries and all desktop builds remain tag-only. To catch a packaging failure before tagging, run it on
-   the release branch: `gh workflow run binaries.yml --ref release/X.Y.Z`.
+   check). The configured publish path calls the full four-platform binary and
+   desktop matrix for a release tag, but check the live workflow state first:
+   a manually disabled workflow will not run on the tag. Manual dispatch is a
+   rehearsal, not the release build. A run on `release/X.Y.Z` is not proof of
+   the merged source. After synchronizing main at the release merge, run
+   `gh workflow run binaries.yml --ref main` and inspect the resulting workflow
+   run's `head_sha`. Accept it as pre-tag source evidence only if that SHA equals
+   the recorded release merge; if main advanced and the run used another SHA,
+   stop and reconcile the release source before retrying. The tag-triggered
+   run remains the publication build when publish is enabled.
    Each platform stages a hash/version-checked native CLI from
    the same workflow; absent version inputs use `pyproject.toml`, while a
    supplied tag must match it. macOS and Linux desktop asset names therefore
@@ -185,12 +198,14 @@ scripts/docker-runtime.sh smoke
    release without the installer, or with half the pair, fails.
 6. Re-run the secret scan on the exact public commit.
 7. Install it locally (Prepare a release in a writer worktree; tag merged
-   main, step 6) and check `kollab --version` inside and outside the repo.
+   main, step 6) and verify the installed release version. Report the source
+   checkout's version separately if main has since advanced.
 
 ## Post-Release
 
-- [ ] `main` matches `origin/main`, `git status` lists none of the release's
-      files, and `kollab --version` reports X.Y.Z inside and outside the repo.
+- [ ] `main` matches current `origin/main`, `git status` lists none of the release's
+      files, and the installed release binary reports X.Y.Z. The tag resolves to
+      the recorded release merge; any later main SHA and source version are reported.
 - [ ] Create follow-up issues for deferred work.
 - [ ] Confirm installation instructions still work from a fresh environment.
 - [ ] Confirm the changelog entry is visible and human-readable.

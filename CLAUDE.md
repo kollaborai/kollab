@@ -874,12 +874,16 @@ Use scoped Conventional Commits and DRAFT PRs. Marco authorizes a concrete
 integration plan or bounded batch; its named integrator may mark covered PRs
 ready and merge them after independent source review of the exact head, current
 base, required CI, and resolved conversations. Do not repeat permission for
-listed steps. The PR author cannot self-review; an integrator-authored PR needs
-another reviewer. Out-of-scope work needs new authorization, and release tags
-always need separate explicit instruction. Update branches with ordinary
-merges; never rebase or force-push. Report worktree, branch, base/head SHAs,
-remote/PR state, and synchronized local/remote `main` SHAs. The `main` checkout's
-source files are never edited, staged, or committed.
+listed steps. A different AI agent must review every PR's exact final head and
+record the GitHub approval as whichever account, `kollaborai` or `maarco`, is
+not the PR author. Record the agent identity and reviewed SHA; GitHub prohibits
+author self-approval. A new head requires fresh review and CI. Every merge uses
+`kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
+Out-of-scope work needs new authorization, and release tags always need
+separate explicit instruction. Update branches with ordinary merges; never
+rebase or force-push. Report worktree, branch, base/head SHAs, remote/PR state,
+and synchronized local/remote `main` SHAs. The `main` checkout's source files
+are never edited, staged, or committed.
 
 ### Version Management
 Version managed centrally in `pyproject.toml`:
@@ -909,19 +913,24 @@ checkout source-read-only.
    and inter-package constraint to `X.Y.Z`, update `uv.lock`, and move
    `[Unreleased]` entries into matching byte-identical changelogs.
 2. Commit by explicit paths, push normally, and open a DRAFT release PR.
-   The exact PR head must pass required CI and independent review, all
-   conversations must be resolved, and the branch must include current `main`.
-   A Marco-authorized release plan covers its merge; the designated integrator
-   merges with a merge commit. Release tags still require Marco's separate
-   explicit instruction.
+   A different AI agent reviews the exact final head and records the required
+   GitHub approval as whichever account, `kollaborai` or `maarco`, is not the
+   PR author. Record the reviewer agent and SHA; GitHub prohibits author
+   self-approval. Required CI, resolved conversations, and current base must
+   pass. A Marco-authorized release plan covers its merge; the designated
+   integrator merges as `kollaborai` with a merge commit, never with `--admin`
+   or a ruleset bypass. Release tags still require Marco's separate explicit
+   instruction.
 3. The integrator runs `git pull --ff-only origin main` in the integration
    checkout and proves local `main` equals `origin/main` at the release merge.
    Run the pre-tag release build and validation gates from that exact commit.
    Create and push an annotated `vX.Y.Z` tag there only when Marco explicitly
    instructs it; never push `--tags` broadly.
-4. After publishing is green, run `uv sync --all-extras` and
-   `KOLLAB_VERSION=X.Y.Z bash install.sh`. Done also requires the published
-   artifacts and installed version to match the tag.
+4. After publishing, run `uv sync --all-extras` and
+   `KOLLAB_VERSION=X.Y.Z bash install.sh`. Verify that the tag and published
+   artifacts still identify the recorded release merge. Synchronize local
+   `main` to current `origin/main`; if it advanced after tagging, report its
+   SHA and source version separately from the tagged release version.
 
 The tag triggers `.github/workflows/publish.yml` → the four platform binaries
 (`binaries.yml`, built and checked before anything publishes) → PyPI + Homebrew

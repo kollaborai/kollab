@@ -23,13 +23,20 @@ here for detail.
   separate permission request for each merge step. Marco retains release and
   tag authority; release tags always need his explicit instruction.
 - Designated integrator: one active named owner for the repository's merge
-  queue. The integrator independently reviews each exact PR head, verifies its
-  base and required gates, and may mark ready and merge only work within Marco's
-  authorized plan. An integrator-authored PR needs review from another person;
-  self-review never counts. Scope outside the authorization needs a new decision.
+  queue. The integrator verifies each exact PR head, base, and required gates,
+  and may mark ready and merge only work within Marco's authorized plan. A
+  different AI agent must review every PR's exact final head
+  and record the required GitHub approval with whichever account, `kollaborai`
+  or `maarco`, is not the PR author. GitHub prohibits author self-approval.
+  Record the reviewer agent and exact SHA. Every merge is performed as
+  `kollaborai` with a merge commit; no `--admin` or ruleset bypass is allowed.
+  Scope outside the authorization needs a new decision.
   Record the current integrator, authorization, and checkpoint in a shared,
-  discoverable project record. A takeover requires an explicit record update
-  and evidence the prior integrator has stopped. If the record or ownership is
+  discoverable project record. A transfer is effective only after verifiable
+  stop evidence for the prior integrator is recorded and checked; then update
+  the shared record with the
+  new owner, effective time, and scope. A planned or conditional transfer does
+  not grant write authority. If the record, stop evidence, or ownership is
   missing, conflicting, stale, or unreachable, stay read-only until resolved;
   elapsed time or a local lock does not prove exclusive ownership.
 - Writers: investigate, implement, test, open DRAFT PRs, keep branches updated,
@@ -129,11 +136,14 @@ gh pr create --draft --head issue-8-version-display --title "fix(cli): correct v
 batches; an authorization covers the listed merge steps without a repeated
 permission request per PR. The designated integrator may mark a covered PR
 ready and merge it with a merge commit after independent source review of its
-exact head, current base, required CI, and resolved review conversations. If
-the integrator authored the PR, another person must review it. Writers do not
-approve or merge their own unreviewed changes. Work outside the authorized
-scope requires a new decision. This authority does not cover release tags,
-which require Marco's separate explicit instruction.
+exact final head, current base, required CI, and resolved review conversations.
+A different AI agent must submit the required GitHub approval using whichever
+account, `kollaborai` or `maarco`, is not the PR author; include the agent
+identity and reviewed SHA in the review record. GitHub prohibits author
+self-approval. Every merge is performed as `kollaborai` with a merge commit and
+no admin or ruleset bypass. Work outside the authorized scope requires a new
+decision. This authority does not cover release tags, which require Marco's
+separate explicit instruction.
 
 ## Pull request gates
 
@@ -142,23 +152,39 @@ designated integrator marks ready only for covered work after independent
 review and exact-head gates. Automatic arming is disabled until an enforceable
 independent exact-head review gate exists. Do not arm GitHub auto-merge manually.
 
-A PR must be current with `main`, have all required checks green, and have all
-review conversations resolved. The active main ruleset currently requires
-`ci/tests`, `ci/standards-check`, and `ci/security-scan`, strict current-base
-status, and resolved threads; it requires zero approving reviews. The project
-process still requires a real independent source review, never an author
-self-review. Record the exact reviewed head SHA and tested head SHA; a new push
-requires review and CI evidence for that new head. Before an authorized merge,
-the integrator rechecks the current head, base, checks, conversations, and that
-auto-merge is not already armed. Then use a merge commit with a head match:
+A PR must be current with `main`, have the required approval, all configured
+checks green, and all review conversations resolved. The active `main` ruleset
+requires one approving review, dismisses stale approvals on push, does not
+require approval from someone other than the last pusher, and enforces strict
+current-base status, resolved threads, and only the `merge` method. Its required
+checks are `ci/tests`, `ci/standards-check`, and `ci/security-scan`. The
+`kollaborai` owner readback showed an empty bypass list and
+`current_user_can_bypass=never`. Repository auto-merge is off. Run
+`.github/scripts/setup-branch-protection.sh --check` with an identity that can
+read bypass actors, and recheck the live ruleset and repository settings before
+integration. No admin or ruleset bypass is allowed.
+
+Approvals are recorded by a different AI agent after reviewing the exact
+final head. The agent uses whichever account, `kollaborai` or `maarco`, is not
+the PR author and records its identity and the reviewed SHA. GitHub prohibits
+authors from approving their own PRs; do not attempt self-approval. A new push
+dismisses stale approvals and requires fresh review and CI.
+
+Every merge uses `kollaborai` and a merge commit. Never use `--admin` or a
+ruleset bypass. If identity, bypass status, current base, required checks, or
+thread evidence is uncertain, stop. Before an authorized merge, recheck the
+current head, base, checks, conversations, approval, and that auto-merge is not
+armed. Then use a merge commit with a head match:
 
 ```bash
 gh pr merge <PR-number> --repo kollaborai/kollab --merge --match-head-commit <reviewed-head-SHA>
 ```
 
-The head match prevents merging a different head; it does not verify that an
-independent review happened. That remains a process gate: the live host permits
-zero approvals and its separate auto-merge capability may still be enabled.
+The head match prevents merging a different head; it does not pin the base or
+prove the review agent's identity. The strict current-base rule blocks stale
+branches when enforced, but it does not replace an immediate base/check
+recheck. Repository auto-merge is currently off; recheck live settings rather
+than assuming they have not changed.
 Desktop Mac/Linux builds
 (the `binaries` and `desktop` workflows) run only on release tags and are not
 merge requirements. `ci/binary-smoke` is an early Linux build, not a required

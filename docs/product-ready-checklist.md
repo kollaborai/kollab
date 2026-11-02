@@ -70,10 +70,13 @@ Keep the PR draft while any required evidence or work is outstanding.
   was clear; existing dirty work, branches, and worktrees were preserved; the
   maintainer integration checkout had no source edits.
 - [ ] The PR remains a draft until its designated integrator marks it ready
-  within Marco's authorized integration plan, after independent exact-head
-  review and required CI. The PR author never reviews their own change; work
-  outside the plan needs new authorization, and release tags need separate
-  explicit instruction.
+  within Marco's authorized integration plan, after a different AI agent
+  reviews the exact final head and records approval using whichever account
+  (`kollaborai` or `maarco`) is not the PR author. Record the reviewer agent
+  and SHA; GitHub prohibits author self-approval. Required CI must pass.
+  Every merge uses `kollaborai` with a merge commit; never use `--admin` or a
+  ruleset bypass. Work outside the plan needs new authorization, and release
+  tags need separate explicit maintainer instruction.
 
 ## Evidence notes
 

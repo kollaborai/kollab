@@ -23,7 +23,7 @@ release scope
   = built wheel/sdist metadata
   = PyPI package metadata
   = fresh-install `kollab --version`
-  = local main (fast-forwarded to the merge) and every local `kollab --version`
+  = local main synchronized to current `origin/main`, with the tag still pointing to the recorded release merge
   = GitHub Release/update-check marker, carrying the four platform binaries
 ```
 
@@ -167,12 +167,16 @@ message such as `chore: prepare release vX.Y.Z`; do not add attribution footers.
 
 ## 3. Merge and validate before tagging
 
-After the release PR is within Marco's authorized release plan and passes
-independent exact-head review, required checks, resolved conversations, and
-current-base gates, the designated integrator merges it with a merge commit and
-fast-forwards the integration checkout. Verify local `main` equals `origin/main` at the release
-merge SHA. Then run the release build and checks from that synchronized main
-checkout; a pre-merge build is only rehearsal, not release source proof.
+After the release PR is within Marco's authorized plan, a different AI
+agent reviews the exact final head and records the required GitHub approval as
+whichever account, `kollaborai` or `maarco`, is not the PR author. GitHub
+prohibits author self-approval; record the reviewer agent and SHA. Required CI,
+resolved conversations, and current-base gates must also pass. The integrator
+merges as `kollaborai` with a merge commit; never use `--admin` or a ruleset
+bypass. Verify live policy, then fast-forward the integration checkout and
+confirm local `main` equals `origin/main` at the release merge SHA. Run the
+release build and checks from that exact merged source; any pre-merge or
+writer-branch build is rehearsal only.
 
 Run checks proportionate to the release scope, including the negative version cases:
 
@@ -245,14 +249,18 @@ Run the strongest available consumer proof:
 5. Verify the GitHub Release tag, release notes, source commit, and workflow artifacts all
    identify `X.Y.Z`, and the release carries `kollab-macos-aarch64`, `kollab-macos-x86_64`,
    `kollab-linux-x86_64` and `kollab-linux-aarch64`, each with its `.sha256`.
-6. Re-run the version parity probe against the post-release source. If the
-   publish workflow's conditional version-bump push advanced remote `main`,
-   record that SHA, fast-forward the integration checkout normally, and verify
-   the version; preserve and report any unrelated dirty paths.
+6. Record the tag's release commit separately from current `origin/main`. If
+   publishing or later work advanced main, fast-forward the integration checkout
+   normally, inspect the changes since the release commit, and re-run relevant
+   parity checks. If source intentionally advanced to a newer version, report
+   that version separately; do not claim the checkout is still the release tag.
+   Preserve and report unrelated dirty paths and any impact on the release.
 
-The release is `verified` only when source, tag, workflow, PyPI, GitHub Release, fresh
-install, and the local checkout (step 6) all agree. Otherwise report `published-partial` or
-`blocked`, never `done`.
+The release is `verified` only when the recorded release commit, tag,
+workflow artifacts, PyPI, GitHub Release, and fresh install agree on the
+release. The integration checkout must match current `origin/main`; if main
+advanced after tagging, report its SHA and source version separately. Otherwise
+report `published-partial` or `blocked`, never `done`.
 
 ## 6. Leave the integration checkout synchronized and install
 
@@ -264,10 +272,12 @@ venv) and `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in
 `~/.local/bin`; it replaces a uv tool or pipx kollab there, so `/upgrade` never
 touches the checkout).
 
-Leaving local `main` behind or diverged from `origin/main`, or an older version
-installed, is a failed release. Done means the integration checkout matches
-`origin/main` at the release merge, `git status` lists none of the release's
-files, and `kollab --version` reports `X.Y.Z` inside and outside the repo.
+Leaving local `main` behind or diverged from `origin/main`, or an older release
+binary installed, is a failed release. Done means local and remote `main` match,
+the tag and artifacts identify the recorded release merge, `git status` lists
+none of the release's files, and the installed release binary reports `X.Y.Z`.
+If main advanced after tagging, report its SHA and source version separately;
+do not require that later SHA to equal the tag or conceal a version change.
 Running agents keep the code they started with: list them, and ask before
 restarting any.
 
@@ -302,8 +312,8 @@ packages: each package -> published/failed/unverified
 PyPI: exact package/version observations
 GitHub Release: exact tag/release observation
 fresh install: exact environment and `kollab --version` output
-local main: SHA equal to origin/main and the release tag; unrelated dirty paths preserved, none from the release
-local install: each `kollab --version` (repo .venv, ~/.local/bin binary) -> X.Y.Z
+local main: SHA equal to current origin/main; tag -> recorded release merge SHA; unrelated dirty paths preserved, none from the release
+local install: installed release binary -> X.Y.Z; repo .venv version -> observed value and explanation if main advanced
 changelog: root/package copy parity result
 dirty/unrelated work: preserved paths
 unverified: explicit remaining gaps

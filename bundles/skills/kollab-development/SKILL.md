@@ -66,14 +66,20 @@ Create new lanes from the fetched current `origin/main` after checking that the
 worktree path and branch are unused. Keep file ownership explicit and avoid
 concurrent writers to the same paths. Use scoped Conventional Commits and DRAFT
 PRs; update branches only with ordinary merges, never rebase or force-push.
-Review and CI must match the exact PR head and current base. Marco may
+Review and CI must match the exact final PR head and current base. Marco may
 authorize a concrete integration plan or bounded batch; within it, the named
-integrator may mark ready and merge after an independent source review, current
-base, required checks, and resolved threads. No extra permission request is
-needed for listed steps. A PR author never reviews their own change; work
-outside the plan needs new authorization, and release tags always require
-separate explicit instruction. The integrator owns post-merge fast-forward
-synchronization; divergence is reported with exact local, remote, and PR SHAs.
+integrator may mark ready and merge after the gates pass. A different AI agent
+reviews the exact final head and records the required approval as whichever
+account, `kollaborai` or `maarco`, is not the PR author. Record the agent and
+reviewed SHA; GitHub prohibits author self-approval. A new head needs fresh
+review and CI. Every merge uses `kollaborai` with a merge commit; never use
+`--admin` or a ruleset bypass. Verify the active identity cannot bypass
+protection and stop if identity, bypass status, or gate evidence is uncertain.
+Ruleset changes require separate explicit authorization. No extra permission
+request is needed for listed steps. Work outside the plan needs new
+authorization, and release tags always require separate explicit instruction.
+The integrator owns post-merge fast-forward synchronization; divergence is
+reported with exact local, remote, and PR SHAs.
 
 For any release request, read `docs/release-process.md`. Author release-source
 and version-preparation edits in a dedicated worktree PR. Build from clean,

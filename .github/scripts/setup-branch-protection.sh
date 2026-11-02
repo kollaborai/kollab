@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Configure the "main protection" ruleset that guards main (classic branch
 # protection is not used). Applying needs admin access to the repo (the
-# kollaborai account). `--check` needs read access only: it diffs the live
-# ruleset against this one and exits 1 on drift.
+# kollaborai account). `--check` is read-only but needs enough administration
+# access to see bypass actors; it exits 1 on drift or insufficient visibility.
 #
 # Required checks are job names in .github/workflows/ci.yml. Merge commits
 # only: after a squash or rebase merge, `git pull --ff-only origin main` in
@@ -45,7 +45,9 @@ for file in "${required_files[@]}"; do
 done
 
 # integration_id 15368 is GitHub Actions: no other app can satisfy a check.
-# No bypass_actors: an update leaves the live list alone, a new ruleset has none.
+# Do not write bypass_actors in apply mode. `--check` separately verifies that
+# the list is empty so hidden or unexpected actors cannot pass.
+expected_bypass='[]'
 ruleset='{
   "name": "main protection",
   "target": "branch",
@@ -55,7 +57,7 @@ ruleset='{
     {"type": "deletion"},
     {"type": "non_fast_forward"},
     {"type": "pull_request", "parameters": {
-      "required_approving_review_count": 0,
+      "required_approving_review_count": 1,
       "dismiss_stale_reviews_on_push": true,
       "required_reviewers": [],
       "require_code_owner_review": false,
@@ -83,10 +85,16 @@ if [[ "${1:-}" == "--check" ]]; then
     echo "No \"main protection\" ruleset on $repo."
     exit 1
   fi
-  live="$(gh api "repos/$repo/rulesets/$id" | jq -S '{name, target, enforcement, conditions, rules}')"
+  live_ruleset="$(gh api "repos/$repo/rulesets/$id")"
+  if ! jq -e 'has("bypass_actors") and (.bypass_actors | type == "array")' <<<"$live_ruleset" >/dev/null; then
+    echo "Cannot verify bypass actors on $repo; use a credential with administration read access."
+    exit 1
+  fi
+  live="$(jq -S '{name, target, enforcement, bypass_actors, conditions, rules}' <<<"$live_ruleset")"
+  expected="$(jq -S --argjson bypass "$expected_bypass" '. + {bypass_actors: $bypass}' <<<"$ruleset")"
   merge_ok="$(gh api "repos/$repo" --jq '.allow_merge_commit')"
-  if diff <(jq -S . <<<"$ruleset") <(echo "$live") && [[ "$merge_ok" == "true" ]]; then
-    echo "Live ruleset and merge settings match this script."
+  if diff <(echo "$expected") <(echo "$live") && [[ "$merge_ok" == "true" ]]; then
+    echo "Live ruleset (one approval, strict checks, empty bypass list) and merge settings match this script."
     exit 0
   fi
   echo "Drift on $repo (< this script, > live; merge commits allowed: $merge_ok)."
