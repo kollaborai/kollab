@@ -28,12 +28,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kollabor_agent.runtime import AgentRuntime
+from plugins.hub import messenger as messenger_mod
 from plugins.hub.messenger import (
     INBOX_MAX_REPLAY,
     INBOX_MAX_SIZE,
     INBOX_TTL_SECS,
     AgentMessenger,
     _prune_inbox,
+    get_restart_boundary,
+    set_restart_boundary,
 )
 from plugins.hub.models import HubMessage, MessageScope
 from plugins.hub.task_ledger import TaskLedger
@@ -1122,3 +1125,302 @@ class TestSingleBlockDelivery:
         self._run(plugin._deliver_inbox_batch(batch))
 
         assert len(received) == 3
+
+
+# ---------------------------------------------------------------------------
+# 7. Restart boundary reconciliation (issue #639)
+# ---------------------------------------------------------------------------
+
+class TestRestartBoundaryReconciliation:
+    """Issue #639: stale pre-reboot inbox messages must never be replayed
+    as current instructions.
+
+    The messenger records a restart boundary (process boot, or an explicit
+    override). Ordinary messages written before the boundary are dropped
+    with a log line — never delivered as current instructions. Durable
+    task controls are preserved so the normal receive path can classify
+    them against the TaskLedger (the current authority).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_boundary(self):
+        saved = messenger_mod.get_restart_boundary()
+        yield
+        messenger_mod.set_restart_boundary(saved)
+
+    def _write(self, inbox: Path, msg: HubMessage, ts: float, name: str) -> None:
+        inbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data = msg.to_dict()
+        data["timestamp"] = ts
+        (inbox / name).write_text(json.dumps(data))
+
+    def test_reboot_scenario_stale_messages_not_redelivered(
+        self, tmp_path: Path
+    ) -> None:
+        """Seed pre-reboot messages, 'restart' (new boundary), read: the
+        pre-reboot messages must not be redelivered as current instructions."""
+        boot = time.time()
+        messenger_mod.set_restart_boundary(boot)
+        inbox = tmp_path / "moonstone"
+        for i in range(10):
+            ts = boot - 3600 - i
+            self._write(
+                inbox,
+                _make_msg(content=f"stale pre-reboot {i}"),
+                ts=ts,
+                name=f"{ts:.6f}-{i:04d}-from-koordinator.json",
+            )
+        for i in range(2):
+            ts = boot + 0.01 + i
+            self._write(
+                inbox,
+                _make_msg(content=f"fresh post-reboot {i}"),
+                ts=ts,
+                name=f"{ts:.6f}-{9000 + i:04d}-from-koordinator.json",
+            )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("moonstone")
+
+        contents = [m.content for m in result]
+        assert not any("pre-reboot" in c for c in contents)
+        assert "fresh post-reboot 0" in contents
+        assert "fresh post-reboot 1" in contents
+
+    def test_post_boot_messages_preserved_without_summary(
+        self, tmp_path: Path
+    ) -> None:
+        """Messages written during the current process are delivered as-is:
+        no summary is prepended when nothing was dropped."""
+        boundary = time.time()
+        messenger_mod.set_restart_boundary(boundary)
+        inbox = tmp_path / "lapis"
+        for i in range(2):
+            ts = boundary + 0.01 + i
+            self._write(
+                inbox,
+                _make_msg(content=f"current {i}"),
+                ts=ts,
+                name=f"{ts:.6f}-{i:04d}-from-koordinator.json",
+            )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert len(result) == 2
+        assert all(m.action == "message" for m in result)
+        assert result[0].content == "current 0"
+
+    def test_pre_reboot_ordinary_dropped_with_visible_summary(
+        self, tmp_path: Path
+    ) -> None:
+        """When pre-reboot ordinary messages are dropped alongside survivors,
+        a synthetic inbox_summary makes the staleness visible to the agent."""
+        boundary = time.time()
+        messenger_mod.set_restart_boundary(boundary)
+        inbox = tmp_path / "lapis"
+        ts_stale = boundary - 3600
+        self._write(
+            inbox,
+            _make_msg(content="stale directive"),
+            ts=ts_stale,
+            name=f"{ts_stale:.6f}-0000-from-koordinator.json",
+        )
+        ts_fresh = boundary + 0.01
+        self._write(
+            inbox,
+            _make_msg(content="fresh directive"),
+            ts=ts_fresh,
+            name=f"{ts_fresh:.6f}-9999-from-koordinator.json",
+        )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert result[0].action == "inbox_summary"
+        assert result[0].metadata["stale_preboot_dropped"] == 1
+        assert "restart" in result[0].content
+        assert "stale" in result[0].content
+        delivered = [m.content for m in result[1:]]
+        assert "fresh directive" in delivered
+        assert "stale directive" not in delivered
+
+    def test_all_stale_returns_nothing_deliverable(self, tmp_path: Path) -> None:
+        """An inbox containing only pre-reboot ordinary messages delivers
+        nothing: no blind redelivery, no synthetic instruction."""
+        boundary = time.time()
+        messenger_mod.set_restart_boundary(boundary)
+        inbox = tmp_path / "lapis"
+        for i in range(3):
+            ts = boundary - 3600 - i
+            self._write(
+                inbox,
+                _make_msg(content=f"stale {i}"),
+                ts=ts,
+                name=f"{ts:.6f}-{i:04d}-from-koordinator.json",
+            )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert result == []
+
+    def test_pre_reboot_task_cron_control_preserved_for_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """Pre-reboot task-cron controls survive the boundary so the normal
+        receive path (TaskLedger) can classify them: stale ACK, never a wake."""
+        boundary = time.time()
+        messenger_mod.set_restart_boundary(boundary)
+        inbox = tmp_path / "lapis"
+        ts = boundary - 3600
+        reminder = HubMessage(
+            action="message",
+            from_agent="task-cron-id",
+            from_identity="task-cron",
+            to="lapis",
+            content="[task reminder: pre-reboot] classify me",
+            scope=MessageScope.DIRECT.value,
+            metadata={
+                "task_cron": True,
+                "task_id": "pre-reboot-card",
+                "source_identity": "koordinator",
+            },
+        )
+        self._write(inbox, reminder, ts=ts, name=f"{ts:.6f}-cron-from-task-cron.json")
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert len(result) == 1
+        assert result[0].metadata["task_cron"] is True
+
+    def test_pre_reboot_task_assignment_preserved_for_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """Pre-reboot task assignments survive the boundary so the normal
+        receive path can classify them against the TaskLedger."""
+        boundary = time.time()
+        messenger_mod.set_restart_boundary(boundary)
+        inbox = tmp_path / "lapis"
+        ts = boundary - 3600
+        assignment = HubMessage(
+            action="message",
+            from_identity="koordinator",
+            to="lapis",
+            content="[task assignment] check the ledger",
+            scope=MessageScope.DIRECT.value,
+            metadata={
+                "task_assignment": {"task_id": "card-1"},
+            },
+        )
+        self._write(
+            inbox, assignment, ts=ts, name=f"{ts:.6f}-assign-from-koordinator.json"
+        )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert len(result) == 1
+        assert result[0].metadata["task_assignment"] == {"task_id": "card-1"}
+
+    def test_bounded_replay_summary_reports_stale_drops(
+        self, tmp_path: Path
+    ) -> None:
+        """When bounded replay also applies, the summary reports both the
+        bounded drops and the pre-reboot stale drops."""
+        boundary = time.time()
+        messenger_mod.set_restart_boundary(boundary)
+        inbox = tmp_path / "lapis"
+        for i in range(3):
+            ts = boundary - 3600 - i
+            self._write(
+                inbox,
+                _make_msg(content=f"stale {i}"),
+                ts=ts,
+                name=f"{ts:.6f}-{i:04d}-from-koordinator.json",
+            )
+        for i in range(25):
+            ts = boundary + 0.01 + i
+            self._write(
+                inbox,
+                _make_msg(content=f"msg {i}"),
+                ts=ts,
+                name=f"{ts:.6f}-{9000 + i:04d}-from-koordinator.json",
+            )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis", max_replay=INBOX_MAX_REPLAY)
+
+        summary = result[0]
+        assert summary.action == "inbox_summary"
+        assert summary.metadata["total"] == 28
+        assert summary.metadata["showing"] == INBOX_MAX_REPLAY
+        assert summary.metadata["dropped"] == 25 - INBOX_MAX_REPLAY
+        assert summary.metadata["stale_preboot_dropped"] == 3
+        assert "stale" in summary.content
+
+    def test_explicit_boundary_parameter_overrides_global(
+        self, tmp_path: Path
+    ) -> None:
+        """An explicit restart_boundary argument takes precedence over the
+        module-level boot boundary."""
+        old_boot = time.time() - 100000
+        messenger_mod.set_restart_boundary(old_boot)
+        inbox_old = tmp_path / "lapis"
+        inbox_new = tmp_path / "peridot"
+
+        # One hour old: current under the old global boundary, stale under
+        # an explicit recent boundary.
+        ts = time.time() - 3600
+        self._write(
+            inbox_old,
+            _make_msg(content="old-global current"),
+            ts=ts,
+            name=f"{ts:.6f}-0001-from-koordinator.json",
+        )
+        self._write(
+            inbox_new,
+            _make_msg(content="explicit stale"),
+            ts=ts,
+            name=f"{ts:.6f}-0002-from-koordinator.json",
+        )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            with_global = AgentMessenger.read_mailbox("lapis")
+            with_explicit = AgentMessenger.read_mailbox(
+                "peridot", restart_boundary=time.time()
+            )
+
+        assert [m.content for m in with_global] == ["old-global current"]
+        assert with_explicit == []
+
+    def test_boundary_grace_tolerates_clock_skew(self, tmp_path: Path) -> None:
+        """Messages written slightly before the recorded boundary (within
+        the skew grace window) are still delivered as current."""
+        boundary = time.time()
+        messenger_mod.set_restart_boundary(boundary)
+        inbox = tmp_path / "lapis"
+        ts = boundary - 30
+        self._write(
+            inbox,
+            _make_msg(content="just before boot"),
+            ts=ts,
+            name=f"{ts:.6f}-0000-from-koordinator.json",
+        )
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert [m.content for m in result] == ["just before boot"]
+
+    def test_restart_boundary_helpers_roundtrip(self) -> None:
+        """set/get restart boundary round-trips."""
+        original = messenger_mod.get_restart_boundary()
+        assert original > 0
+        try:
+            messenger_mod.set_restart_boundary(123.0)
+            assert messenger_mod.get_restart_boundary() == 123.0
+        finally:
+            messenger_mod.set_restart_boundary(original)
+        assert messenger_mod.get_restart_boundary() == original
