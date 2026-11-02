@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The hub's crystal summary token cache now scales with the live vault (a power of two of at least twice its entries, minimum 8) instead of a fixed floor of 8,192, so its size tracks the live memories (#567).
 - Agent-facing crystal writes reject bodies over 2,000 characters; crystal-store saves are atomic and verified, and failed writes surface errors without retaining partial mutations (#638).
 - The web UI no longer serves beyond this machine without saying so: whenever it binds an address other than 127.0.0.1, whether from KOLLAB_WEBUI_HOSTS or the new `--web-ui-hosts` flag, startup prints a warning that the page is exposed and that anyone who can open it gets the engine token. `kollab --web-ui --web-ui-hosts IP[,IP]` is the explicit per-launch opt-in and overrides the shell's KOLLAB_WEBUI_HOSTS; an explicitly empty value forces localhost-only, and the desktop app forwards its own `--web-ui-hosts` argument to kollab, showing the exposure warning in its window before opening the UI (#674).
+- The desktop exposure interstitial now recognizes IPv4-mapped IPv6 addresses
+  whose embedded IPv4 is private or link-local (#674).
 
 ### Added
 - Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).

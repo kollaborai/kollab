@@ -373,7 +373,10 @@ fn exposure_notice(explicit: Option<&str>) -> Option<Vec<String>> {
         let Ok(ip) = host.trim().trim_matches(['[', ']']).parse::<std::net::IpAddr>() else { continue };
         let bindable = match ip {
             std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
-            std::net::IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+            std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => v4.is_private() || v4.is_link_local(),
+                None => v6.is_unique_local() || v6.is_unicast_link_local(),
+            },
         };
         let text = ip.to_string();
         if !ip.is_loopback() && bindable && !exposed.contains(&text) {
@@ -1205,6 +1208,31 @@ mod tests {
         assert_eq!(exposure_notice(Some(" 192.168.1.20 , 127.0.0.1 ")), Some(vec!["192.168.1.20".to_string()]));
         assert_eq!(exposure_notice(Some("[fd00::5]")), Some(vec!["fd00::5".to_string()]));
         assert_eq!(exposure_notice(Some("fe80::1")), Some(vec!["fe80::1".to_string()]));
+        assert_eq!(
+            exposure_notice(Some("::ffff:10.0.0.7")),
+            Some(vec!["::ffff:10.0.0.7".to_string()]),
+            "IPv4-mapped private IPv4 address is exposed"
+        );
+        assert_eq!(
+            exposure_notice(Some("::ffff:192.168.68.179")),
+            Some(vec!["::ffff:192.168.68.179".to_string()]),
+            "IPv4-mapped private IPv4 address is exposed"
+        );
+        assert_eq!(
+            exposure_notice(Some("::ffff:169.254.1.1")),
+            Some(vec!["::ffff:169.254.1.1".to_string()]),
+            "IPv4-mapped link-local IPv4 address is exposed"
+        );
+        assert_eq!(
+            exposure_notice(Some("::ffff:127.0.0.1")),
+            None,
+            "IPv4-mapped loopback is not exposed"
+        );
+        assert_eq!(
+            exposure_notice(Some("::ffff:8.8.8.8")),
+            None,
+            "IPv4-mapped public IPv4 address is refused"
+        );
         assert_eq!(exposure_notice(Some("10.0.0.7,10.0.0.7")), Some(vec!["10.0.0.7".to_string()]), "duplicates collapse");
         assert_eq!(exposure_notice(Some("myhost.local")), None, "DNS names are refused by kollab, not exposure");
         assert_eq!(exposure_notice(Some("0.0.0.0")), None, "unspecified addresses are refused by kollab");
