@@ -18,12 +18,18 @@ here for detail.
 
 ## Roles
 
-- Marco (operator): decides what ships, approves and marks PRs ready (the koordinator
-  may too), decides
-  releases and tags, and is the only merge authority for product changes.
-- Agents: investigate, implement, test, open DRAFT PRs, keep branches updated,
-  and respond to review. Agents never mark their own PRs ready and never merge
-  product changes without explicit authorization.
+- Marco (operator): decides what ships and may authorize a concrete integration
+  plan or bounded PR batch. That authorization covers its listed work without a
+  separate permission request for each merge step. Marco retains release and
+  tag authority; release tags always need his explicit instruction.
+- Designated integrator: one named owner for each merge queue. The integrator
+  independently reviews each exact PR head, verifies its base and required
+  gates, and may mark ready and merge only work within Marco's authorized plan.
+  An integrator-authored PR needs review from another person; self-review never
+  counts. Scope outside the authorization needs a new decision.
+- Writers: investigate, implement, test, open DRAFT PRs, keep branches updated,
+  and respond to review. Writers do not approve or merge their own unreviewed
+  changes.
 - Koordinator: routes work, tracks the task ledger, and verifies gates before
   reporting to the operator.
 
@@ -69,8 +75,9 @@ test -z "$remote_branch" || { echo "remote branch exists"; exit 1; }
 git worktree add -b "issue-<N>-<slug>" "../kollab-wt/<task-slug>" origin/main
 ```
 
-Use `issue-<N>-<slug>` for issue work and a descriptive `docs/<slug>` branch
-for documentation work without an issue. Check the new worktree's status
+Use `issue-<N>-<slug>` for issue work, `docs/<slug>` for documentation work
+without an issue, or `codex/<scope>` for a Codex-authored lane without an issue.
+Keep existing branch names unchanged. Check the new worktree's status
 before editing. Do not copy uncommitted files from the integration checkout
 into a lane without its owner's authorization.
 
@@ -100,9 +107,10 @@ gh pr create --draft --head issue-8-version-display --title "fix(cli): correct v
   fetch and merge that branch too. Resolve conflicts only within owned paths;
   stop and coordinate if a conflict crosses another owner's scope. Never rebase
   or force-push; preserve history with ordinary merges.
-- One named integrator coordinates each merge queue and lands authorized PRs
-  with a merge commit; never squash or rebase. Marco remains the merge authority
-  for product changes, with approval/authorization requirements below.
+- One named integrator coordinates each merge queue and lands PRs covered by
+  Marco's authorized plan, using merge commits only. Marco authorizes the scope;
+  the integrator executes it after the review and CI gates below, with no repeat
+  permission request for each listed PR.
 - After a PR has already merged, the integration checkout may run
   `git pull --ff-only origin main`. Verify its HEAD equals `origin/main`.
   If the pull refuses or the SHAs differ, stop and report the exact local,
@@ -110,27 +118,33 @@ gh pr create --draft --head issue-8-version-display --title "fix(cli): correct v
 
 ## Main protection and merge authority
 
-`main` is protected. Agents investigate, implement, test, open DRAFT PRs, keep
-their own branches current, and respond to review. Marco decides what ships,
-approves and marks PRs ready (the koordinator may too), decides releases and
-tags, and is the merge authority for product changes. Agents never mark their
-own PRs ready and never merge product changes without explicit authorization.
-The designated integrator is the single owner of merge sequencing and post-merge
-`main` synchronization; designation does not grant release-tag authority.
+`main` is protected. Marco authorizes concrete integration plans or bounded PR
+batches; an authorization covers the listed merge steps without a repeated
+permission request per PR. The designated integrator may mark a covered PR
+ready and merge it with a merge commit after independent source review of its
+exact head, current base, required CI, and resolved review conversations. If
+the integrator authored the PR, another person must review it. Writers do not
+approve or merge their own unreviewed changes. Work outside the authorized
+scope requires a new decision. This authority does not cover release tags,
+which require Marco's separate explicit instruction.
 
 ## Pull request gates
 
-Agents ALWAYS open PRs as drafts. Only Marco or the koordinator marks a PR
-ready or approves it. Once authorized and ready, the repository's configured
-merge workflow may merge it with a merge commit when required checks pass.
+Writers ALWAYS open PRs as drafts and do not mark their own PRs ready. The
+designated integrator marks ready only for covered work after independent
+review and exact-head gates. The repository's configured merge workflow may
+then merge it with a merge commit.
 
 A PR must be current with `main`, have all required checks green, and have all
-conversations resolved. Required checks are `ci/tests`,
-`ci/standards-check`, and `ci/security-scan`. Record the exact reviewed head
-SHA and the tested head SHA; a new push requires review and CI evidence for the
-new head. Desktop Mac/Linux builds (the `binaries` and `desktop` workflows)
-run only on release tags and are not merge requirements. `ci/binary-smoke` is
-an early Linux build, not a required merge check.
+review conversations resolved. The active main ruleset currently requires
+`ci/tests`, `ci/standards-check`, and `ci/security-scan`, strict current-base
+status, and resolved threads; it requires zero approving reviews. The project
+process still requires a real independent source review, never an author
+self-review. Record the exact reviewed head SHA and tested head SHA; a new push
+requires review and CI evidence for that new head. Desktop Mac/Linux builds
+(the `binaries` and `desktop` workflows) run only on release tags and are not
+merge requirements. `ci/binary-smoke` is an early Linux build, not a required
+merge check.
 
 ## Implement and test
 
@@ -158,7 +172,8 @@ git commit -m "feat(webui): copy a profile and pin its reasoning effort"
 
 - Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Draft is the
   default for every agent-opened PR, no exceptions.
-- Only Marco or the koordinator marks a PR ready or approves it. Once ready, auto-merge
+- Only the designated integrator marks a covered PR ready after independent
+  review and exact-head gates. Once ready, auto-merge
   (`.github/workflows/auto-merge.yml`) merges it when checks pass.
 - Merging needs the PR branch up to date with `main`. The writer updates its
   owned branch by fetching and merging `origin/main`, then pushing normally;
@@ -180,9 +195,14 @@ early; it is not a required merge check.
 
 ## Review and merge
 
-An approving review from Marco is required before merge. Marco decides merge
-order and timing. Agents merge only when a task explicitly authorizes it, and
-never their own unreviewed work.
+Every PR requires an independent source review of the exact head; the PR author
+cannot supply that review. Marco's explicit integration plan/batch is the merge
+authorization for the work it names. The designated integrator owns queue
+order, may mark covered PRs ready, and lands them with merge commits after the
+review, base, CI, and thread-resolution gates pass. No extra permission request
+is needed for a merge already covered by that plan. Out-of-scope work requires
+a new authorization; release tags remain separately gated by Marco's explicit
+instruction.
 
 ## Release process
 

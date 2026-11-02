@@ -870,12 +870,16 @@ PRs. Fetching refs and registering a new worktree may use Git metadata without
 changing those files. Do not edit, stage, commit, or push source there, and
 preserve existing dirty files and worktrees.
 
-Use scoped Conventional Commits and DRAFT PRs. Required CI, review, and the
-current `main` base must match the exact PR head. Update a branch with ordinary
-merges; never rebase or force-push. One named integrator sequences authorized
-merge commits. Report the worktree, branch, base/head SHAs, remote/PR state,
-and synchronized local/remote `main` SHAs so divergence is explicit. The
-`main` checkout is never reset, cleaned, stashed, restored, or switched.
+Use scoped Conventional Commits and DRAFT PRs. Marco authorizes a concrete
+integration plan or bounded batch; its named integrator may mark covered PRs
+ready and merge them after independent source review of the exact head, current
+base, required CI, and resolved conversations. Do not repeat permission for
+listed steps. The PR author cannot self-review; an integrator-authored PR needs
+another reviewer. Out-of-scope work needs new authorization, and release tags
+always need separate explicit instruction. Update branches with ordinary
+merges; never rebase or force-push. Report worktree, branch, base/head SHAs,
+remote/PR state, and synchronized local/remote `main` SHAs. The `main` checkout's
+source files are never edited, staged, or committed.
 
 ### Version Management
 Version managed centrally in `pyproject.toml`:
@@ -905,9 +909,11 @@ checkout source-read-only.
    and inter-package constraint to `X.Y.Z`, update `uv.lock`, and move
    `[Unreleased]` entries into matching byte-identical changelogs.
 2. Commit by explicit paths, push normally, and open a DRAFT release PR.
-   The exact PR head must pass required CI and review, all conversations must
-   be resolved, and the branch must include current `main`. The designated
-   integrator merges with a merge commit after explicit authorization.
+   The exact PR head must pass required CI and independent review, all
+   conversations must be resolved, and the branch must include current `main`.
+   A Marco-authorized release plan covers its merge; the designated integrator
+   merges with a merge commit. Release tags still require Marco's separate
+   explicit instruction.
 3. The integrator runs `git pull --ff-only origin main` in the integration
    checkout and proves local `main` equals `origin/main` at the release merge.
    Run the pre-tag release build and validation gates from that exact commit.

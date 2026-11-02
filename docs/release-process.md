@@ -63,8 +63,11 @@ integration checkout with `origin/main`.
    normal exact-head review, required-CI, conversation-resolution, and current
    base gates. If the base advances, merge `origin/main` into the writer branch
    and push normally; never rebase or force-push.
-4. The designated integrator merges the authorized release PR with a merge
-   commit. In the integration checkout, run `git pull --ff-only origin main`,
+4. The designated integrator merges the release PR only when it is within
+   Marco's authorized release plan and has independent exact-head review,
+   required checks, resolved conversations, and a current `main` base. Use a
+   merge commit. In the integration checkout, run
+   `git pull --ff-only origin main`,
    then verify its HEAD equals `origin/main` and identifies the release merge
    commit. If this fast-forward fails or the SHAs differ, stop and report the
    exact state; never reset, rebase, or force-push.
@@ -79,9 +82,14 @@ integration checkout with `origin/main`.
 
 The integration checkout must match `origin/main` at the intended merge commit
 before build or tag actions. Classify any other dirty path instead of removing
-or carrying it into release scope. Done means `kollab --version` reports the
-released version inside and outside the repo, in addition to the existing
-package, artifact, tag, and publication proofs below.
+or carrying it into release scope. Done means `kollab --version` prints
+`Build: <branch> @ <8-character SHA>` immediately before the unchanged final
+`kollab X.Y.Z` line inside and outside the repo. Build identity comes from the
+exact checkout used to build the artifact; detached checkouts report branch
+`unknown` while retaining a resolvable short SHA, and each unavailable field
+displays as `unknown`. Running agents keep the code they started with; list them
+and ask before restarting any. These proofs are required in addition to the
+existing package, artifact, tag, and publication gates below.
 
 ## Pre-Release Checklist
 

@@ -167,10 +167,10 @@ message such as `chore: prepare release vX.Y.Z`; do not add attribution footers.
 
 ## 3. Merge and validate before tagging
 
-After the release PR passes exact-head review and required checks, all
-conversations are resolved, and its branch includes current `main`, the
-designated integrator merges it with a merge commit and fast-forwards the
-integration checkout. Verify local `main` equals `origin/main` at the release
+After the release PR is within Marco's authorized release plan and passes
+independent exact-head review, required checks, resolved conversations, and
+current-base gates, the designated integrator merges it with a merge commit and
+fast-forwards the integration checkout. Verify local `main` equals `origin/main` at the release
 merge SHA. Then run the release build and checks from that synchronized main
 checkout; a pre-merge build is only rehearsal, not release source proof.
 

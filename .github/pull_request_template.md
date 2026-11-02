@@ -91,8 +91,11 @@ in `docs/product-ready-checklist.md`.
   contributor branch when no other writer shares the checkout. File ownership
   was clear; existing dirty work, branches, and worktrees were preserved; the
   maintainer integration checkout had no source edits.
-- [ ] The PR remains a draft until Marco or the koordinator marks it ready; agents do not merge or
-  create release tags without explicit authorization.
+- [ ] The PR remains a draft until its designated integrator marks it ready
+  within the maintainer-authorized integration plan, after independent
+  exact-head review and required CI. The PR author never reviews their own
+  change; work outside the plan needs new authorization, and release tags need
+  separate explicit maintainer instruction.
 
 ## Risk and rollout notes
 

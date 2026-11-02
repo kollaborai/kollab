@@ -33,12 +33,15 @@ new path and branch do not exist, fetch the intended base, and record its SHA.
 Avoid concurrent writers to the same paths.
 
 Source work lands through a DRAFT PR from the owning worktree. Keep commits
-scoped to owned paths, use Conventional Commits, review and test the exact PR
-head against the current `main` base, and require all configured checks and
-review gates. Update a PR branch with ordinary merges; never rebase or
-force-push. The designated integrator owns merge sequencing and merges only
-with explicit authorization and a merge commit. If local and remote state
-diverge, stop and report exact SHAs and PR state; never reset or force-push.
+scoped to owned paths, use Conventional Commits, and require independent review
+and all configured checks on the exact PR head against current `main`. Update
+a PR branch with ordinary merges; never rebase or force-push. Marco authorizes
+a concrete plan or bounded PR batch; within it, the designated integrator may
+mark ready and merge after its review/base/CI/thread gates pass, without
+repeating permission per listed PR. Writers never review their own changes.
+Anything outside the plan needs new authorization; release tags require
+separate explicit instruction. If local and remote state diverge, stop and
+report exact SHAs and PR state; never reset or force-push.
 
 For every release, read `docs/release-process.md`. Author release-preparation
 changes in a worktree PR, then build/tag from the clean, synchronized merged

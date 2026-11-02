@@ -66,8 +66,13 @@ Create new lanes from the fetched current `origin/main` after checking that the
 worktree path and branch are unused. Keep file ownership explicit and avoid
 concurrent writers to the same paths. Use scoped Conventional Commits and DRAFT
 PRs; update branches only with ordinary merges, never rebase or force-push.
-Review and CI must match the exact PR head and current base. One named
-integrator coordinates authorized merge commits and post-merge fast-forward
+Review and CI must match the exact PR head and current base. Marco may
+authorize a concrete integration plan or bounded batch; within it, the named
+integrator may mark ready and merge after an independent source review, current
+base, required checks, and resolved threads. No extra permission request is
+needed for listed steps. A PR author never reviews their own change; work
+outside the plan needs new authorization, and release tags always require
+separate explicit instruction. The integrator owns post-merge fast-forward
 synchronization; divergence is reported with exact local, remote, and PR SHAs.
 
 For any release request, read `docs/release-process.md`. Author release-source

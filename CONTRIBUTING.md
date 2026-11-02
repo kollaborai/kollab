@@ -66,18 +66,24 @@ regular local branch when no other writer shares that checkout.
    git worktree add -b issue-123-fix ../kollab-wt/issue-123-fix origin/main
    ```
 
-   Use a descriptive `docs/<slug>` branch when no issue tracks the work.
+   Use `docs/<slug>` for documentation without an issue, or `codex/<scope>`
+   for a Codex-authored lane without an issue. Keep existing branch names.
 3. Make a focused change and run targeted validation from the owning worktree.
 4. Update docs when behavior, setup, commands, config, or public APIs change.
 5. Push normally and open a DRAFT pull request against `main`. Keep review and
    CI tied to the exact head; merge current `main` into the branch when needed.
    Never rebase or force-push.
 6. Fill out the PR template, including commands run and rollout risk. Use
-   Conventional Commit messages and leave the PR as a draft until an authorized
-   reviewer marks it ready.
-7. A designated integrator sequences authorized merge commits. The integration
-   checkout remains source-read-only and may only fast-forward after a PR has
-   already merged. Do not automatically remove or delete worktrees or branches.
+   Conventional Commit messages. The project maintainer authorizes a concrete
+   integration plan; its designated integrator may mark covered PRs ready only
+   after independent review and exact-head gates pass. The PR author cannot
+   review their own change.
+7. The designated integrator lands authorized PRs with merge commits; no
+   repeated permission is needed for steps already in the plan. Work outside
+   its scope needs new authorization. Release tags require separate explicit
+   maintainer instruction. The integration checkout remains source-read-only
+   and may only fast-forward after a PR has already merged. Do not automatically
+   remove or delete worktrees or branches.
 
 ## Validation
 
