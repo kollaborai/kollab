@@ -492,7 +492,7 @@ def _mint_tls_cert(tmp_path: Path) -> tuple[str, str]:
 
 @pytest.mark.asyncio
 async def test_direct_secure_record_uses_tls_identity_and_rejects_other_methods(
-    tmp_path, loopback_endpoints
+    tmp_path, loopback_endpoints, monkeypatch
 ):
     cert, key = _mint_tls_cert(tmp_path)
     server_ssl = build_server_ssl_context(cert, key)
@@ -570,6 +570,33 @@ async def test_direct_secure_record_uses_tls_identity_and_rejects_other_methods(
             ("client-agent", client_key, "secure_packet", {"records": ["opaque"]})
         ]
 
+        # Trust can change while the direct TLS/identity handshake is in
+        # progress. Check again before writing the protected record.
+        from plugins.hub.network_attach import _Withdrawn
+
+        allowed = True
+        handshake = AgentMessenger.do_remote_client_handshake
+
+        async def revoke_after_handshake(*args, **kwargs):
+            nonlocal allowed
+            result = await handshake(*args, **kwargs)
+            allowed = False
+            return result
+
+        async def guard():
+            if not allowed:
+                raise _Withdrawn("synthetic withdrawal")
+
+        monkeypatch.setattr(
+            AgentMessenger, "do_remote_client_handshake", staticmethod(revoke_after_handshake)
+        )
+        with pytest.raises(_Withdrawn):
+            await mesh._send_direct_secure(
+                remote_relay_key, "secure_packet", {"records": ["protected"]},
+                timeout=4, before_send=guard,
+            )
+        assert len(calls) == 1
+
         # Only the two secure record methods ride this carrier.
         with pytest.raises(TransientPeerDeliveryError):
             await mesh._direct_request(
@@ -583,6 +610,127 @@ async def test_direct_secure_record_uses_tls_identity_and_rejects_other_methods(
         await mesh.close()
         secure.close()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_guarded_mesh_send_rechecks_after_relay_lock_wait(mesh_network):
+    """A routed packet cannot leave its first hop after a local withdrawal."""
+    from plugins.hub.network_attach import _Withdrawn
+
+    clients, states, _, dispatch_calls, wire = mesh_network
+    mesh = states["origin"]["mesh"]
+    destination = clients["destination"].public_key
+    lock = clients["origin"]._send_lock
+    allowed = True
+    sent_before = len(wire.sent)
+    calls_before = len(dispatch_calls["destination"])
+    held = False
+
+    async def guard():
+        if not allowed:
+            raise _Withdrawn("synthetic withdrawal")
+
+    await lock.acquire()
+    held = True
+    task = asyncio.create_task(
+        mesh.request(
+            destination, "secure_packet", {"synthetic": "protected"},
+            timeout=5, before_send=guard,
+        )
+    )
+    try:
+        for _ in range(500):
+            if any(not waiter.done() for waiter in (lock._waiters or ())):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("routed output did not reach the relay send lock")
+        allowed = False
+        lock.release()
+        held = False
+        with pytest.raises(_Withdrawn):
+            await asyncio.wait_for(task, 5)
+        assert len(wire.sent) == sent_before
+        assert len(dispatch_calls["destination"]) == calls_before
+    finally:
+        if held:
+            lock.release()
+        if not task.done():
+            task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_guarded_forward_never_uses_an_unguarded_injected_direct_sender(mesh_network, monkeypatch):
+    """Custom senders without the commit-guard contract must use the relay."""
+    from plugins.hub.network_attach import _Withdrawn
+
+    clients, states, *_ = mesh_network
+    mesh = states["origin"]["mesh"]
+    peer = clients["relay"].public_key
+    mesh.direct_enabled = True
+    mesh.endpoint_identity_manager = object()
+    monkeypatch.setattr(mesh, "_locator_for_peer", lambda _peer: {"endpoint": "synthetic"})
+    direct_calls = []
+    relay_calls = []
+
+    async def injected_sender(*args, **kwargs):
+        direct_calls.append(True)
+        return {"v": 1}
+
+    async def relay_request(_peer, _method, _payload, *, timeout, before_send):
+        relay_calls.append(True)
+        await before_send()
+        raise AssertionError("guard should have stopped the relay")
+
+    async def guard():
+        raise _Withdrawn("synthetic withdrawal")
+
+    monkeypatch.setattr(mesh, "_direct_sender", injected_sender)
+    monkeypatch.setattr(mesh.client, "request", relay_request)
+    with pytest.raises(_Withdrawn):
+        await mesh._send_forward_to_peer(peer, {}, timeout=5, before_send=guard)
+    assert direct_calls == []
+    assert relay_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_guarded_packet_stays_withdrawn_after_peer_is_reapproved(mesh_network, monkeypatch):
+    """A revoked secure session cannot send its queued packet after reapproval."""
+    from plugins.hub.relay_state import SendGuardRevoked
+
+    clients, states, _, _, _ = mesh_network
+    client = clients["origin"]
+    secure = states["origin"]["secure"]
+    peer = clients["destination"].public_key
+    await secure.request(peer, "directory", {}, timeout=10)
+    waiting = asyncio.Event()
+    release = asyncio.Event()
+    submitted = []
+
+    async def held_carrier(_peer, _method, _payload, *, timeout, before_send):
+        waiting.set()
+        await release.wait()
+        await before_send()
+        submitted.append(True)
+        raise AssertionError("withdrawn packet was submitted")
+
+    async def allow():
+        pass
+
+    monkeypatch.setattr(secure, "_transport_request", held_carrier)
+    task = asyncio.create_task(secure.request(peer, "directory", {}, timeout=10, before_send=allow))
+    try:
+        await asyncio.wait_for(waiting.wait(), 5)
+        client.revoke(peer)
+        client.approve(peer)
+        release.set()
+        with pytest.raises(SendGuardRevoked):
+            await asyncio.wait_for(task, 5)
+        assert submitted == []
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
 
 
 @pytest.mark.asyncio

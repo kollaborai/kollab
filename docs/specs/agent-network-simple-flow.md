@@ -656,8 +656,17 @@ agent's. Rules on the server: a member device, by trust as above, never a
 stranger, at most four open agents per device. The server asks these rules
 again while an agent stays open: a `/connect` command that withdraws it
 (`trust manual`, a `deny` of that agent under `trust agents`, `revoke`) closes
-it at once, and any other change (membership from the network, an agent
-stopping) within about five seconds.
+the local channel and waits for its blocked output send to stop before the
+command completes. The peer-close notice is best effort. Bytes already
+submitted to the network before withdrawal may still arrive; they cannot be
+recalled. If the owner observes a permission being withdrawn and it is then
+restored while a frame or open is waiting, that old operation remains withdrawn;
+a permitted connection can be opened again. For rule changes outside a
+`/connect` command, the owner checks on input delivery, after pacing, after
+securing the peer session, and immediately
+before each relay or direct-peer network write; an idle channel checks at
+least every five seconds. A device enforces its own rules once it learns a
+change; an offline peer cannot enforce changes it has not yet received.
 
 ## 6. Commands: keep, rename, remove
 
