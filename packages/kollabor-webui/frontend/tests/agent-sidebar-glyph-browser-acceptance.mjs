@@ -200,8 +200,17 @@ async function main() {
           0,
           "offline persona without type metadata must not be assigned an inferred glyph",
         );
+        const nonGlyphRowHeight = await untypedOfflineRows.evaluate((row) =>
+          row.getBoundingClientRect().height,
+        );
+        assert.ok(nonGlyphRowHeight > 0, "offline baseline row must have a measurable height");
 
         for (const glyph of glyphs) {
+          assert.equal(
+            glyph.rowHeight,
+            nonGlyphRowHeight,
+            `glyph row height changed for ${glyph.type} at ${capture.width}px`,
+          );
           assert.equal(glyph.title, glyph.type, `title mismatch for ${glyph.type}`);
           assert.equal(glyph.role, "img", `missing image role for ${glyph.type}`);
           assert.equal(Array.from(glyph.glyph ?? "").length, 1, `glyph is not one character for ${glyph.type}`);
