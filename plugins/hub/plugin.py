@@ -6235,11 +6235,16 @@ class HubPlugin(BasePlugin):
         peer_names = [agent.identity for agent in peers]
         peer_list = ", ".join(peer_names) if peer_names else "none"
         new_features = "\n".join(f"  - {feature}" for feature in HUB_NEW_FEATURES)
-        operator_help = (
-            "To stop all agents, submit: /hub stop all\n"
-            f"Tip: {choose_startup_tip()}\n"
-            f"New features:\n{new_features}"
-        )
+        # Advertise stop all only to callers that actually started agents
+        # of their own (issue #669); agents with nothing of their own to
+        # stop get no mesh-wide stop hint.
+        started = self._locally_started_agent_count() > 0
+        help_lines = []
+        if started:
+            help_lines.append("To stop all agents you started, submit: /hub stop all")
+        help_lines.append(f"Tip: {choose_startup_tip(include_stop_all=started)}")
+        help_lines.append(f"New features:\n{new_features}")
+        operator_help = "\n".join(help_lines)
         try:
             renderer.message_coordinator.display_message_sequence(
                 [
@@ -13499,6 +13504,33 @@ class HubPlugin(BasePlugin):
             return None
         return self.event_bus.get_service("agent_orchestrator")
 
+    def _locally_started_agent_count(self) -> int:
+        """How many agent subprocesses this process started itself."""
+        orch = self._get_orchestrator()
+        if orch is None:
+            return 0
+        try:
+            return len(orch.orchestrator.get_all_agents())
+        except Exception:
+            return 0
+
+    def _locally_managed_pids(self) -> set:
+        """PIDs of agent subprocesses this process started itself.
+
+        The agent_orchestrator tracks every subprocess it launched; PID
+        matching bridges hub identities to those sessions (issue #669).
+        """
+        orch = self._get_orchestrator()
+        if orch is None:
+            return set()
+        try:
+            sessions = orch.orchestrator.get_all_agents()
+        except Exception:
+            return set()
+        return {
+            session.pid for session in sessions.values() if getattr(session, "pid", None)
+        }
+
     def _resolve_identity_to_agent_name(self, identity: str) -> Optional[str]:
         """Resolve a hub identity (gem name) to the orchestrator agent name.
 
@@ -14195,9 +14227,11 @@ class HubPlugin(BasePlugin):
     async def _handle_stop_command(self, rest: str) -> str:
         """Handle /hub stop <name|all>.
 
-        Sends shutdown signals via hub sockets (works for org-launched
-        agents and any other peer on the mesh, not just orchestrator-
-        managed agents).
+        Sends shutdown signals via hub sockets. `stop all` is scoped to
+        the agents the CALLER started (agent_orchestrator-managed
+        sessions matched by PID, issue #669): peers launched by other
+        lanes or the operator are immune. The mesh-wide stop is the
+        operator CLI, `kollab --hub stop all`.
         """
         target = rest.strip()
         if not target:
@@ -14218,9 +14252,17 @@ class HubPlugin(BasePlugin):
                 return "no peers to stop"
 
             results = []
-            stop_targets = [
-                agent for agent in peers if agent.agent_id != self._identity.agent_id
-            ]
+            managed_pids = self._locally_managed_pids()
+            stop_targets = []
+            immune = []
+            for agent in peers:
+                if agent.agent_id == self._identity.agent_id:
+                    continue
+                pid = getattr(agent, "pid", None)
+                if pid is not None and pid in managed_pids:
+                    stop_targets.append(agent)
+                else:
+                    immune.append(agent.identity)
             stop_results = await asyncio.gather(
                 *[
                     self._stop_peer_agent(
@@ -14233,9 +14275,21 @@ class HubPlugin(BasePlugin):
             for agent, result in zip(stop_targets, stop_results):
                 results.append(f"  {agent.identity}: {result}")
 
-            if not results:
+            if not stop_targets:
+                if immune:
+                    return (
+                        "no agents started by you to stop "
+                        f"(immune: {', '.join(immune)}); only the operator "
+                        "CLI or their launcher can stop them"
+                    )
                 return "no peers to stop (only you on mesh)"
-            return f"stopping {len(results)} agent(s):\n" + "\n".join(results)
+            summary = f"stopping {len(results)} agent(s):"
+            if immune:
+                summary += (
+                    f"\nskipped {len(immune)} agent(s) not started by you "
+                    f"(immune): {', '.join(immune)}"
+                )
+            return summary + "\n" + "\n".join(results)
         else:
             # Single agent
             if target == self._identity.identity:

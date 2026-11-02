@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- An agent running `/hub stop all` in a TUI session now stops only the agents that session started: peers launched by other sessions or the operator are immune and reported in the result, and the command is advertised only to sessions that started agents; the operator CLI `kollab --hub stop all` remains the mesh-wide stop (#669).
 - Coordinator task assignments survive restarts in a durable dispatch ledger,
   suppress re-routing delivered work, and keep completion reports unverified
   until the original assigner verifies a worktree or commit reference (#636).

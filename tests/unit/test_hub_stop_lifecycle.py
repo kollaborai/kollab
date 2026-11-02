@@ -243,9 +243,20 @@ def test_stop_all_stops_peers_concurrently():
             identity="koordinator",
         )
         plugin._presence.agents = [
-            SimpleNamespace(identity="lapis", agent_id="agent-lapis"),
-            SimpleNamespace(identity="sapphire", agent_id="agent-sapphire"),
+            SimpleNamespace(identity="lapis", agent_id="agent-lapis", pid=101),
+            SimpleNamespace(identity="sapphire", agent_id="agent-sapphire", pid=102),
         ]
+        # stop all only sweeps agents the caller started (#669)
+        plugin.event_bus = SimpleNamespace(
+            get_service=lambda name: SimpleNamespace(
+                orchestrator=SimpleNamespace(
+                    get_all_agents=lambda: {
+                        "lapis": SimpleNamespace(pid=101),
+                        "sapphire": SimpleNamespace(pid=102),
+                    }
+                )
+            )
+        )
 
         async def stop_peer(agent, reason):
             await asyncio.sleep(0.1)
