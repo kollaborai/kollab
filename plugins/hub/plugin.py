@@ -3379,8 +3379,11 @@ class HubPlugin(BasePlugin):
             )
 
         try:
-            verified = self._task_ledger.mark_dispatch_verified(
-                dispatch_id, verified_by=verified_by, note=note
+            verified = await asyncio.to_thread(
+                self._task_ledger.mark_dispatch_verified,
+                dispatch_id,
+                verified_by=verified_by,
+                note=note,
             )
         except Exception as e:
             logger.exception("failed to verify hub dispatch %s", dispatch_id)
@@ -3815,7 +3818,8 @@ class HubPlugin(BasePlugin):
                     ),
                 )
             try:
-                self._task_ledger.record_dispatch(
+                dispatch_record = await asyncio.to_thread(
+                    self._task_ledger.record_dispatch,
                     task_id=str(metadata.get("task_id") or msg.id),
                     assigned_by=assigned_by,
                     assignee=target,
@@ -3838,6 +3842,23 @@ class HubPlugin(BasePlugin):
                     ),
                 )
             dispatch_id = msg.id
+            dispatch_status = str(dispatch_record.get("status") or "dispatching")
+            if dispatch_status not in {"dispatching", "delivery_failed"}:
+                logger.info(
+                    "not rerouting dispatch %s already in status %s",
+                    dispatch_id,
+                    dispatch_status,
+                )
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=True,
+                    output=(
+                        f"Dispatch {dispatch_id} is already {dispatch_status}; "
+                        "not sent again."
+                    ),
+                    metadata={"end_turn": True} if any_wait else None,
+                )
             metadata["dispatch_id"] = dispatch_id
         # Apply the existing TaskLedger handoff hint only after the durable
         # write-ahead record has been saved and before routing begins.
@@ -3851,7 +3872,8 @@ class HubPlugin(BasePlugin):
             and target not in ("all", "*", "everyone", "team", "project")
         ):
             try:
-                begin_handoff(
+                await asyncio.to_thread(
+                    begin_handoff,
                     self._task_ledger,
                     task_id,
                     self._identity.identity,
@@ -3867,7 +3889,8 @@ class HubPlugin(BasePlugin):
             and target not in ("all", "*", "everyone", "team", "project")
         ):
             try:
-                self._task_ledger.expect_reply(
+                await asyncio.to_thread(
+                    self._task_ledger.expect_reply,
                     task_id=str(metadata.get("task_id") or msg.id),
                     assignee=target,
                     requested_by=(
@@ -3884,7 +3907,8 @@ class HubPlugin(BasePlugin):
             if not dispatch_id:
                 raise
             try:
-                updated = self._task_ledger.update_dispatch(
+                updated = await asyncio.to_thread(
+                    self._task_ledger.update_dispatch,
                     dispatch_id,
                     status="delivery_failed",
                     delivery_error=f"routing failed: {e}",
@@ -3911,7 +3935,8 @@ class HubPlugin(BasePlugin):
                 f"{recipient}: {reason}" for recipient, reason in (rejections or [])
             )
             try:
-                updated = self._task_ledger.update_dispatch(
+                updated = await asyncio.to_thread(
+                    self._task_ledger.update_dispatch,
                     dispatch_id,
                     status=dispatch_status,
                     delivery_error=dispatch_error,
@@ -8999,7 +9024,8 @@ class HubPlugin(BasePlugin):
         dispatch_task_id = str(dispatch_metadata.get("task_id") or "").strip()
         if self._task_ledger and is_intended:
             try:
-                self._task_ledger.record_dispatch_report(
+                await asyncio.to_thread(
+                    self._task_ledger.record_dispatch_report,
                     task_id=dispatch_task_id,
                     assignee=message.from_identity or message.from_agent,
                     thread_id=getattr(message, "thread_id", "") or "",

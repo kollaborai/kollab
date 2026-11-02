@@ -181,6 +181,8 @@ hub_msg = ToolDefinition(
         "be concise — other agents have limited context too",
         "for direct task assignments, include task_id, worktree, and starting commit when known",
         "tell workers to use the exact first line 'Task complete' only for final, acceptance-complete reports",
+        "for final task reports, include task_id and at least one of the worktree "
+        "or commit attributes",
         "manual trust only: start a remote task with kind='message', the exact request text from its human "
         "contact instruction, and that instruction's exact thread_id; do not wrap or extend it",
         "manual trust only: use kind='question' only as the receiver of an active authenticated remote task, "

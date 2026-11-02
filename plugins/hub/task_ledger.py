@@ -514,8 +514,12 @@ class TaskLedger:
         commit: str = "",
         reply_to: str = "",
     ) -> bool:
-        """Correlate strong completion evidence but leave it unverified."""
+        """Correlate completion reports with a worktree or commit evidence ref."""
         if not isinstance(report, str) or not report.strip():
+            return False
+        worktree = worktree.strip() if isinstance(worktree, str) else ""
+        commit = commit.strip() if isinstance(commit, str) else ""
+        if not worktree and not commit:
             return False
         first_line = report.strip().splitlines()[0].strip().casefold()
         if first_line != "task complete":

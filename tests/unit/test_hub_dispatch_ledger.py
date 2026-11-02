@@ -146,6 +146,36 @@ def test_dispatch_report_is_assignee_and_thread_bound_until_verified(tmp_path):
     assert reloaded["verification_note"] == "Inspected the diff and reran focused tests."
 
 
+@pytest.mark.parametrize(
+    ("reference", "expected"),
+    [
+        pytest.param({}, False, id="missing-reference"),
+        pytest.param({"worktree": "/tmp/lane-636"}, True, id="worktree-reference"),
+        pytest.param({"commit": "abc1234"}, True, id="commit-reference"),
+    ],
+)
+def test_dispatch_report_requires_worktree_or_commit_reference(
+    tmp_path, reference, expected
+):
+    ledger = TaskLedger(str(tmp_path))
+    _record_dispatch(ledger)
+    assert ledger.update_dispatch("dispatch-message-1", status="in_flight")
+
+    accepted = ledger.record_dispatch_report(
+        task_id="task-636",
+        assignee="lapis",
+        thread_id="dispatch-thread-1",
+        reply_to="dispatch-message-1",
+        message_id="report-with-reference",
+        report="Task complete\nEvidence is ready for inspection.",
+        **reference,
+    )
+
+    assert accepted is expected
+    expected_status = "reported_unverified" if expected else "in_flight"
+    assert ledger.get_dispatch("dispatch-message-1")["status"] == expected_status
+
+
 @pytest.mark.asyncio
 async def test_hub_assignment_is_persisted_before_routing(tmp_path):
     ledger = TaskLedger(str(tmp_path))
@@ -263,6 +293,77 @@ async def test_hub_assignment_is_persisted_before_routing(tmp_path):
         )
     assert not failed_write.success
     plugin._route_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_completed_dispatch_replay_is_not_routed(tmp_path):
+    ledger = TaskLedger(str(tmp_path))
+    plugin = HubPlugin(event_bus=MagicMock())
+    plugin._identity = AgentRuntime(
+        name="coordinator", identity="koordinator", agent_id="koordinator-id",
+        is_coordinator=True,
+    )
+    plugin._presence = MagicMock()
+    plugin._presence.scan_all_presence.return_value = [
+        AgentRuntime(name="coder", identity="lapis", agent_id="lapis-id")
+    ]
+    plugin._task_ledger = ledger
+    plugin._route_message = AsyncMock(return_value=[])
+    plugin._display_outgoing_message = MagicMock()
+    plugin._bridge_forward = AsyncMock()
+    plugin._resolve_scope = MagicMock(return_value=MessageScope.DIRECT.value)
+
+    payload = {
+        "id": "dispatch-tool-call",
+        "_message_id": "dispatch-replay-id",
+        "_acp_hub": True,
+        "to": "lapis",
+        "content": "Task: review the patch and report back.",
+        "task_id": "task-replay",
+        "worktree": "/tmp/lane-replay",
+        "commit": "abc1234",
+    }
+    sent = await plugin._handle_hub_msg_tool(payload)
+    assert sent.success
+    plugin._route_message.assert_awaited_once()
+
+    dispatch = ledger.get_dispatch("dispatch-replay-id")
+
+    plugin._route_message.reset_mock(side_effect=True)
+    in_flight_replay = await plugin._handle_hub_msg_tool(
+        {**payload, "id": "replay-in-flight", "thread_id": dispatch["thread_id"]}
+    )
+    assert in_flight_replay.success
+    assert "not sent again" in in_flight_replay.output
+    plugin._route_message.assert_not_awaited()
+    assert ledger.get_dispatch("dispatch-replay-id")["status"] == "in_flight"
+
+    assert ledger.record_dispatch_report(
+        task_id="task-replay",
+        assignee="lapis",
+        thread_id=dispatch["thread_id"],
+        reply_to="dispatch-replay-id",
+        message_id="report-replay-id",
+        report="Task complete\nInspected changes are ready.",
+        worktree="/tmp/lane-replay",
+        commit="abc1234",
+    )
+
+    for status in ("reported_unverified", "verified"):
+        if status == "verified":
+            assert ledger.mark_dispatch_verified(
+                "dispatch-replay-id",
+                verified_by="koordinator",
+                note="Inspected the worktree and commit.",
+            )
+        plugin._route_message.reset_mock(side_effect=True)
+        replay = await plugin._handle_hub_msg_tool(
+            {**payload, "id": f"replay-{status}", "thread_id": dispatch["thread_id"]}
+        )
+        assert replay.success
+        assert "not sent again" in replay.output
+        plugin._route_message.assert_not_awaited()
+        assert ledger.get_dispatch("dispatch-replay-id")["status"] == status
 
 
 @pytest.mark.asyncio
@@ -434,6 +535,7 @@ async def test_dispatch_verify_handler_enforces_assigner_identity(tmp_path):
     ledger.record_dispatch_report(
         task_id="task-636", assignee="lapis", thread_id="dispatch-thread-1",
         message_id="report-message-1", report="Task complete\ntests passed.",
+        worktree="/tmp/lane-636",
     )
 
     plugin = HubPlugin.__new__(HubPlugin)

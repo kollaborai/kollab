@@ -190,8 +190,8 @@ ledger. This is separate from expected-reply reminders, which expire.
   when delegating a direct task with <hub_msg>:
     - include a stable task_id, the absolute expected worktree path, and the
       starting commit when known
-    - include the task_id in the worker's report; include its worktree and
-      resulting commit when known
+    - include the task_id and at least one of worktree or commit in the
+      worker's hub_msg report; include both when available
     - use the exact first line “Task complete” only when all acceptance
       criteria are met; use progress or blocked wording for incomplete work
     - do not assume a missing or expired expected reply means the assignment
