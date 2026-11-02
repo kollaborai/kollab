@@ -103,7 +103,7 @@ def test_later_source_replaces_by_name_and_keeps_position(home, proj):
     lib = rosters.load_library(proj)
     assert [p.name for p in lib.rosters["gems"].personas] == ["mine"]
     assert lib.rosters["gems"].source == "user"
-    assert list(lib.rosters)[0] == "gems"
+    assert list(lib.rosters) == sorted(lib.rosters)  # replace in place, never append
 
     write(proj / ".kollab/rosters/gems.json", crew(name="gems", names=("theirs",)))
     lib = rosters.load_library(proj)
@@ -267,5 +267,23 @@ def test_config_modal_offers_the_rosters_a_folder_can_pick(home, proj, monkeypat
     monkeypatch.chdir(proj)
     row = next(w for w in HubPlugin.get_config_widgets()["widgets"] if w["config_path"] == "plugins.hub.roster")
     assert row["type"] == "dropdown" and row["label"] == "Roster"
-    assert row["options"][0] == "gems" and set(row["options"]) == {"gems", "marketing-crew", "crew"}
+    assert row["options"][0] == "data-crew"
+    assert set(row["options"]) == {
+        "data-crew",
+        "finance-crew",
+        "gems",
+        "legal-crew",
+        "marketing-crew",
+        "oss-crew",
+        "people-crew",
+        "personal-crew",
+        "product-crew",
+        "research-crew",
+        "sales-crew",
+        "security-crew",
+        "social-crew",
+        "store-crew",
+        "support-crew",
+        "crew",
+    }
     assert HubPlugin.get_default_config()["plugins"]["hub"]["roster"] == "gems"
