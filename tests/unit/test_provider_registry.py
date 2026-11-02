@@ -136,8 +136,15 @@ class TestProviderRegistration:
         assert ProviderRegistry.is_registered(ProviderType.OPENAI)
         assert ProviderRegistry.is_registered(ProviderType.ANTHROPIC)
 
-    def test_register_provider_returns_class(self):
+    def test_register_provider_returns_class(self, monkeypatch):
         """Test decorator returns the original class."""
+        # The decorator test temporarily replaces Azure registration; keep the
+        # process-global provider map intact for tests running in other orders.
+        monkeypatch.setattr(
+            ProviderRegistry,
+            "_providers",
+            ProviderRegistry._providers.copy(),
+        )
 
         # Use AZURE_OPENAI to avoid overwriting mock providers
         @register_provider(ProviderType.AZURE_OPENAI)
@@ -156,8 +163,6 @@ class TestProviderRegistration:
 
         assert TestProvider is not None
         assert TestProvider.__name__ == "TestProvider"
-        # Clean up the test registration
-        ProviderRegistry._providers.pop(ProviderType.AZURE_OPENAI, None)
 
     def test_list_providers(self):
         """Test listing registered providers."""
@@ -166,8 +171,13 @@ class TestProviderRegistration:
         assert ProviderType.ANTHROPIC in providers
         assert len(providers) >= 2
 
-    def test_is_registered(self):
+    def test_is_registered(self, monkeypatch):
         """Test checking if provider is registered."""
+        monkeypatch.delitem(
+            ProviderRegistry._providers,
+            ProviderType.AZURE_OPENAI,
+            raising=False,
+        )
         assert ProviderRegistry.is_registered(ProviderType.OPENAI) is True
         assert ProviderRegistry.is_registered(ProviderType.ANTHROPIC) is True
         assert ProviderRegistry.is_registered(ProviderType.AZURE_OPENAI) is False
@@ -182,8 +192,13 @@ class TestProviderRegistration:
         assert anthropic_class is not None
         assert anthropic_class == MockAnthropicProvider
 
-    def test_get_provider_class_not_registered(self):
+    def test_get_provider_class_not_registered(self, monkeypatch):
         """Test getting unregistered provider class returns None."""
+        monkeypatch.delitem(
+            ProviderRegistry._providers,
+            ProviderType.AZURE_OPENAI,
+            raising=False,
+        )
         azure_class = ProviderRegistry.get_provider_class(ProviderType.AZURE_OPENAI)
         assert azure_class is None
 
