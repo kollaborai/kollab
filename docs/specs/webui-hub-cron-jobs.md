@@ -23,9 +23,13 @@ served by two read-only hops:
    gate as `get_status`/`health_status`. Plugins: `plugins/hub/plugin.py`
    (`_cron_jobs_payload`), `plugins/hub/messenger.py`.
 2. Engine aggregation: `GET /hub/cron-jobs` queries every live agent's
-   socket and tags each row with the agent's identity. An agent that does
-   not answer is reported in `agents_unavailable` and never blocks the
-   others. Package: `packages/kollabor-engine/src/kollabor_engine/routes/hub.py`.
+   socket concurrently (each socket gets its own timeout budget) and tags
+   each row with the agent's identity. An agent that does not answer is
+   reported in `agents_unavailable` and never blocks the others; a framed
+   refusal (the local-operator gate's `{"type": "error", "msg": ...}`) or
+   a cron frame with a callback failure is surfaced verbatim in
+   `agents_errors` (identity -> message). Package:
+   `packages/kollabor-engine/src/kollabor_engine/routes/hub.py`.
 
 Row fields (epoch seconds; the renderer formats):
 

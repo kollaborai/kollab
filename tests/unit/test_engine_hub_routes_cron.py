@@ -138,8 +138,102 @@ class TestAggregateCronJobs(_Fixture):
         data = self.client.get("/hub/cron-jobs").json()
 
         self.assertEqual(
-            data, {"jobs": [], "count": 0, "agents_responded": [], "agents_unavailable": []}
+            data,
+            {
+                "jobs": [],
+                "count": 0,
+                "agents_responded": [],
+                "agents_unavailable": [],
+                "agents_errors": {},
+            },
         )
+
+    def test_an_operator_gate_rejection_is_surfaced_not_swallowed(self):
+        """The dispatcher's local-operator gate answers a typed error frame.
+
+        The engine must report the agent as unavailable AND carry the
+        rejection message, not silently render an empty schedule.
+        """
+        bridge = _StubBridge(
+            agents=[{"agent_id": "ghost-1", "identity": "ghost"}],
+            replies={
+                "ghost-1": {
+                    "type": "error",
+                    "msg": "local operator authorization required",
+                }
+            },
+        )
+        self._install(bridge)
+
+        data = self.client.get("/hub/cron-jobs").json()
+
+        self.assertEqual(data["jobs"], [])
+        self.assertEqual(data["agents_responded"], [])
+        self.assertEqual(data["agents_unavailable"], ["ghost"])
+        self.assertEqual(
+            data["agents_errors"], {"ghost": "local operator authorization required"}
+        )
+
+    def test_a_cron_reply_with_an_error_keeps_rows_and_names_the_failure(self):
+        bridge = _StubBridge(
+            agents=[{"agent_id": "sick-1", "identity": "sick"}],
+            replies={
+                "sick-1": {
+                    "type": "cron_jobs",
+                    "jobs": [_job("dddd4444")],
+                    "error": "cron jobs callback returned a non-list",
+                }
+            },
+        )
+        self._install(bridge)
+
+        data = self.client.get("/hub/cron-jobs").json()
+
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["agents_responded"], ["sick"])
+        self.assertEqual(
+            data["agents_errors"], {"sick": "cron jobs callback returned a non-list"}
+        )
+
+    def test_queries_run_concurrently_not_one_agent_at_a_time(self):
+        """The aggregation loop must not serialize per-agent awaits.
+
+        Each stub query parks until all expected calls are in flight;
+        if the route awaited them one at a time, at most one would ever
+        be in flight and the barrier would time out.
+        """
+        import asyncio
+
+        class _BarrierBridge(_StubBridge):
+            def __init__(self, agents, replies):
+                super().__init__(agents, replies)
+                self.expected = len(agents)
+                self.in_flight = 0
+                self.max_in_flight = 0
+                self.release = asyncio.Event()
+
+            async def query_socket(self, agent_id, action, payload=None, timeout=5.0):
+                self.in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self.in_flight)
+                if self.in_flight >= self.expected:
+                    self.release.set()
+                try:
+                    await asyncio.wait_for(self.release.wait(), timeout=2.0)
+                finally:
+                    self.in_flight -= 1
+                return self._replies.get(agent_id)
+
+        roster = [{"agent_id": f"a{i}-1", "identity": f"a{i}"} for i in range(3)]
+        bridge = _BarrierBridge(
+            agents=roster,
+            replies={row["agent_id"]: {"type": "cron_jobs", "jobs": [], "error": ""} for row in roster},
+        )
+        self._install(bridge)
+
+        data = self.client.get("/hub/cron-jobs").json()
+
+        self.assertEqual(data["agents_responded"], ["a0", "a1", "a2"])
+        self.assertGreaterEqual(bridge.max_in_flight, 3)
 
     def test_refresh_query_bypasses_the_presence_cache(self):
         bridge = _StubBridge(agents=[], replies={})
