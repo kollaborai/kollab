@@ -197,3 +197,17 @@ test("a page without trailing transient rows has nothing to drop", () => {
 test("an empty tail has nothing to dedupe against", () => {
   assert.equal(dropTransientTurnDuplicates(turnShown, []), null);
 });
+
+test("a partially replayed turn keeps transient rows without a replayed counterpart", () => {
+  // the anchor row replayed into kept history, the reply has not:
+  // only the anchor matches, so dropping the block would erase live content.
+  const shown = [
+    { id: "history-0", role: "user", content: "q1" },
+    { id: "history-1", role: "assistant", content: "a1" },
+    { id: "history-2", role: "user", content: "q2" },
+    { id: "user-ws1-5", role: "user", content: "q2" },
+    { id: "assistant-ws1-6", role: "assistant", content: "a2" },
+  ];
+  const tail = [{ id: "history-2", role: "user", content: "q2" }];
+  assert.equal(dropTransientTurnDuplicates(shown, tail), null);
+});
