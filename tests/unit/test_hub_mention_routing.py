@@ -133,7 +133,9 @@ def test_hub_mentions_persist_to_the_session_jsonl() -> None:
         ]
         assert llm.logger.calls[0][2] == "root"
         assert llm.logger.calls[1][2] == "u1"
-        assert llm.current_parent_uuid == "a1"
+        # Detached mention tasks never mutate the shared pointer; concurrent
+        # mentions would otherwise reparent each other mid-turn.
+        assert llm.current_parent_uuid == "root"
 
     asyncio.run(scenario())
 
@@ -222,5 +224,72 @@ def test_failed_hub_mention_still_persists_the_typed_turn() -> None:
 
         assert llm.logger.calls[0] == ("user", "@lapis inspect the queue")
         assert llm.logger.calls[1][0] == "assistant"
+
+    asyncio.run(scenario())
+
+
+def test_overlapping_mentions_do_not_reparent_each_other() -> None:
+    async def scenario() -> None:
+        class FakeLogger:
+            def __init__(self) -> None:
+                self.records: list[tuple[str, str, object, str]] = []
+                self._n = 0
+
+            async def log_user_message(self, content, parent_uuid=None):
+                self._n += 1
+                uid = f"u{self._n}"
+                self.records.append(("user", content, parent_uuid, uid))
+                return uid
+
+            async def log_assistant_message(self, content, parent_uuid=None):
+                self._n += 1
+                uid = f"a{self._n}"
+                self.records.append(("assistant", content, parent_uuid, uid))
+                return uid
+
+        class FakeLlm:
+            is_processing = False
+            current_parent_uuid = "root"
+
+            def __init__(self) -> None:
+                self.logger = FakeLogger()
+                self.conversation_logger = self.logger
+                self.tasks: list[asyncio.Task] = []
+
+            def create_background_task(self, coro, *, name: str):
+                task = asyncio.create_task(coro, name=name)
+                self.tasks.append(task)
+                return task
+
+            def _add_conversation_message(self, role, content, *, metadata):
+                pass
+
+        llm = FakeLlm()
+        service = LocalStateService(llm, object())
+        release_lapis = asyncio.Event()
+
+        async def slow_send(target, content):
+            if target == "lapis":
+                await release_lapis.wait()
+            return f"sent to {target}"
+
+        service.hub_send_msg = AsyncMock(side_effect=slow_send)
+
+        first = asyncio.create_task(service.send_message("@lapis slow one"))
+        while len(llm.logger.records) < 1:
+            await asyncio.sleep(0)
+        second = asyncio.create_task(service.send_message("@peridot fast one"))
+        await second
+        await llm.tasks[1]
+        release_lapis.set()
+        await first
+        await llm.tasks[0]
+
+        records = {
+            (role, content): (parent, uid)
+            for role, content, parent, uid in llm.logger.records
+        }
+        assert records[("assistant", "sent to lapis")][0] == "u1"
+        assert records[("assistant", "sent to peridot")][0] == "u2"
 
     asyncio.run(scenario())

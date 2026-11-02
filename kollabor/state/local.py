@@ -3602,7 +3602,10 @@ class LocalStateService(StateService):
         add_message = getattr(self._llm_service, "_add_conversation_message", None)
         if callable(add_message):
             add_message("user", text, metadata=metadata)
-        await self._log_jsonl_turn_message("user", text)
+        turn_parent = getattr(self._llm_service, "current_parent_uuid", None)
+        user_uuid = await self._log_jsonl_turn_message(
+            "user", text, parent_uuid=turn_parent
+        )
 
         try:
             # A broadcast takes the terminal's @ path (HubPlugin.send_user_message),
@@ -3617,7 +3620,9 @@ class LocalStateService(StateService):
             response_metadata = {**metadata, "hub_success": success}
             if callable(add_message):
                 add_message("assistant", output, metadata=response_metadata)
-            await self._log_jsonl_turn_message("assistant", output)
+            await self._log_jsonl_turn_message(
+                "assistant", output, parent_uuid=user_uuid
+            )
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(
                 self._event_bus,
@@ -3636,7 +3641,9 @@ class LocalStateService(StateService):
                     message,
                     metadata={**metadata, "hub_success": False},
                 )
-            await self._log_jsonl_turn_message("assistant", message)
+            await self._log_jsonl_turn_message(
+                "assistant", message, parent_uuid=user_uuid
+            )
             publish_semantic(self._event_bus, "error", message=message)
             publish_semantic(
                 self._event_bus,
@@ -3647,26 +3654,31 @@ class LocalStateService(StateService):
                 stop_reason="error",
             )
 
-    async def _log_jsonl_turn_message(self, role: str, content: str) -> None:
-        """Persist a hub-mention turn record to the session JSONL.
+    async def _log_jsonl_turn_message(
+        self, role: str, content: str, *, parent_uuid: str | None = None
+    ) -> str | None:
+        """Persist one hub-mention turn record to the session JSONL.
 
         Addressed LLM turns log through the input pipeline; hub mentions skip
         the pipeline entirely, so log here for the same parity. The JSONL
         feeds /resume and the engine's disk-seeded history.
+
+        Mentions run as detached tasks, so the parent chain is passed in per
+        turn instead of read from the shared ``current_parent_uuid`` pointer,
+        which concurrent mentions would reparent mid-turn. Fail-open: a
+        logger error never fails the hub send.
         """
         logger_service = getattr(self._llm_service, "conversation_logger", None)
         log_message = getattr(logger_service, f"log_{role}_message", None)
         if not callable(log_message):
-            return
+            return None
         try:
-            self._llm_service.current_parent_uuid = await log_message(
-                content,
-                parent_uuid=getattr(self._llm_service, "current_parent_uuid", None),
-            )
+            return await log_message(content, parent_uuid=parent_uuid)
         except Exception:
             logger.warning(
                 "could not log a hub mention %s record", role, exc_info=True
             )
+            return None
 
     async def _run_web_slash_command(
         self, command: Any, executor: Any
