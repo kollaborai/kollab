@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Web hub mentions (@agent and @broadcast) now persist to the session JSONL like addressed LLM turns, so wake and broadcast turns survive resume and reload instead of vanishing on reload (#672).
+- An ordinary turn queued while a detached completion (hub mention or voice reply) runs now parents from the user row logged at its admission, so a concurrent completion can no longer re-parent the queued reply under the detached turn (#676).
+
 - Coordinator task assignments survive restarts in a durable dispatch ledger,
   suppress re-routing delivered work, and keep completion reports unverified
   until the original assigner verifies a worktree or commit reference (#636).

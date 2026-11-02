@@ -63,6 +63,11 @@ class TaggedInput:
 
     content: MessageContent
     request_ids: tuple[str, ...]
+    # Chain position frozen at admission (#676): the parent this turn's user
+    # row was logged under. The queue must parent from this, not from the
+    # mutable ``current_parent_uuid`` pointer a detached completion (hub
+    # mention, voice reply) may advance while the input sits queued.
+    parent_uuid: str | None = None
 
 
 def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
@@ -80,6 +85,9 @@ class QueuedInput:
     # Marks a system-initiated corrective nudge (first-turn stall revival,
     # #453): never resets the nudge budget, so it cannot loop.
     is_system_nudge: bool = False
+    # Chain position frozen at admission (#676); see TaggedInput.parent_uuid.
+    # Nudges leave it None and keep the pointer fallback.
+    parent_uuid: str | None = None
 
 
 _UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")

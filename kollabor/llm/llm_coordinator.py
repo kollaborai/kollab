@@ -1732,18 +1732,42 @@ class LLMService:
                 [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
             combined = self.merge_pending_agent_hud(combined)
+            # Keep the admission-time capture through the rebatch (#676):
+            # the most recent capture, since the pointer today lands on the
+            # last row admitted into the batch.
+            rebatch_parent = next(
+                (
+                    m.parent_uuid
+                    for m in reversed(messages)
+                    if getattr(m, "parent_uuid", None)
+                ),
+                None,
+            )
             messages = [
                 QueuedInput(
                     combined,
                     voice_inputs[-1].voice,
                     merged_origin_context,
+                    parent_uuid=rebatch_parent,
                 )
                 if voice_inputs
                 else combined
             ]
+        # Parent from the admission-time capture, not the pointer: a detached
+        # completion (hub mention, voice reply) may have advanced the pointer
+        # while this batch sat queued (#676). Items without a capture (system
+        # nudges, bare content) keep the pointer fallback.
+        batch_parent_uuid = next(
+            (
+                m.parent_uuid
+                for m in reversed(messages)
+                if getattr(m, "parent_uuid", None)
+            ),
+            self.current_parent_uuid,
+        )
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
-            current_parent_uuid=self.current_parent_uuid,
+            current_parent_uuid=batch_parent_uuid,
             request_ids=request_ids,
         )
 
@@ -2053,14 +2077,30 @@ class LLMService:
         self.current_parent_uuid = await self.conversation_logger.log_user_message(
             display_text, parent_uuid=self.current_parent_uuid
         )
+        # Freeze this turn's chain position now (the row just logged). A
+        # detached completion — a hub mention, a voice reply — can advance the
+        # shared pointer before the queue starts this batch; the batch must
+        # parent from what admission captured, not from the mutable pointer
+        # (#676).
+        admitted_parent_uuid = self.current_parent_uuid
 
-        # Add to processing queue with overflow handling
+        # Add to processing queue with overflow handling. Plain input rides a
+        # zero-id TaggedInput so the capture travels with the item (#676); a
+        # bare string could not carry it, and an empty request_ids tuple
+        # behaves like bare content in every batch-pipeline consumer.
         await self._enqueue_with_overflow_strategy(
-            QueuedInput(normalized_message, voice or {}, trusted_origin_context)
+            QueuedInput(
+                normalized_message,
+                voice or {},
+                trusted_origin_context,
+                parent_uuid=admitted_parent_uuid,
+            )
             if voice or trusted_origin_context
-            else TaggedInput(normalized_message, (request_id,))
-            if request_id
-            else normalized_message
+            else TaggedInput(
+                normalized_message,
+                (request_id,) if request_id else (),
+                parent_uuid=admitted_parent_uuid,
+            )
         )
 
         # Start processing if not already running

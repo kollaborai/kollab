@@ -703,3 +703,82 @@ async def test_native_only_generation_is_rejected_for_active_acp():
     }
     assert acp.admissions == []
     service._enqueue_with_overflow_strategy.assert_not_awaited()
+@pytest.mark.asyncio
+async def test_concurrent_pointer_advance_between_user_row_and_queue_start_cannot_reparent_turn():
+    """A detached completion that advances ``current_parent_uuid`` between an
+    ordinary turn's user-row log and its queue start must not become that
+    turn's parent. The turn threads the parent captured at admission (its own
+    user row), never the mutable pointer the batch reads at start."""
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "native")
+    )
+    service._pending_agent_hud = []
+    service.current_parent_uuid = "prev-turn"
+    enqueued = asyncio.Event()
+    gate = asyncio.Event()
+    captured_items: list = []
+
+    async def gated_enqueue(item):
+        captured_items.append(item)
+        enqueued.set()
+        await gate.wait()  # the ordinary turn sits between log and queue start
+
+    batch_spy = AsyncMock(return_value="assistant-row")
+    service._queue_processor = SimpleNamespace(
+        enqueue=gated_enqueue,
+        process_message_batch=batch_spy,
+        continue_conversation=AsyncMock(return_value="parent-3"),
+        turn_completed=False,
+        processing_queue=SimpleNamespace(full=MagicMock(return_value=False)),
+    )
+    service.is_processing = True  # property: backed by _queue_processor
+    service.cancel_processing = False
+    service.cancellation_message_shown = False
+    service.create_background_task = MagicMock()
+    service.message_display_service = SimpleNamespace(
+        display_user_message=MagicMock(),
+        display_error_message=MagicMock(),
+    )
+    service.conversation_logger = SimpleNamespace(
+        log_user_message=AsyncMock(return_value="user-row")
+    )
+    service._message_handler = SimpleNamespace(
+        handle_user_input=AsyncMock(return_value={"status": "native"})
+    )
+    service._enqueue_with_overflow_strategy = gated_enqueue
+    assert await bus.register_hook(
+        Hook(
+            name="process_user_input",
+            plugin_name="llm_core",
+            event_type=EventType.USER_INPUT,
+            priority=HookPriority.LLM.value,
+            callback=service._handle_user_input,
+        )
+    )
+
+    task = asyncio.create_task(service.process_user_input("hello"))
+    await asyncio.wait_for(enqueued.wait(), 1)
+    # Admission logged the user row and the pointer moved onto it.
+    assert service.current_parent_uuid == "user-row"
+    assert len(captured_items) == 1
+
+    # The race window: a detached mention completion advances the pointer.
+    service.current_parent_uuid = "hub-assistant"
+
+    gate.set()
+    result = await asyncio.wait_for(task, 1)
+    assert result["status"] == "queued"
+
+    # The drain now starts the batch (the queue-start pointer read).
+    await service._process_message_batch(captured_items[:1])
+
+    batch_spy.assert_awaited_once()
+    batch_kwargs = batch_spy.await_args.kwargs
+    assert batch_kwargs["current_parent_uuid"] == "user-row", (
+        "ordinary turn must parent from its admission-time user row, "
+        f"not the pointer a concurrent completion advanced "
+        f"({batch_kwargs['current_parent_uuid']})"
+    )

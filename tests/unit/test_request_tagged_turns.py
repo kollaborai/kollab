@@ -57,12 +57,18 @@ async def test_native_admission_keeps_the_request_id_and_echoes_it():
     service = await _native_service()
     result = await service.submit_human_input("hi", source=UserInputSource.STATE_RPC, request_id="r1")
     assert result == {"status": "queued", "request_id": "r1"}
-    service._enqueue_with_overflow_strategy.assert_awaited_once_with(TaggedInput("hi", ("r1",)))
+    # parent_uuid rides every admission (#676): the fixture's logger returns "parent-2".
+    service._enqueue_with_overflow_strategy.assert_awaited_once_with(
+        TaggedInput("hi", ("r1",), parent_uuid="parent-2")
+    )
 
-    # Input with no id (the terminal, a hub peer) queues as before and echoes none.
+    # Input with no id (the terminal, a hub peer) echoes none; it rides a
+    # zero-id TaggedInput so the admission capture travels with it (#676).
     service._enqueue_with_overflow_strategy.reset_mock()
     assert await service.submit_human_input("typed here", source=UserInputSource.TUI) == {"status": "queued"}
-    service._enqueue_with_overflow_strategy.assert_awaited_once_with("typed here")
+    service._enqueue_with_overflow_strategy.assert_awaited_once_with(
+        TaggedInput("typed here", (), parent_uuid="parent-2")
+    )
 
 
 def _drain(q):
