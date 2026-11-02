@@ -1594,7 +1594,9 @@ async def assistant_transport(
                             refreshed = None
                             for _attempt in (0, 1):
                                 try:
-                                    refreshed = await session.refresh_history()
+                                    refreshed = await session.refresh_history(
+                                    stale_raises=True
+                                )
                                 except Exception as exc:
                                     logger.debug(
                                         "history refresh for %s failed: %s",
