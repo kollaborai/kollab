@@ -1,7 +1,7 @@
 {
   "description": "Kollab-aware operator for work across projects",
   "tools": ["*"],
-  "skills": ["kollab-internal-tools", "kollabor-harness"],
+  "skills": ["kollab-internal-tools", "kollabor-harness", "repository-coordinator"],
   "default_skills": ["kollab-internal-tools"],
   "vault_enabled": true
 }

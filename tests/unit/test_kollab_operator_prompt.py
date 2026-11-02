@@ -7,12 +7,14 @@ supplies a stand-in; when bundled, these tests use the actual catalog instead.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import kollabor_config.config_utils as config_utils
 from kollabor.cli import parse_arguments
 from kollabor.llm.session_manager import SessionManager
 from kollabor_agent.agent_manager import AgentManager, skill_markdown_body
@@ -22,6 +24,7 @@ from plugins.context_compaction_plugin import ContextCompactionPlugin
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "bundles" / "skills" / "kollab-internal-tools" / "SKILL.md"
+COORDINATOR = ROOT / "bundles" / "skills" / "repository-coordinator" / "SKILL.md"
 
 
 class Config:
@@ -111,6 +114,10 @@ def test_required_catalog_is_shipped():
     assert CATALOG.is_file(), "kollab-operator requires the bundled internal-tools catalog"
 
 
+def test_required_coordinator_is_shipped():
+    assert COORDINATOR.is_file(), "kollab-operator requires the bundled repository-coordinator skill"
+
+
 def test_default_skill_body_enters_the_real_system_message(machine, monkeypatch):
     project = machine.project("one", "Handoff A", "Policy A")
     inactive, inactive_builder = activate(project, monkeypatch, defaults=False)
@@ -125,6 +132,92 @@ def test_default_skill_body_enters_the_real_system_message(machine, monkeypatch)
     assert history[0].metadata["system_initialization"] is True
     assert machine.catalog_body in history[0].content
     assert "## Skill: kollabor-harness" not in history[0].content
+
+
+def test_real_coordinator_is_available_on_demand_and_local_skills_still_resolve(machine, monkeypatch):
+    project = machine.project("neutral", "Plan a catalog update.", "Use the local tracker.")
+    local_skill = project / ".kollab" / "skills" / "catalog-work" / "SKILL.md"
+    local_skill.parent.mkdir(parents=True)
+    local_skill.write_text(
+        "---\nname: catalog-work\ndescription: Local catalog procedures\n---\n\nLocal-only catalog procedure.\n",
+        encoding="utf-8",
+    )
+    manager, builder = activate(project, monkeypatch)
+    agent = manager.get_active_agent()
+    assert COORDINATOR.is_file()
+    coordinator = agent.skills["repository-coordinator"]
+    assert coordinator.source == "bundled"
+    assert coordinator.file_path.resolve() == COORDINATOR
+    assert "repository-coordinator" not in agent.active_skills
+    assert agent.skills["catalog-work"].source == "local"
+    # Restrict unrelated bundled guidance without hiding user-installed skills.
+    assert "oss-maintainers" in manager.skill_library.list_names()
+    assert "oss-maintainers" not in agent.skills
+
+    coordinator_body = skill_markdown_body(COORDINATOR.read_text(encoding="utf-8")).strip()
+    initial = builder.build()
+    assert str(COORDINATOR) in initial
+    assert str(local_skill) in initial
+    assert coordinator_body not in initial
+    assert "Local-only catalog procedure." not in initial
+
+    assert manager.load_skill("repository-coordinator")
+    assert manager.load_skill("catalog-work")
+    loaded = builder.build()
+    assert coordinator_body in loaded
+    assert "Local-only catalog procedure." in loaded
+    assert machine.catalog_body in loaded
+
+
+def test_seeded_operator_uses_ordinary_files_and_preserves_global_customization(machine, monkeypatch):
+    project = machine.project("seeded", "Handoff A", "Policy A")
+    monkeypatch.chdir(project)
+    original = AgentManager(project_path=project)
+    assert original.set_active_agent("kollab-operator")
+    assert original.get_active_agent().source == "bundled"
+
+    attempts = []
+
+    def deny_symlink(*args, **kwargs):
+        attempts.append((args, kwargs))
+        raise PermissionError("symlinks unavailable")
+
+    monkeypatch.setattr(os, "symlink", deny_symlink)
+    monkeypatch.setattr(Path, "symlink_to", deny_symlink)
+    config_utils.initialize_system_prompt()
+
+    seeded = Path.home() / ".kollab" / "agents" / "kollab-operator"
+    for name in ("agent.json", "system_prompt.md"):
+        source = ROOT / "bundles" / "agents" / "kollab-operator" / name
+        target = seeded / name
+        assert target.is_file() and not target.is_symlink()
+        assert target.read_bytes() == source.read_bytes()
+
+    global_manager = AgentManager(project_path=project)
+    assert global_manager.set_active_agent("kollab-operator")
+    assert global_manager.get_active_agent().source == "global"
+    assert machine.catalog_body in SystemPromptBuilder(config=Config(), agent_manager=global_manager).build()
+
+    customized = (seeded / "system_prompt.md").read_text(encoding="utf-8") + "\nUser note.\n"
+    (seeded / "system_prompt.md").write_text(customized, encoding="utf-8")
+    global_skill = Path.home() / ".kollab" / "skills" / "kollab-internal-tools" / "SKILL.md"
+    global_skill.parent.mkdir(parents=True, exist_ok=True)
+    custom_skill = (
+        "---\nname: kollab-internal-tools\ndescription: Customized tool guide\n---\n\nUser-customized tool guidance.\n"
+    )
+    global_skill.write_text(custom_skill, encoding="utf-8")
+    config_utils.initialize_system_prompt()
+    assert (seeded / "system_prompt.md").read_text(encoding="utf-8") == customized
+    assert global_skill.read_text(encoding="utf-8") == custom_skill
+    assert not global_skill.is_symlink()
+    resumed_manager = AgentManager(project_path=project)
+    assert resumed_manager.set_active_agent("kollab-operator")
+    assert resumed_manager.get_active_agent().source == "global"
+    assert resumed_manager.get_active_agent().skills["kollab-internal-tools"].source == "global"
+    resumed = SystemPromptBuilder(config=Config(), agent_manager=resumed_manager).build()
+    assert "User note." in resumed
+    assert "User-customized tool guidance." in resumed
+    assert attempts == []
 
 
 def test_operator_and_active_guide_survive_compaction(machine, monkeypatch):
