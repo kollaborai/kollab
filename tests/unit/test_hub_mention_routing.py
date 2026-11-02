@@ -343,3 +343,137 @@ def test_ordinary_turn_continues_after_a_hub_mention() -> None:
         assert llm.logger.calls[-1] == ("user", "ordinary follow-up", "a1")
 
     asyncio.run(scenario())
+
+
+def test_mixed_turn_overlap_does_not_misparent_or_clobber_the_cursor() -> None:
+    async def scenario() -> None:
+        class FakeLogger:
+            def __init__(self) -> None:
+                self.records: list[tuple[str, str, object, str]] = []
+                self._n = 0
+
+            async def log_user_message(self, content, parent_uuid=None):
+                self._n += 1
+                uid = f"u{self._n}"
+                self.records.append(("user", content, parent_uuid, uid))
+                return uid
+
+            async def log_assistant_message(self, content, parent_uuid=None):
+                self._n += 1
+                uid = f"a{self._n}"
+                self.records.append(("assistant", content, parent_uuid, uid))
+                return uid
+
+        class FakeLlm:
+            is_processing = False
+            current_parent_uuid = "root"
+
+            def __init__(self) -> None:
+                self.logger = FakeLogger()
+                self.conversation_logger = self.logger
+                self.coros: list[object] = []
+
+            def create_background_task(self, coro, *, name: str):
+                # Spawn without starting: the ordinary turn below completes
+                # while the mention task is still queued, so any pointer read
+                # inside the task body would grab the wrong lineage.
+                self.coros.append(coro)
+
+            def _add_conversation_message(self, role, content, *, metadata):
+                pass
+
+        llm = FakeLlm()
+        service = LocalStateService(llm, object())
+
+        async def overlapping_send(target, content):
+            # An ordinary LLM turn completes while the hub send awaits: the
+            # pointer moves root -> ordinary-1 -> ordinary-2 around the task.
+            llm.current_parent_uuid = "ordinary-2"
+            return "sent to lapis"
+
+        service.hub_send_msg = AsyncMock(side_effect=overlapping_send)
+
+        send_task = asyncio.create_task(service.send_message("@lapis hi"))
+        while not llm.coros:
+            await asyncio.sleep(0)
+        llm.current_parent_uuid = "ordinary-1"  # ordinary turn done before task start
+        await send_task
+        await asyncio.create_task(llm.coros[0])
+
+        records = {
+            (role, content): (parent, uid)
+            for role, content, parent, uid in llm.logger.records
+        }
+        # The mention's typed turn must chain from the lineage captured at
+        # spawn (root), not from the ordinary turn that completed meanwhile.
+        assert records[("user", "@lapis hi")][0] == "root"
+        assert records[("assistant", "sent to lapis")][0] == (
+            records[("user", "@lapis hi")][1]
+        )
+        # The newer ordinary turn owns the cursor: the mention completion must
+        # never overwrite a pointer that moved past its captured value.
+        assert llm.current_parent_uuid == "ordinary-2"
+
+    asyncio.run(scenario())
+
+
+def test_mixed_turn_overlap_failure_keeps_the_newer_cursor() -> None:
+    async def scenario() -> None:
+        class FakeLogger:
+            def __init__(self) -> None:
+                self.records: list[tuple[str, str, object, str]] = []
+                self._n = 0
+
+            async def log_user_message(self, content, parent_uuid=None):
+                self._n += 1
+                uid = f"u{self._n}"
+                self.records.append(("user", content, parent_uuid, uid))
+                return uid
+
+            async def log_assistant_message(self, content, parent_uuid=None):
+                self._n += 1
+                uid = f"a{self._n}"
+                self.records.append(("assistant", content, parent_uuid, uid))
+                return uid
+
+        class FakeLlm:
+            is_processing = False
+            current_parent_uuid = "root"
+
+            def __init__(self) -> None:
+                self.logger = FakeLogger()
+                self.conversation_logger = self.logger
+                self.coros: list[object] = []
+
+            def create_background_task(self, coro, *, name: str):
+                self.coros.append(coro)
+
+            def _add_conversation_message(self, role, content, *, metadata):
+                pass
+
+        llm = FakeLlm()
+        service = LocalStateService(llm, object())
+
+        async def failing_send(target, content):
+            llm.current_parent_uuid = "ordinary-2"  # ordinary turn wins mid-await
+            raise RuntimeError("hub down")
+
+        service.hub_send_msg = AsyncMock(side_effect=failing_send)
+
+        send_task = asyncio.create_task(service.send_message("@lapis hi"))
+        while not llm.coros:
+            await asyncio.sleep(0)
+        llm.current_parent_uuid = "ordinary-1"
+        await send_task
+        await asyncio.create_task(llm.coros[0])
+
+        records = {
+            (role, content): (parent, uid)
+            for role, content, parent, uid in llm.logger.records
+        }
+        assert records[("user", "@lapis hi")][0] == "root"
+        assert records[("assistant", "hub down")][0] == records[("user", "@lapis hi")][1]
+        # The failure path is held to the same compare-and-swap rule.
+        assert llm.current_parent_uuid == "ordinary-2"
+
+    asyncio.run(scenario())

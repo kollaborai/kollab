@@ -3277,7 +3277,14 @@ class LocalStateService(StateService):
         if hub_mention is not None:
             target, content = hub_mention
             create_task = getattr(llm, "create_background_task", None)
-            hub_coro = self._execute_hub_message(text, target, content)
+            # The lineage is frozen at spawn: the detached task must never
+            # read the shared pointer itself, because an ordinary turn may
+            # complete between spawn and task start and the mention would
+            # silently reparent onto it.
+            hub_parent = getattr(self._llm_service, "current_parent_uuid", None)
+            hub_coro = self._execute_hub_message(
+                text, target, content, parent_uuid=hub_parent
+            )
             if callable(create_task):
                 create_task(hub_coro, name="rpc_hub_message")
             else:
@@ -3588,8 +3595,15 @@ class LocalStateService(StateService):
             accepted["goal_reply_id"] = reply_id
         return accepted
 
-    async def _execute_hub_message(self, text: str, target: str, content: str) -> None:
-        """Send one chat mention through Hub and publish a web turn."""
+    async def _execute_hub_message(
+        self, text: str, target: str, content: str, *, parent_uuid: str | None = None
+    ) -> None:
+        """Send one chat mention through Hub and publish a web turn.
+
+        ``parent_uuid`` is the lineage captured by the caller at spawn time;
+        reading the shared ``current_parent_uuid`` pointer inside this task
+        would grab whatever ordinary turn happened to complete meanwhile.
+        """
         from kollabor_tui.display_tap import publish_semantic
 
         broadcast = target.lower() if target.lower() in _HUB_BROADCASTS else None
@@ -3602,7 +3616,7 @@ class LocalStateService(StateService):
         add_message = getattr(self._llm_service, "_add_conversation_message", None)
         if callable(add_message):
             add_message("user", text, metadata=metadata)
-        turn_parent = getattr(self._llm_service, "current_parent_uuid", None)
+        turn_parent = parent_uuid
         user_uuid = await self._log_jsonl_turn_message(
             "user", text, parent_uuid=turn_parent
         )
@@ -3623,14 +3637,14 @@ class LocalStateService(StateService):
             assistant_uuid = await self._log_jsonl_turn_message(
                 "assistant", output, parent_uuid=user_uuid
             )
-            if assistant_uuid:
+            if assistant_uuid and self._llm_service.current_parent_uuid == turn_parent:
                 # Ordinary LLM turns take their parent from this pointer
                 # (pipeline parity), so the chain must continue after the
-                # mention. The assignment follows the awaited log directly
-                # with no yield between, so per asyncio interleaving the
-                # pointer tracks the last-completed assistant record;
-                # per-turn capture above keeps concurrent mention chains
-                # from reparenting each other.
+                # mention. Compare-and-swap against the lineage captured at
+                # spawn: an ordinary turn that completed while the hub send
+                # awaited owns the newer cursor, and this completion must
+                # never drag it back onto the mention. The mention's own
+                # chain stays intact through its per-turn lineage either way.
                 self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(
@@ -3653,7 +3667,9 @@ class LocalStateService(StateService):
             assistant_uuid = await self._log_jsonl_turn_message(
                 "assistant", message, parent_uuid=user_uuid
             )
-            if assistant_uuid:
+            if assistant_uuid and self._llm_service.current_parent_uuid == turn_parent:
+                # Same compare-and-swap as the success path: a newer turn
+                # keeps the cursor; the failed mention never overwrites it.
                 self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "error", message=message)
             publish_semantic(
