@@ -137,6 +137,20 @@ except ImportError as _dns_import_err:
 
 logger = logging.getLogger(__name__)
 
+
+MAX_CRYSTAL_BODY_CHARS = 2000
+
+
+def _crystal_body_limit_error(tool_name: str, body: str) -> str | None:
+    if len(body) <= MAX_CRYSTAL_BODY_CHARS:
+        return None
+    return (
+        f"{tool_name} rejected: body has {len(body)} characters; "
+        f"maximum is {MAX_CRYSTAL_BODY_CHARS}. No changes were saved. "
+        "Reduce the body or split long notes across entries."
+    )
+
+
 _OPERATOR_NOTIFY_KINDS = frozenset({"decision", "blocker", "done"})
 _DEFAULT_OPERATOR_ALIASES = frozenset({"boss", "human", "operator"})
 
@@ -2590,6 +2604,15 @@ class HubPlugin(BasePlugin):
                 output="empty content, nothing saved",
             )
 
+        body_error = _crystal_body_limit_error("vault_write", content)
+        if body_error:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="vault_write",
+                success=False,
+                error=body_error,
+            )
+
         if not self._crystal_store:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2620,7 +2643,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="vault_write",
                 success=False,
-                output=f"vault_write error: {e}",
+                error=f"vault_write error: {e}",
             )
 
     async def _handle_global_vault_write_tool(self, tool_data: dict[str, Any]):
@@ -2636,6 +2659,15 @@ class HubPlugin(BasePlugin):
                 tool_type="global_vault_write",
                 success=True,
                 output="empty content, nothing saved",
+            )
+
+        body_error = _crystal_body_limit_error("global_vault_write", content)
+        if body_error:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="global_vault_write",
+                success=False,
+                error=body_error,
             )
 
         if not self._global_crystal_store:
@@ -2667,7 +2699,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="global_vault_write",
                 success=False,
-                output=f"global_vault_write error: {e}",
+                error=f"global_vault_write error: {e}",
             )
 
     async def _handle_crystal_search_tool(self, tool_data: dict[str, Any]):
@@ -2946,6 +2978,15 @@ class HubPlugin(BasePlugin):
                     output="empty body",
                 )
 
+            body_error = _crystal_body_limit_error("crystal_edit", body)
+            if body_error:
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="crystal_edit",
+                    success=False,
+                    error=body_error,
+                )
+
             summary = tool_data.get("summary")
             keywords = tool_data.get("keywords")
             entry = self._crystal_store.update_entry(
@@ -2981,7 +3022,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="crystal_edit",
                 success=False,
-                output=f"crystal_edit error: {e}",
+                error=f"crystal_edit error: {e}",
             )
 
     async def _handle_crystal_delete_tool(self, tool_data: dict[str, Any]):
