@@ -240,14 +240,30 @@ async def test_failed_voice_revoke_keeps_the_reload_needed_error() -> None:
     assert session.reload_needed == "No module named 'kollabor.state.goal_replies'"
     assert session.voice_admission.await_count == 2
 
+# === one request across the whole chain, only the transport faked ===
+#
+# A single POST /voice/sessions/<id>/turns crosses: the route handler ->
+# open_turn (the session's real send path, admission included) ->
+# EngineSession.send_message -> RemoteStateService -> the real registered
+# daemon handler. Fakes: the _WireRpc transport and the simulated fault
+# (a state service whose lazy import has left the checkout).
 
-# === the real chain end to end, with only the transport faked ===
+
+class _WireRpc:
+    """Carries method calls to real registered handlers: the fake transport."""
+
+    def __init__(self, handlers: dict) -> None:
+        self._handlers = handlers
+
+    async def call(self, method: str, params=None, **kwargs):
+        return await self._handlers[method](params or {})
 
 
 @pytest.mark.asyncio
-async def test_real_chain_handler_to_voice_route_409() -> None:
-    # daemon side: the real registered handler over a state service
-    # whose lazy import has left the checkout
+async def test_one_request_crosses_the_whole_chain_to_409() -> None:
+    from kollabor_agent.voice_admission import issue_voice_admission_context
+
+    # daemon side: the real handlers over a service whose lazy import broke
     state_service = SimpleNamespace(
         send_message=AsyncMock(
             side_effect=ModuleNotFoundError(
@@ -255,33 +271,87 @@ async def test_real_chain_handler_to_voice_route_409() -> None:
             )
         )
     )
-    handler = _registered(state_service)["state.send_message"]
+    wire = _WireRpc(_registered(state_service))
 
-    # the wire: the only fake in the chain. It carries the handler's
-    # wire-format dict to a real RemoteStateService.
-    class _WireRpc:
-        async def call(self, method, params=None, **kwargs):
-            return await handler(params or {})
-
+    # engine side: a real session; its admission calls go over the same wire
     session = _bare_session("coder")
-    session.daemon.state = RemoteStateService(_WireRpc())
+    session.daemon.state = RemoteStateService(wire)
+    session.daemon.rpc = wire
+    del session.voice_admission  # the real EngineSession.voice_admission runs
 
-    with pytest.raises(ReloadNeededError) as excinfo:
-        await session.send_message("hi", request_id="req-1")
+    origin_context = issue_voice_admission_context(
+        {
+            "owner_id": "owner-1",
+            "voice_session_id": "2f7a1c3e-5b8d-4a90-b2e1-6c9d0e4f8a27",
+            "control_session_id": "ctl-1",
+            "conversation_session_id": "conv-1",
+            "agent_id": "agent-1",
+            "voice_provider_profile_id": "profile-1",
+            "voice_prompt_revision": 1,
+            "voice_tool_policy": "policy-1",
+            "generation": 1,
+            "service_lease_epoch": 1,
+        },
+        "6a9f4d34-9c98-4a2e-86a5-f0eb8e02a7c3",
+    )
 
-    assert str(excinfo.value).startswith("coder could not run the turn:")
-    assert "Restart it." in str(excinfo.value)
+    # open_turn: the actual send path the route's VoiceControl drives
+    async def open_turn(voice_session_id, snapshot, *, kind="speech", talk_over=False):
+        return await session.send_message(
+            snapshot.display_text,
+            request_id=f"voice-{snapshot.turn_id}",
+            origin_context=origin_context,
+        )
+
+    app = FastAPI()
+    app.include_router(voice_router)
+    app.state.voice = SimpleNamespace(open_turn=open_turn)
+
+    body = VoiceTurnRequest(
+        transcript_id="1c2d1bf8-93e2-4f6c-9f74-a4b83c00ba11",
+        voice_session_id="2f7a1c3e-5b8d-4a90-b2e1-6c9d0e4f8a27",
+        turn_id="6a9f4d34-9c98-4a2e-86a5-f0eb8e02a7c3",
+        generation=1,
+        speaker="user",
+        revision=1,
+        final=True,
+        display_text="hello",
+        spoken_text=None,
+        language=None,
+        observed_at_utc_ms=0,
+    ).model_dump()
+
+    response = TestClient(app).post(
+        "/voice/sessions/2f7a1c3e-5b8d-4a90-b2e1-6c9d0e4f8a27/turns", json=body
+    )
+
+    assert response.status_code == 409
+    payload = response.json()
+    assert payload["code"] == "reload_needed"
+    assert "goal_replies" in payload["detail"]
+    assert "Its code changed on disk after it started. Restart it." in payload["detail"]
     assert session.reload_needed == "No module named 'kollabor.state.goal_replies'"
-    enriched = excinfo.value
+    # admit ran once over the wire; the failed turn's revoke ran once too
+    assert state_service.send_message.await_count == 1
 
-    # the voice route maps the enriched error to 409 reload_needed
+
+# === the route maps the enriched error to 409: open_turn stubbed on purpose,
+# this test covers only the route's own error mapping ===
+
+
+@pytest.mark.asyncio
+async def test_voice_route_answers_reload_needed_as_409() -> None:
     app = FastAPI()
     app.include_router(voice_router)
 
     async def open_turn(*args: object, **kwargs: object) -> object:
-        raise enriched
+        raise ReloadNeededError(
+            "coder could not run the turn: No module named 'gone'. "
+            "Its code changed on disk after it started. Restart it."
+        )
 
     app.state.voice = SimpleNamespace(open_turn=open_turn)
+
     body = VoiceTurnRequest(
         transcript_id="1c2d1bf8-93e2-4f6c-9f74-a4b83c00ba11",
         voice_session_id="2f7a1c3e-5b8d-4a90-b2e1-6c9d0e4f8a27",
