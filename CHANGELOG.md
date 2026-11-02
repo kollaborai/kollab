@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- POSIX Hub presence now uses the shared runtime directory immediately for
+  new and restarted agents (project-scoped when enabled). Agents already
+  running during the upgrade keep heartbeating under their original
+  HOME-scoped path and remain undiscoverable from a different HOME until
+  restarted; Windows presence remains HOME-scoped.
 - Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
 - Coordinator task assignments survive restarts in a durable dispatch ledger,
   suppress re-routing delivered work, and keep completion reports unverified
