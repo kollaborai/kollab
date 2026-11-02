@@ -47,10 +47,21 @@ MAX_WIRE_PACKET_BYTES = 12 * 1024
 MAX_FRAMED_BYTES = MAX_SECURE_MESSAGE_BYTES + 4
 _HEX_SESSION = re.compile(r"[0-9a-f]{32}\Z")
 _SECURE_APP_METHODS = frozenset(
-    {"message", "status", "cancel", "directory", "peer.exchange", "config_sync", "network_members", "network_halt"}
+    {
+        "message",
+        "status",
+        "cancel",
+        "directory",
+        "peer.exchange",
+        "config_sync",
+        "network_members",
+        "network_halt",
+    }
     | ATTACH_METHODS
 )
 SecureDispatch = Callable[[str, str, dict], Awaitable[dict]]
+
+
 class TransportRequest(Protocol):
     async def __call__(
         self, peer_key: str, method: str, payload: dict, *, timeout: float
@@ -444,7 +455,9 @@ class SecureConversationTransport:
             self._discard_inbound(peer_key, payload)
             raise
         except Exception as exc:
-            logger.warning("secure conversation packet was rejected: %s", failure_text(exc))
+            logger.warning(
+                "secure conversation packet was rejected: %s", failure_text(exc)
+            )
             self._discard_inbound(peer_key, payload)
             raise RelayError("secure conversation packet was rejected") from None
 
@@ -455,7 +468,8 @@ class SecureConversationTransport:
         dispatch: SecureDispatch,
     ) -> dict:
         if (
-            not isinstance(value, dict) or not value.keys() >= {"v", "method", "payload"}
+            not isinstance(value, dict)
+            or not value.keys() >= {"v", "method", "payload"}
             or type(value["v"]) is not int
             or value["v"] != 1
             or value["method"] not in _SECURE_APP_METHODS
@@ -571,7 +585,8 @@ class SecureConversationTransport:
                             "peer returned multiple secure application responses"
                         )
                     if (
-                        not isinstance(value, dict) or not value.keys() >= {"v", "result"}
+                        not isinstance(value, dict)
+                        or not value.keys() >= {"v", "result"}
                         or type(value["v"]) is not int
                         or value["v"] != 1
                         or not isinstance(value["result"], dict)
@@ -713,7 +728,7 @@ def _encode_frame(value: dict) -> bytes:
         raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
-    except (UnicodeError, ValueError, TypeError, OverflowError, RecursionError):
+    except UnicodeError, ValueError, TypeError, OverflowError, RecursionError:
         raise RelayError("secure application payload is invalid") from None
     if not raw or len(raw) > MAX_SECURE_MESSAGE_BYTES:
         raise RelayError("secure application payload exceeds its bound")
@@ -769,7 +784,7 @@ def _parse_packet(value: object) -> TLSRecordPacket:
         raise SecureSessionError("invalid TLS packet metadata")
     try:
         data = base64.b64decode(encoded, validate=True)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         raise SecureSessionError("invalid TLS packet encoding") from None
     if (
         not data
@@ -822,7 +837,7 @@ def _decode_certificate(value: object) -> bytes:
         raise SecureSessionError("invalid peer identity certificate")
     try:
         certificate = base64.b64decode(value, validate=True)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         raise SecureSessionError("invalid peer identity certificate") from None
     if (
         not certificate
