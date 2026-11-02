@@ -138,6 +138,7 @@ async def test_launch_starts_every_member_lead_first_and_a_second_call_starts_no
     first = (await client.post("/teams/marketing/launch", json={"workspace": folders.project})).json()
     assert first["started"] == ["omar", "maya", "theo", "priya", "luz", "jonas"]
     assert first["skipped"] == [] and first["failed"] == []
+    assert first["excluded"] == []
     assert [s["session_id"] for s in first["sessions"]] == [f"s-{i}" for i in range(1, 7)]
 
     lead, maya = hub.calls[0], hub.calls[1]
@@ -229,3 +230,87 @@ async def test_agents_rows_carry_the_folders_roster_and_persona_fields(client, f
     theo = by_name["theo"]
     assert theo["pool"] is False and theo["roster"] == "marketing-crew" and theo["display_name"] == "Theo Brandt"
     assert theo["avatar"] == {"kind": "initials"} and theo["color"] == [176, 96, 178]
+
+
+@pytest.mark.asyncio
+async def test_selection_uses_effective_tree_and_sends_mission_only_to_selected_lead(
+    client, folders, hub, monkeypatch
+):
+    from kollabor_engine import server as engine_server  # type: ignore[import-not-found]
+
+    delivered = []
+    sessions = {}
+
+    class RecordingSession:
+        def __init__(self, identity):
+            self.identity = identity
+
+        async def send_message(self, message):
+            delivered.append((self.identity, message))
+            return {"accepted": True}
+
+    async def create_with_sender(body, request):
+        session = await hub.create_session(body, request)
+        sessions[session["session_id"]] = RecordingSession(body.identity)
+        return session
+
+    monkeypatch.setattr(teams_routes, "create_session", create_with_sender)
+    monkeypatch.setattr(engine_server, "get_session_registry", lambda: sessions)
+
+    response = await client.post(
+        "/teams/marketing/launch",
+        json={
+            "workspace": folders.project,
+            "members": ["omar", "jonas"],
+            "lead": "jonas",
+            "mission": "prepare the release",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["started"] == ["jonas", "omar"]
+    assert body["excluded"] == ["maya", "theo", "priya", "luz"]
+    assert "you report to: omar" in hub.calls[0].launch_brief
+    assert "theo" not in hub.calls[0].launch_brief
+    assert delivered == [("marketing-crew/jonas", "prepare the release")]
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"members": ["omar"], "exclude": ["maya"]},
+        {"members": ["unknown"]},
+        {"members": ["omar", "omar"]},
+        {"members": ["maya"]},
+        {"members": ["omar", "maya"], "lead": "theo"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_invalid_selection_is_a_400_and_starts_nothing(client, folders, hub, selection):
+    response = await client.post(
+        "/teams/marketing/launch",
+        json={"workspace": folders.project, **selection},
+    )
+
+    assert response.status_code == 400
+    assert hub.calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_selected_lead_does_not_receive_mission(client, folders, hub):
+    hub.agents.append({"identity": "omar", "project": folders.project})
+
+    response = await client.post(
+        "/teams/marketing/launch",
+        json={
+            "workspace": folders.project,
+            "members": ["omar", "maya"],
+            "mission": "do not send twice",
+        },
+    )
+
+    body = response.json()
+    assert body["skipped"] == [{"persona": "omar", "reason": "live"}]
+    assert body["notes"] == ["mission not sent, omar is already live"]
+    assert body["started"] == ["maya"]

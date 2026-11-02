@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Team launches now support member selection or exclusions across the CLI,
+  TUI and Web UI. The launch sheet sets the workspace, profile, lead and
+  mission, validates the effective reporting tree, and saves choices per team
+  and workspace folder.
 - Hub tests now cover short AF_UNIX hub-state socket paths, so long
   socket paths cannot silently regress the hub state client (#582).
 - Hub status flags an idle agent that still holds an open task as
@@ -137,6 +141,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider profile with the harness's model and effort in session state and
   the engine API, instead of a blank model/effort readout and an unresolved
   loadout name (#605).
+- Hub membership updates now send to every peer in a tick together, so one
+  slow or failing peer no longer delays the peers listed after it (#603).
+- Membership fan-out now stays inside the relay's pending budget: surplus
+  sends wait on a semaphore instead of being rejected for capacity, a relay
+  capacity reject is backpressure rather than a peer failure — the reject is
+  now typed ("capacity") and the typed signal survives the secure conversation
+  transport, so the live relay path honors backpressure too — retry backoff
+  saturates instead of overflowing after ~1024 consecutive failures (both
+  membership and config sync), and a peer's send bookkeeping is pruned when
+  it leaves the list (#603).
 - ACP: attaching with `--llm` no longer closes the running harness before the
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness
@@ -219,6 +233,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vanishes from the roster (a 15 s grace window before the link is lost), and
   `KOLLAB_RELAY_DEBUG=1` on the relay traces every room-member row deletion
   and peer disconnect by key, room and reason.
+- Web UI: scrolling up in a long chat keeps loading older messages. A cursor
+  the engine rejects (409 history changed, 400 invalid cursor) now rebuilds the
+  visible window from a fresh fetch instead of a retry banner that can never
+  recover, a byte-capped refresh page that skips past the cached window is
+  served contiguously instead of stranding a stale one, the byte-cap trim no
+  longer strands paging past the older cursor or the truncated offline window,
+  a merged window too large for the history cache is skipped from the cache,
+  not the screen, and the load-failure banner uses the standard error styling
+  (#471).
 - Web UI: Trajectory's detail title no longer repeats the tool output, and the
   active tab in Trajectory, the Agent Library and Gem Studio is underlined in
   the accent color like every other tab bar (#459).

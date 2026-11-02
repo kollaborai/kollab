@@ -358,6 +358,8 @@ export type TeamLaunchResult = {
   started: string[];
   skipped: { persona: string; reason: string }[];
   failed: { persona: string; error: string }[];
+  excluded?: string[];
+  notes?: string[];
   sessions: Session[];
 };
 
@@ -1434,11 +1436,23 @@ export class EngineApi {
     return this.json<TeamsResponse>(`/teams${query}`);
   }
 
-  /** Start every member of a team that is not already running in the folder, lead first. */
-  launchTeam(name: string, workspace: string, profile?: string) {
+  /** Start the selected team members in launch order; omitted selection fields preserve full-team behavior. */
+  launchTeam(
+    name: string,
+    workspace: string,
+    profile?: string,
+    selection?: { members?: string[]; exclude?: string[]; lead?: string; mission?: string },
+  ) {
     return this.json<TeamLaunchResult>(`/teams/${encodeURIComponent(name)}/launch`, {
       method: "POST",
-      body: JSON.stringify({ workspace, ...(profile ? { profile } : {}) }),
+      body: JSON.stringify({
+        workspace,
+        ...(profile ? { profile } : {}),
+        ...(selection?.members !== undefined ? { members: selection.members } : {}),
+        ...(selection?.exclude !== undefined ? { exclude: selection.exclude } : {}),
+        ...(selection?.lead ? { lead: selection.lead } : {}),
+        ...(selection?.mission !== undefined ? { mission: selection.mission } : {}),
+      }),
     });
   }
 
