@@ -38,7 +38,19 @@ import type {
 } from "./api";
 import { isToolOutputBatch } from "./api";
 import { GoalCancellationTracker } from "./utils/goal-cancel";
-import { mergeMissingHistoryMessages, reconcileBoundaryToolResults, shownMessagesChanged } from "./history-merge";
+import {
+  historyHasAssistantRequestId,
+  mergeCompactionHistorySnapshot,
+  mergeMissingHistoryMessages,
+  reconcileBoundaryToolResults,
+  shownMessagesChanged,
+} from "./history-merge";
+import {
+  composerDraftStorageKey,
+  completeComposerDraftSubmission,
+  takeComposerDraftSubmission,
+  type ComposerDraftSubmission,
+} from "./composer-draft";
 import {
   apartFromLive,
   applyLiveEvent,
@@ -433,6 +445,17 @@ function historyToMessages(
         role: "assistant",
         content: compactionMessage(message),
         status: { type: "complete", reason: "stop" },
+        metadata: {
+          custom: {
+            contextCompaction: true,
+            compactionRound: typeof metadata.compaction_round === "number"
+              ? metadata.compaction_round : null,
+            preMessageCount: typeof metadata.pre_message_count === "number"
+              ? metadata.pre_message_count : null,
+            postMessageCount: typeof metadata.post_message_count === "number"
+              ? metadata.post_message_count : null,
+          },
+        },
       });
       return;
     }
@@ -695,6 +718,7 @@ function InitialMessagesGate({
 export function EngineRuntimeProvider({
   api,
   sessionId,
+  agentIdentity,
   initialState,
   onStale,
   liveEvents,
@@ -702,6 +726,7 @@ export function EngineRuntimeProvider({
 }: {
   api: EngineApi;
   sessionId: string;
+  agentIdentity?: string;
   initialState: EngineState;
   /** Reload the thread whole, optionally only while a caller's guard holds. */
   onStale?: (stillCurrent?: () => boolean) => void | Promise<void>;
@@ -715,6 +740,8 @@ export function EngineRuntimeProvider({
   const goalCancellation = useRef(new GoalCancellationTracker());
   const mounted = useRef(true);
   const runVersion = useRef(0);
+  const draftKey = composerDraftStorageKey(agentIdentity, sessionId);
+  const pendingDraftSubmissions = useRef<ComposerDraftSubmission[]>([]);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -746,12 +773,16 @@ export function EngineRuntimeProvider({
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
         turnRef.current = newTurnClock();
+        const draftSubmission = takeComposerDraftSubmission(draftKey);
+        if (draftSubmission) pendingDraftSubmissions.current.push(draftSubmission);
       }
       runStartRef.current = performance.now();
       const goalReplyId = goalCancellation.current.prepare(body.commands);
       return { ...body, sessionId, ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}) };
     },
     onResponse: (response) => {
+      const draftSubmission = pendingDraftSubmissions.current.shift();
+      if (response.ok) completeComposerDraftSubmission(draftSubmission);
       if (response.status === 401) {
         void api.refreshToken();
         return;
@@ -771,6 +802,7 @@ export function EngineRuntimeProvider({
       }
     },
     onError: async (error, { updateState }) => {
+      pendingDraftSubmissions.current.shift();
       updateState((state) => ({ ...state, error: error.message }));
     },
     onCancel: ({ commands, updateState, error }) => {
@@ -778,6 +810,7 @@ export function EngineRuntimeProvider({
       // set, and leave the daemon's turn alone (a dropped phone connection
       // must not stop the agent's work).
       if (error) return;
+      pendingDraftSubmissions.current.shift();
       // A goal control can run while a different model turn is active. Stop
       // only the request that this transport owns.
       const goal = goalCancellation.current.cancel(commands);
@@ -933,6 +966,89 @@ export function EngineRuntimeProvider({
   }), [runtime]);
   useEffect(() => {
     const thread = runtime.thread.getState();
+    // A compaction replaces the daemon's history indexes. Treat its marker as
+    // an in-place transcript rebase before stale-row checks can remount the
+    // provider. Do not consume it while a local input owns the thread: its
+    // compacted snapshot must be retried after that run settles.
+    const currentShown = (thread.extras as { state?: EngineState } | undefined)?.state;
+    const compacted = currentShown && initialState.messages !== reloaded.current &&
+      initialState.synced && initialState.synced.authoritative !== false
+      ? mergeCompactionHistorySnapshot(currentShown.messages, initialState.messages)
+      : null;
+    if (compacted) {
+      if (ownsPendingInput(thread)) {
+        deferredHistorySync.current = true;
+        return;
+      }
+      const snapshot = initialState;
+      const timer = window.setTimeout(() => {
+        if (!mounted.current || latestInitial.current.messages !== snapshot.messages) return;
+        const currentThread = runtime.thread.getState();
+        if (ownsPendingInput(currentThread)) {
+          deferredHistorySync.current = true;
+          return;
+        }
+        const current = (currentThread.extras as { state?: EngineState } | undefined)?.state;
+        if (!current || current.sessionId !== snapshot.sessionId ||
+          (current.conversationUid && snapshot.conversationUid &&
+            current.conversationUid !== snapshot.conversationUid)) return;
+
+        const rebased = mergeCompactionHistorySnapshot(current.messages, snapshot.messages);
+        if (!rebased) {
+          // Another sync already imported this marker; it is now our baseline.
+          reloaded.current = snapshot.messages;
+          deferredOlderWindow.current = null;
+          return;
+        }
+        const liveBefore = liveTurn.current;
+        const exactLiveReply = liveBefore.parts.length > 0 &&
+          historyHasAssistantRequestId(rebased.history, liveBefore.requestId);
+        const nextLive = exactLiveReply ? replacedLiveTurn(liveBefore) : liveBefore;
+        const held = exactLiveReply ? liveMessage(nextLive) : null;
+        const messages = exactLiveReply
+          ? [...rebased.messages.filter((message) => !isLiveMessage(message)), ...(held ? [held] : [])]
+          : rebased.messages;
+        const replacement: EngineState = {
+          ...current,
+          ...snapshot,
+          messages,
+          synced: { ...snapshot.synced!, messages: messages.length },
+        };
+        const priorReloaded = reloaded.current;
+        const runAtRebase = runVersion.current;
+        reloaded.current = snapshot.messages;
+        try {
+          // assistant-ui can retain removed rows as branches. Clear and restore
+          // in one browser turn while keeping this provider and its live owner.
+          flushSync(() => runtime.thread.importExternalState({
+            ...current,
+            messages: [],
+            synced: current.synced ? { ...current.synced, messages: 0 } : undefined,
+          }));
+        } finally {
+          if (mounted.current) {
+            const afterClear = runtime.thread.getState();
+            const busy = ownsPendingInput(afterClear);
+            const stillCurrent = latestInitial.current.messages === snapshot.messages &&
+              runVersion.current === runAtRebase && liveTurn.current === liveBefore && !busy;
+            if (!stillCurrent) {
+              reloaded.current = priorReloaded;
+              deferredHistorySync.current = busy;
+              if (!busy) window.setTimeout(() => {
+                if (mounted.current) setHistorySyncRevision((revision) => revision + 1);
+              }, 0);
+            } else {
+              if (exactLiveReply) liveTurn.current = nextLive;
+              deferredOlderWindow.current = null;
+            }
+            flushSync(() => runtime.thread.importExternalState(stillCurrent ? replacement : current));
+          }
+        }
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+
+
     // Never remap the thread while a locally queued input still owns it.
     if (ownsPendingInput(thread)) {
       if (initialState.messages === reloaded.current) return;

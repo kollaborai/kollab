@@ -1,7 +1,14 @@
 // Run: node --test tests/history-merge.test.ts (Node 24 strips the types).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeMissingHistoryMessages, reconcileBoundaryToolResults, shownMessagesChanged } from "../src/history-merge.ts";
+import {
+  historyHasAssistantRequestId,
+  isCompactionMarker,
+  mergeCompactionHistorySnapshot,
+  mergeMissingHistoryMessages,
+  reconcileBoundaryToolResults,
+  shownMessagesChanged,
+} from "../src/history-merge.ts";
 
 const user = { id: "history-0", role: "user", content: "go" };
 const step = (result?: string) => ({
@@ -141,4 +148,78 @@ test("separate fallback results with a reused ID retain their own calls", () => 
 test("rows outside an older window are not interpreted as removals", () => {
   const row = (index: number) => ({ id: `history-${index}`, content: `message-${index}` });
   assert.equal(reconcileBoundaryToolResults([row(10), row(20)], [row(9), row(10)], 9, 11), null);
+});
+
+
+test("compaction markers are recognized only from their history metadata", () => {
+  const marker = {
+    id: "history-0",
+    role: "assistant",
+    content: "Context compacted (round 1): 20 -> 4 messages.",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+  };
+  assert.equal(isCompactionMarker(marker), true);
+  assert.equal(isCompactionMarker({ id: "history-0", content: marker.content }), false);
+});
+
+
+test("compaction only replaces a live assistant turn for its exact request ID", () => {
+  const older = { id: "history-2", role: "assistant", content: "older reply",
+    metadata: { custom: { requestId: "request-old" } } };
+  assert.equal(historyHasAssistantRequestId([older], "request-active"), false);
+  assert.equal(historyHasAssistantRequestId([older], "request-old"), true);
+  assert.equal(historyHasAssistantRequestId([{ ...older, role: "user" }], "request-old"), false);
+});
+
+test("compaction archives shown history and imports the compacted snapshot once", () => {
+  const old = [
+    { id: "history-0", role: "user", content: "original prompt" },
+    { id: "history-1", role: "assistant", content: "original answer" },
+  ];
+  const marker = {
+    id: "history-0",
+    role: "assistant",
+    content: "Context compacted (round 1): 20 -> 4 messages.",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+  };
+  const recent = { id: "history-1", role: "user", content: "retained prompt" };
+  const appended = { id: "history-2", role: "assistant", content: "answer during compaction" };
+
+  const rebased = mergeCompactionHistorySnapshot(old, [marker, recent, appended]);
+
+  assert.ok(rebased);
+  assert.deepEqual(rebased.messages.map((message) => message.content), [
+    "original prompt",
+    "original answer",
+    marker.content,
+    "retained prompt",
+    "answer during compaction",
+  ]);
+  assert.match(rebased.messages[0].id ?? "", /^compaction-archive-/);
+  assert.equal(shownMessagesChanged(rebased.messages, [marker, recent, appended]), false);
+  assert.equal(mergeCompactionHistorySnapshot(rebased.messages, [marker, recent, appended]), null);
+});
+
+test("post-compaction rows append after archived transcript rather than before it", () => {
+  const old = [{ id: "history-0", role: "user", content: "original prompt" }];
+  const marker = {
+    id: "history-0",
+    role: "assistant",
+    content: "Context compacted",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+  };
+  const rebased = mergeCompactionHistorySnapshot(old, [marker, { id: "history-1", content: "recent" }]);
+  assert.ok(rebased);
+
+  const appended = mergeMissingHistoryMessages(rebased.messages, [
+    marker,
+    { id: "history-1", content: "recent" },
+    { id: "history-2", content: "new turn" },
+  ]);
+  assert.deepEqual(appended.messages.map((message) => message.content), [
+    "original prompt",
+    "Context compacted",
+    "recent",
+    "new turn",
+  ]);
 });

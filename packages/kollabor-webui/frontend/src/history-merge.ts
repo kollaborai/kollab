@@ -1,5 +1,6 @@
 type Message = {
   id?: string;
+  role?: string;
   content?: unknown;
   metadata?: { custom?: Record<string, unknown> };
   convertConfig?: { joinStrategy?: string };
@@ -25,14 +26,11 @@ export function mergeMissingHistoryMessages<T extends Message>(
   const messages: T[] = [];
   let nextAdded = 0;
   for (const existing of shown) {
-    const existingIndex = historyIndex(existing.id) ?? Infinity;
+    const existingOrder = historyOrder(existing, order.get(existing.id) ?? Infinity);
     while (nextAdded < added.length) {
       const candidate = added[nextAdded];
-      const candidateIndex = historyIndex(candidate.id)!;
-      if (candidateIndex > existingIndex || (
-        candidateIndex === existingIndex &&
-        (order.get(candidate.id) ?? Infinity) > (order.get(existing.id) ?? Infinity)
-      )) break;
+      const candidateOrder = historyOrder(candidate, order.get(candidate.id) ?? Infinity);
+      if (compareHistoryOrder(candidateOrder, existingOrder) > 0) break;
       messages.push(candidate);
       nextAdded += 1;
     }
@@ -151,4 +149,98 @@ export function shownMessagesChanged(shown: ReadonlyArray<Message>, loaded: Read
       old.convertConfig?.joinStrategy !== message.convertConfig?.joinStrategy
     );
   });
+}
+
+
+type HistoryOrder = { section: number; index: number; tie: number };
+
+const compactionArchiveOrder = (message: Message): number | null => {
+  const value = message.metadata?.custom?.compactionArchiveOrder;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+};
+
+export const isCompactionMarker = (message: Message): boolean => {
+  const value = message.metadata?.custom?.contextCompaction;
+  return value === true || value === "true";
+};
+
+
+/** Only a persisted assistant row for this exact request can replace a live turn. */
+export function historyHasAssistantRequestId(
+  history: ReadonlyArray<Message>,
+  requestId: string | null | undefined,
+): boolean {
+  return !!requestId && history.some((message) =>
+    message.role === "assistant" && message.metadata?.custom?.requestId === requestId);
+}
+
+const hashText = (value: string): string => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+};
+
+const compactionMarkerKey = (message: Message): string => {
+  const custom = message.metadata?.custom ?? {};
+  const fingerprint = JSON.stringify({
+    round: custom.compactionRound ?? null,
+    before: custom.preMessageCount ?? null,
+    after: custom.postMessageCount ?? null,
+    content: message.content ?? null,
+  });
+  return hashText(fingerprint);
+};
+
+const historyOrder = (message: Message, tie: number): HistoryOrder => {
+  const archived = compactionArchiveOrder(message);
+  if (archived !== null) return { section: 0, index: archived, tie };
+  const index = historyIndex(message.id);
+  if (index !== null) return { section: 1, index, tie };
+  return { section: 2, index: 0, tie };
+};
+
+const compareHistoryOrder = (left: HistoryOrder, right: HistoryOrder): number =>
+  left.section - right.section || left.index - right.index || left.tie - right.tie;
+
+/**
+ * Rebase a compacted snapshot in place: preserve all history the user has
+ * already seen under non-conflicting IDs, then add the compacted rows in their
+ * authoritative order. Returning null means this is not a new compaction.
+ */
+export function mergeCompactionHistorySnapshot<T extends Message>(
+  shown: ReadonlyArray<T>,
+  loaded: ReadonlyArray<T>,
+): { messages: T[]; history: T[]; key: string } | null {
+  const shownMarkers = new Set(
+    shown.filter(isCompactionMarker).map(compactionMarkerKey),
+  );
+  const marker = loaded.find(
+    (message) => isCompactionMarker(message) && !shownMarkers.has(compactionMarkerKey(message)),
+  );
+  if (!marker) return null;
+  const key = compactionMarkerKey(marker);
+
+  const transcript = shown.filter((message) =>
+    historyIndex(message.id) !== null || compactionArchiveOrder(message) !== null,
+  );
+  const nonHistory = shown.filter((message) =>
+    historyIndex(message.id) === null && compactionArchiveOrder(message) === null,
+  );
+  const archived = transcript.map((message, index) => ({
+    ...message,
+    id: `compaction-archive-${key}-${index}`,
+    metadata: {
+      ...(message.metadata ?? {}),
+      custom: {
+        ...(message.metadata?.custom ?? {}),
+        compactionArchiveOrder: index,
+        compactionArchiveKey: key,
+      },
+    },
+  }) as T);
+  const history = loaded.filter((message) => historyIndex(message.id) !== null);
+  return { messages: [...archived, ...history, ...nonHistory], history, key };
 }
