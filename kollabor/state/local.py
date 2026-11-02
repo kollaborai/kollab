@@ -3603,6 +3603,21 @@ class LocalStateService(StateService):
         if callable(add_message):
             add_message("user", text, metadata=metadata)
 
+        # Persist the turn to the session JSONL like a typed prompt: the
+        # mention path skips the LLM pipeline that normally writes records,
+        # so without this a resume or history reload silently drops the
+        # turn (#672).
+        hub_logger = getattr(self._llm_service, "conversation_logger", None)
+        parent_uuid = getattr(self._llm_service, "current_parent_uuid", None)
+        user_uuid = None
+        if hub_logger is not None:
+            user_uuid = await hub_logger.log_user_message(
+                text,
+                parent_uuid=parent_uuid,
+                user_context={"hub_target": target, "hub_broadcast": is_broadcast},
+            )
+            self._llm_service.current_parent_uuid = user_uuid
+
         try:
             # A broadcast takes the terminal's @ path (HubPlugin.send_user_message),
             # so both screens wake every agent and reach other computers alike.
@@ -3616,6 +3631,11 @@ class LocalStateService(StateService):
             response_metadata = {**metadata, "hub_success": success}
             if callable(add_message):
                 add_message("assistant", output, metadata=response_metadata)
+            if hub_logger is not None:
+                assistant_uuid = await hub_logger.log_assistant_message(
+                    output, parent_uuid=user_uuid or parent_uuid or ""
+                )
+                self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(
                 self._event_bus,
@@ -3634,6 +3654,11 @@ class LocalStateService(StateService):
                     message,
                     metadata={**metadata, "hub_success": False},
                 )
+            if hub_logger is not None:
+                assistant_uuid = await hub_logger.log_assistant_message(
+                    message, parent_uuid=user_uuid or parent_uuid or ""
+                )
+                self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "error", message=message)
             publish_semantic(
                 self._event_bus,
