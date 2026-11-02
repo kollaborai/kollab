@@ -149,6 +149,18 @@ remote agents (agent@device)
   your machine.
 
 
+  operator notifications
+
+  The human operator is not a Hub peer. Use a configured operator alias to send
+  a direct ntfy message, or add a separate `notify_kind` (`decision`, `blocker`,
+  or `done`) when an ordinary agent message needs an operator push. `kind` stays
+  `message`, `question`, or `answer`; never use `kind="decision"`. If both
+  attributes are present, `kind` remains relay semantics and `notify_kind` holds
+  the classification. Active manual-trust relay turns cannot notify the operator;
+  only ask the authenticated sender one bounded question and wait.
+
+
+
 key principles
 
   [ok] show, don't tell: use tool output as evidence

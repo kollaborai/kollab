@@ -541,10 +541,35 @@ Telegram bridge setup (run inside interactive mode):
         help=(
             "Hub CLI: status, agents, stop <name|all>, capture <name> [lines] [--raw], "
             "msg <name> <text>, broadcast <text>, where <name>, user [name], on/off, "
-            "org <name> [mission]. Pass '--hub help' for the full list. "
+            "org <name> [mission] [--dir FOLDER] [--only a,b | --without a,b]. "
+            "Pass '--hub help' for the full list. "
             "Telegram bridge and notifications are configured interactively "
             "via /hub bridge setup and /hub notify."
         ),
+    )
+
+    parser.add_argument(
+        "--dir",
+        dest="hub_org_dir",
+        metavar="FOLDER",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--without",
+        dest="hub_org_without",
+        action="append",
+        default=None,
+        metavar="PERSONA,...",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--only",
+        dest="hub_org_only",
+        action="append",
+        default=None,
+        metavar="PERSONA,...",
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -568,6 +593,16 @@ Telegram bridge setup (run inside interactive mode):
         action="store_true",
         default=False,
         help="Open kollab in your browser (http://127.0.0.1:8080)",
+    )
+    parser.add_argument(
+        "--web-ui-hosts",
+        dest="web_ui_hosts",
+        default=None,
+        metavar="IP[,IP...]",
+        help="With --web-ui: extra interface addresses to serve on, comma "
+        "separated (LAN/VPN opt-in; localhost is always bound, and each "
+        "extra address prints an exposure warning). Pass an empty value to "
+        "force localhost-only even when KOLLAB_WEBUI_HOSTS is set",
     )
     parser.add_argument(
         "--mcp-hub",
@@ -726,6 +761,18 @@ Telegram bridge setup (run inside interactive mode):
         if not args.hub or args.hub[0].lower() != "capture":
             parser.error("--raw is only valid with --hub capture")
         args.hub.append("--raw")
+
+    hub_org_options_used = (
+        args.hub_org_dir is not None
+        or args.hub_org_without is not None
+        or args.hub_org_only is not None
+    )
+    if hub_org_options_used and (not args.hub or args.hub[0].lower() != "org"):
+        parser.error("--dir, --only, and --without are only valid with --hub org")
+    if args.hub_org_without is not None and args.hub_org_only is not None:
+        parser.error("--only and --without are mutually exclusive")
+    if args.hub_org_dir is not None and not args.hub_org_dir.strip():
+        parser.error("--dir requires a non-empty folder path")
 
     # --profile was replaced by --llm. Unknown "--x" flags are otherwise
     # treated as CLI commands, so the old flag would resolve to a nonexistent
@@ -1000,6 +1047,20 @@ async def _run_acp_cli(args: Any) -> None:
         await runner.close()
 
 
+def _hub_args_with_org_options(args: argparse.Namespace) -> list[str]:
+    """Append top-level org selectors to the hub subcommand arguments."""
+    hub_args = list(args.hub or [])
+    if args.hub_org_dir is not None:
+        hub_args.extend(["--dir", args.hub_org_dir])
+    for flag, values in (
+        ("--without", args.hub_org_without),
+        ("--only", args.hub_org_only),
+    ):
+        for value in values or []:
+            hub_args.extend([flag, value])
+    return hub_args
+
+
 async def async_main() -> None:
     """Main async entry point for the application with proper error handling."""
     import time
@@ -1086,7 +1147,7 @@ async def async_main() -> None:
 
     # Handle --web-ui: spawn engine + browser UI and block until Ctrl+C.
     if args.web_ui:
-        await _handle_cli_web_ui(restart=args.restart)
+        await _handle_cli_web_ui(restart=args.restart, hosts=args.web_ui_hosts)
         return
     if args.restart:
         print("Error: --restart works with --web-ui", file=sys.stderr)
@@ -1110,7 +1171,7 @@ async def async_main() -> None:
                 args._cli_args.hub = True
             # continue to full TUI below
         else:
-            await _handle_cli_hub(args.hub)
+            await _handle_cli_hub(_hub_args_with_org_options(args))
             return
 
     # Handle --attach: boot full TUI app in proxy mode
@@ -1426,7 +1487,9 @@ def _print_hub_help() -> None:
     print("  user [name]                show or set the hub user display name")
     print("  on                         enable hub plugin (next session)")
     print("  off                        disable hub plugin (next session)")
-    print("  org <name> [mission]       launch a team")
+    print(
+        "  org <team> [mission] [--dir FOLDER] [--only a,b | --without a,b]"
+    )
     print("  help                       show this help")
     print()
     print("examples:")
@@ -1438,6 +1501,7 @@ def _print_hub_help() -> None:
     print("  kollab --hub capture koordinator 200")
     print("  kollab --hub capture koordinator 200 --raw")
     print("  kollab --hub org engineering 'ship the billing flow'")
+    print("  kollab --hub org engineering --dir ./project --without designer")
     print()
     print("interactive equivalents (run these inside a kollab session):")
     print("  /hub status        /hub msg <name> <text>    /hub broadcast <text>")
@@ -2127,19 +2191,63 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "org":
         if not rest:
-            print("usage: kollab --hub org <name> [mission]")
+            print("usage: kollab --hub org <name> [mission] [--dir FOLDER] "
+                  "[--only a,b | --without a,b]", file=sys.stderr)
             sys.exit(1)
-        org_name = rest[0]
-        mission = " ".join(rest[1:]) if len(rest) > 1 else ""
+
+        org_parser = argparse.ArgumentParser(
+            prog="kollab --hub org", add_help=False
+        )
+        org_parser.add_argument("name")
+        org_parser.add_argument("mission", nargs="*")
+        org_parser.add_argument("--dir", dest="folder")
+        org_parser.add_argument("--without", action="append", default=None)
+        org_parser.add_argument("--only", action="append", default=None)
+        parsed = org_parser.parse_intermixed_args(rest)
+        if parsed.without is not None and parsed.only is not None:
+            org_parser.error("--only and --without are mutually exclusive")
+
+        def parse_member_names(values, flag):
+            if values is None:
+                return None
+            names = [name.strip() for value in values for name in value.split(",")]
+            if not names or any(not name for name in names):
+                org_parser.error(f"{flag} requires one or more comma-separated names")
+            return names
+
+        org_name = parsed.name
+        mission = " ".join(parsed.mission)
+        members = parse_member_names(parsed.only, "--only")
+        exclude = parse_member_names(parsed.without, "--without")
+        folder = parsed.folder
 
         from plugins.hub.org_launcher import OrgLauncher, load_organization
+        from plugins.hub.rosters import LibraryError
 
-        team = load_organization(org_name)
+        try:
+            team = load_organization(org_name, folder=folder)
+        except LibraryError as exc:
+            print(f"could not load team '{org_name}': {exc}", file=sys.stderr)
+            sys.exit(2)
         if not team:
             print(f"team '{org_name}' not found")
             sys.exit(1)
 
-        launch = OrgLauncher().launch_org(org_name, mission=mission)
+        launcher = OrgLauncher(folder or "")
+        try:
+            if members is not None or exclude is not None:
+                launch = launcher.launch_org(
+                    org_name,
+                    mission=mission,
+                    members=members,
+                    exclude=exclude,
+                )
+            else:
+                launch = launcher.launch_org(org_name, mission=mission)
+        except LibraryError as exc:
+            print(f"invalid selection for team '{org_name}': {exc}", file=sys.stderr)
+            sys.exit(2)
+
         names = f": {', '.join(launch.started)}" if launch.started else ""
         print(f"launched {len(launch.started)} agent(s){names}")
         for line in launch.notes(team, mission):
@@ -2479,7 +2587,7 @@ def _adopt_login_path() -> None:
         os.environ["PATH"] = os.pathsep.join(dict.fromkeys(login.split(os.pathsep) + current))
 
 
-async def _handle_cli_web_ui(restart: bool = False) -> None:
+async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None) -> None:
     """Handle --web-ui: spawn the engine + browser UI, block until Ctrl+C.
 
     Both pieces already exist as installable console entry points
@@ -2604,6 +2712,12 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     env = dict(os.environ)
     env["KOLLAB_ENGINE_URL"] = engine_url
     env["KOLLAB_WEBUI_PORT"] = str(webui_port)
+    if hosts is not None:
+        # Explicit opt-in per invocation: the flag, not whatever the shell
+        # exports, decides whether the UI is served beyond this machine. An
+        # explicitly EMPTY value means "localhost only": it must override the
+        # shell's KOLLAB_WEBUI_HOSTS, so absence and empty stay distinct.
+        env["KOLLAB_WEBUI_HOSTS"] = hosts
     webui_proc = subprocess.Popen(
         [*py, "-c", "from kollabor_webui import main; main()"], env=env, **group_flags
     )
@@ -2837,20 +2951,51 @@ def _run_async_main_with_sigterm_cleanup(detached_runtime: bool) -> None:
     """Run the app and route detached SIGTERM through normal cleanup."""
     previous_sigterm = None
     signal_module = None
+    sigterm_received = False
     if detached_runtime:
         import signal as signal_module
 
-        def _on_detached_sigterm(signum, frame):
-            # Route SIGTERM through async_main's existing KeyboardInterrupt
-            # cleanup so ACP runner process groups and Hub sockets are closed.
-            raise KeyboardInterrupt()
+        event_loop: asyncio.AbstractEventLoop | None = None
+        main_task: asyncio.Task[Any] | None = None
+
+        async def _run_detached_async_main() -> None:
+            nonlocal event_loop, main_task
+            event_loop = asyncio.get_running_loop()
+            main_task = asyncio.current_task()
+            if sigterm_received and main_task is not None:
+                event_loop.call_soon(main_task.cancel)
+            await async_main()
+
+        def _on_detached_sigterm(signum, frame) -> None:
+            nonlocal sigterm_received
+            if sigterm_received:
+                return
+            sigterm_received = True
+            if event_loop is None or main_task is None:
+                return
+            if event_loop.is_closed() or main_task.done():
+                return
+            # Defer cancellation to the top-level task. Raising KeyboardInterrupt
+            # here can inject it into an unrelated child task's cleanup.
+            event_loop.call_soon(main_task.cancel)
 
         previous_sigterm = signal_module.signal(
             signal_module.SIGTERM, _on_detached_sigterm
         )
 
     try:
-        asyncio.run(async_main())
+        if detached_runtime:
+            try:
+                asyncio.run(_run_detached_async_main())
+            except asyncio.CancelledError:
+                if not sigterm_received:
+                    raise
+            if sigterm_received:
+                logging.getLogger(__name__).info(
+                    "Detached application shutdown requested by SIGTERM"
+                )
+        else:
+            asyncio.run(async_main())
     except KeyboardInterrupt:
         pass
     finally:

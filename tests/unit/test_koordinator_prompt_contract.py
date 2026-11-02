@@ -64,6 +64,14 @@ def test_directive_explains_assignment_path(prompt):
     assert "hub_msg" in prompt
 
 
+def test_durable_dispatch_recovery_contract_is_present(prompt):
+    assert "DURABLE DISPATCH RECOVERY" in prompt
+    assert "task_id" in prompt and "worktree" in prompt and "commit" in prompt
+    assert "reported-unverified" in prompt
+    assert "hub_dispatch_verify" in prompt
+    assert "Never trust or" in prompt
+
+
 def test_directive_mentions_supervisor_backstop(prompt):
     assert "idle supervisor" in prompt
 

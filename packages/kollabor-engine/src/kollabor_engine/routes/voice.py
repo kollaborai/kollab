@@ -11,6 +11,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..voice_control import VoiceControl, WorkerEvent, encode_cursor
 from ..voice_runtime_host import RuntimeHostError
+from kollabor.state.remote import ReloadNeededError
 from ..voice_session_router import MAX_FINAL_TRANSCRIPT_BYTES
 from ..voice_types import (
     CreateVoiceSessionRequest,
@@ -55,6 +56,10 @@ def error_response(exc: RuntimeHostError) -> JSONResponse:
 async def _guard(fn):
     try:
         return await fn()
+    except ReloadNeededError as exc:
+        # The agent's code changed on disk after it started (#571): say so
+        # instead of letting this fall through as an opaque 500.
+        return error_response(RuntimeHostError("reload_needed", 409, str(exc)))
     except RuntimeHostError as exc:
         return error_response(exc)
 
@@ -222,6 +227,10 @@ async def worker_turn(request: Request, voice_session_id: str, body: VoiceTurnRe
             kind=body.kind,
             talk_over=body.talk_over,
         )
+    except ReloadNeededError as exc:
+        # The agent's code changed on disk after it started (#571): say so
+        # instead of letting this fall through as an opaque 500.
+        return error_response(RuntimeHostError("reload_needed", 409, str(exc)))
     except RuntimeHostError as exc:
         return error_response(exc)
 

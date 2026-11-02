@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from kollabor.state.remote import ReloadNeededError
 from kollabor.state.snapshots import ProfileSnapshot
 from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.model_registry import supports_vision
@@ -50,6 +51,16 @@ INLINE_PROFILE = "app-inline"
 # RPC can be queued behind a long-running tool, so this is deliberately shorter
 # than the normal RPC timeout and falls back to the cached snapshot.
 HISTORY_REFRESH_TIMEOUT_SECONDS = 0.75
+
+
+class HistoryRefreshUnavailable(Exception):
+    """refresh_history could not prove a fresh mirror; the cache it would
+    return is stale.
+
+    The synced watermark consumer asks for this explicitly: a watermark set
+    from a stale mirror misses the turn a window just ran, so the next
+    history reload replays that turn next to its already-shown rows (#666).
+    """
 ACP_STARTUP_TIMEOUT_SECONDS = 45.0
 
 
@@ -174,6 +185,10 @@ class EngineSession:
         # means no known problem.
         self.approval_mode_warning: Optional[str] = None
         self.persistence_warning: Optional[str] = None
+        # Set when the daemon fails a turn because its code no longer
+        # matches the checkout (lazy import of a removed module): the
+        # agent needs a restart onto the current code (#571).
+        self.reload_needed: Optional[str] = None
         # Delete stopped the daemon but its durable owner record is still
         # present: the row stays listed and a retried Delete clears it
         # without stopping anything a second time.
@@ -609,7 +624,9 @@ class EngineSession:
                 )
         await self.state.reload_mcp_servers()
 
-    async def refresh_history(self, notify: bool = False) -> List[Dict[str, Any]]:
+    async def refresh_history(
+        self, notify: bool = False, stale_raises: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Pull the daemon's conversation into the local mirror.
 
         Asks for only the messages past the ones already held, with the digest
@@ -648,13 +665,22 @@ class EngineSession:
                         else getattr(snapshot, "metadata", {})
                     )
                     current_uid = metadata.get("conversation_uid") if isinstance(metadata, dict) else None
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
+                if stale_raises:
+                    raise HistoryRefreshUnavailable(
+                        "timed out after "
+                        f"{HISTORY_REFRESH_TIMEOUT_SECONDS}s waiting for the daemon"
+                    ) from exc
                 logger.debug(
                     "session %s history refresh timed out; using cached history",
                     self.session_id,
                 )
                 return self.history
             except Exception as e:
+                if stale_raises:
+                    raise HistoryRefreshUnavailable(
+                        f"daemon answered with an error: {e}"
+                    ) from e
                 logger.debug(
                     "session %s history refresh failed: %s", self.session_id, e
                 )
@@ -690,6 +716,10 @@ class EngineSession:
             if since is not None and since > len(held):
                 # A tail past what is held cannot be joined; the next refresh
                 # sends no anchor and gets all of it.
+                if stale_raises:
+                    raise HistoryRefreshUnavailable(
+                        "the daemon sent a tail the mirror cannot join"
+                    )
                 self._history_anchor = ""
                 return self.history
             self._raw_history = (held[:since] if since else []) + received
@@ -895,9 +925,40 @@ class EngineSession:
                 kwargs["private_goal_reply_id"] = private_goal_reply_id
                 kwargs["goal_conversation_uid"] = goal_conversation_uid
             result = await self.state.send_message(content, **kwargs)
+        except ReloadNeededError as exc:
+            self.reload_needed = str(exc)
+            agent_name = (
+                self.agent
+                or (self.daemon.agent_name if self.daemon else "")
+                or "default"
+            )
+            enriched = ReloadNeededError(
+                f"{agent_name} could not run the turn: {exc}. "
+                "Its code changed on disk after it started. Restart it."
+            )
+            if voice_turn:
+                # Revoke cleanup must not mask the reload-needed error the
+                # route and voice worker rely on: voice_admission raises on
+                # RPC errors, and the turn already failed for a real reason.
+                try:
+                    await self.voice_admission("revoke", context=origin_context)
+                except Exception as revoke_error:
+                    logger.warning(
+                        "voice admission revoke failed for session %s (%s)",
+                        self.session_id,
+                        type(revoke_error).__name__,
+                    )
+            raise enriched from exc
         except BaseException:
             if voice_turn:
-                await self.voice_admission("revoke", context=origin_context)
+                try:
+                    await self.voice_admission("revoke", context=origin_context)
+                except Exception as revoke_error:
+                    logger.warning(
+                        "voice admission revoke failed for session %s (%s)",
+                        self.session_id,
+                        type(revoke_error).__name__,
+                    )
             raise
         if voice_turn and not (isinstance(result, dict) and result.get("accepted")):
             await self.voice_admission("revoke", context=origin_context)
@@ -1179,6 +1240,8 @@ class EngineSession:
                 if provider == "acp" else supports_vision(model, provider)
             ),
             "agent": agent_name,
+            "reload_needed": self.reload_needed is not None,
+            "reload_needed_error": self.reload_needed or "",
             "workspace": self.workspace,
             "device": self.device,
             # The mode name, matching permissions.py; None (unknown) while the

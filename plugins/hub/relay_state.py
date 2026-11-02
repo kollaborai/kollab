@@ -50,6 +50,10 @@ class RelayFrameShapeError(RelayError):
     """
 
 
+class SendGuardRevoked(Exception):
+    """A guarded send lost its authorization or peer binding; do not retry it."""
+
+
 # Errors whose message is a fixed string this transport wrote; any other type logs its name only.
 _FIXED_MESSAGE_ERRORS = frozenset({"RelayError", "PeerRouteError", "SecureSessionError"})
 
