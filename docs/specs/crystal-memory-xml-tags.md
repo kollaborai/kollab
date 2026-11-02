@@ -8,12 +8,13 @@ author: maintainers
 > **STALE NOTE** (2026-05-15): This spec remains in draft. Crystal memory XML tags are implemented and in active use — see live code for current tag set rather than this spec.
 
 > **Current implementation:** Each crystal store gives its deduplication cache
-> a capacity of at least 8,192 tokenized summaries, growing with live entries
-> and shrinking when entries leave. Resizing keeps the most recently used tokens,
-> evicting only what exceeds the new limit. When capacity falls to one quarter of
-> its peak since the last compaction, the cache compacts its backing storage while
-> preserving that order. Eviction only recomputes tokens; it does not remove
-> persisted memories or change merge matching.
+> a capacity of a power of two of at least twice its live entries, with a minimum
+> allowance of 8 tokenized summaries for transient ones. Resizing keeps the most
+> recently used tokens, evicting only what exceeds the new limit, so the cache
+> shrinks as entries merge away or are deleted (#567). When capacity falls to one
+> quarter of its peak since the last compaction, the cache compacts its backing
+> storage while preserving that order. Eviction only recomputes tokens; it does not
+> remove persisted memories or change merge matching.
 
 # Crystal Memory XML Tags
 
@@ -45,6 +46,20 @@ missing:
   edit/update an existing entry
   delete a bad/stale memory
 
+
+## write limits and durability
+
+Agent-facing `vault_write`, `global_vault_write`, and `crystal_edit`
+accept bodies up to 2,000 characters after surrounding whitespace is
+trimmed. Longer bodies return `success=false` with the limit and do not
+change memory or disk; split long notes across entries instead.
+`CrystalStore` remains uncapped for internal callers.
+
+CrystalStore serializes saves to a temporary file, verifies its byte
+length and SHA-256 digest, atomically replaces the durable file, and
+verifies the read-back. Persistence errors are raised to the tool handler
+and the in-memory mutation is rolled back; failed verification is not
+reported as a successful write.
 
 ## design
 
