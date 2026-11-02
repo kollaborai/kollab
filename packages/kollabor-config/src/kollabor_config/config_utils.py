@@ -877,6 +877,7 @@ def _windows_seed_directory(path: Path, *, create: bool):
     close.argtypes = [wintypes.HANDLE]
     close.restype = wintypes.BOOL
     invalid = ctypes.c_void_p(-1).value
+    list_directory = 0x1
     read_attributes = 0x80
     share_read_write = 0x1 | 0x2
     open_existing = 3
@@ -900,7 +901,7 @@ def _windows_seed_directory(path: Path, *, create: bool):
             # FILE_SHARE_DELETE is deliberately omitted, preventing another
             # process from renaming a checked ancestor before publication.
             handle = open_dir(
-                str(directory), read_attributes, share_read_write, None,
+                str(directory), list_directory | read_attributes, share_read_write, None,
                 open_existing, backup_semantics | open_reparse_point, None,
             )
             if handle == invalid:
@@ -1205,9 +1206,127 @@ def _is_seed_copy(folder: Path, known: dict[str, set[str]]) -> bool:
                 not in known.get(rel.as_posix(), ())
             ):
                 return False
-    except OSError:
+    except (OSError, TypeError):
         return False
     return True
+
+
+def _is_seed_copy_at(parent_fd: int, name: str, known: dict[str, set[str]]) -> bool:
+    """Fingerprint a moved skill through its pinned POSIX backup directory."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        root_fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError:
+        return False
+    seen_skill = False
+
+    def check(directory_fd: int, prefix: str) -> bool:
+        nonlocal seen_skill
+        for entry in os.listdir(directory_fd):
+            if entry in (".DS_Store", "__pycache__"):
+                continue
+            relative = f"{prefix}/{entry}" if prefix else entry
+            info = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                child = os.open(entry, flags, dir_fd=directory_fd)
+                try:
+                    if not check(child, relative):
+                        return False
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(info.st_mode):
+                descriptor = os.open(
+                    entry,
+                    os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=directory_fd,
+                )
+                with os.fdopen(descriptor, "rb") as stream:
+                    opened = os.fstat(stream.fileno())
+                    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        return False
+                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                if digest not in known.get(relative, ()):
+                    return False
+                if relative == "SKILL.md":
+                    seen_skill = True
+            else:
+                return False
+        return True
+
+    try:
+        return check(root_fd, "") and seen_skill
+    except (OSError, TypeError):
+        return False
+    finally:
+        os.close(root_fd)
+
+
+def _restore_changed_skill(
+    folder: Path,
+    backup_path: Path,
+    *,
+    skills_fd: Optional[int],
+    backup_fd: Optional[int],
+) -> bool:
+    """Restore a changed move only if the original name is still unoccupied."""
+    try:
+        if skills_fd is None or backup_fd is None:
+            _rename_seed_noreplace(backup_path, folder)
+        else:
+            _rename_seed_noreplace(
+                backup_path.name,
+                folder.name,
+                src_dir_fd=backup_fd,
+                dst_dir_fd=skills_fd,
+            )
+    except OSError:
+        logger.error(
+            "Skill retirement conflict: %s changed during the move and could not "
+            "be restored safely. Do not replace an entry at %s; the moved copy "
+            "is at %s (the backup directory may have been moved). Review both paths.",
+            folder.name,
+            folder,
+            backup_path,
+        )
+        return False
+    logger.warning("Skill %s changed during retirement and was restored to %s", folder.name, folder)
+    return True
+
+
+def _rename_seed_noreplace(
+    source: str | Path,
+    target: str | Path,
+    *,
+    src_dir_fd: Optional[int] = None,
+    dst_dir_fd: Optional[int] = None,
+) -> None:
+    """Atomically rename without replacing an entry, or fail closed."""
+    if os.name == "nt":
+        os.rename(source, target)  # Windows raises if target exists.
+        return
+    if src_dir_fd is None or dst_dir_fd is None:
+        raise OSError(errno.ENOTSUP, "pinned directory descriptors are required")
+
+    # Python has no no-replace directory rename on POSIX. Use only the native
+    # exclusive variant; never fall back to os.rename, which can overwrite.
+    import ctypes
+
+    if sys.platform == "darwin":
+        symbol, flag = "renameatx_np", 0x4  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        symbol, flag = "renameat2", 0x1  # RENAME_NOREPLACE
+    else:
+        raise OSError(errno.ENOTSUP, "exclusive directory rename is unavailable")
+    library = ctypes.CDLL(None, use_errno=True)
+    function = getattr(library, symbol, None)
+    if function is None:
+        raise OSError(errno.ENOTSUP, "exclusive directory rename is unavailable")
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    result = function(src_dir_fd, os.fsencode(source), dst_dir_fd, os.fsencode(target), flag)
+    if result:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(target))
 
 
 def _classify_global_skills(global_skills_dir: Path) -> tuple[list[Path], int]:
@@ -1257,16 +1376,78 @@ def _retire_seeded_skills(global_skills_dir: Path) -> None:
     bundled update. Retired folders move aside; nothing is deleted.
     """
     seeds, edited = _classify_global_skills(global_skills_dir)
+    moved = 0
+    skipped = 0
     if seeds:
         backup_dir = global_skills_dir / SEED_BACKUP_DIR_NAME
         if _is_link_or_reparse(backup_dir):
             logger.warning("Preserving linked skill backup directory: %s", backup_dir)
             return
-        backup_dir.mkdir(exist_ok=True)
-        for folder in seeds:
-            shutil.move(str(folder), str(_unused_backup_path(backup_dir, folder.name)))
-    if seeds or edited:
-        logger.info(f"Retired seed skills: moved={len(seeds)}, kept_as_edited={edited}")
+        known = _load_skill_seed_hashes()
+        if known is None:
+            return
+        with _seed_directory(global_skills_dir, create=False) as skills_fd:
+            with _seed_directory(backup_dir, create=True) as backup_fd:
+                for folder in seeds:
+                    versions = known.get(folder.name)
+                    if versions is None or _is_link_or_reparse(folder) or not _is_seed_copy(folder, versions):
+                        skipped += 1
+                        continue
+                    if skills_fd is None or backup_fd is None:
+                        # The pinned Windows directories cannot be replaced; its
+                        # rename fails rather than overwriting an existing path.
+                        backup_path = _unused_backup_path(backup_dir, folder.name)
+                        while True:
+                            try:
+                                _rename_seed_noreplace(folder, backup_path)
+                                break
+                            except FileExistsError:
+                                suffix = f"{datetime.now():%Y%m%d-%H%M%S-%f}-{os.urandom(4).hex()}"
+                                backup_path = backup_dir / f"{folder.name}-{suffix}"
+                            except OSError as exc:
+                                logger.warning("Could not safely retire %s: %s", folder, exc)
+                                backup_path = None
+                                break
+                        if backup_path is None:
+                            skipped += 1
+                            continue
+                        try:
+                            with _seed_directory(backup_path, create=False):
+                                unchanged = _is_seed_copy(backup_path, versions)
+                        except OSError:
+                            unchanged = False
+                    else:
+                        candidate = folder.name
+                        while True:
+                            try:
+                                _rename_seed_noreplace(
+                                    folder.name, candidate,
+                                    src_dir_fd=skills_fd, dst_dir_fd=backup_fd,
+                                )
+                                break
+                            except FileExistsError:
+                                candidate = f"{folder.name}-{datetime.now():%Y%m%d-%H%M%S-%f}-{os.urandom(4).hex()}"
+                            except OSError as exc:
+                                logger.warning("Could not safely retire %s: %s", folder, exc)
+                                candidate = ""
+                                break
+                        if not candidate:
+                            skipped += 1
+                            continue
+                        backup_path = backup_dir / candidate
+                        unchanged = _is_seed_copy_at(backup_fd, candidate, versions)
+                    if not unchanged:
+                        _restore_changed_skill(
+                            folder, backup_path, skills_fd=skills_fd, backup_fd=backup_fd
+                        )
+                        skipped += 1
+                        continue
+                    moved += 1
+    if moved or edited or skipped:
+        logger.info(
+            "Retired seed skills: moved=%s, kept_as_edited=%s, skipped=%s",
+            moved, edited, skipped,
+        )
 
 
 def _migrate_old_prompt_to_agent(old_prompt_file: Path, agent_dir: Path) -> None:

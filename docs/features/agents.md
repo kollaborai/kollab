@@ -59,6 +59,16 @@ hidden `.<filename>.seed-...` file can remain beside the target. Once no seeding
 process is using it and the target has been checked, that exact temporary file
 can be removed. Kollab does not use it as an agent file or remove it silently.
 
+Old global skill copies that match the historical seed hashes can be moved into
+`skills/.seed-backup`. Kollab checks a moved copy again and restores it if it
+changed and a safe no-replace rename is available. If the original path is
+occupied or restoration cannot be done safely, the backup and any other copy
+are preserved and the log identifies the conflict for review. If a safe move
+is unavailable initially, the global skill stays in place.
+A writer that keeps a file descriptor open can still change a moved file after
+the last check; avoid editing a skill while startup is retiring it and inspect
+the backup if this occurs.
+
 The local tier is the folder the agent runs in. A chat the engine starts for the web
 UI or a team launch uses that chat's own folder, not the engine's
 (`AgentManager(project_path=...)`). The hub protocol docs (`system/hub-*.md`) and the

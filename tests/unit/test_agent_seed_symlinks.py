@@ -570,6 +570,25 @@ def test_windows_seed_directory_blocks_concurrent_parent_rename(tmp_path):
     assert not moved.exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows directory handles only")
+def test_windows_seed_directory_blocks_cross_process_parent_rename(tmp_path):
+    directory = tmp_path / "sections"
+    moved = tmp_path / "sections-original"
+    directory.mkdir()
+    script = "from pathlib import Path; import sys; Path(sys.argv[1]).rename(sys.argv[2])"
+
+    with config_utils._seed_directory(directory, create=False):
+        process = subprocess.run(
+            [sys.executable, "-c", script, str(directory), str(moved)],
+            capture_output=True,
+            check=False,
+        )
+        assert process.returncode != 0
+
+    assert directory.is_dir()
+    assert not moved.exists()
+
+
 def test_seed_skips_linked_global_root_but_agent_resolution_still_works(tmp_path, monkeypatch):
     from kollabor_agent import agent_manager
 
