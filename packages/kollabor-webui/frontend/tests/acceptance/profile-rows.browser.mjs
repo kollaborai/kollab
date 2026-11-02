@@ -1,20 +1,14 @@
 // Focused retained UI coverage for the Profiles list rows (issue #578): at
 // narrow widths the provider, model, and effort metadata must stay readable
 // without hover while Test/Edit/Copy/Delete remain usable by touch.
-// Run after `npm ci`. Keep Playwright and its browser isolated from the
-// frontend dependency tree:
-//   npm install --prefix /tmp/kollab-578-playwright playwright-core
-//   npx --prefix /tmp/kollab-578-playwright playwright-core install chromium
-// Then run with:
-//   PLAYWRIGHT_CORE_PATH=/tmp/kollab-578-playwright/node_modules/playwright-core \
-//   node tests/acceptance/profile-rows.browser.mjs
+// Run after `npm ci` and `npx playwright-core install chromium`:
+//   npm run test:e2e:profile-rows
 // Browser resolution: CHROME_PATH if set (any Chrome/Chromium binary works),
 // else the chromium that `playwright-core install chromium` downloaded under
 // PLAYWRIGHT_BROWSERS_PATH (default ~/Library/Caches/ms-playwright on macOS).
-// Set PROFILE_ROWS_CAPTURE=1 to write screenshots under docs/media.
-// This harness is retained local coverage, not a CI step: ci.yml's web UI job
-// runs vitest, node:test and tsc, but no workflow installs a browser binary,
-// and the sibling profile-copy acceptance harness follows the same precedent.
+// PLAYWRIGHT_CORE_PATH can override the pinned package when using an isolated
+// Playwright installation. Set PROFILE_ROWS_CAPTURE=1 to write docs/media shots.
+// CI installs Chromium and runs this harness plus the full-App Learn acceptance.
 // The fixture uses a fake API and synthetic profiles; no engine or key is used.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
