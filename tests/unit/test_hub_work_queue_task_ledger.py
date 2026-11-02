@@ -187,14 +187,18 @@ async def test_claiming_linked_task_card_assigns_its_work_slot(tmp_path, monkeyp
     assert claimed_card.status == "active"
     assert claimed_card.assignee == "lapis"
     monkeypatch.setattr(
-        coordinator,
-        "github_terminal_state",
-        lambda ref: pytest.fail("assigned work must not be checked for staleness"),
+        coordinator, "github_terminal_state", lambda ref: f"{ref} merged"
     )
     assert plugin._sweep_stale_work_queue() == []
+    slot = plugin._work_queue.get_all()[0]
+    assert slot.status == "assigned"
+    assert slot.stale_upstream_note == "terminal upstream: #640 merged"
+    assert plugin._task_ledger.get(card.id).status == "active"
 
 
-def test_stale_sweep_leaves_active_paired_card_untouched(tmp_path, monkeypatch, caplog):
+def test_stale_sweep_keeps_active_paired_card_pending_with_note(
+    tmp_path, monkeypatch, caplog
+):
     plugin = _plugin(tmp_path, monkeypatch)
     plugin._handle_queue_command("work tied to #640", upstream_refs=["#640"])
     card = plugin._task_ledger.get_open(project="test-project")[0]
@@ -209,13 +213,61 @@ def test_stale_sweep_leaves_active_paired_card_untouched(tmp_path, monkeypatch, 
 
     slot = plugin._work_queue.get_all()[0]
     saved = plugin._task_ledger.get(card.id)
-    assert [item.id for item in retired] == [slot.id]
-    assert slot.status == "retired"
+    assert retired == []
+    assert slot.status == "pending"
+    assert slot.assigned_to is None
+    assert slot.stale_upstream_note == "terminal upstream: #640 merged"
     assert saved.status == "active"
     assert saved.assignee == "ruby"
     assert saved.terminal_reason is None
     assert "leaving active task card" in caplog.text.lower()
 
-    # Retired slots are retried; an active card must remain protected then too.
+
+def test_claim_racing_stale_cleanup_preserves_pending_slot_and_card(
+    tmp_path, monkeypatch
+):
+    plugin = _plugin(tmp_path, monkeypatch)
+    plugin._handle_queue_command("work tied to #640", upstream_refs=["#640"])
+    card = plugin._task_ledger.get_open(project="test-project")[0]
+    monkeypatch.setattr(
+        coordinator, "github_terminal_state", lambda ref: f"{ref} merged"
+    )
+    original_sweep = plugin._work_queue.sweep_stale
+
+    def claim_after_sweep_snapshot(*args, **kwargs):
+        retired = original_sweep(*args, **kwargs)
+        assert retired
+        assert plugin._task_ledger.claim(card.id, "ruby", project="test-project")
+        return retired
+
+    monkeypatch.setattr(plugin._work_queue, "sweep_stale", claim_after_sweep_snapshot)
+
     plugin._sweep_stale_work_queue()
-    assert plugin._task_ledger.get(card.id).status == "active"
+
+    slot = plugin._work_queue.get_all()[0]
+    saved = plugin._task_ledger.get(card.id)
+    assert slot.status == "pending"
+    assert slot.assigned_to is None
+    assert slot.stale_upstream_note == "terminal upstream: #640 merged"
+    assert saved.status == "active"
+    assert saved.assignee == "ruby"
+
+
+@pytest.mark.parametrize("status", sorted(TaskLedger.TERMINAL_STATUSES))
+def test_pending_slot_retires_when_linked_task_card_is_terminal(
+    status, tmp_path, monkeypatch
+):
+    plugin = _plugin(tmp_path, monkeypatch)
+    plugin._handle_queue_command("work with no GitHub upstream")
+    card = plugin._task_ledger.get_open(project="test-project")[0]
+    card.status = status
+    plugin._task_ledger._save(card)
+
+    retired = plugin._sweep_stale_work_queue()
+
+    slot = plugin._work_queue.get_all()[0]
+    saved = plugin._task_ledger.get(card.id)
+    assert [item.id for item in retired] == [slot.id]
+    assert slot.status == "retired"
+    assert slot.retired_reason == f"TaskLedger card [{card.id}] terminal ({status})"
+    assert saved.status == status

@@ -16,10 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The hub no longer replays stale pre-reboot inbox messages as current instructions: ordinary messages written before the last restart are dropped at the boot boundary (visible in the offline inbox summary), while durable task controls are still delivered for TaskLedger classification (#639).
 - The hub's crystal summary token cache now scales with the live vault (a power of two of at least twice its entries, minimum 8) instead of a fixed floor of 8,192, so its size tracks the live memories (#567).
 - Agent-facing crystal writes reject bodies over 2,000 characters; crystal-store saves are atomic and verified, and failed writes surface errors without retaining partial mutations (#638).
-- Hub stale-queue sweeps run on startup and recheck closed issues and unmerged
-  PRs, so new work linked to reopened refs is not incorrectly retired. Claiming
-  a linked TaskLedger card marks its slot assigned; stale cleanup cancels a
-  linked card when it retires the slot unless that card is already active (#640).
+- Hub stale-queue sweeps recheck closed issues and unmerged closed PRs; only
+  merged PRs count as terminal. Completed slots retire; pending slots retire
+  when their linked TaskLedger card is terminal or all explicit GitHub refs are
+  terminal. Assigned slots stay assigned, active linked cards keep their slot
+  status with an idempotent stale-upstream note, and legacy slots without refs
+  or a linked card are report-only (#640).
 
 ### Added
 - The `hub_queue` tool accepts optional explicit `upstream_refs` for GitHub issues and PRs; refs are never inferred from task descriptions (#640).

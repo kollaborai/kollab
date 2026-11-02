@@ -13,8 +13,26 @@ from kollabor_config.file_lock import locked_file, try_lock, unlock
 from .models import WorkSlot
 from .presence import _atomic_write, get_hub_dir, pid_alive
 from .rosters import roster_names
+from .task_ledger import TERMINAL_TASK_STATUSES
 
 logger = logging.getLogger(__name__)
+
+
+def _append_stale_upstream_note(slot: WorkSlot, note: str) -> bool:
+    """Append one unique note line to a slot without changing its status."""
+    value = str(note or "").strip()
+    if not value:
+        return False
+    existing = [
+        line.strip()
+        for line in str(slot.stale_upstream_note or "").splitlines()
+        if line.strip()
+    ]
+    if value in existing:
+        return False
+    existing.append(value)
+    slot.stale_upstream_note = "\n".join(existing)
+    return True
 
 
 class CoordinatorElection:
@@ -215,11 +233,10 @@ def github_terminal_state(ref: str) -> Optional[str]:
     """Return a terminal reason for ``ref`` if its issue/PR is done.
 
     Queries ``gh`` (repo inferred from the working directory). Returns
-    ``None`` for open items, unknown numbers, and any ``gh`` failure --
-    unknown means keep the work item, never retire on a bad answer.
-    Merged PRs are cached for the process lifetime. Closed issues and
-    unmerged closed PRs are re-checked each sweep because they can reopen;
-    open answers are re-checked because they can change.
+    ``None`` for open items, unmerged closed PRs, unknown numbers, and any
+    ``gh`` failure -- unknown means keep the work item, never retire on a bad
+    answer. Merged PRs are cached for the process lifetime. Closed issues and
+    unmerged closed PRs are re-checked each sweep because they can reopen.
     """
     cached = _TERMINAL_CACHE.get(ref)
     if cached is not None:
@@ -244,13 +261,18 @@ def github_terminal_state(ref: str) -> Optional[str]:
             continue
         state = data.get("state", "")
         if kind == "pr":
-            if state == "MERGED":
+            merged = state == "MERGED" or (
+                state == "CLOSED" and bool(data.get("mergedAt"))
+            )
+            if merged:
                 reason = f"{ref} merged"
                 _TERMINAL_CACHE[ref] = reason
                 return reason
-            if state == "CLOSED":
-                return f"{ref} closed"
-            return None
+            # A CLOSED PR may later reopen, and PRs are also GitHub issues.
+            # Do not fall through to issue-state handling without merge proof.
+            if state in {"OPEN", "CLOSED"}:
+                return None
+            continue
         if state != "CLOSED":
             return None
         state_reason = data.get("stateReason") or "closed"
@@ -448,57 +470,132 @@ class WorkQueue:
 
         return self._mutate(_requeue)
 
+    def record_stale_upstream_note(
+        self,
+        slot_id: str,
+        note: str,
+        *,
+        restore_pending_reason: Optional[str] = None,
+    ) -> Optional[WorkSlot]:
+        """Persist a note and optionally undo a raced stale retirement.
+
+        ``restore_pending_reason`` must exactly match the current retirement
+        reason. It is used only when a linked card became active after the
+        sweep snapshot; a concurrent claim may already have assigned the slot,
+        in which case its claim-time status is left untouched.
+        """
+
+        def _record(slots: List[WorkSlot]) -> Tuple[Optional[WorkSlot], bool]:
+            for slot in slots:
+                if slot.id != slot_id:
+                    continue
+                changed = _append_stale_upstream_note(slot, note)
+                if (
+                    restore_pending_reason
+                    and restore_pending_reason != "terminal slot (completed)"
+                    and slot.status == "retired"
+                    and slot.retired_reason == restore_pending_reason
+                ):
+                    slot.status = "pending"
+                    slot.retired_reason = None
+                    changed = True
+                return slot, changed
+            return None, False
+
+        return self._mutate(_record)
+
     def sweep_stale(
-        self, checker: Optional[Callable[[str], Optional[str]]] = None
+        self,
+        checker: Optional[Callable[[str], Optional[str]]] = None,
+        task_card_status_checker: Optional[Callable[[str], Optional[str]]] = None,
     ) -> List[WorkSlot]:
-        """Retire dead slots: completed ones always, pending ones whose
-        explicitly registered upstream refs are all terminal.
+        """Retire stale slots and annotate work that must remain active.
 
-        Retirement rules (folded from the superseded #654 design):
+        Completed slots are always retired. A pending slot is retired when an
+        explicitly linked TaskLedger card is terminal or all explicit GitHub
+        upstream refs are terminal. Assigned slots are never retired. If an
+        upstream is terminal while a linked card is active, or while the slot
+        is assigned, only an idempotent note is persisted; status is preserved.
+        A slot with neither explicit refs nor a linked TaskLedger card is
+        report-only. Free text is never scanned or used to migrate old slots.
 
-        - ``completed`` slots are dead weight and are always retired;
-          no upstream check is spent on them.
-        - ``pending`` slots are retired only when ``upstream_refs`` was
-          registered explicitly on the slot AND every ref reports a
-          terminal state (merged PR, closed issue). Free text is never
-          scanned: a mention like "follow-up to #577" cannot retire
-          live work (review F6).
-        - ``assigned`` slots are live work and are never touched;
-          ``requeue_orphans`` owns their lifecycle.
+        GitHub and TaskLedger status checks run outside the queue lock. The live
+        queue is then reloaded under lock and only still-pending decisions are
+        retired. A slot claimed during checks is kept and receives the terminal
+        reason as a note. The sweep fails open on checker errors or budget
+        exhaustion. At most ``MAX_UPSTREAM_CHECKS`` unique refs are checked.
 
-        The upstream budget is bounded: at most ``MAX_UPSTREAM_CHECKS``
-        unique refs are checked per sweep, deduplicated across slots.
-        Once the budget is spent, remaining refs count as unknown and
-        their slots are kept -- the sweep fails open, never retiring on
-        a missing answer. A checker exception is also treated as
-        "keep", so a flaky checker can never destroy queued work.
-
-        Two phases keep the queue lock off the slow path: decisions are
-        computed from a snapshot while the checkers run lock-free (they
-        shell out to gh), then the live queue is re-loaded under the
-        lock and only the decided ids that are still pending, plus
-        every still-completed slot, are retired. Anything appended or
-        claimed while the checkers ran is preserved.
-
-        Returns retired WorkSlot snapshots. Paired retired slots are
-        returned again on later sweeps so TaskLedger cleanup can retry
-        after transient persistence failures.
+        Returns retired WorkSlot snapshots. Paired retired slots are returned
+        again on later sweeps so TaskLedger cleanup can retry transient failures.
         """
         if checker is None:
             checker = github_terminal_state
         snapshot = self._load()
         decisions: Dict[str, str] = {}
+        notes: Dict[str, List[str]] = {}
         states: Dict[str, Optional[str]] = {}
+        task_card_statuses: Dict[str, Optional[str]] = {}
         budget = MAX_UPSTREAM_CHECKS
-        for slot in snapshot:
+
+        def add_note(slot_id: str, note: str) -> None:
+            notes.setdefault(slot_id, []).append(note)
+
+        # Check pending work first so assigned-slot annotations cannot exhaust
+        # the bounded GitHub budget ahead of retireable pending slots.
+        candidates = sorted(
+            snapshot,
+            key=lambda slot: slot.status == "assigned",
+        )
+        for slot in candidates:
             if slot.status == "completed":
                 decisions[slot.id] = "terminal slot (completed)"
                 continue
-            if slot.status != "pending":
+            if slot.status not in {"pending", "assigned"}:
                 continue
+
+            card_status = None
+            if slot.task_card_id and task_card_status_checker is not None:
+                if slot.task_card_id not in task_card_statuses:
+                    try:
+                        task_card_statuses[slot.task_card_id] = (
+                            task_card_status_checker(slot.task_card_id)
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "TaskLedger status check failed for card %s: %s",
+                            slot.task_card_id,
+                            e,
+                        )
+                        task_card_statuses[slot.task_card_id] = None
+                card_status = task_card_statuses[slot.task_card_id]
+
             refs = sorted(set(slot.upstream_refs or []))
-            if not refs:
+            if slot.status == "pending" and card_status in TERMINAL_TASK_STATUSES:
+                decisions[slot.id] = (
+                    f"TaskLedger card [{slot.task_card_id}] terminal "
+                    f"({card_status})"
+                )
                 continue
+            if slot.status == "assigned" and card_status in TERMINAL_TASK_STATUSES:
+                add_note(
+                    slot.id,
+                    f"terminal TaskLedger card [{slot.task_card_id}] ({card_status})",
+                )
+
+            if not refs:
+                if not slot.task_card_id:
+                    add_note(
+                        slot.id,
+                        "report-only: no explicit upstream refs or linked TaskLedger card",
+                    )
+                elif task_card_status_checker is not None and card_status is None:
+                    add_note(
+                        slot.id,
+                        f"report-only: linked TaskLedger card [{slot.task_card_id}] "
+                        "unavailable; no explicit upstream refs",
+                    )
+                continue
+
             reasons: List[str] = []
             for ref in refs:
                 if ref not in states:
@@ -507,7 +604,9 @@ class WorkQueue:
                         try:
                             states[ref] = checker(ref)
                         except Exception as e:
-                            logger.debug(f"stale sweep checker failed for {ref}: {e}")
+                            logger.debug(
+                                "stale sweep checker failed for %s: %s", ref, e
+                            )
                             states[ref] = None
                     else:
                         # Budget exhausted: unknown, fail open, keep.
@@ -517,9 +616,16 @@ class WorkQueue:
                     reasons = []
                     break
                 reasons.append(reason)
-            if reasons:
-                decisions[slot.id] = "; ".join(reasons)
-        if not decisions:
+            if not reasons:
+                continue
+
+            verdict = "; ".join(reasons)
+            if slot.status == "assigned" or card_status == "active":
+                add_note(slot.id, f"terminal upstream: {verdict}")
+            else:
+                decisions[slot.id] = verdict
+
+        if not decisions and not notes:
             return [
                 slot
                 for slot in snapshot
@@ -530,15 +636,14 @@ class WorkQueue:
             slots: List[WorkSlot],
         ) -> Tuple[List[WorkSlot], bool]:
             retired = [
-                slot
-                for slot in slots
-                if slot.status == "retired" and slot.task_card_id
+                slot for slot in slots if slot.status == "retired" and slot.task_card_id
             ]
             changed = False
             for slot in slots:
                 if slot.status == "retired":
                     continue
                 verdict = decisions.get(slot.id)
+                requested_notes = list(notes.get(slot.id, []))
                 if slot.status == "completed":
                     # Completed after phase 1 still counts: terminal is
                     # terminal, and nothing un-completes a slot.
@@ -546,13 +651,44 @@ class WorkQueue:
                     slot.retired_reason = "terminal slot (completed)"
                     retired.append(slot)
                     changed = True
-                    logger.info(f"Retired stale work {slot.id}: completed")
-                elif verdict and slot.status == "pending":
+                    logger.info("Retired stale work %s: completed", slot.id)
+                    continue
+                if verdict and slot.status == "pending":
                     slot.status = "retired"
                     slot.retired_reason = verdict
                     retired.append(slot)
                     changed = True
-                    logger.info(f"Retired stale work {slot.id}: {verdict}")
+                    logger.info("Retired stale work %s: %s", slot.id, verdict)
+                    continue
+                if verdict and slot.status == "assigned":
+                    requested_notes.append(f"terminal upstream: {verdict}")
+
+                if slot.status not in {"pending", "assigned"}:
+                    continue
+                for note in requested_notes:
+                    if not _append_stale_upstream_note(slot, note):
+                        continue
+                    changed = True
+                    if note.lower().startswith("report-only:"):
+                        logger.warning(
+                            "Work slot %s is report-only and remains %s: %s",
+                            slot.id,
+                            slot.status,
+                            note,
+                        )
+                    elif task_card_statuses.get(slot.task_card_id or "") == "active":
+                        logger.warning(
+                            "Leaving active task card %s and work slot %s unchanged; %s",
+                            slot.task_card_id,
+                            slot.id,
+                            note,
+                        )
+                    else:
+                        logger.warning(
+                            "Leaving assigned work slot %s unchanged; %s",
+                            slot.id,
+                            note,
+                        )
             return retired, changed
 
         return self._mutate(_retire)

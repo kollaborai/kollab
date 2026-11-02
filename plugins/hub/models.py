@@ -124,6 +124,7 @@ class WorkSlot:
     upstream_refs: List[str] = field(default_factory=list)
     task_card_id: Optional[str] = None
     retired_reason: Optional[str] = None
+    stale_upstream_note: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -140,6 +141,7 @@ class WorkSlot:
             "upstream_refs": self.upstream_refs,
             "task_card_id": self.task_card_id,
             "retired_reason": self.retired_reason,
+            "stale_upstream_note": self.stale_upstream_note,
         }
 
     @classmethod

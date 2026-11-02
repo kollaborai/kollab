@@ -28,9 +28,17 @@ A simple FIFO queue for dispatching work items to agents. Slots are
 persisted and claimed by agents. When the TaskLedger and agent identity are
 available, each queue item is paired with a durable TaskLedger card; the slot
 remains the dispatch unit. Claiming a linked card marks its slot assigned so
-stale sweeps skip claimed work. If stale cleanup retires a pending slot, it
-cancels the paired card unless that card is already active; active cards remain
-available to the worker, and the retired slot is not reactivated.
+stale sweeps skip claimed work. Completed slots retire unconditionally. A
+pending slot retires when its linked TaskLedger card is terminal (`done`,
+`failed`, `closed`, `cancelled`, or `obsolete`), or when every explicitly linked
+GitHub ref is terminal. Assigned slots are never retired.
+
+When a linked card is active and an explicit upstream ref becomes terminal, the
+slot keeps its current status and records an idempotent `stale_upstream_note`;
+a pending slot remains pending. Assignment is made only by a claim, never
+inferred from a card's assignee. Legacy slots with neither explicit refs nor a
+linked TaskLedger card are report-only: their prose is not parsed and their
+refs are not inferred or backfilled.
 
 Tools:
 
@@ -70,8 +78,9 @@ work description; only explicitly supplied refs are used by stale-queue cleanup.
 
 The manual `/hub queue` command accepts only a task description and does not
 pass `upstream_refs`. Slots created through that command therefore have no
-upstream refs and are not retired based on issue or pull-request state. Use the
-`hub_queue` tool with explicit refs when ref-based stale cleanup is needed.
+GitHub refs and are not retired based on issue or pull-request state (a pending
+slot can still retire when its linked TaskLedger card becomes terminal). Use the
+`hub_queue` tool with explicit refs when GitHub-ref stale cleanup is needed.
 
 Claim next item:
   `<hub_claim>item-id</hub_claim>`

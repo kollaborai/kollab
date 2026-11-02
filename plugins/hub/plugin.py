@@ -7819,12 +7819,32 @@ class HubPlugin(BasePlugin):
     def _sweep_stale_work_queue(self) -> List[WorkSlot]:
         """Retire stale slots and terminalize their paired ledger cards.
 
-        Retired linked slots are returned by later sweeps too, so a transient
-        ledger write failure is retried instead of leaving an open card behind.
+        Active linked cards are preserved with their slot's status unchanged;
+        a claim that races the sweep is also preserved by the atomic ledger
+        terminalize guard and recorded on the slot for the next reader.
+        Retired linked slots are retried after transient ledger write failures.
         """
         if not self._work_queue:
             return []
-        retired = self._work_queue.sweep_stale()
+
+        task_card_status_checker = None
+        if self._task_ledger:
+
+            def task_card_status_checker(task_card_id: str) -> Optional[str]:
+                try:
+                    card = self._task_ledger.get(task_card_id)
+                except Exception as e:
+                    logger.warning(
+                        "TaskLedger status read failed for card %s: %s",
+                        task_card_id,
+                        e,
+                    )
+                    return None
+                return card.status if card else None
+
+        retired = self._work_queue.sweep_stale(
+            task_card_status_checker=task_card_status_checker
+        )
         if not self._task_ledger:
             return retired
 
@@ -7862,6 +7882,20 @@ class HubPlugin(BasePlugin):
                     slot.id,
                     card.assignee or "unknown",
                 )
+                if reason != "terminal slot (completed)":
+                    try:
+                        self._work_queue.record_stale_upstream_note(
+                            slot.id,
+                            f"terminal upstream: {reason}",
+                            restore_pending_reason=reason,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Could not preserve active task card %s work slot %s: %s",
+                            slot.task_card_id,
+                            slot.id,
+                            e,
+                        )
         return retired
 
     async def _try_assign_work(self) -> None:

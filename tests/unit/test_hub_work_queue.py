@@ -76,7 +76,32 @@ def test_sweep_stale_keeps_open_and_refless_slots(tmp_path, monkeypatch):
     assert all(s.status == "pending" for s in fresh._load())
 
 
-def test_sweep_stale_spares_assigned_slots(tmp_path, monkeypatch):
+def test_legacy_unlinked_slot_is_report_only_without_parsing_text(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    legacy = queue.add("follow-up for merged #219; do not touch #220")
+    legacy.upstream_refs = None
+    queue._save([legacy])
+
+    def must_not_check(ref):
+        pytest.fail(f"unstructured legacy ref was inferred: {ref}")
+
+    assert queue.sweep_stale(must_not_check) == []
+
+    saved = WorkQueue()._load()[0]
+    assert saved.status == "pending"
+    assert saved.task_card_id is None
+    assert saved.upstream_refs is None
+    assert "report-only" in (saved.stale_upstream_note or "").lower()
+    assert "#219" not in saved.stale_upstream_note
+    assert "report-only" in caplog.text.lower()
+
+
+def test_sweep_stale_notes_terminal_upstream_without_retiring_assigned_work(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
     claimed = queue.add("agent is actively on PR #219", upstream_refs=["#219"])
@@ -85,7 +110,15 @@ def test_sweep_stale_spares_assigned_slots(tmp_path, monkeypatch):
     assert queue.sweep_stale(lambda ref: f"{ref} merged") == []
     slot = WorkQueue()._load()[0]
     assert slot.status == "assigned"
+    assert slot.assigned_to == "lapis"
     assert slot.retired_reason is None
+    assert slot.stale_upstream_note == "terminal upstream: #219 merged"
+
+    saves = []
+    monkeypatch.setattr(WorkQueue, "_save", lambda self, slots: saves.append(1))
+    assert queue.sweep_stale(lambda ref: f"{ref} merged") == []
+    assert saves == []
+    assert WorkQueue()._load()[0].stale_upstream_note == slot.stale_upstream_note
 
 
 def test_sweep_stale_requires_every_ref_terminal(tmp_path, monkeypatch):
@@ -167,7 +200,10 @@ def test_github_terminal_state_parses_gh_output(tmp_path, monkeypatch):
     fake, calls = _fake_gh(
         {
             ("gh", "pr", "view", "219"): (0, '{"state": "MERGED"}'),
-            ("gh", "pr", "view", "220"): (0, '{"state": "CLOSED"}'),
+            ("gh", "pr", "view", "220"): (
+                0,
+                '{"state": "CLOSED", "mergedAt": "2026-11-02T15:00:00Z"}',
+            ),
             ("gh", "pr", "view", "221"): (0, '{"state": "OPEN"}'),
             ("gh", "pr", "view", "222"): (1, ""),
             ("gh", "issue", "view", "222"): (
@@ -183,7 +219,7 @@ def test_github_terminal_state_parses_gh_output(tmp_path, monkeypatch):
     monkeypatch.setattr(coordinator, "subprocess", fake)
 
     assert coordinator.github_terminal_state("#219") == "#219 merged"
-    assert coordinator.github_terminal_state("#220") == "#220 closed"
+    assert coordinator.github_terminal_state("#220") == "#220 merged"
     assert coordinator.github_terminal_state("#221") is None
     assert coordinator.github_terminal_state("#222") == "#222 issue closed (COMPLETED)"
     assert coordinator.github_terminal_state("#223") is None
@@ -466,9 +502,12 @@ def test_sweep_scheduler_throttles_between_intervals():
     [
         (
             "#219",
-            [(0, '{"state": "CLOSED"}'), (0, '{"state": "OPEN"}')],
+            [
+                (0, '{"state": "CLOSED", "mergedAt": null}'),
+                (0, '{"state": "OPEN"}'),
+            ],
             [],
-            "#219 closed",
+            None,
             None,
         ),
         (

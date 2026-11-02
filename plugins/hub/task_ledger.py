@@ -35,6 +35,10 @@ from kollabor_config.file_lock import lock, unlock
 
 logger = logging.getLogger(__name__)
 
+TERMINAL_TASK_STATUSES = frozenset(
+    {"done", "failed", "closed", "cancelled", "obsolete"}
+)
+
 
 @dataclass
 class TaskCard:
@@ -237,7 +241,7 @@ class TaskCard:
 class TaskLedger:
     """Manages TaskCards on disk. Survives any crash or compaction."""
 
-    TERMINAL_STATUSES = frozenset({"done", "failed", "closed", "cancelled", "obsolete"})
+    TERMINAL_STATUSES = TERMINAL_TASK_STATUSES
     EXPLICIT_TERMINAL_STATUSES = frozenset({"cancelled", "obsolete"})
 
     def __init__(self, tasks_dir: Optional[str] = None):
