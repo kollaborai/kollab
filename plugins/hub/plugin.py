@@ -7475,6 +7475,9 @@ class HubPlugin(BasePlugin):
                 logger.info(
                     f"Reassigning work {slot_id}: agent {dead_agent} is dead"
                 )
+            # Retire pending work whose upstream issue/PR already closed
+            # (gh subprocess calls run off the event loop).
+            await asyncio.to_thread(self._work_queue.sweep_stale)
 
     async def _try_assign_work(self) -> None:
         """Try to assign pending work to idle agents using capability matching."""

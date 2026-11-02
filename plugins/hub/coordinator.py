@@ -3,8 +3,10 @@
 import json
 import logging
 import os
+import re
+import subprocess
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from kollabor_agent.runtime import AgentRuntime
 from kollabor_config.file_lock import try_lock, unlock
@@ -183,6 +185,63 @@ class IdentityAssigner:
 
         return f"agent-{os.getpid()}"
 
+_UPSTREAM_REF_RE = re.compile(r"#(\d+)")
+_GH_TIMEOUT_SECS = 15
+_TERMINAL_CACHE: Dict[str, str] = {}
+
+
+def extract_upstream_refs(text: str) -> List[str]:
+    """Extract every ``#NNN`` upstream reference from free text."""
+    return [f"#{n}" for n in _UPSTREAM_REF_RE.findall(text)]
+
+
+def github_terminal_state(ref: str) -> Optional[str]:
+    """Return a terminal reason for ``ref`` if its issue/PR is done.
+
+    Queries ``gh`` (repo inferred from the working directory). Returns
+    ``None`` for open items, unknown numbers, and any ``gh`` failure --
+    unknown means keep the work item, never retire on a bad answer.
+    Terminal answers are cached for the process lifetime; open answers
+    are re-checked each sweep because they can change.
+    """
+    cached = _TERMINAL_CACHE.get(ref)
+    if cached is not None:
+        return cached
+    num = ref.lstrip("#")
+    attempts = (
+        (["gh", "pr", "view", num, "--json", "state,mergedAt"], "pr"),
+        (["gh", "issue", "view", num, "--json", "state,stateReason"], "issue"),
+    )
+    for argv, kind in attempts:
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=_GH_TIMEOUT_SECS
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode != 0:
+            continue
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            continue
+        state = data.get("state", "")
+        if kind == "pr":
+            if state == "MERGED":
+                reason = f"{ref} merged"
+            elif state == "CLOSED":
+                reason = f"{ref} closed"
+            else:
+                return None
+        else:
+            if state != "CLOSED":
+                return None
+            state_reason = data.get("stateReason") or "closed"
+            reason = f"{ref} issue closed ({state_reason})"
+        _TERMINAL_CACHE[ref] = reason
+        return reason
+    return None
+
 
 class WorkQueue:
     """Manages pending work slots."""
@@ -280,6 +339,57 @@ class WorkQueue:
         if requeued:
             self._save(slots)
         return requeued
+
+    def sweep_stale(
+        self, checker: Optional[Callable[[str], Optional[str]]] = None
+    ) -> List[Tuple[str, str]]:
+        """Retire pending slots whose upstream work is already done.
+
+        A slot retires only when it references at least one ``#NNN``
+        upstream item and every referenced item reports a terminal
+        state (merged PR, closed issue). Slots without references and
+        slots with any live reference are kept. Assigned and completed
+        slots are never touched.
+
+        ``checker`` maps a ``#NNN`` reference to a terminal reason
+        string, or None to keep. Defaults to ``github_terminal_state``.
+        A checker exception is treated as "keep" so a flaky checker can
+        never destroy queued work.
+
+        Returns ``(slot_id, reason)`` pairs and saves once, only when
+        something was retired.
+        """
+        if checker is None:
+            checker = github_terminal_state
+        slots = self._load()
+        retired: List[Tuple[str, str]] = []
+        for slot in slots:
+            if slot.status != "pending":
+                continue
+            refs = extract_upstream_refs(f"{slot.task}\n{slot.context}")
+            if not refs:
+                continue
+            reasons: List[str] = []
+            for ref in refs:
+                try:
+                    reason = checker(ref)
+                except Exception as e:
+                    logger.debug(f"stale sweep checker failed for {ref}: {e}")
+                    reason = None
+                if not reason:
+                    reasons = []
+                    break
+                reasons.append(reason)
+            if not reasons:
+                continue
+            verdict = "; ".join(reasons)
+            slot.status = "retired"
+            slot.retired_reason = verdict
+            retired.append((slot.id, verdict))
+            logger.info(f"Retired stale work {slot.id}: {verdict}")
+        if retired:
+            self._save(slots)
+        return retired
 
     def get_pending(self) -> List[WorkSlot]:
         """Get all pending work slots."""

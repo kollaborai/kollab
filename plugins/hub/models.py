@@ -121,6 +121,7 @@ class WorkSlot:
     status: str = "pending"
     context: str = ""
     required_capabilities: List[str] = field(default_factory=list)
+    retired_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -134,6 +135,7 @@ class WorkSlot:
             "status": self.status,
             "context": self.context,
             "required_capabilities": self.required_capabilities,
+            "retired_reason": self.retired_reason,
         }
 
     @classmethod
