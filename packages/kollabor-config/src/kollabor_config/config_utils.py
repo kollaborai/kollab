@@ -1,6 +1,7 @@
 """Configuration utilities for Kollab."""
 
 import hashlib
+import io
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import BinaryIO, Optional
 
 from .atomic_write import write_text_atomic
 
@@ -788,6 +789,18 @@ def initialize_system_prompt() -> None:
         logger.error(f"Failed to initialize system prompt: {e}")
 
 
+def _is_link_or_reparse(path: Path) -> bool:
+    """Treat links, junctions, and other Windows reparse entries as user-owned."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
 def _copy_missing_tree_contents(source_dir: Path, target_dir: Path) -> tuple[int, int]:
     """Copy only missing files/directories from source tree into target tree.
 
@@ -800,29 +813,115 @@ def _copy_missing_tree_contents(source_dir: Path, target_dir: Path) -> tuple[int
     if not source_dir.exists() or not source_dir.is_dir():
         return copied, preserved
 
+    # A user's agent (or one of its sections) may be a link into another
+    # tree. Seeding must not write through it, including when its target is
+    # missing. Treat the link itself as an existing, user-owned entry.
+    if _is_link_or_reparse(target_dir):
+        return copied, preserved + 1
+
     target_dir.mkdir(parents=True, exist_ok=True)
 
     for item in source_dir.iterdir():
         target = target_dir / item.name
 
-        if target.exists():
-            if item.is_dir() and target.is_dir():
-                nested_copied, nested_preserved = _copy_missing_tree_contents(
-                    item, target
-                )
-                copied += nested_copied
-                preserved += nested_preserved
-            else:
-                preserved += 1
+        if _is_link_or_reparse(target):
+            preserved += 1
             continue
 
         if item.is_dir():
-            shutil.copytree(item, target)
+            try:
+                target.mkdir()
+                copied += 1
+            except FileExistsError:
+                pass
+            if _is_link_or_reparse(target) or not target.is_dir():
+                preserved += 1
+                continue
+            nested_copied, nested_preserved = _copy_missing_tree_contents(item, target)
+            copied += nested_copied
+            preserved += nested_preserved
         else:
-            shutil.copy2(item, target)
-        copied += 1
+            if _copy_file_if_missing(item, target):
+                copied += 1
+            else:
+                preserved += 1
 
     return copied, preserved
+
+
+def _copy_file_if_missing(source: Path, target: Path) -> bool:
+    """Copy a complete seed without replacing a concurrently created target."""
+    if _is_link_or_reparse(target) or target.exists():
+        return False
+    with source.open("rb") as source_file:
+        info = os.fstat(source_file.fileno())
+        return _publish_seed_file(
+            source_file,
+            target,
+            mode=stat.S_IMODE(info.st_mode),
+            timestamps=(info.st_atime_ns, info.st_mtime_ns),
+        )
+
+
+def _write_text_if_missing(target: Path, content: str) -> bool:
+    """Create generated defaults only if no entry already occupies the path."""
+    return _publish_seed_file(io.BytesIO(content.encode("utf-8")), target)
+
+
+def _publish_seed_file(
+    source: BinaryIO,
+    target: Path,
+    *,
+    mode: int = 0o600,
+    timestamps: Optional[tuple[int, int]] = None,
+) -> bool:
+    """Stage bytes beside the target and publish with atomic create-if-absent.
+
+    Hard links provide publication; Windows can use its no-overwrite rename if
+    they are unavailable. If neither is available, no partial target is
+    installed and an existing entry is not replaced.
+    """
+    if _is_link_or_reparse(target) or target.exists():
+        return False
+
+    fd, staged_path = tempfile.mkstemp(prefix=f".{target.name}.seed-", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as staged_file:
+            shutil.copyfileobj(source, staged_file)
+            staged_file.flush()
+            if hasattr(os, "fchmod"):
+                os.fchmod(staged_file.fileno(), mode)
+            if timestamps and os.utime in os.supports_fd:
+                os.utime(staged_file.fileno(), ns=timestamps)
+            os.fsync(staged_file.fileno())
+        try:
+            os.link(staged_path, target)
+        except FileExistsError:
+            return False
+        except (OSError, NotImplementedError, AttributeError) as link_error:
+            if not IS_WINDOWS:
+                raise OSError(
+                    f"Cannot safely publish agent seed {target}: atomic "
+                    "create-if-absent is unavailable. Existing files were preserved. "
+                    "Use a filesystem that supports hard links, or use the bundled "
+                    "agent where no local or global override exists."
+                ) from link_error
+            # On Windows, rename fails when the destination already exists.
+            # Never use os.replace: it would overwrite a concurrent user file.
+            try:
+                os.rename(staged_path, target)
+            except FileExistsError:
+                return False
+            except (OSError, NotImplementedError, AttributeError) as rename_error:
+                raise OSError(
+                    f"Cannot safely publish agent seed {target}: both hard-link "
+                    "and no-overwrite rename failed. Existing files were preserved. "
+                    "Check filesystem permissions or use the bundled agent where "
+                    "no local or global override exists."
+                ) from rename_error
+    finally:
+        Path(staged_path).unlink(missing_ok=True)
+    return True
 
 
 def _get_bundled_dir(name: str) -> Optional[Path]:
@@ -858,6 +957,10 @@ def _copy_seed_agents_to_global(
         global_agents_dir: Target global agents directory (~/.kollab/agents/)
         old_global_prompt_dir: Old system_prompt dir for migration
     """
+    if _is_link_or_reparse(global_agents_dir):
+        logger.info("Preserving linked global agents directory: %s", global_agents_dir)
+        return
+
     seed_agents_dir = _get_bundled_dir("agents")
 
     if seed_agents_dir is None:
@@ -879,7 +982,18 @@ def _copy_seed_agents_to_global(
     for agent_dir in seed_agents_dir.iterdir():
         if agent_dir.is_dir():
             target_agent_dir = global_agents_dir / agent_dir.name
-            copied, preserved = _copy_missing_tree_contents(agent_dir, target_agent_dir)
+            try:
+                copied, preserved = _copy_missing_tree_contents(agent_dir, target_agent_dir)
+            except OSError:
+                if (target_agent_dir / "system_prompt.md").is_file():
+                    logger.error(
+                        "Global agent %s still shadows the bundle unless a project-local "
+                        "agent takes precedence; its missing files may leave it incomplete. "
+                        "Review %s before activation.",
+                        agent_dir.name,
+                        target_agent_dir,
+                    )
+                raise
             logger.info(
                 f"Seeded agent to global: {agent_dir.name} "
                 f"(copied={copied}, preserved_existing={preserved})"
@@ -917,13 +1031,15 @@ def _is_seed_copy(folder: Path, known: dict[str, set[str]]) -> bool:
     """
     try:
         skill_md = folder / "SKILL.md"
-        if hashlib.sha256(skill_md.read_bytes()).hexdigest() not in known.get("SKILL.md", ()):
+        if _is_link_or_reparse(skill_md) or hashlib.sha256(
+            skill_md.read_bytes()
+        ).hexdigest() not in known.get("SKILL.md", ()):
             return False  # the usual edit, checked first
         for path in folder.rglob("*"):
             rel = path.relative_to(folder)
             if rel.name == ".DS_Store" or "__pycache__" in rel.parts:
                 continue
-            if path.is_symlink():
+            if _is_link_or_reparse(path):
                 return False
             if path.is_file() and (
                 hashlib.sha256(path.read_bytes()).hexdigest()
@@ -945,14 +1061,18 @@ def _classify_global_skills(global_skills_dir: Path) -> tuple[list[Path], int]:
     Returns (seed folders to retire, folders kept as edited).
     """
     seed_hashes = _load_skill_seed_hashes()
-    if seed_hashes is None or not global_skills_dir.is_dir():
+    if (
+        seed_hashes is None
+        or _is_link_or_reparse(global_skills_dir)
+        or not global_skills_dir.is_dir()
+    ):
         return [], 0
 
     seeds: list[Path] = []
     edited = 0
     for folder in sorted(global_skills_dir.iterdir()):
         known = seed_hashes.get(folder.name)
-        if known is None or folder.is_symlink() or not (folder / "SKILL.md").is_file():
+        if known is None or _is_link_or_reparse(folder) or not (folder / "SKILL.md").is_file():
             continue
         if _is_seed_copy(folder, known):
             seeds.append(folder)
@@ -964,7 +1084,7 @@ def _classify_global_skills(global_skills_dir: Path) -> tuple[list[Path], int]:
 def _unused_backup_path(backup_dir: Path, name: str) -> Path:
     """Return backup_dir/name, or a timestamped sibling when that name is taken."""
     target = backup_dir / name
-    if target.exists():
+    if _is_link_or_reparse(target) or target.exists():
         target = backup_dir / f"{name}-{datetime.now():%Y%m%d-%H%M%S-%f}"
     return target
 
@@ -979,6 +1099,9 @@ def _retire_seeded_skills(global_skills_dir: Path) -> None:
     seeds, edited = _classify_global_skills(global_skills_dir)
     if seeds:
         backup_dir = global_skills_dir / SEED_BACKUP_DIR_NAME
+        if _is_link_or_reparse(backup_dir):
+            logger.warning("Preserving linked skill backup directory: %s", backup_dir)
+            return
         backup_dir.mkdir(exist_ok=True)
         for folder in seeds:
             shutil.move(str(folder), str(_unused_backup_path(backup_dir, folder.name)))
@@ -993,24 +1116,23 @@ def _migrate_old_prompt_to_agent(old_prompt_file: Path, agent_dir: Path) -> None
         old_prompt_file: Path to old default.md file
         agent_dir: Target agent directory (e.g., .kollab/agents/default/)
     """
+    if _is_link_or_reparse(agent_dir) or _is_link_or_reparse(agent_dir.parent):
+        return
+
     agent_dir.mkdir(parents=True, exist_ok=True)
 
     new_prompt_file = agent_dir / "system_prompt.md"
-    if not new_prompt_file.exists():
-        shutil.copy2(old_prompt_file, new_prompt_file)
+    if _copy_file_if_missing(old_prompt_file, new_prompt_file):
         logger.info(f"Migrated system prompt to: {new_prompt_file}")
 
         # Create agent.json with default config
         agent_json = agent_dir / "agent.json"
-        if not agent_json.exists():
-            import json
-
-            agent_config = {
-                "name": "default",
-                "description": "Default agent with standard system prompt",
-                "profile": None,
-            }
-            agent_json.write_text(json.dumps(agent_config, indent=2), encoding="utf-8")
+        agent_config = {
+            "name": "default",
+            "description": "Default agent with standard system prompt",
+            "profile": None,
+        }
+        if _write_text_if_missing(agent_json, json.dumps(agent_config, indent=2)):
             logger.info(f"Created agent config: {agent_json}")
 
 
@@ -1022,6 +1144,9 @@ def _create_agent_from_defaults(agent_dir: Path) -> None:
     Args:
         agent_dir: Agent directory to create (e.g., ~/.kollab/agents/default/)
     """
+    if _is_link_or_reparse(agent_dir) or _is_link_or_reparse(agent_dir.parent):
+        return
+
     agent_name = agent_dir.name  # e.g., "default"
 
     seed_agents_dir = _get_bundled_dir("agents")
@@ -1029,38 +1154,25 @@ def _create_agent_from_defaults(agent_dir: Path) -> None:
 
     if seed_agent_dir and seed_agent_dir.exists() and seed_agent_dir.is_dir():
         # Copy entire agent directory from seed
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        for item in seed_agent_dir.iterdir():
-            target = agent_dir / item.name
-            if not target.exists():
-                if item.is_file():
-                    shutil.copy2(item, target)
-                    logger.debug(f"Copied seed file: {item.name}")
-                elif item.is_dir():
-                    shutil.copytree(item, target)
-                    logger.debug(f"Copied seed directory: {item.name}")
+        _copy_missing_tree_contents(seed_agent_dir, agent_dir)
         logger.info(f"Created agent from seed: {agent_dir}")
     else:
         # Fallback: create minimal agent
         agent_dir.mkdir(parents=True, exist_ok=True)
 
         prompt_file = agent_dir / "system_prompt.md"
-        if not prompt_file.exists():
-            prompt_file.write_text(get_default_system_prompt(), encoding="utf-8")
+        if _write_text_if_missing(prompt_file, get_default_system_prompt()):
             logger.warning(
                 f"Created fallback system prompt (seed not found): {prompt_file}"
             )
 
         agent_json = agent_dir / "agent.json"
-        if not agent_json.exists():
-            import json
-
-            agent_config = {
-                "name": agent_name,
-                "description": f"{agent_name} agent",
-                "profile": None,
-            }
-            agent_json.write_text(json.dumps(agent_config, indent=2), encoding="utf-8")
+        agent_config = {
+            "name": agent_name,
+            "description": f"{agent_name} agent",
+            "profile": None,
+        }
+        if _write_text_if_missing(agent_json, json.dumps(agent_config, indent=2)):
             logger.info(f"Created agent config: {agent_json}")
 
 

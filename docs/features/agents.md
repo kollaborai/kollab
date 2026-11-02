@@ -38,6 +38,27 @@ Agents are resolved from:
 When the same agent name exists at multiple tiers, the higher-priority definition
 wins. The bundled copy remains the install-safe fallback.
 
+On app startup Kollab copies missing bundled agent files into the global agents
+directory. Existing files are preserved, so a global copy does not automatically
+receive later bundle changes. Linked agent or section directories, junctions,
+reparse points and file links are preserved instead of being seeded through. If
+the global agents directory itself is linked, startup skips seeding there;
+existing global agents in that directory still resolve normally. An agent with
+no local or global `system_prompt.md` resolves from the bundle.
+
+New seed files are staged in their target directory and published without
+overwriting a file created at the same time. On Windows a no-overwrite rename
+is used if hard links are unavailable. If the filesystem cannot provide a safe
+publication operation, startup logs an error and leaves the target absent; use
+the bundled agent when no higher-priority copy shadows it, or use a filesystem
+that supports the operation. If a global `system_prompt.md` already exists, it
+still shadows the bundle unless a project-local agent wins; the log identifies
+that override for review because missing fragments may leave it incomplete. If
+a process exits abruptly during staging, a
+hidden `.<filename>.seed-...` file can remain beside the target. Once no seeding
+process is using it and the target has been checked, that exact temporary file
+can be removed. Kollab does not use it as an agent file or remove it silently.
+
 The local tier is the folder the agent runs in. A chat the engine starts for the web
 UI or a team launch uses that chat's own folder, not the engine's
 (`AgentManager(project_path=...)`). The hub protocol docs (`system/hub-*.md`) and the
