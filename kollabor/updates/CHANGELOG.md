@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
 - Hub tests now cover short AF_UNIX hub-state socket paths, so long
   socket paths cannot silently regress the hub state client (#582).
 - Hub status flags an idle agent that still holds an open task as
