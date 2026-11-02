@@ -58,6 +58,14 @@ export async function storeHistoryPageIfCurrent(
   await mutateIfCurrent(cache, sessionId, stillCurrent, () => cache.store(sessionId, page));
 }
 
+export async function clearHistoryPagesIfCurrent(
+  sessionId: string,
+  cache: HistoryPageCache,
+  stillCurrent: () => boolean,
+): Promise<void> {
+  await mutateIfCurrent(cache, sessionId, stillCurrent, () => cache.clear(sessionId));
+}
+
 
 export interface HistoryPageClient {
   getHistoryPage(sessionId: string, options?: { limit?: number; before?: string; after?: string }): Promise<HistoryPage>;
@@ -67,6 +75,8 @@ export type LoadedHistoryPage = {
   page: HistoryPage;
   fromCache: boolean;
   error?: unknown;
+  // The engine accepted this exact after-cursor, validating its history prefix.
+  validatedPrefixCursor?: string;
 };
 
 function pageKey(page: HistoryPage) {
@@ -95,6 +105,29 @@ function validPage(value: unknown): value is HistoryPage {
     (page.newer_cursor === null || typeof page.newer_cursor === "string");
 }
 
+/**
+ * The engine rejected the page-down cursor (409 stale, 400 invalid): the
+ * history the window paged against changed underneath it (compaction,
+ * engine restart, cursor-key rotation). Paging can never succeed from the
+ * current cursor; the caller must drop the cached pages and reload a fresh
+ * window instead of showing a dead-end retry error.
+ */
+export class UnusableHistoryCursorError extends Error {
+  readonly status: number;
+
+  constructor(detail: string, status: number) {
+    super(detail);
+    this.name = "UnusableHistoryCursorError";
+    this.status = status;
+  }
+}
+
+function cursorRejectionStatus(reason: unknown): number | null {
+  if (typeof reason !== "object" || reason === null) return null;
+  const status = (reason as { status?: unknown }).status;
+  return status === 409 || status === 400 ? status : null;
+}
+
 export function mergeRecentHistoryPage(
   cached: HistoryPage,
   updates: HistoryPage,
@@ -108,6 +141,18 @@ export function mergeRecentHistoryPage(
       newer_cursor: updates.newer_cursor ?? cached.newer_cursor,
       has_more_newer: updates.has_more_newer,
       last_turn_error: updates.last_turn_error ?? cached.last_turn_error,
+    };
+  }
+
+  if (updates.start_index > cached.end_index) {
+    // The refresh page starts beyond the cached window (for example a
+    // byte-capped engine response dropped the leading span). Merging by
+    // index would leave holes, fail validation, and strand the stale
+    // cached page. Serve the contiguous refresh page and keep the missing
+    // span reachable through the signed older cursor instead.
+    return {
+      ...updates,
+      has_more_older: true,
     };
   }
 
@@ -140,7 +185,24 @@ export function mergeRecentHistoryPage(
     last_turn_error: null,
   };
 
-  while (history.length > 1 && encodedSize(merged) > HISTORY_MAX_PAGE_BYTES) {
+  // Cursor floor: the byte-trim below may drop leading messages, but it must
+  // never push start_index above the position an older_cursor was minted at
+  // (cursor position == issuing page's start_index, verified server-side by
+  // an HMAC). Keeping the cursor while trimming past that floor would
+  // desynchronize the window: the next page-down would land entirely above
+  // the cursor position and return an empty merge forever after. When no
+  // cursor is in play the trim may run freely.
+  const cursorFloor = updates.older_cursor
+    ? updates.start_index
+    : cached.older_cursor
+      ? cached.start_index
+      : Number.POSITIVE_INFINITY;
+
+  while (
+    history.length > 1 &&
+    startIndex < cursorFloor &&
+    encodedSize(merged) > HISTORY_MAX_PAGE_BYTES
+  ) {
     history = history.slice(1);
     startIndex += 1;
     merged.history = history;
@@ -194,6 +256,32 @@ export function mergeOlderHistoryPage(
   };
 }
 
+/** Keep an already-open prefix only when the engine validated its cursor. */
+export function retainVerifiedOlderWindow(
+  open: HistoryPage | undefined,
+  refreshed: HistoryPage,
+  validatedPrefixCursor: string | undefined,
+): HistoryPage {
+  if (
+    !open || !validatedPrefixCursor || open.newer_cursor !== validatedPrefixCursor ||
+    !sameConversation(open, refreshed) || open.start_index >= refreshed.start_index ||
+    open.end_index < refreshed.start_index || open.end_index > refreshed.end_index
+  ) return refreshed;
+  const retained = mergeOlderHistoryPage(refreshed, open);
+  return {
+    ...retained,
+    // A successful refresh owns the latest error state. Retaining the
+    // prefix must not revive an error that the engine has cleared.
+    last_turn_error: refreshed.last_turn_error
+      ? {
+          ...refreshed.last_turn_error,
+          history_length: refreshed.start_index - retained.start_index +
+            refreshed.last_turn_error.history_length,
+        }
+      : null,
+  };
+}
+
 
 export async function loadLatestHistoryPage(
   sessionId: string,
@@ -224,6 +312,9 @@ export async function loadLatestHistoryPage(
         ...newestCached,
         history: newestCached.history.slice(-HISTORY_PAGE_SIZE),
         start_index: newestCached.end_index - HISTORY_PAGE_SIZE,
+        has_more_older:
+          newestCached.has_more_older ||
+          newestCached.start_index < newestCached.end_index - HISTORY_PAGE_SIZE,
         last_turn_error: newestCached.last_turn_error &&
           newestCached.start_index + newestCached.last_turn_error.history_length >=
             newestCached.end_index - HISTORY_PAGE_SIZE
@@ -236,10 +327,6 @@ export async function loadLatestHistoryPage(
           : null,
       }
     : newestCached;
-  const isStaleCursor = (reason: unknown) =>
-    typeof reason === "object" && reason !== null &&
-    "status" in reason && (reason as { status?: unknown }).status === 409;
-
   if (cached?.newer_cursor) {
     try {
       const updates = await api.getHistoryPage(sessionId, {
@@ -261,9 +348,10 @@ export async function loadLatestHistoryPage(
       const page = mergeRecentHistoryPage(cached, updates);
       if (updates.history.length) await store(updates);
       await store(page);
-      return { page, fromCache: false };
+      return { page, fromCache: false, validatedPrefixCursor: cached.newer_cursor };
     } catch (error) {
-      if (!isStaleCursor(error)) return { page: cached, fromCache: true, error };
+      // 409 = stale cursor, 400 = invalid cursor: both are unusable, drop and refetch.
+      if (cursorRejectionStatus(error) === null) return { page: cached, fromCache: true, error };
       await clear();
       try {
         const page = await api.getHistoryPage(sessionId, { limit: HISTORY_PAGE_SIZE });
@@ -297,14 +385,49 @@ export async function loadOlderHistoryPage(
 ): Promise<HistoryPage | null> {
   if (!current.has_more_older) return null;
   const cached = await cache.findOlder(sessionId, current.start_index);
-  if (cached && sameConversation(current, cached)) return cached;
+  if (cached && sameConversation(current, cached)) {
+    // A cached page is a snapshot from an earlier window. Its exhaustion
+    // flags can predate the capped refresh that made older history reachable
+    // again (a byte-capped page with start_index > 0 was capped, not
+    // terminal). Carry the current window's engine-issued cursor down so
+    // the window keeps paging; an empty next page marks it exhausted for
+    // real. Never synthesize a cursor — the engine signs its cursors and
+    // rejects unsigned ones with 400 InvalidHistoryCursor.
+    if (cached.start_index === 0) {
+      // The cached fragment already reaches the beginning of history:
+      // nothing older exists, whatever the current window's flags say.
+      return { ...cached, has_more_older: false, older_cursor: null };
+    }
+    if (cached.has_more_older && cached.older_cursor) return cached;
+    return {
+      ...cached,
+      has_more_older: current.has_more_older,
+      older_cursor: current.older_cursor,
+    };
+  }
   if (!current.older_cursor) return null;
-  const older = await api.getHistoryPage(sessionId, {
-    limit: HISTORY_PAGE_SIZE,
-    before: current.older_cursor,
-  });
+  let older: HistoryPage;
+  try {
+    older = await api.getHistoryPage(sessionId, {
+      limit: HISTORY_PAGE_SIZE,
+      before: current.older_cursor,
+    });
+  } catch (error) {
+    const status = cursorRejectionStatus(error);
+    if (status !== null) {
+      throw new UnusableHistoryCursorError(
+        `The engine rejected the history cursor (HTTP ${status}); cached pages may be stale.`,
+        status,
+      );
+    }
+    throw error;
+  }
   if (!sameConversation(current, older)) throw new Error("Conversation changed while loading history.");
-  if (older.history.length) await storeHistoryPageIfCurrent(sessionId, older, cache, stillCurrent);
+  if (older.history.length) {
+    await storeHistoryPageIfCurrent(sessionId, older, cache, stillCurrent).catch((reason) => {
+      console.warn("Skipping history page cache", reason);
+    });
+  }
   return older;
 }
 

@@ -574,9 +574,15 @@ kollab --hub msg lapis "review the latest diff"
 kollab --hub capture lapis 100
 kollab --hub capture lapis 100 --raw
 kollab --hub org engineering "ship the billing flow"
+kollab --hub org engineering --dir ./project --only backend-eng,qa-eng
 kollab --org engineering
 kollab --hub stop lapis
 ```
+
+In an interactive session, `/hub orgs` lists teams and `/hub org engineering`
+opens a picker for members, lead, and mission. For CLI launches, use `--dir` to
+choose the workspace and either `--only` or `--without` to select members; the
+two selection options cannot be combined.
 
 Hub capabilities include identities, project-scoped memory, task ledger
 workflows, recurring hub messages, optional Telegram forwarding, organization

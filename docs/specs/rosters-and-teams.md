@@ -167,21 +167,39 @@ token and uses a blob URL.
 "members": [{"persona": {...as above...}, "role", "agent", "profile", "prompt",
 "reports_to"}]}], "problems": [...]}`.
 
-`POST /teams/{name}/launch` with `{"workspace": "/abs/folder", "profile": "optional"}`
-starts each member that is not already live **in that folder**, lead first, each through
-`POST /sessions` (same code and registry, so they appear in the sidebar). The agent is
-the member's, the profile is the request's, else the member's, else none: `POST /sessions`
-then picks the active profile, the one a New Session chat starts on.
+`POST /teams/{name}/launch` accepts a workspace, an optional profile, and an optional
+selection:
+
+```json
+{"workspace": "/abs/folder", "profile": "optional",
+ "members": ["omar", "maya"], "lead": "maya", "mission": "Review the launch plan"}
+```
+
+`members` is an allowlist; alternatively, `exclude` is a denylist. They are mutually
+exclusive. Names must be unique members of the team. With neither selector, the full
+authored team launches as before. The lead defaults to the authored lead; a replacement
+must be selected. A 400 explains unknown or duplicate names and reports when an omitted
+authored lead needs a replacement. Selection is non-mutating: retained members whose
+manager was omitted are re-parented to their nearest retained authored ancestor. Launch
+order and each `KOLLAB_LAUNCH_BRIEF` use that effective reporting tree.
+
+Each effective member not already live **in that folder** starts in launch order through
+`POST /sessions` (same code and registry, so sessions appear in the sidebar). The request
+profile overrides each member's profile; without it, the member's profile is used, then
+the normal default. `mission`, when non-empty, goes only to the effective lead after it
+starts. If the lead is already live or fails to start, the mission is not sent and a
+`notes` entry explains why.
 
 ```json
 {"team": "marketing", "workspace": "/abs/folder",
  "started": ["omar", "maya"], "skipped": [{"persona": "theo", "reason": "live"}],
- "failed": [{"persona": "priya", "error": "Profile 'x' not found"}],
+ "excluded": ["priya"], "failed": [],
  "sessions": [{"session_id": "...", "identity": "marketing-crew/omar", "...": "..."}]}
 ```
 
-A second call starts nothing new. A failing member is reported and the others still
-start. 404 for an unknown team.
+`excluded` lists members omitted by selection; `skipped` lists selected members already
+live in this folder. A second call starts nothing new. A failing member is reported and
+the others still start. 404 for an unknown team.
 
 `GET /agents` rows (the launch list) gain `roster`, `display_name`, `avatar` and `agent`
 (`agent_type` stays); with `?workspace=` the list is that folder's roster.
@@ -194,23 +212,32 @@ persona (the koordinator) carries none of them; the client falls back to its poo
 
 ## CLI and TUI
 
-`kollab --as roster/name`; `/hub orgs` lists teams; `/hub org <team> [mission]` and
-`kollab --hub org <team>` / `--org <team>` launch one (detached processes, each with
-its brief). Help text says "team".
+`kollab --as roster/name`; `/hub orgs` lists teams with their source, member count and
+reporting outline. `/hub org <team>` opens the interactive picker: select members, choose
+a replacement lead if needed, review the effective reporting tree, and optionally enter a
+mission. The picker launches off the event loop. `/hub orgs` and the picker display the
+team tree under each member's `reports_to` manager.
 
-A launch starts the members one at a time, lead first, and waits for each to be online
-(its presence is live in the folder's hub) before starting the next, so the lead holds
-the coordinator seat on a slow start too. A member already online in that folder is left
-alone and named (`already online: ...`); when the lead is one of them the mission is not
-sent (`kollab --hub msg <lead> <mission>` does that). The launch stops at the first member
-that does not come online within 30 s and names it; the same command launches the rest.
-`/hub org` and `--org` run it off the event loop, and `/hub org` lists each member under
-who they report to. `kollab --hub org` exits 1 when a member fails.
+`kollab --hub org <team> [mission] [--dir FOLDER] [--only a,b | --without a,b]` and
+`--org <team>` launch one (detached processes, each with its brief). `--dir` selects the
+workspace; repeatable `--only` allowlists members and repeatable `--without` excludes
+them. Names may be comma-separated within each option. `--only` and `--without` cannot
+be combined. CLI has no replacement-lead option, so excluding the authored lead without
+including it in `--only` is an error with guidance to select a replacement in the picker.
+Help text says "team".
+
+A launch starts the effective members one at a time, lead first, and waits for each to
+be online (its presence is live in the folder's hub) before starting the next. An already
+online member is left alone and reported separately from excluded members. The mission
+goes only to a newly started effective lead; if it is already online, use
+`kollab --hub msg <lead> <mission>`. A member that does not come online within 30 s is
+named and the rest still launch. `kollab --hub org` exits 1 when a member fails.
 
 ## Web UI
 
 Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `AgentPicker`,
-`AgentLibrary`, `launch-choices.ts`, `team-model.ts`), `hooks/use-rosters.ts`.
+`AgentLibrary`, `TeamLaunchSheet`, `launch-choices.ts`, `team-model.ts`,
+`team-preferences.ts`), `hooks/use-rosters.ts`.
 
 - **Names.** A persona is called by its `display_name` in rows (live, offline, remote),
   the Session Controls panel, Who Is Online and the Session settings tab, and
@@ -240,12 +267,18 @@ Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `Agen
   name and job title. "In Use" is per folder and by bare name: a name running in the
   Workspace is disabled in every group, one running only in another folder is free.
   Picking a persona preselects its *Type* (the agent bundle; `agent` in the request,
-  which the user can override). With no answer from the folder nobody is offered.
+  which the user can override). With no answer from the folder nobody is offered. The
+  New Session popover's **Launch a Team** opens the shared team launch sheet with its
+  selected folder and profile prefilled.
 - **Agents view.** Rosters tab (personas with Handle, the `@name` people type to
-  message it, Type, Model Profile, Skills, Personality, Prompt), Teams tab (outline
-  by `reports_to`, lead marked, Launch Team into the chosen folder: Started, Already
-  Running, Failed), and the `problems` grouped by file. The folder picker applies
-  project rosters and teams.
+  message it, Type, Model Profile, Skills, Personality, Prompt) and Teams tab (outline
+  by `reports_to`, lead marked). Selecting a team opens the shared launch sheet rather
+  than launching immediately. The sheet chooses folder, profile, members, lead and
+  mission; it previews the effective tree, re-parenting retained members past omitted
+  managers. Launch results distinguish Started, Already Running, Not Selected and Failed.
+  Member and lead choices persist in browser storage per team and folder; Reset restores
+  the full team and authored lead. A storage error is shown and does not block launch.
+  The folder picker applies project rosters and teams; `problems` are grouped by file.
 
 ## Not built yet
 

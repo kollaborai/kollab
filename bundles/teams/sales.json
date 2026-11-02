@@ -1,0 +1,28 @@
+{
+  "name": "sales",
+  "description": "B2B sales pod: head of sales, prospecting, account executive, sales engineering and revenue operations. Researches, qualifies, drafts outreach and proposals, and keeps the CRM honest; nothing is sent or priced without approval.",
+  "roster": "sales-crew",
+  "lead": "grace",
+  "members": [
+    {
+      "persona": "grace",
+      "reports_to": null
+    },
+    {
+      "persona": "ravi",
+      "reports_to": "grace"
+    },
+    {
+      "persona": "chloe",
+      "reports_to": "grace"
+    },
+    {
+      "persona": "tobias",
+      "reports_to": "grace"
+    },
+    {
+      "persona": "mina",
+      "reports_to": "grace"
+    }
+  ]
+}

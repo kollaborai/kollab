@@ -197,7 +197,7 @@ All fields are optional:
 | Field | Type | Description |
 |---|---|---|
 | `continue` | bool | `false` to block the event |
-| `decision` | string | `"deny"` to block the event |
+| `decision` | string | `"deny"` (or `"block"`, the Stop-hook synonym) to block the event |
 | `reason` | string | Shown to user when blocked |
 | `data` | object | Merged into event data (transforms the event) |
 | `systemMessage` | string | Logged as a warning message |

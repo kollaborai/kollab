@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
+- Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
+- Detached daemon SIGTERM cancels its top-level async task so application cleanup
+  completes without injecting `KeyboardInterrupt` into child-task cleanup (#667).
+- Coordinator task assignments survive restarts in a durable dispatch ledger,
+  suppress re-routing delivered work, and keep completion reports unverified
+  until the original assigner verifies a worktree or commit reference (#636).
+- An agent whose code changed on disk after it started no longer fails every turn with an opaque 500: the daemon flags the mismatch, the Engine names the agent and says to restart it (`<agent> could not run the turn: <error>. Its code changed on disk after it started. Restart it.`), and voice turns carry the same explanation to the speaker (#571).
+- The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
+- The hub no longer replays stale pre-reboot inbox messages as current instructions: ordinary messages written before the last restart are dropped at the boot boundary (visible in the offline inbox summary), while durable task controls are still delivered for TaskLedger classification (#639).
+- The hub's crystal summary token cache now scales with the live vault (a power of two of at least twice its entries, minimum 8) instead of a fixed floor of 8,192, so its size tracks the live memories (#567).
+- Agent-facing crystal writes reject bodies over 2,000 characters; crystal-store saves are atomic and verified, and failed writes surface errors without retaining partial mutations (#638).
+- The web UI no longer serves beyond this machine without saying so: whenever it binds an address other than 127.0.0.1, whether from KOLLAB_WEBUI_HOSTS or the new `--web-ui-hosts` flag, startup prints a warning that the page is exposed and that anyone who can open it gets the engine token. `kollab --web-ui --web-ui-hosts IP[,IP]` is the explicit per-launch opt-in and overrides the shell's KOLLAB_WEBUI_HOSTS; an explicitly empty value forces localhost-only, and the desktop app forwards its own `--web-ui-hosts` argument to kollab, showing the exposure warning in its window before opening the UI (#674).
+- The desktop exposure interstitial now recognizes IPv4-mapped IPv6 addresses
+  whose embedded IPv4 is private or link-local (#674).
+
+- The web UI labels a hub broadcast note as addressed to All instead of naming
+  the observing window's own agent as the recipient; notes delivered straight to
+  the window keep addressing it (#671).
+
 ### Added
+- Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
+- Team launches now support member selection or exclusions across the CLI,
+  TUI and Web UI. The launch sheet sets the workspace, profile, lead and
+  mission, validates the effective reporting tree, and saves choices per team
+  and workspace folder.
 - Hub tests now cover short AF_UNIX hub-state socket paths, so long
   socket paths cannot silently regress the hub state client (#582).
 - Hub status flags an idle agent that still holds an open task as
@@ -129,11 +155,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Network: withdrawing access stops queued remote-agent input and output before
+  network submission; bytes already sent may still arrive (#524).
+- Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
+  `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
+  internal agent message-tool syntax (#622).
 - Gem Studio keeps preview activity choices on one scrollable row with touch-sized targets and visible keyboard focus, makes Save the primary action, and keeps footer actions and save errors usable with enlarged text and long names (#465).
 - ACP: switching a session's profile or loadout now reports the resolved
   provider profile with the harness's model and effort in session state and
   the engine API, instead of a blank model/effort readout and an unresolved
   loadout name (#605).
+- Hub membership updates now send to every peer in a tick together, so one
+  slow or failing peer no longer delays the peers listed after it (#603).
+- Membership fan-out now stays inside the relay's pending budget: surplus
+  sends wait on a semaphore instead of being rejected for capacity, a relay
+  capacity reject is backpressure rather than a peer failure — the reject is
+  now typed ("capacity") and the typed signal survives the secure conversation
+  transport, so the live relay path honors backpressure too — retry backoff
+  saturates instead of overflowing after ~1024 consecutive failures (both
+  membership and config sync), and a peer's send bookkeeping is pruned when
+  it leaves the list (#603).
 - ACP: attaching with `--llm` no longer closes the running harness before the
   name lookup finishes. An unknown profile or loadout name reports its error
   and leaves the harness untouched; a valid loadout name switches the harness
@@ -216,6 +257,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vanishes from the roster (a 15 s grace window before the link is lost), and
   `KOLLAB_RELAY_DEBUG=1` on the relay traces every room-member row deletion
   and peer disconnect by key, room and reason.
+- Web UI: scrolling up in a long chat keeps loading older messages. A cursor
+  the engine rejects (409 history changed, 400 invalid cursor) now rebuilds the
+  visible window from a fresh fetch instead of a retry banner that can never
+  recover, a byte-capped refresh page that skips past the cached window is
+  served contiguously instead of stranding a stale one, the byte-cap trim no
+  longer strands paging past the older cursor or the truncated offline window,
+  a merged window too large for the history cache is skipped from the cache,
+  not the screen, and the load-failure banner uses the standard error styling
+  (#471).
 - Web UI: Trajectory's detail title no longer repeats the tool output, and the
   active tab in Trajectory, the Agent Library and Gem Studio is underlined in
   the accent color like every other tab bar (#459).
