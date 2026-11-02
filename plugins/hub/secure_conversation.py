@@ -241,6 +241,17 @@ class SecureConversationTransport:
         except Exception as exc:
             if held:
                 self._discard_outbound(key)
+            if isinstance(exc, RelayError) and (
+                getattr(exc, "code", None) == "capacity"
+                or str(exc) == "pending application request capacity reached"
+            ):
+                # A relay pending-budget rejection is backpressure, not a
+                # broken conversation. Carry the typed signal across this
+                # boundary with fixed, sanitized text so callers can wait a
+                # tick instead of counting a peer failure. A mid-chunk raise
+                # still discarded the session above, so no partial frame ever
+                # executes remotely.
+                raise RelayError("relay pending capacity reached", "capacity") from None
             logger.warning(
                 "secure %s request to %s failed: %s: %s",
                 method,
@@ -305,6 +316,16 @@ class SecureConversationTransport:
         except Exception as exc:
             if held:
                 self._discard_outbound(key)
+            if isinstance(exc, RelayError) and (
+                getattr(exc, "code", None) == "capacity"
+                or str(exc) == "pending application request capacity reached"
+            ):
+                # Same typed carry as request(): the handshake's own packet
+                # send crosses the relay pending budget, so a pre-handshake
+                # rejection must stay backpressure too. The local session
+                # table's own "secure session capacity reached" cap is a
+                # different message and keeps the generic rewrite.
+                raise RelayError("relay pending capacity reached", "capacity") from None
             logger.warning(
                 "secure session to %s failed: %s: %s",
                 peer_key[:12],

@@ -29,7 +29,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
 
-from kollabor_config.config_utils import encode_project_path, get_config_directory
+from kollabor_config.config_utils import (
+    ProjectStateLocationError,
+    _windows_project_state_dir,
+    encode_project_path,
+    get_config_directory,
+)
 
 from .device_names import default_device_name
 
@@ -57,7 +62,7 @@ class LocalDirectoryError(ValueError):
     """Unsafe or invalid local directory state; contains no private file data."""
 
 
-def _directory_fd(path: str | Path, *, parent: int | None = None) -> int:
+def _directory_fd(path: str | Path, *, parent: int | Path | None = None) -> int | Path:
     if parent is None:
         absolute = Path(path).absolute()
         # /tmp and /var are root-owned platform aliases on macOS. Runtime
@@ -66,7 +71,16 @@ def _directory_fd(path: str | Path, *, parent: int | None = None) -> int:
             info = component.lstat()
             if stat.S_ISLNK(info.st_mode) and (component == absolute or info.st_uid != 0):
                 raise LocalDirectoryError("local runtime paths must not contain user symlinks")
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    if os.name == "nt":  # no O_DIRECTORY or dir_fd on Windows: keep the full path, private_fs checks the ACL
+        from kollabor_config import private_fs
+
+        full = Path(path) if parent is None else Path(parent) / path
+        if not private_fs.owned_private(full, mask=0o022):
+            raise LocalDirectoryError("local directory must be owned by this user and not writable by others")
+        return full
+    from kollabor_config import private_fs
+
+    fd = private_fs.open_nofollow(path, os.O_RDONLY | os.O_DIRECTORY, dir_fd=parent)
     info = os.fstat(fd)
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
         os.close(fd)
@@ -74,11 +88,23 @@ def _directory_fd(path: str | Path, *, parent: int | None = None) -> int:
     return fd
 
 
-def _read_file(parent: int, name: str, *, limit: int = _MAX_FILE, single_link: bool = True) -> bytes:
-    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+def _read_file(parent: int | Path, name: str, *, limit: int = _MAX_FILE, single_link: bool = True) -> bytes:
+    from kollabor_config import private_fs
+
+    if os.name == "nt":  # dir_fd is POSIX-only: open the full path, private_fs refuses reparse points
+        fd = private_fs.open_nofollow(Path(parent) / name, os.O_RDONLY)
+    else:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if (
+        if os.name == "nt":  # owner and access list, where POSIX checks the uid and mode below
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or not private_fs.owned_private(Path(parent) / name, info)
+                or (single_link and info.st_nlink != 1)
+            ):
+                raise LocalDirectoryError("local state files must be private regular files owned by this user")
+        elif (
             not stat.S_ISREG(info.st_mode)
             or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) & 0o077
@@ -170,7 +196,14 @@ class LocalAgentDirectory:
         if not 1 <= stale_after <= 300:
             raise ValueError("heartbeat expiry must be between 1 and 300 seconds")
         self.config_dir = Path(config_dir or get_config_directory()).absolute()
-        self.socket_dir = Path(socket_dir or "/tmp/kollabor-hub").absolute()
+        # The hub's per-platform socket root: /tmp/kollabor-hub on POSIX, but
+        # <home>/.kollab/hub-sockets on Windows (#439) — a "/tmp" default there
+        # resolves to C:\tmp\kollabor-hub, no socket is ever relative to it, and
+        # _socket_valid rejects every presence record ("local agent is no
+        # longer online"). Same constant the writer side uses.
+        from .presence import SOCKET_DIR_ROOT
+
+        self.socket_dir = Path(socket_dir or SOCKET_DIR_ROOT).absolute()
         self.max_entries = max_entries
         self.max_projects = max_projects
         self.stale_after = stale_after
@@ -188,7 +221,8 @@ class LocalAgentDirectory:
         try:
             self.machine_id = self._machine_id(root)
         finally:
-            os.close(root)
+            if os.name != "nt":  # nt keeps a path, not a descriptor
+                os.close(root)
 
     @staticmethod
     def _machine_id(root: int) -> str:
@@ -198,26 +232,53 @@ class LocalAgentDirectory:
             # Link an already fsynced private file so concurrent readers never
             # observe a partially written identifier. Never overwrite an ID.
             name = f".machine-id-{secrets.token_hex(12)}"
-            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)
+            if os.name == "nt":  # dir_fd is POSIX-only; nt hardlinks are fine
+                from kollabor_config import private_fs
+
+                fd = private_fs.open_nofollow(root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            else:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)
             try:
                 with os.fdopen(fd, "w") as stream:
                     stream.write(secrets.token_hex(16) + "\n")
                     stream.flush()
                     os.fsync(stream.fileno())
                 try:
-                    os.link(name, "machine-id", src_dir_fd=root, dst_dir_fd=root, follow_symlinks=False)
+                    if os.name == "nt":
+                        os.link(str(root / name), str(root / "machine-id"))
+                    else:
+                        os.link(name, "machine-id", src_dir_fd=root, dst_dir_fd=root, follow_symlinks=False)
                 except FileExistsError:
                     pass
             finally:
-                os.unlink(name, dir_fd=root)
+                if os.name == "nt":
+                    os.unlink(str(root / name))
+                else:
+                    os.unlink(name, dir_fd=root)
             # The temporary hard link is removed before validation/read.
             value = _read_file(root, "machine-id", limit=64, single_link=False).decode("ascii").strip()
         if not _HEX_ID.fullmatch(value):
             raise LocalDirectoryError("invalid local machine identity")
         return value
 
-    def _presence_dirs(self, root: int, workspace: Path | None) -> Iterator[tuple[int, str | None]]:
+    def _presence_dirs(
+        self, root: int | Path, workspace: Path | None
+    ) -> Iterator[tuple[int | Path, str | None, Path | None]]:
         """Yield open directory descriptors, never following runtime symlinks."""
+        if workspace is None and os.name == "nt":
+            # A pre-upgrade cross-drive state directory can be outside the
+            # projects tree; include this process's workspace in machine views.
+            from .project_scope import resolve_project_root
+
+            current_workspace = resolve_project_root()
+        else:
+            current_workspace = workspace
+        selected = (
+            _windows_project_state_dir(current_workspace, self.config_dir, create_new=False)
+            if current_workspace is not None and os.name == "nt"
+            else None
+        )
+        external = selected is not None and selected.parent.resolve() != (self.config_dir / "projects").resolve()
         try:
             projects = _directory_fd("projects", parent=root)
         except (OSError, LocalDirectoryError):
@@ -226,7 +287,9 @@ class LocalAgentDirectory:
             try:
                 with ExitStack() as stack:
                     if workspace is not None:
-                        names = iter([encode_project_path(workspace)])
+                        names = iter(
+                            [] if external else [selected.name if selected else encode_project_path(workspace)]
+                        )
                     else:
                         entries = stack.enter_context(os.scandir(projects))
                         names = (entry.name for entry in entries)
@@ -234,12 +297,22 @@ class LocalAgentDirectory:
                         if number >= self.max_projects:
                             self.truncated = True
                             break
-                        yield from self._presence_path(projects, (name, "hub", "presence"), name)
+                        for directory, project_name in self._presence_path(projects, (name, "hub", "presence"), name):
+                            yield directory, project_name, None
             finally:
-                os.close(projects)
+                if os.name != "nt":  # nt keeps a path, not a descriptor
+                    os.close(projects)
+        if external:
+            try:
+                external_root = _directory_fd(selected)
+                for directory, _ in self._presence_path(external_root, ("hub", "presence"), None):
+                    yield directory, None, current_workspace
+            except (OSError, LocalDirectoryError):
+                pass
         # The configured global-Hub mode uses the same payloads; still filter
         # each payload by its exact workspace when publishing remotely.
-        yield from self._presence_path(root, ("hub", "presence"), None)
+        for directory, project_name in self._presence_path(root, ("hub", "presence"), None):
+            yield directory, project_name, None
 
     @staticmethod
     def _presence_path(parent: int, parts: tuple[str, ...], project_name: str | None):
@@ -248,14 +321,20 @@ class LocalAgentDirectory:
             for part in parts:
                 parent = _directory_fd(part, parent=parent)
                 opened.append(parent)
-            if stat.S_IMODE(os.fstat(parent).st_mode) & 0o077:
+            if os.name == "nt":  # nt keeps a path, not a descriptor; private_fs holds the ACL check
+                from kollabor_config import private_fs
+
+                if not private_fs.owned_private(parent, mask=0o077):
+                    return
+            elif stat.S_IMODE(os.fstat(parent).st_mode) & 0o077:
                 return
             yield parent, project_name
         except (OSError, LocalDirectoryError):
             return
         finally:
             for fd in reversed(opened):
-                os.close(fd)
+                if os.name != "nt":  # nt keeps a path, not a descriptor
+                    os.close(fd)
 
     def _workspace_state_parts(self, root: int, workspace: Path) -> list[list[str]]:
         """Directory chains that may hold this workspace's RelayState: the v2
@@ -272,13 +351,16 @@ class LocalAgentDirectory:
                     try:
                         slugs = os.listdir(networks)
                     finally:
-                        os.close(networks)
+                        if os.name != "nt":  # nt keeps a path, not a descriptor
+                            os.close(networks)
                     for slug in sorted(slugs):
                         chains.append(["workspaces", digest, "networks", slug])
                 finally:
-                    os.close(workspace_fd)
+                    if os.name != "nt":  # nt keeps a path, not a descriptor
+                        os.close(workspace_fd)
             finally:
-                os.close(workspaces)
+                if os.name != "nt":  # nt keeps a path, not a descriptor
+                    os.close(workspaces)
         except (OSError, LocalDirectoryError):
             pass
         chains.append(["network", digest])  # v1 fallback
@@ -299,7 +381,8 @@ class LocalAgentDirectory:
                 pass
             finally:
                 for fd in reversed(opened):
-                    os.close(fd)
+                    if os.name != "nt":  # nt keeps a path, not a descriptor
+                        os.close(fd)
         # (the offline fallback follows)
         # Stable offline identifier without creating networking credentials.
         # Once connected, the existing relay workspace identity takes precedence.
@@ -314,6 +397,10 @@ class LocalAgentDirectory:
             relative = path.relative_to(self.socket_dir)
             if not 1 <= len(relative.parts) <= 2:
                 return False
+            if os.name == "nt":  # no dir_fd on Windows: the hub socket is a local_ipc endpoint file
+                from kollabor_config import private_fs
+
+                return private_fs.owned_private(self.socket_dir.joinpath(*relative.parts))
             root = _directory_fd(self.socket_dir)
             opened.append(root)
             for part in relative.parts[:-1]:
@@ -325,7 +412,8 @@ class LocalAgentDirectory:
             return False
         finally:
             for fd in reversed(opened):
-                os.close(fd)
+                if os.name != "nt":  # nt keeps a path, not a descriptor
+                    os.close(fd)
 
     def _record(
         self, root: int, data: dict, filename: str, project_name: str | None, workspace: Path | None, now: float
@@ -354,8 +442,18 @@ class LocalAgentDirectory:
         actual_workspace = Path(project).resolve()
         if workspace is not None and actual_workspace != workspace:
             return None
-        if project_name is not None and encode_project_path(actual_workspace) != project_name:
-            return None
+        if project_name is not None:
+            if os.name == "nt":
+                try:
+                    state = _windows_project_state_dir(actual_workspace, self.config_dir, create_new=False)
+                except ProjectStateLocationError:
+                    # A machine-wide scan must not publish an unclaimed or
+                    # ambiguously owned presence record from another project.
+                    return None
+                if state.parent.resolve() != (self.config_dir / "projects").resolve() or state.name != project_name:
+                    return None
+            elif encode_project_path(actual_workspace) != project_name:
+                return None
         if os.name == "nt":  # os.kill(pid, 0) sends Ctrl+C there (#268)
             from kollabor_config import proc_ctl
 
@@ -409,7 +507,7 @@ class LocalAgentDirectory:
         scanned = 0
         now = time.time()
         try:
-            for directory, project_name in self._presence_dirs(root, selected):
+            for directory, project_name, source_workspace in self._presence_dirs(root, selected):
                 with os.scandir(directory) as entries:
                     for entry in entries:
                         scanned += 1
@@ -420,7 +518,8 @@ class LocalAgentDirectory:
                             continue
                         try:
                             row = self._record(
-                                root, _json_file(directory, entry.name), entry.name, project_name, selected, now
+                                root, _json_file(directory, entry.name), entry.name, project_name,
+                                selected or source_workspace, now,
                             )
                         except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
                             continue
@@ -428,7 +527,8 @@ class LocalAgentDirectory:
                             result[row.global_id] = row
             return list(result.values())
         finally:
-            os.close(root)
+            if os.name != "nt":  # nt keeps a path, not a descriptor
+                os.close(root)
 
     def publishable_agents(
         self, workspace: Path, workspace_id: str, device_name: str | None = None

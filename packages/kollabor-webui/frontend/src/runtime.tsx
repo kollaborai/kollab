@@ -27,6 +27,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
 import type {
   EngineApi,
   HistoryMessage,
@@ -37,7 +38,7 @@ import type {
 } from "./api";
 import { isToolOutputBatch } from "./api";
 import { GoalCancellationTracker } from "./utils/goal-cancel";
-import { shownMessagesChanged } from "./history-merge";
+import { mergeMissingHistoryMessages, reconcileBoundaryToolResults, shownMessagesChanged } from "./history-merge";
 import {
   apartFromLive,
   applyLiveEvent,
@@ -69,7 +70,7 @@ export type EngineState = {
    * messages. Set when the history loads, and by the engine when a turn this
    * page ran ends; a later reload appends only what lies past it.
    */
-  synced?: { history: number; messages: number; start?: number };
+  synced?: { history: number; messages: number; start?: number; authoritative?: boolean; olderWindow?: boolean };
   /** A private goal result may have interleaved with another history write. */
   goalHistoryReloadRequired?: boolean;
   error?: string;
@@ -551,6 +552,7 @@ function historyToMessages(
         role: "assistant",
         content: [fallbackCall],
         status: { type: "complete", reason: "stop" },
+        ...(callId ? { metadata: { custom: { historyToolFallback: callId } } } : {}),
       });
     }
   });
@@ -641,6 +643,12 @@ type ThreadReadyRuntime = {
     subscribe: (callback: () => void) => () => void;
   };
 };
+
+const ownsPendingInput = (thread: {
+  isRunning: boolean;
+  messages: readonly { role: string; metadata?: { isOptimistic?: boolean } }[];
+}) => thread.isRunning || thread.messages.some((message) =>
+  message.role === "user" && message.metadata?.isOptimistic);
 
 function InitialMessagesGate({
   runtime,
@@ -913,21 +921,49 @@ export function EngineRuntimeProvider({
   // assistant-ui keeps every message it was given, so swapping in reloaded
   // copies of turns already on screen would show those turns twice.
   const reloaded = useRef(initialState.messages);
+  const latestInitial = useRef(initialState);
+  latestInitial.current = initialState;
+  const [historySyncRevision, setHistorySyncRevision] = useState(0);
+  const deferredHistorySync = useRef(false);
+  const deferredOlderWindow = useRef<EngineState | null>(null);
+  useEffect(() => runtime.thread.subscribe(() => {
+    if (!deferredHistorySync.current || ownsPendingInput(runtime.thread.getState())) return;
+    deferredHistorySync.current = false;
+    setHistorySyncRevision((revision) => revision + 1);
+  }), [runtime]);
   useEffect(() => {
-    if (initialState.messages === reloaded.current) return;
-    reloaded.current = initialState.messages;
     const thread = runtime.thread.getState();
+    // Never remap the thread while a locally queued input still owns it.
+    if (ownsPendingInput(thread)) {
+      if (initialState.messages === reloaded.current) return;
+      if (initialState.synced?.olderWindow) deferredOlderWindow.current = initialState;
+      // As before, an event refresh received during our own run is consumed;
+      // replaying it later as authoritative can remove that run's messages
+      // when the engine mirror has not caught up. Only retry the older-page
+      // work, against the newest available snapshot, after the run ends.
+      reloaded.current = initialState.messages;
+      deferredHistorySync.current = deferredOlderWindow.current !== null;
+      return;
+    }
+    const pendingOlder = deferredOlderWindow.current;
+    const deferred = !!pendingOlder && pendingOlder.sessionId === initialState.sessionId &&
+      (!pendingOlder.conversationUid || !initialState.conversationUid ||
+        pendingOlder.conversationUid === initialState.conversationUid);
+    if (pendingOlder && !deferred) deferredOlderWindow.current = null;
+    if (!deferred && initialState.messages === reloaded.current) return;
     // A permission prompt opened or closed in another window (the agent's
     // terminal): a run that ends at a prompt leaves no sync point to append
     // from, so when the thread and the reloaded history disagree on whether a
     // prompt is waiting, reload the thread whole.
     const waiting = (message?: { status?: { type?: string } }) => message?.status?.type === "requires-action";
-    if (!thread.isRunning && waiting(thread.messages.at(-1)) !== initialState.messages.some(waiting)) {
+    if (!deferred && waiting(thread.messages.at(-1)) !== initialState.messages.some(waiting)) {
+      reloaded.current = initialState.messages;
       onStale?.();
       return;
     }
     // The turn behind the shown prompt ended and left it open: reload whole too.
-    if (!thread.isRunning && promptParkedSinceShown(thread.messages, initialState.messages)) {
+    if (!deferred && promptParkedSinceShown(thread.messages, initialState.messages)) {
+      reloaded.current = initialState.messages;
       onStale?.();
       return;
     }
@@ -935,39 +971,125 @@ export function EngineRuntimeProvider({
     const from = shown?.synced;
     // A run that ended without a sync point (an older engine, a dropped
     // stream) leaves the thread to its next full load.
-    if (thread.isRunning || !shown || !from || shown.messages.length !== from.messages) return;
-    if (!initialState.synced) return;
-    if (shownMessagesChanged(shown.messages, initialState.messages)) {
+    if (!shown || !from || shown.messages.length !== from.messages || !initialState.synced) {
+      deferredOlderWindow.current = null;
+      reloaded.current = initialState.messages;
+      return;
+    }
+    if ((initialState.synced.olderWindow || deferred) && reconcileBoundaryToolResults(
+      shown.messages, initialState.messages, initialState.synced.start ?? 0, initialState.synced.history,
+    )) {
+      // assistant-ui retains removed messages as branches when a nonempty
+      // external snapshot is imported. Clear and restore the repository in
+      // one browser turn, keeping this provider (and its live-turn owner).
+      // The timer runs outside React's effect before using flushSync.
+      const timer = window.setTimeout(() => {
+        if (!mounted.current || latestInitial.current.messages !== initialState.messages) return;
+        const currentThread = runtime.thread.getState();
+        if (ownsPendingInput(currentThread)) {
+          deferredHistorySync.current = true;
+          return;
+        }
+        const current = (currentThread.extras as { state?: EngineState } | undefined)?.state;
+        const currentSync = current?.synced;
+        const incoming = initialState.synced;
+        if (!current || !currentSync || current.messages.length !== currentSync.messages || !incoming ||
+          current.sessionId !== initialState.sessionId ||
+          (current.conversationUid && initialState.conversationUid && current.conversationUid !== initialState.conversationUid)) {
+          deferredOlderWindow.current = null;
+          reloaded.current = initialState.messages;
+          return;
+        }
+        const corrected = reconcileBoundaryToolResults(current.messages, initialState.messages,
+          incoming.start ?? 0, incoming.history);
+        if (!corrected) {
+          setHistorySyncRevision((revision) => revision + 1);
+          return;
+        }
+        const shownIds = new Set(current.messages.map((message) => message.id));
+        const tail = initialState.messages.filter((message) => {
+          const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
+          return index !== undefined && Number(index) >= currentSync.history && !shownIds.has(message.id);
+        });
+        const liveBefore = liveTurn.current;
+        const replaced = historyReplacesLiveTurn(liveBefore, tail);
+        const nextLive = replaced ? replacedLiveTurn(liveBefore) : liveBefore;
+        const held = replaced ? liveMessage(nextLive) : null;
+        const messages = replaced
+          ? [...corrected.filter((message) => !isLiveMessage(message)), ...(held ? [held] : [])]
+          : corrected;
+        const replacement = {
+          ...current,
+          messages,
+          synced: {
+            history: Math.max(currentSync.history, incoming.history),
+            start: Math.min(currentSync.start ?? 0, incoming.start ?? 0),
+            messages: messages.length,
+          },
+        };
+        const previousReloaded = reloaded.current;
+        const version = runVersion.current;
+        reloaded.current = initialState.messages;
+        try {
+          flushSync(() => runtime.thread.importExternalState({
+            ...current, messages: [], synced: { ...currentSync, messages: 0 },
+          }));
+        } finally {
+          if (mounted.current) {
+            const busy = ownsPendingInput(runtime.thread.getState());
+            const stillCurrent = latestInitial.current.messages === initialState.messages &&
+              runVersion.current === version && liveTurn.current === liveBefore && !busy;
+            if (!stillCurrent) {
+              reloaded.current = previousReloaded;
+              deferredHistorySync.current = busy;
+              if (!busy) window.setTimeout(() => {
+                if (mounted.current) setHistorySyncRevision((revision) => revision + 1);
+              }, 0);
+            } else if (replaced) {
+              liveTurn.current = nextLive;
+            }
+            flushSync(() => runtime.thread.importExternalState(stillCurrent ? replacement : current));
+            if (stillCurrent) deferredOlderWindow.current = null;
+          }
+        }
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+    // A non-authoritative window (older-focused merge, or a cache fallback
+    // while a fresh sync was unavailable) cannot prove that rows missing
+    // from it were deleted: merging keeps the shown rows instead of
+    // resetting the thread on every such publish. Only a fresh
+    // latest-window claim may declare shown rows gone.
+    if (
+      shownMessagesChanged(shown.messages, initialState.messages) &&
+      initialState.synced.authoritative !== false && !deferred
+    ) {
+      reloaded.current = initialState.messages;
       onStale?.();
       return;
     }
+    deferredOlderWindow.current = null;
+    reloaded.current = initialState.messages;
     const currentStart = from.start ?? 0;
     const nextStart = initialState.synced.start ?? currentStart;
-    const currentIds = new Set(shown.messages.map((message) => String(message.id ?? "")));
     const historyIndex = (message: ThreadMessageLike) => {
       const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
       return index === undefined ? null : Number(index);
     };
-    const older = nextStart < currentStart
-      ? initialState.messages.filter((message) => {
-          const index = historyIndex(message);
-          const id = String(message.id ?? "");
-          return index !== null && index >= nextStart && index < currentStart && !currentIds.has(id);
-        })
-      : [];
-    const tail = initialState.messages.filter((message) => {
+    const kept = shown.messages.filter((message) => !isLiveMessage(message));
+    const merged = mergeMissingHistoryMessages(kept, initialState.messages);
+    const tail = merged.added.filter((message) => {
       const index = historyIndex(message);
-      return index !== null && index >= from.history && !currentIds.has(String(message.id ?? ""));
+      return index !== null && index >= from.history;
     });
-    if (!older.length && !tail.length && nextStart >= currentStart) return;
+    if (!merged.added.length && nextStart >= currentStart) return;
     // A live turn this page is only watching rides at the end, outside the
     // synced bookkeeping, until the history carries its reply (replaced above).
     const replaced = historyReplacesLiveTurn(liveTurn.current, tail);
     if (replaced) liveTurn.current = replacedLiveTurn(liveTurn.current);
     const held = replaced ? liveMessage(liveTurn.current) : null;  // the queued turn it held back
     const liveShown = replaced ? (held ? [held] : []) : shown.messages.filter(isLiveMessage);
-    const kept = shown.messages.filter((message) => !isLiveMessage(message));
-    const messages = [...older, ...kept, ...tail, ...liveShown];
+    const messages = [...merged.messages, ...liveShown];
     runtime.thread.importExternalState({
       ...shown,
       messages,
@@ -977,7 +1099,7 @@ export function EngineRuntimeProvider({
         messages: messages.length,
       },
     });
-  }, [initialState, runtime, onStale]);
+  }, [initialState, runtime, onStale, historySyncRevision]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -1026,6 +1148,12 @@ export function buildInitialState(
   lastTurnError: TurnError | null = null,
   historyStartIndex = 0,
   conversationUid: string | null = null,
+  // A window built from an older-focused merge or a cache fallback is not a
+  // fresh "this is the latest history" claim: rows beyond its end may still
+  // exist upstream. Publishers pass false for those so the reload-sync
+  // effect merges instead of hard-resetting the thread.
+  authoritative = true,
+  olderWindow = false,
 ): EngineState {
   const messages = historyToMessages(
     history,
@@ -1043,6 +1171,8 @@ export function buildInitialState(
       history: historyStartIndex + history.length,
       start: historyStartIndex,
       messages: messages.length,
+      ...(authoritative ? {} : { authoritative: false }),
+      ...(olderWindow ? { olderWindow: true } : {}),
     },
   };
 }
