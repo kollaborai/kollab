@@ -15811,12 +15811,15 @@ class HubPlugin(BasePlugin):
             if linked_slot is None:
                 card_warning = "work-slot link failed; card cancellation attempted"
                 try:
-                    card = self._task_ledger.terminalize(
-                        card.id,
-                        status="cancelled",
-                        reason=f"work queue slot [{slot.id}] could not be linked",
-                        actor="work-queue-link",
-                    ) or card
+                    card = (
+                        self._task_ledger.terminalize(
+                            card.id,
+                            status="cancelled",
+                            reason=f"work queue slot [{slot.id}] could not be linked",
+                            actor="work-queue-link",
+                        )
+                        or card
+                    )
                 except Exception as e:
                     card_warning = "work-slot link and card cancellation failed"
                     logger.error(
@@ -15830,15 +15833,18 @@ class HubPlugin(BasePlugin):
                     "slot retired before card link; card cancellation attempted"
                 )
                 try:
-                    card = self._task_ledger.terminalize(
-                        card.id,
-                        status="cancelled",
-                        reason=(
-                            f"work queue slot [{slot.id}] was already retired: "
-                            f"{linked_slot.retired_reason or 'stale'}"
-                        ),
-                        actor="work-queue-sweep",
-                    ) or card
+                    card = (
+                        self._task_ledger.terminalize(
+                            card.id,
+                            status="cancelled",
+                            reason=(
+                                f"work queue slot [{slot.id}] was already retired: "
+                                f"{linked_slot.retired_reason or 'stale'}"
+                            ),
+                            actor="work-queue-sweep",
+                        )
+                        or card
+                    )
                 except Exception as e:
                     card_warning = (
                         "slot retired before link and card cancellation failed"
