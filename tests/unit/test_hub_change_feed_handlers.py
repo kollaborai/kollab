@@ -3,17 +3,19 @@
 Tests the async handler methods that were migrated to the pipeline
 architecture in phase 2d:
   - _handle_lane_claim_tool
+  - _handle_lane_release_tool
   - _handle_file_changed_tool
   - _handle_feed_recent_tool
   - _handle_claims_tool
 """
 
 import asyncio
+import copy
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -152,6 +154,123 @@ class TestHandleLaneClaim(unittest.TestCase):
             "path": "core/app.py",
         }))
         self.assertEqual(result.tool_id, "unknown")
+
+
+# ================================================================== #
+#  _handle_lane_release_tool
+# ================================================================== #
+
+
+class TestHandleLaneRelease(unittest.TestCase):
+    """Release results describe actual outcomes without mutating other claims."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.feed = ChangeFeed(hub_dir=self.tmpdir)
+        self.plugin = _make_plugin(self.feed, "sapphire")
+        self.path = "core/app.py"
+        self.other_path = "core/other.py"
+        self.feed.claim("lapis", self.other_path, "unrelated work")
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _claims(self):
+        return copy.deepcopy(self.feed.get_claims()["claims"])
+
+    def _release(self):
+        return _run(
+            self.plugin._handle_lane_release_tool(
+                {
+                    "id": "release-test",
+                    "path": self.path,
+                }
+            )
+        )
+
+    def _assert_claims_persisted(self, expected):
+        self.assertEqual(self._claims(), expected)
+        reopened = ChangeFeed(hub_dir=self.tmpdir)
+        self.assertEqual(reopened.get_claims()["claims"], expected)
+
+    def test_owned_claim_is_released_and_other_claim_preserved(self):
+        self.feed.claim("sapphire", self.path, "owned work")
+        expected = self._claims()
+        del expected[self.path]
+
+        result = self._release()
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.tool_id, "release-test")
+        self.assertEqual(result.tool_type, "lane_release")
+        self.assertEqual(result.output, "released: core/app.py")
+        self._assert_claims_persisted(expected)
+
+    def test_absent_claim_reports_not_claimed_and_preserves_other_claim(self):
+        expected = self._claims()
+
+        result = self._release()
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output, "not_claimed: core/app.py")
+        self._assert_claims_persisted(expected)
+
+    def test_foreign_claim_reports_owner_and_preserves_all_claims(self):
+        self.feed.claim("lapis", self.path, "other agent's work")
+        expected = self._claims()
+
+        result = self._release()
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output, "not_owner: core/app.py (claimed by lapis)")
+        self._assert_claims_persisted(expected)
+
+    def test_not_owner_without_owner_name_uses_unknown(self):
+        self.feed.claim("lapis", self.path, "other agent's work")
+        expected = self._claims()
+        with patch.object(self.feed, "release", return_value={"status": "not_owner"}):
+            result = self._release()
+        self.assertTrue(result.success)
+        self.assertEqual(result.output, "not_owner: core/app.py (claimed by unknown)")
+        self._assert_claims_persisted(expected)
+
+    def test_unexpected_status_reports_unconfirmed_without_mutating_claims(self):
+        self.feed.claim("sapphire", self.path, "owned work")
+        expected = self._claims()
+        for status in ("future_status", None, [], 42):
+            with self.subTest(status=status):
+                with patch.object(
+                    self.feed, "release", return_value={"status": status}
+                ):
+                    result = self._release()
+                self.assertTrue(result.success)
+                self.assertIn("release unconfirmed: core/app.py", result.output)
+                self.assertIn("unexpected status", result.output)
+                self._assert_claims_persisted(expected)
+
+    def test_invalid_result_reports_unconfirmed_without_mutating_claims(self):
+        self.feed.claim("sapphire", self.path, "owned work")
+        expected = self._claims()
+        for returned in (None, [], "invalid", {}):
+            with self.subTest(returned=returned):
+                with patch.object(self.feed, "release", return_value=returned):
+                    result = self._release()
+                self.assertTrue(result.success)
+                self.assertIn("release unconfirmed: core/app.py", result.output)
+                self._assert_claims_persisted(expected)
+
+    def test_missing_change_feed_or_identity_is_transport_failure(self):
+        expected = self._claims()
+        for missing in ("_change_feed", "_identity"):
+            with self.subTest(missing=missing):
+                plugin = _make_plugin(self.feed, "sapphire")
+                setattr(plugin, missing, None)
+                result = _run(plugin._handle_lane_release_tool({"path": self.path}))
+                self.assertFalse(result.success)
+                self.assertIn("change feed not initialized", result.error)
+                self._assert_claims_persisted(expected)
 
 
 # ================================================================== #

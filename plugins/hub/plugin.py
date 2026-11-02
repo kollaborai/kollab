@@ -4757,12 +4757,22 @@ class HubPlugin(BasePlugin):
 
         identity = self._identity.identity
         path = tool_data.get("path", "")
-        self._change_feed.release(identity, path)
+        result = self._change_feed.release(identity, path)
+        status = result.get("status") if isinstance(result, dict) else None
+        if status == "released":
+            output = f"released: {path}"
+        elif status == "not_claimed":
+            output = f"not_claimed: {path}"
+        elif status == "not_owner":
+            claimed_by = result.get("claimed_by") or "unknown"
+            output = f"not_owner: {path} (claimed by {claimed_by})"
+        else:
+            output = f"release unconfirmed: {path} (unexpected status: {status!r})"
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="lane_release",
             success=True,
-            output=f"released: {path}",
+            output=output,
         )
 
     async def _handle_file_changed_tool(self, tool_data: dict):
