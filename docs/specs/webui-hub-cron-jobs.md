@@ -57,11 +57,35 @@ scope per issue).
 step, open it in a browser. Desktop shows the table; 390px stacks rows
 into cards. Sample data is clearly marked as mock.
 
+## Web UI view (implemented)
+
+Design calls settled by approval: Settings tab placement, all live
+agents' jobs (not current-folder only), read-only (no delete buttons).
+
+- `frontend/src/components/panels/CronJobsPanel.tsx`: settings panel
+  rendered by the panel host. Desktop (md and up) shows a table
+  (agent, job, schedule, target, message, next fire, last error);
+  narrow widths stack rows into cards. Summary line reports
+  "N jobs across M live agents".
+- `agents_errors` from the engine route render as amber alerts, so an
+  operator-gate rejection or a failed cron query on any agent is
+  visible instead of silent.
+- Read-only by design: deletion stays in the owning agent's terminal
+  (`/hub cron delete`); the refresh button re-fetches with
+  `refresh=true`, and a deleted job disappears from the view on
+  refresh.
+- Frontend tests: `frontend/tests/cron-jobs-panel.test.tsx` covers
+  summary line, table rows, error surfacing, empty state, and the
+  read-only hint.
+
 ## Acceptance criteria (from the issue)
 
-- Mockup approved before any UI code ships.
+- Mockup approved before any UI code ships. (Satisfied: placement,
+  scope, and read-only behavior were settled by approval before the
+  UI commit.)
 - Unit test for the socket op and the engine aggregation (landed:
   `tests/unit/test_hub_cron_jobs_view.py`,
   `tests/unit/test_engine_hub_routes_cron.py`).
-- After UI lands (later commit): live proof at 390px and desktop widths,
-  and a deleted job disappears from the view.
+- UI landed: `CronJobsPanel.tsx` + frontend tests.
+- Still open: live proof at 390px and desktop widths, and a deleted
+  job disappearing from the view after a refresh.

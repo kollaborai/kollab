@@ -196,6 +196,7 @@ const mainConfig = defineConfig({
       "tests/team-model.test.ts",
       "tests/team-selection.test.ts",
       "tests/team-launch-api.test.ts",
+      "tests/cron-jobs-panel.test.tsx",
     ],
     environment: "node",
   },
