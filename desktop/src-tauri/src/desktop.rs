@@ -333,9 +333,35 @@ fn pick_kollab() -> Option<PathBuf> {
     }
 }
 
-/// Starts `kollab --web-ui` in its own session and process group (on Windows, with
-/// no console window, so `stop_child` can end its tree), its output going to `log`.
-fn spawn_webui(kollab: &Path, log: &Path) -> std::io::Result<Child> {
+/// The desktop app's own `--web-ui-hosts [IP[,IP...]]` argument: forwarded to
+/// kollab so LAN exposure stays an explicit per-launch choice on the desktop
+/// path too (#674). An explicitly empty value still forwards, as "localhost
+/// only" overriding any KOLLAB_WEBUI_HOSTS the desktop process inherited.
+fn webui_hosts_from_args<I>(args: I) -> Option<String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut args = args;
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix("--web-ui-hosts=") {
+            return Some(value.to_string());
+        }
+        if arg == "--web-ui-hosts" {
+            return args.next();
+        }
+    }
+    None
+}
+
+/// [`webui_hosts_from_args`] over this process's own arguments.
+fn webui_hosts() -> Option<String> {
+    webui_hosts_from_args(std::env::args().skip(1))
+}
+
+/// Builds the `kollab --web-ui` command: its own session and process group
+/// (on Windows, no console window, so `stop_child` can end its tree), its
+/// output going to `log`.
+fn webui_command(kollab: &Path, log: &Path, hosts: Option<&str>) -> std::io::Result<Command> {
     let out = std::fs::File::create(log)?;
     let mut command = Command::new(kollab);
     command
@@ -346,6 +372,9 @@ fn spawn_webui(kollab: &Path, log: &Path) -> std::io::Result<Child> {
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);
+    if let Some(hosts) = hosts {
+        command.arg("--web-ui-hosts").arg(hosts);
+    }
     // setsid: Quit signals the CLI, its engine and its UI server as one group.
     #[cfg(unix)]
     unsafe {
@@ -359,7 +388,12 @@ fn spawn_webui(kollab: &Path, log: &Path) -> std::io::Result<Child> {
     // Windows: stdin stays open until stop_child closes it, which asks the runtime to stop.
     #[cfg(windows)]
     command.stdin(Stdio::piped()).env("KOLLAB_STOP_ON_STDIN_EOF", "1");
-    command.spawn()
+    Ok(command)
+}
+
+/// Starts `kollab --web-ui`, forwarding the desktop app's `--web-ui-hosts`.
+fn spawn_webui(kollab: &Path, log: &Path, hosts: Option<&str>) -> std::io::Result<Child> {
+    webui_command(kollab, log, hosts)?.spawn()
 }
 
 fn show_status(win: &WebviewWindow, state: &str, log: &str) {
@@ -423,7 +457,7 @@ fn boot(app: &AppHandle, operation: u64) {
         .unwrap_or_else(|_| std::env::temp_dir())
         .join("webui.log");
     let _ = std::fs::create_dir_all(log.parent().expect("log file has a folder"));
-    let spawned = app.state::<Spawned>().0.lock().unwrap().spawn(operation, || spawn_webui(&kollab, &log));
+    let spawned = app.state::<Spawned>().0.lock().unwrap().spawn(operation, || spawn_webui(&kollab, &log, webui_hosts().as_deref()));
     match spawned {
         Ok(true) => eprintln!("kollab-desktop: started {} --web-ui", kollab.display()),
         Ok(false) => return,
@@ -1097,6 +1131,45 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn web_ui_hosts_flag_is_parsed_from_the_desktop_args() {
+        let parse = |args: &[&str]| webui_hosts_from_args(args.iter().map(|s| s.to_string()));
+        assert_eq!(parse(&["kollab-desktop", "--web-ui-hosts", "10.0.0.7"]).as_deref(), Some("10.0.0.7"));
+        assert_eq!(parse(&["kollab-desktop", "--web-ui-hosts=10.0.0.7"]).as_deref(), Some("10.0.0.7"));
+        assert_eq!(parse(&["kollab-desktop", "--web-ui-hosts", ""]).as_deref(), Some(""));
+        assert_eq!(parse(&["kollab-desktop"]).as_deref(), None);
+        assert_eq!(parse(&["kollab-desktop", "--web-ui"]).as_deref(), None);
+    }
+
+    #[test]
+    fn spawned_kollab_receives_the_web_ui_hosts_flag() {
+        let log = std::env::temp_dir().join("kollab-desktop-test-webui.log");
+        let command = webui_command(Path::new("/usr/bin/kollab"), &log, Some("10.0.0.7")).unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let flag = args.iter().position(|arg| arg == "--web-ui-hosts").expect("flag forwarded");
+        assert_eq!(args[flag + 1], "10.0.0.7");
+        let envs: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())))
+            .collect();
+        assert!(envs.contains(&("KOLLAB_WEBUI_NO_BROWSER".into(), "1".into())));
+    }
+
+    #[test]
+    fn spawned_kollab_omits_the_web_ui_hosts_flag_when_not_given() {
+        let log = std::env::temp_dir().join("kollab-desktop-test-webui.log");
+        let command = webui_command(Path::new("/usr/bin/kollab"), &log, None).unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.contains(&"--web-ui-hosts".to_string()));
+        assert!(args.contains(&"--web-ui".to_string()));
+    }
 
     #[test]
     fn repeated_retry_and_confirmed_quit_cannot_launch_a_late_child() {

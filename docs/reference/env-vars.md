@@ -370,7 +370,10 @@ machine (#674).
 Default: unset (127.0.0.1 only)
 
 `kollab --web-ui --web-ui-hosts 192.168.1.20` is the per-launch equivalent and
-overrides the shell's `KOLLAB_WEBUI_HOSTS` value for that launch.
+overrides the shell's `KOLLAB_WEBUI_HOSTS` value for that launch. An explicitly
+empty value (`--web-ui-hosts ""`) also overrides the environment, forcing
+`127.0.0.1` only for that launch. The desktop app accepts the same
+`--web-ui-hosts IP[,IP]` argument and forwards it to kollab.
 
 ### KOLLAB_ENGINE_URL
 

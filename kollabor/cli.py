@@ -601,7 +601,8 @@ Telegram bridge setup (run inside interactive mode):
         metavar="IP[,IP...]",
         help="With --web-ui: extra interface addresses to serve on, comma "
         "separated (LAN/VPN opt-in; localhost is always bound, and each "
-        "extra address prints an exposure warning)",
+        "extra address prints an exposure warning). Pass an empty value to "
+        "force localhost-only even when KOLLAB_WEBUI_HOSTS is set",
     )
     parser.add_argument(
         "--mcp-hub",
@@ -2711,9 +2712,11 @@ async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None)
     env = dict(os.environ)
     env["KOLLAB_ENGINE_URL"] = engine_url
     env["KOLLAB_WEBUI_PORT"] = str(webui_port)
-    if hosts:
+    if hosts is not None:
         # Explicit opt-in per invocation: the flag, not whatever the shell
-        # exports, decides whether the UI is served beyond this machine.
+        # exports, decides whether the UI is served beyond this machine. An
+        # explicitly EMPTY value means "localhost only": it must override the
+        # shell's KOLLAB_WEBUI_HOSTS, so absence and empty stay distinct.
         env["KOLLAB_WEBUI_HOSTS"] = hosts
     webui_proc = subprocess.Popen(
         [*py, "-c", "from kollabor_webui import main; main()"], env=env, **group_flags
