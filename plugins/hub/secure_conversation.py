@@ -230,66 +230,69 @@ class SecureConversationTransport:
         deadline = time.monotonic() + timeout
         # Only a call that held the session may discard it: one cancelled or
         # timed out while waiting for the lock leaves the holder's session alone.
-        held = False
+        # The discard runs inside the guard, while this call's lock is still
+        # the registered one; the guard retires the lock on its own way out.
         sent = False
-        request_lock: asyncio.Lock | None = None
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
                 async with self._request_guard(key) as request_lock:
-                    held = True
-                    state = await self._open_locked(peer_key, key, binding, deadline, request_lock)
-                    raw = _encode_frame({"v": 1, "method": method, "payload": payload})
-                    result = None
-                    chunks = [
-                        raw[offset : offset + MAX_SECURE_CHUNK_BYTES]
-                        for offset in range(0, len(raw), MAX_SECURE_CHUNK_BYTES)
-                    ]
-                    for index, chunk in enumerate(chunks):
-                        if before_send is not None:
-                            await before_send()
-                        packet = state.tls.send(chunk)
-                        sent = True
-                        state.last_used = time.monotonic()
-                        response = await self._send_packet(
-                            state,
-                            packet,
-                            deadline,
-                            certificate="",
-                            before_send=before_send,
-                        )
-                        if (
-                            self._request_locks.get(key) is not request_lock
-                            or self._outbound.get(key) is not state
-                        ):
+                    try:
+                        state = await self._open_locked(peer_key, key, binding, deadline, request_lock)
+                        raw = _encode_frame({"v": 1, "method": method, "payload": payload})
+                        result = None
+                        chunks = [
+                            raw[offset : offset + MAX_SECURE_CHUNK_BYTES]
+                            for offset in range(0, len(raw), MAX_SECURE_CHUNK_BYTES)
+                        ]
+                        for index, chunk in enumerate(chunks):
                             if before_send is not None:
-                                raise SendGuardRevoked("secure session was withdrawn")
-                            raise RelayError("secure session was superseded")
-                        received = self._receive_packets(state, response)
-                        if received is not None:
-                            if index != len(chunks) - 1 or result is not None:
-                                raise SecureSessionError(
-                                    "peer returned an early secure response"
-                                )
-                            result = received
-                    if result is None:
-                        raise SecureSessionError(
-                            "peer did not return a secure application response"
-                        )
-                    return result
+                                await before_send()
+                            packet = state.tls.send(chunk)
+                            sent = True
+                            state.last_used = time.monotonic()
+                            response = await self._send_packet(
+                                state,
+                                packet,
+                                deadline,
+                                certificate="",
+                                before_send=before_send,
+                            )
+                            if (
+                                self._request_locks.get(key) is not request_lock
+                                or self._outbound.get(key) is not state
+                            ):
+                                if before_send is not None:
+                                    raise SendGuardRevoked("secure session was withdrawn")
+                                raise RelayError("secure session was superseded")
+                            received = self._receive_packets(state, response)
+                            if received is not None:
+                                if index != len(chunks) - 1 or result is not None:
+                                    raise SecureSessionError(
+                                        "peer returned an early secure response"
+                                    )
+                                result = received
+                        if result is None:
+                            raise SecureSessionError(
+                                "peer did not return a secure application response"
+                            )
+                        return result
+                    except SendGuardRevoked:
+                        # Before the first data chunk, the held session is
+                        # still usable. A partial application frame requires
+                        # a fresh TLS session.
+                        if sent and self._request_locks.get(key) is request_lock:
+                            self._discard_outbound(key)
+                        raise
+                    except BaseException:
+                        if self._request_locks.get(key) is request_lock:
+                            self._discard_outbound(key)
+                        raise
         except SendGuardRevoked:
-            # Before the first data chunk, the held session is still usable.
-            # A partial application frame requires a fresh TLS session.
-            if held and sent and self._request_locks.get(key) is request_lock:
-                self._discard_outbound(key)
             raise
         except asyncio.CancelledError:
-            if held and self._request_locks.get(key) is request_lock:
-                self._discard_outbound(key)
             raise
         except Exception as exc:
-            if held and self._request_locks.get(key) is request_lock:
-                self._discard_outbound(key)
             if isinstance(exc, RelayError) and (
                 getattr(exc, "code", None) == "capacity"
                 or str(exc) == "pending application request capacity reached"
@@ -359,22 +362,22 @@ class SecureConversationTransport:
         key = binding
         deadline = time.monotonic() + timeout
         # Only a call that held the session may discard it: one cancelled or
-        # timed out while waiting for the lock leaves the holder's session alone.
-        held = False
-        request_lock: asyncio.Lock | None = None
+        # timed out while waiting for the lock leaves the holder's session
+        # alone. The discard runs inside the guard, while this call's lock is
+        # still the registered one; the guard retires the lock on its way out.
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
                 async with self._request_guard(key) as request_lock:
-                    held = True
-                    await self._open_locked(peer_key, key, binding, deadline, request_lock)
+                    try:
+                        await self._open_locked(peer_key, key, binding, deadline, request_lock)
+                    except BaseException:
+                        if self._request_locks.get(key) is request_lock:
+                            self._discard_outbound(key)
+                        raise
         except asyncio.CancelledError:
-            if held and self._request_locks.get(key) is request_lock:
-                self._discard_outbound(key)
             raise
         except Exception as exc:
-            if held and self._request_locks.get(key) is request_lock:
-                self._discard_outbound(key)
             if isinstance(exc, RelayError) and (
                 getattr(exc, "code", None) == "capacity"
                 or str(exc) == "pending application request capacity reached"
@@ -714,7 +717,11 @@ class SecureConversationTransport:
             self._clear_sessions()
         elif event.peer_key is not None:
             self._peer_guard_tokens.pop(event.peer_key, None)
-            self._discard_peer(event.peer_key)
+            # A revoke or session change invalidates the generation: work
+            # queued under the old one must not inherit its lock, or a
+            # re-approved peer's next request would queue behind the
+            # very request the revocation should have killed.
+            self._discard_peer(event.peer_key, trust_event=True)
 
     def _make_room(self, peer_key: str, *, inbound: bool) -> None:
         self._prune_expired()
@@ -773,7 +780,15 @@ class SecureConversationTransport:
             state.tls.close()
             state.receive_buffer.clear()
 
-    def _discard_peer(self, peer_key: str) -> None:
+    def _discard_peer(self, peer_key: str, *, trust_event: bool = False) -> None:
+        """Drop a peer's sessions and, per caller, their request locks.
+
+        Local capacity and idle cleanup keeps a lock that still has
+        callers or waiters so concurrent requests keep sharing it. A
+        trust event (revoke, re-approval, session change) drops the
+        lock outright: the old generation's queued work dies on the
+        lock-identity check instead of sending after the peer reset.
+        """
         for key in tuple(self._outbound):
             if key[0] == peer_key:
                 self._discard_outbound(key)
@@ -782,7 +797,11 @@ class SecureConversationTransport:
                 self._discard_inbound_key(key)
         for key in tuple(self._request_locks):
             if key[0] == peer_key:
-                self._discard_idle_request_lock(key)
+                if trust_event:
+                    self._request_lock_users.pop(key, None)
+                    self._request_locks.pop(key, None)
+                else:
+                    self._discard_idle_request_lock(key)
 
     def _clear_sessions(self) -> None:
         self._peer_guard_tokens.clear()

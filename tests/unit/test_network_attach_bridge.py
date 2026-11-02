@@ -234,9 +234,12 @@ async def test_withdrawal_fences_output_waiting_for_the_real_secure_session(
     assert await reader.readline() == b"agent here\n"
 
     peer = left.commands.client.public_key
-    binding = right.secure_transport._current_binding(peer)
-    lock = right.secure_transport._request_locks[binding]
-    await lock.acquire()
+    transport = right.secure_transport
+    binding = transport._current_binding(peer)
+    # Hold the binding through its own guard so the lock survives the
+    # idle-drop while we simulate a queued request behind it.
+    guard = transport._request_guard(binding)
+    lock = await guard.__aenter__()
     held = True
     recheck = None
     try:
@@ -258,14 +261,15 @@ async def test_withdrawal_fences_output_waiting_for_the_real_secure_session(
                 await asyncio.sleep(0.01)
             else:
                 pytest.fail("withdrawal did not close the channel")
-        lock.release()
+        await guard.__aexit__(None, None, None)
         held = False
         if recheck is not None:
             await asyncio.wait_for(recheck, 8)
         assert await asyncio.wait_for(reader.read(), 8) == b""
     finally:
         if held:
-            lock.release()
+            with contextlib.suppress(Exception):
+                await guard.__aexit__(None, None, None)
         if recheck is not None and not recheck.done():
             recheck.cancel()
         writer.close()
