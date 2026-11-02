@@ -197,13 +197,13 @@ class TerminalLLMChat:
             if not self._attach_socket:
                 # List available agents
                 available = []
-                from plugins.hub.presence import get_presence_dir, pid_alive
+                from plugins.hub.presence import _presence_files, get_presence_dir, pid_alive
 
                 presence_dir = get_presence_dir()
                 if presence_dir.exists():
                     import json as _j
 
-                    for f in presence_dir.glob("*.json"):
+                    for f in _presence_files(presence_dir):
                         try:
                             d = _j.loads(f.read_text())
                             pid = d.get("pid", 0)
@@ -1126,12 +1126,12 @@ class TerminalLLMChat:
         """
         import json as _json
 
-        from plugins.hub.presence import get_presence_dir, pid_alive
+        from plugins.hub.presence import _presence_files, get_presence_dir, pid_alive
 
         presence_dir = get_presence_dir()
         if not presence_dir.exists():
             return None
-        for f in presence_dir.glob("*.json"):
+        for f in _presence_files(presence_dir):
             try:
                 data = _json.loads(f.read_text())
                 if data.get("identity") == identity:

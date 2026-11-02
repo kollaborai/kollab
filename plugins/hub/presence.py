@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 import time
@@ -61,13 +62,12 @@ def _secure_socket_dir_windows(path: Path, *, create: bool) -> Path:
 
 
 def get_hub_dir() -> Path:
-    """Get the hub directory, creating if needed.
+    """Get the HOME-backed hub metadata directory, creating if needed.
 
-    By default, state siloes under
-    ~/.kollab/projects/<encoded>/hub/ so agents launched from
-    different repos stay invisible to each other. Setting
-    KOLLAB_HUB_PROJECT_SCOPED to an explicit false value uses the
-    legacy global directory at ~/.kollab/hub/.
+    By default, metadata is siloed under ~/.kollab/projects/<encoded>/hub/;
+    KOLLAB_HUB_PROJECT_SCOPED explicitly false selects ~/.kollab/hub/ instead.
+    On POSIX, live presence and sockets use the separate shared runtime root
+    under /tmp/kollabor-hub. Windows keeps presence in this per-user state tree.
     """
     from kollabor_config.config_utils import get_config_directory
 
@@ -82,10 +82,56 @@ def get_hub_dir() -> Path:
 
 
 def get_presence_dir() -> Path:
-    """Get the presence directory."""
-    d = get_hub_dir() / "presence"
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return d
+    """Get the current hub presence directory.
+
+    POSIX sockets and their presence records share the project-hashed runtime
+    directory, which is intentionally independent of HOME. Windows retains its
+    existing per-user state location.
+    """
+    if os.name == "nt":
+        directory = get_hub_dir() / "presence"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return directory
+    return secure_socket_dir(get_socket_dir())
+
+
+def _legacy_presence_dir() -> Optional[Path]:
+    """Return this HOME's pre-shared-root presence directory, if applicable."""
+    if os.name == "nt":
+        return None
+
+    from kollabor_config.config_utils import get_config_directory, get_project_data_dir
+
+    from .project_scope import is_project_scoped, resolve_project_root
+
+    if is_project_scoped():
+        base = get_project_data_dir(resolve_project_root())
+    else:
+        base = get_config_directory()
+    return base / "hub" / "presence"
+
+
+def _presence_directories(primary: Path) -> List[Path]:
+    """Current shared location first, then any same-HOME pre-upgrade records."""
+    directories = [primary]
+    legacy = _legacy_presence_dir()
+    if legacy is not None and legacy != primary and legacy.is_dir():
+        directories.append(legacy)
+    return directories
+
+
+def _presence_files(primary: Path):
+    """Yield JSON records, preferring the new shared location on name clashes."""
+    seen: set[str] = set()
+    for directory in _presence_directories(primary):
+        try:
+            for path in directory.glob("*.json"):
+                if path.name in seen:
+                    continue
+                seen.add(path.name)
+                yield path
+        except OSError:
+            continue
 
 
 def get_messages_dir() -> Path:
@@ -177,29 +223,100 @@ def stall_status(data: dict, *, now: Optional[float] = None, threshold: float = 
     return f"stalled (idle {int(idle_for // 60)}m with open task)"
 
 
+def _shared_socket_dirs() -> List[Path]:
+    """Private POSIX socket directories that may contain shared presence."""
+    if os.name == "nt":
+        return []
+
+    root = Path(SOCKET_DIR_ROOT)
+
+    def owned_private_directory(path: Path) -> bool:
+        try:
+            info = path.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.getuid()
+            and not stat.S_IMODE(info.st_mode) & 0o077
+        )
+
+    if not owned_private_directory(root):
+        return []
+
+    directories = [root]
+    try:
+        children = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return directories
+    for child in children:
+        if re.fullmatch(r"[0-9a-f]{12}", child.name) and owned_private_directory(child):
+            directories.append(child)
+    return directories
+
+
+def _logical_shared_hub_dir(
+    presence_dir: Path, data: dict, config_dir: Path
+) -> Path:
+    """Return the HOME-backed logical hub path for a shared presence record."""
+    if presence_dir == Path(SOCKET_DIR_ROOT):
+        return config_dir / "hub"
+
+    project = data.get("project")
+    if not isinstance(project, str) or not project:
+        return presence_dir
+
+    try:
+        from kollabor_config.config_utils import get_project_data_dir
+        from kollabor_config.hub_paths import hub_project_socket_key
+
+        project_path = Path(project)
+        if hub_project_socket_key(project_path) != presence_dir.name:
+            return presence_dir
+        return get_project_data_dir(project_path) / "hub"
+    except (OSError, TypeError, ValueError):
+        return presence_dir
+
+
 def live_agents_on_machine() -> List[tuple[Path, dict]]:
     """``(hub_dir, presence record)`` for every live agent on this machine.
 
-    Searches every project's hub dir and the global one, so a caller outside
-    an agent's project (an ssh session, say) still finds it. Read-only: no
-    directory is created. A record counts only while its pid is alive and its
-    endpoint exists and is a suitable local IPC endpoint.
+    Searches shared POSIX socket directories and this HOME's legacy project
+    and global dirs, so callers outside an agent's project still find it.
+    Read-only: no directory is created. A record counts only while its pid is
+    alive and its endpoint exists and is a suitable local IPC endpoint.
     """
     from kollabor_config.config_utils import get_config_directory
     from kollabor_config.local_ipc import is_local_endpoint
 
     base = get_config_directory()
+    shared_dirs = _shared_socket_dirs()
+    shared_dir_set = set(shared_dirs)
+    sources = [(directory, directory) for directory in shared_dirs]
+    sources.extend(
+        (hub_dir / "presence", hub_dir)
+        for hub_dir in [base / "hub", *sorted((base / "projects").glob("*/hub"))]
+    )
     found: List[tuple[Path, dict]] = []
-    for hub_dir in [base / "hub", *sorted((base / "projects").glob("*/hub"))]:
-        for pf in (hub_dir / "presence").glob("*.json"):
-            try:
-                data = json.loads(pf.read_text())
-                sock = Path(data.get("socket_path") or "")
-                live = sock.is_absolute() and is_local_endpoint(sock)
-                if live and pid_alive(data.get("pid", 0)):
-                    found.append((hub_dir, data))
-            except Exception:
-                continue
+    for presence_dir, hub_dir in sources:
+        try:
+            presence_files = presence_dir.glob("*.json")
+            for pf in presence_files:
+                try:
+                    data = json.loads(pf.read_text())
+                    sock = Path(data.get("socket_path") or "")
+                    live = sock.is_absolute() and is_local_endpoint(sock)
+                    if live and pid_alive(data.get("pid", 0)):
+                        reported_hub_dir = (
+                            _logical_shared_hub_dir(presence_dir, data, base)
+                            if presence_dir in shared_dir_set
+                            else hub_dir
+                        )
+                        found.append((reported_hub_dir, data))
+                except Exception:
+                    continue
+        except OSError:
+            continue
     return found
 
 
@@ -305,7 +422,7 @@ class PresenceManager:
         Both must pass - a recycled PID with a dead socket is stale.
         """
         agents = []
-        for f in self._presence_dir.glob("*.json"):
+        for f in _presence_files(self._presence_dir):
             if not include_self and f.stem == self.identity.agent_id:
                 continue
             try:
@@ -353,7 +470,7 @@ class PresenceManager:
         (prompt renderer, status widgets) get fresh data for free.
         """
         agents: List[AgentRuntime] = []
-        for f in self._presence_dir.glob("*.json"):
+        for f in _presence_files(self._presence_dir):
             if not include_self and f.stem == self.identity.agent_id:
                 continue
             try:
@@ -430,7 +547,7 @@ class PresenceManager:
         is responsible for cleanup after the operation.
         """
         agents = []
-        for f in self._presence_dir.glob("*.json"):
+        for f in _presence_files(self._presence_dir):
             if not include_self and f.stem == self.identity.agent_id:
                 continue
             try:
@@ -472,8 +589,8 @@ class PresenceManager:
         Public method for callers (like hub stop) that need to
         explicitly clean up an agent they know is dead.
         """
-        pf = self._presence_dir / f"{agent.agent_id}.json"
-        pf.unlink(missing_ok=True)
+        for directory in _presence_directories(self._presence_dir):
+            (directory / f"{agent.agent_id}.json").unlink(missing_ok=True)
         self._cleanup_agent_socket(agent)
 
     def get_agent_by_identity(self, identity: str) -> Optional[AgentRuntime]:
@@ -498,7 +615,7 @@ class PresenceManager:
         Returns count of dead presence files removed.
         """
         removed = 0
-        for f in self._presence_dir.glob("*.json"):
+        for f in _presence_files(self._presence_dir):
             try:
                 with open(f) as fh:
                     data = json.load(fh)
@@ -547,7 +664,7 @@ class PresenceManager:
         # Sockets can be named by agent_id OR identity, so we must
         # read the actual socket_path field from each presence file.
         live_socket_names: set[str] = set()
-        for pf in presence_dir.glob("*.json"):
+        for pf in _presence_files(presence_dir):
             try:
                 with open(pf) as fh:
                     data = json.load(fh)

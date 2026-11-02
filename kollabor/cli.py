@@ -1379,7 +1379,7 @@ async def _handle_cli_attach(identity: str) -> None:
 
     _apply_hub_project_scope_from_config()
 
-    from plugins.hub.presence import get_presence_dir
+    from plugins.hub.presence import _presence_files, get_presence_dir
 
     presence_dir = get_presence_dir()
 
@@ -1387,7 +1387,7 @@ async def _handle_cli_attach(identity: str) -> None:
     target_socket = None
     target_identity = None
 
-    for f in presence_dir.glob("*.json"):
+    for f in _presence_files(presence_dir):
         try:
             with open(f) as fh:
                 data = json.load(fh)
@@ -1414,7 +1414,7 @@ async def _handle_cli_attach(identity: str) -> None:
         print(f"no agent found with identity '{identity}'", file=sys.stderr)
 
         available = []
-        for f in presence_dir.glob("*.json"):
+        for f in _presence_files(presence_dir):
             try:
                 with open(f) as fh:
                     data = json.load(fh)
@@ -1533,9 +1533,11 @@ async def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
 
 
 def _cleanup_presence_for_pid(presence_dir: Path, pid: int) -> None:
+    from plugins.hub.presence import _presence_files
+
     if not pid:
         return
-    for f in presence_dir.glob("*.json"):
+    for f in _presence_files(presence_dir):
         try:
             with open(f) as fh:
                 d = json.load(fh)
@@ -1689,7 +1691,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
     _apply_hub_project_scope_from_config()
 
     from plugins.hub.messenger import AgentMessenger
-    from plugins.hub.presence import get_presence_dir
+    from plugins.hub.presence import _presence_files, get_presence_dir
 
     subcmd = hub_args[0].lower() if hub_args else "status"
     rest = hub_args[1:] if len(hub_args) > 1 else []
@@ -1722,7 +1724,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
         import time as _time
 
         agents = []
-        for f in presence_dir.glob("*.json"):
+        for f in _presence_files(presence_dir):
             try:
                 with open(f) as fh:
                     data = json.load(fh)

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -136,4 +137,143 @@ async def test_windows_presence_discovers_and_connects_to_real_local_ipc(
         assert presence.find_live_socket("ruby") == str(endpoint)
     finally:
         server.close()
+        project_scope.resolve_project_root.cache_clear()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX socket root is HOME-independent")
+def test_presence_discovery_is_independent_of_home_directory(monkeypatch, tmp_path):
+    from kollabor_agent.runtime import AgentRuntime
+    from kollabor_config.config_utils import get_project_data_dir
+    from plugins.hub import presence, project_scope
+    from plugins.hub.org_launcher import OrgLauncher
+
+    project = tmp_path / "workspace"
+    home_a = tmp_path / "home-a"
+    home_b = tmp_path / "home-b"
+    socket_root = Path(tempfile.mkdtemp(prefix="kh-670-", dir="/tmp"))
+    for directory in (project, home_a, home_b):
+        directory.mkdir()
+
+    monkeypatch.setenv("KOLLAB_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "1")
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", socket_root)
+    monkeypatch.setattr(Path, "home", lambda: home_a)
+    project_scope.resolve_project_root.cache_clear()
+
+    endpoint = presence.get_socket_dir() / "publisher.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(endpoint))
+    server.listen()
+    try:
+        publisher = AgentRuntime(
+            identity="publisher",
+            agent_id="publisher-id",
+            project=str(project),
+            socket_path=str(endpoint),
+        )
+        publisher_manager = presence.PresenceManager(publisher)
+        publisher_manager.publish()
+
+        monkeypatch.setattr(Path, "home", lambda: home_b)
+        reader = AgentRuntime(
+            identity="reader",
+            agent_id="reader-id",
+            project=str(project),
+            socket_path=str(endpoint.parent / "reader.sock"),
+        )
+        reader_manager = presence.PresenceManager(reader)
+
+        assert [agent.identity for agent in reader_manager.discover_agents()] == [
+            "publisher"
+        ]
+
+        monkeypatch.setattr(local_ipc, "is_local_endpoint", lambda path: Path(path).is_socket())
+        live_agents = presence.live_agents_on_machine()
+        assert [record["identity"] for _, record in live_agents] == ["publisher"]
+        expected_hub = get_project_data_dir(project) / "hub"
+        assert [hub_dir for hub_dir, _ in live_agents] == [expected_hub]
+        assert OrgLauncher(str(project))._online() == {"publisher"}
+
+        monkeypatch.setattr(hub_bridge, "hub_socket_root", lambda: socket_root)
+        assert [row["identity"] for row in hub_bridge.HubBridge().discover_sessions(use_cache=False)] == [
+            "publisher"
+        ]
+    finally:
+        server.close()
+        shutil.rmtree(socket_root, ignore_errors=True)
+        project_scope.resolve_project_root.cache_clear()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX presence uses the shared socket root")
+def test_global_shared_presence_reports_logical_hub_dir(monkeypatch, tmp_path):
+    from kollabor_agent.runtime import AgentRuntime
+    from kollabor_config.config_utils import get_config_directory
+    from plugins.hub import presence
+
+    project = tmp_path / "workspace"
+    home = tmp_path / "home"
+    project.mkdir()
+    home.mkdir()
+    socket_root = Path(tempfile.mkdtemp(prefix="kg-670-", dir="/tmp"))
+
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "0")
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", socket_root)
+
+    endpoint = presence.get_socket_dir() / "publisher.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(endpoint))
+    server.listen()
+    try:
+        publisher = AgentRuntime(
+            identity="publisher",
+            agent_id="publisher-id",
+            project=str(project),
+            socket_path=str(endpoint),
+        )
+        presence.PresenceManager(publisher).publish()
+        monkeypatch.setattr(
+            local_ipc, "is_local_endpoint", lambda path: Path(path).is_socket()
+        )
+
+        live_agents = presence.live_agents_on_machine()
+        assert [record["identity"] for _, record in live_agents] == ["publisher"]
+        assert [hub_dir for hub_dir, _ in live_agents] == [
+            get_config_directory() / "hub"
+        ]
+    finally:
+        server.close()
+        shutil.rmtree(socket_root, ignore_errors=True)
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="legacy POSIX presence lives under HOME"
+)
+def test_presence_files_include_current_home_legacy_directory(monkeypatch, tmp_path):
+    from plugins.hub import presence, project_scope
+
+    project = tmp_path / "workspace"
+    home = tmp_path / "home"
+    project.mkdir()
+    home.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("KOLLAB_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "1")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", tmp_path / "hub-sockets")
+    project_scope.resolve_project_root.cache_clear()
+
+    try:
+        legacy_dir = presence._legacy_presence_dir()
+        assert legacy_dir is not None
+        legacy_dir.mkdir(parents=True)
+        legacy_record = legacy_dir / "legacy-agent.json"
+        legacy_record.write_text(json.dumps({"identity": "legacy-agent"}))
+
+        shared_dir = presence.get_presence_dir()
+        assert shared_dir != legacy_dir
+        assert list(presence._presence_files(shared_dir)) == [legacy_record]
+    finally:
         project_scope.resolve_project_root.cache_clear()

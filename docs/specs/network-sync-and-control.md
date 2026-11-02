@@ -124,7 +124,9 @@ What option A still cannot stop, stated so nobody claims more:
 - `kollab service` agents come back by themselves: systemd `Restart=always`
   and launchd `KeepAlive: true` (`kollabor/service.py:81`, `:99`).
 - `presence.live_agents_on_machine()` (`plugins/hub/presence.py:128`) finds
-  every agent that wrote presence. Presence does not record argv, start mode,
+  every live agent that wrote presence. POSIX records share the HOME-independent
+  project-hashed socket directories; current-HOME paths remain a legacy fallback.
+  Presence does not record argv, start mode,
   loadout, `--as` or `KOLLAB_LAUNCH_BRIEF` (`kollabor_agent/runtime.py:624`);
   pipe runs and `KOLLAB_NO_HUB` runs write none.
 - `kollab_argv()` (`kollabor/binary.py:46` to `:51`) returns the binary or app

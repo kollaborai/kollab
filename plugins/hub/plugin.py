@@ -6801,46 +6801,44 @@ class HubPlugin(BasePlugin):
                 projects_root = config_root / "projects"
                 removed = 0
 
+                # POSIX presence lives beside sockets in the HOME-independent
+                # root. Keep scanning per-HOME locations for older live agents.
+                from .presence import _shared_socket_dirs
+
+                presence_dirs = _shared_socket_dirs()
                 if projects_root.exists():
-                    for presence_dir in projects_root.glob("*/hub/presence/*.json"):
-                        try:
-                            with open(presence_dir) as f:
-                                data = json.load(f)
-                            pid = data.get("pid", 0)
-                            if not pid:
-                                continue
+                    presence_dirs.extend(
+                        sorted(projects_root.glob("*/hub/presence"), key=lambda p: str(p))
+                    )
+                presence_dirs.append(config_root / "hub" / "presence")
 
-                            # Check if PID is alive
-                            if not pid_alive(pid):
-                                # PID is dead — remove presence file
-                                identity = data.get("identity", "?")
-                                presence_dir.unlink(missing_ok=True)
-                                removed += 1
-                                logger.info(
-                                    f"presence sweep: removed dead agent "
-                                    f"{identity} (pid {pid}) from "
-                                    f"{presence_dir.parent.parent.parent.name}"
-                                )
-                        except (json.JSONDecodeError, Exception) as e:
-                            logger.debug(
-                                f"presence sweep: bad file {presence_dir}: {e}"
-                            )
-
-                # Also sweep the legacy global hub dir
-                global_presence = config_root / "hub" / "presence"
-                if global_presence.exists():
-                    for pf in global_presence.glob("*.json"):
-                        try:
-                            with open(pf) as f:
-                                data = json.load(f)
-                            pid = data.get("pid", 0)
-                            if not pid:
+                seen_files: set[Path] = set()
+                for presence_dir in presence_dirs:
+                    try:
+                        files = presence_dir.glob("*.json")
+                        for pf in files:
+                            if pf in seen_files:
                                 continue
-                            if not pid_alive(pid):
-                                pf.unlink(missing_ok=True)
-                                removed += 1
-                        except Exception:
-                            pass
+                            seen_files.add(pf)
+                            try:
+                                with open(pf) as f:
+                                    data = json.load(f)
+                                pid = data.get("pid", 0)
+                                if not pid:
+                                    continue
+
+                                if not pid_alive(pid):
+                                    identity = data.get("identity", "?")
+                                    pf.unlink(missing_ok=True)
+                                    removed += 1
+                                    logger.info(
+                                        f"presence sweep: removed dead agent "
+                                        f"{identity} (pid {pid}) from {presence_dir.name}"
+                                    )
+                            except Exception as e:
+                                logger.debug(f"presence sweep: bad file {pf}: {e}")
+                    except OSError as e:
+                        logger.debug(f"presence sweep: cannot scan {presence_dir}: {e}")
 
                 if removed:
                     logger.info(

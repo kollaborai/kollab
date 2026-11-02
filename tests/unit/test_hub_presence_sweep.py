@@ -11,7 +11,9 @@ import sys
 from types import SimpleNamespace
 
 from kollabor_config import config_utils
+from kollabor_config.hub_paths import hub_project_socket_key
 from plugins.hub import plugin as hub_plugin
+from plugins.hub import presence
 
 
 def _presence(path, pid):
@@ -28,6 +30,16 @@ def test_sweep_removes_only_dead_agents(tmp_path, monkeypatch):
     live = [_presence(project / "lapis.json", os.getpid()), _presence(legacy / "ruby.json", os.getpid())]
     no_pid = _presence(project / "unknown.json", 0)  # the sweep cannot tell, so it keeps the file
     dead = [_presence(project / "peridot.json", exited.pid), _presence(legacy / "pearl.json", exited.pid)]
+
+    socket_root = tmp_path / "socket-root"
+    socket_root.mkdir(mode=0o700)
+    workspace = tmp_path / "shared-workspace"
+    workspace.mkdir()
+    shared = socket_root / hub_project_socket_key(workspace)
+    shared.mkdir(mode=0o700)
+    shared_live = _presence(shared / "shared-live.json", os.getpid())
+    shared_dead = _presence(shared / "shared-dead.json", exited.pid)
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", socket_root)
     passes = []
 
     async def one_pass(seconds):
@@ -40,5 +52,5 @@ def test_sweep_removes_only_dead_agents(tmp_path, monkeypatch):
     asyncio.run(hub_plugin.HubPlugin._presence_sweep_loop(SimpleNamespace(_task_ledger=None)))
 
     assert len(passes) == 2  # one full pass ran
-    assert all(path.exists() for path in [*live, no_pid])
-    assert not any(path.exists() for path in dead)
+    assert all(path.exists() for path in [*live, no_pid, shared_live])
+    assert not any(path.exists() for path in [*dead, shared_dead])

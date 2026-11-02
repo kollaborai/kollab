@@ -314,3 +314,56 @@ def test_cli_status_not_connected_when_no_local_agents_online(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "no agents online" in out
     assert "network: not connected" in out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX presence root is HOME-independent")
+def test_cli_status_and_capture_find_presence_after_home_changes(
+    monkeypatch, tmp_path, capsys
+):
+    from plugins.hub import presence, project_scope
+
+    project = tmp_path / "workspace"
+    home_a = tmp_path / "home-a"
+    home_b = tmp_path / "home-b"
+    socket_root = tmp_path / "hub-sockets"
+    for directory in (project, home_a, home_b):
+        directory.mkdir()
+
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("KOLLAB_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "1")
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", socket_root)
+    monkeypatch.setattr(Path, "home", lambda: home_a)
+    project_scope.resolve_project_root.cache_clear()
+
+    try:
+        published_dir = presence.get_presence_dir()
+        _presence(published_dir, "publisher", is_coordinator=True)
+
+        monkeypatch.setattr(Path, "home", lambda: home_b)
+        assert presence.get_presence_dir() == published_dir
+
+        request_network_status = AsyncMock(return_value=None)
+        with patch(
+            "plugins.hub.messenger.AgentMessenger.request_network_status",
+            request_network_status,
+        ):
+            asyncio.run(_handle_cli_hub(["status"]))
+        request_network_status.assert_awaited_once_with(
+            str(published_dir / "publisher.sock")
+        )
+        assert "1 agent(s) online" in capsys.readouterr().out
+
+        request_capture = AsyncMock(return_value=({}, None))
+        with patch(
+            "plugins.hub.messenger.AgentMessenger.request_capture", request_capture
+        ):
+            asyncio.run(_handle_cli_hub(["capture", "publisher"]))
+        request_capture.assert_awaited_once_with(
+            str(published_dir / "publisher.sock"),
+            lines=50,
+            capture_format="json",
+            max_chars=10_000,
+        )
+    finally:
+        project_scope.resolve_project_root.cache_clear()
