@@ -376,3 +376,131 @@ def test_unknown_mode_rejected(tree):
 def test_missing_projects_root_is_noop(tmp_path):
     plan, report = run_projects_sweep(tmp_path / "absent", mode="execute")
     assert plan.decisions == [] and report == []
+
+
+# ---------------------------------------------------------------------------
+# Garnet review round: scan failures, resurrect provenance, trash
+# containment, dry-run purge preview.
+
+
+def _sealed_scandir(monkeypatch, marker):
+    """Make os.scandir raise PermissionError for exactly ``marker``."""
+    import kollabor_config.projects_sweep as sweep_module
+
+    real_scandir = sweep_module.os.scandir
+
+    def sealed(path, *args, **kwargs):
+        if str(path) == str(marker):
+            raise PermissionError(13, "simulated denied scan")
+        return real_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(sweep_module.os, "scandir", sealed)
+
+
+def _quarantine_and_age(root, slug, days=20):
+    """Quarantine an orphan on boot, then age its trash record past retention."""
+    _orphan(root, slug)
+    run_projects_sweep(root, mode="boot")
+    trash_entry = root / TRASH_DIR_NAME / slug
+    assert trash_entry.is_dir()
+    meta = json.loads((root / TRASH_DIR_NAME / TRASH_META_FILE).read_text())
+    meta[slug]["moved_at"] = time.time() - days * 86400
+    (root / TRASH_DIR_NAME / TRASH_META_FILE).write_text(json.dumps(meta))
+    return trash_entry
+
+
+def test_unreadable_branch_is_ambiguous_never_orphan(tree, monkeypatch):
+    """A PermissionError during the provenance walk is a search GAP.
+
+    An unreadable branch is not evidence of absence: marking the entry
+    orphan would quarantine a workspace the sweep never got to examine.
+    Inconclusive must read ambiguous (report-only) instead.
+    """
+    root, workspaces = tree
+    base = workspaces / "sealed"
+    base.mkdir()
+    slug = encode_project_path(base) + "_inner_notes"
+    entry = _orphan(root, slug)
+    _sealed_scandir(monkeypatch, base)
+    plan, _ = run_projects_sweep(root, mode="execute", active_window_hours=0)
+    assert {d.name: d.category for d in plan.decisions}[slug] == "ambiguous"
+    assert entry.is_dir(), "an unreadable branch must never be quarantined"
+
+
+def test_purge_rechecks_provenance_for_lossy_recreation(tree):
+    """A same-slug workspace recreated at a different lossy path is live.
+
+    The trash record's decoded hint names only ONE reading of the slug;
+    the resurrect guard must rerun the full provenance search for the
+    slug before purging, not just check the hint path.
+    """
+    root, workspaces = tree
+    base = workspaces / "carter"
+    slug = encode_project_path(base) + "_marcoverse_notes"
+    trash_entry = _quarantine_and_age(root, slug)
+    # The user recreated the workspace while the copy sat in quarantine,
+    # using a literal-underscore name (a different lossy reading).
+    recreated = base / "marcoverse_notes"
+    recreated.mkdir(parents=True)
+    run_projects_sweep(root, mode="execute")
+    assert trash_entry.is_dir(), (
+        "a recreated same-slug workspace must keep its quarantine copy"
+    )
+
+
+def test_purge_keeps_copy_when_provenance_is_inconclusive(tree, monkeypatch):
+    """Inconclusive provenance at purge time retains the copy."""
+    root, workspaces = tree
+    base = workspaces / "sealed_purge"
+    base.mkdir()
+    slug = encode_project_path(base) + "_inner_notes"
+    trash_entry = _quarantine_and_age(root, slug)
+    _sealed_scandir(monkeypatch, base)
+    plan, _ = run_projects_sweep(root, mode="execute")
+    assert plan.purges == []
+    assert trash_entry.is_dir(), "inconclusive provenance must retain the copy"
+
+
+def test_symlinked_trash_root_refuses_quarantine(tree, tmp_path):
+    """A symlinked trash root must not receive quarantine moves."""
+    root, _ = tree
+    external = tmp_path / "external-vault"
+    external.mkdir()
+    (root / TRASH_DIR_NAME).symlink_to(external)
+    orphan = _orphan(root, "private_tmp_sealed-lane")
+    plan, report = run_projects_sweep(root, mode="execute", active_window_hours=0)
+    assert orphan.is_dir(), (
+        "a symlinked trash root must not receive quarantine moves"
+    )
+    assert not (external / "private_tmp_sealed-lane").exists()
+    assert any("FAILED to quarantine" in line for line in report)
+
+
+def test_symlinked_trash_root_never_purges(tree):
+    """Execute must not rmtree through a symlinked trash root."""
+    root, _ = tree
+    slug = "private_tmp_legacy-lane"
+    _quarantine_and_age(root, slug)
+    external = root.parent / "external-trash"
+    trash_dir = root / TRASH_DIR_NAME
+    external.mkdir()
+    for child in trash_dir.iterdir():
+        os.rename(child, external / child.name)
+    trash_dir.rmdir()
+    trash_dir.symlink_to(external)
+    plan, report = run_projects_sweep(root, mode="execute")
+    assert plan.purges == [], "a symlinked trash root must not plan purges"
+    assert (external / slug).is_dir(), (
+        "execute must not rmtree through a symlinked trash root"
+    )
+
+
+def test_dry_run_previews_pending_purges(tree):
+    """Dry-run lists would-purge rows instead of pretending there is no plan."""
+    root, _ = tree
+    slug = "private_tmp_preview-lane"
+    trash_entry = _quarantine_and_age(root, slug)
+    plan, report = run_projects_sweep(root, mode="dry-run")
+    assert plan.purges, "aged entry must be planned for purge"
+    assert any(f"would purge trash/{slug}" in line for line in report)
+    assert trash_entry.is_dir(), "dry-run must not purge"

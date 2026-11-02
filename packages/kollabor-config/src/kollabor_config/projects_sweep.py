@@ -212,6 +212,10 @@ def _dfs_slug_match(start: Path, slug: str) -> tuple[bool, bool]:
             with os.scandir(node) as entries:
                 children = [Path(e.path) for e in entries if e.is_dir(follow_symlinks=True)]
         except OSError:
+            # An unreadable branch is a gap in the search, not proof of
+            # absence: report inconclusive so the entry is treated as
+            # ambiguous (report-only) instead of a false orphan.
+            exhausted = True
             return
         for child in children:
             # A symlinked directory must compare under its link path:
@@ -282,7 +286,7 @@ def _provenance_is_live(
     if found:
         return True, "live workspace found under ancestor search"
     if exhausted:
-        return False, f"ambiguous encoding (search budget exceeded under {start})"
+        return False, f"ambiguous encoding (search inconclusive under {start})"
     return False, "no live workspace maps to this slug"
 
 
@@ -345,7 +349,28 @@ def _save_trash_meta(trash_dir: Path, meta: dict) -> None:
     )
 
 
+def _trash_escapes(projects_root: Path, trash_dir: Path) -> bool:
+    """True when trash exists but sits outside ``projects_root``.
+
+    A symlinked or escaped trash root would let ``os.rename`` or
+    ``shutil.rmtree`` reach a directory outside the projects root; the
+    sweep refuses to move into or purge from one. A trash root that does
+    not exist yet is not an escape: creating it lands inside the root.
+    """
+    if trash_dir.is_symlink():
+        return True
+    if not trash_dir.exists():
+        return False
+    try:
+        root_real = os.path.realpath(projects_root)
+        trash_real = os.path.realpath(trash_dir)
+    except OSError:
+        return True
+    return not trash_real.startswith(root_real + os.sep)
+
+
 def _plan_trash_purges(
+    projects_root: Path,
     trash_dir: Path,
     *,
     now: float,
@@ -354,15 +379,20 @@ def _plan_trash_purges(
     """Trash entries old enough to purge, minus the resurrect guard.
 
     An entry is purgeable only when its recorded quarantine age exceeds the
-    retention window AND its recorded source path is still missing. Entries
-    without recorded metadata are never purged automatically.
+    retention window AND full provenance for the original slug finds no
+    live workspace at ANY lossy reading of it (an inconclusive search
+    retains the copy). Entries without recorded metadata are never purged
+    automatically. A symlinked or escaped trash root plans nothing.
     """
     purges: list[tuple[str, Path, float]] = []
-    if not trash_dir.is_dir():
+    if trash_dir.is_symlink() or not trash_dir.is_dir() or _trash_escapes(
+        projects_root, trash_dir
+    ):
         return purges
     meta = _load_trash_meta(trash_dir)
     for child in sorted(trash_dir.iterdir()):
-        if not child.is_dir() or child.name == TRASH_META_FILE:
+        if child.is_symlink() or not child.is_dir() or child.name == TRASH_META_FILE:
+            # A symlinked child cannot be rmtree'd safely; never plan it.
             continue
         record = meta.get(child.name)
         if not isinstance(record, dict):
@@ -378,6 +408,18 @@ def _plan_trash_purges(
         if decoded_path.exists() or _tmp_variant_exists(decoded_path):
             # The workspace came back; hand its state back by keeping the copy.
             continue
+        # The decoded hint names only one lossy reading of the slug. The
+        # workspace may have been recreated under a different reading, so
+        # rerun the full provenance search for the original slug before
+        # destroying the copy; an inconclusive search retains it.
+        slug = record.get("original_name")
+        if isinstance(slug, str) and slug:
+            try:
+                live, evidence = _provenance_is_live(slug, decoded_path, child)
+            except OSError:
+                live, evidence = False, "ambiguous encoding (unreadable provenance check)"
+            if live or evidence.startswith("ambiguous"):
+                continue
         purges.append((child.name, child, age / 86400))
     return purges
 
@@ -417,6 +459,7 @@ def build_sweep_plan(
             plan.empty_shells.append(decision)
 
     plan.purges = _plan_trash_purges(
+        projects_root,
         projects_root / TRASH_DIR_NAME,
         now=now,
         retention_seconds=retention_days * 86400,
@@ -458,6 +501,7 @@ def apply_sweep_plan(
         raise ValueError(f"unknown sweep mode: {mode}")
     report: list[str] = []
     trash_dir = projects_root / TRASH_DIR_NAME
+    trash_escapes = _trash_escapes(projects_root, trash_dir)
     moved = 0
     removed_shells = 0
     purged = 0
@@ -468,6 +512,12 @@ def apply_sweep_plan(
             report.append(
                 f"would quarantine {decision.name} "
                 f"({_human_size(decision.size_bytes)}) - {decision.reason}"
+            )
+            continue
+        if trash_escapes:
+            report.append(
+                f"FAILED to quarantine {decision.name}: trash root is a "
+                "symlink or outside the projects root; entry left in place"
             )
             continue
         try:
@@ -496,8 +546,20 @@ def apply_sweep_plan(
         removed_shells += 1
         report.append(f"removed empty shell {decision.name}")
 
-    if mode == "execute":
+    if mode in {"dry-run", "execute"}:
         for name, path, age_days in plan.purges:
+            if mode == "dry-run":
+                report.append(
+                    f"would purge trash/{name} after {age_days:.0f}d "
+                    f"({_human_size(_path_size(path))}, source still absent)"
+                )
+                continue
+            if trash_escapes:
+                report.append(
+                    f"FAILED to purge trash/{name}: trash root is a symlink "
+                    "or outside the projects root; entry left in place"
+                )
+                continue
             size = _path_size(path)
             try:
                 shutil.rmtree(path)
