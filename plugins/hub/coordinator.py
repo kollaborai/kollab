@@ -3,8 +3,10 @@
 import json
 import logging
 import os
+import re
+import subprocess
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from kollabor_agent.runtime import AgentRuntime
 from kollabor_config.file_lock import try_lock, unlock
@@ -14,6 +16,56 @@ from .presence import _atomic_write, get_hub_dir, pid_alive
 from .rosters import roster_names
 
 logger = logging.getLogger(__name__)
+
+# --- Work-queue boot sweep (issue #640) ---
+# The persisted work queue never removed entries whose upstream work had
+# landed, so slots referencing merged PRs / closed issues kept looking
+# actionable across restarts. Issue/PR references are embedded in the slot
+# text ("fix the #219 wave"), not stored as structured fields.
+UPSTREAM_REF_RE = re.compile(r"#(\d+)\b")
+DEFAULT_UPSTREAM_REPO = "kollaborai/kollab"
+# Bounds boot-time upstream verification: at most this many distinct numbers
+# are checked per sweep, each with a short timeout. Unchecked numbers are
+# treated as unknown and their slots are kept (fail-open).
+MAX_UPSTREAM_CHECKS = 20
+UPSTREAM_CHECK_TIMEOUT_SECS = 5.0
+
+
+def github_upstream_check(
+    repo: str = DEFAULT_UPSTREAM_REPO,
+) -> Callable[[int], Optional[str]]:
+    """Build an upstream state checker backed by the ``gh`` CLI.
+
+    Maps an issue/PR number to ``"open"`` or ``"closed"``. A merged PR and
+    a closed-unmerged PR both report ``closed`` through the issues API:
+    either way the queue entry's work is no longer live. Returns ``None``
+    when the state cannot be determined (gh missing, unauthenticated,
+    network error, timeout, unexpected output) — callers must treat
+    ``None`` as "unknown" and fail open by keeping the slot.
+    """
+
+    def check(number: int) -> Optional[str]:
+        try:
+            proc = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo}/issues/{number}",
+                    "--jq",
+                    ".state",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=UPSTREAM_CHECK_TIMEOUT_SECS,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
+            return None
+        state = (proc.stdout or "").strip()
+        return state if state in ("open", "closed") else None
+
+    return check
 
 
 class CoordinatorElection:
@@ -314,3 +366,88 @@ class WorkQueue:
 
     def get_all(self) -> List[WorkSlot]:
         return self._load()
+
+    def sweep(
+        self,
+        upstream_check: Optional[Callable[[int], Optional[str]]] = None,
+        max_checks: int = MAX_UPSTREAM_CHECKS,
+    ) -> List[Tuple[WorkSlot, str]]:
+        """Retire dead work slots; returns ``[(slot, reason)]``.
+
+        Boot-time reconciliation (issue #640): the persisted queue never
+        removed items whose upstream work had landed, so entries kept
+        looking actionable across restarts. Retirement rules:
+
+        - ``completed`` slots are dead weight and are always retired.
+        - ``pending`` slots are retired when at least one ``#N`` reference
+          in task/context resolves upstream and every reference resolves to
+          a closed issue/PR (merged or closed work is no longer live).
+          Unknown or failed checks keep the slot: the sweep fails open.
+        - ``assigned`` slots are live work and are never touched here;
+          ``requeue_orphans`` owns their lifecycle.
+
+        Each retired slot is logged with its reason. The queue file is
+        rewritten only when something retires. Pass ``upstream_check`` to
+        override the default ``gh``-backed checker (tests inject fakes).
+        """
+        slots = self._load()
+        if not slots:
+            return []
+        if upstream_check is None:
+            upstream_check = github_upstream_check()
+
+        retired: List[Tuple[WorkSlot, str]] = []
+        keep: List[WorkSlot] = []
+        states: Dict[int, Optional[str]] = {}
+        budget = max(0, int(max_checks))
+
+        for slot in slots:
+            reason: Optional[str] = None
+            if slot.status == "completed":
+                reason = "terminal slot (completed)"
+            elif slot.status == "pending":
+                refs = sorted(
+                    {
+                        int(match)
+                        for match in UPSTREAM_REF_RE.findall(
+                            f"{slot.task} {slot.context}"
+                        )
+                    }
+                )
+                if refs:
+                    resolved: List[Optional[str]] = []
+                    for number in refs:
+                        if number not in states:
+                            if budget > 0:
+                                budget -= 1
+                                try:
+                                    states[number] = upstream_check(number)
+                                except Exception as e:
+                                    logger.debug(
+                                        "Upstream check for #%d failed: %s",
+                                        number,
+                                        e,
+                                    )
+                                    states[number] = None
+                            else:
+                                # Budget exhausted: treat as unknown,
+                                # fail open, keep the slot.
+                                states[number] = None
+                        resolved.append(states[number])
+                    if resolved and all(state == "closed" for state in resolved):
+                        reason = "upstream closed/merged: " + ", ".join(
+                            f"#{number}" for number in refs
+                        )
+            if reason:
+                retired.append((slot, reason))
+            else:
+                keep.append(slot)
+
+        if retired:
+            self._save(keep)
+            for slot, why in retired:
+                logger.info("Swept work slot %s (%s): %s", slot.id, slot.status, why)
+            logger.info(
+                "Work queue sweep: retired %d of %d slot(s)", len(retired), len(slots)
+            )
+        return retired

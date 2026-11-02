@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The hub coordinator now sweeps the persisted work queue at boot: completed slots and pending entries whose referenced issues/PRs are all closed are retired with a log line each, instead of piling up across restarts; unknown upstream states keep the slot (#640).
 - The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
 
 ### Added

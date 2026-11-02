@@ -5194,6 +5194,16 @@ class HubPlugin(BasePlugin):
             )
             self._identity.is_coordinator = is_coordinator
 
+            # Issue #640: reconcile the persisted work queue against
+            # upstream at boot — completed slots and pending entries whose
+            # referenced issues/PRs have closed are retired with a log
+            # line each. The sweep fails open; it never blocks hub start.
+            if is_coordinator and self._work_queue:
+                try:
+                    self._work_queue.sweep()
+                except Exception as e:
+                    logger.warning("Boot work-queue sweep failed: %s", e)
+
             # Discover existing agents to get taken identities (solo ones
             # too: their sockets are named by identity)
             existing = self._presence.discover_agents(include_solo=True)
