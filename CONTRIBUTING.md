@@ -83,6 +83,13 @@ regular local branch when no other writer shares that checkout.
    Record reviewer identity and exact reviewed SHA in private maintainer audit
    evidence. Keep the GitHub approval plain, with no AI attribution or footer.
    GitHub prohibits author self-approval.
+   After the code-owner gate is enabled, every path is covered by
+   `.github/CODEOWNERS`: an external contributor needs approval from
+   `@maarco` or `@kollaborai`, and a PR authored under either account needs
+   approval from the other. GitHub enforces the account approval, not whether
+   an independent AI performed the review; record AI reviewer identity and the
+   exact head in private audit evidence. The maintainer bootstrap sequence is
+   in `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`.
    A new head requires fresh review and CI.
 7. The designated integrator lands authorized PRs as `kollaborai` with merge
    commits after verifying that identity cannot bypass applicable protection.

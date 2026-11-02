@@ -76,6 +76,10 @@ Keep the PR draft while any required evidence or work is outstanding.
   and exact reviewed SHA in private maintainer audit evidence. Keep the GitHub
   approval plain, with no AI attribution or footer. GitHub prohibits author
   self-approval. Required CI must pass.
+  After the code-owner gate is enabled, external PRs need approval from
+  `@maarco` or `@kollaborai`; a PR authored under either account needs the
+  other account's approval. GitHub does not verify the independent AI review,
+  which stays in private exact-head audit evidence.
   Every merge uses `kollaborai` with a merge commit; never use `--admin` or a
   ruleset bypass. Work outside the plan needs new authorization, and release
   tags need separate explicit maintainer instruction.

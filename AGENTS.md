@@ -50,6 +50,13 @@ ruleset bypass. Verify that identity cannot bypass applicable protection and
 stop if identity, bypass status, or gate evidence is uncertain. An emergency
 ruleset change requires separate explicit authorization. Writers never review
 their own changes.
+After the code-owner gate is bootstrapped, every path including
+`.github/CODEOWNERS` is owned by `@maarco` and `@kollaborai`; external PRs need
+one of those accounts to approve, and PRs authored by either account need the
+other account's approval. GitHub enforces the owner-account approval, not the
+independence or identity of the AI reviewer; record that separately in private
+audit evidence. Follow the exact bootstrap sequence in
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md` before enabling the live rule.
 Anything outside the plan needs new authorization; release tags require
 separate explicit instruction. If local and remote state diverge, stop and
 report exact SHAs and PR state; never reset or force-push.

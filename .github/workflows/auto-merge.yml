@@ -1,10 +1,10 @@
 name: Auto-merge
 
-# Automatic arming is disabled: the host requires one approval but cannot prove
-# that a separate AI agent reviewed the exact final head. The integrator merges
-# as kollaborai with a merge commit after the documented gates, using
-# --match-head-commit and no admin or ruleset bypass. Reintroduce
-# automatic arming only when the host enforces the complete review requirement.
+# Automatic arming is disabled. After CODEOWNERS bootstrap the host requires
+# one owner approval, but it cannot prove that a separate AI agent reviewed the
+# exact final head. Keep that review in private audit evidence; the integrator
+# merges as kollaborai with a merge commit after the documented gates, using
+# --match-head-commit and no admin or ruleset bypass.
 # This workflow deliberately has no PR trigger and no write permissions.
 
 on:

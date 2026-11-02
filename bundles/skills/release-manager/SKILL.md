@@ -175,8 +175,13 @@ keep the GitHub approval plain, with no AI attribution or footer. GitHub
 prohibits author self-approval. Required CI,
 resolved conversations, and current-base gates must also pass. The integrator
 merges as `kollaborai` with a merge commit; never use `--admin` or a ruleset
-bypass. Verify live policy, then fast-forward the integration checkout and
-confirm local `main` equals `origin/main` at the release merge SHA. Run the
+bypass. After the code-owner gate is enabled, one of `@maarco` or
+`@kollaborai` must approve; the other account approves a PR authored under one
+of them. GitHub records the approving account but cannot verify the independent
+AI review, which stays in private exact-head audit evidence. Verify live policy
+using the bootstrap sequence in `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`, then
+fast-forward the integration checkout and confirm local `main` equals
+`origin/main` at the release merge SHA. Run the
 release build and checks from that exact merged source; any pre-merge or
 writer-branch build is rehearsal only.
 

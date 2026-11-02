@@ -77,9 +77,15 @@ author self-approval. A new head needs fresh review and CI. Every merge uses
 `kollaborai` with a merge commit; never use
 `--admin` or a ruleset bypass. Verify the active identity cannot bypass
 protection and stop if identity, bypass status, or gate evidence is uncertain.
-Ruleset changes require separate explicit authorization. No extra permission
-request is needed for listed steps. Work outside the plan needs new
-authorization, and release tags always require separate explicit instruction.
+After code-owner enforcement is enabled, every path including
+`.github/CODEOWNERS` requires approval from either `@maarco` or `@kollaborai`;
+the other account must approve a PR authored under one of them. GitHub enforces
+the account approval, not independent AI-review identity, which belongs in
+private exact-head audit evidence. Follow the bootstrap sequence in
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`. Ruleset changes require separate explicit
+authorization. No extra permission request is needed for listed steps. Work
+outside the plan needs new authorization, and release tags always require
+separate explicit instruction.
 The integrator owns post-merge fast-forward synchronization; divergence is
 reported with exact local, remote, and PR SHAs.
 

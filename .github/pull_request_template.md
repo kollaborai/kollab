@@ -98,6 +98,10 @@ in `docs/product-ready-checklist.md`.
   Record reviewer identity and exact reviewed SHA in private maintainer audit
   evidence. Keep the GitHub approval plain, with no AI attribution or footer.
   GitHub prohibits author self-approval.
+  Once the code-owner gate is enabled, an external PR needs approval from
+  `@maarco` or `@kollaborai`; a PR authored by either account needs approval
+  from the other. GitHub enforces the owner-account approval, while separate
+  AI reviewer identity and exact-head evidence stay in the private audit.
   Every merge uses `kollaborai` with a merge commit; never use `--admin` or a
   ruleset bypass. Work outside the plan needs new authorization, and release
   tags need separate explicit maintainer instruction.

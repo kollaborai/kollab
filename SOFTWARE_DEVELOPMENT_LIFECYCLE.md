@@ -28,6 +28,10 @@ here for detail.
   different AI agent must review every PR's exact final head
   and record the required GitHub approval with whichever account, `kollaborai`
   or `maarco`, is not the PR author. GitHub prohibits author self-approval.
+  Once the code-owner gate is enabled, that approval must also come from one
+  of the two repository code owners. GitHub verifies the approving account,
+  not which agent performed the review; keep independent reviewer identity and
+  exact SHA in private maintainer audit evidence.
   Record reviewer identity and exact reviewed SHA in private maintainer audit
   evidence. Keep the GitHub approval plain, with no AI attribution or footer.
   Every merge is performed as `kollaborai` with a merge commit; no `--admin`
@@ -148,19 +152,45 @@ commit and no admin or ruleset bypass. Work outside the authorized scope require
 decision. This authority does not cover release tags, which require Marco's
 separate explicit instruction.
 
+## Code-owner approval and bootstrap
+
+`.github/CODEOWNERS` assigns every path and the CODEOWNERS file itself to
+`@maarco` and `@kollaborai`. With one required approval and code-owner review
+enabled, either owner can satisfy the owner approval. After activation, a PR
+from an external contributor needs approval from one of those accounts; a PR
+authored as either account needs approval from the other because GitHub
+prohibits author self-approval. The separately assigned AI review and its
+exact-head identity record remain mandatory in private audit evidence; GitHub
+enforces the required owner-account approval, not the identity or
+independence of the AI reviewer.
+
+Bootstrap this rule without locking `main`: first merge the PR that adds the
+exact `.github/CODEOWNERS` file under the existing approval, strict CI,
+conversation-resolution, and merge-only gates. Only after that file is present
+on `main`, use the repository owner account `kollaborai` to run
+`.github/scripts/setup-branch-protection.sh`. The script refuses to apply or
+report success unless the remote `main` file has the expected all-path and
+self-protecting owners and both accounts retain repository write access. Then
+run `.github/scripts/setup-branch-protection.sh --check` as an identity with
+ruleset write access and verify that `require_code_owner_review` is enabled,
+one approval and the existing checks remain required, and bypass actors are
+empty. Until that readback passes, treat code-owner enforcement as pending.
+
 ## Pull request gates
 
 Writers ALWAYS open PRs as drafts and do not mark their own PRs ready. The
 designated integrator marks ready only for covered work after independent
-review and exact-head gates. Automatic arming is disabled until an enforceable
-independent exact-head review gate exists. Do not arm GitHub auto-merge manually.
+review and exact-head gates. Automatic arming remains disabled because the
+ruleset cannot verify the independent AI review; the separate exact-head audit
+remains required. Do not arm GitHub auto-merge manually.
 
 A PR must be current with `main`, have the required approval, all configured
-checks green, and all review conversations resolved. The active `main` ruleset
-requires one approving review, dismisses stale approvals on push, does not
-require approval from someone other than the last pusher, and enforces strict
-current-base status, resolved threads, and only the `merge` method. Its required
-checks are `ci/tests`, `ci/standards-check`, and `ci/security-scan`. The
+checks green, and all review conversations resolved. After the bootstrap above,
+the `main` ruleset requires one approving code-owner review, dismisses stale
+approvals on push, does not require approval from someone other than the last
+pusher, and enforces strict current-base status, resolved threads, and only the
+`merge` method. Its required checks are `ci/tests`, `ci/standards-check`, and
+`ci/security-scan`. The
 `kollaborai` owner readback showed an empty bypass list and
 `current_user_can_bypass=never`. Repository auto-merge is off. Run
 `.github/scripts/setup-branch-protection.sh --check` with an identity that has

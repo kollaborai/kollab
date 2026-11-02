@@ -57,6 +57,12 @@ not require a separate human approval; other GitHub comments and mutations still
 batch-approval table. The authorized merge action is limited to covered PRs;
 every merge uses `kollaborai` with a merge commit, never through `--admin` or a
 ruleset bypass.
+After the code-owner gate is enabled, `.github/CODEOWNERS` covers every path
+and is self-protected; either `@maarco` or `@kollaborai` must approve. The other
+account approves a PR authored under one of them. GitHub enforces the account
+approval but cannot verify independent AI-review identity; retain that
+evidence privately with the reviewed head. Follow the bootstrap sequence in
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md` before applying the live rule.
 
 ## 2. Dry-run plan format
 

@@ -1,5 +1,6 @@
 """The review gate must not be bypassed by automatic merge arming."""
 
+import base64
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+CODEOWNERS_BODY = "* @maarco @kollaborai\n/.github/CODEOWNERS @maarco @kollaborai\n"
 
 
 def _workflow(name):
@@ -64,17 +66,23 @@ def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path):
     gh = fakebin / "gh"
     gh.write_text(
         f"#!{sys.executable}\n"
-        "import json, os, sys\n"
+        "import json, os, pathlib, sys\n"
         "args = sys.argv[1:]\n"
         "with open(os.environ['FAKE_GH_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')\n"
         "if args[:2] == ['auth', 'status']:\n"
         "    pass\n"
         "elif args[:2] == ['repo', 'view']:\n"
         "    print('example/project')\n"
+        "elif args[0] == 'api' and '/contents/.github/CODEOWNERS?ref=main' in args[1]:\n"
+        "    print(json.dumps({'encoding': 'base64', 'content': os.environ['FAKE_CODEOWNERS']}))\n"
+        "elif args[0] == 'api' and '/collaborators/maarco/permission' in args[1]:\n"
+        "    print('write')\n"
+        "elif args[0] == 'api' and '/collaborators/kollaborai/permission' in args[1]:\n"
+        "    print('admin')\n"
         "elif args[0] == 'api' and args[1].endswith('/rulesets'):\n"
         "    print('123')\n"
         "elif args[0] == 'api' and args[1].endswith('/rulesets/123'):\n"
-        "    json.loads(sys.stdin.read())\n"
+        "    pathlib.Path(os.environ['FAKE_RULESET']).write_text(sys.stdin.read())\n"
         "elif args[0] == 'api' and args[1] == 'repos/example/project':\n"
         "    pass\n"
         "else:\n"
@@ -84,7 +92,12 @@ def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path):
     env = dict(os.environ)
     for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
         env.pop(key, None)
-    env.update(PATH=f"{fakebin}{os.pathsep}{os.environ.get('PATH', os.defpath)}", FAKE_GH_LOG=str(log))
+    env.update(
+        PATH=f"{fakebin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
+        FAKE_GH_LOG=str(log),
+        FAKE_RULESET=str(tmp_path / "applied-ruleset.json"),
+        FAKE_CODEOWNERS=base64.b64encode(CODEOWNERS_BODY.encode()).decode(),
+    )
 
     subprocess.run(
         ["bash", str(ROOT / ".github" / "scripts" / "setup-branch-protection.sh")],
@@ -101,6 +114,130 @@ def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path):
     assert len(patches) == 1
     fields = [patches[0][i + 1] for i, arg in enumerate(patches[0][:-1]) if arg == "-F"]
     assert fields == ["allow_merge_commit=true"]
+    applied_ruleset = json.loads(Path(env["FAKE_RULESET"]).read_text())
+    pull_request_rule = next(rule for rule in applied_ruleset["rules"] if rule["type"] == "pull_request")
+    assert pull_request_rule["parameters"]["required_approving_review_count"] == 1
+    assert pull_request_rule["parameters"]["require_code_owner_review"] is True
+    assert pull_request_rule["parameters"]["dismiss_stale_reviews_on_push"] is True
+    assert pull_request_rule["parameters"]["required_review_thread_resolution"] is True
+    assert pull_request_rule["parameters"]["allowed_merge_methods"] == ["merge"]
+    assert {rule["type"] for rule in applied_ruleset["rules"]} == {
+        "deletion", "non_fast_forward", "pull_request", "required_status_checks"
+    }
+    checks = next(rule for rule in applied_ruleset["rules"] if rule["type"] == "required_status_checks")
+    assert checks["parameters"]["strict_required_status_checks_policy"] is True
+    assert checks["parameters"]["required_status_checks"] == [
+        {"context": "ci/tests", "integration_id": 15368},
+        {"context": "ci/standards-check", "integration_id": 15368},
+        {"context": "ci/security-scan", "integration_id": 15368},
+    ]
+    assert any("/collaborators/maarco/permission" in arg for call in calls for arg in call)
+    assert any("/collaborators/kollaborai/permission" in arg for call in calls for arg in call)
+
+
+@pytest.mark.parametrize("main_codeowners", ["", "* @someone\n"])
+def test_branch_protection_apply_refuses_until_expected_codeowners_is_on_main(tmp_path, main_codeowners):
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    log = tmp_path / "calls.jsonl"
+    gh = fakebin / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import base64, json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['FAKE_GH_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')\n"
+        "if args[:2] == ['auth', 'status']:\n"
+        "    pass\n"
+        "elif args[:2] == ['repo', 'view']:\n"
+        "    print('example/project')\n"
+        "elif args[0] == 'api' and '/contents/.github/CODEOWNERS?ref=main' in args[1]:\n"
+        "    body = os.environ['FAKE_MAIN_CODEOWNERS'].encode()\n"
+        "    print(json.dumps({'encoding': 'base64', 'content': base64.b64encode(body).decode()}))\n"
+        "else:\n"
+        "    sys.exit(2)\n"
+    )
+    gh.chmod(0o755)
+    env = dict(os.environ)
+    for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        env.pop(key, None)
+    env.update(
+        PATH=f"{fakebin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
+        FAKE_GH_LOG=str(log),
+        FAKE_MAIN_CODEOWNERS=main_codeowners,
+    )
+
+    result = subprocess.run(
+        ["bash", str(ROOT / ".github" / "scripts" / "setup-branch-protection.sh")],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert result.returncode == 1
+    assert "CODEOWNERS" in result.stdout and "on main" in result.stdout
+    assert not any("--method" in call or "-F" in call for call in calls)
+    assert not any("rulesets" in arg for call in calls for arg in call)
+
+
+def test_codeowners_cover_every_path_and_protect_themselves():
+    rules = (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
+    assert rules == [
+        "* @maarco @kollaborai",
+        "/.github/CODEOWNERS @maarco @kollaborai",
+    ]
+
+
+@pytest.mark.skipif(
+    not shutil.which("bash") or not shutil.which("jq"),
+    reason="branch-protection setup uses bash and jq",
+)
+def test_branch_protection_apply_requires_write_access_for_both_codeowners(tmp_path):
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    log = tmp_path / "calls.jsonl"
+    gh = fakebin / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import base64, json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['FAKE_GH_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')\n"
+        "if args[:2] == ['auth', 'status']:\n"
+        "    pass\n"
+        "elif args[:2] == ['repo', 'view']:\n"
+        "    print('example/project')\n"
+        "elif args[0] == 'api' and '/contents/.github/CODEOWNERS?ref=main' in args[1]:\n"
+        "    body = os.environ['FAKE_MAIN_CODEOWNERS'].encode()\n"
+        "    print(json.dumps({'encoding': 'base64', 'content': base64.b64encode(body).decode()}))\n"
+        "elif args[0] == 'api' and '/collaborators/maarco/permission' in args[1]:\n"
+        "    print('read')\n"
+        "else:\n"
+        "    sys.exit(2)\n"
+    )
+    gh.chmod(0o755)
+    env = dict(os.environ)
+    for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        env.pop(key, None)
+    env.update(
+        PATH=f"{fakebin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
+        FAKE_GH_LOG=str(log),
+        FAKE_MAIN_CODEOWNERS=CODEOWNERS_BODY,
+    )
+
+    result = subprocess.run(
+        ["bash", str(ROOT / ".github" / "scripts" / "setup-branch-protection.sh")],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert result.returncode == 1
+    assert "@maarco needs repository write access" in result.stdout
+    assert not any("--method" in call or "-F" in call for call in calls)
+    assert not any("rulesets" in arg for call in calls for arg in call)
 
 
 @pytest.mark.skipif(
@@ -109,8 +246,9 @@ def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path):
 )
 @pytest.mark.parametrize("bypass", ["empty", "hidden", "null", "unexpected"])
 @pytest.mark.parametrize("approval_count", [0, 1, 2])
-def test_branch_protection_check_requires_one_approval_and_visible_empty_bypass(
-    tmp_path, bypass, approval_count
+@pytest.mark.parametrize("code_owner_review", [False, True])
+def test_branch_protection_check_requires_one_code_owner_approval_and_visible_empty_bypass(
+    tmp_path, bypass, approval_count, code_owner_review
 ):
     fakebin = tmp_path / "bin"
     fakebin.mkdir()
@@ -126,6 +264,12 @@ def test_branch_protection_check_requires_one_approval_and_visible_empty_bypass(
         "    pass\n"
         "elif args[:2] == ['repo', 'view']:\n"
         "    print('example/project')\n"
+        "elif args[0] == 'api' and '/contents/.github/CODEOWNERS?ref=main' in args[1]:\n"
+        "    print(json.dumps({'encoding': 'base64', 'content': os.environ['FAKE_CODEOWNERS']}))\n"
+        "elif args[0] == 'api' and '/collaborators/maarco/permission' in args[1]:\n"
+        "    print('write')\n"
+        "elif args[0] == 'api' and '/collaborators/kollaborai/permission' in args[1]:\n"
+        "    print('admin')\n"
         "elif args[0] == 'api' and args[1].endswith('/rulesets'):\n"
         "    print('123')\n"
         "elif args[0] == 'api' and args[1].endswith('/rulesets/123'):\n"
@@ -139,6 +283,8 @@ def test_branch_protection_check_requires_one_approval_and_visible_empty_bypass(
         "            if rule['type'] == 'pull_request':\n"
         "                rule['parameters']['required_approving_review_count'] = int(os.environ["
         "'FAKE_APPROVAL_COUNT'])\n"
+        "                rule['parameters']['require_code_owner_review'] = os.environ["
+        "'FAKE_CODEOWNER_REVIEW'] == 'true'\n"
         "        if case == 'empty': data['bypass_actors'] = []\n"
         "        elif case == 'hidden': data.pop('bypass_actors', None)\n"
         "        elif case == 'null': data['bypass_actors'] = None\n"
@@ -160,6 +306,8 @@ def test_branch_protection_check_requires_one_approval_and_visible_empty_bypass(
         FAKE_RULESET=str(saved),
         FAKE_BYPASS=bypass,
         FAKE_APPROVAL_COUNT=str(approval_count),
+        FAKE_CODEOWNER_REVIEW=str(code_owner_review).lower(),
+        FAKE_CODEOWNERS=base64.b64encode(CODEOWNERS_BODY.encode()).decode(),
     )
     script = str(ROOT / ".github" / "scripts" / "setup-branch-protection.sh")
     subprocess.run(["bash", script], cwd=ROOT, env=env, input="", text=True, capture_output=True, check=True, timeout=5)
@@ -167,7 +315,7 @@ def test_branch_protection_check_requires_one_approval_and_visible_empty_bypass(
     result = subprocess.run(["bash", script, "--check"], cwd=ROOT, env=env, text=True, capture_output=True, timeout=5)
     calls = [json.loads(line) for line in log.read_text().splitlines()[before_check:]]
     assert not any("--method" in call for call in calls)
-    matches_policy = bypass == "empty" and approval_count == 1
+    matches_policy = bypass == "empty" and approval_count == 1 and code_owner_review
     assert (result.returncode == 0) is matches_policy
     if bypass in ("hidden", "null"):
         assert "bypass_actors" in result.stdout
@@ -175,7 +323,7 @@ def test_branch_protection_check_requires_one_approval_and_visible_empty_bypass(
     elif not matches_policy:
         assert "Drift on" in result.stdout
     else:
-        assert "one approval" in result.stdout
+        assert "one code-owner approval" in result.stdout
 
 
 def test_watcher_event_envelopes_include_workflow_run_association_fallback_and_review():

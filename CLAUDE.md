@@ -881,6 +881,12 @@ identity and exact reviewed SHA in private maintainer audit evidence; keep the
 GitHub approval plain, with no AI attribution or footer. A new head requires
 fresh review and CI. Every merge uses
 `kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
+After code-owner enforcement is enabled, `.github/CODEOWNERS` covers every
+path and protects itself; one of `@maarco` or `@kollaborai` must approve. The
+other account approves PRs authored under either account. GitHub enforces the
+approving account, not independent AI-review identity; retain that exact-head
+evidence privately and follow the bootstrap sequence in
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`.
 Out-of-scope work needs new authorization, and release tags always need
 separate explicit instruction. Update branches with ordinary merges; never
 rebase or force-push. Report worktree, branch, base/head SHAs, remote/PR state,

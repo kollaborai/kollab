@@ -65,8 +65,12 @@ integration checkout with `origin/main`.
    reviewer identity and exact reviewed SHA in private maintainer audit
    evidence; keep the GitHub approval plain, with no AI attribution or footer.
    GitHub prohibits author self-approval. Required
-   CI, resolved conversations, and current-base gates apply. If the base
-   advances, merge `origin/main` into the writer branch and push normally;
+   CI, resolved conversations, and current-base gates apply. When the
+   code-owner gate is enabled, one of `@maarco` or `@kollaborai` must approve;
+   when one account authored the PR, the other must approve. GitHub enforces
+   the owner-account approval, not independent AI-review identity, which stays
+   in private exact-head audit evidence.
+   If the base advances, merge `origin/main` into the writer branch and push normally;
    never rebase or force-push.
 4. The designated integrator merges the release PR only when it is within
    Marco's authorized release plan and all exact-head review, approval, CI,
