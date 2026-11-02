@@ -242,17 +242,29 @@ def test_stop_all_stops_peers_concurrently():
             agent_id="agent-koordinator",
             identity="koordinator",
         )
+        boot = time.time() - 1
         plugin._presence.agents = [
-            SimpleNamespace(identity="lapis", agent_id="agent-lapis", pid=101),
-            SimpleNamespace(identity="sapphire", agent_id="agent-sapphire", pid=102),
+            SimpleNamespace(
+                identity="lapis",
+                agent_id="agent-lapis",
+                pid=101,
+                started_at=boot,
+            ),
+            SimpleNamespace(
+                identity="sapphire",
+                agent_id="agent-sapphire",
+                pid=102,
+                started_at=boot,
+            ),
         ]
-        # stop all only sweeps agents the caller started (#669)
+        # stop all only sweeps agents the caller started (#669); ownership
+        # is pid + liveness + process generation, not a bare PID match
         plugin.event_bus = SimpleNamespace(
             get_service=lambda name: SimpleNamespace(
                 orchestrator=SimpleNamespace(
                     get_all_agents=lambda: {
-                        "lapis": SimpleNamespace(pid=101),
-                        "sapphire": SimpleNamespace(pid=102),
+                        "lapis": SimpleNamespace(pid=101, start_time=boot - 0.2),
+                        "sapphire": SimpleNamespace(pid=102, start_time=boot - 0.2),
                     }
                 )
             )

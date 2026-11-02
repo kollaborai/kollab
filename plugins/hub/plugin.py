@@ -157,6 +157,10 @@ _DEFAULT_OPERATOR_ALIASES = frozenset({"boss", "human", "operator"})
 STOP_GRACE_SECONDS = 1.5
 STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
+# Presence rows are written once at child boot; session.start_time at spawn.
+# started_at - start_time equals boot latency (>= 0); this tolerance covers slow
+# boots so PID reuse by an unrelated process cannot pass a generation check.
+PRESENCE_GENERATION_TOLERANCE_SECONDS = 120
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
 _ACP_BUSY_SHUTDOWN_WAIT_SECONDS = 5.0
@@ -13514,22 +13518,44 @@ class HubPlugin(BasePlugin):
         except Exception:
             return 0
 
-    def _locally_managed_pids(self) -> set:
-        """PIDs of agent subprocesses this process started itself.
+    def _locally_managed_sessions(self) -> dict:
+        """Agent sessions this process started itself, keyed by PID.
 
         The agent_orchestrator tracks every subprocess it launched; PID
         matching bridges hub identities to those sessions (issue #669).
+        Values are the full session objects so callers can verify liveness
+        and process generation -- a PID alone is not a kill token (the OS
+        reuses PIDs and stale presence rows can share a PID number).
         """
         orch = self._get_orchestrator()
         if orch is None:
-            return set()
+            return {}
         try:
             sessions = orch.orchestrator.get_all_agents()
         except Exception:
-            return set()
+            return {}
         return {
-            session.pid for session in sessions.values() if getattr(session, "pid", None)
+            session.pid: session
+            for session in sessions.values()
+            if getattr(session, "pid", None)
         }
+
+    def _presence_generation_matches(self, session, agent) -> bool:
+        """True when presence row and tracked session are the same process
+        generation (fail closed on missing timestamps).
+
+        Compares the presence row's boot start time against the session's
+        spawn start time. A row written by a different (stale or reused-PID)
+        process cannot land within the tolerance of our own spawn time.
+        """
+        started_at = getattr(agent, "started_at", None)
+        session_start = getattr(session, "start_time", None)
+        if started_at is None or session_start is None:
+            return False
+        return (
+            abs(float(session_start) - float(started_at))
+            <= PRESENCE_GENERATION_TOLERANCE_SECONDS
+        )
 
     def _resolve_identity_to_agent_name(self, identity: str) -> Optional[str]:
         """Resolve a hub identity (gem name) to the orchestrator agent name.
@@ -14252,14 +14278,19 @@ class HubPlugin(BasePlugin):
                 return "no peers to stop"
 
             results = []
-            managed_pids = self._locally_managed_pids()
+            managed = self._locally_managed_sessions()
             stop_targets = []
             immune = []
             for agent in peers:
                 if agent.agent_id == self._identity.agent_id:
                     continue
                 pid = getattr(agent, "pid", None)
-                if pid is not None and pid in managed_pids:
+                session = managed.get(pid) if pid is not None else None
+                if (
+                    session is not None
+                    and getattr(session, "is_alive", True)
+                    and self._presence_generation_matches(session, agent)
+                ):
                     stop_targets.append(agent)
                 else:
                     immune.append(agent.identity)
