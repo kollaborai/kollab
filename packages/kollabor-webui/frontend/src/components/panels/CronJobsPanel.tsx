@@ -23,7 +23,7 @@ export function inSeconds(seconds: number) {
   return `in ${d}d`;
 }
 
-function summaryLine(view: HubCronJobsView) {
+export function summaryLine(view: HubCronJobsView) {
   const agents = view.agents_responded.length;
   const jobs = `${view.count} ${view.count === 1 ? "job" : "jobs"}`;
   const live = `${agents} live ${agents === 1 ? "agent" : "agents"}`;
@@ -33,12 +33,32 @@ function summaryLine(view: HubCronJobsView) {
   return `${jobs} across ${live}${unavailable}`;
 }
 
+/** Per-agent cron query failures surface as amber alerts in every state. */
+function ErrorAlerts({ errors }: { errors: [string, string][] }) {
+  if (!errors.length) return null;
+  return (
+    <div className="mb-3 space-y-1">
+      {errors.map(([agent, msg]) => (
+        <p
+          key={agent}
+          role="alert"
+          className="text-amber-600 dark:text-amber-400 text-sm"
+        >
+          <AlertTriangle className="mr-1 inline size-4 align-[-3px]" />
+          {agent}: {msg}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 /** Read-only schedule table (desktop) and cards (narrow screens). */
 export function CronJobsBody({ view }: { view: HubCronJobsView }) {
   const errorAgents = Object.entries(view.agents_errors || {});
   if (!view.jobs.length) {
     return (
       <div className="text-muted-foreground rounded-lg border p-4 text-sm">
+        <ErrorAlerts errors={errorAgents} />
         <p className="text-foreground font-medium">No scheduled jobs</p>
         <p className="mt-1">
           No live agent on this machine has a hub cron job. Schedule one from
@@ -54,20 +74,7 @@ export function CronJobsBody({ view }: { view: HubCronJobsView }) {
   }
   return (
     <>
-      {errorAgents.length > 0 ? (
-        <div className="mb-3 space-y-1">
-          {errorAgents.map(([agent, msg]) => (
-            <p
-              key={agent}
-              role="alert"
-              className="text-amber-600 dark:text-amber-400 text-sm"
-            >
-              <AlertTriangle className="mr-1 inline size-4 align-[-3px]" />
-              {agent}: {msg}
-            </p>
-          ))}
-        </div>
-      ) : null}
+      <ErrorAlerts errors={errorAgents} />
       <div className="hidden overflow-x-auto md:block">
         <table className="text-left text-sm">
           <thead>

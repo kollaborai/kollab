@@ -42,7 +42,7 @@ scope per issue).
 
 ## UI decisions (recommendations, awaiting mockup approval)
 
-- Placement: a Settings tab panel ("Hub cron jobs"), not the sidebar. The
+- Placement: a Settings tab panel ("Cron Jobs"), not the sidebar. The
   sidebar lists sessions and agents; a cross-agent schedule view is
   settings-shaped, like other read-only infrastructure views.
 - Scope: all live agents on this machine, aggregated, with the agent name
@@ -59,8 +59,10 @@ into cards. Sample data is clearly marked as mock.
 
 ## Web UI view (implemented)
 
-Design calls settled by approval: Settings tab placement, all live
-agents' jobs (not current-folder only), read-only (no delete buttons).
+Design calls taken per koordinator's direction: Settings tab
+placement, all live agents' jobs (not current-folder only), read-only
+(no delete buttons). Marco's ruling on the UI is still pending; no
+approval record exists yet.
 
 - `frontend/src/components/panels/CronJobsPanel.tsx`: settings panel
   rendered by the panel host. Desktop (md and up) shows a table
@@ -75,14 +77,15 @@ agents' jobs (not current-folder only), read-only (no delete buttons).
   `refresh=true`, and a deleted job disappears from the view on
   refresh.
 - Frontend tests: `frontend/tests/cron-jobs-panel.test.tsx` covers
-  summary line, table rows, error surfacing, empty state, and the
-  read-only hint.
+  summary line, table rows, error surfacing (including a refusal that
+  renders even when zero jobs exist), the empty state, and the
+  refresh control.
 
 ## Acceptance criteria (from the issue)
 
-- Mockup approved before any UI code ships. (Satisfied: placement,
-  scope, and read-only behavior were settled by approval before the
-  UI commit.)
+- Mockup approved before any UI code ships. (Pending: no approval
+  record exists; the implementation follows koordinator's recommended
+  design and awaits Marco's ruling.)
 - Unit test for the socket op and the engine aggregation (landed:
   `tests/unit/test_hub_cron_jobs_view.py`,
   `tests/unit/test_engine_hub_routes_cron.py`).

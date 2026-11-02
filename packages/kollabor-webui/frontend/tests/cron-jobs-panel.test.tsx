@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, test } from "vitest";
 import { SETTINGS_TABS, PANEL_NAME } from "../src/components/panels/panel-model";
-import { CronJobsBody, CronJobsPanel, inSeconds, shortId } from "../src/components/panels/CronJobsPanel";
-import type { HubCronJobsView } from "../src/api";
+import { CronJobsBody, CronJobsPanel, inSeconds, shortId, summaryLine } from "../src/components/panels/CronJobsPanel";
+import type { EngineApi, HubCronJobsView } from "../src/api";
 
 const view: HubCronJobsView = {
   count: 3,
@@ -90,6 +90,40 @@ test("per-agent refusals surface as alerts even when rows are present", () => {
   const html = renderToStaticMarkup(<CronJobsBody view={view} />);
   expect(html).toContain('role="alert"');
   expect(html).toContain("garnet: operator gate refused the cron_jobs question");
+});
+
+test("a per-agent refusal still shows the refusal text when no jobs exist", () => {
+  const refused: HubCronJobsView = {
+    count: 0,
+    jobs: [],
+    agents_responded: [],
+    agents_unavailable: ["garnet"],
+    agents_errors: { garnet: "operator gate refused the cron_jobs question" },
+  };
+  const html = renderToStaticMarkup(<CronJobsBody view={refused} />);
+  expect(html).toContain("operator gate refused the cron_jobs question");
+});
+
+test("the summary line counts jobs, live agents, and unavailable agents", () => {
+  expect(summaryLine(view)).toBe("3 jobs across 2 live agents · 1 unavailable");
+  const solo: HubCronJobsView = {
+    count: 1,
+    jobs: view.jobs.slice(0, 1),
+    agents_responded: ["moonstone"],
+    agents_unavailable: [],
+    agents_errors: {},
+  };
+  expect(summaryLine(solo)).toBe("1 job across 1 live agent");
+});
+
+test("the panel renders the refresh control and loading state before data arrives", () => {
+  const html = renderToStaticMarkup(<CronJobsPanel api={{} as EngineApi} />);
+  expect(html).toContain('aria-label="Refresh cron jobs"');
+  expect(html).toContain("Refresh");
+  expect(html).toContain("Loading scheduled jobs");
+  expect(html).toContain(
+    "Deleting a job happens in the owning agent",
+  );
 });
 
 test("an empty roster view explains where jobs are scheduled instead of an empty table", () => {
