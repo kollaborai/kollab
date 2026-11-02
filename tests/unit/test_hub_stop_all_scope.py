@@ -266,3 +266,97 @@ def test_stop_all_never_signals_reused_pid_after_mid_stop_exit(monkeypatch):
         assert "PID-reuse guard" in result
 
     asyncio.run(run_test())
+
+
+def test_stop_all_withholds_escalation_when_session_dies_after_guard(monkeypatch):
+    """Garnet r3 interleaving: the pre-dispatch liveness guard passes, then
+    the tracked process exits BEFORE the signal is sent. Escalation must
+    signal through the tracked Popen handle (a no-op once the child is
+    reaped, fail-closed without a handle) -- never raw os.kill by PID,
+    because the just-exited PID can already belong to another process."""
+
+    async def run_test():
+        now = time.time()
+        plugin = HubPlugin()
+        session = _session(4242, now - 7, alive=True)
+        plugin._presence = SimpleNamespace(
+            scan_all_presence=lambda: [_peer("helper", 4242, started_at=now - 5)],
+            cleanup_agent=lambda agent: None,
+        )
+        plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
+        monkeypatch.setattr(
+            plugin,
+            "_get_orchestrator",
+            lambda: _orch({"helper": session}),
+        )
+        # Force the guard to pass: the exit lands in the window AFTER the
+        # guard check, BEFORE the signal — exactly the check-then-use race.
+        monkeypatch.setattr(
+            HubPlugin, "_signal_allowed", staticmethod(lambda session: True)
+        )
+        # session stays "alive" through selection; the death is modeled as
+        # landing between the guard and the signal (guard forced true).
+
+        async def fail_shutdown(socket_path, reason="", timeout=3.0):
+            return False
+
+        monkeypatch.setattr(
+            "plugins.hub.plugin.AgentMessenger.signal_shutdown", fail_shutdown
+        )
+
+        async def instant_wait(agent, timeout=5.0):
+            return False
+
+        monkeypatch.setattr(plugin, "_wait_for_agent_exit", instant_wait)
+
+        kills = []
+
+        def fake_kill(pid, sig):
+            kills.append((pid, sig))
+            return True
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        result = await plugin._handle_stop_command("all")
+
+        assert kills == [], f"raw-signaled {kills} after the guard passed"
+        assert "PID-reuse guard" in result
+
+    asyncio.run(run_test())
+
+
+def test_signal_session_noops_when_child_already_reaped():
+    """Popen.send_signal checks returncode: a reaped child can never be
+    signaled, so its recycled PID is unreachable through the handle."""
+
+    class FakeProc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def send_signal(self, sig):
+            raise AssertionError("send_signal must not run on a reaped child")
+
+    assert HubPlugin._signal_session(SimpleNamespace(proc=FakeProc()), 15) is False
+
+
+def test_signal_session_sends_through_handle_while_child_unreaped():
+    recorded = []
+
+    class FakeProc:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def send_signal(self, sig):
+            recorded.append(sig)
+
+    assert HubPlugin._signal_session(SimpleNamespace(proc=FakeProc()), 15) is True
+    assert recorded == [15]
+
+
+def test_signal_session_fails_closed_without_handle():
+    assert HubPlugin._signal_session(SimpleNamespace(pid=4242), 15) is False
+    assert HubPlugin._signal_session(None, 15) is False

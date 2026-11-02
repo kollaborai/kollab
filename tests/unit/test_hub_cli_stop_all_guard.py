@@ -47,9 +47,12 @@ def test_cli_stop_all_refuses_agent_context_without_confirm(
     stop.assert_not_awaited()
 
 
-def test_cli_stop_all_agent_context_proceeds_with_explicit_confirm(
+def test_cli_stop_all_agent_context_refuses_even_with_confirm(
     tmp_path, capsys, monkeypatch
 ):
+    """--confirm is argv, and agents control argv: it is not an operator
+    override. An agent-context shell is refused unconditionally (issue
+    #669 r3); the operator's own shell carries no TOOL_SHELL markers."""
     _presence(tmp_path, "helper")
     stop = AsyncMock(return_value=(True, "stopped"))
     monkeypatch.setattr("kollabor.cli.stop_agent_record", stop)
@@ -57,9 +60,13 @@ def test_cli_stop_all_agent_context_proceeds_with_explicit_confirm(
     monkeypatch.setenv("KOLLAB_TOOL_SHELL", "1")
     monkeypatch.delenv("KOLLAB_AGENT_PID", raising=False)
 
-    asyncio.run(_handle_cli_hub(["stop", "all", "--confirm"]))
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(_handle_cli_hub(["stop", "all", "--confirm"]))
 
-    stop.assert_awaited()
+    assert exc.value.code == 2
+    out = capsys.readouterr()
+    assert "agent-context" in out.err or "agent-context" in out.out
+    stop.assert_not_awaited()
 
 
 def test_cli_stop_all_from_operator_shell_still_works_without_confirm(

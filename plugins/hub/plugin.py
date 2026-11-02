@@ -14398,6 +14398,40 @@ class HubPlugin(BasePlugin):
         """
         return session is None or bool(getattr(session, "is_alive", False))
 
+    @staticmethod
+    def _signal_session(session, sig) -> bool:
+        """Send ``sig`` through the tracked Popen handle (issue #669 r3).
+
+        Handle signaling is PID-reuse immune: ``Popen.send_signal`` no-ops
+        once the child is reaped (returncode set), and an exited-but-unreaped
+        child holds its PID as a zombie, so a recycled PID is unreachable.
+        Returns False — no signal sent, fail closed — when there is no handle
+        or the child is already reaped.
+        """
+        proc = getattr(session, "proc", None) if session is not None else None
+        if proc is None:
+            return False
+        if proc.poll() is not None:
+            return False
+        try:
+            proc.send_signal(sig)
+            return True
+        except (ProcessLookupError, OSError):
+            return False
+
+    def _escalate_agent(self, agent, session, sig) -> bool:
+        """Escalate a stop signal for ``agent`` under ``session`` ownership.
+
+        Caller-owned sweep targets are signaled through the tracked Popen
+        handle (``_signal_session``); only the session-less operator
+        single-stop path falls back to raw ``os.kill`` by PID (issue #669 r3).
+        """
+        if session is not None:
+            return self._signal_session(session, sig)
+        if sig == signal.SIGKILL:
+            return self._hard_kill_agent(agent)
+        return self._force_kill_agent(agent)
+
     async def _stop_peer_agent(self, agent, reason: str, session=None) -> str:
         """Stop a peer and only report success after the pid exits.
 
@@ -14441,7 +14475,12 @@ class HubPlugin(BasePlugin):
                 self._presence.cleanup_agent(agent)
                 return guard
 
-            killed = self._force_kill_agent(agent)
+            killed = self._escalate_agent(agent, session, signal.SIGTERM)
+            if session is not None and not killed:
+                # Handle gone or child already reaped: the PID is no longer
+                # ours to signal — never fall back to raw os.kill (r3).
+                self._presence.cleanup_agent(agent)
+                return guard
             if killed and await self._wait_for_agent_exit(
                 agent, timeout=STOP_TERM_SECONDS
             ):
@@ -14450,7 +14489,12 @@ class HubPlugin(BasePlugin):
             if not self._signal_allowed(session):
                 self._presence.cleanup_agent(agent)
                 return guard
-            if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
+
+            killed = self._escalate_agent(agent, session, signal.SIGKILL)
+            if session is not None and not killed:
+                self._presence.cleanup_agent(agent)
+                return guard
+            if killed and await self._wait_for_agent_exit(
                 agent, timeout=STOP_KILL_SECONDS
             ):
                 self._presence.cleanup_agent(agent)
@@ -14461,7 +14505,10 @@ class HubPlugin(BasePlugin):
             self._presence.cleanup_agent(agent)
             return guard
 
-        killed = self._force_kill_agent(agent)
+        killed = self._escalate_agent(agent, session, signal.SIGTERM)
+        if session is not None and not killed:
+            self._presence.cleanup_agent(agent)
+            return guard
         if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
             self._presence.cleanup_agent(agent)
             return "killed (SIGTERM fallback)"
@@ -14474,7 +14521,11 @@ class HubPlugin(BasePlugin):
             self._presence.cleanup_agent(agent)
             return guard
 
-        if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
+        killed = self._escalate_agent(agent, session, signal.SIGKILL)
+        if session is not None and not killed:
+            self._presence.cleanup_agent(agent)
+            return guard
+        if killed and await self._wait_for_agent_exit(
             agent, timeout=STOP_KILL_SECONDS
         ):
             self._presence.cleanup_agent(agent)
