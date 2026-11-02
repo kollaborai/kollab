@@ -1,7 +1,7 @@
 // Run: node --test tests/history-merge.test.ts (Node 24 strips the types).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeMissingHistoryMessages, reconcileBoundaryToolResults, shownMessagesChanged } from "../src/history-merge.ts";
+import { dropTransientTurnDuplicates, mergeMissingHistoryMessages, reconcileBoundaryToolResults, shownMessagesChanged } from "../src/history-merge.ts";
 
 const user = { id: "history-0", role: "user", content: "go" };
 const step = (result?: string) => ({
@@ -141,4 +141,59 @@ test("separate fallback results with a reused ID retain their own calls", () => 
 test("rows outside an older window are not interpreted as removals", () => {
   const row = (index: number) => ({ id: `history-${index}`, content: `message-${index}` });
   assert.equal(reconcileBoundaryToolResults([row(10), row(20)], [row(9), row(10)], 9, 11), null);
+});
+
+// Issue #666: the turn a window just ran renders as transient rows
+// (user-<session>-<n>, assistant-<session>-<n>) while its stored rows are
+// still unwritten. When the sync point missed the turn -- the daemon's
+// refresh failed or read the mirror before the rows landed -- the next
+// history reload replays the turn as a tail, and the window drew it twice
+// until a manual reload.
+const turnShown = [
+  { id: "history-0", role: "user", content: "q1" },
+  { id: "history-1", role: "assistant", content: "a1" },
+  { id: "user-ws1-5", role: "user", content: "q2" },
+  { id: "assistant-ws1-6", role: "assistant", content: "a2" },
+];
+const turnLoaded = [
+  { id: "history-0", role: "user", content: "q1" },
+  { id: "history-1", role: "assistant", content: "a1" },
+  { id: "history-2", role: "user", content: "q2" },
+  { id: "history-3", role: "assistant", content: "a2" },
+];
+
+test("a replayed turn replaces its transient rows instead of doubling them", () => {
+  // from.history=2 (stale by two): the tail replays the whole turn.
+  const merged = mergeMissingHistoryMessages(turnShown, turnLoaded);
+  const tail = merged.added;
+  assert.deepEqual(tail.map((m) => m.id), ["history-2", "history-3"]);
+  assert.equal(merged.messages.length, 6); // today: both copies present
+  const deduped = dropTransientTurnDuplicates(merged.messages, tail);
+  assert.deepEqual(deduped.map((m) => m.id),
+    ["history-0", "history-1", "history-2", "history-3"]);
+});
+
+test("a late assistant row replaces its transient block once the user row landed", () => {
+  // from.history=3: the user row synced, only the reply replays.
+  const merged = mergeMissingHistoryMessages(turnShown, turnLoaded);
+  const tail = merged.added.filter((m) => m.id === "history-3");
+  const deduped = dropTransientTurnDuplicates(merged.messages, tail);
+  assert.deepEqual(deduped.map((m) => m.id),
+    ["history-0", "history-1", "history-2", "history-3"]);
+});
+
+test("a tail from another turn leaves the transient rows alone", () => {
+  const merged = mergeMissingHistoryMessages(turnShown, turnLoaded);
+  const tail = [{ id: "history-4", role: "user", content: "different prompt" }];
+  assert.equal(dropTransientTurnDuplicates(merged.messages, tail), null);
+});
+
+test("a page without trailing transient rows has nothing to drop", () => {
+  const shown = turnLoaded.slice(0, 3);
+  const merged = mergeMissingHistoryMessages(shown, turnLoaded);
+  assert.equal(dropTransientTurnDuplicates(merged.messages, merged.added), null);
+});
+
+test("an empty tail has nothing to dedupe against", () => {
+  assert.equal(dropTransientTurnDuplicates(turnShown, []), null);
 });

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
 - Coordinator task assignments survive restarts in a durable dispatch ledger,
   suppress re-routing delivered work, and keep completion reports unverified
   until the original assigner verifies a worktree or commit reference (#636).
