@@ -380,6 +380,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [appsOpen, setAppsOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
+  const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
@@ -1414,7 +1415,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           }}
           onBundleChange={setPickedBundle}
           onApps={() => setAppsOpen(true)}
-          onAgents={() => setAgentsOpen(true)}
+          onAgents={() => {
+            setAgentLibraryInitialTab("rosters");
+            setAgentsOpen(true);
+          }}
+          onLaunchTeam={() => {
+            setAgentLibraryInitialTab("teams");
+            setAgentsOpen(true);
+          }}
           onSettings={() => openSettings()}
           onHalt={() => openSettings({ tab: "network", intent: "halt" })}
           onLearn={() => navigateToLearn()}
@@ -1450,6 +1458,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onOpenChange={setAgentsOpen}
           workspace={workspacePath.trim()}
           profile={selectedProfile}
+          profiles={profiles}
+          initialTab={agentLibraryInitialTab}
           onLaunched={() => {
             void loadSessions();
             void refreshAgentPool();

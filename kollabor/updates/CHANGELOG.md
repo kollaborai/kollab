@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Team launches now support member selection or exclusions across the CLI,
+  TUI and Web UI. The launch sheet sets the workspace, profile, lead and
+  mission, validates the effective reporting tree, and saves choices per team
+  and workspace folder.
 - Hub tests now cover short AF_UNIX hub-state socket paths, so long
   socket paths cannot silently regress the hub state client (#582).
 - Hub status flags an idle agent that still holds an open task as

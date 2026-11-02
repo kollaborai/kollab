@@ -130,6 +130,28 @@ Launch a bundled chart with `/hub org engineering` or `kollab --org
 engineering`. The launcher passes the role identity as `--as` and the role's
 `agent_bundle` as `--agent`.
 
+In the interactive TUI, `/hub orgs` lists teams and their reporting outlines.
+`/hub org engineering` opens a picker where you can select members, choose a
+lead, review the effective reporting tree, and enter an optional mission.
+
+For noninteractive launches, use `--dir` to choose the workspace and either
+`--only` or `--without` to select members:
+
+```bash
+kollab --hub org engineering --dir ./project --only backend-eng,qa-eng
+kollab --hub org engineering --dir ./project --without designer
+```
+
+These options accept comma-separated names and cannot be combined. The CLI uses
+the team's authored lead. If your selection omits that lead, use the TUI picker
+to select a replacement.
+
+In the Web UI, choose a team in Agents > Teams and open Configure & Launch to
+set the workspace, profile, members, lead, and mission. The sheet previews the
+effective reporting tree and saves choices per team and workspace folder. New
+Session > Launch a Team opens the same sheet with the current workspace and
+profile prefilled.
+
 ### system_prompt.md
 
 The main prompt file can include other files:

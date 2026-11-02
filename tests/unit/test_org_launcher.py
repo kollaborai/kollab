@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from kollabor import cli
+from kollabor_tui.key_parser import KeyPress
 from plugins.hub import org_launcher, presence, rosters
 from plugins.hub.org_launcher import Launch, OrgLauncher
 from plugins.hub.plugin import HubPlugin
@@ -31,6 +32,7 @@ class Fleet:
         self.online = set(online)
         self.starting = []
         self.launched = []
+        self.briefs = []
         self.never = set()
 
     def launch(self, identity, brief, message, bundle, profile):
@@ -40,6 +42,7 @@ class Fleet:
         ), f"{identity} launched while {self.starting} still starting"
         name = identity.split("/")[-1]
         self.launched.append((name, message))
+        self.briefs.append((name, brief))
         if name not in self.never:
             self.starting.append(name)
 
@@ -146,13 +149,29 @@ def test_online_means_live_in_this_folders_hub(home, monkeypatch):
     assert OrgLauncher(str(home / "other"))._online() == {"omar"}
 
 
+class _SelectingOrgPickerStack:
+    async def push(self, picker, name, reuse=False):
+        assert name == "hub-org-picker"
+        assert reuse is False
+        await picker.on_enter(None)
+        return await picker.handle_input(KeyPress(name="Enter", code=0, char=None))
+
+
+def _hub_with_org_picker(project):
+    hub = SimpleNamespace(
+        _identity=SimpleNamespace(project=str(project)), event_bus=object()
+    )
+    hub._altview_stack = lambda: _SelectingOrgPickerStack()
+    return hub
+
+
 def test_the_hub_command_does_not_freeze_the_event_loop(home, monkeypatch):
-    def slow_launch(self, org_name, mission=""):
+    def slow_launch(self, org_name, mission="", *, members=None, exclude=None, lead=None):
         time.sleep(0.3)  # waiting for members to come online
         return Launch(["omar"], ["maya"])
 
     monkeypatch.setattr(OrgLauncher, "launch_org", slow_launch)
-    hub = SimpleNamespace(_identity=SimpleNamespace(project=str(home)))
+    hub = _hub_with_org_picker(home)
 
     async def main():
         ticks = 0
@@ -177,9 +196,13 @@ def test_the_hub_command_does_not_freeze_the_event_loop(home, monkeypatch):
 
 def test_the_hub_command_lists_each_member_under_who_they_report_to(home, monkeypatch):
     monkeypatch.setattr(
-        OrgLauncher, "launch_org", lambda self, name, mission="": Launch(MARKETING, [])
+        OrgLauncher,
+        "launch_org",
+        lambda self, name, mission="", *, members=None, exclude=None, lead=None: Launch(
+            MARKETING, []
+        ),
     )
-    hub = SimpleNamespace(_identity=SimpleNamespace(project=str(home)))
+    hub = _hub_with_org_picker(home)
 
     reply = asyncio.run(HubPlugin._handle_org_command(hub, "marketing"))
 
@@ -223,3 +246,165 @@ def test_the_hub_org_cli_prints_what_happened(
     out = capsys.readouterr().out
     for line in lines:
         assert line in out
+
+
+
+def test_allowlist_launches_only_selected_members_and_reports_omissions(fleet, home):
+    launch = OrgLauncher(str(home)).launch_org(
+        "marketing", "selected mission", members=["maya", "omar"]
+    )
+
+    assert launch.started == ["omar", "maya"]
+    assert launch.excluded == ("theo", "priya", "jonas", "luz")
+    assert fleet.launched == [("omar", "selected mission"), ("maya", "")]
+
+
+def test_excluding_manager_reparents_prompt_before_launch(fleet, home):
+    launch = OrgLauncher(str(home)).launch_org("marketing", exclude=["theo"])
+
+    prompts = dict(fleet.briefs)
+    assert launch.excluded == ("theo",)
+    assert "you report to: omar" in prompts["jonas"]
+    assert "you report to: theo" not in prompts["jonas"]
+    assert "theo" not in prompts["jonas"]
+
+
+def test_replacement_lead_receives_mission_and_launches_first(fleet, home):
+    launch = OrgLauncher(str(home)).launch_org(
+        "marketing", "maya's mission", members=["omar", "maya"], lead="maya"
+    )
+
+    assert launch.started == ["maya", "omar"]
+    assert fleet.launched == [("maya", "maya's mission"), ("omar", "")]
+
+
+def test_omitting_authored_lead_without_replacement_is_rejected(fleet, home):
+    with pytest.raises(rosters.LibraryError, match="replacement lead"):
+        OrgLauncher(str(home)).launch_org("marketing", exclude=["omar"])
+
+    assert fleet.launched == []
+
+
+def test_org_cli_parses_and_forwards_selection_flags():
+    args = cli.parse_arguments(
+        plugin_classes=[],
+        argv=[
+            "--hub",
+            "org",
+            "marketing",
+            "plan",
+            "the",
+            "launch",
+            "--dir",
+            "/tmp/project",
+            "--without",
+            "theo,luz",
+            "--without",
+            "jonas",
+        ],
+    )
+
+    assert args.hub == ["org", "marketing", "plan", "the", "launch"]
+    assert cli._hub_args_with_org_options(args) == [
+        "org",
+        "marketing",
+        "plan",
+        "the",
+        "launch",
+        "--dir",
+        "/tmp/project",
+        "--without",
+        "theo,luz",
+        "--without",
+        "jonas",
+    ]
+
+
+def test_org_cli_rejects_selection_flags_outside_org_and_mixed_selectors():
+    with pytest.raises(SystemExit) as wrong_command:
+        cli.parse_arguments(
+            plugin_classes=[], argv=["--hub", "status", "--only", "maya"]
+        )
+    assert wrong_command.value.code == 2
+
+    with pytest.raises(SystemExit) as conflicting_selectors:
+        cli.parse_arguments(
+            plugin_classes=[],
+            argv=["--hub", "org", "marketing", "--only", "maya", "--without", "theo"],
+        )
+    assert conflicting_selectors.value.code == 2
+
+
+def test_org_cli_scopes_team_and_launch_to_folder_with_mission(
+    home, monkeypatch, capsys
+):
+    project_dir = home / "project"
+    project_dir.mkdir()
+    team = org_launcher.load_organization("marketing", str(home))
+    captured = {}
+
+    def load_team(name, folder=None):
+        captured["loaded"] = (name, folder)
+        return team
+
+    class CapturingLauncher:
+        def __init__(self, folder):
+            captured["launcher_folder"] = folder
+
+        def launch_org(self, name, mission="", *, members=None, exclude=None):
+            captured["launch"] = (name, mission, members, exclude)
+            return SimpleNamespace(
+                started=["omar"],
+                failed="",
+                notes=lambda _team, _mission: ["excluded: theo, luz"],
+            )
+
+    monkeypatch.setattr(cli, "_apply_hub_project_scope_from_config", lambda: None)
+    monkeypatch.setattr(presence, "get_presence_dir", lambda: home / "presence")
+    monkeypatch.setattr(org_launcher, "load_organization", load_team)
+    monkeypatch.setattr(org_launcher, "OrgLauncher", CapturingLauncher)
+    monkeypatch.chdir(home)
+
+    asyncio.run(
+        cli._handle_cli_hub(
+            [
+                "org",
+                "marketing",
+                "plan",
+                "the",
+                "launch",
+                "--dir",
+                str(project_dir),
+                "--without",
+                "theo,luz",
+            ]
+        )
+    )
+
+    assert captured["loaded"] == ("marketing", str(project_dir))
+    assert captured["launcher_folder"] == str(project_dir)
+    assert captured["launch"] == (
+        "marketing",
+        "plan the launch",
+        None,
+        ["theo", "luz"],
+    )
+    assert "excluded: theo, luz" in capsys.readouterr().out
+
+
+def test_org_cli_reports_missing_replacement_lead(
+    home, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli, "_apply_hub_project_scope_from_config", lambda: None)
+    monkeypatch.setattr(presence, "get_presence_dir", lambda: home / "presence")
+    monkeypatch.chdir(home)
+
+    with pytest.raises(SystemExit) as exit_info:
+        asyncio.run(
+            cli._handle_cli_hub(
+                ["org", "marketing", "--without", "omar"]
+            )
+        )
+
+    assert exit_info.value.code == 2
+    assert "replacement lead" in capsys.readouterr().err
