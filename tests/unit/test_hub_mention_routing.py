@@ -6,6 +6,32 @@ from unittest.mock import AsyncMock
 from kollabor.state.local import LocalStateService, parse_hub_mention
 
 
+class _CursorSerial:
+    """Mirror of the coordinator's admission-serial cursor protocol (#676).
+
+    ``claim_turn_serial`` hands out one monotonic ticket per admitted turn
+    (mention spawn / ordinary pipeline admission); ``publish_cursor`` moves
+    the shared pointer unless a strictly later-admitted turn already wrote
+    it. Every FakeLlm below speaks this protocol so the routing tests
+    exercise the same ordering contract the production pipeline does.
+    """
+
+    _turn_serial = 0
+    _cursor_winner_serial = -1
+
+    def claim_turn_serial(self) -> int:
+        self._turn_serial += 1
+        return self._turn_serial
+
+    def publish_cursor(self, uuid, serial) -> bool:
+        if serial is not None and serial < self._cursor_winner_serial:
+            return False
+        if serial is not None:
+            self._cursor_winner_serial = serial
+        self.current_parent_uuid = uuid
+        return True
+
+
 def test_parse_hub_mention_supports_direct_and_broadcast_syntax() -> None:
     assert parse_hub_mention("@lapis message here") == ("lapis", "message here")
     assert parse_hub_mention("@broadcast 'message to all'") == (
@@ -18,7 +44,7 @@ def test_parse_hub_mention_supports_direct_and_broadcast_syntax() -> None:
 
 def test_send_message_routes_mentions_without_invoking_llm() -> None:
     async def scenario() -> None:
-        class FakeLlm:
+        class FakeLlm(_CursorSerial):
             is_processing = False
 
             def __init__(self) -> None:
@@ -104,7 +130,7 @@ def test_hub_mentions_persist_to_the_session_jsonl() -> None:
                 self.calls.append(("assistant", content, parent_uuid))
                 return "a1"
 
-        class FakeLlm:
+        class FakeLlm(_CursorSerial):
             is_processing = False
             current_parent_uuid = "root"
 
@@ -155,7 +181,7 @@ def test_broadcasts_persist_to_the_session_jsonl() -> None:
                 self.calls.append(("assistant", content))
                 return "a1"
 
-        class FakeLlm:
+        class FakeLlm(_CursorSerial):
             is_processing = False
             current_parent_uuid = None
 
@@ -200,7 +226,7 @@ def test_failed_hub_mention_still_persists_the_typed_turn() -> None:
                 self.calls.append(("assistant", content))
                 return "a1"
 
-        class FakeLlm:
+        class FakeLlm(_CursorSerial):
             is_processing = False
             current_parent_uuid = None
 
@@ -248,7 +274,7 @@ def test_overlapping_mentions_do_not_reparent_each_other() -> None:
                 self.records.append(("assistant", content, parent_uuid, uid))
                 return uid
 
-        class FakeLlm:
+        class FakeLlm(_CursorSerial):
             is_processing = False
             current_parent_uuid = "root"
 
@@ -310,7 +336,7 @@ def test_ordinary_turn_continues_after_a_hub_mention() -> None:
                 self.calls.append(("assistant", content, parent_uuid))
                 return "a1"
 
-        class FakeLlm:
+        class FakeLlm(_CursorSerial):
             is_processing = False
             current_parent_uuid = "root"
 
@@ -364,7 +390,7 @@ def test_mixed_turn_overlap_does_not_misparent_or_clobber_the_cursor() -> None:
                 self.records.append(("assistant", content, parent_uuid, uid))
                 return uid
 
-        class FakeLlm:
+        class FakeLlm(_CursorSerial):
             is_processing = False
             current_parent_uuid = "root"
 
@@ -388,7 +414,7 @@ def test_mixed_turn_overlap_does_not_misparent_or_clobber_the_cursor() -> None:
         async def overlapping_send(target, content):
             # An ordinary LLM turn completes while the hub send awaits: the
             # pointer moves root -> ordinary-1 -> ordinary-2 around the task.
-            llm.current_parent_uuid = "ordinary-2"
+            llm.publish_cursor("ordinary-2", llm.claim_turn_serial())
             return "sent to lapis"
 
         service.hub_send_msg = AsyncMock(side_effect=overlapping_send)
@@ -396,7 +422,9 @@ def test_mixed_turn_overlap_does_not_misparent_or_clobber_the_cursor() -> None:
         send_task = asyncio.create_task(service.send_message("@lapis hi"))
         while not llm.coros:
             await asyncio.sleep(0)
-        llm.current_parent_uuid = "ordinary-1"  # ordinary turn done before task start
+        # ordinary turn done before task start: admission claim + completion
+        # write, exactly what the pipeline does around its user row (#676).
+        llm.publish_cursor("ordinary-1", llm.claim_turn_serial())
         await send_task
         await asyncio.create_task(llm.coros[0])
 
@@ -436,7 +464,7 @@ def test_mixed_turn_overlap_failure_keeps_the_newer_cursor() -> None:
                 self.records.append(("assistant", content, parent_uuid, uid))
                 return uid
 
-        class FakeLlm:
+        class FakeLlm(_CursorSerial):
             is_processing = False
             current_parent_uuid = "root"
 
@@ -455,7 +483,8 @@ def test_mixed_turn_overlap_failure_keeps_the_newer_cursor() -> None:
         service = LocalStateService(llm, object())
 
         async def failing_send(target, content):
-            llm.current_parent_uuid = "ordinary-2"  # ordinary turn wins mid-await
+            # ordinary turn wins mid-await (admission claim + completion write)
+            llm.publish_cursor("ordinary-2", llm.claim_turn_serial())
             raise RuntimeError("hub down")
 
         service.hub_send_msg = AsyncMock(side_effect=failing_send)
@@ -463,7 +492,9 @@ def test_mixed_turn_overlap_failure_keeps_the_newer_cursor() -> None:
         send_task = asyncio.create_task(service.send_message("@lapis hi"))
         while not llm.coros:
             await asyncio.sleep(0)
-        llm.current_parent_uuid = "ordinary-1"
+        # ordinary turn done before task start: admission claim + completion
+        # write, exactly what the pipeline does around its user row (#676).
+        llm.publish_cursor("ordinary-1", llm.claim_turn_serial())
         await send_task
         await asyncio.create_task(llm.coros[0])
 
@@ -475,5 +506,216 @@ def test_mixed_turn_overlap_failure_keeps_the_newer_cursor() -> None:
         assert records[("assistant", "hub down")][0] == records[("user", "@lapis hi")][1]
         # The failure path is held to the same compare-and-swap rule.
         assert llm.current_parent_uuid == "ordinary-2"
+
+    asyncio.run(scenario())
+
+
+
+
+def _garnet_llm():
+    """FakeLlm + FakeLogger speaking the admission-serial cursor protocol."""
+
+    class FakeLogger:
+        def __init__(self) -> None:
+            self.records: list[tuple[str, str, object, str]] = []
+            self._n = 0
+
+        async def log_user_message(self, content, parent_uuid=None):
+            self._n += 1
+            uid = f"u{self._n}"
+            self.records.append(("user", content, parent_uuid, uid))
+            return uid
+
+        async def log_assistant_message(self, content, parent_uuid=None):
+            self._n += 1
+            uid = f"a{self._n}"
+            self.records.append(("assistant", content, parent_uuid, uid))
+            return uid
+
+    class FakeLlm(_CursorSerial):
+        is_processing = False
+        current_parent_uuid = "root"
+
+        def __init__(self) -> None:
+            self.logger = FakeLogger()
+            self.conversation_logger = self.logger
+            self.coros: list[object] = []
+
+        def create_background_task(self, coro, *, name: str):
+            self.coros.append(coro)
+
+        def _add_conversation_message(self, role, content, *, metadata):
+            pass
+
+    return FakeLlm()
+
+
+def test_mention_completion_order_fast_first_later_admitted_owns_cursor() -> None:
+    """Garnet's r7 repro, completion order 1 (fast-first/slow-second).
+
+    Two mentions admit back-to-back with the cursor at root: @peridot fast
+    (serial 1), @lapis slow (serial 2). Fast completes first and owns the
+    cursor for now; slow completes second and, by admission order, must
+    STILL own the cursor at the end. The r6 value-compare CAS dropped this
+    write (cursor was a2, not the stale captured root), skipping a4 from
+    the continuation chain.
+    """
+
+    async def scenario() -> None:
+        llm = _garnet_llm()
+        service = LocalStateService(llm, object())
+        service.hub_send_msg = AsyncMock(side_effect=lambda t, c: f"sent to {t}")
+
+        fast = asyncio.create_task(service.send_message("@peridot fast one"))
+        while len(llm.coros) < 1:
+            await asyncio.sleep(0)
+        slow = asyncio.create_task(service.send_message("@lapis slow one"))
+        while len(llm.coros) < 2:
+            await asyncio.sleep(0)
+        await fast
+        await slow
+
+        # Completion order: fast (serial 1) first, slow (serial 2) second.
+        await asyncio.create_task(llm.coros[0])
+        await asyncio.create_task(llm.coros[1])
+
+        records = {
+            (role, content): (parent, uid)
+            for role, content, parent, uid in llm.logger.records
+        }
+        # Lineage chains stay intact for both mentions.
+        assert records[("assistant", "sent to peridot")][0] == (
+            records[("user", "@peridot fast one")][1]
+        )
+        assert records[("assistant", "sent to lapis")][0] == (
+            records[("user", "@lapis slow one")][1]
+        )
+        # The later-admitted mention owns the cursor at the end.
+        assert llm.current_parent_uuid == records[("assistant", "sent to lapis")][1]
+
+    asyncio.run(scenario())
+
+
+def test_mention_completion_order_slow_first_later_admitted_owns_cursor() -> None:
+    """Garnet's r7 repro, completion order 2 (slow-first/fast-second).
+
+    Same admission order as order 1 (@peridot fast serial 1, @lapis slow
+    serial 2) but reversed completions. The later-admitted mention still
+    owns the cursor: the first-admitted completion must not jump the queue
+    just because it happened to finish last in wall-clock time.
+    """
+
+    async def scenario() -> None:
+        llm = _garnet_llm()
+        service = LocalStateService(llm, object())
+        service.hub_send_msg = AsyncMock(side_effect=lambda t, c: f"sent to {t}")
+
+        fast = asyncio.create_task(service.send_message("@peridot fast one"))
+        while len(llm.coros) < 1:
+            await asyncio.sleep(0)
+        slow = asyncio.create_task(service.send_message("@lapis slow one"))
+        while len(llm.coros) < 2:
+            await asyncio.sleep(0)
+        await fast
+        await slow
+
+        # Completion order reversed: slow (serial 2) first, fast (serial 1)
+        # second. Admission order — not completion order — owns the cursor.
+        await asyncio.create_task(llm.coros[1])
+        await asyncio.create_task(llm.coros[0])
+
+        records = {
+            (role, content): (parent, uid)
+            for role, content, parent, uid in llm.logger.records
+        }
+        assert llm.current_parent_uuid == records[("assistant", "sent to lapis")][1]
+
+    asyncio.run(scenario())
+
+
+def test_ordinary_between_mentions_loses_only_to_later_admitted_turns() -> None:
+    """The r7 trap, order A: ordinary completes between the two mentions.
+
+    m1 admits (serial 1), an ordinary turn admits after it (serial 2), m2
+    admits last (serial 3). Completions: m1, ordinary, m2. The ordinary
+    write beats the earlier-admitted m1, and the later-admitted m2 beats
+    both — the final cursor is m2's assistant record.
+    """
+
+    async def scenario() -> None:
+        llm = _garnet_llm()
+        service = LocalStateService(llm, object())
+        service.hub_send_msg = AsyncMock(side_effect=lambda t, c: f"sent to {t}")
+
+        first = asyncio.create_task(service.send_message("@peridot first one"))
+        while len(llm.coros) < 1:
+            await asyncio.sleep(0)
+        # An ordinary turn admits after m1 (pipeline admission + completion
+        # write around its user row) before m2 is even typed.
+        ordinary_serial = llm.claim_turn_serial()
+        llm.publish_cursor("ordinary-user-row", ordinary_serial)
+        second = asyncio.create_task(service.send_message("@lapis second one"))
+        while len(llm.coros) < 2:
+            await asyncio.sleep(0)
+        await first
+        await second
+
+        # Completions: m1, then ordinary (already done), then m2.
+        await asyncio.create_task(llm.coros[0])
+        llm.publish_cursor("ordinary-assistant-row", ordinary_serial)
+        await asyncio.create_task(llm.coros[1])
+
+        records = {
+            (role, content): (parent, uid)
+            for role, content, parent, uid in llm.logger.records
+        }
+        assert records[("user", "@peridot first one")][0] == "root"
+        # m2 admitted after the ordinary row published, so its lineage
+        # legitimately continues from that row — the stale-parent problem
+        # is only about the CURSOR, not the lineage capture.
+        assert records[("user", "@lapis second one")][0] == "ordinary-user-row"
+        # The later-admitted mention owns the cursor over everything.
+        assert llm.current_parent_uuid == records[("assistant", "sent to lapis")][1]
+
+    asyncio.run(scenario())
+
+
+def test_ordinary_between_mentions_cannot_reclaim_from_later_admitted() -> None:
+    """The r7 trap, order B: ordinary completes last in wall-clock time.
+
+    Same admission order as order A (m1 serial 1, ordinary serial 2, m2
+    serial 3) but completions m1, m2, ordinary. The ordinary turn was
+    admitted BEFORE m2, so its late completion must not reclaim the cursor
+    from the later-admitted mention — admission order, not completion
+    order, resolves the race.
+    """
+
+    async def scenario() -> None:
+        llm = _garnet_llm()
+        service = LocalStateService(llm, object())
+        service.hub_send_msg = AsyncMock(side_effect=lambda t, c: f"sent to {t}")
+
+        first = asyncio.create_task(service.send_message("@peridot first one"))
+        while len(llm.coros) < 1:
+            await asyncio.sleep(0)
+        ordinary_serial = llm.claim_turn_serial()
+        llm.publish_cursor("ordinary-user-row", ordinary_serial)
+        second = asyncio.create_task(service.send_message("@lapis second one"))
+        while len(llm.coros) < 2:
+            await asyncio.sleep(0)
+        await first
+        await second
+
+        # Completions: m1, m2, then the ordinary turn LAST.
+        await asyncio.create_task(llm.coros[0])
+        await asyncio.create_task(llm.coros[1])
+        llm.publish_cursor("ordinary-assistant-row", ordinary_serial)
+
+        records = {
+            (role, content): (parent, uid)
+            for role, content, parent, uid in llm.logger.records
+        }
+        # m2 (admitted after the ordinary turn) keeps the cursor.
+        assert llm.current_parent_uuid == records[("assistant", "sent to lapis")][1]
 
     asyncio.run(scenario())

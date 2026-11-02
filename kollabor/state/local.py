@@ -3282,8 +3282,16 @@ class LocalStateService(StateService):
             # complete between spawn and task start and the mention would
             # silently reparent onto it.
             hub_parent = getattr(self._llm_service, "current_parent_uuid", None)
+            # The admission ticket is claimed at the same atomic point as
+            # the lineage capture (#676 r7): cursor writes resolve by
+            # admission order, so the later-admitted mention legitimately
+            # owns the cursor even when its captured parent went stale.
+            # Minimal coordinator doubles without the protocol keep the
+            # legacy unconditional cursor behavior (serial None).
+            claim_serial = getattr(self._llm_service, "claim_turn_serial", None)
+            hub_serial = claim_serial() if callable(claim_serial) else None
             hub_coro = self._execute_hub_message(
-                text, target, content, parent_uuid=hub_parent
+                text, target, content, parent_uuid=hub_parent, turn_serial=hub_serial
             )
             if callable(create_task):
                 create_task(hub_coro, name="rpc_hub_message")
@@ -3596,13 +3604,23 @@ class LocalStateService(StateService):
         return accepted
 
     async def _execute_hub_message(
-        self, text: str, target: str, content: str, *, parent_uuid: str | None = None
+        self,
+        text: str,
+        target: str,
+        content: str,
+        *,
+        parent_uuid: str | None = None,
+        turn_serial: int | None = None,
     ) -> None:
         """Send one chat mention through Hub and publish a web turn.
 
         ``parent_uuid`` is the lineage captured by the caller at spawn time;
         reading the shared ``current_parent_uuid`` pointer inside this task
         would grab whatever ordinary turn happened to complete meanwhile.
+        ``turn_serial`` is the admission ticket claimed at the same atomic
+        point (#676 r7): completion writes publish through the coordinator's
+        admission-serial protocol, so the later-admitted mention owns the
+        cursor regardless of completion order.
         """
         from kollabor_tui.display_tap import publish_semantic
 
@@ -3614,6 +3632,7 @@ class LocalStateService(StateService):
             "hub_broadcast": is_broadcast,
         }
         add_message = getattr(self._llm_service, "_add_conversation_message", None)
+        publish_cursor = getattr(self._llm_service, "publish_cursor", None)
         if callable(add_message):
             add_message("user", text, metadata=metadata)
         turn_parent = parent_uuid
@@ -3637,14 +3656,20 @@ class LocalStateService(StateService):
             assistant_uuid = await self._log_jsonl_turn_message(
                 "assistant", output, parent_uuid=user_uuid
             )
-            if assistant_uuid and self._llm_service.current_parent_uuid == turn_parent:
+            if assistant_uuid and callable(publish_cursor):
                 # Ordinary LLM turns take their parent from this pointer
                 # (pipeline parity), so the chain must continue after the
-                # mention. Compare-and-swap against the lineage captured at
-                # spawn: an ordinary turn that completed while the hub send
-                # awaited owns the newer cursor, and this completion must
-                # never drag it back onto the mention. The mention's own
-                # chain stays intact through its per-turn lineage either way.
+                # mention. The write publishes through the admission-serial
+                # protocol (#676 r7): the later-admitted turn owns the
+                # cursor regardless of completion order — a strictly
+                # later-admitted completion that already wrote keeps it,
+                # and this mention wins over anything admitted before it.
+                # The mention's own chain stays intact through its per-turn
+                # lineage either way.
+                publish_cursor(assistant_uuid, turn_serial)
+            elif assistant_uuid:
+                # Minimal coordinator doubles without the protocol: plain
+                # assignment, as before r7.
                 self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(
@@ -3667,9 +3692,13 @@ class LocalStateService(StateService):
             assistant_uuid = await self._log_jsonl_turn_message(
                 "assistant", message, parent_uuid=user_uuid
             )
-            if assistant_uuid and self._llm_service.current_parent_uuid == turn_parent:
-                # Same compare-and-swap as the success path: a newer turn
-                # keeps the cursor; the failed mention never overwrites it.
+            if assistant_uuid and callable(publish_cursor):
+                # Same admission-serial publish as the success path (#676
+                # r7): a later-admitted turn keeps the cursor, and the
+                # failed mention — itself a legitimate admitted turn —
+                # still wins over anything admitted before it.
+                publish_cursor(assistant_uuid, turn_serial)
+            elif assistant_uuid:
                 self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "error", message=message)
             publish_semantic(
