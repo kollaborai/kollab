@@ -177,7 +177,8 @@ subcommands:
   user [name]                    show or set the hub user display name
   on                             enable hub plugin (next session)
   off                            disable hub plugin (next session)
-  org <name> [mission]           launch an organization
+  org <team> [mission]           launch a team
+    [--dir FOLDER] [--only a,b | --without a,b]
   help                           show this help
 
 examples:
@@ -189,6 +190,10 @@ examples:
   kollab --hub capture koordinator 200
   kollab --hub capture koordinator 200 --raw
   kollab --hub org engineering "ship the billing flow"
+  kollab --hub org engineering --dir ./project --only backend-eng,qa-eng
+
+`--dir` chooses the workspace. For member selection, use either `--only` or
+`--without` with comma-separated names; the options cannot be combined.
 
 capture addresses a live hub identity or live orchestrator session. It does not
 address a bundle name, and an offline inbox is not a capturable process. For
@@ -678,8 +683,8 @@ type / in the input box to open the command menu.
     agents                        list all active agents
 
   teams:
-    org <name> [mission]          launch a team
-    orgs                          list available teams
+    org <team> [mission]          open picker to choose members, lead, mission
+    orgs                          list teams and reporting outlines
 
   vaults (persistent memory):
     vault [name]                  show vault info
