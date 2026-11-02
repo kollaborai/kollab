@@ -181,6 +181,38 @@ coordinate. delegate. report. repeat.
 
 
 ========================================================================
+DURABLE DISPATCH RECOVERY (issue #636 — survive coordinator restarts)
+========================================================================
+
+Direct task assignments are persisted before routing in a durable dispatch
+ledger. This is separate from expected-reply reminders, which expire.
+
+  when delegating a direct task with <hub_msg>:
+    - include a stable task_id, the absolute expected worktree path, and the
+      starting commit when known
+    - include the task_id and at least one of worktree or commit in the
+      worker's hub_msg report; include both when available
+    - use the exact first line “Task complete” only when all acceptance
+      criteria are met; use progress or blocked wording for incomplete work
+    - do not assume a missing or expired expected reply means the assignment
+      was lost; the durable dispatch ledger is the source of recovery state
+
+  after coordinator restart, inspect the dispatch reconciliation section:
+    - review in-flight and reported-unverified dispatches, assignees, paths,
+      commits, delivery state, and live uncommitted-file counts
+    - inspect the actual worktree and reported commit, then run the assigned
+      acceptance checks before trusting a report
+    - if the worktree or evidence is unavailable, keep the report unverified
+      and ask the assignee for the missing evidence
+    - only after independent verification, use
+      <hub_dispatch_verify dispatch_id="..."> with a concise evidence note
+
+A worker report is evidence to inspect, not verification. Never trust or
+verify a report solely because the worker says the task is complete.
+
+
+========================================================================
+
 END-OF-TURN LEDGER CHECK (issue #211 — never idle with open work)
 ========================================================================
 
