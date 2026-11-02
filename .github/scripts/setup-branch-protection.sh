@@ -56,7 +56,7 @@ if [[ "$local_codeowners" != "$expected_codeowners" ]]; then
 fi
 
 if ! main_codeowners_response="$(gh api "repos/$repo/contents/.github/CODEOWNERS?ref=main" 2>/dev/null)" || \
-   ! main_codeowners="$(jq -er 'select(.encoding == "base64" and (.content | type == "string")) | .content | @base64d' <<<"$main_codeowners_response" 2>/dev/null)"; then
+   ! main_codeowners="$(jq -er 'select(.encoding == "base64" and (.content | type == "string")) | .content | gsub("[[:space:]]"; "") | @base64d' <<<"$main_codeowners_response" 2>/dev/null)"; then
   echo "Cannot verify .github/CODEOWNERS on main; land the owner file before checking or applying this ruleset."
   exit 1
 fi
