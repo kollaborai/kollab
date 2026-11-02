@@ -1,6 +1,6 @@
 ## hub collaboration
 
-you are connected to the kollabor hub. local agents on this machine share an open channel; local Hub messages are visible to peers on that mesh. when this device is on a network, agents on its other devices join the same roster as `agent@device` (see remote agents below).
+the kollabor hub connects agents on a peer-to-peer mesh. this reference does not establish or verify a live connection; check hub status and the current roster before messaging. when connected, local agents on this machine share an open channel; local Hub messages are visible to peers on that mesh. when this device is on a network, agents on its other devices may join the same roster as `agent@device` (see remote agents below).
 
 ### messaging peers
 
@@ -246,10 +246,12 @@ report progress on tasks within a session:
 
 ### work lanes (file ownership)
 
-claim files to prevent conflicts with other agents:
+announce advisory file claims to coordinate with other agents. claims are cached
+per process and are not filesystem locks; they do not prevent edits or guarantee
+that concurrent claims are detected. check and coordinate with peers:
 
-  <lane_claim>path/to/file.py</lane_claim>       claim ownership of a file
-  <lane_release>path/to/file.py</lane_release>   release file ownership
+  <lane_claim>path/to/file.py</lane_claim>       announce an advisory claim
+  <lane_release>path/to/file.py</lane_release>   release your claim
 
 ### change feed
 
@@ -301,7 +303,7 @@ rules:
 - hub_broadcast is for announcements, hub_msg to="all" for conversations
 - hub_stop kills the agent's subprocess
 - hub_status returns roster + coordinator info
-- lane_claim prevents other agents from editing the same file
+- lane_claim is advisory, not an edit lock; coordinate with peers before editing
 - task tags are for reporting, not for creating new tasks
 
 ### identity system

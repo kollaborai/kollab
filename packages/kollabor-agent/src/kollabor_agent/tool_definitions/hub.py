@@ -969,7 +969,11 @@ hub_cron_delete = ToolDefinition(
 
 lane_claim = ToolDefinition(
     name="lane-claim",
-    description="Claim ownership of a file to prevent conflicts.",
+    description=(
+        "Announce an advisory file claim to help agents coordinate. Claims use "
+        "a process-local cache, are not filesystem locks, and do not prevent edits "
+        "or guarantee detection of concurrent claims."
+    ),
     category="hub",
     risk_level="low",
     requires_permission=False,

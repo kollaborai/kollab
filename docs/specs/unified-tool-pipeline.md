@@ -13,6 +13,27 @@ native vs XML. plugin tools (hub_msg, agent spawn, etc) are
 real tools, not regex hacks on LLM_RESPONSE_POST.
 
 
+## current request exposure
+
+The registry reference is independent of the native schema loader. When
+`kollabor.tool_registry.use_registry` is false, the generated reference is
+omitted and any static agent guidance remains. Otherwise, disabling
+`kollabor.llm.native_tool_calling` retains the scoped XML registry reference,
+even for a native-capable provider. When native calling is enabled and the
+profile manager exposes a true direct `get_supports_tools()` result, the
+reference is omitted; if that capability cannot be determined, it is retained.
+The current `ProfileManager` exposes this method on its active profile rather
+than directly, so its fallback currently retains the XML reference even when
+native schemas are sent.
+
+`NativeToolsHandler` independently checks the global setting and the active
+profile, then loads the schemas permitted by the active bundle. The streaming
+handler uses the available native schemas after the discovery wait. A native
+schema load can still fail or return no tools after the prompt has been built;
+there is no automatic cross-layer regeneration of the XML reference in that
+case. Tool discovery or reference text is not authorization: execution uses
+bundle-scope checks and permission hooks.
+
 ## problem
 
 queue_processor.py has two completely separate code paths for

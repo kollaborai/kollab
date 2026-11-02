@@ -84,7 +84,7 @@ class TestStaticPromptByteIdentity(unittest.TestCase):
             self.assertNotIn("ATTACH-BODY-w8p", result)
             self.assertNotIn("ALIAS-BLOCK-v7r", result)
             self.assertIn(
-                "This is the codebase and context for our session.", result
+                "This is the project context available for this session.", result
             )
 
     def test_aliases_appear_only_with_static_optin(self):

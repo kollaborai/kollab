@@ -586,9 +586,10 @@ class SystemPromptBuilder:
             prompt_parts.append(self._shell_alias_prompt)
             logger.info("Added cached shell aliases to static system prompt")
 
-        # Add closing statement (static session-awareness handoff)
+        # A prompt can only include the context that was collected for this session.
         prompt_parts.append(
-            "This is the codebase and context for our session. You now have full project awareness."
+            "This is the project context available for this session. "
+            "Inspect relevant files and current state before acting."
         )
 
         return "\n\n".join(prompt_parts)
@@ -621,11 +622,13 @@ class SystemPromptBuilder:
             if not use_registry:
                 return None
 
-            # Tools come from ONE source: providers with native tool
-            # calling get the schemas over the API, so the prompt carries
-            # only a short pointer. The full XML registry reference is
-            # emitted only for providers without native tools.
-            if self.profile_manager is not None:
+            # Provider capability alone does not enable native schemas: the
+            # global native-calling switch must also be on. Retain the
+            # existing XML fallback if the capability cannot be determined.
+            if (
+                self.config.get("kollabor.llm.native_tool_calling", True)
+                and self.profile_manager is not None
+            ):
                 try:
                     if self.profile_manager.get_supports_tools():
                         return None
