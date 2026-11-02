@@ -83,8 +83,10 @@ brain, and ACP is the only wire between them.
 
 Each device that runs a harness agent needs the harness's own CLI, to log in,
 and its ACP adapter. These pinned versions are the qualification targets. The
-current qualification pass has run all three: Claude Code and Codex's model,
-tool, permission, cancel, steering, resume and missing-login gates pass;
+previous qualification pass covered Claude Code and an earlier Codex adapter's
+model, tool, permission, cancel, steering, resume and missing-login gates;
+Codex adapter 2.5.0 has a focused live multi-tool usage check, but its full
+qualification matrix has not yet been rerun. Earlier testing also found that
 Gemini rejects the configured consumer Google
 authentication. Gemini's empty-auth startup preserves `-32000` and its
 missing-API-key reason, and the runner closes cleanly; the positive
@@ -94,7 +96,7 @@ live runs for these versions and for any later update.
 | Profile | Log in with | ACP adapter |
 |---|---|---|
 | `claude-code` | `npm install -g @anthropic-ai/claude-code`, then `claude` and `/login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0` |
-| `codex-cli` | `npm install -g @openai/codex`, then `codex login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1` |
+| `codex-cli` | `npm install -g @openai/codex`, then `codex login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.5.0 --no-save @agentclientprotocol/codex-acp@2.5.0` |
 
 Gemini CLI is not a built-in profile: Google retired it on June 18, 2026. A
 user-defined ACP profile can still run any ACP command.
@@ -120,7 +122,22 @@ can't be found fails the turn naming it.
 The two canonical profiles also check the managed adapter directories above
 when shell resolution fails. This lets a Web UI or service launch find a pinned
 adapter without changing the user's global npm installation. A custom command
-is resolved as configured; its executable is never replaced by a built-in one.
+or cached global executable stays selected. For the built-in Codex command, a
+cached managed 2.1.1 path is reconsidered when managed 2.5.0 is present: an
+explicit shell/PATH selection wins, otherwise the new managed pin is used. If
+only the existing managed 2.1.1 is available, it remains usable, including on
+a cold cache. Version 2.1.1 reports only its last request even on the prompt
+response, so kollab does not treat that response as a turn total; its context
+sample is labeled `last req`. Kollab does not install an adapter in the background.
+When an existing managed 2.1.1 session moves to an identified Codex adapter,
+kollab attempts to resume the same session. If the selected adapter cannot be
+identified or resume fails, startup reports the problem and retains the saved
+binding instead of silently replacing it with a fresh session.
+On Windows the managed executable is npm's `.cmd` launcher. Kollab recognizes
+the checked npm Node-shim templates only when their complete contents and
+declared package bin agree; modified or unknown wrappers remain unverified.
+Both the `.cmd` and extensionless forms of an existing managed binding are
+eligible for the same guarded resume.
 
 **Environment.** The child gets your environment minus provider keys
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
@@ -285,6 +302,14 @@ one item: your text as is, or a hub message rendered as
 `Broadcast from lapis` with its thread, followed by its text. The hub tools take
 that thread handle to post on the thread.
 
+Image uploads travel with the prompt or steering message as ACP image content
+blocks only when the harness advertises `promptCapabilities.image`. The
+attachment control uses that negotiated value; an attempted image on an
+unsupported harness is rejected with one line. Image bytes stay in the
+bounded in-memory attachment store and are not written to conversation history.
+ACP image inputs currently require uploaded image data; an HTTPS or
+provider-file reference is rejected with an instruction to upload it.
+
 Not sent: the open channel, the HUD after the preface, vault rebirth, working
 memory, crystal and scratchpad nudges, kollab's system prompt. Compaction and
 dreaming are off: the harness manages its own context.
@@ -335,6 +360,27 @@ claude@home-server` and `hub_ask` settle on it.
 | `usage_update` | context use and cost in the status bar, replaced by each update, never added up; Web UI counts use thousands with at most one decimal, truncated (`137657/475000` → `137.6k/475k Tokens`) |
 | `user_message_chunk` | only inside a load replay, which is swallowed |
 | the rest | logged |
+
+For recognized installed Codex 2.5.0 and Claude 0.89.0 adapter packages, settle
+their prompt-response usage once and carry it through the session snapshot to
+local and attached status widgets. Recognition reads the resolved executable's
+package name and version, without running it for detection. Unknown versions,
+wrappers and custom adapters still run, but their response usage is not treated
+as a verified turn total. These two recognized adapters report cache counters
+separately from input and include reasoning in output; settle only when input,
+cache and output reconcile with the reported total.
+Settlement tracks consecutive completed turn IDs compactly, including turns
+that fail without a result. A late older result still settles without allowing
+a replay to add its usage twice.
+The reported scope is adapter-dependent: Claude prompt usage excludes
+subagent and sidechain costs. Show context samples separately from the
+reported prompt total; when there is no usable total, label the context sample
+as the last request. Clear a previous total at the next turn start and when
+the harness changes or closes. A delayed older turn may still contribute to
+cumulative accounting but cannot replace the current display.
+Settle a received result before binding or history persistence: a subsequent
+write failure or cancellation must carry its usage on the failed completion.
+If no result was received, no prompt usage is inferred.
 
 None of it is a tool kollab runs.
 
@@ -694,7 +740,26 @@ A clean transcript is the bar on every live run.
 
 - Model choice and reasoning effort: when an agent advertises ACP `model` or
   `thought_level` config options, `/model` and the Model panel list and set them
-  through `session/set_config_option`; unadvertised options are refused.
+  through `session/set_config_option`; unadvertised options are refused. Confirmed
+  Model-panel picks are saved per profile and override ordinary profile defaults.
+  Explicit startup loadouts take precedence over those saved picks without
+  rewriting them, and must be confirmed by the harness before readiness; a
+  refused model or effort closes the partial runner. ACP loadouts reject
+  native-only temperature and max-token settings at startup and in-app.
+  Unavailable saved picks without an explicit loadout remain nonfatal notices.
+  Session-tab effort is scoped to the current daemon, survives
+  its harness restart, and never changes another daemon's saved options. An
+  in-app ACP loadout applies its advertised model and effort before saving the
+  confirmed picks; a refused or cancelled value restores the previous active
+  profile. One task owns an ACP profile/loadout transition through its full
+  application or rollback; competing changes are refused, an older runner's
+  cleanup cannot retire a successor, and readiness is published only after the
+  transition completes. Restart, resume and web history clear hold the same
+  ownership across conversation mutation and harness replacement. Competing
+  changes fail before mutation. If cancellation or failure follows mutation,
+  the harness is stopped and the caller must retry; local history may already
+  have changed. Inbound ACP load/resume reports a retryable failure for a busy
+  daemon, reserving resource-not-found for a missing saved session.
 - Notices: when an SDK release carries `session.notices`, advertise them
   outbound and send mesh-started turns to attached clients. They stay live
   only: never history, never replayed by load or resume, never in a harness
@@ -706,5 +771,5 @@ A clean transcript is the bar on every live run.
   made so each turn answers one sender; the steering rule keeps that and lets
   the follow-ups in.
 - More profiles (goose, opencode, Cursor CLI) once their commands are checked.
-- Images and files in prompts, both ways.
+- Non-image files in prompts and image output from harnesses.
 - ACP v2, in draft since 2026-07-20: revisit when it is stable.

@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 import uuid
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, cast
 
 from kollabor.user_input_source import UserInputSource
@@ -19,6 +20,8 @@ from kollabor_agent.queue_processor import (
     CancellationOrigin,
     QueuedInput,
     QueueProcessor,
+    TaggedInput,
+    batch_request_ids,
     merge_voice_origin_contexts,
 )
 from kollabor_agent.tool_executor import ToolExecutor
@@ -36,6 +39,7 @@ from kollabor_ai import (
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.context_injection import ContextService as ContextInjectionService
 from kollabor_ai.context_service import ContextService
+from kollabor_ai.goal_image_scope import current_goal_image_scope
 from kollabor_ai.message_content import (
     EphemeralImageStore,
     MessageContent,
@@ -44,6 +48,7 @@ from kollabor_ai.message_content import (
     contains_image_content,
     content_to_text,
     normalize_message_content,
+    serialize_gemini_parts,
 )
 from kollabor_ai.providers.registry import ProviderRegistry, create_config_from_profile
 from kollabor_ai.providers.transformers import ToolCallAccumulator
@@ -114,7 +119,7 @@ class LLMService:
         )
 
     def _add_conversation_message(
-        self, message_or_role, content=None, parent_uuid=None, metadata=None
+        self, message_or_role, content=None, parent_uuid=None, metadata=None, *, publish_user_event=True
     ) -> str:
         """Add a message to both conversation manager and legacy history.
 
@@ -167,7 +172,7 @@ class LLMService:
         # conversation_manager: adds persistence, UUID tracking, metadata
         # both systems stay synchronized
         self.conversation_history.append(message)
-        if role == "user" and not hidden:
+        if role == "user" and not hidden and publish_user_event:
             # What mirrors this conversation (the engine) follows it by these,
             # so a window opened mid-turn shows the message being answered.
             publish_semantic(
@@ -830,6 +835,10 @@ class LLMService:
 
     def supports_image_input(self) -> bool:
         """Return whether the active provider model accepts image input."""
+        acp = self._active_acp()
+        selected_acp, _ = self._profile_selects_acp()
+        if selected_acp or acp is not None:
+            return bool(acp and getattr(acp, "supports_image_input", False))
         return bool(
             getattr(
                 getattr(self, "api_service", None),
@@ -837,6 +846,12 @@ class LLMService:
                 lambda: False,
             )()
         )
+
+    def image_input_rejection_reason(self) -> str:
+        selected_acp, _ = self._profile_selects_acp()
+        if selected_acp or self._active_acp() is not None:
+            return "This harness can't take images."
+        return f"model '{self.api_service.model}' does not accept image input"
 
     def _init_components(self):
         """Initialize all extracted components (NativeToolsHandler, SystemPromptBuilder, QueueProcessor, etc)."""
@@ -1709,11 +1724,12 @@ class LLMService:
 
     async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
+        request_ids = batch_request_ids(messages)
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
             merged_origin_context = merge_voice_origin_contexts(messages)
             combined = combine_message_contents(
-                [m.content if isinstance(m, QueuedInput) else m for m in messages]
+                [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
             combined = self.merge_pending_agent_hud(combined)
             messages = [
@@ -1728,6 +1744,7 @@ class LLMService:
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
             current_parent_uuid=self.current_parent_uuid,
+            request_ids=request_ids,
         )
 
     async def _continue_conversation(self):
@@ -1747,16 +1764,24 @@ class LLMService:
             if hud_content:
                 from kollabor_events.data_models import ConversationMessage
 
+                hud_message = ConversationMessage(
+                    role="user",
+                    content=hud_content,
+                    metadata={
+                        "agent_hud": True,
+                        "agent_hud_sources": ["pending"],
+                    },
+                )
+                image_scope = current_goal_image_scope()
+                if (
+                    image_scope is not None
+                    and image_scope.owner_queue is self._queue_processor
+                    and image_scope.carrier is None
+                ):
+                    hud_message._goal_image_marker = image_scope.marker
+                    image_scope.carrier = hud_message
                 self.current_parent_uuid = self._add_conversation_message(
-                    ConversationMessage(
-                        role="user",
-                        content=hud_content,
-                        metadata={
-                            "agent_hud": True,
-                            "agent_hud_sources": ["pending"],
-                        },
-                    ),
-                    parent_uuid=self.current_parent_uuid,
+                    hud_message, parent_uuid=self.current_parent_uuid
                 )
         self.current_parent_uuid = await self._queue_processor.continue_conversation(
             current_parent_uuid=self.current_parent_uuid,
@@ -1911,6 +1936,7 @@ class LLMService:
         origin_context: dict | None = None,
         may_answer: bool = False,
         native_only: bool = False,
+        request_id: str | None = None,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1927,6 +1953,8 @@ class LLMService:
                 generation prompt, a hub peer, a pipe is never the user's yes.
             native_only: the caller needs the native tool loop (agent/skill
                 generation writes files); refused while ACP owns the chat.
+            request_id: the client follows this turn by it (#551): its events
+                carry it in ``request_ids``, and the result echoes it.
 
         Returns:
             Status information about processing
@@ -1938,7 +1966,7 @@ class LLMService:
         if contains_image_content(message) and not self.supports_image_input():
             return {
                 "status": "rejected",
-                "reason": f"model '{self.api_service.model}' does not accept image input",
+                "reason": self.image_input_rejection_reason(),
             }
         try:
             normalized_message = normalize_message_content(message, image_store)
@@ -1955,7 +1983,7 @@ class LLMService:
         ):
             return {
                 "status": "rejected",
-                "reason": f"model '{self.api_service.model}' does not accept image input",
+                "reason": self.image_input_rejection_reason(),
             }
 
         # A LiveKit room's turn, or a /voice turn VoicePlugin.admit let in.
@@ -1971,11 +1999,9 @@ class LLMService:
                 return {"status": "rejected", "reason": "native_provider_required"}
             if acp is None:
                 return _acp_unavailable_result(self._acp_service())
-            if not isinstance(message, str):
-                return {"status": "rejected", "reason": "acp_text_only"}
             return await self._admit_acp(
                 acp,
-                {"message": message, "voice": voice, "origin_context": origin_context},
+                {"message": normalized_message, "voice": voice, "origin_context": origin_context},
                 UserInputSource.TUI.value,
             )
 
@@ -2032,6 +2058,8 @@ class LLMService:
         await self._enqueue_with_overflow_strategy(
             QueuedInput(normalized_message, voice or {}, trusted_origin_context)
             if voice or trusted_origin_context
+            else TaggedInput(normalized_message, (request_id,))
+            if request_id
             else normalized_message
         )
 
@@ -2041,6 +2069,8 @@ class LLMService:
                 lambda: self._process_queue(), name="process_queue"
             )
 
+        if request_id and not (voice or trusted_origin_context):
+            return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
 
     def _voice_aside_due(self, origin: dict) -> bool:
@@ -2101,9 +2131,6 @@ class LLMService:
         selected_acp, profile_unknown = self._profile_selects_acp()
         if (selected_acp or (is_agent and profile_unknown)) and not acp_dispatch:
             return _acp_unavailable_result(acp)
-        if acp_dispatch and not isinstance(message, str):
-            return {"status": "rejected", "reason": "acp_text_only"}
-
         emit = getattr(self.event_bus, "emit_with_hooks", None)
         if not callable(emit):
             return {"status": "rejected", "reason": "input_pipeline_unavailable"}
@@ -2198,12 +2225,82 @@ class LLMService:
         except Exception:
             return False, True
 
+    def _manual_relay_origin_authorized(self, origin: Mapping[str, Any]) -> bool:
+        """Fail closed when a manual relay grant expires before ACP delivery."""
+        if not origin.get("relay_turn_id"):
+            return True
+        event_bus = getattr(self, "event_bus", None)
+        get_service = getattr(event_bus, "get_service", None)
+        if not callable(get_service):
+            return False
+        try:
+            hub_plugin = get_service("hub_plugin")
+            validate = getattr(hub_plugin, "_manual_relay_origin_authorized", None)
+            return callable(validate) and validate(origin) is True
+        except Exception:
+            logger.warning(
+                "manual relay ACP admission authority check failed", exc_info=True
+            )
+            return False
+
     async def _admit_acp(self, acp, data: Dict[str, Any], source: str) -> Dict[str, Any]:
         """The one ACP admission: steer a running turn or queue a new one."""
         request_id = data.get("request_id") or uuid.uuid4().hex
         origin = dict(data.get("origin_context") or {})
         origin.setdefault("operator", source != "agent")
-        message = str(data["message"])
+        if not self._manual_relay_origin_authorized(origin):
+            return {
+                "status": "rejected",
+                "reason": "remote conversation authority is no longer valid",
+            }
+        content = data["message"]
+        images: tuple[dict[str, str], ...] = ()
+        if not isinstance(content, str):
+            if contains_image_content(content) and not getattr(acp, "supports_image_input", False):
+                return {"status": "rejected", "reason": "This harness can't take images."}
+            image_store = getattr(self, "_image_store", None)
+            if image_store is None:
+                image_store = EphemeralImageStore()
+                self._image_store = image_store
+            existing_media_ids = {
+                source.get("media_id")
+                for part in content if isinstance(part, Mapping)
+                for source in [part.get("source")]
+                if isinstance(source, Mapping)
+                and source.get("kind") == "managed_upload"
+                and isinstance(source.get("media_id"), str)
+            } if isinstance(content, list) else set()
+            try:
+                content = normalize_message_content(content, image_store)
+            except MessageContentError as exc:
+                return {"status": "rejected", "reason": str(exc)}
+            try:
+                parts = serialize_gemini_parts(content, self.resolve_media)
+                images = tuple(
+                    {"mime_type": part["inline_data"]["mime_type"],
+                     "data": part["inline_data"]["data"]}
+                    for part in parts if "inline_data" in part
+                )
+                image_count = (
+                    sum(part.get("type") == "image" for part in content)
+                    if isinstance(content, list) else 0
+                )
+                if len(images) != image_count:
+                    raise MessageContentError("ACP image data is unavailable")
+            except MessageContentError:
+                # Drop only images created by this normalization; existing
+                # managed references may still be used by an earlier turn.
+                if isinstance(content, list):
+                    for part in content:
+                        source = part.get("source")
+                        if isinstance(source, Mapping) and source.get("kind") == "managed_upload":
+                            media_id = source.get("media_id")
+                            if isinstance(media_id, str) and media_id not in existing_media_ids:
+                                image_store.remove(media_id)
+                return {"status": "rejected", "reason": "Image unavailable or unsupported; upload it and retry."}
+        message = content_to_text(content)
+        if not message.strip():
+            return {"status": "rejected", "reason": "empty message"}
         voice = data.get("voice")
         if voice:
             # A mic turn carries the voice rules, as on the native path, and
@@ -2213,17 +2310,38 @@ class LLMService:
             epoch = voice.get("epoch")
             message = voice_preamble(voice, epoch in acp.voice_rules_epochs) + message
             acp.voice_rules_epochs.add(epoch)
-        elif await acp.steer(message, origin=origin, thread_id=data.get("thread_id")):
-            return {"status": "injected", "request_id": request_id}
+        else:
+            try:
+                steered = await acp.steer(
+                    message, origin=origin, thread_id=data.get("thread_id"),
+                    **({"images": images} if images else {}),
+                )
+            except RuntimeError as exc:
+                if images and "can't take images" in str(exc):
+                    return {"status": "rejected", "reason": "This harness can't take images."}
+                raise
+            if steered:
+                return {"status": "injected", "request_id": request_id}
+        # `steer` above can await while a relay is revoked; re-check at the
+        # actual queue-admission boundary before sending anything to ACP.
+        if not self._manual_relay_origin_authorized(origin):
+            return {
+                "status": "rejected",
+                "reason": "remote conversation authority is no longer valid",
+            }
+
         try:
             admission = acp.admit(
                 message, request_id=request_id, source=source,
                 thread_id=data.get("thread_id"),
                 origin=origin,
+                **({"images": images} if images else {}),
             )
         except (RuntimeError, ValueError) as exc:
             if "full" in str(exc).lower():
                 return {"status": "rejected", "reason": "acp_queue_full"}
+            if images and "can't take images" in str(exc):
+                return {"status": "rejected", "reason": "This harness can't take images."}
             return _acp_unavailable_result(acp)
         except Exception as exc:
             if "full" in str(exc).lower():

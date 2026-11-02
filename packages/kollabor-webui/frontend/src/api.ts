@@ -126,6 +126,7 @@ export const HISTORY_MAX_PAGE_BYTES = Number.isInteger(configuredHistoryPageByte
 
 export type HistoryPage = {
   history: HistoryMessage[];
+  conversation_uid?: string | null;
   start_index: number;
   end_index: number;
   has_more_older: boolean;
@@ -357,6 +358,8 @@ export type TeamLaunchResult = {
   started: string[];
   skipped: { persona: string; reason: string }[];
   failed: { persona: string; error: string }[];
+  excluded?: string[];
+  notes?: string[];
   sessions: Session[];
 };
 
@@ -1184,6 +1187,13 @@ export class EngineApi {
     );
   }
 
+  getHistoryMetadata(sessionId: string, reference: string) {
+    const query = new URLSearchParams({ ref: reference });
+    return this.json<{ session_id: string; metadata: Record<string, unknown> }>(
+      `/sessions/${encodeURIComponent(sessionId)}/history/metadata?${query}`,
+    );
+  }
+
   /** Preserve the existing full/limited history consumer contract. */
   async getHistory(sessionId: string, limit?: number) {
     const targetCount = limit && Number.isFinite(limit) && limit > 0
@@ -1426,11 +1436,23 @@ export class EngineApi {
     return this.json<TeamsResponse>(`/teams${query}`);
   }
 
-  /** Start every member of a team that is not already running in the folder, lead first. */
-  launchTeam(name: string, workspace: string, profile?: string) {
+  /** Start the selected team members in launch order; omitted selection fields preserve full-team behavior. */
+  launchTeam(
+    name: string,
+    workspace: string,
+    profile?: string,
+    selection?: { members?: string[]; exclude?: string[]; lead?: string; mission?: string },
+  ) {
     return this.json<TeamLaunchResult>(`/teams/${encodeURIComponent(name)}/launch`, {
       method: "POST",
-      body: JSON.stringify({ workspace, ...(profile ? { profile } : {}) }),
+      body: JSON.stringify({
+        workspace,
+        ...(profile ? { profile } : {}),
+        ...(selection?.members !== undefined ? { members: selection.members } : {}),
+        ...(selection?.exclude !== undefined ? { exclude: selection.exclude } : {}),
+        ...(selection?.lead ? { lead: selection.lead } : {}),
+        ...(selection?.mission !== undefined ? { mission: selection.mission } : {}),
+      }),
     });
   }
 

@@ -1630,21 +1630,72 @@ async def test_issuer_requires_explicit_decision_after_proof(
             raise RuntimeError("simulated process interruption after receipt")
 
         monkeypatch.setattr(relay, "approve", fail_peer_approval)
+    polling_started_at = time.monotonic()
     task = asyncio.create_task(issuer._serve_offer(offer))
+    # Prove the polling window survives the >5 s scheduling delay observed on
+    # loaded CI runners without relying on an actual flaky runner. The deadline
+    # stays anchored before this deterministic delay, so a 5 s bound would fail.
+    delayed_proof_case = (
+        decision_name == "accept"
+        and not tamper_ack
+        and not wrong_ack_digest
+        and not crash_before_peer_approval
+        and not revoke_after_receipt_before_peer_approval
+    )
+    if delayed_proof_case:
+        await real_sleep(5.3)
     # Real wall-clock deadline, not a fixed iteration count: a fixed count of
     # 1ms sleeps assumes the event loop gets scheduled promptly, which is not
     # true under full-suite CPU contention and was the source of a flaky
     # "verified proof did not become a pending request" failure (issue #121).
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
+    # The issuer's own offer expiry is far longer, so 30 s keeps the same bound
+    # with measured headroom for loaded test runners and the deterministic delay.
+    poll_timeout_seconds = 30.0
+    deadline = polling_started_at + poll_timeout_seconds
+    while True:
+        if task.done():
+            # A dead issuer task can never create the pending request. Fail
+            # fast and report its outcome: spinning out the deadline would
+            # hide the real cause behind a generic timeout (issue #574).
+            if task.cancelled():
+                failure: BaseException = asyncio.CancelledError(
+                    "issuer task was cancelled before creating the pending request"
+                )
+            else:
+                failure = task.exception() or AssertionError(
+                    "issuer task finished without creating a pending request"
+                )
+            raise AssertionError(
+                f"issuer task stopped before creating the pending request: {failure!r}"
+            ) from failure
         requests = issuer.pending_requests()
         if requests:
             break
+        if time.monotonic() >= deadline:
+            where = ""
+            stack = task.get_stack()
+            if stack:
+                frame = stack[-1]
+                where = (
+                    f"issuer task last suspended at {frame.f_code.co_name}:"
+                    f"{frame.f_lineno}"
+                )
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if task.cancelled():
+                detail = f"{where}; issuer task was cancelled at deadline".lstrip("; ")
+            else:
+                task_failure = task.exception()
+                if task_failure is not None:
+                    detail = f"{where}; issuer task failed with: {task_failure!r}"
+                elif task.done():
+                    detail = "issuer task finished without creating a pending request"
+                else:
+                    detail = where or "issuer task still running at deadline"
+            raise AssertionError(
+                f"verified proof did not become a pending request within {poll_timeout_seconds:g}s ({detail})"
+            )
         await real_sleep(0.001)
-    else:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        raise AssertionError("verified proof did not become a pending request")
 
     pending_request = requests[0]
     assert pending_request.enrollment_id == round_id

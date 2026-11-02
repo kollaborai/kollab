@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -18,10 +19,19 @@ from typing import Any, Awaitable, Callable, ClassVar
 
 import acp
 import psutil
-from acp.schema import AllowedOutcome, DeniedOutcome, EnvVariable, Implementation, McpServerStdio, TextContentBlock
+from acp.schema import (
+    AllowedOutcome,
+    DeniedOutcome,
+    EnvVariable,
+    ImageContentBlock,
+    Implementation,
+    McpServerStdio,
+    TextContentBlock,
+)
+
+from kollabor.version import __version__
 
 from .acp_state import ACPBinding
-from kollabor.version import __version__
 
 
 class ACPError(RuntimeError):
@@ -30,6 +40,10 @@ class ACPError(RuntimeError):
     def __init__(self, message: str, *, code: int | None = None):
         super().__init__(message)
         self.code = code
+
+
+def _on_windows() -> bool:
+    return sys.platform == "win32"
 
 
 @dataclass(frozen=True)
@@ -46,12 +60,20 @@ class ACPProfile:
         "claude-code": {
             "command": ["claude-agent-acp"],
             "managed_dir": "claude-0.89.0",
-            "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0",
+            "install": (
+                "npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save "
+                "@agentclientprotocol/claude-agent-acp@0.89.0"
+            ),
         },
         "codex-cli": {
             "command": ["codex-acp"],
-            "managed_dir": "codex-2.1.1",
-            "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1",
+            "managed_dir": "codex-2.5.0",
+            # Existing device-local installs may still only have this adapter.
+            "previous_managed_dirs": ("codex-2.1.1",),
+            "install": (
+                "npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.5.0 --no-save "
+                "@agentclientprotocol/codex-acp@2.5.0"
+            ),
         },
     }
     _PROVIDER_KEYS: ClassVar[frozenset[str]] = frozenset({
@@ -128,10 +150,51 @@ class ACPProfile:
         builtin = self.BUILTIN_PROFILES.get(self.name)
         if not builtin or self.command[0] != builtin["command"][0]:
             return ""
-        return str(
+        path = str(
             Path.home() / ".local" / "share" / "kollab" / "acp-adapters"
             / builtin["managed_dir"] / "node_modules" / ".bin" / self.command[0]
         )
+        return path + ".cmd" if _on_windows() else path
+
+    def _previous_managed_adapter_paths(self, *, for_binding: bool = False) -> tuple[str, ...]:
+        builtin = self.BUILTIN_PROFILES.get(self.name)
+        if not builtin or (not for_binding and self.command[0] != builtin["command"][0]):
+            return ()
+        root = Path.home() / ".local" / "share" / "kollab" / "acp-adapters"
+        paths = (str(root / directory / "node_modules" / ".bin" / builtin["command"][0])
+                 for directory in builtin.get("previous_managed_dirs", ()))
+        # Both spellings can occur in a saved binding, even when the current
+        # platform launches only one of them.
+        return tuple(path for base in paths for path in (base, base + ".cmd"))
+
+    def _retargets_previous_binding(
+        self, binding: ACPBinding, cwd: str, command: tuple[str, ...]
+    ) -> bool:
+        """Identify an old managed Codex binding whose executable changed."""
+        if (self.name != "codex-cli" or binding.profile != self.name
+                or binding.workspace != os.path.realpath(cwd)
+                or not binding.command or not command):
+            return False
+        def normalize(path: str) -> str:
+            return os.path.normcase(os.path.abspath(path))
+        return (
+            normalize(binding.command[0]) in {
+                normalize(path) for path in self._previous_managed_adapter_paths(for_binding=True)
+            }
+            and (normalize(command[0]) != normalize(binding.command[0])
+                 or command[1:] != binding.command[1:])
+        )
+
+    def _matches_managed_upgrade(
+        self, binding: ACPBinding, cwd: str, command: tuple[str, ...]
+    ) -> bool:
+        """Allow only identified Codex adapters to try the old session."""
+        return (self._retargets_previous_binding(binding, cwd, command)
+                and binding.command[1:] == command[1:]
+                and _adapter_package_identity(command[0]) in {
+                    ("@agentclientprotocol/codex-acp", "2.1.1"),
+                    ("@agentclientprotocol/codex-acp", "2.5.0"),
+                })
 
     def resolve(self) -> tuple[tuple[str, ...], dict[str, str], str]:
         cache_path = self._cache_path()
@@ -145,6 +208,31 @@ class ACPProfile:
         cached = cache.get(self.name)
         executable = str(cached.get("path", "")) if isinstance(cached, dict) else ""
         cached_command = cached.get("command") if isinstance(cached, dict) else None
+        previous_managed = self._previous_managed_adapter_paths()
+        preferred_managed = self._managed_adapter_path()
+        if (_on_windows() and executable
+                and os.path.normcase(os.path.abspath(executable)) in {
+                    os.path.normcase(os.path.abspath(path)) for path in previous_managed
+                }
+                and not executable.lower().endswith(".cmd")
+                and self._is_executable_file(executable + ".cmd")):
+            executable += ".cmd"
+        previous_candidates = tuple(
+            path for path in previous_managed
+            if path.lower().endswith(".cmd") == _on_windows()
+        )
+        # A cached path to the formerly managed pin is not an explicit custom
+        # command. Adopt the new pin when present, but honor a shell/PATH
+        # selection first. Paths cached outside our managed directory stay put.
+        if (cached_command == self.command[0] and executable
+                and os.path.normcase(os.path.abspath(executable)) in {
+                    os.path.normcase(os.path.abspath(path)) for path in previous_managed
+                } and self._is_executable_file(preferred_managed)):
+            executable = next(
+                (candidate for candidate in (self._login_shell_path(), shutil.which(self.command[0]) or "")
+                 if self._is_executable_file(candidate)),
+                preferred_managed,
+            )
         if (
             cached_command != self.command[0]
             or not executable
@@ -156,7 +244,8 @@ class ACPProfile:
                     for candidate in (
                         self._login_shell_path(),
                         shutil.which(self.command[0]) or "",
-                        self._managed_adapter_path(),
+                        preferred_managed,
+                        *previous_candidates,
                     )
                     if self._is_executable_file(candidate)
                 ),
@@ -333,6 +422,149 @@ class ACPAdmission:
     text: str
     future: asyncio.Future["ACPResult"]
     origin: dict[str, Any] = field(default_factory=dict)
+    images: tuple[dict[str, str], ...] = field(default_factory=tuple, repr=False)
+
+
+def _turn_usage_payload(usage: Any) -> dict[str, int] | None:
+    """Normalize a prompt-response Usage object into snake_case token totals.
+
+    A response may include adapter-reported prompt usage. The adapter determines
+    the coverage of its report, which is not necessarily all sidechain or
+    subagent usage (#495).
+    """
+    if usage is None:
+        return None
+    payload: dict[str, int] = {}
+    for name in (
+        "total_tokens", "input_tokens", "output_tokens", "thought_tokens",
+        "cached_read_tokens", "cached_write_tokens",
+    ):
+        value = getattr(usage, name, None)
+        if value is not None:
+            payload[name] = int(value)
+    return payload or None
+
+
+# SHA-256 of the complete npm cmd-shim 7 and 9 Node launcher templates after
+# replacing their verified relative bin target with <npm-target>. Any changed
+# wrapper, extra command, or unknown template remains an unverified adapter.
+_NPM_NODE_SHIM_HASHES = {
+    "": {
+        "bebad2186d5fd4fb2875d002f3b4b78db2f5f9963f534c24fd20e49ed65e1ffc",
+        "6a2ce219acc995b55e641a670a9ee75d90897e325659bfbb73dfdfb270353ad0",
+    },
+    ".cmd": {
+        "ff5f8b1d8275cf4fa515d4a768aa4c0793611e77ac34b5756f26537f831ce645",
+        "2b8447b91b7c62b3fd4786926e15e5c55bdaa9d3364925be946b11bcc4ed9cfb",
+    },
+}
+
+
+def _npm_shim_identity(executable: str) -> tuple[str, str] | None:
+    """Identify only an intact npm-generated Node shim for a known package."""
+    try:
+        shim = Path(executable).resolve(strict=True)
+        suffix = ".cmd" if shim.suffix.lower() == ".cmd" else ""
+        binary_name = shim.name[:-4] if suffix else shim.name
+        packages = {
+            "codex-acp": "@agentclientprotocol/codex-acp",
+            "claude-agent-acp": "@agentclientprotocol/claude-agent-acp",
+        }
+        package_name = packages.get(binary_name.lower())
+        if not package_name or shim.stat().st_size > 65536:
+            return None
+        # npm places project shims in node_modules/.bin and Windows global
+        # shims beside node_modules itself.
+        parent = shim.parent
+        modules = parent.parent if parent.name.lower() == ".bin" else parent / "node_modules"
+        if modules.name.lower() != "node_modules":
+            return None
+        package = modules / package_name
+        manifest = package / "package.json"
+        if manifest.stat().st_size > 65536:
+            return None
+        data = json.loads(manifest.read_text())
+        if not isinstance(data, dict) or data.get("name") != package_name:
+            return None
+        binary = data.get("bin")
+        target = binary.get(binary_name.lower()) if isinstance(binary, dict) else binary
+        if not isinstance(target, str) or Path(target).is_absolute():
+            return None
+        actual = package / target
+        if not actual.resolve(strict=True).is_relative_to(package.resolve(strict=True)):
+            return None
+        identity = _direct_adapter_package_identity(str(actual))
+        if identity is None or identity != (package_name, data.get("version")):
+            return None
+        relative = os.path.relpath(actual, parent).replace("\\", "/")
+        if suffix:
+            relative = relative.replace("/", "\\")
+        contents = shim.read_text()
+        if relative not in contents:
+            return None
+        normalized = contents.replace(relative, "<npm-target>")
+        digest = hashlib.sha256(normalized.encode()).hexdigest()
+        return identity if digest in _NPM_NODE_SHIM_HASHES[suffix] else None
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _direct_adapter_package_identity(executable: str) -> tuple[str, str] | None:
+    """Read the resolved executable's own declared package identity, if present."""
+    try:
+        resolved = Path(executable).resolve(strict=True)
+        directory = resolved.parent
+        for _ in range(4):
+            manifest = directory / "package.json"
+            if manifest.is_file():
+                if manifest.stat().st_size > 65536:
+                    return None
+                data = json.loads(manifest.read_text())
+                if not isinstance(data, dict):
+                    return None
+                name, version = data.get("name"), data.get("version")
+                binary = data.get("bin")
+                official = {
+                    "@agentclientprotocol/codex-acp": "codex-acp",
+                    "@agentclientprotocol/claude-agent-acp": "claude-agent-acp",
+                }
+                binary_name = official.get(name) if isinstance(name, str) else None
+                if binary_name is not None and (
+                    directory.name.lower() != binary_name
+                    or directory.parent.name.lower() != "@agentclientprotocol"
+                    or directory.parent.parent.name.lower() != "node_modules"
+                ):
+                    # A random wrapper beside a self-declared manifest does not
+                    # identify an installed official npm package.
+                    return None
+                target = binary.get(binary_name) if isinstance(binary, dict) else binary
+                if (not isinstance(name, str) or not isinstance(version, str)
+                        or not isinstance(target, str) or Path(target).is_absolute()
+                        or not resolved.is_relative_to(directory.resolve(strict=True))
+                        or (directory / target).resolve(strict=True) != resolved):
+                    return None
+                return name, version
+            directory = directory.parent
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return None
+
+
+def _adapter_package_identity(executable: str) -> tuple[str, str] | None:
+    return _npm_shim_identity(executable) or _direct_adapter_package_identity(executable)
+
+
+def _known_prompt_usage(executable: str) -> bool:
+    """Trust only installed adapter versions whose prompt usage was checked.
+
+    Read package metadata beside the resolved executable, without executing a
+    command or guessing from a profile name. An unknown wrapper or version may
+    report only its last request and is therefore not a verified turn total.
+    """
+    return _adapter_package_identity(executable) in {
+        ("@agentclientprotocol/codex-acp", "2.5.0"),
+        ("@agentclientprotocol/claude-agent-acp", "0.89.0"),
+    }
 
 
 @dataclass(frozen=True)
@@ -347,6 +579,7 @@ class ACPResult:
     request_id: str = ""
     source: str = ""
     thread_id: str | None = None
+    usage: dict[str, int] | None = None
 
 
 class _Client(acp.Client):
@@ -419,6 +652,7 @@ class ACPRunner:
         # options without coupling UI code to the ACP schema classes.
         self.config_options: list[dict[str, Any]] = []
         self.resolved_command: tuple[str, ...] = ()
+        self._prompt_usage_supported = False
         self.workspace = ""
         self.resume_mode = "fresh"
         self._resume_binding: ACPBinding | None = None
@@ -493,7 +727,18 @@ class ACPRunner:
             await self.lifecycle_callback("starting", self)
         command, env, cwd = self.profile.resolve()
         self.resolved_command = tuple(command)
+        self._prompt_usage_supported = _known_prompt_usage(command[0])
         self.workspace = cwd
+        binding = self._resume_binding
+        managed_upgrade = bool(binding and self.profile._matches_managed_upgrade(binding, cwd, tuple(command)))
+        if (binding is not None and not managed_upgrade
+                and self.profile._retargets_previous_binding(binding, cwd, tuple(command))):
+            # Do not execute an unidentified replacement merely to discover
+            # whether an existing managed session could be resumed.
+            raise ACPError(
+                "The selected Codex adapter could not be identified for this saved session. "
+                "The existing binding was kept; select the previous adapter or start a new session."
+            )
         # An inherited run marker also identifies children that fork, detach
         # and lose their parent wholly between tree observations. It is not
         # a credential; avoid names that vendor env policies filter as one.
@@ -540,10 +785,9 @@ class ACPRunner:
         self.initialize_metadata = dict(wire.get("_meta") or {})
         self.state = "opening"
         self.config_options = []
-        binding = self._resume_binding
         self.resume_mode = "fresh"
         session_caps = self.capabilities.get("sessionCapabilities") or {}
-        if binding is not None and binding.matches(cwd, self.profile.name, tuple(command)):
+        if binding is not None and (binding.matches(cwd, self.profile.name, tuple(command)) or managed_upgrade):
             self.session_id = binding.session_id
             self._replaying = True
             try:
@@ -561,7 +805,21 @@ class ACPRunner:
                     ), timeout=60)
                     self.config_options = self._wire_config_options(loaded)
                     self.resume_mode = "loaded"
-            except Exception:
+                elif managed_upgrade:
+                    raise ACPError("the updated Codex adapter does not offer session resume or load")
+            except BaseException as exc:
+                if managed_upgrade:
+                    # Do not replace the saved binding with a new session on an
+                    # upgrade failure, including during orchestrator cleanup.
+                    self.session_id = None
+                    if not isinstance(exc, Exception):
+                        raise
+                    raise ACPError(
+                        "The updated Codex adapter could not resume the saved session. "
+                        "The existing binding was kept; select the previous adapter or start a new session."
+                    ) from exc
+                if not isinstance(exc, Exception):
+                    raise
                 # A vanished session or changed login is recoverable with new
                 # context. No prompt is replayed or retried.
                 self.resume_mode = "fresh"
@@ -718,20 +976,27 @@ class ACPRunner:
         source: str,
         thread_id: str | None = None,
         origin: dict[str, Any] | None = None,
+        images: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
         if not self.session_id or self._connection is None:
             raise ACPError("ACP runner is not started")
         if not text.strip():
             raise ValueError("prompt must not be empty")
+        if images and not self.supports_image_input:
+            raise ACPError("This harness can't take images.")
         generation = self.generation
-        self._next_turn_id += 1
-        turn_id = self._next_turn_id
+        # A rejected queue admission is not a turn and must not create a hole
+        # in the orchestrator's compact completed-turn frontier.
+        turn_id = self._next_turn_id + 1
         future: asyncio.Future[ACPResult] = asyncio.get_running_loop().create_future()
-        admission = ACPAdmission(request_id, source, thread_id, generation, turn_id, text, future, dict(origin or {}))
+        admission = ACPAdmission(
+            request_id, source, thread_id, generation, turn_id, text, future, dict(origin or {}), images
+        )
         try:
             self._queue.put_nowait(admission)
         except asyncio.QueueFull as exc:
             raise ACPError("ACP prompt queue is full") from exc
+        self._next_turn_id = turn_id
         return admission
 
     async def prompt(self, text: str) -> ACPResult:
@@ -835,12 +1100,20 @@ class ACPRunner:
                                   "turn_id": turn_id, "source": admission.source,
                                   "thread_id": admission.thread_id, "generation": generation})
         try:
+            if admission.images and not self.supports_image_input:
+                raise ACPError("This harness can't take images.")
             response = await self._connection.prompt(
                 session_id=self.session_id,
-                prompt=[TextContentBlock(type="text", text=text)],
+                prompt=[
+                    TextContentBlock(type="text", text=text),
+                    *(ImageContentBlock(type="image", data=image["data"], mimeType=image["mime_type"])
+                      for image in admission.images),
+                ],
             )
             await asyncio.sleep(0)
             stop_reason = str(response.stopReason) if response else None
+            turn_usage = (_turn_usage_payload(getattr(response, "usage", None))
+                          if self._prompt_usage_supported else None)
             answer = self._select_answer(self._updates)
             return ACPResult(
                 generation=generation,
@@ -855,18 +1128,25 @@ class ACPRunner:
                     "sessionId": self.session_id,
                     "stopReason": stop_reason,
                     "outcome": "success" if stop_reason == "end_turn" else "failed",
+                    "acp_turn_usage": turn_usage,
                 },
                 turn_id=turn_id,
                 request_id=admission.request_id,
                 source=admission.source,
                 thread_id=admission.thread_id,
+                usage=turn_usage,
             )
         except Exception as exc:
+            if isinstance(exc, ACPError):
+                raise
             exit_code = getattr(self._process, "returncode", None)
             if isinstance(exc, acp.RequestError):
                 raise self._request_error(exc, self._updates) from exc
             if exit_code is not None:
-                line = f"{self.profile.name}: harness exited ({type(exc).__name__}, exit={exit_code}); it may have stopped mid-change"
+                line = (
+                    f"{self.profile.name}: harness exited ({type(exc).__name__}, exit={exit_code}); "
+                    "it may have stopped mid-change"
+                )
             else:
                 line = f"{self.profile.name}: harness request failed ({type(exc).__name__})"
             raise ACPError(line) from exc
@@ -891,7 +1171,15 @@ class ACPRunner:
     def supports_steering(self) -> bool:
         return bool((self.initialize_metadata.get("steering") or {}).get("supported"))
 
-    async def steer(self, text: str, *, origin: dict[str, Any], thread_id: str | None = None) -> bool:
+    @property
+    def supports_image_input(self) -> bool:
+        prompt_capabilities = self.capabilities.get("promptCapabilities")
+        return isinstance(prompt_capabilities, dict) and prompt_capabilities.get("image") is True
+
+    async def steer(
+        self, text: str, *, origin: dict[str, Any], thread_id: str | None = None,
+        images: tuple[dict[str, str], ...] = (),
+    ) -> bool:
         active = getattr(self, "_active_context", None)
         if not self._active_turn_id or not active or not self.supports_steering:
             return False
@@ -902,10 +1190,16 @@ class ACPRunner:
         )
         if not human and not same_requester:
             return False
+        if images and not self.supports_image_input:
+            raise ACPError("This harness can't take images.")
         try:
             await asyncio.wait_for(self._connection.ext_method("session/steering", {
                 "sessionId": self.session_id,
-                "prompt": [{"type": "text", "text": text}],
+                "prompt": [
+                    {"type": "text", "text": text},
+                    *({"type": "image", "data": image["data"], "mimeType": image["mime_type"]}
+                      for image in images),
+                ],
             }), timeout=10)
             return True
         except Exception:

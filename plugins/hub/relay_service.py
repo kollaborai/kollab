@@ -16,7 +16,6 @@ import asyncio
 import base64
 import binascii
 import contextlib
-import grp
 import hashlib
 import hmac
 import ipaddress
@@ -24,7 +23,6 @@ import json
 import logging
 import os
 import re
-import resource
 import secrets
 import signal
 import socket
@@ -34,6 +32,12 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import urlsplit
+
+# POSIX-only stdlib. Windows has no RLIMIT_NOFILE (the per-process descriptor
+# budget is effectively unbounded) and no setrlimit to call, so raise_fd_limit
+# takes an nt branch and this import never runs there.
+if os.name != "nt":
+    import resource
 
 from aiohttp import WSCloseCode, WSMsgType, hdrs, web
 from nacl.exceptions import BadSignatureError
@@ -57,6 +61,12 @@ from .relay_backend import (
     RelayLimits,
     validate_backend_url,
 )
+
+try:  # POSIX only: this module is imported on Windows too
+    import grp
+    import resource
+except ImportError:  # Windows has no groups or descriptor limits
+    grp = resource = None
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1652,7 +1662,7 @@ def _source_ip(
 ) -> str | None:
     transport = request.transport
     sock = transport.get_extra_info("socket") if transport is not None else None
-    if sock is not None and sock.family == socket.AF_UNIX:
+    if sock is not None and sock.family == getattr(socket, "AF_UNIX", None):
         # Only a process allowed to open the listener's socket file (the proxy;
         # see bind_unix_socket) gets here, so its X-Real-IP is the client. No
         # header means a misconfigured proxy: refuse rather than share one bucket.
@@ -1684,7 +1694,13 @@ def raise_fd_limit(max_connections: int) -> int:
     A hard limit below the need lowers the cap to fit, as Redis does with
     maxclients; the caller says so, so a small host still starts.
     """
+    if os.name == "nt":
+        # Windows has no RLIMIT_NOFILE: the per-process descriptor budget is
+        # effectively unbounded, and there is no setrlimit to call.
+        return max_connections
     need = max_connections + FD_HEADROOM
+    if resource is None:  # Windows has no descriptor limit to raise
+        return max_connections
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft >= need:
         return max_connections
@@ -1708,6 +1724,8 @@ def bind_unix_socket(path: str, group: str | None = None) -> socket.socket:
     connect in between. A leftover socket from a crash is replaced; a live
     one, any other file, or a directory its group or others can write to is refused.
     """
+    if os.name == "nt":  # no AF_UNIX sockets, uid or grp on Windows
+        raise RelayConfigError("--unix-socket needs Linux or macOS")
     if not os.path.isabs(path) or "\0" in path or len(path.encode()) > UNIX_SOCKET_MAX_BYTES:
         raise RelayConfigError(f"unix socket must be an absolute path of at most {UNIX_SOCKET_MAX_BYTES} bytes")
     parent = os.path.dirname(path)
@@ -1721,6 +1739,7 @@ def bind_unix_socket(path: str, group: str | None = None) -> socket.socket:
         )
     gid = None
     if group is not None:
+        import grp  # POSIX-only stdlib; unix sockets have no Windows meaning
         try:
             gid = grp.getgrnam(group).gr_gid
         except KeyError as exc:

@@ -47,6 +47,7 @@ from .relay_state import (
     MAX_REVOKED,
     MAX_VOUCHERS,
     RelayError,
+    RelayFrameShapeError,
     RelayStateStore,
     canonical_origin,
     failure_text,
@@ -1037,7 +1038,16 @@ class RelayClient:
             try:
                 async for message in ws:
                     if message.type == aiohttp.WSMsgType.TEXT:
-                        await self._handle_frame(strict_json(message.data))
+                        try:
+                            await self._handle_frame(strict_json(message.data))
+                        except RelayFrameShapeError as exc:
+                            # Well-formed text that is not a JSON object: a
+                            # healthy socket must not reconnect over it.
+                            self._counts["peer_state_frame_errors"] += 1
+                            _LOGGER.warning(
+                                "relay frame rejected without reconnect: %s",
+                                exc,
+                            )
                     elif message.type == aiohttp.WSMsgType.BINARY:
                         raise RelayError("binary relay frames are unsupported")
                     elif message.type == aiohttp.WSMsgType.ERROR:
@@ -1204,7 +1214,9 @@ class RelayClient:
             or sum(p.peer == peer_key for p in self._application_pending.values())
             >= MAX_PEER_PENDING
         ):
-            raise RelayError("pending application request capacity reached")
+            raise RelayError(
+                "pending application request capacity reached", "capacity"
+            )
         request_id = secrets.token_hex(16)
         future = asyncio.get_running_loop().create_future()
         pending = _ApplicationPending(
@@ -1451,6 +1463,12 @@ class RelayClient:
         # never tear down the whole relay connection, because a reconnect
         # mints a fresh session and re-keys every peer. Genuine transport
         # failures (send/receive errors, invalid wire JSON) still reconnect.
+        if not isinstance(frame, dict):
+            self._counts["peer_state_frame_errors"] += 1
+            _LOGGER.warning(
+                "relay frame rejected without reconnect: non-object frame"
+            )
+            return
         try:
             await self._apply_frame(frame)
         except RelayError as exc:

@@ -1,0 +1,36 @@
+{
+  "name": "ecommerce",
+  "description": "Runs an online store (Shopify or similar): catalog and listings, merchandising, customer support, fulfillment and inventory, ads and growth. Drafts every customer message, price change and ad spend for approval.",
+  "roster": "store-crew",
+  "lead": "nadia",
+  "members": [
+    {
+      "persona": "nadia",
+      "reports_to": null
+    },
+    {
+      "persona": "matteo",
+      "reports_to": "nadia"
+    },
+    {
+      "persona": "lena",
+      "reports_to": "matteo"
+    },
+    {
+      "persona": "sofia",
+      "reports_to": "nadia"
+    },
+    {
+      "persona": "kwame",
+      "reports_to": "nadia"
+    },
+    {
+      "persona": "diego",
+      "reports_to": "nadia"
+    },
+    {
+      "persona": "hana",
+      "reports_to": "diego"
+    }
+  ]
+}

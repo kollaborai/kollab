@@ -14,8 +14,10 @@ import pytest_asyncio
 import segno
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
+from kollabor_engine import phone_link as phone_link_module
 from kollabor_engine.phone_link import (
     CHUNK,
+    LEGACY_CHUNK,
     PhoneLink,
     PhoneLinkError,
     decode_phone_frame,
@@ -63,9 +65,9 @@ async def setup_link(tmp_path, monkeypatch):
         return StreamingResponse(chunks(), media_type="text/event-stream")
 
     @app.get("/sessions/burst")
-    async def burst(width: int = 128):
+    async def burst(width: int = 128, size: int = LEGACY_CHUNK * 4 + 1):
         async def chunks():
-            body = b"01234567" * CHUNK
+            body = (b"01234567" * ((size + 7) // 8))[:size]
             for offset in range(0, len(body), width):
                 yield body[offset : offset + width]
 
@@ -204,15 +206,28 @@ async def test_approved_phone_streams_authenticated_app_without_engine_token(set
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", [128, CHUNK // 2 + 1])
-async def test_stream_packets_are_bounded_and_coalesce_small_events(setup_link, width):
+@pytest.mark.parametrize(
+    ("chunk_size", "width", "size"),
+    [
+        (LEGACY_CHUNK, 128, LEGACY_CHUNK * 4 + 1),
+        (LEGACY_CHUNK, LEGACY_CHUNK // 2 + 1, LEGACY_CHUNK * 4 + 1),
+        (CHUNK, CHUNK // 2 + 1, CHUNK * 2 + 1),
+    ],
+    ids=["small-writes", "small-boundary", "maximum-boundary"],
+)
+async def test_stream_packets_are_bounded_and_coalesce_small_events(
+    setup_link, chunk_size, width, size
+):
     packet = await secure_phone(
         setup_link,
         frame_compression=True,
-        max_chunk=CHUNK,
+        max_chunk=chunk_size,
     )
     identifier = secrets.token_hex(16)
-    await packet(op="start", id=identifier, method="GET", path=f"/sessions/burst?width={width}", headers=[], size=0)
+    await packet(
+        op="start", id=identifier, method="GET",
+        path=f"/sessions/burst?width={width}&size={size}", headers=[], size=0,
+    )
     await packet(op="run", id=identifier)
     assert (await packet(op="read", id=identifier))["type"] == "headers"
     chunks = []
@@ -222,11 +237,12 @@ async def test_stream_packets_are_bounded_and_coalesce_small_events(setup_link, 
             break
         assert event["type"] == "data"
         chunk = base64.b64decode(event["data"])
-        assert 0 < len(chunk) <= CHUNK
+        assert 0 < len(chunk) <= chunk_size
         chunks.append(chunk)
-    assert b"".join(chunks) == b"01234567" * CHUNK
+    assert b"".join(chunks) == (b"01234567" * ((size + 7) // 8))[:size]
+    assert len(chunks) >= 2
     if width == 128:
-        assert len(chunks) < CHUNK * 8 // width
+        assert len(chunks) < (size + width - 1) // width
 
 
 @pytest.mark.asyncio
@@ -353,6 +369,9 @@ async def test_persisted_approval_is_private_and_corruption_preserves_data(setup
     await restored.start()
     try:
         assert restored.records[offer["id"]]["key"] == phone.public_key
+
+        assert restored._read_contexts[offer["id"]].owner_id == "local"
+        assert restored._read_contexts[offer["id"]].phone_id == offer["id"]
         assert restored.records[offer["id"]]["network"] == "relay.example"
         history = await restored.event_history()
         restored_event = next(
@@ -498,6 +517,51 @@ asyncio.run(main())
         assert response["protocol"] == "kollab-phonelink/1"
     finally:
         await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_context_is_available_before_transport_approval(setup_link):
+    manager, offer, host, phone, *_ = setup_link
+    original_approve = host.approve
+    seen_contexts = []
+
+    def approve_with_observation(public_key):
+        seen_contexts.append(manager._read_contexts.get(offer["id"]))
+        return original_approve(public_key)
+
+    host.approve = approve_with_observation
+    await manager.approve(offer["id"], phone.public_key)
+
+    assert len(seen_contexts) == 1
+    assert seen_contexts[0] is not None
+    assert seen_contexts[0].owner_id == "local"
+    assert seen_contexts[0].phone_id == offer["id"]
+
+
+@pytest.mark.asyncio
+async def test_revoke_marks_context_and_purges_after_persisted_removal(setup_link, monkeypatch):
+    manager, offer, *_ = setup_link
+    await secure_phone(setup_link)
+    context = manager._read_contexts[offer["id"]]
+    observations = []
+
+    def close_streams(received_context):
+        observations.append(
+            (received_context, received_context.revoked, offer["id"] not in manager.records)
+        )
+        return 0
+
+    monkeypatch.setattr(
+        phone_link_module,
+        "get_daemon_pool",
+        lambda: types.SimpleNamespace(close_streams_for_context=close_streams),
+        raising=False,
+    )
+
+    await manager.revoke(offer["id"])
+
+    assert observations == [(context, True, True)]
+    assert offer["id"] not in manager._read_contexts
 
 
 @pytest.mark.asyncio

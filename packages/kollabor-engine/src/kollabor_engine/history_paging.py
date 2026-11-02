@@ -21,6 +21,16 @@ HISTORY_DEFAULT_PAGE_SIZE = 50
 HISTORY_MAX_PAGE_SIZE = 100
 HISTORY_MAX_PAGE_BYTES = 150_000
 HISTORY_TOOL_OUTPUT_PREVIEW_BYTES = 4_096
+# Metadata keys whose values are whole display lists a page never renders.
+# One Claude ACP reply stores every streaming update in "acp_updates"; a
+# 472 KB list re-exceeds the page byte cap after the content preview and
+# 413s the whole history request (issue #482).
+_HISTORY_HEAVY_METADATA_KEYS = (
+    "acp_updates",
+    "tool_calls",
+    "xml_tool_calls",
+    "provider_reasoning",
+)
 _CURSOR_SECRET: bytes | None = None
 
 
@@ -211,6 +221,23 @@ def _metadata_without_diffs(metadata: dict[str, Any]) -> dict[str, Any]:
     return stripped
 
 
+def _slim_page_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Drop heavyweight display lists a truncated page message cannot carry.
+
+    ``_truncated_message`` shrinks content to a preview, but oversized
+    metadata would keep the message over the page byte cap and fail the
+    whole history request. A truncated page message is light by
+    construction: each heavy list is replaced by a count marker and the
+    originals stay in the stored history, where the TUI keeps full form.
+    """
+    slimmed = dict(metadata)
+    for key in _HISTORY_HEAVY_METADATA_KEYS:
+        value = slimmed.pop(key, None)
+        if isinstance(value, list) and value:
+            slimmed[f"{key}_dropped"] = len(value)
+    return slimmed
+
+
 def _is_tool_result_message(message: dict[str, Any]) -> bool:
     """The messages the web UI renders as a tool result card.
 
@@ -289,7 +316,7 @@ def _truncated_message(
     metadata["history_output_ref"] = _encode_cursor(
         session_id, "output", index, _digest(history[index])
     )
-    message["metadata"] = metadata
+    message["metadata"] = _slim_page_metadata(metadata)
     return message
 
 
@@ -442,3 +469,17 @@ def resolve_history_output(
     """Fetch one deferred tool result after checking its snapshot reference."""
     index, _ = _decode_cursor(reference, session_id, "output", history)
     return copy.deepcopy(history[index].get("content"))
+
+
+def resolve_history_metadata(
+    session_id: str, history: list[dict[str, Any]], reference: str
+) -> dict[str, Any]:
+    """Fetch one message's full metadata after checking its snapshot reference.
+
+    Page slimming drops heavy metadata lists (acp_updates, tool_calls, ...)
+    from the served page, but the slimmed entry keeps its signed reference so
+    a client can load the original metadata on demand (issue #522).
+    """
+    index, _ = _decode_cursor(reference, session_id, "output", history)
+    metadata = history[index].get("metadata")
+    return copy.deepcopy(metadata) if isinstance(metadata, dict) else {}

@@ -51,9 +51,19 @@ jobs:
       # turn_runner module in dca5e73 -- pytest then exited 4 ("collected 0
       # items") and every other file in the list was skipped too, so CI
       # reported failure without ever running a test. A directory can't rot
-      # that way, and it covers ~2700 tests instead of 8.
-      - name: Run unit tests
-        run: uv run python -m pytest tests/unit/ -q
+      # that way. The two tests below have failed only under parallel load;
+      # keep them covered in a separate serial invocation until fixed (#470).
+      - name: Run unit tests in parallel
+        run: >-
+          uv run python -m pytest tests/unit/ -q -n auto
+          --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle
+          --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
+
+      - name: Run isolation-sensitive unit tests
+        run: >-
+          uv run python -m pytest -q
+          tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle
+          tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
 
       # The engine and rpc packages have their own tests that tests/unit never
       # collected, so engine changes merged without them.
@@ -80,6 +90,7 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx tsc --noEmit
+          node scripts/check-test-discovery.mjs
           npx vitest run
           node --test $(grep -L 'from "vitest"' tests/*.test.ts)
 

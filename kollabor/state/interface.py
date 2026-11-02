@@ -18,6 +18,7 @@ from .context import ContextListSnapshot, ConversationContext
 from .snapshots import (
     AgentListSnapshot,
     AgentSnapshot,
+    ContextCompactionSnapshot,
     ConversationSnapshot,
     HubSnapshot,
     McpSnapshot,
@@ -32,6 +33,8 @@ from .snapshots import (
 )
 
 OFFER_FAILED = "connect offer could not be created"
+ACP_CONVERSATION_BUSY = "ACP startup or profile change is in progress; retry when ready"
+ACP_HARNESS_UNAVAILABLE = "ACP harness unavailable; retry when ready"
 
 
 def offer_failure(result: Any = None) -> dict[str, str]:
@@ -109,7 +112,8 @@ class StateService(Protocol):
     # === Conversation ===
 
     async def get_conversation(
-        self, since: int | None = None, anchor: str | None = None
+        self, since: int | None = None, anchor: str | None = None,
+        expected_conversation_uid: str | None = None,
     ) -> ConversationSnapshot:
         """Return the current conversation history as a snapshot.
 
@@ -149,6 +153,13 @@ class StateService(Protocol):
         Used by status widgets that show message count and token usage.
         """
         ...
+
+    # === Context compaction ===
+
+    async def get_context_compaction_snapshot(self) -> ContextCompactionSnapshot:
+        """Return current context usage and compaction-policy status."""
+        ...
+
 
     # === Profile ===
 
@@ -782,6 +793,9 @@ class StateService(Protocol):
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: dict[str, Any] | None = None,
+        private_goal_reply: bool = False,
+        private_goal_reply_id: str | None = None,
+        goal_conversation_uid: str | None = None,
     ) -> dict[str, Any]:
         """Submit a user turn to the daemon.
 

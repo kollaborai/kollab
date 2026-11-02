@@ -5,7 +5,10 @@ import json
 import logging
 import os
 import shutil
+import stat
 import sys
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -103,11 +106,203 @@ def resolve_local_path(*parts: str) -> Path:
     return get_local_config_directory().joinpath(*parts)
 
 
+class ProjectStateLocationError(RuntimeError):
+    """Project state cannot safely be identified or claimed."""
+
+
+def _legacy_encode_project_path(project_path: Path) -> str:
+    """The exact pre-#439 encoder, including its Windows drive-relative prefix."""
+    encoded = str(project_path.resolve()).replace("/", "_").replace("\\", "_")
+    return encoded.lstrip("_")
+
+
+_PROJECT_OWNER_FILE = ".kollab-project-owner.json"
+_PROJECT_OWNER_WAIT_SECONDS = 2.0
+_PROJECT_OWNER_POLL_SECONDS = 0.05
+
+
+def _project_owner(project: Path, identity: str | None) -> dict:
+    return {"version": 1, "project": os.path.normcase(str(project.resolve())), "identity": identity or ""}
+
+
+def _read_project_owner(directory: Path) -> dict | None:
+    """Read a private ownership claim; absence is distinct from an invalid claim."""
+    from . import private_fs
+
+    marker = directory / _PROJECT_OWNER_FILE
+    try:
+        fd = private_fs.open_nofollow(marker, os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ProjectStateLocationError(f"Cannot read project ownership marker: {marker}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not private_fs.owned_private(marker, info, mask=0o022):
+            raise ProjectStateLocationError(f"Unsafe project ownership marker: {marker}")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(16385)
+        value = json.loads(raw.decode("utf-8"))
+        if (
+            len(raw) > 16384 or not isinstance(value, dict) or set(value) != {"version", "project", "identity"}
+            or type(value["version"]) is not int or value["version"] != 1
+            or not isinstance(value["project"], str) or not isinstance(value["identity"], str)
+        ):
+            raise ValueError("invalid ownership marker")
+        return value
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ProjectStateLocationError(f"Invalid project ownership marker: {marker}") from exc
+    finally:
+        os.close(fd)
+
+
+def _write_project_owner(directory: Path, owner: dict) -> None:
+    """Publish a complete claim without replacing a competing claim."""
+    fd, temporary = tempfile.mkstemp(prefix=".project-owner-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(owner, stream, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, directory / _PROJECT_OWNER_FILE)
+    finally:
+        os.unlink(temporary)
+
+
+def _windows_project_state_dir(
+    project_path: Path,
+    root: Path,
+    *,
+    selection_prefix: str = "KOLLAB_PROJECT_DATA",
+    identity: str | None = None,
+    create_new: bool = True,
+) -> Path:
+    """Reuse an existing Windows project directory without moving or merging it."""
+    project = project_path.resolve()
+    current = root / "projects" / encode_project_path(project)
+    legacy_raw = root / "projects" / _legacy_encode_project_path(project)
+    selection = os.environ.get(f"{selection_prefix}_DIR", "").strip()
+    selected_project = os.environ.get(f"{selection_prefix}_PROJECT", "").strip()
+    selected_identity = os.environ.get(f"{selection_prefix}_IDENTITY", "").strip() if identity else None
+    if selection or selected_project or selected_identity:
+        if not selection or not selected_project or (identity and not selected_identity):
+            raise ProjectStateLocationError(f"Incomplete {selection_prefix} selection")
+        applies = os.path.normcase(str(Path(selected_project).resolve())) == os.path.normcase(str(project))
+        if identity:
+            applies = applies and selected_identity == identity
+        if not applies:
+            selection = ""
+    if selection:
+        selected = Path(selection).expanduser()
+        if not selected.is_absolute() or not selected.is_dir():
+            raise ProjectStateLocationError(f"{selection_prefix}_DIR must name an existing absolute directory")
+        recorded = _read_project_owner(selected)
+        if recorded is not None and recorded != _project_owner(project, identity):
+            raise ProjectStateLocationError(f"Selected project state belongs to another project: {selected}")
+        return selected.resolve()
+
+    legacy_paths = [legacy_raw]
+    cross_drive = not legacy_raw.is_absolute()
+    if cross_drive:
+        # Previous cross-drive joins were relative to the old process's D: CWD.
+        # Check the current resolution, the project CWD, and the drive root;
+        # other historical drive CWDs cannot be reconstructed without an index.
+        tail = str(legacy_raw)[len(legacy_raw.drive) :]
+        legacy_paths = [legacy_raw.resolve(), project / tail, Path(project.anchor) / tail]
+    existing = []
+    for candidate in [current, *legacy_paths]:
+        try:
+            info = candidate.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            raise ProjectStateLocationError(f"Cannot inspect project state location: {candidate}") from exc
+        reparse = getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if not stat.S_ISDIR(info.st_mode) or reparse:
+            raise ProjectStateLocationError(f"Project state location is not a regular directory: {candidate}")
+        resolved = candidate.resolve()
+        if all(os.path.normcase(str(resolved)) != os.path.normcase(str(p)) for p in existing):
+            existing.append(resolved)
+    if len(existing) > 1:
+        raise ProjectStateLocationError(
+            f"Multiple project state locations exist; select one with {selection_prefix}_PROJECT "
+            f"and {selection_prefix}_DIR: "
+            + ", ".join(str(path) for path in existing)
+        )
+    if existing:
+        recorded = _read_project_owner(existing[0])
+        if (
+            recorded is None and identity is None
+            and os.path.normcase(str(existing[0])) == os.path.normcase(str(current.resolve()))
+        ):
+            # A second process may observe the new directory between mkdir and
+            # the atomic marker publication. Never claim it on its behalf.
+            deadline = time.monotonic() + _PROJECT_OWNER_WAIT_SECONDS
+            while recorded is None and time.monotonic() < deadline:
+                time.sleep(min(_PROJECT_OWNER_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+                recorded = _read_project_owner(existing[0])
+        if recorded == _project_owner(project, identity):
+            # A legacy candidate might have appeared while we waited for the
+            # claim. Do not start using the new location if that happened.
+            for candidate in legacy_paths:
+                if os.path.normcase(str(candidate.resolve())) == os.path.normcase(str(existing[0])):
+                    continue
+                try:
+                    candidate.lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except OSError as exc:
+                    raise ProjectStateLocationError(f"Cannot inspect project state location: {candidate}") from exc
+                raise ProjectStateLocationError(f"Multiple project state locations exist: {existing[0]}, {candidate}")
+            return existing[0]
+        if recorded is not None:
+            raise ProjectStateLocationError(f"Project state belongs to another project: {existing[0]}")
+        identity_help = f", {selection_prefix}_IDENTITY" if identity else ""
+        raise ProjectStateLocationError(
+            f"Cannot establish ownership of existing project state: {existing[0]}. Inspect it, then select it "
+            f"with {selection_prefix}_PROJECT{identity_help} and {selection_prefix}_DIR"
+        )
+    if identity or not create_new:
+        # Read-side probes must not claim a project or create a nested vault.
+        return current
+    try:
+        current.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as exc:
+        raise ProjectStateLocationError(f"Could not create project state parent: {current.parent}") from exc
+    try:
+        current.mkdir(mode=0o700)
+    except FileExistsError:
+        # A competing startup created it after our scan. Read its claim; an
+        # incomplete or absent claim is never adopted as this project.
+        return _windows_project_state_dir(
+            project, root, selection_prefix=selection_prefix, identity=identity, create_new=create_new
+        )
+    except OSError as exc:
+        raise ProjectStateLocationError(f"Could not create project state: {current}") from exc
+    try:
+        _write_project_owner(current, _project_owner(project, identity))
+    except OSError as exc:
+        raise ProjectStateLocationError(f"Could not claim new project state: {current}") from exc
+    # An older process may have created a legacy candidate while we claimed.
+    for candidate in legacy_paths:
+        if candidate != current:
+            try:
+                candidate.lstat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as exc:
+                raise ProjectStateLocationError(f"Cannot inspect project state location: {candidate}") from exc
+            raise ProjectStateLocationError(f"A legacy project state appeared during startup: {candidate}")
+    return current.resolve()
+
+
 def get_project_data_dir_candidates(project_path: Optional[Path] = None) -> list[Path]:
     """Return project data directories in read precedence order."""
     if project_path is None:
         project_path = Path.cwd()
 
+    if IS_WINDOWS:
+        return [_windows_project_state_dir(project_path, directory) for directory in get_config_directory_candidates()]
     encoded = encode_project_path(project_path)
     return [
         directory / "projects" / encoded
@@ -138,7 +333,12 @@ def encode_project_path(project_path: Path) -> str:
         >>> encode_project_path(Path("C:\\\\Users\\\\dev\\\\project"))
         'C_Users_dev_project'
     """
-    path_str = str(project_path.resolve())
+    path = project_path.resolve()
+    path_str = str(path)
+    if path.drive.endswith(":"):
+        # Windows drive prefix "C:" reads as a drive-relative prefix once the
+        # name is joined under projects/, so drop the colon: "C:\Users\x" -> "C\Users\x".
+        path_str = path.drive[:-1] + path_str[len(path.drive):]
     # Replace path separators with underscores
     encoded = path_str.replace("/", "_").replace("\\", "_")
     # Remove leading underscore if present (from root /)

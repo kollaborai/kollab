@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import types
 from collections.abc import Iterable, Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from kollabor_engine.routes import messages
@@ -202,7 +203,9 @@ async def test_assistant_transport_submits_add_message(monkeypatch):
     assert isinstance(response, response_type)
     async for _chunk in response.stream:
         pass
-    session.send_message.assert_awaited_once_with("hello")
+    session.send_message.assert_awaited_once_with("hello", request_id=ANY)
+    # Always an id, so a daemon that echoes it can stamp the turn (#551).
+    assert re.fullmatch(r"[0-9a-f]{32}", session.send_message.await_args.kwargs["request_id"])
     assert captured["controller"].errors == []
     assert captured["controller"].state["usage"]["inputTokens"] == 2
 
@@ -244,7 +247,8 @@ async def test_assistant_transport_preserves_image_part_in_submitted_message(
         [
             {"type": "text", "text": "inspect this"},
             {"type": "image", "image": "data:image/png;base64,iVBORw0KGgo="},
-        ]
+        ],
+        request_id=ANY,
     )
     assert captured["controller"].state["messages"][0]["content"] == (
         "inspect this\n[image1]"
@@ -1155,6 +1159,79 @@ async def test_assistant_transport_ends_a_failed_turn_with_its_error(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_assistant_transport_streams_its_own_reply_behind_a_running_turn(monkeypatch):
+    """#551: a message sent while another turn ran ended on that turn's
+    untagged completion, and its own reply never streamed."""
+    session = _FakeSession([])
+
+    def admit(content, request_id=None):
+        for event in (
+            {"type": "turn_complete", "stop_reason": "end_turn"},  # the turn already running
+            {"type": "token", "text": "B-OK", "request_ids": [request_id]},
+            {"type": "turn_complete", "stop_reason": "end_turn", "request_ids": [request_id]},
+        ):
+            session._events.put_nowait(event)
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=admit)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "hello"}],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    _user, reply = captured["controller"].state["messages"]
+    assert "B-OK" in json.dumps(reply)
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_shows_none_of_a_running_turn_typed_in_the_terminal(monkeypatch):
+    """Chalcedony on #554 round 5: a turn typed in the terminal names no
+    request, and its text and permission prompt became this message's."""
+    session = _FakeSession([])
+
+    def admit(content, request_id=None):
+        for event in (
+            {"type": "token", "text": "THEIRS"},
+            {"type": "permission_request", "tool_id": "their-tool", "tool_name": "terminal",
+             "input": {"command": "echo hi"}},
+            {"type": "turn_complete", "stop_reason": "end_turn"},
+            {"type": "token", "text": "B-OK", "request_ids": [request_id]},
+            {"type": "turn_complete", "stop_reason": "end_turn", "request_ids": [request_id]},
+        ):
+            session._events.put_nowait(event)
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=admit)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "hello"}],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    controller = captured["controller"]
+    assert controller.text == ["B-OK"] and controller.tool_calls == []
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_fails_the_run_when_no_state_carries_the_error(
     monkeypatch,
 ):
@@ -1288,3 +1365,303 @@ def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
         "warning": "Saved by [harness]; Kollab cannot undo it.",
     }
     assert native == {"decision": "approve", "scope": "once"}
+
+
+@pytest.mark.asyncio
+async def test_private_goal_assistant_stream_ignores_foreign_turn(monkeypatch):
+    session = _FakeSession([{"type": "token", "text": "foreign turn"}, {"type": "turn_complete"}])
+    session.send_message = AsyncMock(return_value={"accepted": True, "goal_reply_id": "a" * 32})
+    session.poll_goal_reply = AsyncMock(side_effect=[{"status": "pending"}, {"status": "complete", "success": True, "conversation_uid": "a", "message": "own goal result"}])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=[{"type": "add-message", "content": "/goal show"}], state={"messages": [], "conversationUid": "a"}),
+    )
+    async for _chunk in response.stream:
+        pass
+    controller = captured["controller"]
+    assert controller.text == ["own goal result"]
+    assert "foreign turn" not in repr(controller.state)
+    assert not session.subscriptions
+    session.send_message.assert_awaited_once_with(
+        "/goal show", request_id=ANY, private_goal_reply=True, goal_conversation_uid="a",
+    )
+
+
+@pytest.mark.asyncio
+async def test_goal_stream_does_not_claim_concurrent_history_as_rendered(monkeypatch):
+    session = _FakeSession([])
+    session.send_message = AsyncMock(return_value={"accepted": True, "goal_reply_id": "a" * 32})
+    session.poll_goal_reply = AsyncMock(return_value={
+        "status": "complete", "success": True, "conversation_uid": "a",
+        "message": "own goal result", "history_recorded": True,
+    })
+    session.refresh_history = AsyncMock(return_value=[{}, {}, {}, {}])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=[{"type": "add-message", "content": "/goal show"}],
+                                  state={"messages": [], "conversationUid": "a", "synced": {"history": 0, "messages": 0}}),
+    )
+    async for _chunk in response.stream:
+        pass
+    assert captured["controller"].state["synced"] is None
+    assert captured["controller"].state["goalHistoryReloadRequired"] is True
+    session.refresh_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_goal_history_reload_signal_is_sent_through_real_state_proxy(monkeypatch):
+    session = _FakeSession([])
+    session.send_message = AsyncMock(return_value={"accepted": True, "goal_reply_id": "a" * 32})
+    session.poll_goal_reply = AsyncMock(return_value={
+        "status": "complete", "success": True, "conversation_uid": "a",
+        "message": "own goal result", "history_recorded": True,
+    })
+    session.refresh_history = AsyncMock(return_value=[{}, {}, {}, {}])
+    ops = await _state_ops(monkeypatch, session,
+        [{"type": "add-message", "content": "/goal show"}],
+        {"messages": [], "conversationUid": "a", "synced": {"history": 0, "messages": 0}})
+    assert (["synced"], None) in ops
+    assert (["goalHistoryReloadRequired"], True) in ops
+    session.refresh_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_private_goal_legacy_stream_ignores_foreign_turn(monkeypatch):
+    session = _FakeSession([{"type": "token", "text": "foreign turn"}, {"type": "turn_complete"}])
+    session.send_message = AsyncMock(return_value={"accepted": True, "goal_reply_id": "b" * 32})
+    session.poll_goal_reply = AsyncMock(return_value={"status": "complete", "success": True, "conversation_uid": "a", "message": "own goal result"})
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    response = await messages.send_message(session.session_id, messages.MessageRequest(content="/goal show", conversation_uid="a"))
+    events = [item async for item in response.body_iterator]
+    assert "own goal result" in repr(events) and "foreign turn" not in repr(events)
+    assert len(events) == 2 and not session.subscriptions
+
+
+@pytest.mark.asyncio
+async def test_private_goal_rejects_unupgraded_daemon_before_submission():
+    from kollabor_engine.session import EngineSession
+
+    session = EngineSession.__new__(EngineSession)
+    state = types.SimpleNamespace(send_message=AsyncMock())
+    session.daemon = types.SimpleNamespace(state=state, rpc=types.SimpleNamespace(call=AsyncMock(side_effect=RuntimeError("not found"))))
+    result = await session.send_message("/goal show", private_goal_reply=True)
+    assert not result["accepted"] and "does not support" in result["reason"]
+    state.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owned_goal_cancel_never_falls_back_to_current_model_turn():
+    from kollabor_engine.session import EngineSession
+
+    session = EngineSession.__new__(EngineSession)
+    rpc = types.SimpleNamespace(call=AsyncMock(return_value={"cancelled": True, "queued": True}))
+    session.daemon = types.SimpleNamespace(rpc=rpc)
+    reply_id = "goal-" + "c" * 32
+    result = await session.cancel_owned_turn(reply_id)
+    assert result["cancelled"] and result["queued"]
+    rpc.call.assert_awaited_once_with("state.cancel_goal_reply", {"reply_id": reply_id})
+
+
+class _PromptRpc:
+    def register(self, method, handler):
+        self.handler = handler
+
+
+@pytest.mark.asyncio
+async def test_an_answer_to_a_parked_card_reaches_the_message_that_gives_it(monkeypatch):
+    """Danburite on #554 round 6: a parked native prompt keeps the ids of the
+    turn that showed it, so its answer, given by a later message, was dropped
+    as that turn's output, and the card stayed open after the answer took
+    effect. Real stamp, permission bridge, display tap and event normalizer."""
+    from kollabor_engine.daemon_pool import _normalize_event
+
+    from kollabor.llm.permissions.attach_bridge import AttachPermissionBridge
+    from kollabor_agent.queue_processor import QueueProcessor
+    from kollabor_tui.display_tap import DisplayTap
+
+    session = _FakeSession([])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    tap = DisplayTap()
+    events = tap.subscribe("parked-answer")
+    bridge, rpc = AttachPermissionBridge(), _PromptRpc()
+    turn = QueueProcessor.__new__(QueueProcessor)
+    turn._turn_token = None
+    turn._stamp_turn(None, ("request-A",))
+    try:
+        prompt = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=tap,
+                rpc_server=rpc,
+                details={"tool_id": "shell-3", "tool_type": "shell"},
+                timeout=None,
+            )
+        )
+    finally:
+        turn._stamp_turn(None)  # turn A ends; its parked prompt keeps A's context
+    await asyncio.sleep(0)
+    assert events.get_nowait()["request_ids"] == ["request-A"]
+    bridge.park("shell-3")
+    assert events.get_nowait()["type"] == "permission_parked"
+    answers = []
+
+    async def submit(content, *, request_id=None, **kwargs):
+        # This message's "no" answers the card.
+        assert (await rpc.handler({"tool_id": "shell-3", "response": "DENY"}))["ok"]
+        await asyncio.wait_for(prompt, 1)
+        answers.append(events.get_nowait())
+        session._events.put_nowait(_normalize_event(answers[-1]))
+        session._events.put_nowait({"type": "turn_complete", "request_ids": [request_id]})
+        return {"accepted": True, "request_id": request_id}
+
+    async def drain(stream):
+        async for _ in stream:
+            pass
+
+    session.send_message = AsyncMock(side_effect=submit)
+    card = {
+        "type": "tool-call",
+        "toolCallId": "permission_shell-3",
+        "toolName": "request_permission",
+        "args": {"tool_id": "shell-3"},
+    }
+    state = {"messages": [{"id": "old-assistant", "role": "assistant", "content": [card]}]}
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=[{"type": "add-message", "content": "no"}], state=state),
+    )
+    try:
+        await asyncio.wait_for(drain(response.stream), 1)
+        assert answers[0]["type"] == "permission_denied" and answers[0]["request_ids"] == ["request-A"]
+        shown = captured["controller"].state["messages"][0]["content"][0]
+        assert shown.get("result", {}).get("decision") == "deny", shown
+    finally:
+        tap.unsubscribe("parked-answer")
+        if not prompt.done():
+            prompt.cancel()
+            await asyncio.gather(prompt, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_goal_image_replay_legacy_stream_returns_only_its_receipt(monkeypatch):
+    session = _FakeSession([{'type': 'token', 'text': 'unrelated reply'}, {'type': 'turn_complete'}])
+    session.send_message = AsyncMock(return_value={
+        'accepted': True, 'completed': True, 'replayed': True,
+        'request_id': 'saved-request', 'goal_id': 'saved-goal',
+        'message': 'This submission already created goal saved-goal.',
+    })
+    monkeypatch.setattr(messages, 'get_session_registry', lambda: _FakeRegistry(session))
+    response = await messages.send_message(session.session_id, messages.MessageRequest(
+        content=[{'type': 'text', 'text': '/goal inspect'}, {'type': 'image', 'image': 'data:image/png;base64,aA=='}],
+        request_id='stable-client-id'))
+    events = [item async for item in response.body_iterator]
+    assert len(events) == 2 and 'saved-goal' in repr(events)
+    assert 'unrelated reply' not in repr(events) and not session.subscriptions
+    assert session.send_message.await_args.kwargs['request_id'] == 'stable-client-id'
+
+
+@pytest.mark.asyncio
+async def test_goal_image_replay_assistant_stream_preserves_message_id_and_owns_reply(monkeypatch):
+    session = _FakeSession([{'type': 'token', 'text': 'unrelated reply'}, {'type': 'turn_complete'}])
+    session.send_message = AsyncMock(return_value={
+        'accepted': True, 'completed': True, 'replayed': True,
+        'request_id': 'saved-request', 'goal_request_id': 'saved-request',
+        'goal_id': None, 'message': 'Images remain saved as saved-request.',
+    })
+    monkeypatch.setattr(messages, 'get_session_registry', lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    command = {'type': 'add-message', 'message': {'id': 'stable-client-id', 'parts': [
+        {'type': 'text', 'text': '/goal inspect'}, {'type': 'image', 'image': 'data:image/png;base64,aA=='},
+    ]}}
+    response = await messages.assistant_transport(session.session_id, messages.AssistantRequest(
+        commands=[command], state={'messages': []}))
+    async for _chunk in response.stream:
+        pass
+    assert captured['controller'].text == ['Images remain saved as saved-request.']
+    assert 'unrelated reply' not in repr(captured['controller'].state) and not session.subscriptions
+    assert captured['controller'].state['goalSubmission'] == {
+        'requestId': 'saved-request', 'clientRequestId': 'stable-client-id',
+    }
+    assert session.send_message.await_args.kwargs['request_id'] == 'stable-client-id'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["message", "assistant"])
+async def test_goal_replay_receipt_is_not_published_after_revocation(monkeypatch, route):
+    from fastapi import HTTPException
+    from kollabor_engine.session_context import SESSION_READ_CONTEXT_SCOPE_KEY, SessionReadContext
+
+    class PhoneSession(_FakeSession):
+        def subscribe(self, context=None):
+            return super().subscribe()
+
+    session = PhoneSession([])
+    context = SessionReadContext(owner_id="owner", phone_id="phone")
+    request = types.SimpleNamespace(scope={"state": {SESSION_READ_CONTEXT_SCOPE_KEY: context}})
+    async def submit(content, **kwargs):
+        assert kwargs["private_goal_reply"]
+        context.revoked = True
+        return {"accepted": True, "completed": True, "replayed": True,
+                "request_id": "secret-request", "goal_request_id": "secret-request",
+                "message": "private replay receipt"}
+    session.send_message = AsyncMock(side_effect=submit)
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    content = [{"type": "text", "text": "/goal inspect"},
+               {"type": "image", "image": "data:image/png;base64,aA=="}]
+    if route == "message":
+        with pytest.raises(HTTPException) as refused:
+            await messages.send_message(session.session_id, messages.MessageRequest(
+                content=content, request_id="stable", conversation_uid="a"), request)
+        assert refused.value.status_code == 403
+    else:
+        captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+        response = await messages.assistant_transport(session.session_id, messages.AssistantRequest(
+            commands=[{"type": "add-message", "message": {"id": "stable", "parts": content}}],
+            state={"messages": [], "conversationUid": "a"}), request)
+        async for _chunk in response.stream:
+            pass
+        assert not captured["controller"].text
+        assert "secret-request" not in repr(captured["controller"].state)
+    assert not session.subscriptions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["message", "assistant"])
+async def test_completed_goal_without_replay_or_private_reply_is_rejected(monkeypatch, route):
+    from fastapi import HTTPException
+
+    session = _FakeSession([])
+    session.send_message = AsyncMock(return_value={"accepted": True, "completed": True})
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    if route == "message":
+        with pytest.raises(HTTPException) as refused:
+            await messages.send_message(session.session_id, messages.MessageRequest(
+                content="/goal show", conversation_uid="a"))
+        assert refused.value.status_code == 502
+    else:
+        captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+        response = await messages.assistant_transport(session.session_id, messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "/goal show"}],
+            state={"messages": [], "conversationUid": "a"}))
+        async for _chunk in response.stream:
+            pass
+        assert "private goal reply" in repr(captured["controller"].errors)
+    assert not session.subscriptions
+
+
+@pytest.mark.asyncio
+async def test_completed_non_goal_still_reads_its_own_shared_events(monkeypatch):
+    session = _FakeSession([
+        {"type": "token", "text": "actual response", "request_id": "owner"},
+        {"type": "turn_complete", "request_id": "owner"},
+    ])
+    session.send_message = AsyncMock(return_value={"accepted": True, "completed": True, "request_id": "owner"})
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    response = await messages.send_message(session.session_id, messages.MessageRequest(content="hello"))
+    events = [item async for item in response.body_iterator]
+    assert "actual response" in repr(events) and "Goal request" not in repr(events)
+    assert not session.subscriptions

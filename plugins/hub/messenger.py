@@ -448,6 +448,11 @@ class AgentSocketServer:
 
     async def start(self) -> str:
         """Start the socket server. Returns the socket path."""
+        if not self.socket_path.parent.exists():
+            # A /tmp cleanup deleted the socket directory under this running
+            # agent: make it again (ours, 0700), or every re-bind fails with
+            # "No such file or directory" until another agent starts (#542).
+            get_socket_dir()
         # Clean stale socket
         if self.socket_path.exists():
             self.socket_path.unlink()
@@ -2112,6 +2117,13 @@ class AgentSocketServer:
             for task in (send_task, recv_task):
                 if not task.done():
                     task.cancel()
+            # Cancelling to_thread does not stop the queue.get already running
+            # in the executor. Wake it so detach/shutdown need not wait for the
+            # five-second heartbeat timeout when the event loop closes.
+            try:
+                sub_queue.put_nowait(None)
+            except queue_mod.Full:
+                pass  # A full queue already has something to wake the reader.
             await asyncio.gather(send_task, recv_task, return_exceptions=True)
             if self._display_tap is not None:
                 self._display_tap.unsubscribe(client_id)

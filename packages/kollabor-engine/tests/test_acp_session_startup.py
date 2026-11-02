@@ -5,11 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from kollabor_engine import session as session_module
+from kollabor_engine.session import EngineSession
+
 from kollabor.llm.acp_bridge import ACPError, ACPProfile
 from kollabor.state import LocalStateService
 from kollabor.state.snapshots import SystemInfoSnapshot
-from kollabor_engine import session as session_module
-from kollabor_engine.session import EngineSession
 
 
 def session_with_daemon(info):
@@ -89,9 +90,10 @@ async def test_missing_adapter_is_rejected_before_spawning(monkeypatch, tmp_path
 @pytest.mark.asyncio
 async def test_readiness_failure_cleans_up_before_http_session_is_registered(monkeypatch, tmp_path):
     from fastapi import HTTPException
-    from kollabor_ai.profile_manager import ProfileManager
     from kollabor_engine.routes import sessions
     from starlette.requests import Request
+
+    from kollabor_ai.profile_manager import ProfileManager
 
     registry = {}
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -145,8 +147,9 @@ async def test_named_profile_uses_daemon_provider_and_waits_for_adapter(monkeypa
         return SystemInfoSnapshot(startup_state="ready" if ready.is_set() else "starting")
 
     profile = ProfileSnapshot(name="workspace-profile", provider="acp")
+    negotiated = ProfileSnapshot(name="workspace-profile", provider="acp", supports_vision=True)
     daemon = SimpleNamespace(alive=True, startup_error="", state=SimpleNamespace(
-        get_active_profile=AsyncMock(return_value=profile),
+        get_active_profile=AsyncMock(side_effect=[profile, negotiated]),
         get_system_info=info,
         get_conversation=AsyncMock(return_value=SimpleNamespace(messages=[], anchor="")),
     ), subscribe=lambda: events, unsubscribe=lambda queue: None)
@@ -160,9 +163,20 @@ async def test_named_profile_uses_daemon_provider_and_waits_for_adapter(monkeypa
         assert session.profile is profile
         ready.set()
         await asyncio.wait_for(initializing, 1)
-        daemon.state.get_active_profile.assert_awaited_once()
+        assert daemon.state.get_active_profile.await_count == 2
+        assert session.profile.supports_vision is True
     finally:
         if not initializing.done():
             initializing.cancel()
         await asyncio.gather(initializing, return_exceptions=True)
         await session.shutdown()
+
+
+def test_session_row_uses_negotiated_acp_vision_capability():
+    from kollabor.state.snapshots import ProfileSnapshot
+
+    profile = ProfileSnapshot(name="workspace-profile", provider="acp", supports_vision=True)
+    session = EngineSession("acp-vision", profile)
+    assert session.to_dict()["supports_vision"] is True
+    profile.supports_vision = False
+    assert session.to_dict()["supports_vision"] is False

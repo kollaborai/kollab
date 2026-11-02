@@ -1,5 +1,6 @@
-import { Fragment, useState, type ChangeEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type FocusEvent, type ReactNode } from "react";
 import { Dices, Loader2, RotateCcw } from "lucide-react";
+import { RadioGroup } from "radix-ui";
 import type { AgentPoolEntry, AvatarSpec, GemAppearance, GemLook, LookColor, Session } from "@/api";
 import { Avatar } from "@/components/agents/Avatar";
 import { isGemAvatar } from "@/components/agents/avatar-model";
@@ -52,6 +53,7 @@ type Rgb = [number, number, number];
 
 const STAGE_ACTIVITIES: Activity[] = ["idle", "thinking", "typing", "speaking", "dance", "error", "dreaming"];
 const HAT_GROUPS = [...new Set(HAT_STYLES.map((hat) => hat.group))];
+const SCROLL_TAB = "any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px] h-auto flex-none self-stretch px-1.5 focus-visible:ring-inset";
 
 const toHex = (rgb: readonly number[]) =>
   `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
@@ -62,6 +64,22 @@ const fromHex = (hex: string): Rgb => [
 ];
 const sameColor = (a?: readonly number[], b?: readonly number[]) =>
   Boolean(a && b && a.length === b.length && a.every((channel, i) => channel === b[i]));
+
+function useScrollRegion() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [scrollable, setScrollable] = useState(false);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => setScrollable(element.scrollHeight > element.clientHeight + 1);
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    for (const child of element.children) observer.observe(child);
+    measure();
+    return () => observer.disconnect();
+  }, []);
+  return { ref, scrollable };
+}
 
 function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
@@ -153,9 +171,18 @@ function StudioBody({
   const [selected, setSelected] = useState(focus?.gem ?? "");
   const [activity, setActivity] = useState<Activity>("idle");
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ message: string } | null>(null);
+  const { ref: headerRef, scrollable: headerScrollable } = useScrollRegion();
+  const { ref: footerRef, scrollable: footerScrollable } = useScrollRegion();
   const chat = focus?.chat;
   const [hub, setHub] = useState(chat?.hub ?? true);
+
+  useLayoutEffect(() => {
+    const footer = footerRef.current;
+    if (!error || !footer) return;
+    footer.scrollTop = 0;
+    if (footer.scrollHeight > footer.clientHeight + 1) footer.focus({ preventScroll: true });
+  }, [error, footerRef]);
 
   const current: AgentPoolEntry | undefined =
     pinned ?? agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
@@ -176,17 +203,20 @@ function StudioBody({
   const pick = (pool: readonly string[]) => pool[Math.floor(Math.random() * pool.length)];
   const season = draft.season ?? "auto";
   const phone = useIsMobile();
+  const revealFocused = (event: FocusEvent<HTMLDivElement>) => {
+    if (event.target instanceof HTMLElement) event.target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  };
 
   const save = async () => {
     if (!studio) return;
     setSaving(true);
-    setError("");
+    setError(null);
     try {
       await studio.save(draft);
       if (chat && chat.hub !== null && hub !== chat.hub) await chat.setHub(hub);
       onDone();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError({ message: err instanceof Error ? err.message : String(err) });
     } finally {
       setSaving(false);
     }
@@ -194,7 +224,14 @@ function StudioBody({
 
   return (
     <>
-      <DialogHeader className="px-5 py-4 text-left">
+      {/* Keep the editor reachable when a large introduction and wrapped footer share a short dialog. */}
+      <DialogHeader
+        ref={headerRef}
+        tabIndex={headerScrollable ? 0 : -1}
+        role="region"
+        aria-label={focus ? `${name} studio introduction` : "Gem Studio introduction"}
+        className="max-h-[30vh] shrink-0 overflow-y-auto px-5 py-4 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset"
+      >
         <DialogTitle>{focus ? name : "Gem Studio"}</DialogTitle>
         <DialogDescription>
           {focus
@@ -266,18 +303,30 @@ function StudioBody({
             </div>
             {!dressGem ? null : (
               <>
-                {/* Touch: every trigger keeps a >=44px hit box (pointer-coarse) while
-                    the visual bar stays compact for mouse users; the list scrolls
-                    horizontally when the seven activities exceed the dialog width. */}
-                <Tabs value={activity} onValueChange={(value) => setActivity(value as Activity)}>
-                  <TabsList aria-label="Preview activity" className="pointer-coarse:h-11 max-w-full overflow-x-auto">
-                    {STAGE_ACTIVITIES.map((option) => (
-                      <TabsTrigger key={option} value={option} className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5 text-xs">
-                        {titleCase(option)}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
-                </Tabs>
+                <RadioGroup.Root
+                  aria-label="Preview activity"
+                  value={activity}
+                  onValueChange={(value) => setActivity(value as Activity)}
+                  onFocus={revealFocused}
+                  orientation="horizontal"
+                  tabIndex={-1}
+                  className="any-pointer-coarse:min-h-[44px] inline-flex min-h-9 w-full min-w-0 max-w-max items-center justify-start gap-1 overflow-x-auto text-muted-foreground"
+                >
+                  {STAGE_ACTIVITIES.map((option) => (
+                    <RadioGroup.Item
+                      key={option}
+                      value={option}
+                      onFocus={() => setActivity(option)}
+                      className={cn(
+                        SCROLL_TAB,
+                        "inline-flex items-center justify-center border-b-2 py-1 text-xs font-medium whitespace-nowrap transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none",
+                        activity === option ? "border-highlight text-foreground" : "border-transparent hover:text-foreground/80",
+                      )}
+                    >
+                      {titleCase(option)}
+                    </RadioGroup.Item>
+                  ))}
+                </RadioGroup.Root>
                 <Button
                   type="button"
                   variant="outline"
@@ -292,21 +341,21 @@ function StudioBody({
             )}
           </section>
 
-          <aside className="bg-muted/20 flex shrink-0 flex-col lg:min-h-0">
+          <aside className="bg-muted/20 flex min-w-0 shrink-0 flex-col lg:min-h-0">
             {(
               <Tabs
                 defaultValue={focus?.tab ?? (focus && !dressGem ? "avatar" : "eyes")}
-                className="flex flex-col gap-0 lg:min-h-0 lg:flex-1"
+                className="flex min-w-0 flex-col gap-0 lg:min-h-0 lg:flex-1"
               >
-                <TabsList aria-label="Look" className="pointer-coarse:h-11 mx-3 mt-3 w-auto shrink-0 justify-start overflow-x-auto">
-                  {focus ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="avatar">Avatar</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="shape">Shape</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="eyes">Eyes</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="hair">Hair</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="hat">Hat</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="aura">Aura</TabsTrigger> : null}
-                  <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="color">Color</TabsTrigger>
-                  {chat ? <TabsTrigger className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 flex-none px-1.5" value="chat">Chat</TabsTrigger> : null}
+                <TabsList aria-label="Look" tabIndex={-1} onFocus={revealFocused} className="any-pointer-coarse:min-h-[44px] mx-3 mt-3 h-auto min-h-9 w-auto shrink-0 justify-start overflow-x-auto">
+                  {focus ? <TabsTrigger className={SCROLL_TAB} value="avatar">Avatar</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="shape">Shape</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="eyes">Eyes</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="hair">Hair</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="hat">Hat</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className={SCROLL_TAB} value="aura">Aura</TabsTrigger> : null}
+                  <TabsTrigger className={SCROLL_TAB} value="color">Color</TabsTrigger>
+                  {chat ? <TabsTrigger className={SCROLL_TAB} value="chat">Chat</TabsTrigger> : null}
                 </TabsList>
 
                 {focus && current ? (
@@ -551,10 +600,16 @@ function StudioBody({
         </div>
       </GemAppearancePreview>
 
-      <DialogFooter className="bg-muted/30 flex-row items-center gap-2 px-5 py-3 sm:justify-between">
-        <div className="min-w-0 flex-1">
+      <DialogFooter
+        ref={footerRef}
+        tabIndex={footerScrollable ? 0 : -1}
+        role="region"
+        aria-label="Gem Studio actions"
+        className="bg-muted/30 max-h-[40vh] shrink-0 flex-row flex-wrap items-center gap-2 overflow-y-auto scroll-py-[4px] px-5 py-3 outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset sm:justify-between"
+      >
+        <div className="min-w-0 max-w-full flex-[1_0_auto]">
           {error ? (
-            <p className="text-destructive text-xs">{error}</p>
+            <p role="alert" className="text-destructive break-words text-xs">{error.message}</p>
           ) : current ? (
             <Button
               type="button"
@@ -568,9 +623,12 @@ function StudioBody({
                 })
               }
               disabled={!draft.gems?.[key]}
+              aria-label={`Reset ${name}`}
+              title={`Reset ${name}`}
+              className="h-auto min-h-8 max-w-full whitespace-normal text-left"
             >
               <RotateCcw className="size-4" />
-              Reset {name}
+              <span className="line-clamp-2 min-w-0 break-words">Reset {name}</span>
             </Button>
           ) : null}
         </div>
