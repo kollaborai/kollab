@@ -16,41 +16,35 @@ do not invent V2 product tracks, legacy implementations, or compatibility obliga
 for nonexistent users. Preserve actual protocol contracts and private persistent
 state. Temporary rollback artifacts require an explicit retention/cleanup condition.
 
-## releases and the shared checkout
+## releases and writer worktrees
 
 We follow Trunk-Based Development with Conventional Commits and SemVer; see
-SOFTWARE_DEVELOPMENT_LIFECYCLE.md.
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md` for the canonical workflow.
 
-Every agent works in the one shared checkout, on `main`. Never create a git
-worktree (unless Marco asks for one), and never stash, reset, clean, restore,
-or switch branches in the checkout. Other agents edit the same tree at the
-same time: run `git status --short` first, leave their uncommitted edits
-alone, and commit only your own files with `git commit -- <paths>` (never
-`git add -A` or `git add .`).
+Each active writing lane owns one unique worktree, branch, and file scope.
+Read-only reviewers may inspect a shared checkout. The local `main` checkout is
+integration-only and its source files stay read-only: inspect them or
+fast-forward after already-merged changes. Repository fetch/worktree setup may
+use its Git metadata without changing those files. Do not edit, stage, commit,
+or push source there. Preserve dirty files and
+existing worktrees/branches; do not automatically clean up or delete them.
+Before creating a lane, inspect repository status and all worktrees, verify the
+new path and branch do not exist, fetch the intended base, and record its SHA.
+Avoid concurrent writers to the same paths.
 
-`main` is protected, so work lands through a draft PR pushed straight from the
-checkout, with no local branch:
+Source work lands through a DRAFT PR from the owning worktree. Keep commits
+scoped to owned paths, use Conventional Commits, review and test the exact PR
+head against the current `main` base, and require all configured checks and
+review gates. Update a PR branch with ordinary merges; never rebase or
+force-push. The designated integrator owns merge sequencing and merges only
+with explicit authorization and a merge commit. If local and remote state
+diverge, stop and report exact SHAs and PR state; never reset or force-push.
 
-    git log --oneline origin/main..HEAD               # every commit listed ships
-    git push origin HEAD:refs/heads/issue-<N>-<slug>
-    gh pr create --draft --head issue-<N>-<slug> --title "<type(scope): summary>" --body "Fixes #<N>"
-
-PRs merge with a merge commit, so once yours merges
-`git pull --ff-only origin main` brings `main` level. If that pull refuses,
-`main` has diverged from `origin/main`: stop and tell Marco, and never reset,
-rebase, or force-push to fix it. Never build a release from uncommitted files
-or a scratch clone.
-
-For every release, read `docs/release-process.md`. Releases are tagged
-whenever Marco decides, and agents may create a release tag ONLY when Marco
-explicitly instructs them to. Commit the release on local `main` by explicit
-paths (other people's edits stay uncommitted and out of it), push `HEAD` to
-`release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only
-origin main` and tag the merge. Once it is published, run
-`uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh` (the
-release binary in `~/.local/bin`). The release is not done until `main`
-matches `origin/main`, `git status` lists none of the release's files, and
-`kollab --version` reports the new version.
+For every release, read `docs/release-process.md`. Author release-preparation
+changes in a worktree PR, then build/tag from the clean, synchronized merged
+`main` checkout. Releases are tagged whenever Marco decides, and agents may
+create a release tag ONLY when Marco explicitly instructs them to. Preserve the
+existing version, changelog, CI, packaging, and installation gates.
 
 ## project snapshot
 

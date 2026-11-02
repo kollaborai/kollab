@@ -34,52 +34,54 @@ Kollab uses SemVer-style versions:
 
 Use a `vX.Y.Z` Git tag for public releases.
 
-## Release From Main, in Place
+## Prepare a release in a writer worktree; tag merged main
 
-Releases run from the shared `main` checkout, where all work happens
-(`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`). In it, never create a worktree, stash,
-reset, clean, restore, or switch branches, and never build a release from
-uncommitted files or a scratch clone: the checkout stays behind, dirty with
-work that already shipped. Commit the release on local `main` instead; the
-merge then fast-forwards it, so `main` ends clean and level by construction.
+Release preparation is source work and follows the normal isolated-writer PR
+workflow in `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`. Do not commit release files
+on the integration checkout. The release build and tag use the exact merged
+`main` commit after the designated integrator has synchronized the
+integration checkout with `origin/main`.
 
-1. Commit the release's work on `main` by explicit paths
-   (`git commit -- <paths>`), never `git add -A` or `git add .`. Other agents'
-   uncommitted work stays uncommitted and out of the release.
-2. Commit the release prep the same way (every version, `uv.lock`, both
-   changelogs) as `chore: prepare release vX.Y.Z`.
-3. Everything committed on `main` ships: review `git log origin/main..HEAD`,
-   then push it and open the PR with
-   `git push origin "HEAD:refs/heads/release/X.Y.Z"`.
-4. Wait for the PR to merge: auto-merge (`.github/workflows/auto-merge.yml`)
-   merges it with a merge commit once the required checks pass. Never squash or
-   rebase it, so local `main` stays a parent of the merge.
-5. Bring `main` level and tag the merge:
+1. Inspect the current repository/worktree status and latest release tag. Create
+   a dedicated worktree and release branch from freshly fetched `origin/main`;
+   confirm both path and branch are unused. Keep the integration checkout
+   source-read-only.
+2. Prepare the release in that worktree, using explicit paths for commits:
+   - update the root version and every workspace package version to exactly
+     `X.Y.Z`;
+   - update all inter-package minimum-version constraints that are part of the
+     same release;
+   - update `uv.lock` using the supported lock command, then inspect the diff;
+   - move intended entries from `[Unreleased]` into
+     `## [X.Y.Z] - YYYY-MM-DD` in both changelogs, keeping them byte-identical;
+   - add migration notes for breaking CLI, config, plugin, package, or API
+     behavior;
+   - keep internal debugging notes, generated indexes, credentials, raw
+     transcripts, and speculative work out of release notes.
+3. Review the exact release diff and commit only the release scope. Push the
+   branch normally and open a DRAFT PR against `main`. The PR must meet the
+   normal exact-head review, required-CI, conversation-resolution, and current
+   base gates. If the base advances, merge `origin/main` into the writer branch
+   and push normally; never rebase or force-push.
+4. The designated integrator merges the authorized release PR with a merge
+   commit. In the integration checkout, run `git pull --ff-only origin main`,
+   then verify its HEAD equals `origin/main` and identifies the release merge
+   commit. If this fast-forward fails or the SHAs differ, stop and report the
+   exact state; never reset, rebase, or force-push.
+5. Only after the release gates below pass and Marco explicitly instructs the
+   agent to tag, create the annotated `vX.Y.Z` tag on that exact merged-main
+   commit and push that exact tag. Never tag the writer branch or push
+   `--tags` broadly.
+6. Once publishing is green, run `uv sync --all-extras` and
+   `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in
+   `~/.local/bin`). Do not build from uncommitted release changes or a scratch
+   clone.
 
-   ```bash
-   git pull --ff-only origin main
-   git tag -a vX.Y.Z -m "Release vX.Y.Z"
-   git push origin vX.Y.Z
-   ```
-
-6. Once publishing is green, install it:
-
-   ```bash
-   uv sync --all-extras                   # the checkout's own venv
-   KOLLAB_VERSION=X.Y.Z bash install.sh   # the release binary in ~/.local/bin
-   ```
-
-   The installer replaces a uv tool or pipx kollab at `~/.local/bin/kollab`, so
-   from then on `/upgrade` swaps the binary and never touches the checkout.
-
-Done means `main` matches `origin/main`, `git status` lists none of the
-release's files, and `kollab --version` prints `Build: <branch> @ <8-character
-SHA>` immediately before the unchanged final `kollab X.Y.Z` line inside and
-outside the repo. Build identity comes from the exact checkout used to build the
-artifact; a detached checkout reports branch `unknown` but still reports the
-short SHA when HEAD is resolvable. Each unavailable field displays as `unknown`. Any other dirty file is work
-outside the release: name it in the release report. Running agents
-keep the code they started with; list them and ask before restarting any.
+The integration checkout must match `origin/main` at the intended merge commit
+before build or tag actions. Classify any other dirty path instead of removing
+or carrying it into release scope. Done means `kollab --version` reports the
+released version inside and outside the repo, in addition to the existing
+package, artifact, tag, and publication proofs below.
 
 ## Pre-Release Checklist
 
@@ -132,8 +134,8 @@ scripts/docker-runtime.sh smoke
 ## Publishing
 
 1. Confirm the release commit is clean and scanned.
-2. Create the annotated release tag on the merge commit (Release From Main, in
-   Place, step 5).
+2. Create the annotated release tag on the synchronized merge commit
+   (Prepare a release in a writer worktree; tag merged main, step 5).
 3. Push that exact tag: `git push origin vX.Y.Z`, never `--tags`.
 4. Let the publish workflow build and check the CLI binaries on all four
    existing platforms, unsigned Tauri desktop bundles for macOS arm64 and
@@ -174,8 +176,8 @@ scripts/docker-runtime.sh smoke
    both workflows run `desktop_release.py verify --windows required`, so a
    release without the installer, or with half the pair, fails.
 6. Re-run the secret scan on the exact public commit.
-7. Install it locally (Release From Main, in Place, step 6) and check
-   `kollab --version` inside and outside the repo.
+7. Install it locally (Prepare a release in a writer worktree; tag merged
+   main, step 6) and check `kollab --version` inside and outside the repo.
 
 ## Post-Release
 

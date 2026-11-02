@@ -1,19 +1,20 @@
 # Software Development Lifecycle
 
 This document is the standard for how work moves from idea to merged code in
-this repository. The short version: trunk-based development in one shared
-`main` checkout with no worktrees, Conventional Commits, draft PRs by default,
-and releases tagged only when Marco decides.
+this repository. The short version: trunk-based development, one isolated
+worktree and branch per active writer, one named integrator, draft PRs by
+default, and releases tagged only when Marco explicitly decides.
 
 ## Standard
 
-We follow Trunk-Based Development: `main` is the single source of truth, and
-every agent commits on it in the one shared checkout. A change reaches GitHub
-through a short-lived PR branch pushed from that checkout; nobody works in a
-worktree or a local feature branch. We follow Conventional Commits 1.0.0 for
-commit messages and SemVer 2.0.0 for versions. Release mechanics live in
-`docs/release-process.md`; the release manager playbook lives in
-`bundles/skills/release-manager/SKILL.md`.
+We follow Trunk-Based Development: `main` is the single source of truth for
+merged work. Each active writing lane uses its own worktree and branch based on
+the latest `origin/main`; source changes reach `main` through a reviewed PR.
+Conventional Commits 1.0.0 apply to commit messages and SemVer 2.0.0 to
+versions. Release mechanics live in `docs/release-process.md`; the release
+manager playbook lives in `bundles/skills/release-manager/SKILL.md`. The rules
+below are canonical for Kollab; shorter repo instructions and templates point
+here for detail.
 
 ## Roles
 
@@ -32,38 +33,104 @@ Work enters through a GitHub issue and becomes a tracked task (via `/goal` or
 the work queue) before any code changes. No tracked task, no edits. Small
 fixes still get an issue so the PR branch and commit can reference it.
 
-## Work on main
+## Writer worktrees and main integration
 
-Everyone works in the one shared checkout on `main`. Never create a git
-worktree (unless Marco asks for one), and never stash, reset, clean, restore,
-or switch branches in the checkout.
+- Each active writing lane has one named owner, one unique worktree, and one
+  branch. Record the owner, worktree path, branch, and file scope before edits.
+  Do not assign concurrent writers to the same paths; arrange a clear handoff
+  before ownership changes.
+- Read-only reviewers may inspect a shared checkout. They do not edit it.
+- Preserve every existing worktree, branch, staged change, and dirty file unless
+  its owner explicitly authorizes a specific change. Never automatically clean
+  up or delete worktrees or branches.
+- The local `main` worktree is the integration checkout. Keep its source
+  files read-only: inspect them or fast-forward after changes have already
+  merged to remote `main`. Fetching refs and registering a new worktree may be
+  done from the repository context; neither changes source in local `main`.
+  Never edit, stage, commit, or push source there, or switch, reset, stash,
+  clean, or restore it.
+- Before creating a writer lane, inspect status and all worktrees, fetch the
+  intended base, and record the exact `origin/main` SHA. Confirm the requested
+  worktree path, local branch, and remote branch are unused; do not reuse an
+  existing path or branch.
 
-- Several agents edit the tree at once. Run `git status --short` before you
-  touch a file, leave other agents' uncommitted edits alone, and check with
-  whoever is editing a file before you change it too.
-- Commit only your own files: `git commit -m "<message>" -- <paths>`. Never
-  `git add -A`, `git add .`, or a tree-wide `ruff --fix` or `black`.
-- `main` is protected, so a change lands through a draft PR pushed straight
-  from the checkout, with no local branch:
+From the integration checkout, a new lane can be created like this after the
+path and branch absence checks:
 
-  ```bash
-  git log --oneline origin/main..HEAD          # every commit listed ships
-  git push origin HEAD:refs/heads/issue-<N>-<slug>
-  gh pr create --draft --head issue-<N>-<slug> --title "<type(scope): summary>" --body "Fixes #<N>"
-  ```
+```bash
+git status --short --branch
+git worktree list
+git fetch origin main
+git rev-parse origin/main
+test ! -e "../kollab-wt/<task-slug>" && test ! -L "../kollab-wt/<task-slug>" || { echo "worktree path exists"; exit 1; }
+! git show-ref --verify --quiet "refs/heads/issue-<N>-<slug>" || { echo "local branch exists"; exit 1; }
+remote_branch=$(git ls-remote --heads origin "refs/heads/issue-<N>-<slug>") || { echo "remote branch check failed"; exit 1; }
+test -z "$remote_branch" || { echo "remote branch exists"; exit 1; }
+git worktree add -b "issue-<N>-<slug>" "../kollab-wt/<task-slug>" origin/main
+```
 
-- PR branch name: `issue-<N>-<slug>` where N is the issue number. Docs tasks
-  with no issue use a descriptive slug without N (for example
-  `docs/software-development-lifecycle`).
-- Review fixes go out the same way: commit on `main`, push `HEAD` to the same
-  PR branch.
-- PRs merge with a merge commit, never a squash or rebase, so local `main`
-  stays a parent of the merge. Once yours merges,
-  `git pull --ff-only origin main`.
-- If that pull refuses, `main` has diverged from `origin/main`: stop and tell
-  Marco. Never reset, rebase, or force-push to fix it.
-- Never build a release from uncommitted files or a scratch clone. Releases
-  run in this same checkout per `docs/release-process.md`.
+Use `issue-<N>-<slug>` for issue work and a descriptive `docs/<slug>` branch
+for documentation work without an issue. Check the new worktree's status
+before editing. Do not copy uncommitted files from the integration checkout
+into a lane without its owner's authorization.
+
+From the owning worktree, commit only owned paths, set the PR branch upstream on
+the first push, and create a DRAFT PR:
+
+```bash
+git status --short --branch
+git commit -m "fix(cli): correct version display" -- kollabor/cli.py
+git push -u origin HEAD:refs/heads/issue-8-version-display
+gh pr create --draft --head issue-8-version-display --title "fix(cli): correct version display" --body "Fixes #8"
+```
+
+## Commits and PRs
+
+- Make small, scoped commits from the owning worktree, naming only the paths
+  owned by that lane. Use Conventional Commits and include the issue reference
+  when one exists. Never broadly stage another writer's files.
+- Push the lane branch normally and open a DRAFT PR against `main`. Agents do
+  not mark their own PR ready or merge it. Note overlapping PRs and path
+  ownership so the integrator can sequence them.
+- Review must name the exact PR head SHA and current `main` base SHA. Required
+  CI checks must be green on that head, the branch must include the current
+  base, and all review conversations must be resolved before merge.
+- When `main` advances, update the writer branch by fetching and merging
+  `origin/main` into it, then push normally. If the remote PR branch advanced,
+  fetch and merge that branch too. Resolve conflicts only within owned paths;
+  stop and coordinate if a conflict crosses another owner's scope. Never rebase
+  or force-push; preserve history with ordinary merges.
+- One named integrator coordinates each merge queue and lands authorized PRs
+  with a merge commit; never squash or rebase. Marco remains the merge authority
+  for product changes, with approval/authorization requirements below.
+- After a PR has already merged, the integration checkout may run
+  `git pull --ff-only origin main`. Verify its HEAD equals `origin/main`.
+  If the pull refuses or the SHAs differ, stop and report the exact local,
+  remote, and PR state. Do not reset, rebase, or force-push to hide divergence.
+
+## Main protection and merge authority
+
+`main` is protected. Agents investigate, implement, test, open DRAFT PRs, keep
+their own branches current, and respond to review. Marco decides what ships,
+approves and marks PRs ready (the koordinator may too), decides releases and
+tags, and is the merge authority for product changes. Agents never mark their
+own PRs ready and never merge product changes without explicit authorization.
+The designated integrator is the single owner of merge sequencing and post-merge
+`main` synchronization; designation does not grant release-tag authority.
+
+## Pull request gates
+
+Agents ALWAYS open PRs as drafts. Only Marco or the koordinator marks a PR
+ready or approves it. Once authorized and ready, the repository's configured
+merge workflow may merge it with a merge commit when required checks pass.
+
+A PR must be current with `main`, have all required checks green, and have all
+conversations resolved. Required checks are `ci/tests`,
+`ci/standards-check`, and `ci/security-scan`. Record the exact reviewed head
+SHA and the tested head SHA; a new push requires review and CI evidence for the
+new head. Desktop Mac/Linux builds (the `binaries` and `desktop` workflows)
+run only on release tags and are not merge requirements. `ci/binary-smoke` is
+an early Linux build, not a required merge check.
 
 ## Implement and test
 
@@ -93,11 +160,11 @@ git commit -m "feat(webui): copy a profile and pin its reasoning effort"
   default for every agent-opened PR, no exceptions.
 - Only Marco or the koordinator marks a PR ready or approves it. Once ready, auto-merge
   (`.github/workflows/auto-merge.yml`) merges it when checks pass.
-- Merging needs the PR branch up to date with `main`. When `main` moves,
-  `gh pr update-branch <n>` merges it in on GitHub (never a rebase). If your
-  next push to that branch is refused, run
-  `git pull --no-rebase origin issue-<N>-<slug>` first, never `--force`.
-- Note any overlapping PRs in the body so the operator can decide disposition.
+- Merging needs the PR branch up to date with `main`. The writer updates its
+  owned branch by fetching and merging `origin/main`, then pushing normally;
+  preserve history with merge commits and never rebase or force-push.
+- Note overlapping PRs and file ownership in the body so the integrator can
+  sequence them.
 
 ## CI gates
 
@@ -121,25 +188,31 @@ never their own unreviewed work.
 
 Full mechanics: `docs/release-process.md`. Summary:
 
-- Releases are tagged whenever Marco decides, and agents may create a release
-  tag ONLY when Marco explicitly instructs them to.
-- Desktop Mac/Linux builds run from the release tag. Full four-platform binary
-  builds and all desktop builds remain tag-only; the only PR-time build is the
-  `ci/binary-smoke` Linux smoke build (not a required check, no artifacts).
-- Before tagging, check all machines for unpushed work.
-- Releases are built from the shared `main` checkout, never from worktrees or
-  scratch clones.
+- Author release source and version-preparation changes in a dedicated
+  worktree/branch and merge them through the same reviewed PR gate.
+- Build from the exact, clean, synchronized merged `main` checkout, never from
+  an unmerged writer branch or scratch clone.
+- Releases are tagged whenever Marco decides; agents may create a release tag
+  ONLY when Marco explicitly instructs them to.
+- Before tagging, check all machines for unpushed work and prove the integration
+  checkout HEAD equals `origin/main` at the intended release merge commit.
 
 ## Hotfixes
 
-Same flow, faster: issue, minimal fix on `main` with a regression test, DRAFT
-PR, explicit merge authorization. Hotfix releases follow the normal release
-process with the fix merged (or cherry-picked) first.
+Same gates, shorter scope: issue, minimal fix and regression test in an isolated
+writer worktree, DRAFT PR, exact-head CI/review, explicit merge authorization,
+and merge commit by the designated integrator. Hotfix releases follow the
+normal release process after the fix is merged and `main` is synchronized.
 
 ## Definition of done
 
 - The PR body contains the complete product-ready checklist from `docs/product-ready-checklist.md`, with evidence for completed items and a specific reason for every N/A.
 - Tracked task complete, tests green on the required CI checks.
 - PR approved by Marco and merged (or explicitly closed).
-- Local `main` pulled level after merge: `git pull --ff-only origin main`.
+- The designated integrator fast-forwarded local `main` after merge:
+  `git pull --ff-only origin main`.
 - Docs updated when behavior or process changed.
+- The handoff records exact worktree path, branch, base SHA, local HEAD, remote
+  branch SHA, PR number/state, reviewed head SHA, required CI state, and the
+  integration checkout's local/remote main SHAs. Any mismatch or dirty path is
+  named; never claim synchronization from labels alone.

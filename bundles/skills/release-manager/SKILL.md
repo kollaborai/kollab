@@ -41,13 +41,12 @@ release source of truth.
   `git clean`, or tag deletion/rewriting to make a release appear clean.
 - A dirty checkout is a release blocker until every dirty path is classified. Do not
   assume generated files, documentation, or index artifacts are safe to ignore.
-- Releases run from the shared `main` checkout, where all work happens
-  (`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`). Never create a worktree, stash, reset, clean,
-  or switch branches in it, and never build a release from uncommitted files or a
-  scratch clone. Commit the release on local `main` by explicit paths, push `HEAD` to
-  `release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only origin main`
-  (`docs/release-process.md`). Do not move, stash, or copy another person's work without
-  explicit authorization.
+- Release preparation is authored in a dedicated writer worktree and DRAFT PR
+  (`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`). The integration checkout is source-read-only;
+  use it only for inspection and fast-forward-only pulls after an authorized merge.
+  Build and tag from clean, synchronized merged `main`, never an unmerged writer branch
+  or scratch clone. Do not move, stash, or copy another person's work without explicit
+  authorization.
 - Never reuse, delete, or force-move an existing tag. If a tag exists, inspect it and stop
   on any metadata or artifact mismatch; repair is a separate, explicitly authorized task.
 - Treat commit, tag, push, PyPI upload, GitHub Release creation, and Homebrew dispatch as
@@ -109,22 +108,35 @@ Do not report `released` or `done` while the state is earlier than `verified`.
    or someone's work in progress (leave it uncommitted, out of the release). Ask its owner
    when unsure; do not decide that unrelated files are disposable.
 
-## 2. Prepare the release commit
+## 2. Prepare the release PR
 
-Prepare one reviewable release commit on local `main`, committed by explicit paths:
+Prepare one reviewable release-preparation commit in a dedicated writer
+worktree and branch from the latest `origin/main`, not on local `main`. Verify
+the worktree path and branch are unused. Keep ownership of the version files,
+package constraints, lockfile, and changelog copies in this release lane; do
+not let another writer edit those paths concurrently.
 
-1. Update the root version and every workspace package version to exactly `X.Y.Z`.
-2. Update all inter-package minimum-version constraints that are part of the same release.
-3. Update `uv.lock` using the repository's supported lock command, then inspect the diff.
-4. Move the intended user-facing entries from `[Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`
-   in `CHANGELOG.md`. Keep a new empty `[Unreleased]` section at the top.
-5. Synchronize `kollabor/updates/CHANGELOG.md` with the root changelog and prove the copies
-   match (`cmp` or an equivalent byte comparison).
+1. Update the root version and every workspace package version to exactly
+   `X.Y.Z`.
+2. Update all inter-package minimum-version constraints that are part of the same
+   release.
+3. Update `uv.lock` using the repository's supported lock command, then inspect
+   the diff.
+4. Move the intended user-facing entries from `[Unreleased]` into
+   `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`. Keep a new empty `[Unreleased]`
+   section at the top.
+5. Synchronize `kollabor/updates/CHANGELOG.md` with the root changelog and prove
+   the copies match (`cmp` or equivalent byte comparison).
 6. Add migration notes for breaking CLI, config, plugin, package, or API behavior.
-7. Do not put internal debugging notes, generated indexes, credentials, raw transcripts, or
-   speculative work into release notes.
-8. Review the exact release diff. The only intended files should be version metadata,
-   dependency locks/constraints, changelogs, and explicitly approved release documentation.
+7. Keep internal debugging notes, generated indexes, credentials, raw
+   transcripts, and speculative work out of release notes.
+8. Review the exact release diff. The only intended files should be version
+   metadata, dependency locks/constraints, changelogs, and explicitly approved
+   release documentation.
+9. Commit by explicit paths, push the branch normally, and open a DRAFT PR.
+   Required CI and review must match the exact PR head and current `main` base.
+   If `main` advances, merge `origin/main` into this worktree and push normally;
+   never rebase or force-push.
 
 Before committing, run a parity probe equivalent to:
 
@@ -150,11 +162,17 @@ cmp CHANGELOG.md kollabor/updates/CHANGELOG.md
 git diff --check
 ```
 
-Commit only after the user has reviewed or authorized the exact release scope. Use a
-release-specific message such as `chore: prepare release vX.Y.Z`; do not add attribution
-footers.
+Commit only after the exact release scope is authorized. Use a release-specific
+message such as `chore: prepare release vX.Y.Z`; do not add attribution footers.
 
-## 3. Validate before tagging
+## 3. Merge and validate before tagging
+
+After the release PR passes exact-head review and required checks, all
+conversations are resolved, and its branch includes current `main`, the
+designated integrator merges it with a merge commit and fast-forwards the
+integration checkout. Verify local `main` equals `origin/main` at the release
+merge SHA. Then run the release build and checks from that synchronized main
+checkout; a pre-merge build is only rehearsal, not release source proof.
 
 Run checks proportionate to the release scope, including the negative version cases:
 
@@ -187,13 +205,13 @@ tag a partially validated build.
 
 ## 4. Tag and publish
 
-Only after the pre-tag gates pass, and only on Marco's explicit instruction
-(releases are tagged whenever Marco decides, and agents may create a release
-tag ONLY when Marco explicitly instructs them to):
+Only after the pre-tag gates in section 3 pass, and only on Marco's explicit
+instruction (releases are tagged whenever Marco decides, and agents may create
+a release tag ONLY when Marco explicitly instructs them to):
 
-1. Push `HEAD` to `release/X.Y.Z` and open its PR; auto-merge merges it with a merge
-   commit (never squash) once checks pass. Then `git pull --ff-only origin main` and create
-   an annotated tag on that merge commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
+1. Confirm the integration checkout still equals `origin/main` at the recorded
+   release merge SHA, then create an annotated tag on that exact commit:
+   `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
 2. Verify the tag resolves to the recorded release commit and that the tag name matches all
    metadata before pushing it.
 3. Push the exact tag intentionally. Do not push `--tags` broadly.
@@ -227,25 +245,31 @@ Run the strongest available consumer proof:
 5. Verify the GitHub Release tag, release notes, source commit, and workflow artifacts all
    identify `X.Y.Z`, and the release carries `kollab-macos-aarch64`, `kollab-macos-x86_64`,
    `kollab-linux-x86_64` and `kollab-linux-aarch64`, each with its `.sha256`.
-6. Re-run the version parity probe against the post-release source branch. If the workflow
-   committed a version bump back to `main`, verify that commit is the same intended version
-   and did not overwrite unrelated work.
+6. Re-run the version parity probe against the post-release source. If the
+   publish workflow's conditional version-bump push advanced remote `main`,
+   record that SHA, fast-forward the integration checkout normally, and verify
+   the version; preserve and report any unrelated dirty paths.
 
 The release is `verified` only when source, tag, workflow, PyPI, GitHub Release, fresh
 install, and the local checkout (step 6) all agree. Otherwise report `published-partial` or
 `blocked`, never `done`.
 
-## 6. Leave main on the release, installed
+## 6. Leave the integration checkout synchronized and install
 
-`main` is already level: the release was committed on it and fast-forwarded to the merge
-(step 4). Once publishing is green, run `uv sync --all-extras` (the checkout's venv) and
-`KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in `~/.local/bin`; it replaces a
-uv tool or pipx kollab there, so `/upgrade` never touches the checkout).
+The designated integrator fast-forwards the integration checkout only after the
+release PR has merged. The release build and tag must point to that merged-main
+commit; never build from the release writer worktree or an unmerged branch.
+Once publishing is green, run `uv sync --all-extras` (the integration checkout's
+venv) and `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in
+`~/.local/bin`; it replaces a uv tool or pipx kollab there, so `/upgrade` never
+touches the checkout).
 
-Leaving `main` behind, dirty with released edits, or an older version installed is a failed
-release. Done means `main` matches `origin/main`, `git status` lists none of the release's
-files, and `kollab --version` reports `X.Y.Z` inside and outside the repo. Running agents
-keep the code they started with: list them, and ask before restarting any.
+Leaving local `main` behind or diverged from `origin/main`, or an older version
+installed, is a failed release. Done means the integration checkout matches
+`origin/main` at the release merge, `git status` lists none of the release's
+files, and `kollab --version` reports `X.Y.Z` inside and outside the repo.
+Running agents keep the code they started with: list them, and ask before
+restarting any.
 
 ## Known failure guard: tag/version drift
 
@@ -278,7 +302,7 @@ packages: each package -> published/failed/unverified
 PyPI: exact package/version observations
 GitHub Release: exact tag/release observation
 fresh install: exact environment and `kollab --version` output
-local main: SHA equal to origin/main and the tag; files still dirty, none from the release
+local main: SHA equal to origin/main and the release tag; unrelated dirty paths preserved, none from the release
 local install: each `kollab --version` (repo .venv, ~/.local/bin binary) -> X.Y.Z
 changelog: root/package copy parity result
 dirty/unrelated work: preserved paths

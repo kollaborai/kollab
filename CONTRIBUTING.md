@@ -50,15 +50,34 @@ new wiring.
 
 ## Branch and Pull Request Workflow
 
-1. Branch from `main`.
-2. Make a focused change.
-3. Run targeted validation.
-4. Update docs when behavior, setup, commands, config, or public APIs change.
-5. Open a pull request against `main`.
-6. Fill out the PR template, including commands run and rollout risk.
+In the Kollab maintainer workflow, every active writer owns one isolated
+worktree, branch, and file scope. Keep one writer per path at a time. Read-only
+reviewers may share a checkout. Contributors using a standalone clone may use a
+regular local branch when no other writer shares that checkout.
 
-Use clear commit messages that describe the user/operator-visible change. Avoid
-AI attribution footers.
+1. Inspect repository status and existing worktrees; preserve all existing
+   dirty files, branches, and worktrees. Claim a unique worktree path, branch,
+   and file scope before editing.
+2. For a new maintainer lane, fetch the intended base and create a new worktree
+   from current `origin/main` after confirming that path and branch are unused:
+
+   ```bash
+   git fetch origin main
+   git worktree add -b issue-123-fix ../kollab-wt/issue-123-fix origin/main
+   ```
+
+   Use a descriptive `docs/<slug>` branch when no issue tracks the work.
+3. Make a focused change and run targeted validation from the owning worktree.
+4. Update docs when behavior, setup, commands, config, or public APIs change.
+5. Push normally and open a DRAFT pull request against `main`. Keep review and
+   CI tied to the exact head; merge current `main` into the branch when needed.
+   Never rebase or force-push.
+6. Fill out the PR template, including commands run and rollout risk. Use
+   Conventional Commit messages and leave the PR as a draft until an authorized
+   reviewer marks it ready.
+7. A designated integrator sequences authorized merge commits. The integration
+   checkout remains source-read-only and may only fast-forward after a PR has
+   already merged. Do not automatically remove or delete worktrees or branches.
 
 ## Validation
 

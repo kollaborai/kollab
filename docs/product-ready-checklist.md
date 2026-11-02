@@ -64,9 +64,11 @@ Keep the PR draft while any required evidence or work is outstanding.
   `Fixes #<issue-number>` when an issue tracks the work.
 - [ ] This complete checklist is present in the PR body, and every item is
   filled with evidence or a specific N/A reason; no result is guessed or left blank.
-- [ ] Work was done in the shared checkout on `main` (no worktree, no branch
-  switch) and committed by explicit paths, leaving other agents' uncommitted
-  edits untouched.
+- [ ] Work was done in a uniquely owned worktree and branch based on the
+  current PR base (`origin/main` in the maintainer checkout), or a standalone
+  contributor branch when no other writer shares the checkout. File ownership
+  was clear; existing dirty work, branches, and worktrees were preserved; the
+  maintainer integration checkout had no source edits.
 - [ ] The PR remains a draft until Marco or the koordinator marks it ready; agents do not merge or
   create release tags without explicit authorization.
 

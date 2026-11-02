@@ -858,36 +858,24 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 ## Development Guidelines
 
 ### Git Workflow
-**Pre-commit:** Commits to `kollabor/`, `plugins/`, `tests/` MUST reference GitHub issue
-- One shared checkout on `main` for every agent (see SOFTWARE_DEVELOPMENT_LIFECYCLE.md):
-  never create a git worktree (unless Marco asks for one), and never stash, reset,
-  clean, restore or switch branches in it
-- Other agents edit the same tree at once: leave their uncommitted edits alone and
-  commit only your own files, `git commit -- <paths>` (never `git add -A` or `git add .`)
-- Commit: Conventional Commits format `type(scope): summary`, referencing the issue:
-  `fixes #123`, `closes #123`, `resolves #123`, or `#123`
-- Main branch protected - no direct pushes. Push `HEAD` to a PR branch named
-  `issue-123-description`, with no local branch; check `git log origin/main..HEAD`
-  first, since every commit it lists ships
-- Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco or the
-  koordinator marks a PR ready or approves it; auto-merge then merges it once checks pass.
-- PRs merge themselves (`.github/workflows/auto-merge.yml`): a PR from a branch of this
-  repo, opened by a person with write access, merges with a merge commit once the three
-  required checks pass. Forks, bots and drafts never do: open a draft to hold one, and
-  `gh pr merge <n> --disable-auto` stops one already armed. Such a merge starts no
-  push-to-main CI run.
-- Merging needs the PR branch up to date with `main`: `gh pr update-branch <n>` (a
-  merge, never a rebase). Once it merges, `git pull --ff-only origin main`; if that
-  refuses, `main` has diverged: stop and tell Marco, never reset, rebase or force-push
 
-```bash
-gh issue create --title "Fix version display"
-git commit -m "fix(cli): version display, fixes #8" -- kollabor/cli.py
-git log --oneline origin/main..HEAD
-git push origin HEAD:refs/heads/issue-8-version-display-fix
-gh pr create --draft --head issue-8-version-display-fix --title "fix(cli): version display" --body "Fixes #8"
-git pull --ff-only origin main   # once the PR has merged
-```
+**Pre-commit:** Commits to `kollabor/`, `plugins/`, and `tests/` must reference a GitHub issue.
+
+For Kollab, follow the canonical isolated-writer process in
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`. Each active writer claims one unique
+worktree, branch, and file scope based on freshly fetched `origin/main`;
+read-only reviewers may share a checkout. Keep the local `main` integration
+worktree's source files read-only; inspect them or fast-forward after merged
+PRs. Fetching refs and registering a new worktree may use Git metadata without
+changing those files. Do not edit, stage, commit, or push source there, and
+preserve existing dirty files and worktrees.
+
+Use scoped Conventional Commits and DRAFT PRs. Required CI, review, and the
+current `main` base must match the exact PR head. Update a branch with ordinary
+merges; never rebase or force-push. One named integrator sequences authorized
+merge commits. Report the worktree, branch, base/head SHAs, remote/PR state,
+and synchronized local/remote `main` SHAs so divergence is explicit. The
+`main` checkout is never reset, cleaned, stashed, restored, or switched.
 
 ### Version Management
 Version managed centrally in `pyproject.toml`:
@@ -908,42 +896,35 @@ do not need runtime Git access.
 
 ### Cutting a Release
 
-`main` is branch-protected: **no direct pushes**, every change lands via PR + 3
-required CI checks (`ci/security-scan`, `ci/standards-check`, `ci/tests`).
+`main` is branch-protected: source and version-preparation changes land through
+a dedicated writer worktree and DRAFT PR, with the three required CI checks
+(`ci/security-scan`, `ci/standards-check`, `ci/tests`). Keep the integration
+checkout source-read-only.
 
-**Correct order: prep PR BEFORE the tag** (source must already match the tag; do
-not rely on CI to repair it):
-
-1. Prep commit on local `main` (`git commit -- <paths>`; never a worktree, branch
-   switch, scratch clone or uncommitted files) bumping *everything* to `X.Y.Z`:
-   - root `pyproject.toml` + all 10 `packages/*/pyproject.toml` versions
-   - inter-package `kollabor-*>=` constraints, then `uv lock`
-   - move `[Unreleased]` → `## [X.Y.Z] - DATE` in **both** `CHANGELOG.md` and
-     `kollabor/updates/CHANGELOG.md` (keep them **byte-identical**, `cmp` them;
-     the in-app update UI reads the packaged copy)
-2. `git push origin "HEAD:refs/heads/release/X.Y.Z"` and open the PR; it merges itself
-   with a merge commit once the checks pass (never squash). Then
-   `git pull --ff-only origin main`.
-3. Annotated tag on the merged commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`,
-   then `git push origin vX.Y.Z` (push the exact tag, never `--tags`).
-   Releases are tagged whenever Marco decides, and agents may create a release
-   tag ONLY when Marco explicitly instructs them to. Desktop Mac, Linux and
-   Windows builds run only from the release tag; they are never PR checks or merge
-   requirements.
-4. Once publishing is green: `uv sync --all-extras` and
-   `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in
-   `~/.local/bin`). Done = `main` matches
-   `origin/main`, `git status` lists none of the release's files, and
-   `kollab --version` reports `X.Y.Z` inside and outside the repo.
+1. In a worktree branch from current `origin/main`, bump every package version
+   and inter-package constraint to `X.Y.Z`, update `uv.lock`, and move
+   `[Unreleased]` entries into matching byte-identical changelogs.
+2. Commit by explicit paths, push normally, and open a DRAFT release PR.
+   The exact PR head must pass required CI and review, all conversations must
+   be resolved, and the branch must include current `main`. The designated
+   integrator merges with a merge commit after explicit authorization.
+3. The integrator runs `git pull --ff-only origin main` in the integration
+   checkout and proves local `main` equals `origin/main` at the release merge.
+   Run the pre-tag release build and validation gates from that exact commit.
+   Create and push an annotated `vX.Y.Z` tag there only when Marco explicitly
+   instructs it; never push `--tags` broadly.
+4. After publishing is green, run `uv sync --all-extras` and
+   `KOLLAB_VERSION=X.Y.Z bash install.sh`. Done also requires the published
+   artifacts and installed version to match the tag.
 
 The tag triggers `.github/workflows/publish.yml` → the four platform binaries
 (`binaries.yml`, built and checked before anything publishes) → PyPI + Homebrew
-tap → GitHub Release with the binaries attached. Its first step, **Verify release consistency**, fails the publish
-if the tagged commit's versions/changelog don't already agree with the tag, so
-a tag cut without a prep PR fails fast instead of publishing silently.
+tap → GitHub Release with the binaries attached. Its first step, **Verify
+release consistency**, fails if the tagged commit's versions/changelog do not
+already match the tag.
 
-Canonical checklist: `docs/release-process.md`. Full agent playbook (not
-invocable from Claude Code; read + follow by hand): `bundles/skills/release-manager/SKILL.md`.
+Canonical checklist: `docs/release-process.md`. Full agent playbook:
+`bundles/skills/release-manager/SKILL.md`.
 
 ### Release Binaries
 

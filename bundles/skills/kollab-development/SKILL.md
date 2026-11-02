@@ -53,18 +53,32 @@ consumers or the maintainer, rather than inventing them.
 5. For DNS, `/connect`, relay, A2A, or deployment work, read
    [relay-change-guide.md](references/relay-change-guide.md) before editing.
 
-## Releases and the shared checkout
+## Writer worktrees and releases
 
-For any release request, read `docs/release-process.md`. Agents share one
-checkout on `main`: never create a worktree, stash, reset, clean, restore, or
-switch branches in it, and never build a release from uncommitted files or a
-scratch clone. Commit the release on local `main` by explicit paths (other
-people's edits stay uncommitted and out of it), push `HEAD` to
-`release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only origin main`
-and tag the merge. Once it is published, run `uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh`
-(the release binary in `~/.local/bin`). The release is not done until
-`main` matches `origin/main`, `git status` lists none of the release's files,
-and `kollab --version` reports the new version.
+Follow `SOFTWARE_DEVELOPMENT_LIFECYCLE.md` for the canonical Kollab workflow.
+Each active writing lane owns a unique worktree, branch, and file scope; read-only
+reviewers may inspect a shared checkout. The local `main` checkout is
+integration-only: use it for inspection and fast-forward-only pulls of already
+merged changes, never for source edits, staging, commits, or pushes. Preserve
+existing dirty work and worktrees/branches; never auto-clean them.
+
+Create new lanes from the fetched current `origin/main` after checking that the
+worktree path and branch are unused. Keep file ownership explicit and avoid
+concurrent writers to the same paths. Use scoped Conventional Commits and DRAFT
+PRs; update branches only with ordinary merges, never rebase or force-push.
+Review and CI must match the exact PR head and current base. One named
+integrator coordinates authorized merge commits and post-merge fast-forward
+synchronization; divergence is reported with exact local, remote, and PR SHAs.
+
+For any release request, read `docs/release-process.md`. Author release-source
+and version-preparation edits in a dedicated worktree PR. Build from clean,
+synchronized merged `main` after the PR lands; never build from uncommitted
+files, an unmerged writer branch, or a scratch clone. Agents may create a
+release tag ONLY when Marco explicitly instructs them to. After publishing, run
+`uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release
+binary in `~/.local/bin`). The release is not done until the integration
+checkout matches `origin/main`, release files are clean, and `kollab --version`
+reports the new version.
 
 ## Put the change in its existing owner
 
