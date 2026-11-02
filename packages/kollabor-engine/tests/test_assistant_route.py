@@ -1284,6 +1284,37 @@ async def test_assistant_transport_says_how_much_history_the_messages_show(
 
 
 @pytest.mark.asyncio
+async def test_failed_history_refresh_publishes_no_watermark(monkeypatch):
+    """A refresh failure must not leave the seeded sync point standing (#666).
+
+    The turn's transient rows publish before the watermark advances, so a
+    stale watermark replays the turn as history next to those rows and the
+    live window draws it twice until a manual reload. ``None`` tells the page
+    its whole sync point is gone, so its next refresh reloads whole."""
+    session = _FakeSession([*_tokens("hi"), {"type": "turn_complete"}])
+    session.refresh_history = AsyncMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "hello"}],
+            state={"messages": [{"id": "history-1", "role": "user", "content": "a"}],
+                   "synced": {"history": 1, "messages": 1}},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    state = captured["controller"].state
+    assert len(state["messages"]) == 3
+    assert state["synced"] is None
+
+
+@pytest.mark.asyncio
 async def test_new_admitted_turn_clears_previous_cancel_error(monkeypatch):
     session = _FakeSession([*_tokens("new answer"), {"type": "turn_complete"}])
     monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
