@@ -2,9 +2,6 @@
   "description": "Deep investigation agent - explores codebases without making changes",
   "tools": [
     "terminal",
-    "terminal-output",
-    "terminal-send",
-    "terminal-status",
     "file-read",
     "file-grep",
     "hub-msg",
