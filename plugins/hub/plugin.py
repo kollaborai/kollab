@@ -10606,20 +10606,21 @@ class HubPlugin(BasePlugin):
         if not peers:
             return data
 
-        # Include source agent identity so receivers know which window
-        # the human typed in.  This prevents other agents from
-        # auto-responding with messages directed at the source agent
-        # (otherwise coordinator sees "user -> *", responds with
-        # <hub_msg to="lapis">, and lapis gets a message "from
-        # coordinator" even though the human was typing locally).
+        # Address the message to the window it was typed in (#659): peers
+        # see "<user> -> <source>" and observe it without answering. The
+        # source agent already holds the text as its own user turn, so it
+        # gets no copy. source_agent tells receivers a human is typing
+        # elsewhere, not that the message is for them.
         source_agent = self._identity.identity if self._identity else ""
         for peer in peers:
+            if source_agent and peer.identity == source_agent:
+                continue
             try:
                 msg = HubMessage(
                     action="message",
                     from_agent="human",
                     from_identity=user_name,
-                    to="*",
+                    to=source_agent or "*",
                     content=user_content,
                     scope=MessageScope.BROADCAST.value,
                     metadata={"source_agent": source_agent},

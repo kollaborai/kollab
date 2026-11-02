@@ -614,3 +614,45 @@ async def test_peer_message_input_is_not_broadcast_as_the_human():
         SimpleNamespace(source="hub_attachment"),
     )
     hub._deliver_to_agent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_typed_input_is_addressed_to_its_window_and_not_echoed_back():
+    """Peers see '<user> -> <window agent>' (#659); the window agent gets no copy."""
+    from unittest.mock import AsyncMock
+
+    hub = HubPlugin()
+    hub._started = True
+    hub._identity = SimpleNamespace(state="idle", identity="lapis")
+    hub._presence = SimpleNamespace(
+        discover_agents_async=AsyncMock(
+            return_value=[
+                SimpleNamespace(identity="lapis"),
+                SimpleNamespace(identity="koordinator"),
+                SimpleNamespace(identity="peridot"),
+            ]
+        )
+    )
+    hub._cli_args = None
+    hub._deliver_to_agent = AsyncMock()
+
+    await hub._broadcast_user_input(
+        {"message": "what changed in the parser?"}, SimpleNamespace(source="user")
+    )
+
+    delivered = [call.args for call in hub._deliver_to_agent.await_args_list]
+    assert [peer.identity for peer, _ in delivered] == ["koordinator", "peridot"]
+    for _, msg in delivered:
+        assert msg.to == "lapis"
+        assert msg.from_agent == "human"
+        assert msg.metadata == {"source_agent": "lapis"}
+
+    # A window with no hub name keeps the old broadcast address.
+    hub._identity = SimpleNamespace(state="idle", identity="")
+    hub._deliver_to_agent.reset_mock()
+    await hub._broadcast_user_input(
+        {"message": "typed with no name"}, SimpleNamespace(source="user")
+    )
+    assert hub._deliver_to_agent.await_count == 3
+    for call in hub._deliver_to_agent.await_args_list:
+        assert call.args[1].to == "*"
