@@ -504,3 +504,105 @@ def test_dry_run_previews_pending_purges(tree):
     assert plan.purges, "aged entry must be planned for purge"
     assert any(f"would purge trash/{slug}" in line for line in report)
     assert trash_entry.is_dir(), "dry-run must not purge"
+
+
+# ---------------------------------------------------------------------------
+# Garnet round 2: encode failures, symlinked metadata, fail-closed purge
+# provenance.
+
+
+def test_unencodable_branch_is_ambiguous_never_orphan(tree, monkeypatch):
+    """A candidate whose encoding cannot be computed is a search gap.
+
+    encode_project_path resolves symlinks and can raise. Swallowing the
+    error read as absence and classified a live workspace orphan; the
+    entry must read ambiguous (report-only) instead.
+    """
+    import kollabor_config.projects_sweep as sweep_module
+
+    real_encode = sweep_module.encode_project_path
+
+    def sealed_encode(path):
+        if str(path) == str(live):
+            raise PermissionError(13, "simulated denied resolve")
+        return real_encode(path)
+
+    monkeypatch.setattr(sweep_module, "encode_project_path", sealed_encode)
+    root, workspaces = tree
+    base = workspaces / "sealed"
+    live = base / "inner-notes"
+    live.mkdir(parents=True)
+    slug = encode_project_path(live)
+    entry = _orphan(root, slug)
+    plan, _ = run_projects_sweep(root, mode="execute", active_window_hours=0)
+    assert {d.name: d.category for d in plan.decisions}[slug] == "ambiguous"
+    assert entry.is_dir(), "an unencodable candidate must never be quarantined"
+
+
+def test_symlinked_trash_metadata_blocks_quarantine(tree, tmp_path):
+    """A symlinked metadata file must not receive quarantine records.
+
+    write_text through the link would insert the trash record into an
+    external file the projects root does not own; the whole move must
+    fail closed with the entry left in place.
+    """
+    root, _ = tree
+    external = tmp_path / "external-meta.json"
+    external.write_text("{}")
+    trash_dir = root / TRASH_DIR_NAME
+    trash_dir.mkdir()
+    (trash_dir / TRASH_META_FILE).symlink_to(external)
+    orphan = _orphan(root, "private_tmp_meta-lane")
+    plan, report = run_projects_sweep(root, mode="execute", active_window_hours=0)
+    assert orphan.is_dir(), "symlinked metadata must block the quarantine move"
+    assert json.loads(external.read_text()) == {}, (
+        "an external metadata file must not receive trash records"
+    )
+    assert any("FAILED to quarantine" in line for line in report)
+
+
+def test_symlinked_trash_metadata_never_plans_purges(tree):
+    """Purge planning must not trust records read through a symlink.
+
+    A link to an external, attacker-crafted JSON would otherwise supply
+    aged records that name trash entries for destruction; planning has
+    to freeze instead of following the link."""
+    root, _ = tree
+    slug = "private_tmp_meta-lane"
+    trash_entry = _quarantine_and_age(root, slug)
+    crafted = {
+        slug: {
+            "moved_at": time.time() - 30 * 86400,
+            "decoded": str(root / "nowhere"),
+            "original_name": slug,
+        }
+    }
+    external = root.parent / "external-meta.json"
+    external.write_text(json.dumps(crafted))
+    meta_path = root / TRASH_DIR_NAME / TRASH_META_FILE
+    meta_path.unlink()
+    meta_path.symlink_to(external)
+    plan, _ = run_projects_sweep(root, mode="execute")
+    assert plan.purges == [], "records through a symlink must not drive purges"
+    assert trash_entry.is_dir()
+
+
+def test_purge_requires_original_name_metadata(tree):
+    """Without original_name the provenance rerun is impossible: no purge.
+
+    A record that lost its required provenance key used to skip the full
+    check and purge anyway - even with the same-slug workspace alive at
+    another lossy reading. Fail closed: absent metadata retains the copy.
+    """
+    root, workspaces = tree
+    base = workspaces / "carter"
+    slug = encode_project_path(base) + "_marcoverse_notes"
+    trash_entry = _quarantine_and_age(root, slug)
+    meta = json.loads((root / TRASH_DIR_NAME / TRASH_META_FILE).read_text())
+    meta[slug].pop("original_name")
+    (root / TRASH_DIR_NAME / TRASH_META_FILE).write_text(json.dumps(meta))
+    # Same slug recreated at a lossy-different reading while the copy sits.
+    (base / "marcoverse_notes").mkdir(parents=True)
+    plan, _ = run_projects_sweep(root, mode="execute")
+    assert plan.purges == [], "records without original_name must not purge"
+    assert trash_entry.is_dir()

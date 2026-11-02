@@ -226,7 +226,11 @@ def _dfs_slug_match(start: Path, slug: str) -> tuple[bool, bool]:
                 if not child.is_symlink():
                     encoded_candidates.add(encode_project_path(child))
             except OSError:
-                continue
+                # A child whose encoding cannot be computed is a gap in
+                # the search, not proof of absence: report inconclusive
+                # so the entry reads ambiguous (report-only).
+                exhausted = True
+                return
             if slug in encoded_candidates:
                 found = True
                 return
@@ -334,9 +338,23 @@ def _classify_entry(
     return SweepDecision(name, entry, "orphan", evidence, size, age_days)
 
 
+def _trash_meta_is_symlink(trash_dir: Path) -> bool:
+    """True when the metadata file is a symlink.
+
+    Records read or written through the link would live outside the
+    projects root: reads could import crafted purge orders and writes
+    would publish trash records into an external file.
+    """
+    return (trash_dir / TRASH_META_FILE).is_symlink()
+
+
 def _load_trash_meta(trash_dir: Path) -> dict:
+    if _trash_meta_is_symlink(trash_dir):
+        return {}
     try:
-        value = json.loads((trash_dir / TRASH_META_FILE).read_text(encoding="utf-8"))
+        value = json.loads(
+            (trash_dir / TRASH_META_FILE).read_text(encoding="utf-8")
+        )
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -344,6 +362,10 @@ def _load_trash_meta(trash_dir: Path) -> dict:
 
 def _save_trash_meta(trash_dir: Path, meta: dict) -> None:
     trash_dir.mkdir(parents=True, exist_ok=True)
+    if _trash_meta_is_symlink(trash_dir):
+        raise OSError(
+            "trash metadata is a symlink; refusing to write records"
+        )
     (trash_dir / TRASH_META_FILE).write_text(
         json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -389,6 +411,9 @@ def _plan_trash_purges(
         projects_root, trash_dir
     ):
         return purges
+    if _trash_meta_is_symlink(trash_dir):
+        # Untrusted records: freeze purge planning entirely.
+        return purges
     meta = _load_trash_meta(trash_dir)
     for child in sorted(trash_dir.iterdir()):
         if child.is_symlink() or not child.is_dir() or child.name == TRASH_META_FILE:
@@ -411,15 +436,17 @@ def _plan_trash_purges(
         # The decoded hint names only one lossy reading of the slug. The
         # workspace may have been recreated under a different reading, so
         # rerun the full provenance search for the original slug before
-        # destroying the copy; an inconclusive search retains it.
+        # destroying the copy; an inconclusive search retains it. Without
+        # the original slug no check is possible: fail closed and retain.
         slug = record.get("original_name")
-        if isinstance(slug, str) and slug:
-            try:
-                live, evidence = _provenance_is_live(slug, decoded_path, child)
-            except OSError:
-                live, evidence = False, "ambiguous encoding (unreadable provenance check)"
-            if live or evidence.startswith("ambiguous"):
-                continue
+        if not isinstance(slug, str) or not slug:
+            continue
+        try:
+            live, evidence = _provenance_is_live(slug, decoded_path, child)
+        except OSError:
+            live, evidence = False, "ambiguous encoding (unreadable provenance check)"
+        if live or evidence.startswith("ambiguous"):
+            continue
         purges.append((child.name, child, age / 86400))
     return purges
 
@@ -469,6 +496,13 @@ def build_sweep_plan(
 
 def _move_into_trash(source: Path, trash_dir: Path, decoded_hint: str) -> Path:
     trash_dir.mkdir(parents=True, exist_ok=True)
+    if _trash_meta_is_symlink(trash_dir):
+        # Quarantine without a trusted record is how copies get lost or
+        # purged later; fail before the rename, leaving the entry in place.
+        raise OSError(
+            "trash metadata is a symlink; refusing to quarantine without "
+            "a trusted record"
+        )
     target = trash_dir / source.name
     counter = 2
     while target.exists():
