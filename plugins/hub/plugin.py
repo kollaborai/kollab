@@ -142,6 +142,20 @@ except ImportError as _dns_import_err:
 
 logger = logging.getLogger(__name__)
 
+
+MAX_CRYSTAL_BODY_CHARS = 2000
+
+
+def _crystal_body_limit_error(tool_name: str, body: str) -> str | None:
+    if len(body) <= MAX_CRYSTAL_BODY_CHARS:
+        return None
+    return (
+        f"{tool_name} rejected: body has {len(body)} characters; "
+        f"maximum is {MAX_CRYSTAL_BODY_CHARS}. No changes were saved. "
+        "Reduce the body or split long notes across entries."
+    )
+
+
 _OPERATOR_NOTIFY_KINDS = frozenset({"decision", "blocker", "done"})
 _DEFAULT_OPERATOR_ALIASES = frozenset({"boss", "human", "operator"})
 
@@ -2596,6 +2610,15 @@ class HubPlugin(BasePlugin):
                 output="empty content, nothing saved",
             )
 
+        body_error = _crystal_body_limit_error("vault_write", content)
+        if body_error:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="vault_write",
+                success=False,
+                error=body_error,
+            )
+
         if not self._crystal_store:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2626,7 +2649,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="vault_write",
                 success=False,
-                output=f"vault_write error: {e}",
+                error=f"vault_write error: {e}",
             )
 
     async def _handle_global_vault_write_tool(self, tool_data: dict[str, Any]):
@@ -2642,6 +2665,15 @@ class HubPlugin(BasePlugin):
                 tool_type="global_vault_write",
                 success=True,
                 output="empty content, nothing saved",
+            )
+
+        body_error = _crystal_body_limit_error("global_vault_write", content)
+        if body_error:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="global_vault_write",
+                success=False,
+                error=body_error,
             )
 
         if not self._global_crystal_store:
@@ -2673,7 +2705,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="global_vault_write",
                 success=False,
-                output=f"global_vault_write error: {e}",
+                error=f"global_vault_write error: {e}",
             )
 
     async def _handle_crystal_search_tool(self, tool_data: dict[str, Any]):
@@ -2783,18 +2815,53 @@ class HubPlugin(BasePlugin):
             ]
             output = "\n".join(lines)
 
-            # Context limit: 3000 chars
-            if len(output) > 3000:
+            # Keep the tool response within the context budget while ensuring
+            # unbounded metadata cannot consume the space reserved for the body.
+            output_limit = 3000
+            header_limit = 600
+            if len(output) > output_limit:
                 body = entry.body
-                truncation_note = f"[truncated, {len(body)} chars total]"
-                header = (
-                    f"[{entry.id}] {entry.summary}\n"
-                    f"date: {entry.date}\n"
-                    f"keywords: {', '.join(entry.keywords)}\n"
-                    "---\n"
+                keywords = ", ".join(entry.keywords)
+
+                def _bounded_metadata(value: str, limit: int) -> Tuple[str, bool]:
+                    if len(value) <= limit:
+                        return value, False
+                    return value[: max(0, limit - 1)] + "…", True
+
+                summary_line, summary_truncated = _bounded_metadata(
+                    f"[{entry.id}] {entry.summary}  [{tier}]", 240
                 )
-                available = 3000 - len(header) - len(truncation_note) - 1
-                output = header + body[:available] + "\n" + truncation_note
+                date_line, date_truncated = _bounded_metadata(
+                    f"date: {entry.date}", 80
+                )
+                fixed_header = f"{summary_line}\n{date_line}\nkeywords: "
+                separator = "\n---\n"
+                metadata_note = "\n[metadata truncated]"
+                keyword_limit = max(
+                    0,
+                    header_limit
+                    - len(fixed_header)
+                    - len(separator)
+                    - len(metadata_note),
+                )
+                keyword_text, keywords_truncated = _bounded_metadata(
+                    keywords, keyword_limit
+                )
+                header = fixed_header + keyword_text
+                if summary_truncated or date_truncated or keywords_truncated:
+                    header += metadata_note
+                header += separator
+
+                available = output_limit - len(header)
+                if len(body) > available:
+                    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+                    body_note = (
+                        f"[body truncated, {len(body)} chars total; sha256={digest}]"
+                    )
+                    available = max(0, output_limit - len(header) - len(body_note) - 1)
+                    output = header + body[:available] + "\n" + body_note
+                else:
+                    output = header + body
 
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2917,6 +2984,15 @@ class HubPlugin(BasePlugin):
                     output="empty body",
                 )
 
+            body_error = _crystal_body_limit_error("crystal_edit", body)
+            if body_error:
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="crystal_edit",
+                    success=False,
+                    error=body_error,
+                )
+
             summary = tool_data.get("summary")
             keywords = tool_data.get("keywords")
             entry = self._crystal_store.update_entry(
@@ -2952,7 +3028,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="crystal_edit",
                 success=False,
-                output=f"crystal_edit error: {e}",
+                error=f"crystal_edit error: {e}",
             )
 
     async def _handle_crystal_delete_tool(self, tool_data: dict[str, Any]):
