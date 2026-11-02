@@ -385,6 +385,33 @@ class WorkQueue:
 
         return self._mutate(_claim)
 
+    def claim_task_card(
+        self, task_card_id: str, agent_identity: str
+    ) -> Optional[WorkSlot]:
+        """Mark a linked slot assigned after its TaskLedger card is claimed."""
+        card_id = (task_card_id or "").strip()
+        identity = (agent_identity or "").strip()
+        if not card_id or not identity:
+            return None
+
+        def _claim(slots: List[WorkSlot]) -> Tuple[Optional[WorkSlot], bool]:
+            for slot in slots:
+                if slot.task_card_id != card_id:
+                    continue
+                if slot.status == "pending":
+                    slot.assigned_to = identity
+                    slot.status = "assigned"
+                    logger.info(
+                        "Assigned linked work slot %s to %s from task card claim",
+                        slot.id,
+                        identity,
+                    )
+                    return slot, True
+                return slot, False
+            return None, False
+
+        return self._mutate(_claim)
+
     def complete(self, slot_id: str) -> None:
         """Mark a work slot as complete."""
 

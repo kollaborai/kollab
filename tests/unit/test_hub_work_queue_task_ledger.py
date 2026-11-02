@@ -164,3 +164,58 @@ def test_queue_command_cancels_card_when_durable_link_fails(tmp_path, monkeypatc
     assert plugin._task_ledger.get(canceled_ids[0]).status == "cancelled"
     assert plugin._work_queue.get_all()[0].task_card_id is None
     assert "warning:" in response
+
+
+@pytest.mark.asyncio
+async def test_claiming_linked_task_card_assigns_its_work_slot(tmp_path, monkeypatch):
+    plugin = _plugin(tmp_path, monkeypatch)
+    plugin._handle_queue_command("work tied to #640", upstream_refs=["#640"])
+    card = plugin._task_ledger.get_open(project="test-project")[0]
+
+    async def no_op_supervisor_kick():
+        return None
+
+    monkeypatch.setattr(plugin, "_supervisor_kick", no_op_supervisor_kick)
+
+    response = await plugin._handle_claim_command(card.id)
+
+    slot = plugin._work_queue.get_all()[0]
+    claimed_card = plugin._task_ledger.get(card.id)
+    assert response.startswith(f"claimed: [{card.id}]")
+    assert slot.status == "assigned"
+    assert slot.assigned_to == "lapis"
+    assert claimed_card.status == "active"
+    assert claimed_card.assignee == "lapis"
+    monkeypatch.setattr(
+        coordinator,
+        "github_terminal_state",
+        lambda ref: pytest.fail("assigned work must not be checked for staleness"),
+    )
+    assert plugin._sweep_stale_work_queue() == []
+
+
+def test_stale_sweep_leaves_active_paired_card_untouched(tmp_path, monkeypatch, caplog):
+    plugin = _plugin(tmp_path, monkeypatch)
+    plugin._handle_queue_command("work tied to #640", upstream_refs=["#640"])
+    card = plugin._task_ledger.get_open(project="test-project")[0]
+    claimed = plugin._task_ledger.claim(card.id, "ruby", project="test-project")
+    assert claimed.status == "active"
+    assert claimed.assignee == "ruby"
+    monkeypatch.setattr(
+        coordinator, "github_terminal_state", lambda ref: f"{ref} merged"
+    )
+
+    retired = plugin._sweep_stale_work_queue()
+
+    slot = plugin._work_queue.get_all()[0]
+    saved = plugin._task_ledger.get(card.id)
+    assert [item.id for item in retired] == [slot.id]
+    assert slot.status == "retired"
+    assert saved.status == "active"
+    assert saved.assignee == "ruby"
+    assert saved.terminal_reason is None
+    assert "leaving active task card" in caplog.text.lower()
+
+    # Retired slots are retried; an active card must remain protected then too.
+    plugin._sweep_stale_work_queue()
+    assert plugin._task_ledger.get(card.id).status == "active"

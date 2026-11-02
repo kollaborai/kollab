@@ -27,8 +27,10 @@ plugins/hub/plugin.py (commands and integration)
 A simple FIFO queue for dispatching work items to agents. Slots are
 persisted and claimed by agents. When the TaskLedger and agent identity are
 available, each queue item is paired with a durable TaskLedger card; the slot
-remains the dispatch unit and its card is cancelled if stale-queue cleanup
-retires the slot.
+remains the dispatch unit. Claiming a linked card marks its slot assigned so
+stale sweeps skip claimed work. If stale cleanup retires a pending slot, it
+cancels the paired card unless that card is already active; active cards remain
+available to the worker, and the retired slot is not reactivated.
 
 Tools:
 

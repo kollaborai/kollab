@@ -7838,6 +7838,7 @@ class HubPlugin(BasePlugin):
                     status="cancelled",
                     reason=f"work queue slot [{slot.id}] retired: {reason}",
                     actor="work-queue-sweep",
+                    preserve_active=True,
                 )
             except Exception as e:
                 logger.warning(
@@ -7852,6 +7853,14 @@ class HubPlugin(BasePlugin):
                     "Task card %s for retired work slot %s is missing",
                     slot.task_card_id,
                     slot.id,
+                )
+            elif card.status == "active":
+                logger.warning(
+                    "Leaving active task card %s for retired work slot %s "
+                    "unchanged; assigned to %s",
+                    slot.task_card_id,
+                    slot.id,
+                    card.assignee or "unknown",
                 )
         return retired
 
@@ -15861,6 +15870,26 @@ class HubPlugin(BasePlugin):
             suffix += f" (warning: {card_warning})"
         return f"queued: [{slot.id}] {task[:60]}{suffix}"
 
+    def _sync_claimed_task_card_slot(self, card_id: str, identity: str) -> None:
+        try:
+            slot = self._work_queue.claim_task_card(card_id, identity)
+        except Exception as e:
+            logger.warning(
+                "Could not synchronize work slot for claimed task card %s: %s",
+                card_id,
+                e,
+            )
+            return
+        if slot and (slot.status != "assigned" or slot.assigned_to != identity):
+            logger.warning(
+                "Claimed task card %s has linked work slot %s in status %s "
+                "assigned to %s",
+                card_id,
+                slot.id,
+                slot.status,
+                slot.assigned_to or "nobody",
+            )
+
     async def _handle_claim_command(self, slot_id: str) -> str:
         if not self._work_queue or not self._identity:
             return "work queue: unavailable"
@@ -15878,6 +15907,7 @@ class HubPlugin(BasePlugin):
                 rest, self._identity.identity, project=self._identity.project
             )
             if card:
+                self._sync_claimed_task_card_slot(card.id, self._identity.identity)
                 await self._supervisor_kick()
                 return f"claimed: [{card.id}] {card.directive[:60]}"
             return f"slot '{rest}' not found or not pending"
@@ -15891,6 +15921,7 @@ class HubPlugin(BasePlugin):
             self._identity.identity, project=self._identity.project
         )
         if card:
+            self._sync_claimed_task_card_slot(card.id, self._identity.identity)
             await self._supervisor_kick()
             return f"claimed: [{card.id}] {card.directive[:60]}"
         return "no available work to claim"
