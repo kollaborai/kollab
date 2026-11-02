@@ -73,6 +73,59 @@ Broadcast to everyone:
 /hub broadcast we're switching to the v2 API, update your imports
 ```
 
+## Notify the Operator from an Agent
+
+The human operator is not a Hub agent. Messages addressed to the configured hub
+user name (falling back to OS `USER`) or default aliases `operator`, `boss`, and
+`human` go directly to ntfy instead of reporting an offline agent. Configure
+additional local aliases with `plugins.hub.notify.ntfy.aliases`. For example:
+
+```text
+kollab --hub msg "$USER" "test"
+```
+
+Configure ntfy in the hub settings:
+
+```text
+/config plugins.hub.notify.ntfy.server https://ntfy.sh
+/config plugins.hub.notify.ntfy.topic <private-topic>
+/config plugins.hub.notify.ntfy.token <access-token>
+/hub notify channel ntfy
+/hub notify test
+/hub notify status
+```
+
+The optional token is used for authenticated ntfy servers. The fallback file
+`~/.config/marco-notify/config.json` may provide `ntfy_server` and `ntfy_topic`;
+non-empty Hub values override those two fallback values. Store tokens only in
+local configuration. `/hub notify status` reports whether the operator route is
+configured but never prints the ntfy server, topic, or token. The channel setting
+selects idle notifications; direct operator aliases use ntfy whenever it is
+configured.
+
+No agent deep link is inferred. To add an ntfy Click link, set
+`plugins.hub.notify.ntfy.webui_agent_url_template` only when a supported agent
+route exists; `{identity}` or `{agent}` is replaced with the URL-encoded agent
+identity. Without that explicit template, no click URL is sent.
+
+For an agent message that should also alert the operator, add the separate
+`notify_kind` attribute:
+
+```text
+<hub_msg to="lapis" notify_kind="decision">The rollout choice is ready.</hub_msg>
+<hub_msg to="lapis" notify_kind="blocker">I need approval to continue.</hub_msg>
+<hub_msg to="lapis" notify_kind="done">The requested change is complete.</hub_msg>
+```
+
+Supported classifications are `decision`, `blocker`, and `done`. Defaults are
+priority 4, 5, and 2 respectively; ordinary messages use priority 3. Identical
+text from the same agent is deduplicated for 10 minutes, and transient HTTP
+failures are retried with bounded exponential backoff. The relay `kind` remains
+reserved for `message`, `question`, and `answer`; do not encode notifications as
+`kind="decision"` as an alternate syntax. If both attributes are present,
+`kind` must remain a relay value and `notify_kind` carries the notification
+classification. Active manual-trust relay turns cannot send operator notifications.
+
 ## Choose Who Wakes When an Agent Joins
 
 When an agent comes online, every other agent in the folder gets a "just came
@@ -278,7 +331,7 @@ directory when you want to customize it without editing the installation.
 |---|---|
 | `/hub status` | Who's online, coordinator, states |
 | `/hub whoami` | Your hub identity and display name |
-| `/hub msg <agent> <text>` | Send message to agent |
+| `/hub msg <agent or operator alias> <text>` | Send to peer or operator via ntfy |
 | `/hub broadcast <text>` | Message all agents |
 | `/hub stop <agent\|all>` | Remote shutdown (`kill` is an alias) |
 | `/hub spawn <name> <task>` | Spawn a sub-agent |
@@ -292,6 +345,8 @@ directory when you want to customize it without editing the installation.
 | `/hub tasks list` | All tasks across the mesh |
 | `/hub bridge setup` | Configure Telegram bridge |
 | `/hub bridge enable` | Start bridge loop |
+| `/hub notify channel ntfy` | Select ntfy for idle notifications |
+| `/hub notify test` | Test the selected notification channel |
 | `/hub vault [name]` | Inspect agent vault |
 | `/hub feed` | Live activity dashboard |
 | `/hub console` | Agent management UI |
@@ -303,7 +358,7 @@ directory when you want to customize it without editing the installation.
 | CLI Flag | What it does |
 |---|---|
 | `kollab --hub status` | List online agents (no TUI) |
-| `kollab --hub msg <agent> <text>` | Send message (no TUI) |
+| `kollab --hub msg <agent-or-operator-alias> <text>` | Send (no TUI) |
 | `kollab --hub capture <agent> [n] [--raw]` | Read transcript; `--raw` keeps terminal output (no TUI) |
 | `kollab --hub kill <agent>` | Remote shutdown (no TUI) |
 | `kollab --attach <identity>` | Interactive TUI proxy to a live agent |
