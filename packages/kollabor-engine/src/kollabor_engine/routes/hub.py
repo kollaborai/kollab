@@ -188,3 +188,41 @@ async def hub_feed():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/cron-jobs")
+async def list_cron_jobs(
+    refresh: bool = Query(False, description="Bypass cache, re-read presence"),
+    timeout: float = Query(3.0, gt=0, le=15),
+):
+    """Aggregate scheduled hub cron jobs across live agents (issue #612).
+
+    Read-only: every job stays owned by the agent process that scheduled
+    it; each live agent's unix socket answers a local-only `cron_jobs`
+    action. An agent that does not answer (offline, socket gone) is
+    reported separately and never blocks the others.
+    """
+    agents = _bridge.get_agents(use_cache=not refresh)
+    jobs: list = []
+    responded: list = []
+    unavailable: list = []
+
+    for agent in agents:
+        agent_id = str(agent.get("agent_id") or "")
+        identity = str(agent.get("identity") or agent_id)
+        reply = await _bridge.query_socket(agent_id, "cron_jobs", timeout=timeout)
+        if not reply or reply.get("type") != "cron_jobs":
+            unavailable.append(identity)
+            continue
+        responded.append(identity)
+        for job in reply.get("jobs") or []:
+            row = dict(job)
+            row["agent"] = identity
+            jobs.append(row)
+
+    return {
+        "jobs": jobs,
+        "count": len(jobs),
+        "agents_responded": responded,
+        "agents_unavailable": unavailable,
+    }
