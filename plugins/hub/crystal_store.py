@@ -74,9 +74,11 @@ DEDUP_THRESHOLD = 0.45
 # short summaries that share common words like "insight" or "about".
 SUMMARY_DEDUP_THRESHOLD = 0.40
 
-# Minimum room for tokenized summaries. Larger stores grow the cache with
-# their live entries so sequential scans do not evict the whole working set.
-SUMMARY_WORD_CACHE_MIN_SIZE = 8192
+# Minimum allowance for tokenized summaries, for transient ones. Above it the
+# cache holds a power of two of at least twice the live entries, so one scan
+# of the vault never evicts its own working set, and it shrinks as entries
+# merge away or are deleted (#567).
+SUMMARY_WORD_CACHE_MIN_SIZE = 8
 
 # Minimum relevance score for nudge results
 NUDGE_MIN_SCORE = 1.0

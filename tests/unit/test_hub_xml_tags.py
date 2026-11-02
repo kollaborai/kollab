@@ -62,6 +62,8 @@ CONVERTED = {
             "kind": "answer",
             "notify_kind": "",
             "task_id": "",
+            "worktree": "",
+            "commit": "",
             "content": "hello there",
         },
     ),
@@ -148,7 +150,7 @@ ONE_OR_NO_ATTRIBUTE = set("""
     scratchpad_get state_update task_checkpoint task_complete task_approve
     task_reject lane_claim lane_release file_changed file_watch file_unwatch
     feed_recent feed_file claims hub_agents hub_queue hub_claim hub_work hub_vault
-    hub_vaults hub_cron_list hub_cron_delete vault_write
+    hub_vaults hub_cron_list hub_cron_delete vault_write hub_dispatch_verify
     global_vault_write crystal_read context_query evict
     """.split())
 
@@ -176,6 +178,37 @@ def test_every_registered_tag_is_classified_as_converted_or_one_attribute():
     )
     assert set(CONVERTED) <= set(REGISTERED)
     assert set(ONE_OR_NO_ATTRIBUTE) <= set(REGISTERED)
+
+
+def test_hub_msg_lane_metadata_attributes_are_extracted():
+    text = (
+        '<hub_msg to="lapis" worktree="/repo/wt with spaces" '
+        'commit="abc1234" task_id="TASK-123">review the lane</hub_msg>'
+    )
+
+    parsed = _extract("hub_msg", text)
+
+    assert parsed["task_id"] == "TASK-123"
+    assert parsed["worktree"] == "/repo/wt with spaces"
+    assert parsed["commit"] == "abc1234"
+
+
+def test_hub_dispatch_verify_requires_id_and_extracts_evidence_note():
+    assert (
+        _extract(
+            "hub_dispatch_verify",
+            "<hub_dispatch_verify>checked tests</hub_dispatch_verify>",
+        )
+        is None
+    )
+    assert _extract(
+        "hub_dispatch_verify",
+        '<hub_dispatch_verify dispatch_id="dispatch-1">'
+        "Inspected commit and passed tests.</hub_dispatch_verify>",
+    ) == {
+        "dispatch_id": "dispatch-1",
+        "note": "Inspected commit and passed tests.",
+    }
 
 
 @pytest.mark.parametrize("tag", sorted(CONVERTED))
