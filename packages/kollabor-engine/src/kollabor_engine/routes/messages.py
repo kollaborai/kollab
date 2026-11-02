@@ -649,7 +649,7 @@ def _assistant_update_message_state(
 
 def _assistant_align_streamed_ids(
     messages: List[Dict[str, Any]], history: List[Dict[str, Any]]
-) -> None:
+) -> bool:
     """Give the rows a streamed turn appended the ids their history rows carry.
 
     The reloaded history names every row ``history-<index>``. A streamed turn
@@ -663,7 +663,14 @@ def _assistant_align_streamed_ids(
     provisional rows justifies a rename; anything else (a refresh that missed
     the turn's rows, an unexpected role) keeps the provisional ids, which the
     next full reload still reconciles.
-    """
+    
+
+    Returns whether the rename happened. ``True`` means every provisional
+    row now carries this snapshot's history id, so the caller may claim
+    incremental sync against exactly this snapshot. ``False`` means the
+    snapshot could not be reconciled (it missed the turn, or rows the
+    page already shows collide with it): the caller must claim nothing
+    and let the page take its next full load."""
     provisional: List[int] = []
     shown: set[int] = set()
     for index, message in enumerate(messages):
@@ -680,7 +687,7 @@ def _assistant_align_streamed_ids(
             continue
         provisional.append(index)
     if not provisional:
-        return
+        return True
     stored: List[int] = []
     cursor = len(provisional) - 1
     for index in range(len(history) - 1, -1, -1):
@@ -697,7 +704,7 @@ def _assistant_align_streamed_ids(
             # assistant pairing on the stored absolute indexes.
             continue
         if role not in ("user", "assistant") or index in shown:
-            return
+            return False
         if role != messages[provisional[cursor]].get("role"):
             # A streamed turn renders every tool round on one assistant row
             # (text, call cards, final text in arrival order); stored history
@@ -711,10 +718,12 @@ def _assistant_align_streamed_ids(
     if cursor >= 0:
         # History ran out before every provisional row paired: the refresh
         # does not cover this turn. Keep the provisional ids.
-        return
+        return False
     stored.reverse()
     for message_index, history_index in zip(provisional, stored):
         messages[message_index]["id"] = f"history-{history_index}"
+
+    return True
 
 
 def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> None:
@@ -748,38 +757,6 @@ def _assistant_close_shown_prompt(
                 }
                 messages[index] = {**message, "content": parts}
                 return
-
-
-async def _assistant_set_synced(
-    controller: Any, session: Any, message_count: int,
-    history: Optional[List[Dict[str, Any]]] = None,
-) -> None:
-    """Say how much of the daemon's history the message state now shows.
-
-    The page reloads the history after turns it did not run (a hub message that
-    woke the agent, a turn typed in the terminal) and appends only what lies
-    past this point, so the turns it already shows keep their ids. ``history``
-    accepts a refresh the caller already made (it also aligned the streamed
-    ids with it) so the daemon is not asked twice.
-    """
-    if history is None:
-        try:
-            history = await session.refresh_history(stale_raises=True)
-        except Exception as exc:
-            # A stale watermark replays the turn as history next to the
-            # transient rows it already shows and the page draws it twice
-            # (#666). Clear it so the next refresh reloads whole instead of
-            # appending a duplicate.
-            logger.debug("history refresh for %s failed: %s", session.session_id, exc)
-            state = controller.state
-            try:
-                has_watermark = state is not None and state.get("synced") is not None
-            except (KeyError, TypeError, AttributeError):
-                has_watermark = False
-            if has_watermark:
-                controller.state["synced"] = None
-            return
-    controller.state["synced"] = {"history": len(history), "messages": message_count}
 
 
 def _now_ms() -> int:
@@ -1525,22 +1502,40 @@ async def assistant_transport(
                                 controller.state["goalHistoryReloadRequired"] = True
                         else:
                             refreshed = None
-                            try:
-                                refreshed = await session.refresh_history()
-                            except Exception as exc:
-                                logger.debug(
-                                    "history refresh for %s failed: %s",
-                                    session_id, exc,
-                                )
+                            for _attempt in (0, 1):
+                                try:
+                                    refreshed = await session.refresh_history()
+                                except Exception as exc:
+                                    logger.debug(
+                                        "history refresh for %s failed: %s",
+                                        session_id, exc,
+                                    )
+                                    refreshed = None
+                                if refreshed:
+                                    break
+                            aligned = False
                             if refreshed:
-                                _assistant_align_streamed_ids(
+                                aligned = _assistant_align_streamed_ids(
                                     state_messages, refreshed
                                 )
                             _assistant_set_messages(controller, state_messages)
-                            await _assistant_set_synced(
-                                controller, session, len(state_messages),
-                                history=refreshed,
-                            )
+                            if aligned:
+                                # The streamed ids were reconciled against
+                                # exactly this snapshot, so the page may
+                                # append canonical rows past it by id.
+                                controller.state["synced"] = {
+                                    "history": len(refreshed),
+                                    "messages": len(state_messages),
+                                }
+                            else:
+                                # No snapshot this stream reconciled against
+                                # (both refreshes failed, or the mirror the
+                                # retry returned missed the turn). Claim
+                                # nothing: claiming it would let the page
+                                # merge canonical rows alongside the
+                                # provisional ones and redraw the turn until
+                                # a full reload. The page takes its full load.
+                                controller.state["synced"] = None
                     _assistant_set_usage(controller, completion["usage"])
                     return
                 elif event_type == "daemon_closed":

@@ -423,7 +423,7 @@ async def test_native_tool_turn_publishes_history_ids(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_refresh_failure_keeps_the_old_behavior(monkeypatch):
+async def test_refresh_failure_claims_no_sync(monkeypatch):
     controllers, runners = _fake_assistant_stream(monkeypatch)
 
     session = _Session(_history())
@@ -447,19 +447,25 @@ async def test_refresh_failure_keeps_the_old_behavior(monkeypatch):
     assert [row["id"] for row in final["messages"]] == [
         "history-0", "history-1", "user-s1-2", "assistant-s1-3",
     ]
-    assert "synced" not in final
+
+    assert final["synced"] is None
 
 
 @pytest.mark.asyncio
-async def test_refresh_failure_with_stale_mirror_still_sets_synced(monkeypatch):
-    """A refresh that raises but leaves a cached mirror keeps the bookkeeping."""
+async def test_failed_refresh_then_stale_retry_never_claims_sync(monkeypatch):
+    """A stale retry snapshot must not be claimed as synced.
+
+    The first refresh (turn_complete branch) raises; the retry returns a
+    mirror missing the current turn. The stream never reconciled its
+    provisional ids against that snapshot, so claiming it would let the
+    runtime merge append the turn's canonical rows alongside the
+    provisional ones: the double draw. No claim means the page takes its
+    next full load, which always reconciles.
+    """
     controllers, runners = _fake_assistant_stream(monkeypatch)
     stale = _history()[:2]  # the turn's rows are missing from the mirror
 
     session = _Session(stale)
-    # The first refresh (in the turn_complete branch) raises; the second one
-    # (inside _assistant_set_synced) returns the stale mirror: provisional ids
-    # stay, the merge re-adds the turn, a full reload still reconciles.
     session.refresh_history = AsyncMock(
         side_effect=[RuntimeError("daemon busy"), stale]
     )
@@ -482,3 +488,4 @@ async def test_refresh_failure_with_stale_mirror_still_sets_synced(monkeypatch):
     assert [row["id"] for row in final["messages"]] == [
         "history-0", "history-1", "user-s1-2", "assistant-s1-3",
     ]
+    assert final["synced"] is None
