@@ -51,6 +51,16 @@ INLINE_PROFILE = "app-inline"
 # RPC can be queued behind a long-running tool, so this is deliberately shorter
 # than the normal RPC timeout and falls back to the cached snapshot.
 HISTORY_REFRESH_TIMEOUT_SECONDS = 0.75
+
+
+class HistoryRefreshUnavailable(Exception):
+    """refresh_history could not prove a fresh mirror; the cache it would
+    return is stale.
+
+    The synced watermark consumer asks for this explicitly: a watermark set
+    from a stale mirror misses the turn a window just ran, so the next
+    history reload replays that turn next to its already-shown rows (#666).
+    """
 ACP_STARTUP_TIMEOUT_SECONDS = 45.0
 
 
@@ -614,7 +624,9 @@ class EngineSession:
                 )
         await self.state.reload_mcp_servers()
 
-    async def refresh_history(self, notify: bool = False) -> List[Dict[str, Any]]:
+    async def refresh_history(
+        self, notify: bool = False, stale_raises: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Pull the daemon's conversation into the local mirror.
 
         Asks for only the messages past the ones already held, with the digest
@@ -653,13 +665,22 @@ class EngineSession:
                         else getattr(snapshot, "metadata", {})
                     )
                     current_uid = metadata.get("conversation_uid") if isinstance(metadata, dict) else None
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
+                if stale_raises:
+                    raise HistoryRefreshUnavailable(
+                        "timed out after "
+                        f"{HISTORY_REFRESH_TIMEOUT_SECONDS}s waiting for the daemon"
+                    ) from exc
                 logger.debug(
                     "session %s history refresh timed out; using cached history",
                     self.session_id,
                 )
                 return self.history
             except Exception as e:
+                if stale_raises:
+                    raise HistoryRefreshUnavailable(
+                        f"daemon answered with an error: {e}"
+                    ) from e
                 logger.debug(
                     "session %s history refresh failed: %s", self.session_id, e
                 )
@@ -695,6 +716,10 @@ class EngineSession:
             if since is not None and since > len(held):
                 # A tail past what is held cannot be joined; the next refresh
                 # sends no anchor and gets all of it.
+                if stale_raises:
+                    raise HistoryRefreshUnavailable(
+                        "the daemon sent a tail the mirror cannot join"
+                    )
                 self._history_anchor = ""
                 return self.history
             self._raw_history = (held[:since] if since else []) + received
