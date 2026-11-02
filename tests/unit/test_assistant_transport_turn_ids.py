@@ -69,6 +69,39 @@ class TestAlignStreamedIds:
         ]
 
     def test_indexes_are_absolute_not_relative_to_the_tail(self):
+        """Two earlier rounds, distinct content; this turn pairs the tail by
+        content and takes those absolute stored indexes, not page-relative
+        ones."""
+        rows = [
+            {"id": "history-0", "role": "user", "content": "welcome prompt"},
+            {"id": "history-1", "role": "assistant", "content": "welcome reply"},
+            {"id": "user-s1-4", "role": "user", "content": "PROOF666 two"},
+            {
+                "id": "assistant-s1-5",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "MOCK666 control reply two."}],
+            },
+        ]
+        history = [
+            {"role": "user", "content": "welcome prompt"},
+            {"role": "assistant", "content": "welcome reply"},
+            {"role": "user", "content": "PROOF666 one"},
+            {"role": "assistant", "content": "MOCK666 control reply one."},
+            {"role": "user", "content": "PROOF666 two"},
+            {"role": "assistant", "content": "MOCK666 control reply two."},
+        ]
+
+        messages._assistant_align_streamed_ids(rows, history)
+
+        assert [row["id"] for row in rows] == [
+            "history-0", "history-1", "history-4", "history-5",
+        ]
+
+    def test_refuses_ambiguous_duplicate_rounds(self):
+        """Duplicate rounds where this turn's text matches the earlier one
+        and the tail holds a DIFFERENT round: a tail claim would map this
+        turn onto rows it did not stream, so the aligner refuses and leaves
+        the provisional ids for the next full reload."""
         rows = _streamed(_state_messages())
         history = [
             {"role": "user", "content": "welcome prompt"},
@@ -79,10 +112,9 @@ class TestAlignStreamedIds:
             {"role": "assistant", "content": "MOCK666 control reply."},
         ]
 
-        messages._assistant_align_streamed_ids(rows, history)
-
+        assert messages._assistant_align_streamed_ids(rows, history) is False
         assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "history-4", "history-5",
+            "history-0", "history-1", "user-s1-2", "assistant-s1-3",
         ]
 
     def test_rows_only_this_turn_appended_are_renamed(self):
@@ -232,6 +264,13 @@ class _Controller:
     def append_reasoning(self, text):
         pass
 
+    async def add_tool_call(self, name, tool_id):
+        class _ToolController:
+            def append_args_text(self, text):
+                pass
+
+        return _ToolController()
+
     def add_tool_result(self, tool_id, result):
         pass
 
@@ -275,10 +314,15 @@ class _Session:
     alive = True
     session_id = "s1"
 
-    def __init__(self, history, replies=None):
+    def __init__(self, history, replies=None, tool_round=None):
         self.queue: asyncio.Queue = asyncio.Queue()
         self._history = history
         self.replies = replies if replies is not None else ["MOCK666 control reply."]
+        # tool_round: ("Running it.", <call id>) emits a streamed tool round
+        # (text, tool_start card) before the final reply, so the turn's
+        # single assistant row carries the call card the stored history
+        # keeps as a separate row.
+        self.tool_round = tool_round
         self.refresh_history = AsyncMock(return_value=history)
 
     def subscribe(self):
@@ -288,9 +332,17 @@ class _Session:
         pass
 
     async def send_message(self, content, **kwargs):
-        # One token per model round: a tool turn streams a call round and a
-        # final reply as two assistant rows.
         for text in self.replies:
+            if self.tool_round is not None and text == self.replies[-1]:
+                call_text, call_id = self.tool_round
+                self.queue.put_nowait({
+                    "type": "token", "request_id": "r1", "text": call_text,
+                })
+                self.queue.put_nowait({
+                    "type": "tool_start", "request_id": "r1",
+                    "tool_id": call_id, "tool_name": "terminal",
+                    "input": {"command": "echo one"},
+                })
             self.queue.put_nowait({
                 "type": "token", "request_id": "r1", "text": text,
             })
@@ -300,9 +352,12 @@ class _Session:
         return {"accepted": True, "request_id": "r1"}
 
 
-async def _run_turn(monkeypatch, history, state_messages, replies=None):
+async def _run_turn(
+    monkeypatch, history, state_messages, replies=None,
+    message="PROOF666 one", tool_round=None,
+):
     controllers, runners = _fake_assistant_stream(monkeypatch)
-    session = _Session(history, replies=replies)
+    session = _Session(history, replies=replies, tool_round=tool_round)
     monkeypatch.setattr(messages, "get_session_registry", lambda: {"s1": session})
     body = messages.AssistantRequest(
         commands=[{
@@ -310,7 +365,7 @@ async def _run_turn(monkeypatch, history, state_messages, replies=None):
             "message": {
                 "id": "client-1",
                 "role": "user",
-                "parts": [{"type": "text", "text": "PROOF666 one"}],
+                "parts": [{"type": "text", "text": message}],
             },
         }],
         state={"messages": state_messages},
@@ -390,14 +445,15 @@ def _tool_streamed():
 async def test_xml_tool_turn_publishes_history_ids(monkeypatch):
     """Route-level: a tool turn's rows still get their stored history ids.
 
-    The fake stream emits both rounds (call round, final reply), matching
-    the stored shape call-row, tool row(s), final row: the rename straddles
-    the tool row (history-7 after history-5) and the wiring passes the mirror
-    through untouched.
+    The fake turn streams one assistant row (text, call card, final text)
+    matching the stored shape call-row, tool row(s), final row: the rename
+    straddles the tool row (history-7 after history-5) and the wiring passes
+    the mirror through untouched.
     """
     state = await _run_turn(
         monkeypatch, _xml_tool_history(), _tool_base_state(),
-        replies=["done"],
+        replies=["done"], message="runtool",
+        tool_round=("Running it.", "terminal_0"),
     )
 
     assert [row["id"] for row in state["messages"]] == [
@@ -412,7 +468,8 @@ async def test_native_tool_turn_publishes_history_ids(monkeypatch):
     """Route-level: native tool rows (no XML metadata) skip the same way."""
     state = await _run_turn(
         monkeypatch, _native_tool_history(), _tool_base_state(),
-        replies=["done"],
+        replies=["done"], message="runtool",
+        tool_round=("Running it.", "call_1"),
     )
 
     assert [row["id"] for row in state["messages"]] == [

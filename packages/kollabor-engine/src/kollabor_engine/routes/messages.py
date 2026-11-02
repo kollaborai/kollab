@@ -650,20 +650,20 @@ def _assistant_update_message_state(
 def _assistant_align_streamed_ids(
     messages: List[Dict[str, Any]], history: List[Dict[str, Any]]
 ) -> bool:
-    """Give the rows a streamed turn appended the ids their history rows carry.
-
-    The reloaded history names every row ``history-<index>``. A streamed turn
-    keeps provisional ``user-<session>-<n>`` ids, so when the page merges the
-    reloaded history after the turn, that merge (which dedupes by id) re-adds
-    the turn under its history ids and the window draws it twice until a full
-    reload. Renaming the streamed rows to their history ids makes the merge a
-    no-op and keeps one id per row across reloads.
+    """Rename this turn's streamed row ids to the snapshot's history ids.
 
     Only a strict one-to-one match between the trailing stored rows and the
     provisional rows justifies a rename; anything else (a refresh that missed
-    the turn's rows, an unexpected role) keeps the provisional ids, which the
-    next full reload still reconciles.
-    
+    the turn, content that does not match, an unexpected role) keeps the
+    provisional ids, which the next full reload still reconciles.
+
+    Role order alone is not evidence: a stale [user, assistant] pair looks
+    identical to this turn's rows by role. Every paired row must also match
+    on content -- user rows by exact text, assistant rows by the stored text
+    being the tail of the streamed text. A stored assistant row with no text
+    of its own (a tool-calls row) may sit between pairs only when its call
+    ids all appear in the streamed row's call cards, proving it was rendered
+    inside this turn's row.
 
     Returns whether the rename happened. ``True`` means every provisional
     row now carries this snapshot's history id, so the caller may claim
@@ -671,6 +671,82 @@ def _assistant_align_streamed_ids(
     snapshot could not be reconciled (it missed the turn, or rows the
     page already shows collide with it): the caller must claim nothing
     and let the page take its next full load."""
+
+    def _text(content: Any) -> str:
+        """Comparable plain text of a content field (string or parts)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") in ("text", "reasoning")
+                    and isinstance(part.get("text"), str)
+                ):
+                    parts.append(part["text"])
+            return "".join(parts)
+        return ""
+
+    def _call_ids(row: Dict[str, Any]) -> set[str]:
+        """Tool call ids recorded on a stored row (metadata-borne)."""
+        ids: set[str] = set()
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            return ids
+        stack: list[Any] = [metadata]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key in ("tool_calls", "xml_tool_calls", "acp_updates"):
+                        stack.append(value)
+                    elif key == "id" and isinstance(value, str) and value:
+                        ids.add(value)
+            elif isinstance(node, list):
+                stack.extend(node)
+        return ids
+
+    def _streamed_call_ids(row: Dict[str, Any]) -> set[str]:
+        """Call-card ids the streamed assistant row rendered."""
+        content = row.get("content")
+        if not isinstance(content, list):
+            return set()
+        return {
+            str(part.get("toolCallId"))
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "tool-call"
+            and part.get("toolCallId")
+        }
+
+    def _rendered_inside(stored_row: Dict[str, Any], streamed_row: Dict[str, Any]) -> bool:
+        """A stored calls row the streamed row's call cards account for.
+
+        Stored history keeps a tool round as one assistant row carrying its
+        text next to metadata-borne call ids; the streamed turn renders the
+        same round inside its single row. Call ids are per-turn identifiers,
+        so a full id subset is the identity proof; the walk only reaches
+        this check for rows not yet paired, and it never consumes a
+        streamed row, so a stale row can extend the search but cannot
+        claim one."""
+        if stored_row.get("role") != "assistant":
+            return False
+        stored_ids = _call_ids(stored_row)
+        if not stored_ids:
+            return False
+        streamed_ids = _streamed_call_ids(streamed_row)
+        return bool(streamed_ids) and stored_ids.issubset(streamed_ids)
+
+    def _pairs_by_content(stored_row: Dict[str, Any], streamed_row: Dict[str, Any]) -> bool:
+        """Content identity for a role-matched pair."""
+        if stored_row.get("role") == "user":
+            return _text(stored_row.get("content")) == _text(streamed_row.get("content"))
+        stored_text = _text(stored_row.get("content"))
+        if not stored_text:
+            return False
+        return _text(streamed_row.get("content")).endswith(stored_text)
+
     provisional: List[int] = []
     shown: set[int] = set()
     for index, message in enumerate(messages):
@@ -688,12 +764,17 @@ def _assistant_align_streamed_ids(
         provisional.append(index)
     if not provisional:
         return True
+    mega_row: Dict[str, Any] = next(
+        (messages[i] for i in provisional if messages[i].get("role") == "assistant"),
+        {},
+    )
     stored: List[int] = []
     cursor = len(provisional) - 1
     for index in range(len(history) - 1, -1, -1):
         if cursor < 0:
             break
-        role = history[index].get("role")
+        stored_row = history[index]
+        role = stored_row.get("role")
         if role == "system":
             # Hub echoes land behind the turn's rows; they render as nothing.
             continue
@@ -705,16 +786,25 @@ def _assistant_align_streamed_ids(
             continue
         if role not in ("user", "assistant") or index in shown:
             return False
-        if role != messages[provisional[cursor]].get("role"):
-            # A streamed turn renders every tool round on one assistant row
-            # (text, call cards, final text in arrival order); stored history
-            # splits the same turn into a calls row, tool rows, and a final
-            # reply. The stored row this turn does not carry as its own row
-            # is left for the merge to add, so only rows whose role lines up
-            # in reverse order get renamed.
+        streamed_row = messages[provisional[cursor]]
+        if role == streamed_row.get("role") and _pairs_by_content(
+            stored_row, streamed_row
+        ):
+            stored.append(index)
+            cursor -= 1
             continue
-        stored.append(index)
-        cursor -= 1
+        if _rendered_inside(stored_row, mega_row):
+            # A turn that ends on its final text pairs the text row first;
+            # its calls rows (text plus metadata-borne ids) then prove
+            # themselves against this turn's streamed call cards and are
+            # left for the merge to add rather than paired. A turn that
+            # ends ON the tool batch pairs its calls row instead, so the
+            # pairing attempt must come first.
+            continue
+        # Role order alone proves nothing: an unrelated stale pair matches
+        # this turn's shape by role. Without content identity the snapshot
+        # cannot be reconciled against what the page shows.
+        return False
     if cursor >= 0:
         # History ran out before every provisional row paired: the refresh
         # does not cover this turn. Keep the provisional ids.

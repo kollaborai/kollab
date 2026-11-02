@@ -1294,6 +1294,41 @@ async def test_assistant_transport_says_how_much_history_the_messages_show(
 
 
 @pytest.mark.asyncio
+async def test_stale_unrelated_history_never_claims_sync(monkeypatch):
+    """A refresh that missed this turn must not be reconciled by role alone.
+
+    Garnet's round-3 probe: client state with only the provisional rows and
+    a stale history holding an unrelated [user, assistant] pair. Matching
+    by role sequence alone rewrote the new rows to history-0/history-1,
+    colliding with canonical rows the page would later load.
+    """
+    session = _FakeSession([*_tokens("brand new reply"), {"type": "turn_complete"}])
+    session.refresh_history = AsyncMock(return_value=[
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "real question"}],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    state = captured["controller"].state
+    assert state["synced"] is None
+    ids = [m["id"] for m in state["messages"]]
+    assert not any(i.startswith("history-") for i in ids), ids
+
+
+@pytest.mark.asyncio
 async def test_failed_history_refresh_publishes_no_watermark(monkeypatch):
     """A refresh failure must not leave the seeded sync point standing (#666).
 
@@ -1322,6 +1357,157 @@ async def test_failed_history_refresh_publishes_no_watermark(monkeypatch):
     state = captured["controller"].state
     assert len(state["messages"]) == 3
     assert state["synced"] is None
+
+
+@pytest.mark.asyncio
+async def test_partial_client_state_with_stale_rows_never_claims_sync(monkeypatch):
+    """Partial prior state (one shown row) plus stale history: the unshown
+    stale assistant row must not be paired with this turn's fresh reply."""
+    session = _FakeSession([*_tokens("brand new reply"), {"type": "turn_complete"}])
+    session.refresh_history = AsyncMock(return_value=[
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "real question"}],
+            state={"messages": [
+                {"id": "history-0", "role": "user", "content": "old question"},
+            ]},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    state = captured["controller"].state
+    assert state["synced"] is None
+    ids = [m["id"] for m in state["messages"]]
+    # The pre-existing row keeps its id; this turn's rows keep provisional ids.
+    assert ids[0] == "history-0"
+    assert not any(i.startswith("history-") for i in ids[1:]), ids
+
+
+@pytest.mark.asyncio
+async def test_align_requires_content_identity_for_paired_rows(monkeypatch):
+    """Same-role, different-content stored rows must not pair: content, not
+    role order, is the evidence a row was streamed by this turn."""
+    session = _FakeSession([*_tokens("the real answer"), {"type": "turn_complete"}])
+    session.refresh_history = AsyncMock(return_value=[
+        {"role": "user", "content": "real question"},
+        {"role": "assistant", "content": "different answer entirely"},
+    ])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "real question"}],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    assert captured["controller"].state["synced"] is None
+
+
+def test_align_helper_renames_only_matching_content():
+    """Helper-level: exact-content rows rename; a mismatched tail refuses."""
+    fresh = [
+        {"id": "user-x", "role": "user", "content": "q"},
+        {
+            "id": "assistant-x",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "final answer"}],
+        },
+    ]
+    good = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "final answer"},
+    ]
+    assert messages._assistant_align_streamed_ids(fresh, good) is True
+    assert [m["id"] for m in fresh] == ["history-0", "history-1"]
+
+    stale = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a different old answer"},
+    ]
+    other = [
+        {"id": "user-y", "role": "user", "content": "q"},
+        {
+            "id": "assistant-y",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "final answer"}],
+        },
+    ]
+    assert messages._assistant_align_streamed_ids(other, stale) is False
+    assert [m["id"] for m in other] == ["user-y", "assistant-y"]
+
+
+def test_align_helper_tolerates_split_tool_round_with_call_identity():
+    """Stored [user, assistant(calls), tool, assistant(final)] still aligns:
+    the calls row is proven rendered inside the streamed row by call id."""
+    streamed = [
+        {"id": "user-x", "role": "user", "content": "run it"},
+        {
+            "id": "assistant-x",
+            "role": "assistant",
+            "content": [
+                {"type": "tool-call", "toolCallId": "call-1"},
+                {"type": "text", "text": "done"},
+            ],
+        },
+    ]
+    stored = [
+        {"role": "system", "content": "init"},
+        {"role": "user", "content": "run it"},
+        {
+            "role": "assistant",
+            "content": "",
+            "metadata": {"tool_calls": [{"id": "call-1", "name": "f"}]},
+        },
+        {"role": "tool", "content": "out"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is True
+    assert [m["id"] for m in streamed] == ["history-1", "history-4"]
+
+
+def test_align_helper_rejects_calls_row_without_call_identity():
+    """An unexplained calls row (ids absent from the streamed row) is not
+    skippable: the walk must refuse instead of reaching past it."""
+    streamed = [
+        {"id": "user-x", "role": "user", "content": "run it"},
+        {
+            "id": "assistant-x",
+            "role": "assistant",
+            "content": [
+                {"type": "tool-call", "toolCallId": "call-1"},
+                {"type": "text", "text": "done"},
+            ],
+        },
+    ]
+    stored = [
+        {"role": "user", "content": "run it"},
+        {
+            "role": "assistant",
+            "content": "",
+            "metadata": {"tool_calls": [{"id": "call-9", "name": "f"}]},
+        },
+        {"role": "tool", "content": "out"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is False
+    assert [m["id"] for m in streamed] == ["user-x", "assistant-x"]
 
 
 @pytest.mark.asyncio
