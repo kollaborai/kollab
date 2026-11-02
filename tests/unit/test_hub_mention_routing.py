@@ -133,9 +133,10 @@ def test_hub_mentions_persist_to_the_session_jsonl() -> None:
         ]
         assert llm.logger.calls[0][2] == "root"
         assert llm.logger.calls[1][2] == "u1"
-        # Detached mention tasks never mutate the shared pointer; concurrent
-        # mentions would otherwise reparent each other mid-turn.
-        assert llm.current_parent_uuid == "root"
+        # The pointer advances after the assistant record so ordinary turns
+        # continue the chain; the per-turn capture is what keeps concurrent
+        # mentions from reparenting each other mid-turn.
+        assert llm.current_parent_uuid == "a1"
 
     asyncio.run(scenario())
 
@@ -291,5 +292,54 @@ def test_overlapping_mentions_do_not_reparent_each_other() -> None:
         }
         assert records[("assistant", "sent to lapis")][0] == "u1"
         assert records[("assistant", "sent to peridot")][0] == "u2"
+
+    asyncio.run(scenario())
+
+
+def test_ordinary_turn_continues_after_a_hub_mention() -> None:
+    async def scenario() -> None:
+        class FakeLogger:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, object]] = []
+
+            async def log_user_message(self, content, parent_uuid=None):
+                self.calls.append(("user", content, parent_uuid))
+                return "u1"
+
+            async def log_assistant_message(self, content, parent_uuid=None):
+                self.calls.append(("assistant", content, parent_uuid))
+                return "a1"
+
+        class FakeLlm:
+            is_processing = False
+            current_parent_uuid = "root"
+
+            def __init__(self) -> None:
+                self.logger = FakeLogger()
+                self.conversation_logger = self.logger
+                self.task = None
+
+            def create_background_task(self, coro, *, name: str):
+                self.task = asyncio.create_task(coro, name=name)
+                return self.task
+
+            def _add_conversation_message(self, role, content, *, metadata):
+                pass
+
+        llm = FakeLlm()
+        service = LocalStateService(llm, object())
+        service.hub_send_msg = AsyncMock(return_value="sent to lapis")
+
+        await service.send_message("@lapis hi")
+        await llm.task
+
+        # The shared pointer must advance to the hub assistant record so the
+        # next ordinary LLM turn (which reads the pointer, pipeline parity)
+        # chains AFTER the mention instead of branching from before it.
+        assert llm.current_parent_uuid == "a1"
+        await llm.conversation_logger.log_user_message(
+            "ordinary follow-up", parent_uuid=llm.current_parent_uuid
+        )
+        assert llm.logger.calls[-1] == ("user", "ordinary follow-up", "a1")
 
     asyncio.run(scenario())

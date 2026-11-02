@@ -3620,9 +3620,18 @@ class LocalStateService(StateService):
             response_metadata = {**metadata, "hub_success": success}
             if callable(add_message):
                 add_message("assistant", output, metadata=response_metadata)
-            await self._log_jsonl_turn_message(
+            assistant_uuid = await self._log_jsonl_turn_message(
                 "assistant", output, parent_uuid=user_uuid
             )
+            if assistant_uuid:
+                # Ordinary LLM turns take their parent from this pointer
+                # (pipeline parity), so the chain must continue after the
+                # mention. The assignment follows the awaited log directly
+                # with no yield between, so per asyncio interleaving the
+                # pointer tracks the last-completed assistant record;
+                # per-turn capture above keeps concurrent mention chains
+                # from reparenting each other.
+                self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(
                 self._event_bus,
@@ -3641,9 +3650,11 @@ class LocalStateService(StateService):
                     message,
                     metadata={**metadata, "hub_success": False},
                 )
-            await self._log_jsonl_turn_message(
+            assistant_uuid = await self._log_jsonl_turn_message(
                 "assistant", message, parent_uuid=user_uuid
             )
+            if assistant_uuid:
+                self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "error", message=message)
             publish_semantic(
                 self._event_bus,
@@ -3665,8 +3676,10 @@ class LocalStateService(StateService):
 
         Mentions run as detached tasks, so the parent chain is passed in per
         turn instead of read from the shared ``current_parent_uuid`` pointer,
-        which concurrent mentions would reparent mid-turn. Fail-open: a
-        logger error never fails the hub send.
+        which concurrent mentions would reparent mid-turn. The caller
+        advances that pointer to the returned assistant uuid so ordinary
+        turns keep following the mention. Fail-open: a logger error never
+        fails the hub send.
         """
         logger_service = getattr(self._llm_service, "conversation_logger", None)
         log_message = getattr(logger_service, f"log_{role}_message", None)
