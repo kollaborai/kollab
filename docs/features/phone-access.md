@@ -199,6 +199,14 @@ starting Kollab:
 KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui
 ```
 
+The same list can be passed per launch as `kollab --web-ui --web-ui-hosts
+192.168.1.20`, which overrides the environment value for that launch. An
+explicitly empty value forces `127.0.0.1` only for that launch. The desktop app
+accepts the same `--web-ui-hosts IP[,IP]` argument and forwards it to kollab,
+and shows the exposure warning in its own window before opening the UI.
+Whenever the WebUI binds any address other than `127.0.0.1`, startup prints an
+exposure warning (#674).
+
 The WebUI port defaults to `8080` and can be changed with `KOLLAB_WEBUI_PORT`.
 The engine remains on loopback; browser requests reach it through the WebUI proxy.
 `KOLLAB_WEBUI_HOSTS` accepts literal loopback, RFC1918, IPv6 ULA, and link-local
