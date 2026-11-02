@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
+- Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
+- Detached daemon SIGTERM cancels its top-level async task so application cleanup
+  completes without injecting `KeyboardInterrupt` into child-task cleanup (#667).
 - Coordinator task assignments survive restarts in a durable dispatch ledger,
   suppress re-routing delivered work, and keep completion reports unverified
   until the original assigner verifies a worktree or commit reference (#636).
@@ -19,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The web UI no longer serves beyond this machine without saying so: whenever it binds an address other than 127.0.0.1, whether from KOLLAB_WEBUI_HOSTS or the new `--web-ui-hosts` flag, startup prints a warning that the page is exposed and that anyone who can open it gets the engine token. `kollab --web-ui --web-ui-hosts IP[,IP]` is the explicit per-launch opt-in and overrides the shell's KOLLAB_WEBUI_HOSTS; an explicitly empty value forces localhost-only, and the desktop app forwards its own `--web-ui-hosts` argument to kollab, showing the exposure warning in its window before opening the UI (#674).
 - The desktop exposure interstitial now recognizes IPv4-mapped IPv6 addresses
   whose embedded IPv4 is private or link-local (#674).
+
+- The web UI labels a hub broadcast note as addressed to All instead of naming
+  the observing window's own agent as the recipient; notes delivered straight to
+  the window keep addressing it (#671).
 
 ### Added
 - Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).

@@ -2951,20 +2951,51 @@ def _run_async_main_with_sigterm_cleanup(detached_runtime: bool) -> None:
     """Run the app and route detached SIGTERM through normal cleanup."""
     previous_sigterm = None
     signal_module = None
+    sigterm_received = False
     if detached_runtime:
         import signal as signal_module
 
-        def _on_detached_sigterm(signum, frame):
-            # Route SIGTERM through async_main's existing KeyboardInterrupt
-            # cleanup so ACP runner process groups and Hub sockets are closed.
-            raise KeyboardInterrupt()
+        event_loop: asyncio.AbstractEventLoop | None = None
+        main_task: asyncio.Task[Any] | None = None
+
+        async def _run_detached_async_main() -> None:
+            nonlocal event_loop, main_task
+            event_loop = asyncio.get_running_loop()
+            main_task = asyncio.current_task()
+            if sigterm_received and main_task is not None:
+                event_loop.call_soon(main_task.cancel)
+            await async_main()
+
+        def _on_detached_sigterm(signum, frame) -> None:
+            nonlocal sigterm_received
+            if sigterm_received:
+                return
+            sigterm_received = True
+            if event_loop is None or main_task is None:
+                return
+            if event_loop.is_closed() or main_task.done():
+                return
+            # Defer cancellation to the top-level task. Raising KeyboardInterrupt
+            # here can inject it into an unrelated child task's cleanup.
+            event_loop.call_soon(main_task.cancel)
 
         previous_sigterm = signal_module.signal(
             signal_module.SIGTERM, _on_detached_sigterm
         )
 
     try:
-        asyncio.run(async_main())
+        if detached_runtime:
+            try:
+                asyncio.run(_run_detached_async_main())
+            except asyncio.CancelledError:
+                if not sigterm_received:
+                    raise
+            if sigterm_received:
+                logging.getLogger(__name__).info(
+                    "Detached application shutdown requested by SIGTERM"
+                )
+        else:
+            asyncio.run(async_main())
     except KeyboardInterrupt:
         pass
     finally:
