@@ -102,12 +102,14 @@ bundle exists.
 
 ## Sidebar Type Marks
 
-The Web UI sidebar places a small, muted glyph after each agent name to identify its
-agent bundle (for example, coder `▸`, research `◈`, or default `●`). Hovering the mark
-shows the full bundle name, which is also exposed to screen readers. A custom bundle
-still gets a generic mark with its actual name; an unknown or missing type is never
-presented as a different bundle. The mark does not change the agent identity, workspace
-grouping, or row actions.
+The Web UI sidebar places a small, muted glyph after each local-session or offline
+agent name to identify its bundle (for example, coder `▸`, research `◈`, or default
+`●`). Hovering the mark shows the full bundle name, which is also exposed to screen
+readers. A custom bundle still gets a generic mark with its actual name; an unknown or
+missing type is never presented as a different bundle. Network/remote rows do not show
+a type mark because their data does not include the bundle type; matching their names
+to a local roster entry could show the wrong type. The mark does not change identity,
+workspace grouping, or row actions.
 
 ## Hub Rosters and Teams
 

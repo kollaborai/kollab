@@ -77,7 +77,21 @@ function sidebarFixtures() {
     workspace: "/glyph-demo/beta",
     last_ran: 1_760_000_000,
   }));
-  return makeFixtures({ poolEntries, sessions, offline });
+  const remoteOnlyAgent = {
+    name: "remote-only-agent",
+    device: "remote-build",
+    network: "learn-test",
+    workspace: "/remote/demo",
+    handle: "remote-session-2",
+    state: "idle",
+    last_seen: 2,
+  };
+  return makeFixtures({
+    poolEntries,
+    sessions,
+    offline,
+    additionalRemoteAgents: [remoteOnlyAgent],
+  });
 }
 
 async function main() {
@@ -115,7 +129,7 @@ async function main() {
           await trigger.click();
         }
         await glyphsLocator.first().waitFor({ state: "visible" });
-        const expectedTypes = [...agentTypes, "coordinator"];
+        const expectedTypes = agentTypes;
         await view.page.waitForFunction((expected) => {
           const labels = Array.from(document.querySelectorAll("[data-agent-type-glyph]"))
             .map((glyph) => glyph.getAttribute("aria-label"));
@@ -149,6 +163,25 @@ async function main() {
           assert.ok(labels.includes(type), `${type} glyph missing at ${capture.width}px`);
         }
         assert.equal(glyphs.length, expectedTypes.length, `unexpected glyph count at ${capture.width}px`);
+
+        const remoteRows = await view.page
+          .locator('[data-sidebar="sidebar"] button[title*=" on remote-build"]')
+          .evaluateAll((rows) =>
+            rows.map((row) => ({
+              title: row.getAttribute("title"),
+              glyphCount: row.querySelectorAll("[data-agent-type-glyph]").length,
+            })),
+          );
+        assert.deepEqual(
+          remoteRows.map(({ title }) => title).sort(),
+          ["Open Remote Coordinator on remote-build", "Open Remote Only Agent on remote-build"].sort(),
+          "both the colliding and remote-only rows should be present",
+        );
+        assert.ok(
+          remoteRows.every(({ glyphCount }) => glyphCount === 0),
+          "remote rows must not infer a type glyph from local roster names",
+        );
+
         for (const glyph of glyphs) {
           assert.equal(glyph.title, glyph.type, `title mismatch for ${glyph.type}`);
           assert.equal(glyph.role, "img", `missing image role for ${glyph.type}`);

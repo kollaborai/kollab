@@ -35,11 +35,12 @@ export function makeFixtures(options = {}) {
     state: "idle",
     last_seen: 1,
   };
+  const remoteAgents = [remoteAgent, ...(options.additionalRemoteAgents ?? [])];
   const network = {
     device: "learn-laptop",
     folder: "/learn-demo",
     live: true,
-    remote: [remoteAgent],
+    remote: remoteAgents,
     contacts: [],
     networks: [
       {
@@ -51,7 +52,7 @@ export function makeFixtures(options = {}) {
           {
             device: "remote-build",
             live: true,
-            workspaces: [{ label: "/remote/demo", agents: [remoteAgent] }],
+            workspaces: [{ label: "/remote/demo", agents: remoteAgents }],
           },
         ],
       },

@@ -750,7 +750,7 @@ export function AppSidebar({
                           // Not up, or unknown: no local agent answered the network probe.
                           const up = (net.live !== false && network.live !== false) && agent.state !== "offline";
                           const seen = agent.last_seen ? `Seen ${since(agent.last_seen)}` : "";
-                          const agentType = resolveSidebarAgentType(poolByName.get(agent.name));
+                          // NetworkAgent has no bundle type. Never infer one from a local name match.
 
                           return (
                           <AgentSidebarRow
@@ -789,7 +789,6 @@ export function AppSidebar({
                               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                                 <span className="flex min-w-0 items-baseline text-sm leading-snug font-medium">
                                   <span className="min-w-0 truncate">{remoteName(agent.name)}</span>
-                                  <AgentTypeGlyph type={agentType} />
                                 </span>
                                 <span className="text-muted-foreground truncate text-[0.8125rem] leading-snug">
                                   {note && !note.error
