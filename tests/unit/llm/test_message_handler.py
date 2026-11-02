@@ -557,8 +557,11 @@ class TestMessageHandler(unittest.TestCase):
         turns = {"n": 0}
 
         async def fake_continue():
-            qp._last_tool_error_sig = sigs[turns["n"]]
+            signature = sigs[turns["n"]]
             turns["n"] += 1
+            if isinstance(signature, Exception):
+                raise signature
+            qp._last_tool_error_sig = signature
             if turns["n"] >= len(sigs):
                 qp.turn_completed = True
 
@@ -582,6 +585,63 @@ class TestMessageHandler(unittest.TestCase):
         self.assertEqual(turns, 3)
         self.assertTrue(qp.turn_completed)
         self.coordinator.message_display_service.display_error_message.assert_called_once()
+
+    def test_hub_continue_reports_identical_tool_errors_to_detached_parent(self):
+        class Hub:
+            report_detached_chain_break = AsyncMock()
+
+        startup_ready = asyncio.Event()
+        startup_ready.set()
+        hub = Hub()
+        self.coordinator.event_bus.get_service.side_effect = (
+            lambda name: hub if name == "hub_plugin" else startup_ready
+        )
+
+        turns, _ = self._run_hub_chain(["terminal:boom"] * 10)
+
+        self.assertEqual(turns, 3)
+        hub.report_detached_chain_break.assert_awaited_once_with(
+            reason="3 identical tool errors"
+        )
+
+    def test_hub_continue_reports_continuation_exception_to_detached_parent(self):
+        class Hub:
+            report_detached_chain_break = AsyncMock()
+
+        startup_ready = asyncio.Event()
+        startup_ready.set()
+        hub = Hub()
+        self.coordinator.event_bus.get_service.side_effect = (
+            lambda name: hub if name == "hub_plugin" else startup_ready
+        )
+
+        turns, qp = self._run_hub_chain([RuntimeError("failed")])
+
+        self.assertEqual(turns, 1)
+        self.assertTrue(qp.turn_completed)
+        hub.report_detached_chain_break.assert_awaited_once_with(
+            reason="conversation continuation failed"
+        )
+
+    def test_hub_continue_reports_continuation_cap_to_detached_parent(self):
+        class Hub:
+            report_detached_chain_break = AsyncMock()
+
+        startup_ready = asyncio.Event()
+        startup_ready.set()
+        hub = Hub()
+        self.coordinator.event_bus.get_service.side_effect = (
+            lambda name: hub if name == "hub_plugin" else startup_ready
+        )
+
+        with patch("kollabor.llm.message_handler.MAX_CONTINUATION_TURNS", 1):
+            turns, qp = self._run_hub_chain([None] * 5)
+
+        self.assertEqual(turns, 2)
+        self.assertTrue(qp.turn_completed)
+        hub.report_detached_chain_break.assert_awaited_once_with(
+            reason="maximum continuation turns reached"
+        )
 
     def test_hub_continue_error_breaker_resets_on_success_or_change(self):
         """A success or a different error starts the identical-error count over."""

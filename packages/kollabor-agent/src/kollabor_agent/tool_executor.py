@@ -758,6 +758,7 @@ class ToolExecutor:
                         "terminal",
                         "terminal_status",
                         "terminal_output",
+                        "terminal_send",
                         "terminal_kill",
                     ):
                         logger.debug(
@@ -1041,6 +1042,8 @@ class ToolExecutor:
             return await self._execute_terminal_status(tool_data)
         elif tool_type == "terminal_output":
             return await self._execute_terminal_output(tool_data)
+        elif tool_type == "terminal_send":
+            return await self._execute_terminal_send(tool_data)
         elif tool_type == "terminal_kill":
             return await self._execute_terminal_kill(tool_data)
 
@@ -1238,12 +1241,69 @@ class ToolExecutor:
             )
 
         if not session_name:
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                tool_type="terminal_output",
-                success=False,
-                error="Session name required",
+            try:
+                status = await self.tmux_plugin.get_session_status("*")
+            except Exception as e:
+                logger.error(f"Error listing terminal sessions: {e}")
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error="Session name required; unable to list active terminal sessions",
+                )
+
+            if not isinstance(status, dict) or not status.get("success"):
+                message = (
+                    status.get("message", "") if isinstance(status, dict) else ""
+                )
+                error = "Session name required; unable to list active terminal sessions"
+                if message:
+                    error = f"{error}: {message}"
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=error,
+                )
+
+            session_list = status.get("sessions")
+            sessions = (
+                [
+                    session
+                    for session in session_list
+                    if isinstance(session, dict)
+                    and isinstance(session.get("name"), str)
+                    and session["name"].strip()
+                    and str(session.get("status", "")).lower() == "alive"
+                ]
+                if isinstance(session_list, list)
+                else []
             )
+            if len(sessions) == 1:
+                session_name = sessions[0].get("name", "")
+            elif not sessions:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=(
+                        "Session name required; no active terminal sessions. "
+                        "Use terminal-status to list sessions."
+                    ),
+                )
+            else:
+                names = ", ".join(
+                    str(session.get("name", "?")) for session in sessions
+                )
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=(
+                        "Session name required; multiple active terminal sessions: "
+                        f"{names}. Use terminal_output with one of these names."
+                    ),
+                )
 
         try:
             result = await self.tmux_plugin.capture_session_output(
@@ -1317,6 +1377,60 @@ class ToolExecutor:
             logger.error(f"Error killing terminal session: {e}")
             return ToolExecutionResult(
                 tool_id=tool_id, tool_type="terminal_kill", success=False, error=str(e)
+            )
+
+    async def _execute_terminal_send(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Send one line of input to a named background terminal session."""
+        tool_id = tool_data.get("id", "unknown")
+        arguments = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        session_name = (
+            tool_data.get("session_name")
+            or arguments.get("session_name")
+        )
+        text = tool_data.get("text", arguments.get("text"))
+
+        if not self.tmux_plugin:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Tmux plugin not available",
+            )
+        if not isinstance(session_name, str) or not session_name.strip():
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Session name required",
+            )
+        if not isinstance(text, str):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Text must be a string",
+            )
+
+        try:
+            result = self.tmux_plugin.send_to_session(session_name.strip(), text)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=result.get("success", False),
+                output=result.get("message", ""),
+                error="" if result.get("success") else result.get("message", ""),
+            )
+        except Exception as e:
+            logger.error(f"Error sending input to terminal session: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error=str(e),
             )
 
     async def _execute_mcp_tool(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
