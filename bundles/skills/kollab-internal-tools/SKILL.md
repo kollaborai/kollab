@@ -31,5 +31,8 @@ If the returned schema is empty or incomplete, inspect the server's own current
 definition instead of guessing its arguments.
 External calls may be native tool calls or XML `<tool name="...">` calls,
 depending on the active provider and session; use the discovered server schema.
+Third-party plugins can also supply runtime tools or handlers. Consult the
+active session and plugin documentation; `tool_search` does not enumerate all
+plugin-only handlers, and the bundled catalog cannot predict arbitrary plugins.
 `/mcp tools [server]` and `/mcp status` are user-facing alternatives; reloading
 connections has effects and requires its own authorization.

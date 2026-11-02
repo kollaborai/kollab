@@ -1,8 +1,8 @@
 """Keep the bundled tool guide aligned with the actual registration paths.
 
-This scans production registration calls without initializing plugins or
-starting processes. Unknown dynamic registration needs an explicit discovery
-strategy instead of being silently omitted from coverage.
+This scans known production registration APIs and probes existing registrars
+with fake services. It does not prove arbitrary dynamic Python enumerable:
+new registration mechanisms need an explicit discovery strategy and test.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kollabor_agent.tool_definition import ToolDefinition, ToolParameter
 from kollabor_agent.tool_executor import ToolExecutor
 from kollabor_agent.tool_registry import ToolRegistry, get_registry
 
@@ -22,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 REFERENCES = ROOT / "bundles/skills/kollab-internal-tools/references"
 FIELDS = ("Purpose", "Inputs", "Result", "Effects", "Permission", "Source")
 HEADING = re.compile(r"^### `([^`]+)`\s*$", re.MULTILINE)
+REGISTRATION_METHODS = {"register_plugin_tag", "register_plugin_handler", "register_custom_tool"}
 
 
 @dataclass(frozen=True)
@@ -37,15 +39,79 @@ def _literal_string(node: ast.AST | None) -> str | None:
 
 
 def _scan_source(source: str, path: str) -> tuple[list[Registration], list[str]]:
-    """Find actual plugin and SDK registration calls, including conditional ones."""
+    """Find direct registrations and reject opaque aliases of known entry points."""
     registrations: list[Registration] = []
     errors: list[str] = []
     tree = ast.parse(source, filename=path)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    registry_getters = {"get_registry"}
+    registry_classes = {"ToolRegistry"}
     for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for item in node.names:
+                if item.name == "get_registry":
+                    registry_getters.add(item.asname or item.name)
+                elif item.name == "ToolRegistry":
+                    registry_classes.add(item.asname or item.name)
+
+    def is_registry_factory(node):
+        if not isinstance(node, ast.Call):
+            return False
+        return (isinstance(node.func, ast.Name) and node.func.id in registry_getters | registry_classes) or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get_global"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in registry_classes
+        )
+
+    registry_vars: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        if is_registry_factory(node.value):
+            registry_vars.update(target.id for target in node.targets if isinstance(target, ast.Name))
+
+    def is_registry(node):
+        return (isinstance(node, ast.Name) and node.id in registry_vars) or is_registry_factory(node)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in registry_getters and isinstance(node.ctx, ast.Load):
+            parent = parents.get(node)
+            if not isinstance(parent, ast.Call) or parent.func is not node:
+                errors.append(f"{path}:{node.lineno}: aliased registry getter needs discovery coverage")
+        if isinstance(node, ast.Attribute):
+            # Registration methods must be called directly. Passing a bound
+            # method into a helper or storing it as an alias bypasses the
+            # literal call-site inventory and requires an explicit new probe.
+            is_registry_register = node.attr == "register" and is_registry(node.value)
+            if node.attr in REGISTRATION_METHODS or is_registry_register:
+                parent = parents.get(node)
+                if not isinstance(parent, ast.Call) or parent.func is not node:
+                    errors.append(f"{path}:{node.lineno}: aliased registration needs discovery coverage")
+                elif is_registry_register and not path.startswith(
+                    "packages/kollabor-agent/src/kollabor_agent/tool_definitions/"
+                ):
+                    errors.append(f"{path}:{node.lineno}: extra registry producer needs runtime discovery coverage")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            # hasattr checks availability without invoking or aliasing a method.
+            if node.func.id == "getattr" and len(node.args) >= 2:
+                name = _literal_string(node.args[1])
+                if name in REGISTRATION_METHODS:
+                    errors.append(f"{path}:{node.lineno}: reflective registration needs discovery coverage")
+                if name == "register" and is_registry(node.args[0]):
+                    errors.append(f"{path}:{node.lineno}: reflective registry needs discovery coverage")
+        if isinstance(node, ast.Subscript) and _literal_string(node.slice) in REGISTRATION_METHODS:
+            errors.append(f"{path}:{node.lineno}: indexed registration needs discovery coverage")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args:
+            if node.func.attr in {"__getattribute__", "methodcaller"}:
+                name = _literal_string(node.args[0])
+                if name in REGISTRATION_METHODS or (name == "register" and is_registry(node.func.value)):
+                    errors.append(f"{path}:{node.lineno}: reflective registration needs discovery coverage")
+
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         method = node.func.attr
-        if method not in {"register_plugin_tag", "register_plugin_handler", "register_custom_tool"}:
+        if method not in REGISTRATION_METHODS:
             continue
         if method == "register_custom_tool":
             definition = node.args[0] if node.args else None
@@ -238,11 +304,15 @@ def _coverage_errors(tools, registrations: list[Registration], entries, registry
     return errors
 
 
-@pytest.fixture
-def inventory(monkeypatch):
+@pytest.fixture(scope="module")
+def inventory():
     # Build the real built-in registry in isolation from earlier tests.
-    monkeypatch.setattr(ToolRegistry, "_instance", None)
-    tools = get_registry().list()
+    original = ToolRegistry._instance
+    ToolRegistry._instance = None
+    try:
+        tools = get_registry().list()
+    finally:
+        ToolRegistry._instance = original
     registrations, scan_errors = _production_registrations()
     registry_sources, source_errors = _registry_sources()
     entries, catalog_errors = _catalog()
@@ -295,6 +365,157 @@ def test_unresolved_dynamic_registration_is_not_silently_skipped():
         "plugins/example.py",
     )
     assert len(errors) == 2
+
+
+def test_new_registry_and_plugin_tools_require_complete_explanations(inventory):
+    tools, registrations, entries, sources = inventory
+    definition_source = "packages/kollabor-agent/src/kollabor_agent/tool_definitions/file_ops.py"
+    plugin_source = "plugins/hub/plugin.py"
+    new_tool = ToolDefinition(
+        name="canary-tool",
+        description="Inspect the named fixture path",
+        xml_tag="canary-tool",
+        risk_level="high",
+        requires_permission=True,
+        parameters=[ToolParameter(name="path", type="string", description="Fixture path", required=True)],
+    )
+    registry = ToolRegistry()
+    for tool in tools:
+        registry.register(tool)
+    registry.register(new_tool)
+
+    class Recorder:
+        def __init__(self):
+            self.registered = []
+
+        def register_plugin_handler(self, name, handler):
+            self.registered.append(Registration("handler", name, plugin_source))
+
+    recorder = Recorder()
+    recorder.register_plugin_handler("canary_plugin", lambda _: None)
+    expanded_registrations = [*registrations, *recorder.registered]
+    expanded_sources = {**sources, new_tool.name: (definition_source, new_tool.native_name)}
+    errors = _coverage_errors(registry.list(), expanded_registrations, entries, expanded_sources)
+    assert "missing explanation: canary_tool" in errors
+    assert "missing explanation: canary_plugin" in errors
+
+    expanded_entries = {
+        **entries,
+        "canary_tool": {
+            "Purpose": "Inspect a fixture path using `canary-tool`.",
+            "Inputs": "Required: `path`.",
+            "Result": "The fixture status.",
+            "Effects": "Reads fixture metadata.",
+            "Permission": "Registry risk `high`, confirmation flag `true`.",
+            "Source": f"`{definition_source}`",
+        },
+        "canary_plugin": {
+            "Purpose": "Inspect a fixture plugin.",
+            "Inputs": "No arguments are required.",
+            "Result": "The fixture status.",
+            "Effects": "Reads fixture metadata.",
+            "Permission": "Current pipeline policy applies.",
+            "Source": f"`{plugin_source}`",
+        },
+    }
+    assert not _coverage_errors(registry.list(), expanded_registrations, expanded_entries, expanded_sources)
+    for name in ("canary_tool", "canary_plugin"):
+        for field in FIELDS:
+            incomplete = {key: dict(value) for key, value in expanded_entries.items()}
+            incomplete[name].pop(field)
+            assert f"{name}: missing or empty {field}" in _coverage_errors(
+                registry.list(), expanded_registrations, incomplete, expanded_sources
+            )
+
+
+def test_aliases_reflection_and_wrapper_registration_fail_closed():
+    _, errors = _scan_source(
+        "from registry import get_registry as get_tools\n"
+        "registry = get_tools()\n"
+        "register = executor.register_plugin_handler\n"
+        "use_callback(parser.register_plugin_tag)\n"
+        'getattr(executor, "register_plugin_handler")("hidden", handler)\n'
+        'executor.__dict__["register_custom_tool"]({"name": "hidden"})\n'
+        'operator.methodcaller("register_plugin_tag", "hidden")(parser)\n'
+        'executor.__getattribute__("register_plugin_handler")("hidden", handler)\n'
+        "wrapped = registry.register\n"
+        "factory = get_tools\n"
+        'getattr(registry, "register")(definition)\n'
+        "def wrapper(parser, tag, kind):\n"
+        "    parser.register_plugin_tag(tag, pattern, kind, extract)\n",
+        "plugins/example.py",
+    )
+    assert sum("aliased registration" in e for e in errors) == 3
+    assert any("reflective registration" in e for e in errors)
+    assert any("reflective registry" in e for e in errors)
+    assert any("indexed registration" in e for e in errors)
+    assert any("aliased registry getter" in e for e in errors)
+    assert any("dynamic tag" in e for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_conditional_registrars_with_fake_services_match_source_inventory(inventory):
+    """Exercise existing registrars without starting plugins or their services."""
+    from kollabor.goals.tooling import register_goal_tools
+    from plugins.agent_orchestrator.plugin import AgentOrchestratorPlugin
+    from plugins.context_compaction_plugin import ContextCompactionPlugin
+    from plugins.env_queue_plugin import EnvQueuePlugin
+    from plugins.hook_monitoring_plugin import HookMonitoringPlugin
+    from plugins.hub.plugin import HubPlugin
+    from plugins.voice_plugin import VoicePlugin
+
+    class Recorder:
+        def __init__(self, source):
+            self.source = source
+            self.records = []
+
+        def register_plugin_tag(self, tag, pattern, name, extract):
+            self.records.append(Registration("tag", name, self.source, tag))
+
+        def register_plugin_handler(self, name, handler):
+            self.records.append(Registration("handler", name, self.source))
+
+        def register_custom_tool(self, definition):
+            self.records.append(Registration("sdk", definition["name"], self.source))
+
+    class FakeOwner:
+        def __init__(self, recorder):
+            self.event_bus = SimpleNamespace(get_service=lambda name: recorder)
+            self._event_bus = self.event_bus
+            self.sdk = recorder
+            self.config = {}
+            self.name = "fixture"
+
+        def __getattr__(self, name):
+            if name.startswith(("_handle_", "_provide_")) or name == "_voice_tool":
+                return lambda *args, **kwargs: None
+            raise AttributeError(name)
+
+    probes = [
+        ("plugins/hub/plugin.py", HubPlugin._register_pipeline_tools),
+        ("plugins/agent_orchestrator/plugin.py", AgentOrchestratorPlugin._register_pipeline_tools),
+        ("plugins/env_queue_plugin.py", EnvQueuePlugin._register_notification_tags),
+        ("plugins/context_compaction_plugin.py", ContextCompactionPlugin._register_compact_tag),
+        ("plugins/voice_plugin.py", VoicePlugin._register_tool),
+    ]
+    _, registrations, entries, _ = inventory
+    for source, register in probes:
+        recorder = Recorder(source)
+        register(FakeOwner(recorder))
+        assert set(recorder.records) == {r for r in registrations if r.source == source}
+        assert all(record.name in entries for record in recorder.records)
+
+    source = "plugins/hook_monitoring_plugin.py"
+    recorder = Recorder(source)
+    await HookMonitoringPlugin._register_monitoring_services(FakeOwner(recorder))
+    assert set(recorder.records) == {r for r in registrations if r.source == source}
+    assert all(record.name in entries for record in recorder.records)
+
+    source = "kollabor/goals/tooling.py"
+    recorder = Recorder(source)
+    register_goal_tools(recorder, recorder, service=None)
+    assert set(recorder.records) == {r for r in registrations if r.source == source}
+    assert all(record.name in entries for record in recorder.records)
 
 
 @pytest.mark.asyncio

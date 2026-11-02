@@ -227,3 +227,17 @@ Source: `packages/kollabor-ai/src/kollabor_ai/system_prompt_builder.py`,
 `packages/kollabor-agent/src/kollabor_agent/native_tools_handler.py`,
 `packages/kollabor-agent/src/kollabor_agent/mcp_integration.py`,
 `kollabor/llm/streaming_handler.py`.
+
+## Maintaining coverage
+
+`tests/unit/test_internal_tool_catalog.py` inventories the live central
+registry, scans known first-party registration calls, and probes existing
+plugin registrars using fake services. Direct calls must use discoverable
+names; bound aliases, constant-name reflection and unknown dynamic registrations
+fail the check until their discovery is made explicit. An added tool needs a
+purpose, inputs, result, effects, permission context, and its actual source.
+
+No static scan can enumerate arbitrary computed Python behavior or future
+registration APIs. When adding a mechanism, add a controlled runtime probe as
+well as the explanation. External MCP servers and third-party plugins remain
+runtime-supplied capabilities, not a finite bundled inventory.
