@@ -2777,18 +2777,53 @@ class HubPlugin(BasePlugin):
             ]
             output = "\n".join(lines)
 
-            # Context limit: 3000 chars
-            if len(output) > 3000:
+            # Keep the tool response within the context budget while ensuring
+            # unbounded metadata cannot consume the space reserved for the body.
+            output_limit = 3000
+            header_limit = 600
+            if len(output) > output_limit:
                 body = entry.body
-                truncation_note = f"[truncated, {len(body)} chars total]"
-                header = (
-                    f"[{entry.id}] {entry.summary}\n"
-                    f"date: {entry.date}\n"
-                    f"keywords: {', '.join(entry.keywords)}\n"
-                    "---\n"
+                keywords = ", ".join(entry.keywords)
+
+                def _bounded_metadata(value: str, limit: int) -> Tuple[str, bool]:
+                    if len(value) <= limit:
+                        return value, False
+                    return value[: max(0, limit - 1)] + "…", True
+
+                summary_line, summary_truncated = _bounded_metadata(
+                    f"[{entry.id}] {entry.summary}  [{tier}]", 240
                 )
-                available = 3000 - len(header) - len(truncation_note) - 1
-                output = header + body[:available] + "\n" + truncation_note
+                date_line, date_truncated = _bounded_metadata(
+                    f"date: {entry.date}", 80
+                )
+                fixed_header = f"{summary_line}\n{date_line}\nkeywords: "
+                separator = "\n---\n"
+                metadata_note = "\n[metadata truncated]"
+                keyword_limit = max(
+                    0,
+                    header_limit
+                    - len(fixed_header)
+                    - len(separator)
+                    - len(metadata_note),
+                )
+                keyword_text, keywords_truncated = _bounded_metadata(
+                    keywords, keyword_limit
+                )
+                header = fixed_header + keyword_text
+                if summary_truncated or date_truncated or keywords_truncated:
+                    header += metadata_note
+                header += separator
+
+                available = output_limit - len(header)
+                if len(body) > available:
+                    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+                    body_note = (
+                        f"[body truncated, {len(body)} chars total; sha256={digest}]"
+                    )
+                    available = max(0, output_limit - len(header) - len(body_note) - 1)
+                    output = header + body[:available] + "\n" + body_note
+                else:
+                    output = header + body
 
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
