@@ -37,15 +37,18 @@ export function resolveSidebarAgentType(
   entry?: AgentTypeSource,
   fallback?: string,
 ): string | undefined {
-  if (!entry) return nonBlank(fallback);
-  return nonBlank(entry.agent_type) ?? nonBlank(entry.agent) ?? "default";
+  const entryType = nonBlank(entry?.agent_type) ?? nonBlank(entry?.agent);
+  return entryType ?? nonBlank(fallback) ?? (entry ? "default" : undefined);
 }
 
 export function AgentTypeGlyph({ type }: { type?: string }) {
   const label = nonBlank(type);
   if (!label) return null;
 
-  const glyph = AGENT_TYPE_GLYPHS[label.toLowerCase()] ?? UNKNOWN_AGENT_TYPE_GLYPH;
+  const normalizedType = label.toLowerCase();
+  const glyph = Object.prototype.hasOwnProperty.call(AGENT_TYPE_GLYPHS, normalizedType)
+    ? AGENT_TYPE_GLYPHS[normalizedType]
+    : UNKNOWN_AGENT_TYPE_GLYPH;
   return (
     <span
       aria-label={label}

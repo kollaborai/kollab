@@ -42,6 +42,10 @@ describe("AgentTypeGlyph", () => {
     expect(resolveSidebarAgentType({ agent_type: "", agent: "coder" }, "default")).toBe("coder");
   });
 
+  it("uses the session bundle when a present roster entry has blank type fields", () => {
+    expect(resolveSidebarAgentType({ agent_type: "", agent: "" }, " research ")).toBe("research");
+  });
+
   it("uses default only for a present roster entry with an empty type and bundle", () => {
     expect(resolveSidebarAgentType({ agent_type: "", agent: "" })).toBe("default");
     expect(resolveSidebarAgentType(undefined, "coder")).toBe("coder");
@@ -56,6 +60,13 @@ describe("AgentTypeGlyph", () => {
     expect(markup).toContain('aria-label="research"');
     expect(markup).toContain("text-[0.75em]");
     expect(markup).toContain("text-muted-foreground");
+  });
+
+  it.each(["constructor", "__proto__"])("treats %s as an unknown type", (type) => {
+    const markup = renderToStaticMarkup(<AgentTypeGlyph type={type} />);
+    expect(markup).toContain("◇");
+    expect(markup).toContain(`title="${type}"`);
+    expect(markup).toContain(`aria-label="${type}"`);
   });
 
   it("uses a generic labeled glyph for unknown types and omits missing types", () => {

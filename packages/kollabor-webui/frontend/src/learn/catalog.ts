@@ -59,7 +59,6 @@ export const LEARN_TOPICS = [
       "Agents are named collaborators with their own instructions and optional skills. Rosters group agents; teams can start several agents together. In the sidebar, local agents are grouped under their workspace so you can tell which project each one works in.",
     howTo: [
       "Open Agents to see the rosters and teams available in the selected workspace.",
-      "The small muted mark after a local or offline agent name identifies its bundle; hover to see the full name, which screen readers also announce. Remote rows omit the mark because network data does not include a bundle type.",
       "Choose a single agent for a focused task, or a team when the work needs parallel roles.",
       "On a team's card, choose Configure & Launch to open the launch sheet.",
       "Choose a workspace and profile, include members, then set a lead and optional mission.",

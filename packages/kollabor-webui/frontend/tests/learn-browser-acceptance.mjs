@@ -74,7 +74,10 @@ export function makeFixtures(options = {}) {
   };
   const poolEntries = options.poolEntries ?? [localCoder];
   const initialSessions = options.sessions ?? [];
-  const offlineAgents = options.offline ?? [];
+  const offlineAgents = [
+    ...(options.offline ?? []),
+    ...(options.additionalOfflineAgents ?? []),
+  ];
   const agents = { agents: poolEntries, live: [], active: [], available: poolEntries.map((entry) => entry.name) };
   const profiles = {
     active: "default",

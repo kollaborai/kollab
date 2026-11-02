@@ -86,10 +86,19 @@ function sidebarFixtures() {
     state: "idle",
     last_seen: 2,
   };
+  const offlineWithoutType = {
+    identity: "offline-without-type",
+    display_name: "Offline Without Type",
+    avatar: { kind: "gem" },
+    color: [120, 120, 120],
+    workspace: "/glyph-demo/beta",
+    last_ran: 1_760_000_001,
+  };
   return makeFixtures({
     poolEntries,
     sessions,
     offline,
+    additionalOfflineAgents: [offlineWithoutType],
     additionalRemoteAgents: [remoteOnlyAgent],
   });
 }
@@ -180,6 +189,16 @@ async function main() {
         assert.ok(
           remoteRows.every(({ glyphCount }) => glyphCount === 0),
           "remote rows must not infer a type glyph from local roster names",
+        );
+
+        const untypedOfflineRows = view.page
+          .locator('[data-sidebar="sidebar"] button')
+          .filter({ hasText: "Offline Without Type" });
+        assert.equal(await untypedOfflineRows.count(), 1, "offline-only persona should be present");
+        assert.equal(
+          await untypedOfflineRows.locator("[data-agent-type-glyph]").count(),
+          0,
+          "offline persona without type metadata must not be assigned an inferred glyph",
         );
 
         for (const glyph of glyphs) {
