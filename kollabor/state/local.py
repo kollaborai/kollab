@@ -693,24 +693,28 @@ class LocalStateService(StateService):
         """Overlay the live ACP harness's model/effort onto a snapshot.
 
         The provider profile object keeps its saved fields; a running
-        harness is authoritative for the active options, so every
-        snapshot that leaves the daemon reports what the harness runs,
-        not the profile's stored blanks (#605).
+        harness is authoritative for its active options, so every
+        snapshot that leaves the daemon reports what the harness runs.
+        An option the harness does not advertise is reported as none,
+        never as the profile's stored value: the web UI's 3 s poll would
+        otherwise put a dropped pick back (#605, #553).
         """
-        harness_model = self._acp_harness_model()
-        if harness_model:
-            # The harness is authoritative for its active options.
-            snapshot.model = harness_model
         try:
             acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
-            if acp is not None and getattr(acp, "active", False) is True:
-                effort = next((o for o in acp.advertised_config_options()
-                               if o.get("id") == "effort"
-                               or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
-                if effort and effort.get("currentValue") is not None:
-                    snapshot.effort = str(effort["currentValue"])
+            if acp is None or getattr(acp, "active", False) is not True:
+                return snapshot
+            harness_model = self._acp_harness_model()
+            options = acp.advertised_config_options()
+            effort = next((o for o in options
+                           if o.get("id") == "effort"
+                           or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
+            harness_effort = str(effort["currentValue"]) if (
+                effort is not None and effort.get("currentValue") is not None
+            ) else ""
+            snapshot.model = harness_model
+            snapshot.effort = harness_effort
         except Exception:
-            logger.debug("ACP harness effort unavailable", exc_info=True)
+            logger.debug("ACP harness state unavailable", exc_info=True)
         return snapshot
 
     async def list_profiles(self) -> ProfileListSnapshot:
@@ -1579,8 +1583,12 @@ class LocalStateService(StateService):
                     if str(current_provider).lower() == "acp" and getattr(orchestrator, "active", False) is True
                     else None
                 )
-                prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
-                prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
+                prior_runner = getattr(orchestrator, "runner", None) if previous is not None else None
+                prior_binding = prior_runner.binding if prior_runner else None
+                prior_conversation = (
+                    getattr(orchestrator, "binding_conversation_id", None)
+                    if previous is not None else None
+                )
                 prior_loadout = getattr(orchestrator, "_loadout_override", None)
 
                 async def restore_previous() -> None:
