@@ -199,13 +199,19 @@ class SecureConversationTransport:
             async with request_lock:
                 yield request_lock
         finally:
-            users = self._request_lock_users.get(key, 0)
-            if users <= 1:
-                self._request_lock_users.pop(key, None)
-                if self._request_locks.get(key) is request_lock:
+            # A trust event supersedes a generation by dropping the lock and
+            # its counter together. Decrement only when the map still holds
+            # this generation's lock: otherwise the live counter belongs to
+            # the replacement generation, and decrementing by key here would
+            # erase a waiter's slot from the new lock (fail-closed
+            # "superseded" churn for callers that never left this binding).
+            if self._request_locks.get(key) is request_lock:
+                users = self._request_lock_users.get(key, 0)
+                if users <= 1:
+                    self._request_lock_users.pop(key, None)
                     self._request_locks.pop(key, None)
-            else:
-                self._request_lock_users[key] = users - 1
+                else:
+                    self._request_lock_users[key] = users - 1
 
     async def request(
         self,
