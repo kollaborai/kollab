@@ -1555,6 +1555,8 @@ def test_hub_msg_parser_preserves_question_kind():
         "kind": "answer",
         "notify_kind": "",
         "task_id": "",
+        "worktree": "",
+        "commit": "",
         "content": "Use the workspace root.",
     }
 
