@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- An agent whose code changed on disk after it started no longer fails every turn with an opaque 500: the daemon flags the mismatch, the Engine names the agent and says to restart it (`<agent> could not run the turn: <error>. Its code changed on disk after it started. Restart it.`), and voice turns carry the same explanation to the speaker (#571).
 - The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
 
 ### Added

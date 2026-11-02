@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from kollabor.state.remote import ReloadNeededError
 from kollabor.state.snapshots import ProfileSnapshot
 from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.model_registry import supports_vision
@@ -174,6 +175,10 @@ class EngineSession:
         # means no known problem.
         self.approval_mode_warning: Optional[str] = None
         self.persistence_warning: Optional[str] = None
+        # Set when the daemon fails a turn because its code no longer
+        # matches the checkout (lazy import of a removed module): the
+        # agent needs a restart onto the current code (#571).
+        self.reload_needed: Optional[str] = None
         # Delete stopped the daemon but its durable owner record is still
         # present: the row stays listed and a retried Delete clears it
         # without stopping anything a second time.
@@ -895,6 +900,19 @@ class EngineSession:
                 kwargs["private_goal_reply_id"] = private_goal_reply_id
                 kwargs["goal_conversation_uid"] = goal_conversation_uid
             result = await self.state.send_message(content, **kwargs)
+        except ReloadNeededError as exc:
+            if voice_turn:
+                await self.voice_admission("revoke", context=origin_context)
+            self.reload_needed = str(exc)
+            agent_name = (
+                self.agent
+                or (self.daemon.agent_name if self.daemon else "")
+                or "default"
+            )
+            raise ReloadNeededError(
+                f"{agent_name} could not run the turn: {exc}. "
+                "Its code changed on disk after it started. Restart it."
+            ) from exc
         except BaseException:
             if voice_turn:
                 await self.voice_admission("revoke", context=origin_context)
@@ -1179,6 +1197,8 @@ class EngineSession:
                 if provider == "acp" else supports_vision(model, provider)
             ),
             "agent": agent_name,
+            "reload_needed": self.reload_needed is not None,
+            "reload_needed_error": self.reload_needed or "",
             "workspace": self.workspace,
             "device": self.device,
             # The mode name, matching permissions.py; None (unknown) while the
