@@ -60,6 +60,7 @@ CONVERTED = {
             "thread_id": "t-1",
             "reply_to": "m-1",
             "kind": "answer",
+            "notify_kind": "",
             "task_id": "",
             "content": "hello there",
         },

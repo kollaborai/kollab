@@ -9,6 +9,9 @@ from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.runtime import AgentRuntime
 from kollabor_ai.system_prompt_builder import SystemPromptBuilder
 
+_EXPLICIT_COMMUNITY_AGENTS = frozenset(
+    {"community", "maintainer", "pr-shepherd", "release-planner", "triager"}
+)
 _EXPLICIT_RESEARCH_TOOLS = [
     "terminal",
     "file-read",
@@ -122,6 +125,10 @@ def test_research_profile_is_explicitly_read_only_and_others_are_wildcard_scoped
         config = json.loads(path.read_text(encoding="utf-8"))
         if path.parent.name == "research":
             assert config["tools"] == _EXPLICIT_RESEARCH_TOOLS, path
+        elif path.parent.name in _EXPLICIT_COMMUNITY_AGENTS:
+            tools = config["tools"]
+            assert tools != ["*"], path
+            assert not {"git", "file-edit", "file-delete", "hub-spawn"} & set(tools), path
         else:
             assert config["tools"] == ["*"], path
 

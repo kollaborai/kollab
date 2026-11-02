@@ -39,6 +39,15 @@ METHOD = "network_members"
 POLL_SECONDS = 10.0
 REQUEST_SECONDS = 15.0
 MAX_RETRY_SECONDS = 300.0
+# 2 ** 1024 overflows a float, so a peer that has been unreachable for about
+# a thousand failed ticks would crash the sync loop when it fails again.
+# Saturate the exponent instead: the delay simply parks at the cap.
+MAX_RETRY_EXPONENT = 16
+# tick() fires every eligible send at once, but the relay admits only
+# MAX_PENDING application requests process-wide (relay_client). Fanning out
+# past that budget turns the surplus sends into capacity rejections. Cap
+# concurrent membership sends below it; the rest wait on the semaphore.
+MEMBERSHIP_MAX_IN_FLIGHT = 12
 # ponytail: one message per list; 64 members is about 11 KB of the 24 KB frame.
 # Past that, send the list in pages.
 MAX_LISTED = 64
@@ -193,12 +202,54 @@ class MembershipSync:
         except Exception as error:
             logger.warning("network members: revocations not applied (%s)", type(error).__name__)
         members, revoked = client.membership()
+        # A peer that left the list must not keep failing against a session
+        # that no longer exists: clear its bookkeeping so a later rejoin
+        # starts fresh instead of resuming a stale backoff.
+        live = {entry[0] for entry in members}
+        for gone in [k for k in self._delivered if k not in live]:
+            del self._delivered[gone]
+        for gone in [k for k in self._v1_only if k not in live]:
+            del self._v1_only[gone]
+        for gone in [k for k in self._failures if k not in live]:
+            del self._failures[gone]
+        for gone in [k for k in self._retry_at if k not in live]:
+            del self._retry_at[gone]
         # Halts, proposals, chain heads and the control records join the digest,
         # so any change to them resends the list.
         digest = hashlib.sha256(
             json.dumps([members, revoked, client.control.digest()], sort_keys=True).encode()
         ).hexdigest()
         online = self._online()
+
+        sem = asyncio.Semaphore(MEMBERSHIP_MAX_IN_FLIGHT)
+
+        async def _send_one(key, session, listed, issued_at):
+            try:
+                async with sem:
+                    await self._send(key, session, listed, revoked, issued_at)
+            except RelayError as error:
+                if getattr(error, "code", None) == "capacity" or (
+                    "pending application request capacity reached" in str(error)
+                ):
+                    # The relay's process-wide pending budget is full; the send
+                    # never reached the peer. The typed code survives the
+                    # secure transport boundary; the string fallback covers
+                    # callers on unwrapped RelayClient paths. This is
+                    # backpressure, not a peer failure: stay eligible and try
+                    # again next tick.
+                    return
+                self._note_failure(key)
+                return
+            except Exception:
+                # The far side may not have approved this device yet; it will
+                # once the list that names us reaches it. Try again later.
+                self._note_failure(key)
+                return
+            self._delivered[key] = (session, digest)
+            self._failures.pop(key, None)
+            self._retry_at.pop(key, None)
+
+        sends = []
         issued_at = 0
         for key in client.members():
             session = online.get(key)
@@ -210,20 +261,27 @@ class MembershipSync:
                 continue
             listed = [entry for entry in members if entry[0] != key]
             issued_at = issued_at or self._stamp()  # one a tick, above every earlier one
-            try:
-                await self._send(key, session, listed, revoked, issued_at)
-            except Exception:
-                # The far side may not have approved this device yet; it will
-                # once the list that names us reaches it. Try again later.
-                failures = self._failures.get(key, 0) + 1
-                self._failures[key] = failures
-                self._retry_at[key] = time.monotonic() + min(
-                    MAX_RETRY_SECONDS, self._poll * 2 ** (failures - 1)
-                )
-                continue
-            self._delivered[key] = (session, digest)
-            self._failures.pop(key, None)
-            self._retry_at.pop(key, None)
+            sends.append(_send_one(key, session, listed, issued_at))
+
+        # All eligible peers send in the same tick together: a slow or failing
+        # peer no longer delays the peers listed after it (head-of-line).
+        if sends:
+            await asyncio.gather(*sends, return_exceptions=True)
+
+    def _note_failure(self, key: str) -> None:
+        """Record a failed send and schedule its retry with a capped exponent.
+
+        The raw term ``poll * 2 ** (failures - 1)`` overflows a float once
+        failures passes ~1024 (2 ** 1023 is out of float range), which would
+        crash the tick instead of backing off. Saturating the exponent parks
+        the delay at MAX_RETRY_SECONDS.
+        """
+        failures = self._failures.get(key, 0) + 1
+        self._failures[key] = failures
+        exponent = min(failures - 1, MAX_RETRY_EXPONENT)
+        self._retry_at[key] = time.monotonic() + min(
+            MAX_RETRY_SECONDS, self._poll * 2**exponent
+        )
 
     async def _send(
         self,

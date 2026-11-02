@@ -18,8 +18,9 @@ import logging
 import math
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Protocol
+from typing import AsyncIterator, Awaitable, Callable, Protocol
 
 from .network_attach import ATTACH_METHODS
 from .relay_client import PeerSessionEvent, RelayClient
@@ -88,6 +89,7 @@ class SecureConversationTransport:
             f"secure-carrying-session-{id(self)}", default=None
         )
         self._request_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        self._request_lock_users: dict[tuple[str, str, str], int] = {}
         self._remove_listener = client.add_peer_session_listener(
             self._on_peer_session_event
         )
@@ -173,6 +175,27 @@ class SecureConversationTransport:
             raise RelayError("invalid secure identity request")
         return {"certificate": self.certificate_b64}
 
+    @asynccontextmanager
+    async def _request_guard(self, key: tuple[str, str, str]) -> AsyncIterator[None]:
+        """Serialize a binding while retaining locks for active callers/waiters."""
+        request_lock = self._request_locks.get(key)
+        if request_lock is None:
+            if len(self._request_locks) >= MAX_SECURE_SESSIONS:
+                raise RelayError("secure session capacity reached")
+            request_lock = self._request_locks[key] = asyncio.Lock()
+        self._request_lock_users[key] = self._request_lock_users.get(key, 0) + 1
+        try:
+            async with request_lock:
+                yield
+        finally:
+            users = self._request_lock_users.get(key, 0)
+            if users <= 1:
+                self._request_lock_users.pop(key, None)
+                if self._request_locks.get(key) is request_lock:
+                    self._request_locks.pop(key, None)
+            else:
+                self._request_lock_users[key] = users - 1
+
     async def request(
         self,
         peer_key: str,
@@ -199,12 +222,7 @@ class SecureConversationTransport:
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
-                request_lock = self._request_locks.get(key)
-                if request_lock is None:
-                    if len(self._request_locks) >= MAX_SECURE_SESSIONS:
-                        raise RelayError("secure session capacity reached")
-                    request_lock = self._request_locks[key] = asyncio.Lock()
-                async with request_lock:
+                async with self._request_guard(key):
                     held = True
                     state = await self._open_locked(peer_key, key, binding, deadline)
                     raw = _encode_frame({"v": 1, "method": method, "payload": payload})
@@ -241,6 +259,17 @@ class SecureConversationTransport:
         except Exception as exc:
             if held:
                 self._discard_outbound(key)
+            if isinstance(exc, RelayError) and (
+                getattr(exc, "code", None) == "capacity"
+                or str(exc) == "pending application request capacity reached"
+            ):
+                # A relay pending-budget rejection is backpressure, not a
+                # broken conversation. Carry the typed signal across this
+                # boundary with fixed, sanitized text so callers can wait a
+                # tick instead of counting a peer failure. A mid-chunk raise
+                # still discarded the session above, so no partial frame ever
+                # executes remotely.
+                raise RelayError("relay pending capacity reached", "capacity") from None
             logger.warning(
                 "secure %s request to %s failed: %s: %s",
                 method,
@@ -290,12 +319,7 @@ class SecureConversationTransport:
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
-                request_lock = self._request_locks.get(key)
-                if request_lock is None:
-                    if len(self._request_locks) >= MAX_SECURE_SESSIONS:
-                        raise RelayError("secure session capacity reached")
-                    request_lock = self._request_locks[key] = asyncio.Lock()
-                async with request_lock:
+                async with self._request_guard(key):
                     held = True
                     await self._open_locked(peer_key, key, binding, deadline)
         except asyncio.CancelledError:
@@ -305,6 +329,16 @@ class SecureConversationTransport:
         except Exception as exc:
             if held:
                 self._discard_outbound(key)
+            if isinstance(exc, RelayError) and (
+                getattr(exc, "code", None) == "capacity"
+                or str(exc) == "pending application request capacity reached"
+            ):
+                # Same typed carry as request(): the handshake's own packet
+                # send crosses the relay pending budget, so a pre-handshake
+                # rejection must stay backpressure too. The local session
+                # table's own "secure session capacity reached" cap is a
+                # different message and keeps the generic rewrite.
+                raise RelayError("relay pending capacity reached", "capacity") from None
             logger.warning(
                 "secure session to %s failed: %s: %s",
                 peer_key[:12],
@@ -611,8 +645,10 @@ class SecureConversationTransport:
         for key, state in tuple(self._outbound.items()):
             request_lock = self._request_locks.get(key)
             if (
-                request_lock is None or not request_lock.locked()
-            ) and now - state.last_used > MAX_SECURE_IDLE_SECONDS:
+                self._request_lock_users.get(key, 0) == 0
+                and (request_lock is None or not request_lock.locked())
+                and now - state.last_used > MAX_SECURE_IDLE_SECONDS
+            ):
                 self._discard_outbound(key)
         for key, state in tuple(self._inbound.items()):
             if not state.lock.locked() and (
@@ -629,6 +665,14 @@ class SecureConversationTransport:
         if state is not None:
             state.tls.close()
             state.receive_buffer.clear()
+        self._discard_idle_request_lock(key)
+
+    def _discard_idle_request_lock(self, key: tuple[str, str, str]) -> None:
+        """Drop only an unused lock; queued or active callers still share it."""
+        if self._request_lock_users.get(key, 0):
+            return
+        self._request_lock_users.pop(key, None)
+        self._request_locks.pop(key, None)
 
     def _discard_inbound(self, peer_key: str, payload: object) -> None:
         if isinstance(payload, dict):
@@ -653,14 +697,15 @@ class SecureConversationTransport:
                 self._discard_inbound_key(key)
         for key in tuple(self._request_locks):
             if key[0] == peer_key:
-                self._request_locks.pop(key, None)
+                self._discard_idle_request_lock(key)
 
     def _clear_sessions(self) -> None:
         for key in tuple(self._outbound):
             self._discard_outbound(key)
         for key in tuple(self._inbound):
             self._discard_inbound_key(key)
-        self._request_locks.clear()
+        for key in tuple(self._request_locks):
+            self._discard_idle_request_lock(key)
 
 
 def _encode_frame(value: dict) -> bytes:

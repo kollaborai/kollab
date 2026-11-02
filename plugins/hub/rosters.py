@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -503,6 +503,80 @@ async def attach_persona_skills(persona: Persona, agent_manager: Any, state_serv
         except Exception as exc:  # activate_skill raises ValueError; a broken inject must not stop startup either
             problems.append(f"{name}: {exc}")
     return problems
+
+
+def effective_team(
+    team: Team,
+    *,
+    members: Optional[List[str]] = None,
+    exclude: Optional[List[str]] = None,
+    lead: Optional[str] = None,
+) -> Tuple[Team, List[str]]:
+    """Return a validated team selection without mutating the authored team.
+
+    ``members`` is an allowlist and ``exclude`` is a denylist; supplying both is
+    ambiguous. Omitted members are returned in authored order. Reporting edges
+    for retained members are walked upward to their nearest retained ancestor.
+    """
+    if members is not None and exclude is not None:
+        raise LibraryError(f"team '{team.name}': 'members' and 'exclude' are mutually exclusive")
+
+    by_name = {member.persona.name: member for member in team.members}
+
+    def validate_names(values: Optional[List[str]], field_name: str) -> Optional[set[str]]:
+        if values is None:
+            return None
+        if not isinstance(values, list) or not all(isinstance(name, str) for name in values):
+            raise LibraryError(f"team '{team.name}': '{field_name}' must be a list of member names")
+        seen: set[str] = set()
+        for name in values:
+            if name not in by_name:
+                raise LibraryError(f"team '{team.name}': unknown member '{name}' in '{field_name}'")
+            if name in seen:
+                raise LibraryError(f"team '{team.name}': duplicate member '{name}' in '{field_name}'")
+            seen.add(name)
+        return seen
+
+    included = validate_names(members, "members")
+    excluded = validate_names(exclude, "exclude") or set()
+    selected_names = included if included is not None else set(by_name) - excluded
+    omitted = [member.persona.name for member in team.members if member.persona.name not in selected_names]
+
+    if lead is not None and not isinstance(lead, str):
+        raise LibraryError(f"team '{team.name}': lead must be a member name")
+    selected_lead = team.lead if lead is None else lead
+    if selected_lead not in by_name:
+        raise LibraryError(f"team '{team.name}': unknown member '{selected_lead}' for lead")
+    if selected_lead not in selected_names:
+        if lead is None:
+            raise LibraryError(
+                f"team '{team.name}': default lead '{team.lead}' is not selected; choose a replacement lead"
+            )
+        raise LibraryError(
+            f"team '{team.name}': replacement lead '{selected_lead}' must be selected"
+        )
+
+    selected: List[Member] = []
+    for member in team.members:
+        name = member.persona.name
+        if name not in selected_names:
+            continue
+        manager = member.reports_to
+        hops = 0
+        while manager is not None and manager not in selected_names:
+            parent = by_name.get(manager)
+            if parent is None:
+                raise LibraryError(
+                    f"team '{team.name}': {name} reports to unknown member '{manager}'"
+                )
+            manager = parent.reports_to
+            hops += 1
+            if hops > len(by_name):
+                raise LibraryError(f"team '{team.name}': {name} is in a reporting loop")
+        selected.append(replace(member, reports_to=manager))
+
+    return replace(team, lead=selected_lead, members=selected), omitted
+
 
 
 def team_launch_order(team: Team) -> List[Member]:

@@ -154,6 +154,7 @@ export function AppSidebar({
   onWorkspaceChange,
   onApps,
   onAgents,
+  onLaunchTeam,
   onSettings,
   onHalt,
   onLearn,
@@ -211,6 +212,8 @@ export function AppSidebar({
   onApps: () => void;
   /** Opens the Agents view: every roster and team this folder can start. */
   onAgents: () => void;
+  /** Opens the shared team launch sheet from New Session. */
+  onLaunchTeam: () => void;
   onSettings: () => void;
   /** Open Settings on the Halt and Resume screen (works with no chat open). */
   onHalt: () => void;
@@ -603,6 +606,19 @@ export function AppSidebar({
                 </Label>
                 <WorkspacePicker api={api} value={workspacePath} onChange={onWorkspaceChange} />
               </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mx-4 mb-3 w-[calc(100%-2rem)] justify-start"
+                onClick={() => {
+                  setOptionsOpen(false);
+                  onLaunchTeam();
+                }}
+              >
+                <Users className="size-4" />
+                Launch a Team
+              </Button>
               {creationError ? (
                 <div role="alert" className="text-destructive bg-destructive/10 px-4 py-3 text-xs leading-relaxed break-words whitespace-pre-wrap">
                   {creationError}

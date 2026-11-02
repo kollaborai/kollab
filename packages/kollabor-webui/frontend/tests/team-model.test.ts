@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 import { launchLines, teamRows } from "../src/components/agents/team-model.ts";
 import type { Persona, TeamMember } from "../src/api.ts";
 
@@ -34,6 +34,24 @@ test("a reporting loop or a missing boss never spins or drops a seat", () => {
   assert.deepEqual(loop.map((row) => row.member.persona.name).sort(), ["a", "b"]);
   const orphan = teamRows({ lead: "a", members: [seat("a", null), seat("b", "ghost")] });
   assert.deepEqual(orphan.map((row) => [row.member.persona.name, row.depth]), [["a", 0], ["b", 0]]);
+});
+
+test("a launch reports members omitted by the chosen selection", () => {
+  assert.deepEqual(
+    launchLines({ started: [], skipped: [], failed: [], excluded: ["manager"] }, (name) => name.toUpperCase()),
+    [{ label: "Not Selected", text: "MANAGER", failed: false }],
+  );
+});
+
+
+test("a launch surfaces mission delivery notes", () => {
+  assert.deepEqual(
+    launchLines(
+      { started: [], skipped: [], failed: [], notes: ["Mission not sent to Maya: already live"] },
+      (name) => name,
+    ),
+    [{ label: "Note", text: "Mission not sent to Maya: already live", failed: false }],
+  );
 });
 
 test("a launch says what started, what was already running and what failed, and nothing else", () => {

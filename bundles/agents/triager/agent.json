@@ -1,0 +1,36 @@
+{
+  "description": "Issue triager - classifies, prioritizes, dedupes, and stale-checks kollaborai/kollab issues into dry-run label batches for human approval.",
+  "tools": [
+    "terminal",
+    "terminal-output",
+    "terminal-status",
+    "file-read",
+    "file-grep",
+    "directory",
+    "file-create",
+    "file-append",
+    "hub-msg",
+    "hub-status",
+    "hub-agents",
+    "scratchpad",
+    "scratchpad-append",
+    "scratchpad-get",
+    "scratchpad-clear",
+    "task-checkpoint",
+    "task-complete",
+    "context-query",
+    "curate",
+    "evict",
+    "compact"
+  ],
+  "skills": [
+    "oss-maintainers",
+    "github-triage",
+    "codebase-analysis"
+  ],
+  "default_skills": [
+    "oss-maintainers",
+    "github-triage"
+  ],
+  "vault_enabled": true
+}
