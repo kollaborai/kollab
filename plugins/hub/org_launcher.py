@@ -10,12 +10,18 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Set
+from typing import List, NamedTuple, Optional, Set, Tuple
 
 from kollabor_config.config_utils import get_config_directory, get_project_data_dir
 
 from .project_scope import is_project_scoped, resolve_project_root
-from .rosters import Team, load_library, team_launch_order, team_member_prompt
+from .rosters import (
+    Team,
+    effective_team,
+    load_library,
+    team_launch_order,
+    team_member_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +36,15 @@ class Launch(NamedTuple):
     started: List[str]  # launched and online
     running: List[str]  # already online in this folder, left alone
     failed: str = ""  # the member that never came online; the launch stopped there
+    excluded: Tuple[str, ...] = ()  # authored members omitted by the selection
 
     def notes(self, team: Team, mission: str = "") -> List[str]:
         """What the launch left alone or undone, one line each."""
         lines = []
         if self.running:
             lines.append(f"already online: {', '.join(self.running)}")
+        if self.excluded:
+            lines.append(f"excluded: {', '.join(self.excluded)}")
         if mission and team.lead in self.running:
             lines.append(
                 f"mission not sent, {team.lead} is already online: kollab --hub msg {team.lead} <mission>"
@@ -71,8 +80,16 @@ class OrgLauncher:
     def __init__(self, project_dir: str = ""):
         self.project_dir = project_dir or str(Path.cwd())
 
-    def launch_org(self, org_name: str, mission: str = "") -> Launch:
-        """Launch every member of a team that is not already online, lead first.
+    def launch_org(
+        self,
+        org_name: str,
+        mission: str = "",
+        *,
+        members: Optional[List[str]] = None,
+        exclude: Optional[List[str]] = None,
+        lead: Optional[str] = None,
+    ) -> Launch:
+        """Launch the selected members that are not already online, lead first.
 
         Each member is waited for before the next one starts: the lead then
         holds the coordinator seat, and a member that cannot start is reported
@@ -81,13 +98,22 @@ class OrgLauncher:
 
         Args:
             org_name: Name of the team to launch
-            mission: Optional mission/task for the lead (handed over at launch,
-                so a lead that is already online does not get it)
+            mission: Optional mission/task for the selected lead. A lead that is
+                already online does not get the mission.
+            members: Optional allowlist of persona names.
+            exclude: Optional denylist of persona names.
+            lead: Optional selected lead; required if the authored lead is omitted.
+
+        Raises:
+            ValueError: If the requested member selection or lead is invalid.
         """
         team = load_organization(org_name, self.project_dir)
-        launch = Launch([], [])
         if not team:
-            return launch
+            return Launch([], [])
+        team, excluded = effective_team(
+            team, members=members, exclude=exclude, lead=lead
+        )
+        launch = Launch([], [], excluded=tuple(excluded))
 
         for member in team_launch_order(team):
             persona = member.persona
