@@ -9,9 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from kollabor.application import TerminalLLMChat
+from kollabor.llm.agent_hud import AgentHudEntry
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.state import LocalStateService
 from kollabor.user_input_source import UserInputSource
+from kollabor_agent.queue_processor import TaggedInput
 from kollabor_events import EventBus, EventType, Hook, HookPriority
 
 
@@ -781,4 +783,47 @@ async def test_concurrent_pointer_advance_between_user_row_and_queue_start_canno
         "ordinary turn must parent from its admission-time user row, "
         f"not the pointer a concurrent completion advanced "
         f"({batch_kwargs['current_parent_uuid']})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_hud_rebatch_of_typed_turn_keeps_admission_parent():
+    """A pending-HUD rebatch of an ordinary typed turn must carry the
+    admission-time capture through the combined payload. The non-voice branch
+    collapses the batch into a bare string with no capture, so without the
+    fix the queue-start read falls back to the mutable pointer -- which a
+    detached completion may have advanced while this turn sat queued (#676
+    round 5)."""
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "native")
+    )
+    service._pending_agent_hud = [  # truthy: exercises the rebatch branch
+        AgentHudEntry("system", "hub_nudge", "[nudge] save notes")
+    ]
+    service.current_parent_uuid = "hub-assistant"  # already advanced by a detached completion
+    batch_spy = AsyncMock(return_value="assistant-row")
+    service._queue_processor = SimpleNamespace(
+        enqueue=AsyncMock(),
+        process_message_batch=batch_spy,
+        continue_conversation=AsyncMock(return_value="parent-3"),
+        turn_completed=False,
+        processing_queue=SimpleNamespace(full=MagicMock(return_value=False)),
+    )
+
+    typed = TaggedInput(
+        content="hello",
+        request_ids=("req-1",),
+        parent_uuid="user-row",  # frozen at admission (#676)
+    )
+    await service._process_message_batch([typed])
+
+    batch_spy.assert_awaited_once()
+    batch_kwargs = batch_spy.await_args.kwargs
+    assert batch_kwargs["current_parent_uuid"] == "user-row", (
+        "pending-HUD rebatch of a typed turn must parent from the "
+        f"admission-time capture, not the pointer a detached completion "
+        f"advanced ({batch_kwargs['current_parent_uuid']})"
     )

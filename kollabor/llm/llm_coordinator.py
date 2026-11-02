@@ -1725,6 +1725,20 @@ class LLMService:
     async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
         request_ids = batch_request_ids(messages)
+        # Keep the admission-time capture through the rebatch (#676): the
+        # most recent capture, since the pointer today lands on the last row
+        # admitted into the batch. Read BEFORE the rebatch so the non-voice
+        # branch (bare combined payload, no capture on it) keeps the value
+        # for the queue-start read below; otherwise a detached completion
+        # that advanced the pointer mid-queue would mis-parent the turn.
+        admission_parent = next(
+            (
+                m.parent_uuid
+                for m in reversed(messages)
+                if getattr(m, "parent_uuid", None)
+            ),
+            None,
+        )
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
             merged_origin_context = merge_voice_origin_contexts(messages)
@@ -1732,23 +1746,12 @@ class LLMService:
                 [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
             combined = self.merge_pending_agent_hud(combined)
-            # Keep the admission-time capture through the rebatch (#676):
-            # the most recent capture, since the pointer today lands on the
-            # last row admitted into the batch.
-            rebatch_parent = next(
-                (
-                    m.parent_uuid
-                    for m in reversed(messages)
-                    if getattr(m, "parent_uuid", None)
-                ),
-                None,
-            )
             messages = [
                 QueuedInput(
                     combined,
                     voice_inputs[-1].voice,
                     merged_origin_context,
-                    parent_uuid=rebatch_parent,
+                    parent_uuid=admission_parent,
                 )
                 if voice_inputs
                 else combined
@@ -1763,7 +1766,7 @@ class LLMService:
                 for m in reversed(messages)
                 if getattr(m, "parent_uuid", None)
             ),
-            self.current_parent_uuid,
+            admission_parent or self.current_parent_uuid,
         )
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
