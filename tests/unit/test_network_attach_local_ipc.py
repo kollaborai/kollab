@@ -29,9 +29,14 @@ def test_a_refused_agent_connect_goes_through_local_ipc_with_the_read_limit(
     async def target(peer, agent_id, name):
         return socket_path
 
+    async def guarded_request(*args, **kwargs):
+        raise AssertionError("the refused local connection must not send data")
+
     async def run():
         attach = NetworkAttach(
             request=None,
+            guarded_request=guarded_request,
+            capture_peer_guard=lambda _: lambda: True,
             target=target,
             peer_name=lambda key: "mac",
             notice=lambda text: None,

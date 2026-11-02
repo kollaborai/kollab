@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
 - Coordinator task assignments survive restarts in a durable dispatch ledger,
   suppress re-routing delivered work, and keep completion reports unverified
   until the original assigner verifies a worktree or commit reference (#636).
@@ -151,6 +152,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Network: withdrawing access stops queued remote-agent input and output before
+  network submission; bytes already sent may still arrive (#524).
 - Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
   `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
   internal agent message-tool syntax (#622).
