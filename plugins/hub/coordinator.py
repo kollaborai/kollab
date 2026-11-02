@@ -326,6 +326,35 @@ class WorkQueue:
 
         return self._mutate(_append)
 
+    def link_task_card(self, slot_id: str, task_card_id: str) -> Optional[WorkSlot]:
+        """Persist the TaskLedger card paired with a queue slot.
+
+        Re-linking the same card is idempotent. A different card never
+        replaces an existing durable association.
+        """
+        card_id = (task_card_id or "").strip()
+        if not card_id:
+            return None
+
+        def _link(slots: List[WorkSlot]) -> Tuple[Optional[WorkSlot], bool]:
+            for slot in slots:
+                if slot.id != slot_id:
+                    continue
+                if slot.task_card_id and slot.task_card_id != card_id:
+                    logger.warning(
+                        "Work slot %s already links to task card %s",
+                        slot_id,
+                        slot.task_card_id,
+                    )
+                    return None, False
+                if slot.task_card_id == card_id:
+                    return slot, False
+                slot.task_card_id = card_id
+                return slot, True
+            return None, False
+
+        return self._mutate(_link)
+
     def claim_next(self, agent_identity: str, project: str = "") -> Optional[WorkSlot]:
         """Claim the next available work slot."""
 
@@ -394,7 +423,7 @@ class WorkQueue:
 
     def sweep_stale(
         self, checker: Optional[Callable[[str], Optional[str]]] = None
-    ) -> List[Tuple[str, str]]:
+    ) -> List[WorkSlot]:
         """Retire dead slots: completed ones always, pending ones whose
         explicitly registered upstream refs are all terminal.
 
@@ -424,15 +453,17 @@ class WorkQueue:
         every still-completed slot, are retired. Anything appended or
         claimed while the checkers ran is preserved.
 
-        Returns ``(slot_id, reason)`` pairs and saves once, only when
-        something was retired.
+        Returns retired WorkSlot snapshots. Paired retired slots are
+        returned again on later sweeps so TaskLedger cleanup can retry
+        after transient persistence failures.
         """
         if checker is None:
             checker = github_terminal_state
+        snapshot = self._load()
         decisions: Dict[str, str] = {}
         states: Dict[str, Optional[str]] = {}
         budget = MAX_UPSTREAM_CHECKS
-        for slot in self._load():
+        for slot in snapshot:
             if slot.status == "completed":
                 decisions[slot.id] = "terminal slot (completed)"
                 continue
@@ -462,27 +493,40 @@ class WorkQueue:
             if reasons:
                 decisions[slot.id] = "; ".join(reasons)
         if not decisions:
-            return []
+            return [
+                slot
+                for slot in snapshot
+                if slot.status == "retired" and slot.task_card_id
+            ]
 
         def _retire(
             slots: List[WorkSlot],
-        ) -> Tuple[List[Tuple[str, str]], bool]:
-            retired: List[Tuple[str, str]] = []
+        ) -> Tuple[List[WorkSlot], bool]:
+            retired = [
+                slot
+                for slot in slots
+                if slot.status == "retired" and slot.task_card_id
+            ]
+            changed = False
             for slot in slots:
+                if slot.status == "retired":
+                    continue
                 verdict = decisions.get(slot.id)
                 if slot.status == "completed":
                     # Completed after phase 1 still counts: terminal is
                     # terminal, and nothing un-completes a slot.
                     slot.status = "retired"
                     slot.retired_reason = "terminal slot (completed)"
-                    retired.append((slot.id, slot.retired_reason))
+                    retired.append(slot)
+                    changed = True
                     logger.info(f"Retired stale work {slot.id}: completed")
                 elif verdict and slot.status == "pending":
                     slot.status = "retired"
                     slot.retired_reason = verdict
-                    retired.append((slot.id, verdict))
+                    retired.append(slot)
+                    changed = True
                     logger.info(f"Retired stale work {slot.id}: {verdict}")
-            return retired, bool(retired)
+            return retired, changed
 
         return self._mutate(_retire)
 

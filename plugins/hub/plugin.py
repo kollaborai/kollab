@@ -75,6 +75,7 @@ from .models import (
     AgentState,
     HubMessage,
     MessageScope,
+    WorkSlot,
     desired_bundle_for_identity,
 )
 from .notifier import HubNotifier, NtfyNotifier, load_ntfy_settings
@@ -7811,9 +7812,48 @@ class HubPlugin(BasePlugin):
             # every heartbeat tick, and never fatal to the heartbeat.
             if self._queue_sweep_scheduler.due(time.monotonic()):
                 try:
-                    await asyncio.to_thread(self._work_queue.sweep_stale)
+                    await asyncio.to_thread(self._sweep_stale_work_queue)
                 except Exception as e:
                     logger.warning(f"Work-queue sweep failed: {e}")
+
+    def _sweep_stale_work_queue(self) -> List[WorkSlot]:
+        """Retire stale slots and terminalize their paired ledger cards.
+
+        Retired linked slots are returned by later sweeps too, so a transient
+        ledger write failure is retried instead of leaving an open card behind.
+        """
+        if not self._work_queue:
+            return []
+        retired = self._work_queue.sweep_stale()
+        if not self._task_ledger:
+            return retired
+
+        for slot in retired:
+            if not slot.task_card_id:
+                continue
+            reason = slot.retired_reason or "stale work queue slot retired"
+            try:
+                card = self._task_ledger.terminalize(
+                    slot.task_card_id,
+                    status="cancelled",
+                    reason=f"work queue slot [{slot.id}] retired: {reason}",
+                    actor="work-queue-sweep",
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not cancel task card %s for retired work slot %s: %s",
+                    slot.task_card_id,
+                    slot.id,
+                    e,
+                )
+                continue
+            if card is None:
+                logger.warning(
+                    "Task card %s for retired work slot %s is missing",
+                    slot.task_card_id,
+                    slot.id,
+                )
+        return retired
 
     async def _try_assign_work(self) -> None:
         """Try to assign pending work to idle agents using capability matching."""
@@ -15732,9 +15772,10 @@ class HubPlugin(BasePlugin):
         )
         # Dual-write to the durable open ledger queue (issue #211): open
         # cards are what the idle supervisor watches and what survives
-        # coordinator restarts. The WorkQueue slot keeps legacy claim
-        # behavior; the card's checkpoint cross-references the slot id.
+        # coordinator restarts. Persist both a human-readable checkpoint and
+        # a durable WorkSlot -> TaskLedger card id for stale-sweep cleanup.
         card = None
+        card_warning = None
         if self._task_ledger and self._identity:
             try:
                 card = self._task_ledger.enqueue(
@@ -15743,11 +15784,75 @@ class HubPlugin(BasePlugin):
                     report_to=self._identity.identity,
                     project=self._identity.project,
                 )
+            except Exception as e:
+                logger.warning("Open-card enqueue failed for slot %s: %s", slot.id, e)
+                card_warning = "TaskLedger card could not be created"
+
+        if card:
+            try:
                 card.add_checkpoint(f"queued as slot [{slot.id}]")
                 self._task_ledger._save(card)
             except Exception as e:
-                logger.debug(f"open-card enqueue failed for slot {slot.id}: {e}")
-        suffix = f" + open card [{card.id}]" if card else ""
+                logger.warning(
+                    "Could not save slot checkpoint for task card %s: %s", card.id, e
+                )
+                card_warning = "TaskLedger checkpoint could not be saved"
+
+            try:
+                linked_slot = self._work_queue.link_task_card(slot.id, card.id)
+            except Exception as e:
+                linked_slot = None
+                logger.warning(
+                    "Could not link task card %s to work slot %s: %s",
+                    card.id,
+                    slot.id,
+                    e,
+                )
+            if linked_slot is None:
+                card_warning = "work-slot link failed; card cancellation attempted"
+                try:
+                    card = self._task_ledger.terminalize(
+                        card.id,
+                        status="cancelled",
+                        reason=f"work queue slot [{slot.id}] could not be linked",
+                        actor="work-queue-link",
+                    ) or card
+                except Exception as e:
+                    card_warning = "work-slot link and card cancellation failed"
+                    logger.error(
+                        "Could not cancel unlinked task card %s for work slot %s: %s",
+                        card.id,
+                        slot.id,
+                        e,
+                    )
+            elif linked_slot.status == "retired":
+                card_warning = (
+                    "slot retired before card link; card cancellation attempted"
+                )
+                try:
+                    card = self._task_ledger.terminalize(
+                        card.id,
+                        status="cancelled",
+                        reason=(
+                            f"work queue slot [{slot.id}] was already retired: "
+                            f"{linked_slot.retired_reason or 'stale'}"
+                        ),
+                        actor="work-queue-sweep",
+                    ) or card
+                except Exception as e:
+                    card_warning = (
+                        "slot retired before link and card cancellation failed"
+                    )
+                    logger.error(
+                        "Could not cancel task card %s for already-retired slot %s: %s",
+                        card.id,
+                        slot.id,
+                        e,
+                    )
+
+        suffix = f" + {card.status} card [{card.id}]" if card else ""
+        if card_warning:
+            suffix += f" (warning: {card_warning})"
         return f"queued: [{slot.id}] {task[:60]}{suffix}"
 
     async def _handle_claim_command(self, slot_id: str) -> str:

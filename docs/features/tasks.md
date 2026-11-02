@@ -21,11 +21,14 @@ Tools (registered in plugins/hub/plugin.py):
 
 ## System 2: Work Queue (lightweight dispatch)
 
-Location: plugins/hub/plugin.py (inline)
+Location: plugins/hub/coordinator.py (queue state and sweep);
+plugins/hub/plugin.py (commands and integration)
 
-A simple FIFO queue for dispatching work items to agents. Items are
-claimed by agents and tracked in memory. Use these for one-shot tasks
-that don't need compaction-proof persistence.
+A simple FIFO queue for dispatching work items to agents. Slots are
+persisted and claimed by agents. When the TaskLedger and agent identity are
+available, each queue item is paired with a durable TaskLedger card; the slot
+remains the dispatch unit and its card is cancelled if stale-queue cleanup
+retires the slot.
 
 Tools:
 
@@ -62,6 +65,11 @@ Associate explicit GitHub issues or pull requests with the queued work:
 
 `upstream_refs` is optional. The queue does not infer references from the
 work description; only explicitly supplied refs are used by stale-queue cleanup.
+
+The manual `/hub queue` command accepts only a task description and does not
+pass `upstream_refs`. Slots created through that command therefore have no
+upstream refs and are not retired based on issue or pull-request state. Use the
+`hub_queue` tool with explicit refs when ref-based stale cleanup is needed.
 
 Claim next item:
   `<hub_claim>item-id</hub_claim>`

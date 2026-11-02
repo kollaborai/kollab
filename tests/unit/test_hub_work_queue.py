@@ -45,7 +45,9 @@ def test_sweep_stale_retires_merged_pr_across_restart(tmp_path, monkeypatch, cap
     with caplog.at_level(logging.INFO, logger="plugins.hub.coordinator"):
         retired = queue.sweep_stale(lambda ref: f"{ref} merged")
 
-    assert retired == [(stale.id, "#219 merged")]
+    assert [(slot.id, slot.retired_reason) for slot in retired] == [
+        (stale.id, "#219 merged")
+    ]
 
     # A fresh WorkQueue (the "restart") must not serve the slot again.
     fresh = WorkQueue()
@@ -95,7 +97,10 @@ def test_sweep_stale_requires_every_ref_terminal(tmp_path, monkeypatch):
     def checker(ref):
         return None if ref == "#101" else f"{ref} merged"
 
-    assert queue.sweep_stale(checker) == [(done.id, "#100 merged; #102 merged")]
+    retired = queue.sweep_stale(checker)
+    assert [(slot.id, slot.retired_reason) for slot in retired] == [
+        (done.id, "#100 merged; #102 merged")
+    ]
     assert [s.id for s in WorkQueue().get_pending()] == [mixed.id]
 
 
@@ -235,7 +240,9 @@ def test_concurrent_add_survives_sweep(tmp_path, monkeypatch):
     release.set()
     sweeper.join(timeout=10)
 
-    assert result["retired"] == [(stale.id, "#571 closed")]
+    assert [(slot.id, slot.retired_reason) for slot in result["retired"]] == [
+        (stale.id, "#571 closed")
+    ]
     states = {s.id: s.status for s in queue.get_all()}
     assert states[added.id] == "pending", "concurrent append was erased"
     assert states[stale.id] == "retired"
@@ -353,7 +360,10 @@ def test_sweep_uses_only_explicit_upstream_refs(tmp_path, monkeypatch):
     queue = WorkQueue()
     stale = queue.add("wrap up #571 docs", upstream_refs=["#571"])
 
-    assert queue.sweep_stale(lambda ref: f"{ref} merged") == [(stale.id, "#571 merged")]
+    retired = queue.sweep_stale(lambda ref: f"{ref} merged")
+    assert [(slot.id, slot.retired_reason) for slot in retired] == [
+        (stale.id, "#571 merged")
+    ]
 
 
 def test_sweep_budget_bounds_upstream_checks(tmp_path, monkeypatch):
@@ -414,7 +424,9 @@ def test_sweep_retires_completed_slots(tmp_path, monkeypatch):
 
     retired = queue.sweep_stale(counting_checker)
 
-    assert retired == [(done.id, "terminal slot (completed)")]
+    assert [(slot.id, slot.retired_reason) for slot in retired] == [
+        (done.id, "terminal slot (completed)")
+    ]
     assert calls == [], "completed retirement must not touch upstream"
     states = {s.id: s.status for s in queue.get_all()}
     assert states[done.id] == "retired"
