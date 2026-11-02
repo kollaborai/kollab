@@ -36,6 +36,14 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Pin the suite to this package's own source tree. Runs rooted at the repo
+# top get pythonpath from the root pyproject; a run rooted HERE (bare
+# `pytest packages/kollabor-engine/tests`, e.g. inside a worktree) reads
+# this ini instead, and without pythonpath the editable install silently
+# wins: the suite imports kollabor_engine from another checkout and can
+# report green against the wrong tree. "src" keeps kollabor_engine local;
+# ".." exposes repo-root plugins/ the way the root ini's "." does.
+pythonpath = ["src", ".."]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kollabor_engine"]
