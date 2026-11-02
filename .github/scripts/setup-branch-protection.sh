@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Configure the "main protection" ruleset that guards main (classic branch
-# protection is not used). Applying needs admin access to the repo (the
-# kollaborai account). `--check` is read-only; GitHub discloses bypass_actors
-# only to users with ruleset write access. It exits 1 on drift or hidden data.
+# Configure the "main protection" repository ruleset. Existing classic branch
+# protection is separate and this script leaves it unchanged. Applying needs
+# admin access to the repo (the kollaborai account). `--check` is read-only and
+# exits 1 on drift or hidden data. GitHub returns bypass_actors only to users
+# with ruleset write access.
 # Both check and apply require the exact all-path CODEOWNERS policy on main, so
 # applying this ruleset before that file lands cannot strand the repository.
 #
@@ -78,13 +79,14 @@ for owner in maarco kollaborai; do
 done
 
 # integration_id 15368 is GitHub Actions: no other app can satisfy a check.
-# Do not write bypass_actors in apply mode. `--check` separately verifies that
-# the list is empty so hidden or unexpected actors cannot pass.
+# Include bypass_actors explicitly in the API payload, then read the ruleset
+# back after applying it. `--check` also verifies that the visible list is empty.
 expected_bypass='[]'
 ruleset='{
   "name": "main protection",
   "target": "branch",
   "enforcement": "active",
+  "bypass_actors": [],
   "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
   "rules": [
     {"type": "deletion"},
@@ -139,7 +141,31 @@ echo "Configuring ruleset \"main protection\" for $repo"
 if [[ -n "$id" ]]; then
   gh api "repos/$repo/rulesets/$id" --method PUT --input - <<<"$ruleset" >/dev/null
 else
-  gh api "repos/$repo/rulesets" --method POST --input - <<<"$ruleset" >/dev/null
+  created_ruleset="$(gh api "repos/$repo/rulesets" --method POST --input - <<<"$ruleset")"
+  if ! id="$(jq -er '.id | select(type == "number")' <<<"$created_ruleset" 2>/dev/null)"; then
+    echo "Created the main protection ruleset but could not identify it for readback verification."
+    exit 1
+  fi
+fi
+
+if [[ -z "$id" ]]; then
+  echo "Could not identify the main protection ruleset for readback verification."
+  exit 1
+fi
+
+if ! applied_ruleset="$(gh api "repos/$repo/rulesets/$id" 2>/dev/null)"; then
+  echo "Could not read back the main protection ruleset after applying it."
+  exit 1
+fi
+if ! jq -e 'has("bypass_actors") and (.bypass_actors | type == "array")' <<<"$applied_ruleset" >/dev/null; then
+  echo "Cannot verify bypass_actors after apply; GitHub discloses this field only to users with ruleset write access."
+  exit 1
+fi
+applied="$(jq -S '{name, target, enforcement, bypass_actors, conditions, rules}' <<<"$applied_ruleset")"
+expected="$(jq -S '{name, target, enforcement, bypass_actors, conditions, rules}' <<<"$ruleset")"
+if ! diff <(echo "$expected") <(echo "$applied"); then
+  echo "Applied ruleset does not match the requested protection policy on $repo; refusing success."
+  exit 1
 fi
 
 # Automatic arming is disabled. Leave the separate auto-merge setting untouched.

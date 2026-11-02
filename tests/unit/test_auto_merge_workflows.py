@@ -58,8 +58,12 @@ def test_manual_notice_has_no_write_authority_or_github_calls(tmp_path):
     assert not marker.exists()
 
 
-@pytest.mark.skipif(not shutil.which("bash"), reason="branch-protection setup uses bash")
-def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path):
+@pytest.mark.skipif(
+    not shutil.which("bash") or not shutil.which("jq"),
+    reason="branch-protection setup uses bash and jq",
+)
+@pytest.mark.parametrize("existing_ruleset", [True, False])
+def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path, existing_ruleset):
     fakebin = tmp_path / "bin"
     fakebin.mkdir()
     log = tmp_path / "calls.jsonl"
@@ -79,10 +83,15 @@ def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path):
         "    print('write')\n"
         "elif args[0] == 'api' and '/collaborators/kollaborai/permission' in args[1]:\n"
         "    print('admin')\n"
-        "elif args[0] == 'api' and args[1].endswith('/rulesets'):\n"
-        "    print('123')\n"
-        "elif args[0] == 'api' and args[1].endswith('/rulesets/123'):\n"
+        "elif args[0] == 'api' and args[1].endswith('/rulesets') and '--method' in args:\n"
         "    pathlib.Path(os.environ['FAKE_RULESET']).write_text(sys.stdin.read())\n"
+        "    print(json.dumps({'id': 123}))\n"
+        "elif args[0] == 'api' and args[1].endswith('/rulesets'):\n"
+        "    print('123' if os.environ.get('FAKE_EXISTING_RULESET', 'true') == 'true' else '')\n"
+        "elif args[0] == 'api' and args[1].endswith('/rulesets/123'):\n"
+        "    p = pathlib.Path(os.environ['FAKE_RULESET'])\n"
+        "    if '--method' in args: p.write_text(sys.stdin.read())\n"
+        "    else: print(p.read_text())\n"
         "elif args[0] == 'api' and args[1] == 'repos/example/project':\n"
         "    pass\n"
         "else:\n"
@@ -97,6 +106,7 @@ def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path):
         FAKE_GH_LOG=str(log),
         FAKE_RULESET=str(tmp_path / "applied-ruleset.json"),
         FAKE_CODEOWNERS=base64.b64encode(CODEOWNERS_BODY.encode()).decode(),
+        FAKE_EXISTING_RULESET=str(existing_ruleset).lower(),
     )
 
     subprocess.run(
@@ -114,7 +124,17 @@ def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path):
     assert len(patches) == 1
     fields = [patches[0][i + 1] for i, arg in enumerate(patches[0][:-1]) if arg == "-F"]
     assert fields == ["allow_merge_commit=true"]
+    ruleset_calls = [call for call in calls if call[0] == "api" and call[1].endswith("/rulesets/123")]
+    mutation_calls = [call for call in calls if call[0] == "api" and "--method" in call and "/rulesets" in call[1]]
+    assert len(ruleset_calls) == (2 if existing_ruleset else 1)
+    assert len(mutation_calls) == 1
+    expected_method = "PUT" if existing_ruleset else "POST"
+    assert mutation_calls[0][mutation_calls[0].index("--method") + 1] == expected_method
+    readback = ruleset_calls[-1]
+    assert "--method" not in readback
+    assert calls.index(readback) < calls.index(patches[0])
     applied_ruleset = json.loads(Path(env["FAKE_RULESET"]).read_text())
+    assert applied_ruleset["bypass_actors"] == []
     pull_request_rule = next(rule for rule in applied_ruleset["rules"] if rule["type"] == "pull_request")
     assert pull_request_rule["parameters"]["required_approving_review_count"] == 1
     assert pull_request_rule["parameters"]["require_code_owner_review"] is True
@@ -133,6 +153,87 @@ def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path):
     ]
     assert any("/collaborators/maarco/permission" in arg for call in calls for arg in call)
     assert any("/collaborators/kollaborai/permission" in arg for call in calls for arg in call)
+
+
+@pytest.mark.skipif(
+    not shutil.which("bash") or not shutil.which("jq"),
+    reason="branch-protection setup uses bash and jq",
+)
+@pytest.mark.parametrize("readback_case", ["nonempty_bypass", "hidden_bypass", "protection_mismatch"])
+def test_branch_protection_apply_fails_when_ruleset_readback_does_not_match(tmp_path, readback_case):
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    log = tmp_path / "calls.jsonl"
+    saved = tmp_path / "ruleset.json"
+    gh = fakebin / "gh"
+    gh.write_text(
+        f'''#!{sys.executable}
+import json, os, pathlib, sys
+args = sys.argv[1:]
+with open(os.environ['FAKE_GH_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')
+if args[:2] == ['auth', 'status']:
+    pass
+elif args[:2] == ['repo', 'view']:
+    print('example/project')
+elif args[0] == 'api' and '/contents/.github/CODEOWNERS?ref=main' in args[1]:
+    print(json.dumps({{'encoding': 'base64', 'content': os.environ['FAKE_CODEOWNERS']}}))
+elif args[0] == 'api' and '/collaborators/maarco/permission' in args[1]:
+    print('write')
+elif args[0] == 'api' and '/collaborators/kollaborai/permission' in args[1]:
+    print('admin')
+elif args[0] == 'api' and args[1].endswith('/rulesets'):
+    print('123')
+elif args[0] == 'api' and args[1].endswith('/rulesets/123'):
+    p = pathlib.Path(os.environ['FAKE_RULESET'])
+    if '--method' in args:
+        p.write_text(sys.stdin.read())
+    else:
+        data = json.loads(p.read_text())
+        case = os.environ['FAKE_READBACK_CASE']
+        if case == 'nonempty_bypass':
+            data['bypass_actors'] = [{{'actor_id': 9, 'actor_type': 'User', 'bypass_mode': 'always'}}]
+        elif case == 'hidden_bypass':
+            data.pop('bypass_actors', None)
+        elif case == 'protection_mismatch':
+            for rule in data['rules']:
+                if rule['type'] == 'pull_request':
+                    rule['parameters']['required_approving_review_count'] = 2
+        print(json.dumps(data))
+elif args[0] == 'api' and args[1] == 'repos/example/project':
+    pass
+else:
+    sys.exit(2)
+'''
+    )
+    gh.chmod(0o755)
+    env = dict(os.environ)
+    for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        env.pop(key, None)
+    env.update(
+        PATH=f"{fakebin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
+        FAKE_GH_LOG=str(log),
+        FAKE_RULESET=str(saved),
+        FAKE_CODEOWNERS=base64.b64encode(CODEOWNERS_BODY.encode()).decode(),
+        FAKE_READBACK_CASE=readback_case,
+    )
+
+    result = subprocess.run(
+        ["bash", str(ROOT / ".github" / "scripts" / "setup-branch-protection.sh")],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert result.returncode == 1
+    assert any(call[0] == "api" and call[1].endswith("/rulesets/123") and "--method" in call for call in calls)
+    assert any(call[0] == "api" and call[1].endswith("/rulesets/123") and "--method" not in call for call in calls)
+    assert not any(call[:2] == ["api", "repos/example/project"] for call in calls)
+    if readback_case == "hidden_bypass":
+        assert "ruleset write access" in result.stdout
+    else:
+        assert "Applied ruleset does not match" in result.stdout
 
 
 @pytest.mark.parametrize("main_codeowners", ["", "* @someone\n"])
@@ -278,18 +379,22 @@ def test_branch_protection_check_requires_one_code_owner_approval_and_visible_em
         "        p.write_text(sys.stdin.read())\n"
         "    else:\n"
         "        data = json.loads(p.read_text())\n"
-        "        case = os.environ['FAKE_BYPASS']\n"
-        "        for rule in data['rules']:\n"
-        "            if rule['type'] == 'pull_request':\n"
-        "                rule['parameters']['required_approving_review_count'] = int(os.environ["
+        "        marker = pathlib.Path(os.environ['FAKE_VERIFY_MARKER'])\n"
+        "        if marker.exists():\n"
+        "            case = os.environ['FAKE_BYPASS']\n"
+        "            for rule in data['rules']:\n"
+        "                if rule['type'] == 'pull_request':\n"
+        "                    rule['parameters']['required_approving_review_count'] = int(os.environ["
         "'FAKE_APPROVAL_COUNT'])\n"
-        "                rule['parameters']['require_code_owner_review'] = os.environ["
+        "                    rule['parameters']['require_code_owner_review'] = os.environ["
         "'FAKE_CODEOWNER_REVIEW'] == 'true'\n"
-        "        if case == 'empty': data['bypass_actors'] = []\n"
-        "        elif case == 'hidden': data.pop('bypass_actors', None)\n"
-        "        elif case == 'null': data['bypass_actors'] = None\n"
-        "        elif case == 'unexpected': data['bypass_actors'] = ["
+        "            if case == 'empty': data['bypass_actors'] = []\n"
+        "            elif case == 'hidden': data.pop('bypass_actors', None)\n"
+        "            elif case == 'null': data['bypass_actors'] = None\n"
+        "            elif case == 'unexpected': data['bypass_actors'] = ["
         "{'actor_id': 5, 'actor_type': 'RepositoryRole', 'bypass_mode': 'always'}]\n"
+        "        else:\n"
+        "            marker.touch()\n"
         "        print(json.dumps(data))\n"
         "elif args[0] == 'api' and args[1] == 'repos/example/project':\n"
         "    if '--jq' in args: print('true')\n"
@@ -304,6 +409,7 @@ def test_branch_protection_check_requires_one_code_owner_approval_and_visible_em
         PATH=f"{fakebin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
         FAKE_GH_LOG=str(log),
         FAKE_RULESET=str(saved),
+        FAKE_VERIFY_MARKER=str(tmp_path / "post-apply-readback"),
         FAKE_BYPASS=bypass,
         FAKE_APPROVAL_COUNT=str(approval_count),
         FAKE_CODEOWNER_REVIEW=str(code_owner_review).lower(),
