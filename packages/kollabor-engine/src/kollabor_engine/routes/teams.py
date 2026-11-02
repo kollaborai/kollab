@@ -1,7 +1,7 @@
 """Team routes: list the teams and launch one into a folder (docs/specs/rosters-and-teams.md)."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request  # type: ignore[import-not-found]
 from pydantic import BaseModel
@@ -21,6 +21,10 @@ class LaunchTeamRequest(BaseModel):
     # One profile for every member. Without it, each member's own; a member with none
     # starts on what POST /sessions picks when it is given no profile.
     profile: Optional[str] = None
+    members: Optional[List[str]] = None
+    exclude: Optional[List[str]] = None
+    lead: Optional[str] = None
+    mission: Optional[str] = None
 
 
 def team_dict(team: Any) -> Dict[str, Any]:
@@ -55,7 +59,7 @@ async def list_teams(
 
 @router.post("/{name}/launch")
 async def launch_team(name: str, body: LaunchTeamRequest, request: Request) -> Dict[str, Any]:
-    """Start every member of a team that is not already live in the folder, lead first.
+    """Start selected members that are not already live in the folder, lead first.
 
     Each member starts through ``POST /sessions`` (same code, same registry), so it
     shows in the sidebar like any chat. A member already live is skipped, which makes
@@ -63,12 +67,23 @@ async def launch_team(name: str, body: LaunchTeamRequest, request: Request) -> D
     folder does not count), and a member that fails to start is reported without
     stopping the rest.
     """
-    from plugins.hub.rosters import team_launch_order, team_member_prompt
+    from plugins.hub.rosters import (
+        LibraryError,
+        effective_team,
+        team_launch_order,
+        team_member_prompt,
+    )
 
     folder = folder_of(body.workspace)
     team = load(folder).teams.get(name)
     if team is None:
         raise HTTPException(status_code=404, detail=f"team '{name}' not found")
+    try:
+        team, excluded = effective_team(
+            team, members=body.members, exclude=body.exclude, lead=body.lead
+        )
+    except LibraryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     result: Dict[str, Any] = {
         "team": team.name,
@@ -77,7 +92,9 @@ async def launch_team(name: str, body: LaunchTeamRequest, request: Request) -> D
         "skipped": [],
         "failed": [],
         "sessions": [],
+        "excluded": excluded,
     }
+    notes: List[str] = []
     for member in team_launch_order(team):
         persona = member.persona
         if any(
@@ -85,6 +102,8 @@ async def launch_team(name: str, body: LaunchTeamRequest, request: Request) -> D
             for a in agents_in_folder(_bridge.get_agents(use_cache=False), folder)
         ):
             result["skipped"].append({"persona": persona.name, "reason": "live"})
+            if persona.name == team.lead and body.mission:
+                notes.append(f"mission not sent, {team.lead} is already live")
             continue
         ref = f"{persona.roster}/{persona.name}" if persona.roster else persona.name
         try:
@@ -100,7 +119,26 @@ async def launch_team(name: str, body: LaunchTeamRequest, request: Request) -> D
             )
         except HTTPException as exc:
             result["failed"].append({"persona": persona.name, "error": str(exc.detail)})
+            if persona.name == team.lead and body.mission:
+                notes.append(f"mission not sent, {team.lead} failed to start")
             continue
         result["started"].append(persona.name)
         result["sessions"].append(session)
+        if body.mission and persona.name == team.lead:
+            try:
+                from ..server import get_session_registry
+
+                session_id = session.get("session_id") if isinstance(session, dict) else None
+                engine_session = get_session_registry().get(session_id)
+                if engine_session is None:
+                    raise RuntimeError("session is not registered")
+                accepted = await engine_session.send_message(body.mission)
+                if not accepted.get("accepted"):
+                    reason = accepted.get("message") or accepted.get("reason") or "rejected"
+                    notes.append(f"mission not sent to {team.lead}: {reason}")
+            except Exception as exc:
+                logger.warning("team mission for %s was not sent: %s", team.lead, exc)
+                notes.append(f"mission not sent to {team.lead}: {exc}")
+    if notes:
+        result["notes"] = notes
     return result
