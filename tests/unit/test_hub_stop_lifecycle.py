@@ -270,7 +270,7 @@ def test_stop_all_stops_peers_concurrently():
             )
         )
 
-        async def stop_peer(agent, reason):
+        async def stop_peer(agent, reason, session=None):
             await asyncio.sleep(0.1)
             return "stopped"
 

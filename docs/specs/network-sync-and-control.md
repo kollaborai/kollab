@@ -117,10 +117,16 @@ What option A still cannot stop, stated so nobody claims more:
 
 - `kollab --hub stop all` (`kollabor/cli.py:1752`) stops the agents of this
   project folder only: hub socket shutdown, then SIGTERM, then SIGKILL
-  (`_stop_agent_record`, `kollabor/cli.py:1607`). `/hub stop all` in the TUI
-  is scoped to the agents that session started: peers launched by other lanes
-  or the operator are immune, and the startup status advertises the command
-  only to sessions that started agents (`plugins/hub/plugin.py:14227`).
+  (`_stop_agent_record`, `kollabor/cli.py:1607`). Run from an agent context
+  (KOLLAB_TOOL_SHELL/KOLLAB_AGENT_PID markers present) it refuses without an
+  explicit `--confirm`, so a spawned agent cannot bypass the caller-scoped
+  sweep by shelling to the CLI. `/hub stop all` in the TUI is scoped to the
+  agents that session started: peers launched by other lanes or the operator
+  are immune, and the startup status advertises the command only to sessions
+  that started agents (`plugins/hub/plugin.py:14227`). Fallback escalation
+  revalidates the orchestrator's process handle at signal time and withholds
+  raw-pid signals when the tracked process exited mid-stop (PID-reuse
+  guard), so a recycled PID is never signaled.
 - A remote handle is refused: "spawn, stop and wake stay local"
   (`plugins/hub/plugin.py:12352`). No network-wide stop exists.
 - `kollab service` agents come back by themselves: systemd `Restart=always`

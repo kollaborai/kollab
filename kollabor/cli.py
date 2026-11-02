@@ -1912,6 +1912,24 @@ async def _handle_cli_hub(hub_args: list) -> None:
         target = rest[0]
 
         if target == "all":
+            # Issue #669 r2: agent contexts carry trusted-shell markers
+            # (KOLLAB_TOOL_SHELL/KOLLAB_AGENT_PID), so a spawned agent could
+            # otherwise bypass the caller-scoped /hub stop all by shelling to
+            # this CLI and stopping agents it does not own. Refuse without an
+            # explicit --confirm from the operator.
+            from plugins.hub.network_halt import TOOL_SHELL_VARS
+
+            if (
+                any(os.environ.get(var) for var in TOOL_SHELL_VARS)
+                and "--confirm" not in rest
+            ):
+                print(
+                    "refusing `stop all`: agent-context markers present; agents "
+                    "may not stop other agents. the operator may rerun with "
+                    "--confirm.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             agents = _get_live_agents()
             if not agents:
                 print("no agents online")

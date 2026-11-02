@@ -198,7 +198,7 @@ same reply still run, but you only see their results on your next turn.
 commands:
   <hub_broadcast>message</hub_broadcast>         broadcast announcement
   <hub_stop>identity</hub_stop>               stop a specific agent
-  <hub_stop>all</hub_stop>                       stop all agents
+  <hub_stop>all</hub_stop>                       stop agents you started (others immune)
   <hub_status />                                 get current hub status
 
 ### scratchpad (ephemeral notes)

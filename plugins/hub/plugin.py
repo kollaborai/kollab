@@ -14280,6 +14280,7 @@ class HubPlugin(BasePlugin):
             results = []
             managed = self._locally_managed_sessions()
             stop_targets = []
+            owned_sessions = []
             immune = []
             for agent in peers:
                 if agent.agent_id == self._identity.agent_id:
@@ -14292,15 +14293,21 @@ class HubPlugin(BasePlugin):
                     and self._presence_generation_matches(session, agent)
                 ):
                     stop_targets.append(agent)
+                    owned_sessions.append(session)
                 else:
                     immune.append(agent.identity)
+            # Carry each target's session into the stop call: the sweep's
+            # ownership gate runs before dispatch, but the tracked process can
+            # exit during the awaited shutdown window. The session's Popen
+            # handle is the only signal-time identity proof (issue #669 r2).
             stop_results = await asyncio.gather(
                 *[
                     self._stop_peer_agent(
                         agent,
                         reason=f"stopped by {self._identity.identity}",
+                        session=session,
                     )
-                    for agent in stop_targets
+                    for agent, session in zip(stop_targets, owned_sessions)
                 ]
             )
             for agent, result in zip(stop_targets, stop_results):
@@ -14376,13 +14383,32 @@ class HubPlugin(BasePlugin):
             )
             return f"'{target}' {result}"
 
-    async def _stop_peer_agent(self, agent, reason: str) -> str:
+    @staticmethod
+    def _signal_allowed(session) -> bool:
+        """Signal-time ownership revalidation (issue #669 r2, PID-reuse TOCTOU).
+
+        The sweep's ownership gates run before dispatch, but the shutdown wait
+        is async: the tracked process can exit mid-stop, and once it exits its
+        PID may be reused by an unrelated process. Raw-pid escalation
+        (SIGTERM/SIGKILL by number) would then signal that process. The
+        orchestrator's own Popen handle is the identity proof — while
+        ``is_alive`` the PID still belongs to our child. Fail closed when the
+        session died mid-stop; ``session=None`` (operator single-stop path)
+        keeps the existing behavior.
+        """
+        return session is None or bool(getattr(session, "is_alive", False))
+
+    async def _stop_peer_agent(self, agent, reason: str, session=None) -> str:
         """Stop a peer and only report success after the pid exits.
 
         A socket shutdown ack means "request received", not "process is gone".
         Wait briefly for graceful exit, then fall back to SIGTERM and verify
         that exit too. This avoids the first-run lie where status still sees
         the agent online and a second stop is needed.
+
+        ``session`` is the orchestrator's spawned-process handle for caller-
+        owned agents; when present, every raw-pid escalation is gated on it
+        (signal-time PID-reuse guard, fail closed).
         """
         if not self._presence:
             return "hub not active"
@@ -14401,10 +14427,19 @@ class HubPlugin(BasePlugin):
             success = False
             logger.debug(f"shutdown signal failed for {agent.identity}: {e}")
 
+        guard = (
+            "process exited during stop wait; fallback signals withheld "
+            "(PID-reuse guard)"
+        )
+
         if success:
             if await self._wait_for_agent_exit(agent, timeout=STOP_GRACE_SECONDS):
                 self._presence.cleanup_agent(agent)
                 return "stopped"
+
+            if not self._signal_allowed(session):
+                self._presence.cleanup_agent(agent)
+                return guard
 
             killed = self._force_kill_agent(agent)
             if killed and await self._wait_for_agent_exit(
@@ -14412,12 +14447,19 @@ class HubPlugin(BasePlugin):
             ):
                 self._presence.cleanup_agent(agent)
                 return "killed (SIGTERM after graceful timeout)"
+            if not self._signal_allowed(session):
+                self._presence.cleanup_agent(agent)
+                return guard
             if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
                 agent, timeout=STOP_KILL_SECONDS
             ):
                 self._presence.cleanup_agent(agent)
                 return "killed (SIGKILL — was unresponsive)"
             return "stop timed out (pid survived SIGKILL)"
+
+        if not self._signal_allowed(session):
+            self._presence.cleanup_agent(agent)
+            return guard
 
         killed = self._force_kill_agent(agent)
         if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
@@ -14427,6 +14469,10 @@ class HubPlugin(BasePlugin):
         if not self._agent_pid_alive(getattr(agent, "pid", 0)):
             self._presence.cleanup_agent(agent)
             return "already dead, cleaned up"
+
+        if not self._signal_allowed(session):
+            self._presence.cleanup_agent(agent)
+            return guard
 
         if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
             agent, timeout=STOP_KILL_SECONDS

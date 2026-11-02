@@ -60,7 +60,7 @@ def test_stop_all_only_sweeps_agents_the_caller_started(monkeypatch):
 
         stopped = []
 
-        async def fake_stop(agent, reason=""):
+        async def fake_stop(agent, reason="", session=None):
             stopped.append(agent.identity)
             return "stopped"
 
@@ -86,7 +86,7 @@ def test_stop_all_with_no_started_agents_stops_nothing(monkeypatch):
 
         stopped = []
 
-        async def fake_stop(agent, reason=""):
+        async def fake_stop(agent, reason="", session=None):
             stopped.append(agent.identity)
             return "stopped"
 
@@ -164,7 +164,7 @@ def test_stop_all_ignores_stale_row_sharing_caller_pid(monkeypatch):
 
         stopped = []
 
-        async def fake_stop(agent, reason=""):
+        async def fake_stop(agent, reason="", session=None):
             stopped.append(agent.identity)
             return "stopped"
 
@@ -201,7 +201,7 @@ def test_stop_all_never_kills_by_reused_pid_of_dead_session(monkeypatch):
 
         stopped = []
 
-        async def fake_stop(agent, reason=""):
+        async def fake_stop(agent, reason="", session=None):
             stopped.append(agent.identity)
             return "stopped"
 
@@ -212,5 +212,57 @@ def test_stop_all_never_kills_by_reused_pid_of_dead_session(monkeypatch):
         assert stopped == [], f"stopped {stopped}: killed by reused PID"
         assert "new-owner" in result
         assert "no agents started by you" in result
+
+    asyncio.run(run_test())
+
+
+def test_stop_all_never_signals_reused_pid_after_mid_stop_exit(monkeypatch):
+    """TOCTOU guard: the sweep validates ownership before dispatch, but the
+    tracked process can exit during the awaited shutdown window. Once it
+    exits its PID may be reused, so fallback escalation must revalidate at
+    signal time and withhold raw-pid signals (fail closed)."""
+
+    async def run_test():
+        now = time.time()
+        plugin = HubPlugin()
+        session = _session(4242, now - 7, alive=True)
+        plugin._presence = SimpleNamespace(
+            scan_all_presence=lambda: [_peer("helper", 4242, started_at=now - 5)],
+            cleanup_agent=lambda agent: None,
+        )
+        plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
+        monkeypatch.setattr(
+            plugin,
+            "_get_orchestrator",
+            lambda: _orch({"helper": session}),
+        )
+
+        async def exiting_shutdown(socket_path, reason="", timeout=3.0):
+            # the tracked process dies during the awaited shutdown window;
+            # graceful path "fails" so the sweep reaches its fallback
+            session.is_alive = False
+            return False
+
+        monkeypatch.setattr(
+            "plugins.hub.plugin.AgentMessenger.signal_shutdown", exiting_shutdown
+        )
+
+        async def instant_wait(agent, timeout=5.0):
+            return False
+
+        monkeypatch.setattr(plugin, "_wait_for_agent_exit", instant_wait)
+
+        kills = []
+
+        def fake_kill(pid, sig):
+            kills.append((pid, sig))
+            return True
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        result = await plugin._handle_stop_command("all")
+
+        assert kills == [], f"signaled {kills} after the tracked process exited"
+        assert "PID-reuse guard" in result
 
     asyncio.run(run_test())
