@@ -901,21 +901,39 @@ class EngineSession:
                 kwargs["goal_conversation_uid"] = goal_conversation_uid
             result = await self.state.send_message(content, **kwargs)
         except ReloadNeededError as exc:
-            if voice_turn:
-                await self.voice_admission("revoke", context=origin_context)
             self.reload_needed = str(exc)
             agent_name = (
                 self.agent
                 or (self.daemon.agent_name if self.daemon else "")
                 or "default"
             )
-            raise ReloadNeededError(
+            enriched = ReloadNeededError(
                 f"{agent_name} could not run the turn: {exc}. "
                 "Its code changed on disk after it started. Restart it."
-            ) from exc
+            )
+            if voice_turn:
+                # Revoke cleanup must not mask the reload-needed error the
+                # route and voice worker rely on: voice_admission raises on
+                # RPC errors, and the turn already failed for a real reason.
+                try:
+                    await self.voice_admission("revoke", context=origin_context)
+                except Exception as revoke_error:
+                    logger.warning(
+                        "voice admission revoke failed for session %s (%s)",
+                        self.session_id,
+                        type(revoke_error).__name__,
+                    )
+            raise enriched from exc
         except BaseException:
             if voice_turn:
-                await self.voice_admission("revoke", context=origin_context)
+                try:
+                    await self.voice_admission("revoke", context=origin_context)
+                except Exception as revoke_error:
+                    logger.warning(
+                        "voice admission revoke failed for session %s (%s)",
+                        self.session_id,
+                        type(revoke_error).__name__,
+                    )
             raise
         if voice_turn and not (isinstance(result, dict) and result.get("accepted")):
             await self.voice_admission("revoke", context=origin_context)

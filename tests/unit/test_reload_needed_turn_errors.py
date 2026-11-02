@@ -116,6 +116,7 @@ def _bare_session(agent: str = "coder") -> EngineSession:
     session = object.__new__(EngineSession)
     session.agent = agent
     session.daemon = SimpleNamespace(agent_name=agent)
+    session.session_id = "test-session"
     session.reload_needed = None
     session.voice_admission = AsyncMock()
     return session
@@ -193,3 +194,113 @@ def test_worker_detail_parses_engine_error_body() -> None:
 def test_worker_detail_ignores_body_without_detail() -> None:
     assert rejected_detail('{"error": "x"}') == ""
     assert rejected_detail("not json at all") == "not json at all"
+
+
+# === the session's voice-admission cleanup never masks the real error ===
+
+
+@pytest.mark.asyncio
+async def test_failed_voice_revoke_keeps_the_reload_needed_error() -> None:
+    from kollabor_agent.voice_admission import issue_voice_admission_context
+
+    session = _bare_session("coder")
+    session.daemon.state = SimpleNamespace(
+        send_message=AsyncMock(
+            side_effect=ReloadNeededError(
+                "No module named 'kollabor.state.goal_replies'"
+            )
+        )
+    )
+    origin_context = issue_voice_admission_context(
+        {
+            "owner_id": "owner-1",
+            "voice_session_id": "2f7a1c3e-5b8d-4a90-b2e1-6c9d0e4f8a27",
+            "control_session_id": "ctl-1",
+            "conversation_session_id": "conv-1",
+            "agent_id": "agent-1",
+            "voice_provider_profile_id": "profile-1",
+            "voice_prompt_revision": 1,
+            "voice_tool_policy": "policy-1",
+            "generation": 1,
+            "service_lease_epoch": 1,
+        },
+        "6a9f4d34-9c98-4a2e-86a5-f0eb8e02a7c3",
+    )
+    session.voice_admission = AsyncMock(
+        side_effect=[{"admitted": True}, ValueError("admission service unreachable")]
+    )
+
+    with pytest.raises(ReloadNeededError) as excinfo:
+        await session.send_message(
+            "hi", request_id="req-1", origin_context=origin_context
+        )
+
+    assert str(excinfo.value).startswith("coder could not run the turn:")
+    assert "Restart it." in str(excinfo.value)
+    assert session.reload_needed == "No module named 'kollabor.state.goal_replies'"
+    assert session.voice_admission.await_count == 2
+
+
+# === the real chain end to end, with only the transport faked ===
+
+
+@pytest.mark.asyncio
+async def test_real_chain_handler_to_voice_route_409() -> None:
+    # daemon side: the real registered handler over a state service
+    # whose lazy import has left the checkout
+    state_service = SimpleNamespace(
+        send_message=AsyncMock(
+            side_effect=ModuleNotFoundError(
+                "No module named 'kollabor.state.goal_replies'"
+            )
+        )
+    )
+    handler = _registered(state_service)["state.send_message"]
+
+    # the wire: the only fake in the chain. It carries the handler's
+    # wire-format dict to a real RemoteStateService.
+    class _WireRpc:
+        async def call(self, method, params=None, **kwargs):
+            return await handler(params or {})
+
+    session = _bare_session("coder")
+    session.daemon.state = RemoteStateService(_WireRpc())
+
+    with pytest.raises(ReloadNeededError) as excinfo:
+        await session.send_message("hi", request_id="req-1")
+
+    assert str(excinfo.value).startswith("coder could not run the turn:")
+    assert "Restart it." in str(excinfo.value)
+    assert session.reload_needed == "No module named 'kollabor.state.goal_replies'"
+    enriched = excinfo.value
+
+    # the voice route maps the enriched error to 409 reload_needed
+    app = FastAPI()
+    app.include_router(voice_router)
+
+    async def open_turn(*args: object, **kwargs: object) -> object:
+        raise enriched
+
+    app.state.voice = SimpleNamespace(open_turn=open_turn)
+    body = VoiceTurnRequest(
+        transcript_id="1c2d1bf8-93e2-4f6c-9f74-a4b83c00ba11",
+        voice_session_id="2f7a1c3e-5b8d-4a90-b2e1-6c9d0e4f8a27",
+        turn_id="6a9f4d34-9c98-4a2e-86a5-f0eb8e02a7c3",
+        generation=1,
+        speaker="user",
+        revision=1,
+        final=True,
+        display_text="hello",
+        spoken_text=None,
+        language=None,
+        observed_at_utc_ms=0,
+    ).model_dump()
+
+    response = TestClient(app).post(
+        "/voice/sessions/2f7a1c3e-5b8d-4a90-b2e1-6c9d0e4f8a27/turns", json=body
+    )
+
+    assert response.status_code == 409
+    payload = response.json()
+    assert payload["code"] == "reload_needed"
+    assert "Its code changed on disk after it started. Restart it." in payload["detail"]
