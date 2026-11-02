@@ -35,9 +35,11 @@ here for detail.
 
 ## Intake: issue to tracked task
 
-Work enters through a GitHub issue and becomes a tracked task (via `/goal` or
-the work queue) before any code changes. No tracked task, no edits. Small
-fixes still get an issue so the PR branch and commit can reference it.
+Work must be a tracked task (via `/goal` or the work queue) before edits.
+GitHub issues are the normal intake for code work; directly authorized
+documentation or process maintenance may use its existing authorization as the
+tracked task without a separate issue. Small code fixes still get an issue so
+the PR branch and commit can reference it.
 
 ## Writer worktrees and main integration
 
@@ -228,7 +230,9 @@ normal release process after the fix is merged and `main` is synchronized.
 
 - The PR body contains the complete product-ready checklist from `docs/product-ready-checklist.md`, with evidence for completed items and a specific reason for every N/A.
 - Tracked task complete, tests green on the required CI checks.
-- PR approved by Marco and merged (or explicitly closed).
+- The PR is covered by Marco's authorized concrete plan or batch (or is
+  individually authorized). The designated integrator independently reviews
+  the exact head, verifies required CI, and merges it (or explicitly closes it).
 - The designated integrator fast-forwarded local `main` after merge:
   `git pull --ff-only origin main`.
 - Docs updated when behavior or process changed.
