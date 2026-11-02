@@ -3,7 +3,6 @@
 import json
 import logging
 import os
-import re
 import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -185,14 +184,31 @@ class IdentityAssigner:
 
         return f"agent-{os.getpid()}"
 
-_UPSTREAM_REF_RE = re.compile(r"#(\d+)")
-_GH_TIMEOUT_SECS = 15
+
+MAX_UPSTREAM_CHECKS = 20
+_GH_TIMEOUT_SECS = 5
 _TERMINAL_CACHE: Dict[str, str] = {}
 
+# The stale sweep never runs more often than this. Review F1 fix: it
+# used to run on every heartbeat tick, re-checking every open ref.
+WORK_QUEUE_SWEEP_INTERVAL_SECS = 900.0
 
-def extract_upstream_refs(text: str) -> List[str]:
-    """Extract every ``#NNN`` upstream reference from free text."""
-    return [f"#{n}" for n in _UPSTREAM_REF_RE.findall(text)]
+
+class SweepScheduler:
+    """Bounds how often the stale-work sweep may run.
+
+    Fires immediately on first ``due()`` (boot) and then at most once
+    per ``interval_secs``."""
+
+    def __init__(self, interval_secs: float = WORK_QUEUE_SWEEP_INTERVAL_SECS):
+        self._interval = interval_secs
+        self._last = 0.0
+
+    def due(self, now: float) -> bool:
+        if now - self._last >= self._interval:
+            self._last = now
+            return True
+        return False
 
 
 def github_terminal_state(ref: str) -> Optional[str]:
@@ -253,22 +269,24 @@ class WorkQueue:
         # survive the swap and would stop excluding anyone.
         self._lock_path = self._path.parent / (self._path.name + ".lock")
 
-    def _load(self) -> List[WorkSlot]:
+    def _load(self, strict: bool = False) -> List[WorkSlot]:
+        """Load slots; with ``strict`` a corrupt file raises instead of
+        reading as empty (review F2: a silent empty read inside a
+        mutation would overwrite the whole queue)."""
         try:
             if self._path.exists():
                 with open(self._path) as f:
                     data = json.load(f)
                 return [WorkSlot.from_dict(s) for s in data.get("slots", [])]
         except Exception:
-            pass
+            if strict:
+                raise
         return []
 
     def _save(self, slots: List[WorkSlot]) -> None:
         _atomic_write(self._path, {"slots": [s.to_dict() for s in slots]})
 
-    def _mutate(
-        self, mutate: Callable[[List[WorkSlot]], Tuple[Any, bool]]
-    ) -> Any:
+    def _mutate(self, mutate: Callable[[List[WorkSlot]], Tuple[Any, bool]]) -> Any:
         """Run ``mutate(slots)`` and persist it under the queue lock.
 
         ``mutate`` returns ``(result, changed)``. Load, mutate, and the
@@ -277,7 +295,7 @@ class WorkQueue:
         or threads.
         """
         with locked_file(self._lock_path, "a+"):
-            slots = self._load()
+            slots = self._load(strict=True)
             result, changed = mutate(slots)
             if changed:
                 self._save(slots)
@@ -290,6 +308,7 @@ class WorkQueue:
         queued_by: str = "",
         priority: int = 5,
         context: str = "",
+        upstream_refs: Optional[List[str]] = None,
     ) -> WorkSlot:
         """Add a work slot to the queue."""
 
@@ -298,6 +317,7 @@ class WorkQueue:
                 task=task,
                 project=project,
                 queued_by=queued_by,
+                upstream_refs=sorted(set(upstream_refs or [])),
                 priority=priority,
                 context=context,
             )
@@ -376,25 +396,34 @@ class WorkQueue:
     def sweep_stale(
         self, checker: Optional[Callable[[str], Optional[str]]] = None
     ) -> List[Tuple[str, str]]:
-        """Retire pending slots whose upstream work is already done.
+        """Retire dead slots: completed ones always, pending ones whose
+        explicitly registered upstream refs are all terminal.
 
-        A slot retires only when it references at least one ``#NNN``
-        upstream item and every referenced item reports a terminal
-        state (merged PR, closed issue). Slots without references and
-        slots with any live reference are kept. Assigned and completed
-        slots are never touched.
+        Retirement rules (folded from the superseded #654 design):
 
-        ``checker`` maps a ``#NNN`` reference to a terminal reason
-        string, or None to keep. Defaults to ``github_terminal_state``.
-        A checker exception is treated as "keep" so a flaky checker can
-        never destroy queued work.
+        - ``completed`` slots are dead weight and are always retired;
+          no upstream check is spent on them.
+        - ``pending`` slots are retired only when ``upstream_refs`` was
+          registered explicitly on the slot AND every ref reports a
+          terminal state (merged PR, closed issue). Free text is never
+          scanned: a mention like "follow-up to #577" cannot retire
+          live work (review F6).
+        - ``assigned`` slots are live work and are never touched;
+          ``requeue_orphans`` owns their lifecycle.
+
+        The upstream budget is bounded: at most ``MAX_UPSTREAM_CHECKS``
+        unique refs are checked per sweep, deduplicated across slots.
+        Once the budget is spent, remaining refs count as unknown and
+        their slots are kept -- the sweep fails open, never retiring on
+        a missing answer. A checker exception is also treated as
+        "keep", so a flaky checker can never destroy queued work.
 
         Two phases keep the queue lock off the slow path: decisions are
         computed from a snapshot while the checkers run lock-free (they
         shell out to gh), then the live queue is re-loaded under the
-        lock and only the decided ids that are still pending are
-        retired. Anything appended or claimed while the checkers ran is
-        preserved.
+        lock and only the decided ids that are still pending, plus
+        every still-completed slot, are retired. Anything appended or
+        claimed while the checkers ran is preserved.
 
         Returns ``(slot_id, reason)`` pairs and saves once, only when
         something was retired.
@@ -402,19 +431,31 @@ class WorkQueue:
         if checker is None:
             checker = github_terminal_state
         decisions: Dict[str, str] = {}
+        states: Dict[str, Optional[str]] = {}
+        budget = MAX_UPSTREAM_CHECKS
         for slot in self._load():
+            if slot.status == "completed":
+                decisions[slot.id] = "terminal slot (completed)"
+                continue
             if slot.status != "pending":
                 continue
-            refs = extract_upstream_refs(f"{slot.task}\n{slot.context}")
+            refs = sorted(set(slot.upstream_refs or []))
             if not refs:
                 continue
             reasons: List[str] = []
             for ref in refs:
-                try:
-                    reason = checker(ref)
-                except Exception as e:
-                    logger.debug(f"stale sweep checker failed for {ref}: {e}")
-                    reason = None
+                if ref not in states:
+                    if budget > 0:
+                        budget -= 1
+                        try:
+                            states[ref] = checker(ref)
+                        except Exception as e:
+                            logger.debug(f"stale sweep checker failed for {ref}: {e}")
+                            states[ref] = None
+                    else:
+                        # Budget exhausted: unknown, fail open, keep.
+                        states[ref] = None
+                reason = states[ref]
                 if not reason:
                     reasons = []
                     break
@@ -430,7 +471,14 @@ class WorkQueue:
             retired: List[Tuple[str, str]] = []
             for slot in slots:
                 verdict = decisions.get(slot.id)
-                if verdict and slot.status == "pending":
+                if slot.status == "completed":
+                    # Completed after phase 1 still counts: terminal is
+                    # terminal, and nothing un-completes a slot.
+                    slot.status = "retired"
+                    slot.retired_reason = "terminal slot (completed)"
+                    retired.append((slot.id, slot.retired_reason))
+                    logger.info(f"Retired stale work {slot.id}: completed")
+                elif verdict and slot.status == "pending":
                     slot.status = "retired"
                     slot.retired_reason = verdict
                     retired.append((slot.id, verdict))

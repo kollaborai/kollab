@@ -38,7 +38,9 @@ def test_sweep_stale_retires_merged_pr_across_restart(tmp_path, monkeypatch, cap
     persisted and logged."""
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    stale = queue.add("open DRAFT PR for feat/whatever @ merged in #219")
+    stale = queue.add(
+        "open DRAFT PR for feat/whatever @ merged in #219", upstream_refs=["#219"]
+    )
 
     with caplog.at_level(logging.INFO, logger="plugins.hub.coordinator"):
         retired = queue.sweep_stale(lambda ref: f"{ref} merged")
@@ -62,7 +64,7 @@ def test_sweep_stale_retires_merged_pr_across_restart(tmp_path, monkeypatch, cap
 def test_sweep_stale_keeps_open_and_refless_slots(tmp_path, monkeypatch):
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    open_pr = queue.add("work PR #101 still open")
+    open_pr = queue.add("work PR #101 still open", upstream_refs=["#101"])
     no_ref = queue.add("tidy the vault with no upstream at all")
 
     assert queue.sweep_stale(lambda ref: None if ref == "#101" else "gone") == []
@@ -75,7 +77,7 @@ def test_sweep_stale_keeps_open_and_refless_slots(tmp_path, monkeypatch):
 def test_sweep_stale_spares_assigned_slots(tmp_path, monkeypatch):
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    claimed = queue.add("agent is actively on PR #219")
+    claimed = queue.add("agent is actively on PR #219", upstream_refs=["#219"])
     assert queue.claim_by_id(claimed.id, "lapis")
 
     assert queue.sweep_stale(lambda ref: f"{ref} merged") == []
@@ -87,8 +89,8 @@ def test_sweep_stale_spares_assigned_slots(tmp_path, monkeypatch):
 def test_sweep_stale_requires_every_ref_terminal(tmp_path, monkeypatch):
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    mixed = queue.add("fix #100 and #101 together")
-    done = queue.add("both #100 and #102 landed")
+    mixed = queue.add("fix #100 and #101 together", upstream_refs=["#100", "#101"])
+    done = queue.add("both #100 and #102 landed", upstream_refs=["#100", "#102"])
 
     def checker(ref):
         return None if ref == "#101" else f"{ref} merged"
@@ -100,7 +102,7 @@ def test_sweep_stale_requires_every_ref_terminal(tmp_path, monkeypatch):
 def test_sweep_stale_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    queue.add("done via #219")
+    queue.add("done via #219", upstream_refs=["#219"])
     queue.sweep_stale(lambda ref: f"{ref} merged")
 
     saves = []
@@ -112,7 +114,9 @@ def test_sweep_stale_is_idempotent(tmp_path, monkeypatch):
 def test_sweep_stale_checker_exception_keeps_work(tmp_path, monkeypatch):
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    slot = queue.add("upstream is #219 but the checker is flaky")
+    slot = queue.add(
+        "upstream is #219 but the checker is flaky", upstream_refs=["#219"]
+    )
 
     def boom(ref):
         raise RuntimeError("gh exploded")
@@ -125,7 +129,7 @@ def test_sweep_stale_checker_exception_keeps_work(tmp_path, monkeypatch):
 def test_sweep_stale_skips_save_when_nothing_retired(tmp_path, monkeypatch):
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    queue.add("live work on #101")
+    queue.add("live work on #101", upstream_refs=["#101"])
 
     saves = []
     monkeypatch.setattr(WorkQueue, "_save", lambda self, slots: saves.append(1))
@@ -211,7 +215,7 @@ def test_concurrent_add_survives_sweep(tmp_path, monkeypatch):
     sweep's save must still preserve the appended slot."""
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    stale = queue.add("wrap up #571 docs")
+    stale = queue.add("wrap up #571 docs", upstream_refs=["#571"])
     entered, release = threading.Event(), threading.Event()
 
     def paused_checker(ref):
@@ -242,8 +246,10 @@ def test_concurrent_claim_survives_sweep(tmp_path, monkeypatch):
     checkers run must not be clobbered back to pending by the sweep."""
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    stale = queue.add("close out #571 followups")
-    claimable = queue.add("no refs, claimable", priority=9)  # higher number claims first
+    stale = queue.add("close out #571 followups", upstream_refs=["#571"])
+    claimable = queue.add(
+        "no refs, claimable", priority=9
+    )  # higher number claims first
     entered, release = threading.Event(), threading.Event()
 
     def paused_checker(ref):
@@ -274,7 +280,7 @@ def test_sweep_does_not_retire_slot_claimed_after_decision(tmp_path, monkeypatch
     save is left alone: claims beat retirement decisions."""
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()
-    contested = queue.add("finish #571, refs terminal")
+    contested = queue.add("finish #571, refs terminal", upstream_refs=["#571"])
     entered, release = threading.Event(), threading.Event()
 
     def paused_checker(ref):
@@ -321,3 +327,123 @@ def test_parallel_adds_do_not_lose_slots(tmp_path, monkeypatch):
 
     assert not errors
     assert len(WorkQueue().get_all()) == 60, "lost-update race dropped slots"
+
+
+# --- review blockers: F1 throttle, F2 strict load, F3 budget, F6 explicit refs ---
+
+
+def test_sweep_ignores_refs_in_free_text(tmp_path, monkeypatch):
+    """Review F6 (false retirement): a #NNN mentioned as background in
+    the task text must never retire the slot. Only refs registered
+    explicitly on the slot (upstream_refs) drive retirement."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    mention = queue.add("Follow-up to #577: add the retention knob")
+
+    retired = queue.sweep_stale(lambda ref: f"{ref} merged")
+
+    assert retired == [], "free-text mention retired live work"
+    states = {s.id: s.status for s in queue.get_all()}
+    assert states[mention.id] == "pending"
+
+
+def test_sweep_uses_only_explicit_upstream_refs(tmp_path, monkeypatch):
+    """Explicitly registered refs still retire genuinely stale work."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    stale = queue.add("wrap up #571 docs", upstream_refs=["#571"])
+
+    assert queue.sweep_stale(lambda ref: f"{ref} merged") == [(stale.id, "#571 merged")]
+
+
+def test_sweep_budget_bounds_upstream_checks(tmp_path, monkeypatch):
+    """Review F3 (fail-open budget): at most MAX_UPSTREAM_CHECKS unique
+    upstream refs are checked per sweep; slots beyond the budget are
+    kept (fail open), never retired on a missing answer."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    for n in range(coordinator.MAX_UPSTREAM_CHECKS + 10):
+        queue.add(f"task {n}", upstream_refs=[f"#{1000 + n}"])
+
+    calls = []
+
+    def counting_checker(ref):
+        calls.append(ref)
+        return f"{ref} merged"
+
+    retired = queue.sweep_stale(counting_checker)
+
+    assert len(calls) == coordinator.MAX_UPSTREAM_CHECKS
+    assert len(retired) == coordinator.MAX_UPSTREAM_CHECKS
+    assert len(queue.get_all()) == coordinator.MAX_UPSTREAM_CHECKS + 10
+
+
+def test_sweep_dedupes_shared_refs_across_slots(tmp_path, monkeypatch):
+    """Review F3 (ref dedup): two slots citing the same ref cost one
+    upstream check, not two."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    queue.add("first", upstream_refs=["#801", "#802"])
+    queue.add("second", upstream_refs=["#801", "#803"])
+
+    calls = []
+
+    def counting_checker(ref):
+        calls.append(ref)
+        return f"{ref} merged"
+
+    retired = queue.sweep_stale(counting_checker)
+    assert len(retired) == 2
+    assert sorted(calls) == ["#801", "#802", "#803"]
+
+
+def test_sweep_retires_completed_slots(tmp_path, monkeypatch):
+    """Review F3 (#654 fold): completed slots are dead weight and are
+    always retired, without spending any upstream check."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    done = queue.add("finished long ago")
+    queue.complete(done.id)
+    refless = queue.add("still pending, no refs")
+
+    calls = []
+
+    def counting_checker(ref):
+        calls.append(ref)
+        return None
+
+    retired = queue.sweep_stale(counting_checker)
+
+    assert retired == [(done.id, "terminal slot (completed)")]
+    assert calls == [], "completed retirement must not touch upstream"
+    states = {s.id: s.status for s in queue.get_all()}
+    assert states[done.id] == "retired"
+    assert states[refless.id] == "pending"
+
+
+def test_mutate_raises_on_corrupt_queue_file(tmp_path, monkeypatch):
+    """Review F2: a corrupt queue file must fail loudly inside the
+    locked mutate path, never silently replace the queue with a fresh
+    single-slot file."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    queue.add("real queued work")
+    (tmp_path / "work-queue.json").write_text("{not json at all")
+
+    with pytest.raises(Exception):
+        queue.add("would have wiped the queue")
+
+    # The failed add must not have saved: the file on disk still holds
+    # the corrupt bytes, not a fresh one-slot queue.
+    assert (tmp_path / "work-queue.json").read_text() == "{not json at all"
+
+
+def test_sweep_scheduler_throttles_between_intervals():
+    """Review F1 (unbounded schedule): the sweep scheduler fires on
+    boot, then at most once per interval."""
+    sched = coordinator.SweepScheduler(interval_secs=900)
+
+    assert sched.due(now=1000.0) is True, "boot sweep must run"
+    assert sched.due(now=1005.0) is False, "second tick must not re-sweep"
+    assert sched.due(now=1899.9) is False
+    assert sched.due(now=1900.0) is True, "interval elapsed: sweep again"

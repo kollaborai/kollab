@@ -47,7 +47,12 @@ from .capture import (
     render_transcript,
 )
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
-from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
+from .coordinator import (
+    CoordinatorElection,
+    IdentityAssigner,
+    SweepScheduler,
+    WorkQueue,
+)
 from .crystal_store import CrystalStore, normalize_crystal_id
 from .delivery import DeliveryPolicy, DeliveryTrace, SenderContext
 from .device_names import DEFAULT_TRUST, format_handle, parse_handle
@@ -1299,6 +1304,7 @@ class HubPlugin(BasePlugin):
 
         # Work queue
         self._work_queue = WorkQueue()
+        self._queue_sweep_scheduler = SweepScheduler()
 
         # Register slash commands
         if self.command_registry:
@@ -7475,9 +7481,15 @@ class HubPlugin(BasePlugin):
                 logger.info(
                     f"Reassigning work {slot_id}: agent {dead_agent} is dead"
                 )
-            # Retire pending work whose upstream issue/PR already closed
-            # (gh subprocess calls run off the event loop).
-            await asyncio.to_thread(self._work_queue.sweep_stale)
+            # Retire dead work whose upstream already landed (gh
+            # subprocess calls run off the event loop). Throttled by
+            # SweepScheduler: boot + at most once per interval, never
+            # every heartbeat tick, and never fatal to the heartbeat.
+            if self._queue_sweep_scheduler.due(time.monotonic()):
+                try:
+                    await asyncio.to_thread(self._work_queue.sweep_stale)
+                except Exception as e:
+                    logger.warning(f"Work-queue sweep failed: {e}")
 
     async def _try_assign_work(self) -> None:
         """Try to assign pending work to idle agents using capability matching."""
