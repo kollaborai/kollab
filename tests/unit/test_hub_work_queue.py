@@ -199,3 +199,125 @@ def test_github_terminal_state_caches_terminal_only(tmp_path, monkeypatch):
     assert coordinator.github_terminal_state("#221") is None
     assert coordinator.github_terminal_state("#221") is None
     assert len([c for c in calls if c[3] == "221"]) == 2  # open re-checked
+
+
+import threading
+
+
+def test_concurrent_add_survives_sweep(tmp_path, monkeypatch):
+    """Regression (issue #645 race): sweep_stale must not erase a slot
+    appended while its checkers run. The checker blocks until the
+    concurrent add has landed, then returns a terminal verdict; the
+    sweep's save must still preserve the appended slot."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    stale = queue.add("wrap up #571 docs")
+    entered, release = threading.Event(), threading.Event()
+
+    def paused_checker(ref):
+        entered.set()
+        assert release.wait(timeout=10)
+        return f"{ref} closed"
+
+    result = {}
+
+    def sweep():
+        result["retired"] = queue.sweep_stale(paused_checker)
+
+    sweeper = threading.Thread(target=sweep)
+    sweeper.start()
+    assert entered.wait(timeout=10)  # sweep is mid-checker on its snapshot
+    added = queue.add("brand new task queued during the sweep")
+    release.set()
+    sweeper.join(timeout=10)
+
+    assert result["retired"] == [(stale.id, "#571 closed")]
+    states = {s.id: s.status for s in queue.get_all()}
+    assert states[added.id] == "pending", "concurrent append was erased"
+    assert states[stale.id] == "retired"
+
+
+def test_concurrent_claim_survives_sweep(tmp_path, monkeypatch):
+    """Regression (issue #645 race): a claim landing while the sweep's
+    checkers run must not be clobbered back to pending by the sweep."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    stale = queue.add("close out #571 followups")
+    claimable = queue.add("no refs, claimable", priority=9)  # higher number claims first
+    entered, release = threading.Event(), threading.Event()
+
+    def paused_checker(ref):
+        entered.set()
+        assert release.wait(timeout=10)
+        return f"{ref} closed"
+
+    result = {}
+
+    def sweep():
+        result["retired"] = queue.sweep_stale(paused_checker)
+
+    sweeper = threading.Thread(target=sweep)
+    sweeper.start()
+    assert entered.wait(timeout=10)
+    claimed = queue.claim_next("ruby")
+    release.set()
+    sweeper.join(timeout=10)
+
+    assert claimed is not None and claimed.id == claimable.id
+    states = {s.id: s.status for s in queue.get_all()}
+    assert states[claimable.id] == "assigned", "claim was clobbered by sweep"
+    assert states[stale.id] == "retired"
+
+
+def test_sweep_does_not_retire_slot_claimed_after_decision(tmp_path, monkeypatch):
+    """A terminal-ref slot claimed between the sweep's decision and its
+    save is left alone: claims beat retirement decisions."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    contested = queue.add("finish #571, refs terminal")
+    entered, release = threading.Event(), threading.Event()
+
+    def paused_checker(ref):
+        entered.set()
+        assert release.wait(timeout=10)
+        return f"{ref} merged"
+
+    result = {}
+
+    def sweep():
+        result["retired"] = queue.sweep_stale(paused_checker)
+
+    sweeper = threading.Thread(target=sweep)
+    sweeper.start()
+    assert entered.wait(timeout=10)
+    assert queue.claim_by_id(contested.id, "ruby")
+    release.set()
+    sweeper.join(timeout=10)
+
+    assert result["retired"] == [], "claimed slot was retired anyway"
+    slot = queue._load()[0]
+    assert slot.status == "assigned"
+    assert slot.assigned_to == "ruby"
+
+
+def test_parallel_adds_do_not_lose_slots(tmp_path, monkeypatch):
+    """Writers racing on the same queue file from separate queue
+    instances (mirrors separate processes): every add lands."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    errors = []
+
+    def hammer(n):
+        try:
+            for i in range(n):
+                WorkQueue().add(f"parallel task {threading.get_ident()}-{i}")
+        except Exception as e:  # pragma: no cover - failure reporting
+            errors.append(e)
+
+    threads = [threading.Thread(target=hammer, args=(20,)) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors
+    assert len(WorkQueue().get_all()) == 60, "lost-update race dropped slots"

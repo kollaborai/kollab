@@ -9,7 +9,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from kollabor_agent.runtime import AgentRuntime
-from kollabor_config.file_lock import try_lock, unlock
+from kollabor_config.file_lock import locked_file, try_lock, unlock
 
 from .models import WorkSlot
 from .presence import _atomic_write, get_hub_dir, pid_alive
@@ -248,6 +248,10 @@ class WorkQueue:
 
     def __init__(self):
         self._path = get_hub_dir() / "work-queue.json"
+        # A dedicated lock file: _save() atomically renames over the
+        # queue file, so a lock held on the queue's inode would not
+        # survive the swap and would stop excluding anyone.
+        self._lock_path = self._path.parent / (self._path.name + ".lock")
 
     def _load(self) -> List[WorkSlot]:
         try:
@@ -262,6 +266,23 @@ class WorkQueue:
     def _save(self, slots: List[WorkSlot]) -> None:
         _atomic_write(self._path, {"slots": [s.to_dict() for s in slots]})
 
+    def _mutate(
+        self, mutate: Callable[[List[WorkSlot]], Tuple[Any, bool]]
+    ) -> Any:
+        """Run ``mutate(slots)`` and persist it under the queue lock.
+
+        ``mutate`` returns ``(result, changed)``. Load, mutate, and the
+        conditional save all happen inside one exclusive locked block,
+        so no read-modify-write window is left open across processes
+        or threads.
+        """
+        with locked_file(self._lock_path, "a+"):
+            slots = self._load()
+            result, changed = mutate(slots)
+            if changed:
+                self._save(slots)
+            return result
+
     def add(
         self,
         task: str,
@@ -271,53 +292,64 @@ class WorkQueue:
         context: str = "",
     ) -> WorkSlot:
         """Add a work slot to the queue."""
-        slot = WorkSlot(
-            task=task,
-            project=project,
-            queued_by=queued_by,
-            priority=priority,
-            context=context,
-        )
-        slots = self._load()
-        slots.append(slot)
-        self._save(slots)
-        logger.info(f"Queued work: {slot.id} - {task[:60]}")
-        return slot
+
+        def _append(slots: List[WorkSlot]) -> Tuple[WorkSlot, bool]:
+            slot = WorkSlot(
+                task=task,
+                project=project,
+                queued_by=queued_by,
+                priority=priority,
+                context=context,
+            )
+            slots.append(slot)
+            logger.info(f"Queued work: {slot.id} - {task[:60]}")
+            return slot, True
+
+        return self._mutate(_append)
 
     def claim_next(self, agent_identity: str, project: str = "") -> Optional[WorkSlot]:
         """Claim the next available work slot."""
-        slots = self._load()
-        for slot in sorted(slots, key=lambda s: -s.priority):
-            if slot.status == "pending":
-                if project and slot.project and slot.project != project:
-                    continue
-                slot.assigned_to = agent_identity
-                slot.status = "assigned"
-                self._save(slots)
-                logger.info(f"Assigned {slot.id} to {agent_identity}")
-                return slot
-        return None
+
+        def _claim(slots: List[WorkSlot]) -> Tuple[Optional[WorkSlot], bool]:
+            for slot in sorted(slots, key=lambda s: -s.priority):
+                if slot.status == "pending":
+                    if project and slot.project and slot.project != project:
+                        continue
+                    slot.assigned_to = agent_identity
+                    slot.status = "assigned"
+                    logger.info(f"Assigned {slot.id} to {agent_identity}")
+                    return slot, True
+            return None, False
+
+        return self._mutate(_claim)
 
     def claim_by_id(self, slot_id: str, agent_identity: str) -> Optional[WorkSlot]:
         """Claim a specific work slot by ID."""
-        slots = self._load()
-        for slot in slots:
-            if slot.id == slot_id and slot.status == "pending":
-                slot.assigned_to = agent_identity
-                slot.status = "assigned"
-                self._save(slots)
-                logger.info(f"Assigned {slot.id} to {agent_identity}")
-                return slot
-        return None
+
+        def _claim(slots: List[WorkSlot]) -> Tuple[Optional[WorkSlot], bool]:
+            for slot in slots:
+                if slot.id == slot_id and slot.status == "pending":
+                    slot.assigned_to = agent_identity
+                    slot.status = "assigned"
+                    logger.info(f"Assigned {slot.id} to {agent_identity}")
+                    return slot, True
+            return None, False
+
+        return self._mutate(_claim)
 
     def complete(self, slot_id: str) -> None:
         """Mark a work slot as complete."""
-        slots = self._load()
-        for slot in slots:
-            if slot.id == slot_id:
-                slot.status = "completed"
-                break
-        self._save(slots)
+
+        def _complete(slots: List[WorkSlot]) -> Tuple[None, bool]:
+            changed = False
+            for slot in slots:
+                if slot.id == slot_id:
+                    slot.status = "completed"
+                    changed = True
+                    break
+            return None, changed
+
+        self._mutate(_complete)
 
     def requeue_orphans(self, live: set) -> List[tuple]:
         """Return work held by agents not in ``live`` to pending.
@@ -325,20 +357,21 @@ class WorkQueue:
         Returns ``(slot_id, dead_agent)`` pairs. Saves once, and only when
         something changed.
         """
-        slots = self._load()
-        requeued = []
-        for slot in slots:
-            if (
-                slot.status == "assigned"
-                and slot.assigned_to
-                and slot.assigned_to not in live
-            ):
-                requeued.append((slot.id, slot.assigned_to))
-                slot.status = "pending"
-                slot.assigned_to = None
-        if requeued:
-            self._save(slots)
-        return requeued
+
+        def _requeue(slots: List[WorkSlot]) -> Tuple[List[tuple], bool]:
+            requeued = []
+            for slot in slots:
+                if (
+                    slot.status == "assigned"
+                    and slot.assigned_to
+                    and slot.assigned_to not in live
+                ):
+                    requeued.append((slot.id, slot.assigned_to))
+                    slot.status = "pending"
+                    slot.assigned_to = None
+            return requeued, bool(requeued)
+
+        return self._mutate(_requeue)
 
     def sweep_stale(
         self, checker: Optional[Callable[[str], Optional[str]]] = None
@@ -356,14 +389,20 @@ class WorkQueue:
         A checker exception is treated as "keep" so a flaky checker can
         never destroy queued work.
 
+        Two phases keep the queue lock off the slow path: decisions are
+        computed from a snapshot while the checkers run lock-free (they
+        shell out to gh), then the live queue is re-loaded under the
+        lock and only the decided ids that are still pending are
+        retired. Anything appended or claimed while the checkers ran is
+        preserved.
+
         Returns ``(slot_id, reason)`` pairs and saves once, only when
         something was retired.
         """
         if checker is None:
             checker = github_terminal_state
-        slots = self._load()
-        retired: List[Tuple[str, str]] = []
-        for slot in slots:
+        decisions: Dict[str, str] = {}
+        for slot in self._load():
             if slot.status != "pending":
                 continue
             refs = extract_upstream_refs(f"{slot.task}\n{slot.context}")
@@ -380,16 +419,25 @@ class WorkQueue:
                     reasons = []
                     break
                 reasons.append(reason)
-            if not reasons:
-                continue
-            verdict = "; ".join(reasons)
-            slot.status = "retired"
-            slot.retired_reason = verdict
-            retired.append((slot.id, verdict))
-            logger.info(f"Retired stale work {slot.id}: {verdict}")
-        if retired:
-            self._save(slots)
-        return retired
+            if reasons:
+                decisions[slot.id] = "; ".join(reasons)
+        if not decisions:
+            return []
+
+        def _retire(
+            slots: List[WorkSlot],
+        ) -> Tuple[List[Tuple[str, str]], bool]:
+            retired: List[Tuple[str, str]] = []
+            for slot in slots:
+                verdict = decisions.get(slot.id)
+                if verdict and slot.status == "pending":
+                    slot.status = "retired"
+                    slot.retired_reason = verdict
+                    retired.append((slot.id, verdict))
+                    logger.info(f"Retired stale work {slot.id}: {verdict}")
+            return retired, bool(retired)
+
+        return self._mutate(_retire)
 
     def get_pending(self) -> List[WorkSlot]:
         """Get all pending work slots."""
