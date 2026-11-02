@@ -19,9 +19,12 @@ Entries are separated by blank lines between the body and the next ---.
 import asyncio
 import bisect
 import functools
+import hashlib
 import heapq
 import logging
+import os
 import re
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -54,6 +57,11 @@ def normalize_crystal_id(raw: str) -> str:
 
 logger = logging.getLogger(__name__)
 
+
+class CrystalStoreIntegrityError(OSError):
+    """Raised when crystal-store bytes cannot be written or verified."""
+
+
 # Dedup threshold: entries with keyword overlap above this merge.
 # 0.55 catches semantic duplicates (same concept, different wording).
 # Higher values (0.70+) miss many real duplicates in natural language.
@@ -83,14 +91,24 @@ def _jaccard(a: frozenset, b: frozenset) -> float:
 
 
 def _locked(method):
-    """Run a store write under its lock. A dedup pass checks for writes and
-    commits under the same lock, so a write from another thread lands wholly
-    before that commit or after it, never lost inside it (#546)."""
+    """Serialize store mutations and roll back memory after a failed save.
+
+    A dedup pass checks for writes and commits under the same lock, so a write
+    from another thread lands wholly before that commit or after it (#546).
+    """
 
     @functools.wraps(method)
     def run(self, *args, **kwargs):
         with self._lock:
-            return method(self, *args, **kwargs)
+            self._ensure_loaded()
+            snapshot = self._snapshot_state()
+            revision_before = self._revision
+            try:
+                return method(self, *args, **kwargs)
+            except Exception:
+                if self._revision == revision_before:
+                    self._restore_state(snapshot)
+                raise
 
     return run
 
@@ -244,15 +262,123 @@ class CrystalStore:
 
         return entries
 
+    def _snapshot_state(self):
+        """Capture mutable state so a failed disk write can be rolled back."""
+        entries = list(self._entries)
+        entry_values = [
+            (
+                entry,
+                entry.id,
+                entry.date,
+                list(entry.keywords),
+                entry.summary,
+                entry.body,
+            )
+            for entry in entries
+        ]
+        changed = None if self._changed is None else set(self._changed)
+        return (
+            entries,
+            entry_values,
+            self._next_id,
+            self._revision,
+            self._dedup_clean,
+            changed,
+        )
+
+    def _restore_state(self, snapshot) -> None:
+        """Restore a snapshot without invalidating callers' entry references."""
+        entries, entry_values, next_id, revision, dedup_clean, changed = snapshot
+        for entry, entry_id, date, keywords, summary, body in entry_values:
+            entry.id = entry_id
+            entry.date = date
+            entry.keywords = keywords
+            entry.summary = summary
+            entry.body = body
+        self._entries = entries
+        self._next_id = next_id
+        self._revision = revision
+        self._dedup_clean = dedup_clean
+        self._changed = changed
+        self._resize_summary_cache()
+
+    @staticmethod
+    def _verify_payload(actual: bytes, expected: bytes, location: str) -> None:
+        """Reject a short or checksum-mismatched crystal-store write."""
+        if (
+            len(actual) != len(expected)
+            or hashlib.sha256(actual).digest() != hashlib.sha256(expected).digest()
+        ):
+            raise CrystalStoreIntegrityError(
+                f"crystal_store {location} integrity verification failed: "
+                f"expected {len(expected)} bytes, received {len(actual)} bytes"
+            )
+
+    def _replace_bytes_atomically(self, payload: bytes) -> None:
+        """Write and verify a temporary file, then atomically replace the store."""
+        file_descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{self._path.name}.",
+            suffix=".tmp",
+            dir=self._path.parent,
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(file_descriptor, "wb") as temp_file:
+                temp_file.write(payload)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            self._verify_payload(temp_path.read_bytes(), payload, "temporary file")
+            os.replace(temp_path, self._path)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                logger.warning("crystal_store temp-file cleanup failed: %s", error)
+
+    def _write_atomically(self, payload: bytes) -> None:
+        """Persist verified bytes, restoring the previous file on read-back error."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            previous = self._path.read_bytes()
+        except FileNotFoundError:
+            previous = None
+
+        self._replace_bytes_atomically(payload)
+        try:
+            self._verify_payload(self._path.read_bytes(), payload, "saved file")
+        except OSError as error:
+            try:
+                if previous is None:
+                    self._path.unlink(missing_ok=True)
+                else:
+                    self._replace_bytes_atomically(previous)
+                    self._verify_payload(
+                        self._path.read_bytes(), previous, "restored file"
+                    )
+            except Exception as restore_error:
+                raise CrystalStoreIntegrityError(
+                    "crystal_store read-back verification failed and previous "
+                    f"data could not be restored: {restore_error}"
+                ) from error
+            if isinstance(error, CrystalStoreIntegrityError):
+                raise
+            raise CrystalStoreIntegrityError(
+                f"crystal_store read-back failed: {error}"
+            ) from error
+
     def _save_to_disk(self) -> None:
-        """Write all entries back to crystallized.md."""
+        """Atomically write all entries and verify the persisted bytes."""
         with self._lock:
             self._resize_summary_cache()
-            self._revision += 1
+            payload = "\n".join(e.to_block() for e in self._entries).encode("utf-8")
             try:
-                self._path.write_text("\n".join(e.to_block() for e in self._entries))
-            except OSError as e:
-                logger.warning("crystal_store write error: %s", e)
+                self._write_atomically(payload)
+            except OSError as error:
+                logger.warning("crystal_store write error: %s", error)
+                raise
+            self._revision += 1
 
     def _mark(self, entry_id: str) -> None:
         """Note an entry a write changed, for the next dedup pass."""
@@ -562,13 +688,19 @@ class CrystalStore:
             with self._lock:  # a write from another thread waits, or already counted
                 if self._revision != revision:
                     continue
-                self._changed = {entry.id for entry in targets}
-                if merged:
-                    self._entries = copies
-                    self._save_to_disk()
-                    logger.info("crystal_store: deduplicated %d entries", merged)
-                else:
-                    self._dedup_clean = self._revision
+                snapshot = self._snapshot_state()
+                try:
+                    self._changed = {entry.id for entry in targets}
+                    if merged:
+                        self._entries = copies
+                        self._save_to_disk()
+                    else:
+                        self._dedup_clean = self._revision
+                except Exception:
+                    self._restore_state(snapshot)
+                    raise
+            if merged:
+                logger.info("crystal_store: deduplicated %d entries", merged)
             return merged
         logger.info("crystal_store: written to during %d dedup passes; the next cycle tries again", attempts)
         return 0
