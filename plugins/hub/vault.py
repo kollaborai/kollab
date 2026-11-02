@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -664,6 +665,7 @@ class AgentVault:
 
         if task_ledger is not None:
             self._append_ledger_section(lines, task_ledger)
+            self._append_dispatch_section(lines, task_ledger)
 
         # The raw stream remains the audit trail, but message traffic is not
         # executable rebirth context. The current task ledger is authoritative
@@ -761,6 +763,139 @@ class AgentVault:
             lines.append(f"  {card.summary_line()}")
         if len(cards) > self._REBIRTH_MAX_CARDS:
             lines.append(f"  +{len(cards) - self._REBIRTH_MAX_CARDS} more")
+
+    _REBIRTH_MAX_DISPATCHES = 10
+
+    @staticmethod
+    def _rebirth_one_line(value: Any, limit: int = 500) -> str:
+        safe = sanitize_rebirth_text(str(value or ""))
+        return " ".join(safe.splitlines()).strip()[:limit]
+
+    @staticmethod
+    def _worktree_status(worktree: str) -> Optional[tuple[str, int]]:
+        """Read local git state only; remote, relative, or missing paths are unavailable."""
+        if not worktree:
+            return None
+        path = Path(worktree).expanduser()
+        if not path.is_absolute():
+            return None
+        try:
+            path = path.resolve(strict=True)
+            if not path.is_dir():
+                return None
+            status = subprocess.run(
+                [
+                    "git",
+                    "--no-optional-locks",
+                    "-C",
+                    str(path),
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            head = subprocess.run(
+                ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError):
+            return None
+        if status.returncode != 0 or head.returncode != 0:
+            return None
+        uncommitted = sum(1 for line in status.stdout.splitlines() if line.strip())
+        return head.stdout.strip(), uncommitted
+
+    def _append_dispatch_section(self, lines: List[str], ledger: Any) -> None:
+        """Append this coordinator's outstanding assignments for rebirth recovery."""
+        lines.append("")
+        try:
+            dispatches = ledger.get_dispatches_for(self.identity)
+        except Exception as e:
+            logger.warning("Rebirth dispatch read failed for %s: %s", self.identity, e)
+            lines.append(
+                "outbound dispatch reconciliation: unavailable (read failed; "
+                "do not assume none)"
+            )
+            return
+
+        if not dispatches:
+            lines.append("outbound dispatch reconciliation: none (no unresolved assignments)")
+            return
+
+        lines.append(f"outbound dispatch reconciliation ({len(dispatches)} unresolved):")
+        recent = list(reversed(dispatches))
+        for dispatch in recent[: self._REBIRTH_MAX_DISPATCHES]:
+            dispatch_id = self._rebirth_one_line(
+                dispatch.get("dispatch_id") or dispatch.get("message_id"), 120
+            )
+            task_id = self._rebirth_one_line(dispatch.get("task_id"), 120)
+            assignee = self._rebirth_one_line(dispatch.get("assignee"), 120)
+            status = self._rebirth_one_line(dispatch.get("status"), 40) or "unknown"
+            directive = self._rebirth_one_line(dispatch.get("directive"), 320)
+            lines.append(
+                f"  [{status}] task {task_id} -> {assignee} (dispatch {dispatch_id})"
+            )
+            if directive:
+                lines.append(f"    directive: {directive}")
+
+            worktree = str(dispatch.get("worktree") or "").strip()
+            lines.append(
+                "    assigned worktree: "
+                + (self._rebirth_one_line(worktree, 300) if worktree else "not provided")
+            )
+            assigned_commit = self._rebirth_one_line(dispatch.get("commit"), 128)
+            if assigned_commit:
+                lines.append(f"    assigned commit: {assigned_commit}")
+            reported_worktree = self._rebirth_one_line(
+                dispatch.get("reported_worktree"), 300
+            )
+            if reported_worktree:
+                lines.append(f"    reported worktree: {reported_worktree}")
+            worktree_to_check = str(
+                dispatch.get("reported_worktree") or worktree
+            ).strip()
+            snapshot = self._worktree_status(worktree_to_check)
+            if snapshot is None:
+                lines.append(
+                    "    worktree status unavailable "
+                    "(missing, remote, or not a git worktree)"
+                )
+            else:
+                head, uncommitted = snapshot
+                lines.append(
+                    f"    live worktree: {self._rebirth_one_line(worktree_to_check, 300)}; "
+                    f"HEAD {head}; uncommitted files: {uncommitted}"
+                )
+            reported_commit = self._rebirth_one_line(
+                dispatch.get("reported_commit"), 128
+            )
+            if reported_commit:
+                lines.append(f"    reported commit: {reported_commit}")
+            report = self._rebirth_one_line(dispatch.get("report"), 500)
+            if report:
+                lines.append(f"    worker report (unverified): {report}")
+
+        if len(recent) > self._REBIRTH_MAX_DISPATCHES:
+            lines.append(
+                f"  +{len(recent) - self._REBIRTH_MAX_DISPATCHES} older unresolved dispatches"
+            )
+        lines.extend(
+            [
+                "  verification checklist (worker reports are not proof):",
+                "    [ ] confirm the assigned/reported worktree and current branch locally",
+                "    [ ] inspect the reported commit, diff, and dirty/untracked-file count",
+                "    [ ] run or independently confirm the task acceptance tests",
+                "    [ ] only then use hub_dispatch_verify with an evidence note",
+                "  Do not trust a report until the actual worktree and acceptance evidence are checked.",
+            ]
+        )
 
     def _append_crystal_section(
         self, lines: List[str], store: Any, budget: int, label: str

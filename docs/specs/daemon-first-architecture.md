@@ -254,7 +254,8 @@ box drawing, colors, themes. the daemon just sends semantic data.
   daemon process:
     - on last client detach: keep running
     - on /quit from client: graceful shutdown
-    - on SIGTERM: graceful shutdown
+    - on SIGTERM: cancel the top-level async task so normal cleanup runs;
+      never inject `KeyboardInterrupt` into an arbitrary child task
     - on SIGINT: graceful shutdown (if no terminal, this is from kill)
     - on crash: presence file goes stale (PID check fails)
 
