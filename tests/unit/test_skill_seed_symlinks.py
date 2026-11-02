@@ -37,6 +37,20 @@ def test_retirement_does_not_move_skills_through_linked_root(tmp_path, seed_hash
     assert not (outside / ".seed-backup").exists()
 
 
+def test_retirement_does_not_traverse_linked_config_parent(tmp_path, seed_hashes):
+    outside = tmp_path / "outside"
+    (outside / "skills" / "tool").mkdir(parents=True)
+    (outside / "skills" / "tool" / "SKILL.md").write_text("known skill")
+    config = tmp_path / ".kollab"
+    _link(config, outside)
+
+    config_utils._retire_seeded_skills(config / "skills")
+
+    assert config.is_symlink()
+    assert (outside / "skills" / "tool" / "SKILL.md").read_text() == "known skill"
+    assert not (outside / "skills" / ".seed-backup").exists()
+
+
 def test_retirement_does_not_move_skills_into_linked_backup(tmp_path, seed_hashes):
     skills = tmp_path / "skills"
     (skills / "tool").mkdir(parents=True)
@@ -52,14 +66,14 @@ def test_retirement_does_not_move_skills_into_linked_backup(tmp_path, seed_hashe
     assert list(outside.iterdir()) == []
 
 
-@pytest.mark.parametrize("component", ["root", "backup"])
+@pytest.mark.parametrize("component", ["parent", "root", "backup"])
 def test_retirement_does_not_traverse_reparse_directories(tmp_path, monkeypatch, seed_hashes, component):
     skills = tmp_path / "skills"
     (skills / "tool").mkdir(parents=True)
     (skills / "tool" / "SKILL.md").write_text("known skill")
     backup = skills / ".seed-backup"
     backup.mkdir()
-    reparse = skills if component == "root" else backup
+    reparse = {"parent": skills.parent, "root": skills, "backup": backup}[component]
     original_lstat = Path.lstat
 
     def fake_lstat(path, *args, **kwargs):

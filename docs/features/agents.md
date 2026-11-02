@@ -42,7 +42,7 @@ On app startup Kollab copies missing bundled agent files into the global agents
 directory. Existing files are preserved, so a global copy does not automatically
 receive later bundle changes. Linked agent or section directories, junctions,
 reparse points and file links are preserved instead of being seeded through. If
-the global agents directory itself is linked, startup skips seeding there;
+the global config directory or its agents directory is linked, startup skips seeding there;
 existing global agents in that directory still resolve normally. An agent with
 no local or global `system_prompt.md` resolves from the bundle.
 

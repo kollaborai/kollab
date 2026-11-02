@@ -957,8 +957,10 @@ def _copy_seed_agents_to_global(
         global_agents_dir: Target global agents directory (~/.kollab/agents/)
         old_global_prompt_dir: Old system_prompt dir for migration
     """
-    if _is_link_or_reparse(global_agents_dir):
-        logger.info("Preserving linked global agents directory: %s", global_agents_dir)
+    if _is_link_or_reparse(global_agents_dir) or _is_link_or_reparse(
+        global_agents_dir.parent
+    ):
+        logger.info("Preserving linked global agents directory or parent: %s", global_agents_dir)
         return
 
     seed_agents_dir = _get_bundled_dir("agents")
@@ -1064,6 +1066,7 @@ def _classify_global_skills(global_skills_dir: Path) -> tuple[list[Path], int]:
     if (
         seed_hashes is None
         or _is_link_or_reparse(global_skills_dir)
+        or _is_link_or_reparse(global_skills_dir.parent)
         or not global_skills_dir.is_dir()
     ):
         return [], 0
@@ -1116,7 +1119,7 @@ def _migrate_old_prompt_to_agent(old_prompt_file: Path, agent_dir: Path) -> None
         old_prompt_file: Path to old default.md file
         agent_dir: Target agent directory (e.g., .kollab/agents/default/)
     """
-    if _is_link_or_reparse(agent_dir) or _is_link_or_reparse(agent_dir.parent):
+    if any(_is_link_or_reparse(path) for path in (agent_dir, agent_dir.parent, agent_dir.parent.parent)):
         return
 
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -1144,7 +1147,7 @@ def _create_agent_from_defaults(agent_dir: Path) -> None:
     Args:
         agent_dir: Agent directory to create (e.g., ~/.kollab/agents/default/)
     """
-    if _is_link_or_reparse(agent_dir) or _is_link_or_reparse(agent_dir.parent):
+    if any(_is_link_or_reparse(path) for path in (agent_dir, agent_dir.parent, agent_dir.parent.parent)):
         return
 
     agent_name = agent_dir.name  # e.g., "default"

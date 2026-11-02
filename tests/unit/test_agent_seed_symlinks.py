@@ -78,6 +78,42 @@ def test_seed_preserves_directory_links(tmp_path, monkeypatch, linked_component)
     assert list(outside.iterdir()) == []
 
 
+def test_seed_preserves_a_linked_global_config_parent(tmp_path, monkeypatch):
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    outside = tmp_path / "outside"
+    (outside / "agents").mkdir(parents=True)
+    linked_config = tmp_path / ".kollab"
+    _link(linked_config, outside, directory=True)
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled)
+
+    config_utils._copy_seed_agents_to_global(linked_config / "agents", tmp_path / "old")
+
+    assert linked_config.is_symlink()
+    assert list((outside / "agents").iterdir()) == []
+
+
+def test_seed_preserves_a_reparse_global_config_parent(tmp_path, monkeypatch):
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    config = tmp_path / ".kollab"
+    (config / "agents").mkdir(parents=True)
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path, *args, **kwargs):
+        if path == config:
+            return SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x400)
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled)
+    config_utils._copy_seed_agents_to_global(config / "agents", tmp_path / "old")
+
+    assert list((config / "agents").iterdir()) == []
+
+
 def test_seed_still_copies_missing_and_preserves_existing_files(tmp_path):
     source = tmp_path / "bundled"
     target = tmp_path / "global"
