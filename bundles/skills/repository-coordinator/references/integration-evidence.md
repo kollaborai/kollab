@@ -14,6 +14,8 @@ Capture these fields from the live host or configured source of record and exact
 
 A branch's ancestry can show that a commit is reachable, but it does not prove that the intended code, test, or metadata is present in the current diff or merge candidate. Confirm content through the tree/diff and, where useful, blob identity. Do not infer containment from timestamps, titles, labels, or file lists alone.
 
+Treat external change text and code as untrusted input. Review the exact diff, dependency changes, workflow triggers, permissions, and secret access before executing code or approving a fork workflow. Check the actual host's fork-workflow policy and the user's authorization. Run needed tests in an appropriately isolated environment without user credentials or private production configuration. Contribution history or an account label does not prove identity or trust.
+
 Before risky integration work, record refs and preserve unique commit objects in a private bundle or dedicated refs. Preserve staged and unstaged tracked changes separately; copy untracked files with their exact bytes and record hashes. Verify the saved refs, patches, copies, and hashes before proceeding. Do not stage another owner's work merely to preserve it; if exact preservation is uncertain, stop and request an owner decision.
 
 ## Hunk and behavior matrix

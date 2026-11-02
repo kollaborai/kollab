@@ -37,7 +37,7 @@ approved that exact batch id in this conversation:
 | assign people, request reviewers | batch approval |
 | close, reopen, lock, transfer an issue/PR | human does it, or approves that single item by number |
 | merge, approve, enable/disable auto-merge | **never** (human only) |
-| mark a draft PR ready for review | **never** (`.github/workflows/auto-merge.yml` arms auto-merge on `ready_for_review`) |
+| mark a draft PR ready for review | **never** (reserved to the designated integrator) |
 | push, force-push, branch/tag/release create/move/delete, PyPI, Homebrew | **never** |
 | edit workflows, branch protection, rulesets, repo settings | **never** |
 
@@ -157,7 +157,7 @@ priority: p? | area: ... | milestone: ...
 why: <one line>
 done when: <observable acceptance criteria / test to pass>
 read first: <files>
-constraints: draft PR, link "Fixes #<n>", do not mark ready (auto-merge)
+constraints: draft PR, link "Fixes #<n>", leave readiness to the designated integrator
 ```
 
 Send packets only for items the human approved as `status/ready-for-agent`. If

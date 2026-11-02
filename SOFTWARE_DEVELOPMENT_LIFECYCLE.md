@@ -22,11 +22,16 @@ here for detail.
   plan or bounded PR batch. That authorization covers its listed work without a
   separate permission request for each merge step. Marco retains release and
   tag authority; release tags always need his explicit instruction.
-- Designated integrator: one named owner for each merge queue. The integrator
-  independently reviews each exact PR head, verifies its base and required
-  gates, and may mark ready and merge only work within Marco's authorized plan.
-  An integrator-authored PR needs review from another person; self-review never
-  counts. Scope outside the authorization needs a new decision.
+- Designated integrator: one active named owner for the repository's merge
+  queue. The integrator independently reviews each exact PR head, verifies its
+  base and required gates, and may mark ready and merge only work within Marco's
+  authorized plan. An integrator-authored PR needs review from another person;
+  self-review never counts. Scope outside the authorization needs a new decision.
+  Record the current integrator, authorization, and checkpoint in a shared,
+  discoverable project record. A takeover requires an explicit record update
+  and evidence the prior integrator has stopped. If the record or ownership is
+  missing, conflicting, stale, or unreachable, stay read-only until resolved;
+  elapsed time or a local lock does not prove exclusive ownership.
 - Writers: investigate, implement, test, open DRAFT PRs, keep branches updated,
   and respond to review. Writers do not approve or merge their own unreviewed
   changes.
@@ -109,7 +114,7 @@ gh pr create --draft --head issue-8-version-display --title "fix(cli): correct v
   fetch and merge that branch too. Resolve conflicts only within owned paths;
   stop and coordinate if a conflict crosses another owner's scope. Never rebase
   or force-push; preserve history with ordinary merges.
-- One named integrator coordinates each merge queue and lands PRs covered by
+- One active named integrator coordinates the repository's merge queue and lands PRs covered by
   Marco's authorized plan, using merge commits only. Marco authorizes the scope;
   the integrator executes it after the review and CI gates below, with no repeat
   permission request for each listed PR.
@@ -134,8 +139,8 @@ which require Marco's separate explicit instruction.
 
 Writers ALWAYS open PRs as drafts and do not mark their own PRs ready. The
 designated integrator marks ready only for covered work after independent
-review and exact-head gates. The repository's configured merge workflow may
-then merge it with a merge commit.
+review and exact-head gates. Automatic arming is disabled until an enforceable
+independent exact-head review gate exists. Do not arm GitHub auto-merge manually.
 
 A PR must be current with `main`, have all required checks green, and have all
 review conversations resolved. The active main ruleset currently requires
@@ -143,7 +148,18 @@ review conversations resolved. The active main ruleset currently requires
 status, and resolved threads; it requires zero approving reviews. The project
 process still requires a real independent source review, never an author
 self-review. Record the exact reviewed head SHA and tested head SHA; a new push
-requires review and CI evidence for that new head. Desktop Mac/Linux builds
+requires review and CI evidence for that new head. Before an authorized merge,
+the integrator rechecks the current head, base, checks, conversations, and that
+auto-merge is not already armed. Then use a merge commit with a head match:
+
+```bash
+gh pr merge <PR-number> --repo kollaborai/kollab --merge --match-head-commit <reviewed-head-SHA>
+```
+
+The head match prevents merging a different head; it does not verify that an
+independent review happened. That remains a process gate: the live host permits
+zero approvals and its separate auto-merge capability may still be enabled.
+Desktop Mac/Linux builds
 (the `binaries` and `desktop` workflows) run only on release tags and are not
 merge requirements. `ci/binary-smoke` is an early Linux build, not a required
 merge check.
@@ -175,8 +191,8 @@ git commit -m "feat(webui): copy a profile and pin its reasoning effort"
 - Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Draft is the
   default for every agent-opened PR, no exceptions.
 - Only the designated integrator marks a covered PR ready after independent
-  review and exact-head gates. Once ready, auto-merge
-  (`.github/workflows/auto-merge.yml`) merges it when checks pass.
+  review and exact-head gates, then merges manually with the head-match command
+  above. Automatic arming is disabled.
 - Merging needs the PR branch up to date with `main`. The writer updates its
   owned branch by fetching and merging `origin/main`, then pushing normally;
   preserve history with merge commits and never rebase or force-push.

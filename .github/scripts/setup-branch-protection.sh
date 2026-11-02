@@ -84,12 +84,12 @@ if [[ "${1:-}" == "--check" ]]; then
     exit 1
   fi
   live="$(gh api "repos/$repo/rulesets/$id" | jq -S '{name, target, enforcement, conditions, rules}')"
-  merge_ok="$(gh api "repos/$repo" --jq '.allow_auto_merge and .allow_merge_commit')"
+  merge_ok="$(gh api "repos/$repo" --jq '.allow_merge_commit')"
   if diff <(jq -S . <<<"$ruleset") <(echo "$live") && [[ "$merge_ok" == "true" ]]; then
     echo "Live ruleset and merge settings match this script."
     exit 0
   fi
-  echo "Drift on $repo (< this script, > live; auto-merge and merge commits allowed: $merge_ok)."
+  echo "Drift on $repo (< this script, > live; merge commits allowed: $merge_ok)."
   exit 1
 fi
 
@@ -101,7 +101,7 @@ else
   gh api "repos/$repo/rulesets" --method POST --input - <<<"$ruleset" >/dev/null
 fi
 
-# auto-merge.yml arms GitHub auto-merge, which the repo has to allow.
-gh api "repos/$repo" --method PATCH -F allow_auto_merge=true -F allow_merge_commit=true >/dev/null
+# Automatic arming is disabled. Leave the separate auto-merge setting untouched.
+gh api "repos/$repo" --method PATCH -F allow_merge_commit=true >/dev/null
 
 echo "Ruleset applied. Required checks: ci/tests, ci/standards-check, ci/security-scan"
