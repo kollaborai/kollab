@@ -563,3 +563,117 @@ async def test_dispatch_verify_handler_enforces_assigner_identity(tmp_path):
     )
     assert accepted.success
     assert ledger.get_dispatch("dispatch-message-1")["status"] == "verified"
+
+
+@pytest.mark.parametrize("failure_point", ["persistence", "routing"])
+@pytest.mark.asyncio
+async def test_failed_dispatch_retry_is_not_suppressed_by_content_dedupe(
+    tmp_path, failure_point
+):
+    ledger = TaskLedger(str(tmp_path))
+    plugin = HubPlugin(event_bus=MagicMock())
+    plugin._identity = AgentRuntime(
+        name="coordinator",
+        identity="koordinator",
+        agent_id="koordinator-id",
+        is_coordinator=True,
+    )
+    plugin._presence = MagicMock()
+    plugin._presence.scan_all_presence.return_value = [
+        AgentRuntime(name="coder", identity="lapis", agent_id="lapis-id")
+    ]
+    plugin._task_ledger = ledger
+    plugin._display_outgoing_message = MagicMock()
+    plugin._bridge_forward = AsyncMock()
+    plugin._resolve_scope = MagicMock(return_value=MessageScope.DIRECT.value)
+
+    route_attempts = 0
+
+    async def route_once_after_failure(message):
+        nonlocal route_attempts
+        route_attempts += 1
+        if failure_point == "routing" and route_attempts == 1:
+            raise RuntimeError("router unavailable")
+        return []
+
+    plugin._route_message = AsyncMock(side_effect=route_once_after_failure)
+
+    record_attempts = 0
+    original_record_dispatch = ledger.record_dispatch
+
+    def record_once_after_failure(**values):
+        nonlocal record_attempts
+        record_attempts += 1
+        if failure_point == "persistence" and record_attempts == 1:
+            raise OSError("dispatch ledger unavailable")
+        return original_record_dispatch(**values)
+
+    tool_data = {
+        "id": "hub-msg-retry",
+        "_message_id": "dispatch-retry-id",
+        "to": "lapis",
+        "content": "Task: inspect the retry path and report back.",
+        "task_id": "task-retry",
+        "worktree": "/tmp/retry-worktree",
+        "commit": "abc1234",
+    }
+    with patch.object(ledger, "record_dispatch", side_effect=record_once_after_failure):
+        first = await plugin._handle_hub_msg_tool(tool_data)
+        assert not first.success
+        retry = await plugin._handle_hub_msg_tool(tool_data)
+
+    expected_route_attempts = 1 if failure_point == "persistence" else 2
+    assert route_attempts == expected_route_attempts
+    assert retry.success
+    assert ledger.get_dispatch("dispatch-retry-id")["status"] == "in_flight"
+
+
+@pytest.mark.asyncio
+async def test_waiting_assignment_queued_to_mailbox_is_not_requeued_on_acp_replay(
+    tmp_path,
+):
+    ledger = TaskLedger(str(tmp_path))
+    plugin = HubPlugin(event_bus=MagicMock())
+    plugin._identity = AgentRuntime(
+        name="worker",
+        identity="sapphire",
+        agent_id="sapphire-id",
+        is_coordinator=False,
+    )
+    waiting_coordinator = AgentRuntime(
+        name="coordinator",
+        identity="koordinator",
+        agent_id="koordinator-id",
+        is_coordinator=True,
+        state="waiting",
+        cooldown_until=9_999_999_999.0,
+    )
+    plugin._presence = MagicMock()
+    plugin._presence.discover_agents_async = AsyncMock(
+        return_value=[waiting_coordinator]
+    )
+    plugin._presence.scan_all_presence.return_value = [waiting_coordinator]
+    plugin._task_ledger = ledger
+    plugin._display_outgoing_message = MagicMock()
+    plugin._bridge_forward = AsyncMock()
+    plugin._resolve_scope = MagicMock(return_value=MessageScope.DIRECT.value)
+
+    tool_data = {
+        "id": "hub-msg-acp-replay",
+        "_message_id": "dispatch-acp-replay-id",
+        "_acp_hub": True,
+        "to": "koordinator",
+        "content": "Task: inspect the mailbox replay and report back.",
+        "task_id": "task-acp-replay",
+    }
+    with patch(
+        "plugins.hub.plugin.AgentMessenger.send_to_file",
+        new=AsyncMock(),
+    ) as send_to_file:
+        first = await plugin._handle_hub_msg_tool(tool_data)
+        retry = await plugin._handle_hub_msg_tool(tool_data)
+
+    send_to_file.assert_awaited_once()
+    assert first.success
+    assert retry.success
+    assert ledger.get_dispatch("dispatch-acp-replay-id")["status"] == "in_flight"

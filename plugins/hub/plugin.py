@@ -3704,8 +3704,6 @@ class HubPlugin(BasePlugin):
                 ),
                 metadata={"end_turn": True} if any_wait else None,
             )
-        if not target.startswith("relay:") and not handle:
-            self._recent_hub_msgs[msg_hash] = now
 
         # Resolve thread context
         is_reply = tool_data.get("_is_reply", False)
@@ -4043,6 +4041,8 @@ class HubPlugin(BasePlugin):
 
         if any_wait and not warned:
             metadata["end_turn"] = True
+        if not target.startswith("relay:") and not handle:
+            self._recent_hub_msgs[msg_hash] = time.time()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_msg",
@@ -11482,6 +11482,13 @@ class HubPlugin(BasePlugin):
             if message.to not in queued_for:
                 message.metadata["_queued_for"] = [*queued_for, message.to]
             await AgentMessenger.send_to_file(message.to, message)
+            # A successful durable enqueue is accepted delivery; remove the
+            # waiting rejection so the dispatch ledger will not allow replay.
+            rejections = [
+                (recipient, reason)
+                for recipient, reason in rejections
+                if recipient != message.to
+            ]
             self._trace_delivery(
                 message,
                 "queued_identity_mailbox",
