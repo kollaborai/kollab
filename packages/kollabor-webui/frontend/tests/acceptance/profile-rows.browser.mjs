@@ -3,11 +3,19 @@
 // without hover while Test/Edit/Copy/Delete remain usable by touch.
 // Run after `npm ci`. Keep Playwright and its browser isolated from the
 // frontend dependency tree:
-// `npm install --prefix /tmp/kollab-578-playwright playwright-core`
-// Then set PLAYWRIGHT_CORE_PATH=/tmp/kollab-578-playwright/node_modules/playwright-core
-// when running this script. Set PROFILE_ROWS_CAPTURE=1 to write screenshots
-// under docs/media. The fixture uses a fake API and synthetic profiles; no
-// engine or key is used.
+//   npm install --prefix /tmp/kollab-578-playwright playwright-core
+//   npx --prefix /tmp/kollab-578-playwright playwright-core install chromium
+// Then run with:
+//   PLAYWRIGHT_CORE_PATH=/tmp/kollab-578-playwright/node_modules/playwright-core \
+//   node tests/acceptance/profile-rows.browser.mjs
+// Browser resolution: CHROME_PATH if set (any Chrome/Chromium binary works),
+// else the chromium that `playwright-core install chromium` downloaded under
+// PLAYWRIGHT_BROWSERS_PATH (default ~/Library/Caches/ms-playwright on macOS).
+// Set PROFILE_ROWS_CAPTURE=1 to write screenshots under docs/media.
+// This harness is retained local coverage, not a CI step: ci.yml's web UI job
+// runs vitest, node:test and tsc, but no workflow installs a browser binary,
+// and the sibling profile-copy acceptance harness follows the same precedent.
+// The fixture uses a fake API and synthetic profiles; no engine or key is used.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { mkdir } from "node:fs/promises";
@@ -87,10 +95,12 @@ try {
         if (metas.length !== 3) {
           throw new Error(`expected 3 profile rows, found ${metas.length}`);
         }
-        const metaBoxes = metas.map((el) => {
+        const expected = window.profileRowsExpectedMeta ?? [];
+        const metaBoxes = metas.map((el, index) => {
           const rect = el.getBoundingClientRect();
           return {
             text: el.textContent ?? "",
+            expected: expected[index] ?? "",
             insideDialog:
               rect.left >= dialogRect.left - 1 &&
               rect.right <= dialogRect.right + 1,
@@ -125,20 +135,20 @@ try {
         bounds.documentWidth <= width,
         `${theme}: document overflows at ${width}px: ${JSON.stringify(bounds)}`,
       );
-      for (const meta of bounds.metaBoxes) {
+      bounds.metaBoxes.forEach((meta, index) => {
         assert.ok(meta.insideDialog, `${theme}: meta escapes dialog at ${width}px: ${meta.text}`);
         assert.ok(
           meta.notClipped,
           `${theme}: meta truncated at ${width}px: ${meta.text}`,
         );
-        const pieces = meta.text.split(" · ").map((piece) => piece.trim());
-        for (const piece of pieces) {
-          assert.ok(
-            page.getByText(piece, { exact: true }),
-            `${theme}: metadata piece missing at ${width}px: ${piece}`,
-          );
-        }
-      }
+        // The row must render the full provider · model · N effort line from
+        // the fixture; a dropped piece changes the text and fails here.
+        assert.equal(
+          meta.text.trim(),
+          meta.expected,
+          `${theme}: row ${index} metadata incomplete at ${width}px: got "${meta.text.trim()}", expected "${meta.expected}"`,
+        );
+      });
       assert.equal(bounds.buttonBoxes.length, 12, `${theme}: expected 4 actions on 3 rows at ${width}px`);
       for (const button of bounds.buttonBoxes) {
         assert.ok(button.visible, `${theme}: action hidden at ${width}px: ${button.label}`);

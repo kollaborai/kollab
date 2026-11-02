@@ -6,6 +6,7 @@ import "../../src/styles.css";
 declare global {
   interface Window {
     profileRowsTestCalls: number;
+    profileRowsExpectedMeta: string[];
   }
 }
 
@@ -13,6 +14,14 @@ declare global {
 // Profiles exercise the narrow-screen metadata layout from issue #578: long
 // names, long model ids, endpoint and ACP target labels, and a missing effort.
 window.profileRowsTestCalls = 0;
+// The full meta line each row must render (provider · model · N effort), so the
+// browser harness can fail when any piece goes missing instead of merely
+// checking whatever text happened to render.
+window.profileRowsExpectedMeta = [
+  "openai_responses · gpt-5.6-luna-ultra-context-2026-preview · high effort",
+  "anthropic · claude-sonnet-4-6 · medium effort",
+  "acp · gemini-3-pro · ultra effort",
+];
 
 const profiles: Profile[] = [
   {
