@@ -91,6 +91,39 @@ agent as `dispatch failures` (this is what `kollab --hub status` shows):
   `queued for X (socket send failed ...)`, no longer `delivered to X`;
 - target unknown: the existing `warning: 'X' is not online` result.
 
+## operator notifications
+
+The configured hub user name (falling back to OS `USER`) and default aliases
+(`operator`, `boss`, `human`) route directly to ntfy; additional aliases may be
+set in `plugins.hub.notify.ntfy.aliases`. An alias is not treated as an offline
+Hub identity. A direct send such as `kollab --hub msg "$USER" "test"` reports
+a successful ntfy handoff or a safe configuration/delivery error.
+
+Agent messages may use the independent `notify_kind` attribute with `decision`,
+`blocker`, or `done`. It does not change `kind`, whose values stay
+`message`/`question`/`answer` for relay semantics. Decision and blocker alerts
+use higher default priorities; done and ordinary message use lower/default
+priority. A same-agent, same-text alert is deduplicated for 10 minutes. ntfy
+retries transient network, 429, and 5xx failures with bounded exponential
+backoff; permanent HTTP errors are not retried.
+
+Non-queued dispatch failures also schedule a best-effort `blocker` alert. A
+message retained for offline mailbox delivery does not alert as a failure. No
+operator notification is emitted from an active manual-trust relay turn, which
+remains limited to one question to its authenticated sender. Notification
+failures are logged without request URLs, topics, or tokens, and do not crash
+the message dispatcher.
+
+`plugins.hub.notify.ntfy` accepts `server`, `topic`, optional `token`,
+`priority_map`, `aliases`, and `webui_agent_url_template`. The optional template
+is used only for a supported HTTP(S) agent route and may use `{identity}` or
+`{agent}`; without it, ntfy receives no Click URL. If server or topic is missing, Kollab
+reads `ntfy_server` and `ntfy_topic` from
+`~/.config/marco-notify/config.json` at runtime. The fallback supplies neither
+token nor priority overrides. `/hub notify status` reports configuration state
+without displaying ntfy credentials.
+
+
 ## configuration
 
 `plugins.hub.*`: `supervisor_enabled` (true), `supervisor_poll_interval`
@@ -104,6 +137,9 @@ agent as `dispatch failures` (this is what `kollab --hub status` shows):
 - `tests/unit/test_hub_supervisor_wake_path.py` — wake delivery, nudge
   routing, wake-efficacy alerting, alert cooldown, error quoting,
   undelivered-nudge alert, status section.
+- `tests/unit/test_hub_operator_notify.py` — ntfy fallback, priority, dedupe,
+  retry/error redaction, Click template, operator aliases, relay guards, and status safety.
+
 - `tests/unit/test_hub_handoff_reliability.py` — handoff tracking,
   single resend, single alert, acknowledgement paths, and failed-dispatch
   surfacing (rejection, offline, socket failure).
