@@ -133,6 +133,77 @@ class TestAlignStreamedIds:
 
         assert [row["id"] for row in rows] == ["history-0", "history-1"]
 
+    def test_tool_turn_streamed_single_row_pairs_final_reply(self):
+        """A streamed tool turn is ONE row (cards + final text); the stored
+        turn is calls row, tool rows, final reply (ground truth from the
+        rig: roles system, user, assistant, tool, assistant). The reverse
+        pairing must skip the stored rows the streamed turn does not carry
+        as its own row and claim the FINAL reply for the streamed row: the
+        merge then adds only the calls row, whose tool row attaches to the
+        card. User keeps its own index; the tool row keeps history-6.
+        """
+        rows = [
+            {"id": "history-0", "role": "user", "content": "welcome prompt"},
+            {"id": "history-1", "role": "assistant", "content": "welcome reply"},
+            {"id": "history-2", "role": "user", "content": "PROOF666 one"},
+            {"id": "history-3", "role": "assistant", "content": "MOCK666 control reply."},
+            {"id": "user-s1-4", "role": "user", "content": "runtool"},
+            {"id": "assistant-s1-5", "role": "assistant",
+             "content": [{"type": "tool-call", "toolCallId": "terminal_0",
+                          "toolName": "terminal"},
+                         {"type": "text", "text": "done"}]},
+        ]
+        history = _history() + [
+            {"role": "user", "content": "runtool"},
+            {"role": "assistant", "content": "Running it.",
+             "metadata": {"tool_calls": [{"id": "terminal_0", "type": "function",
+                "function": {"name": "terminal", "arguments": {"command": "echo one"}}}]}},
+            {"role": "tool", "content": "[terminal] one",
+             "metadata": {"tool_call_id": "terminal_0"}},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        messages._assistant_align_streamed_ids(rows, history)
+
+        assert [row["id"] for row in rows] == [
+            "history-0", "history-1", "history-2", "history-3",
+            "history-4", "history-7",
+        ]
+
+    def test_native_tool_turn_ending_on_the_tool_batch(self):
+        """A native turn that ends on its tool rows still aligns.
+
+        The daemon writes role="tool" rows for native calls too (no XML
+        metadata anywhere); a refresh landing between the batch and the final
+        reply leaves the mirror ending on the tool row.
+        """
+        rows = [
+            {"id": "history-0", "role": "user", "content": "welcome prompt"},
+            {"id": "history-1", "role": "assistant", "content": "welcome reply"},
+            {"id": "history-2", "role": "user", "content": "PROOF666 one"},
+            {"id": "history-3", "role": "assistant", "content": "MOCK666 control reply."},
+            {"id": "user-s1-4", "role": "user", "content": "runtool"},
+            {"id": "assistant-s1-5", "role": "assistant",
+             "content": [{"type": "tool-call", "toolCallId": "call_1",
+                          "toolName": "terminal"},
+                         {"type": "text", "text": "Running it."}]},
+        ]
+        history = _history() + [
+            {"role": "user", "content": "runtool"},
+            {"role": "assistant", "content": "Running it.",
+             "metadata": {"tool_calls": [{"id": "call_1", "type": "function",
+                "function": {"name": "terminal", "arguments": {"command": "ls"}}}]}},
+            {"role": "tool", "content": "[terminal] a.txt",
+             "metadata": {"tool_call_id": "call_1"}},
+        ]
+
+        messages._assistant_align_streamed_ids(rows, history)
+
+        assert [row["id"] for row in rows] == [
+            "history-0", "history-1", "history-2", "history-3",
+            "history-4", "history-5",
+        ]
+
     def test_synthetic_error_rows_are_left_alone(self):
         rows = _streamed(_state_messages())
         rows.insert(2, {"id": "history-2-error", "role": "assistant",
@@ -204,9 +275,10 @@ class _Session:
     alive = True
     session_id = "s1"
 
-    def __init__(self, history):
+    def __init__(self, history, replies=None):
         self.queue: asyncio.Queue = asyncio.Queue()
         self._history = history
+        self.replies = replies if replies is not None else ["MOCK666 control reply."]
         self.refresh_history = AsyncMock(return_value=history)
 
     def subscribe(self):
@@ -216,18 +288,21 @@ class _Session:
         pass
 
     async def send_message(self, content, **kwargs):
-        self.queue.put_nowait({
-            "type": "token", "request_id": "r1", "text": "MOCK666 control reply.",
-        })
+        # One token per model round: a tool turn streams a call round and a
+        # final reply as two assistant rows.
+        for text in self.replies:
+            self.queue.put_nowait({
+                "type": "token", "request_id": "r1", "text": text,
+            })
         self.queue.put_nowait({
             "type": "turn_complete", "request_id": "r1", "stop_reason": "end_turn",
         })
         return {"accepted": True, "request_id": "r1"}
 
 
-async def _run_turn(monkeypatch, history, state_messages):
+async def _run_turn(monkeypatch, history, state_messages, replies=None):
     controllers, runners = _fake_assistant_stream(monkeypatch)
-    session = _Session(history)
+    session = _Session(history, replies=replies)
     monkeypatch.setattr(messages, "get_session_registry", lambda: {"s1": session})
     body = messages.AssistantRequest(
         commands=[{
@@ -253,6 +328,98 @@ async def test_turn_complete_publishes_history_ids(monkeypatch):
         "history-0", "history-1", "history-2", "history-3",
     ]
     assert state["synced"] == {"history": 4, "messages": 4}
+
+
+def _xml_tool_history():
+    """A stored XML tool turn after ``web_history`` shaped it (#666 P2).
+
+    Tool rows sit between the call row and the final reply; the streamed
+    turn carries the call on the assistant row's parts instead of a row.
+    """
+    return _history() + [
+        {"role": "user", "content": "runtool"},
+        {"role": "assistant", "content": "Running it.",
+         "metadata": {"tool_calls": [{"id": "terminal_0", "type": "function",
+            "function": {"name": "terminal", "arguments": {"command": "echo one"}}}]}},
+        {"role": "tool", "content": "[terminal] one",
+         "metadata": {"tool_call_id": "terminal_0"}},
+        {"role": "assistant", "content": "done"},
+    ]
+
+
+def _native_tool_history():
+    """The same turn shape with the daemon's native metadata (no XML keys).
+
+    ``web_history`` passes a native tool turn through as it is; the align
+    must not depend on XML metadata being present.
+    """
+    return _history() + [
+        {"role": "user", "content": "runtool"},
+        {"role": "assistant", "content": "Running it.",
+         "metadata": {"tool_calls": [{"id": "call_1", "type": "function",
+            "function": {"name": "terminal", "arguments": {"command": "ls"}}}]}},
+        {"role": "tool", "content": "[terminal] a.txt",
+         "metadata": {"tool_call_id": "call_1"}},
+        {"role": "assistant", "content": "done"},
+    ]
+
+
+def _tool_base_state():
+    """Rows the page already shows under canonical ids before the tool turn."""
+    return [
+        {"id": "history-0", "role": "user", "content": "welcome prompt"},
+        {"id": "history-1", "role": "assistant", "content": "welcome reply"},
+        {"id": "history-2", "role": "user", "content": "PROOF666 one"},
+        {"id": "history-3", "role": "assistant", "content": "MOCK666 control reply."},
+    ]
+
+
+def _tool_streamed():
+    return _tool_base_state() + [
+        {"id": "user-s1-4", "role": "user", "content": "runtool"},
+        {"id": "assistant-s1-5", "role": "assistant",
+         "content": [{"type": "tool-call", "toolCallId": "terminal_0",
+                      "toolName": "terminal"},
+                     {"type": "text", "text": "Running it."}]},
+        {"id": "assistant-s1-6", "role": "assistant",
+         "content": [{"type": "text", "text": "done"}]},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_xml_tool_turn_publishes_history_ids(monkeypatch):
+    """Route-level: a tool turn's rows still get their stored history ids.
+
+    The fake stream emits both rounds (call round, final reply), matching
+    the stored shape call-row, tool row(s), final row: the rename straddles
+    the tool row (history-7 after history-5) and the wiring passes the mirror
+    through untouched.
+    """
+    state = await _run_turn(
+        monkeypatch, _xml_tool_history(), _tool_base_state(),
+        replies=["done"],
+    )
+
+    assert [row["id"] for row in state["messages"]] == [
+        "history-0", "history-1", "history-2", "history-3",
+        "history-4", "history-7",
+    ]
+    assert state["synced"] == {"history": 8, "messages": 6}
+
+
+@pytest.mark.asyncio
+async def test_native_tool_turn_publishes_history_ids(monkeypatch):
+    """Route-level: native tool rows (no XML metadata) skip the same way."""
+    state = await _run_turn(
+        monkeypatch, _native_tool_history(), _tool_base_state(),
+        replies=["done"],
+    )
+
+    assert [row["id"] for row in state["messages"]] == [
+        "history-0", "history-1", "history-2", "history-3",
+        "history-4", "history-7",
+    ]
+    assert state["synced"] == {"history": 8, "messages": 6}
 
 
 @pytest.mark.asyncio

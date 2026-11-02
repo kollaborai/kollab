@@ -682,22 +682,37 @@ def _assistant_align_streamed_ids(
     if not provisional:
         return
     stored: List[int] = []
+    cursor = len(provisional) - 1
     for index in range(len(history) - 1, -1, -1):
+        if cursor < 0:
+            break
         role = history[index].get("role")
         if role == "system":
             # Hub echoes land behind the turn's rows; they render as nothing.
             continue
+        if role == "tool":
+            # Tool results render onto their call's card (matched by
+            # tool_call_id), never as rows of their own: a streamed turn has
+            # no row to pair them with. Skipping them keeps the user and
+            # assistant pairing on the stored absolute indexes.
+            continue
         if role not in ("user", "assistant") or index in shown:
             return
+        if role != messages[provisional[cursor]].get("role"):
+            # A streamed turn renders every tool round on one assistant row
+            # (text, call cards, final text in arrival order); stored history
+            # splits the same turn into a calls row, tool rows, and a final
+            # reply. The stored row this turn does not carry as its own row
+            # is left for the merge to add, so only rows whose role lines up
+            # in reverse order get renamed.
+            continue
         stored.append(index)
-        if len(stored) == len(provisional):
-            break
-    if len(stored) != len(provisional):
+        cursor -= 1
+    if cursor >= 0:
+        # History ran out before every provisional row paired: the refresh
+        # does not cover this turn. Keep the provisional ids.
         return
     stored.reverse()
-    for message_index, history_index in zip(provisional, stored):
-        if messages[message_index].get("role") != history[history_index].get("role"):
-            return
     for message_index, history_index in zip(provisional, stored):
         messages[message_index]["id"] = f"history-{history_index}"
 
