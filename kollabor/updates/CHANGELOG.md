@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Development and live checkouts no longer masquerade as release builds:
   the CLI, application info, and the engine's `/version` and `/status`
   report a PEP 440 local segment (`0.18.5+<short-sha>`) derived from the
-  checkout, while installed releases keep the exact base version; an
-  unresolvable revision reports `+unknown` instead of hiding (#630).
+  checkout, while installed releases and release artifacts keep the exact
+  base version, and an unresolvable revision reports `+unknown` instead
+  of hiding (#630).
 - Coordinator task assignments survive restarts in a durable dispatch ledger,
   suppress re-routing delivered work, and keep completion reports unverified
   until the original assigner verifies a worktree or commit reference (#636).

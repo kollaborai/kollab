@@ -19,6 +19,7 @@ def test_installed_mode_reports_exact_base(monkeypatch):
 def test_source_mode_appends_local_segment(monkeypatch):
     """A source checkout reports base + short sha as a PEP 440 local segment."""
     monkeypatch.setattr(kollabor_version, "_is_running_from_source", lambda: True)
+    monkeypatch.setattr(kollabor_version, "_EMBEDDED_PROVENANCE", None)
     monkeypatch.setattr(kollabor_version, "get_kollabor_version", lambda: "0.18.5")
     monkeypatch.setattr(
         kollabor_version,
@@ -33,6 +34,7 @@ def test_source_mode_appends_local_segment(monkeypatch):
 def test_unresolved_revision_reports_unknown_suffix(monkeypatch):
     """An unresolvable revision must not masquerade as a release either."""
     monkeypatch.setattr(kollabor_version, "_is_running_from_source", lambda: True)
+    monkeypatch.setattr(kollabor_version, "_EMBEDDED_PROVENANCE", None)
     monkeypatch.setattr(kollabor_version, "get_kollabor_version", lambda: "0.18.5")
     monkeypatch.setattr(
         kollabor_version,
@@ -40,6 +42,29 @@ def test_unresolved_revision_reports_unknown_suffix(monkeypatch):
         lambda: kollabor_version.BuildProvenance(branch="unknown", sha=UNKNOWN),
     )
     assert kollabor_version.get_runtime_version() == "0.18.5+unknown"
+
+def test_embedded_provenance_artifact_stays_exact(monkeypatch):
+    """A release artifact (relay/pyinstaller tree) keeps the exact base version.
+
+    The packaged relay ships a source-like tree (pyproject.toml present) with
+    baked build identity. Embedded provenance marks it as a release artifact,
+    so the runtime identity must stay bare even though it looks like a source
+    checkout. Mirrors tests/unit/test_relay_build_allowlist.py.
+    """
+    monkeypatch.setattr(kollabor_version, "_is_running_from_source", lambda: True)
+    monkeypatch.setattr(
+        kollabor_version,
+        "_EMBEDDED_PROVENANCE",
+        kollabor_version.BuildProvenance(branch="release/0.18.0", sha="ab" * 20),
+    )
+    monkeypatch.setattr(kollabor_version, "get_kollabor_version", lambda: "0.18.5")
+    monkeypatch.setattr(
+        kollabor_version,
+        "get_build_provenance",
+        lambda: kollabor_version.BuildProvenance(branch="release/0.18.0", sha="ab" * 20),
+    )
+    assert kollabor_version.get_runtime_version() == "0.18.5"
+
 
 
 def test_dunder_version_is_the_runtime_identity():
