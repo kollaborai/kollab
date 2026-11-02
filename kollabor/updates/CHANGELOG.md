@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
+- Agent-facing crystal writes reject bodies over 2,000 characters; crystal-store saves are atomic and verified, and failed writes surface errors without retaining partial mutations (#638).
 
 ### Added
 - The Web UI Agents sidebar shows a small type glyph after local-session and offline names (coder `▸`, research `◈`, default `●`); rows without type metadata and all remote rows stay unmarked (#655).
