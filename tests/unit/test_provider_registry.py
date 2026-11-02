@@ -210,8 +210,13 @@ class TestProviderCreation:
         assert provider.is_initialized is True
 
     @pytest.mark.asyncio
-    async def test_create_provider_not_registered(self):
+    async def test_create_provider_not_registered(self, monkeypatch):
         """Test creating unregistered provider raises error."""
+        monkeypatch.delitem(
+            ProviderRegistry._providers,
+            ProviderType.AZURE_OPENAI,
+            raising=False,
+        )
         from kollabor_ai.providers.models import AzureOpenAIConfig
 
         config = AzureOpenAIConfig(
