@@ -305,7 +305,11 @@ def test_no_safe_primitive_leaves_bundle_usable(tmp_path, monkeypatch, caplog, e
     def deny_link(*args, **kwargs):
         raise error
 
+    def deny_exclusive_rename(*args, **kwargs):
+        raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+
     monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils, "_rename_seed_noreplace", deny_exclusive_rename)
     config_utils.initialize_system_prompt()
     manager = agent_manager.AgentManager(project_path=project)
 
@@ -313,7 +317,7 @@ def test_no_safe_primitive_leaves_bundle_usable(tmp_path, monkeypatch, caplog, e
     global_agent = home / ".kollab" / "agents" / "operator"
     assert not (global_agent / "system_prompt.md").exists()
     assert not list(global_agent.glob(".*.seed-*"))
-    assert "create-if-absent is unavailable" in caplog.text
+    assert "both hard-link and POSIX no-replace rename failed" in caplog.text
     assert "Existing files were preserved" in caplog.text
 
 
@@ -342,7 +346,15 @@ def test_seed_failure_does_not_skip_independent_skill_retirement(tmp_path, monke
     def deny_link(*args, **kwargs):
         raise OSError(errno.ENOTSUP, "hard links unsupported")
 
+    native_rename = config_utils._rename_seed_noreplace
+
+    def deny_agent_rename(source_name, target_name, **kwargs):
+        if target_name == "system_prompt.md":
+            raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+        return native_rename(source_name, target_name, **kwargs)
+
     monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils, "_rename_seed_noreplace", deny_agent_rename)
     config_utils.initialize_system_prompt()
 
     assert not skill.exists()
@@ -376,7 +388,11 @@ def test_no_safe_primitive_reports_an_existing_global_shadow(tmp_path, monkeypat
     def deny_link(*args, **kwargs):
         raise PermissionError("hard links denied")
 
+    def deny_exclusive_rename(*args, **kwargs):
+        raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+
     monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils, "_rename_seed_noreplace", deny_exclusive_rename)
     config_utils.initialize_system_prompt()
     manager = agent_manager.AgentManager(project_path=project)
 
@@ -386,6 +402,90 @@ def test_no_safe_primitive_reports_an_existing_global_shadow(tmp_path, monkeypat
     assert "still shadows the bundle" in caplog.text
     assert "may leave it incomplete" in caplog.text
     assert "Review" in caplog.text
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" and not sys.platform.startswith("linux"),
+    reason="native POSIX exclusive rename available on Linux and macOS",
+)
+def test_posix_exclusive_rename_publishes_when_hard_links_are_unavailable(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    sentinel = tmp_path / "user.md"
+    source.write_bytes(b"complete bundled content")
+    sentinel.write_bytes(b"user content")
+
+    def deny_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links unavailable")
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+
+    assert config_utils._copy_file_if_missing(source, target)
+    assert target.read_bytes() == b"complete bundled content"
+    assert sentinel.read_bytes() == b"user content"
+    assert not list(tmp_path.glob(".*.seed-*"))
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" and not sys.platform.startswith("linux"),
+    reason="native POSIX exclusive rename available on Linux and macOS",
+)
+def test_posix_exclusive_rename_preserves_concurrent_destination(tmp_path, monkeypatch):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    sentinel = tmp_path / "user.md"
+    source.write_bytes(b"bundle")
+    sentinel.write_bytes(b"unrelated user content")
+    native_rename = config_utils._rename_seed_noreplace
+
+    def deny_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links unavailable")
+
+    def create_destination_before_rename(source_name, target_name, **kwargs):
+        target.write_bytes(b"concurrent user content")
+        return native_rename(source_name, target_name, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(
+        config_utils, "_rename_seed_noreplace", create_destination_before_rename
+    )
+
+    assert not config_utils._copy_file_if_missing(source, target)
+    assert target.read_bytes() == b"concurrent user content"
+    assert sentinel.read_bytes() == b"unrelated user content"
+    assert not list(tmp_path.glob(".*.seed-*"))
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" and not sys.platform.startswith("linux"),
+    reason="native POSIX exclusive rename available on Linux and macOS",
+)
+def test_posix_no_safe_publication_preserves_user_files(tmp_path, monkeypatch):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    sentinel = tmp_path / "user.md"
+    source.write_bytes(b"bundle")
+    sentinel.write_bytes(b"user content")
+
+    def deny_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links unavailable")
+
+    def deny_exclusive_rename(*args, **kwargs):
+        raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils, "_rename_seed_noreplace", deny_exclusive_rename)
+
+    with pytest.raises(
+        OSError, match="both hard-link and POSIX no-replace rename failed"
+    ):
+        config_utils._copy_file_if_missing(source, target)
+
+    assert not target.exists()
+    assert sentinel.read_bytes() == b"user content"
+    assert not list(tmp_path.glob(".*.seed-*"))
 
 
 @pytest.mark.parametrize("race", [False, True])

@@ -47,14 +47,18 @@ existing global agents in that directory still resolve normally. An agent with
 no local or global `system_prompt.md` resolves from the bundle.
 
 New seed files are staged in their target directory and published without
-overwriting a file created at the same time. On Windows a no-overwrite rename
-is used if hard links are unavailable. If the filesystem cannot provide a safe
-publication operation, startup logs an error and leaves the target absent; use
-the bundled agent when no higher-priority copy shadows it, or use a filesystem
-that supports the operation. If a global `system_prompt.md` already exists, it
-still shadows the bundle unless a project-local agent wins; the log identifies
-that override for review because missing fragments may leave it incomplete. If
-a process exits abruptly during staging, a
+overwriting a file created at the same time. If hard links are unavailable,
+Windows uses a no-overwrite rename and POSIX uses its native exclusive rename
+when the filesystem supports it. If neither safe operation is available,
+startup logs an error and leaves the target absent; use the bundled agent when
+no higher-priority copy shadows it, or use a filesystem that supports one of
+the safe operations. On POSIX, directory descriptors prevent link traversal,
+but another process can relocate an already-open directory during startup; a
+seed file may then be published in the moved directory instead of at its
+original path. If a global `system_prompt.md` already exists, it still shadows
+the bundle unless a project-local agent wins; the log identifies that override
+for review because missing fragments may leave it incomplete. If a process
+exits abruptly during staging, a
 hidden `.<filename>.seed-...` file can remain beside the target. Once no seeding
 process is using it and the target has been checked, that exact temporary file
 can be removed. Kollab does not use it as an agent file or remove it silently.

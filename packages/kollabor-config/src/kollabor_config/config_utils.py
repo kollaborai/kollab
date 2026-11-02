@@ -1046,33 +1046,49 @@ def _publish_in_seed_directory(
                 )
         except FileExistsError:
             return False
-        except (OSError, NotImplementedError, AttributeError) as link_error:
-            if not IS_WINDOWS:
-                raise OSError(
-                    f"Cannot safely publish agent seed {target}: atomic "
-                    "create-if-absent is unavailable. Existing files were preserved. "
-                    "Use a filesystem that supports hard links, or use the bundled "
-                    "agent where no local or global override exists."
-                ) from link_error
-            try:
-                if directory_fd is None:
-                    os.rename(staged_name, target)
-                else:
-                    os.rename(
+        except (OSError, NotImplementedError, AttributeError):
+            if IS_WINDOWS:
+                try:
+                    if directory_fd is None:
+                        os.rename(staged_name, target)
+                    else:
+                        os.rename(
+                            staged_name,
+                            target.name,
+                            src_dir_fd=directory_fd,
+                            dst_dir_fd=directory_fd,
+                        )
+                except FileExistsError:
+                    return False
+                except (OSError, NotImplementedError, AttributeError) as rename_error:
+                    raise OSError(
+                        f"Cannot safely publish agent seed {target}: both hard-link "
+                        "and no-overwrite rename failed. Existing files were preserved. "
+                        "Check filesystem permissions or use the bundled agent where "
+                        "no local or global override exists."
+                    ) from rename_error
+            else:
+                try:
+                    if directory_fd is None:
+                        raise OSError(
+                            errno.ENOTSUP,
+                            "pinned directory descriptors are required for exclusive rename",
+                        )
+                    _rename_seed_noreplace(
                         staged_name,
                         target.name,
                         src_dir_fd=directory_fd,
                         dst_dir_fd=directory_fd,
                     )
-            except FileExistsError:
-                return False
-            except (OSError, NotImplementedError, AttributeError) as rename_error:
-                raise OSError(
-                    f"Cannot safely publish agent seed {target}: both hard-link "
-                    "and no-overwrite rename failed. Existing files were preserved. "
-                    "Check filesystem permissions or use the bundled agent where "
-                    "no local or global override exists."
-                ) from rename_error
+                except FileExistsError:
+                    return False
+                except (OSError, NotImplementedError, AttributeError) as rename_error:
+                    raise OSError(
+                        f"Cannot safely publish agent seed {target}: both hard-link "
+                        "and POSIX no-replace rename failed. Existing files were preserved. "
+                        "Use a filesystem that supports one of these safe operations, "
+                        "or use the bundled agent where no local or global override exists."
+                    ) from rename_error
     finally:
         if directory_fd is None:
             Path(staged_name).unlink(missing_ok=True)
