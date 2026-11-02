@@ -647,6 +647,61 @@ def _assistant_update_message_state(
     return messages
 
 
+def _assistant_align_streamed_ids(
+    messages: List[Dict[str, Any]], history: List[Dict[str, Any]]
+) -> None:
+    """Give the rows a streamed turn appended the ids their history rows carry.
+
+    The reloaded history names every row ``history-<index>``. A streamed turn
+    keeps provisional ``user-<session>-<n>`` ids, so when the page merges the
+    reloaded history after the turn, that merge (which dedupes by id) re-adds
+    the turn under its history ids and the window draws it twice until a full
+    reload. Renaming the streamed rows to their history ids makes the merge a
+    no-op and keeps one id per row across reloads.
+
+    Only a strict one-to-one match between the trailing stored rows and the
+    provisional rows justifies a rename; anything else (a refresh that missed
+    the turn's rows, an unexpected role) keeps the provisional ids, which the
+    next full reload still reconciles.
+    """
+    provisional: List[int] = []
+    shown: set[int] = set()
+    for index, message in enumerate(messages):
+        role = message.get("role")
+        message_id = message.get("id")
+        if role not in ("user", "assistant") or not isinstance(message_id, str):
+            continue
+        if message_id.startswith("history-"):
+            # Synthetic rows (``history-<n>-error``) are state-only; they
+            # never carry a stored counterpart and are left untouched.
+            history_id = re.fullmatch(r"history-(\d+)", message_id)
+            if history_id is not None:
+                shown.add(int(history_id.group(1)))
+            continue
+        provisional.append(index)
+    if not provisional:
+        return
+    stored: List[int] = []
+    for index in range(len(history) - 1, -1, -1):
+        role = history[index].get("role")
+        if role == "system":
+            # Hub echoes land behind the turn's rows; they render as nothing.
+            continue
+        if role not in ("user", "assistant") or index in shown:
+            return
+        stored.append(index)
+        if len(stored) == len(provisional):
+            break
+    if len(stored) != len(provisional):
+        return
+    stored.reverse()
+    for message_index, history_index in zip(provisional, stored):
+        if messages[message_index].get("role") != history[history_index].get("role"):
+            return
+    for message_index, history_index in zip(provisional, stored):
+        messages[message_index]["id"] = f"history-{history_index}"
+
+
 def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> None:
     """Publish message state while retaining the rest of the client state."""
     state = controller.state
@@ -681,29 +736,34 @@ def _assistant_close_shown_prompt(
 
 
 async def _assistant_set_synced(
-    controller: Any, session: Any, message_count: int
+    controller: Any, session: Any, message_count: int,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Say how much of the daemon's history the message state now shows.
 
     The page reloads the history after turns it did not run (a hub message that
     woke the agent, a turn typed in the terminal) and appends only what lies
-    past this point, so the turns it already shows keep their ids.
+    past this point, so the turns it already shows keep their ids. ``history``
+    accepts a refresh the caller already made (it also aligned the streamed
+    ids with it) so the daemon is not asked twice.
     """
-    try:
-        history = await session.refresh_history(stale_raises=True)
-    except Exception as exc:
-        # A stale watermark replays the turn as history next to the transient
-        # rows it already shows and the page draws it twice (#666). Clear it
-        # so the next refresh reloads whole instead of appending a duplicate.
-        logger.debug("history refresh for %s failed: %s", session.session_id, exc)
-        state = controller.state
+    if history is None:
         try:
-            has_watermark = state is not None and state.get("synced") is not None
-        except (KeyError, TypeError, AttributeError):
-            has_watermark = False
-        if has_watermark:
-            controller.state["synced"] = None
-        return
+            history = await session.refresh_history(stale_raises=True)
+        except Exception as exc:
+            # A stale watermark replays the turn as history next to the
+            # transient rows it already shows and the page draws it twice
+            # (#666). Clear it so the next refresh reloads whole instead of
+            # appending a duplicate.
+            logger.debug("history refresh for %s failed: %s", session.session_id, exc)
+            state = controller.state
+            try:
+                has_watermark = state is not None and state.get("synced") is not None
+            except (KeyError, TypeError, AttributeError):
+                has_watermark = False
+            if has_watermark:
+                controller.state["synced"] = None
+            return
     controller.state["synced"] = {"history": len(history), "messages": message_count}
 
 
@@ -1436,19 +1496,35 @@ async def assistant_transport(
                         else {"type": "complete", "reason": "stop"},
                     )
                     if persist_message_state:
-                        _assistant_set_messages(controller, state_messages)
                         if goal_pump is not None:
                             # Other goal commands may have reached history in
                             # between this page's request and its result. A
                             # total history count is not a prefix of the rows
                             # this stream rendered. Ask the page to reload the
-                            # canonical history once it is idle instead.
+                            # canonical history once it is idle instead. The
+                            # daemon is not asked for history: the full reload
+                            # supersedes any count this stream could set.
+                            _assistant_set_messages(controller, state_messages)
                             controller.state["synced"] = None
                             if event.get("history_recorded"):
                                 controller.state["goalHistoryReloadRequired"] = True
                         else:
+                            refreshed = None
+                            try:
+                                refreshed = await session.refresh_history()
+                            except Exception as exc:
+                                logger.debug(
+                                    "history refresh for %s failed: %s",
+                                    session_id, exc,
+                                )
+                            if refreshed:
+                                _assistant_align_streamed_ids(
+                                    state_messages, refreshed
+                                )
+                            _assistant_set_messages(controller, state_messages)
                             await _assistant_set_synced(
-                                controller, session, len(state_messages)
+                                controller, session, len(state_messages),
+                                history=refreshed,
                             )
                     _assistant_set_usage(controller, completion["usage"])
                     return
