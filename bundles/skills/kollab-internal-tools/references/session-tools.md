@@ -212,18 +212,25 @@ sessions. Inspect current help before use. Source: `plugins/hub/plugin.py`,
 
 ## What reaches the model
 
-When native calling is enabled for a tool-capable profile, the API request gets
-the active scope's native-exposed registry schemas. A non-tool-capable profile
-gets the generated XML registry reference when registry rendering is enabled.
-These are independent checks: a tool-capable profile with global native
-calling disabled receives no generated registry reference from this path and
-no native schemas. Some bundles include static XML examples and search/load
-instructions, but those vary by bundle and are not a complete schema catalog.
-Plugin-only tags and SDK services above are not added by the central registry
-schema generator. External MCP schemas and summaries depend on discovered,
-enabled servers and scope; inspect the actual session.
+When global native calling is enabled and the active profile supports it, the
+native handler attempts to supply the active scope's native-exposed schemas to
+the API. Separately, if registry rendering is enabled, the prompt builder emits
+the generated XML registry reference unless global native calling is enabled
+and its profile manager directly reports tool support. The standard
+`ProfileManager` exposes that capability on its active profile, not directly on
+the manager, so the builder's existing exception fallback currently includes
+the XML reference even when native schemas are also present. With an adapter
+that reports capability directly, the XML reference can be suppressed before
+native schema loading succeeds; inspect the actual request rather than assuming
+one path is available. Disabling registry rendering omits the generated reference.
+Some bundles contain static XML examples and search/load instructions, but those
+vary by bundle and are not a complete schema catalog. Plugin-only tags and SDK
+services above are not added by the central registry schema generator. External
+MCP schemas and summaries depend on discovered, enabled servers and scope;
+inspect the actual session.
 
 Source: `packages/kollabor-ai/src/kollabor_ai/system_prompt_builder.py`,
+`packages/kollabor-ai/src/kollabor_ai/profile_manager.py`,
 `packages/kollabor-agent/src/kollabor_agent/native_tools_handler.py`,
 `packages/kollabor-agent/src/kollabor_agent/mcp_integration.py`,
 `kollabor/llm/streaming_handler.py`.

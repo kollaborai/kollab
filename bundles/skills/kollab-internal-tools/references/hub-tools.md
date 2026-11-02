@@ -269,7 +269,7 @@ Source: `packages/kollabor-agent/src/kollabor_agent/tool_definitions/hub.py`, `p
 
 Purpose: Release this identity's advisory path claim in the local change-feed view.
 Inputs: Required: `path`. Optional: none.
-Result: The handler says the path was released, even when the underlying map says it was absent or owned by another identity.
+Result: Read the output: `released: <path>`, `not_claimed: <path>`, `not_owner: <path> (claimed by <identity>)`, or `release unconfirmed: <path> (unexpected status: <status>)`. These all have tool success `true`; a missing change feed or identity fails.
 Effects: Removes this identity's matching process-local claim when present and attempts to persist the map; it does not unlock a filesystem lock.
 Permission: registry risk `low`, confirmation flag `false`; policy above applies.
 Source: `packages/kollabor-agent/src/kollabor_agent/tool_definitions/hub.py`, `plugins/hub/plugin.py`, `plugins/hub/change_feed.py`.
