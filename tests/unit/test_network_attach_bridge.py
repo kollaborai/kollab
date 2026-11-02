@@ -5,6 +5,7 @@ runs a stand-in agent socket; the left device opens it through the network.
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import shutil
@@ -16,7 +17,7 @@ import pytest_asyncio
 
 from plugins.hub import network_attach
 from plugins.hub.network_attach import AttachRefused, NetworkAttach
-from plugins.hub.relay_state import RelayError, RelayStateStore
+from plugins.hub.relay_state import RelayError, RelayStateStore, SendGuardRevoked
 from tests.unit.test_relay_agent_bridge import allow, handle
 
 
@@ -29,6 +30,8 @@ async def devices(bridges):
     for bridge in (left, right):
         bridge.network_attach = NetworkAttach(
             request=bridge.secure_transport.request,
+            guarded_request=bridge.secure_transport.request,
+            capture_peer_guard=bridge.secure_transport.capture_peer_guard,
             target=bridge.attach_target,
             peer_name=bridge._peer_name,
             notice=notices.append,
@@ -61,21 +64,6 @@ async def _open(left, right):
     return await left.attach(await handle(left, right))
 
 
-@pytest.mark.asyncio
-async def test_a_member_device_opens_an_agent_under_trust_open_with_no_command(devices):
-    left, right, notices = devices
-    opened = await _open(left, right)
-    reader, writer = await asyncio.open_unix_connection(opened)
-    assert await reader.readline() == b"agent here\n"
-    writer.write(b"hello\n")
-    await writer.drain()
-    assert await reader.readline() == b"HELLO\n"
-    assert notices == ["left-box opened sapphire from the network"]
-
-    # Revoked: the rules say no, so the device closes the agent it held open.
-    right.commands.client.revoke(left.commands.client.public_key)
-    await right.network_attach.recheck()
-    assert not right.network_attach._channels
 @pytest.mark.asyncio
 async def test_a_member_device_opens_an_agent_under_trust_open_with_no_command(devices):
     left, right, notices = devices
@@ -231,6 +219,647 @@ async def test_a_connect_command_that_withdraws_an_open_agent_closes_it(devices,
     await right._rpc_command({"value": "trust manual", "agent_id": right.identity.agent_id})
     assert await asyncio.wait_for(reader.read(), 5) == b""
     assert notices[-1] == "closed sapphire for left-box: it may no longer open it"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forced_recheck", [False, True])
+async def test_withdrawal_fences_output_waiting_for_the_real_secure_session(
+    devices, monkeypatch, forced_recheck,
+):
+    """A queued transport request cannot send after trust withdrawal."""
+    monkeypatch.setattr(network_attach, "FLUSH_SECONDS", 0)
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+
+    peer = left.commands.client.public_key
+    transport = right.secure_transport
+    binding = transport._current_binding(peer)
+    # Hold the binding through its own guard so the lock survives the
+    # idle-drop while we simulate a queued request behind it.
+    guard = transport._request_guard(binding)
+    lock = await guard.__aenter__()
+    held = True
+    recheck = None
+    try:
+        writer.write(b"synthetic private output\n")
+        await writer.drain()
+        for _ in range(500):
+            if any(not waiter.done() for waiter in (lock._waiters or ())):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("output did not reach the secure session lock")
+
+        right.set_trust_level("manual")
+        if forced_recheck:
+            recheck = asyncio.create_task(right.network_attach.recheck())
+            for _ in range(500):
+                if all(channel.closed for channel in right.network_attach._channels.values()):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("withdrawal did not close the channel")
+        await guard.__aexit__(None, None, None)
+        held = False
+        if recheck is not None:
+            await asyncio.wait_for(recheck, 8)
+        assert await asyncio.wait_for(reader.read(), 8) == b""
+    finally:
+        if held:
+            with contextlib.suppress(Exception):
+                await guard.__aexit__(None, None, None)
+        if recheck is not None and not recheck.done():
+            recheck.cancel()
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_unforced_withdrawal_fences_output_waiting_for_relay_send_lock(devices, monkeypatch):
+    """The final relay send must recheck after its own shared rate-limit wait."""
+    monkeypatch.setattr(network_attach, "FLUSH_SECONDS", 0)
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    lock = right.commands.client._send_lock
+    await lock.acquire()
+    held = True
+    try:
+        writer.write(b"synthetic private output\n")
+        await writer.drain()
+        for _ in range(500):
+            if sum(not waiter.done() for waiter in (lock._waiters or ())) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("input response and output did not reach the relay send lock")
+        right.set_trust_level("manual")
+        lock.release()
+        held = False
+        assert await asyncio.wait_for(reader.read(), 8) == b""
+    finally:
+        if held:
+            lock.release()
+        writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reapprove", [False, True])
+@pytest.mark.parametrize("wait_at", ["relay", "pacer"])
+async def test_requester_revoke_fences_input_waiting_for_relay_send_lock(
+    devices, monkeypatch, reapprove, wait_at,
+):
+    """Locally revoking the peer stops input waiting at either carrier boundary."""
+    monkeypatch.setattr(network_attach, "FLUSH_SECONDS", 0)
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    original_writer = channel.writer
+    received = asyncio.Event()
+
+    class RecordingWriter:
+        def write(self, data):
+            if data:
+                received.set()
+            original_writer.write(data)
+
+        async def drain(self):
+            await original_writer.drain()
+
+        def close(self):
+            original_writer.close()
+
+    channel.writer = RecordingWriter()
+    lock = (left.commands.client._send_lock if wait_at == "relay"
+            else left.network_attach._pacer.lock)
+    await lock.acquire()
+    held = True
+    try:
+        writer.write(b"synthetic private input\n")
+        await writer.drain()
+        for _ in range(500):
+            if any(not waiter.done() for waiter in (lock._waiters or ())):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("input did not reach the relay send lock")
+        peer = right.commands.client.public_key
+        left.commands.client.revoke(peer)
+        if reapprove:
+            left.commands.client.approve(peer)
+        lock.release()
+        held = False
+        await asyncio.wait_for(reader.read(), 8)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(received.wait(), 1)
+    finally:
+        if held:
+            lock.release()
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_reapproval_during_device_rule_check_cannot_revive_output(devices):
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    target = right.network_attach._target
+    checking, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_target(*args):
+        path = await target(*args)
+        checking.set()
+        await release.wait()
+        return path
+
+    right.network_attach._target = delayed_target
+    sending = asyncio.create_task(right.network_attach._send_data(channel, b"synthetic private output\n"))
+    try:
+        await asyncio.wait_for(checking.wait(), 5)
+        peer = left.commands.client.public_key
+        right.commands.client.revoke(peer)
+        right.commands.client.approve(peer)
+        release.set()
+        with pytest.raises(SendGuardRevoked):
+            await asyncio.wait_for(sending, 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.read(1), 1)
+    finally:
+        release.set()
+        writer.close()
+        if not sending.done():
+            sending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await sending
+
+
+@pytest.mark.asyncio
+async def test_trust_withdrawal_then_restore_cannot_revive_paced_output(devices):
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    lock = right.network_attach._pacer.lock
+    await lock.acquire()
+    sending = asyncio.create_task(right.network_attach._send_data(channel, b"synthetic private output\n"))
+    try:
+        await asyncio.sleep(0)
+        right.set_trust_level("manual")
+        assert channel.policy_guard is not None and not channel.policy_guard()
+        right.set_trust_level("open")
+        lock.release()
+        with pytest.raises(SendGuardRevoked):
+            await asyncio.wait_for(sending, 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.read(1), 1)
+    finally:
+        if lock.locked():
+            lock.release()
+        writer.close()
+        if not sending.done():
+            sending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await sending
+
+
+@pytest.mark.asyncio
+async def test_overlapping_trust_commands_cannot_revive_paced_output(devices):
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    lock = right.network_attach._pacer.lock
+    await lock.acquire()
+    sending = asyncio.create_task(right.network_attach._send_data(channel, b"synthetic private output\n"))
+    original_recheck = right.network_attach.recheck
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_recheck():
+        entered.set()
+        await release.wait()
+        await original_recheck()
+
+    right.network_attach.recheck = delayed_recheck
+    manual = asyncio.create_task(right._rpc_command({"value": "trust manual", "agent_id": right.identity.agent_id}))
+    restore = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        restore = asyncio.create_task(right._rpc_command({"value": "trust open", "agent_id": right.identity.agent_id}))
+        for _ in range(100):
+            if right.trust_level() == "open":
+                break
+            await asyncio.sleep(0.01)
+        assert right.trust_level() == "open"
+        release.set()
+        lock.release()
+        await asyncio.wait_for(asyncio.gather(manual, restore), 5)
+        with pytest.raises((SendGuardRevoked, network_attach._PeerClosed)):
+            await asyncio.wait_for(sending, 5)
+        try:
+            received = await asyncio.wait_for(reader.read(64), 1)
+        except asyncio.TimeoutError:
+            received = b""
+        assert b"synthetic private output" not in received
+    finally:
+        release.set()
+        if lock.locked():
+            lock.release()
+        writer.close()
+        for task in (sending, manual, restore):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+
+@pytest.mark.asyncio
+async def test_regrant_cannot_revive_output_after_grant_withdrawal(devices):
+    left, right, _ = devices
+    right.set_trust_level("agents")
+    allow(left, right)
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    lock = right.network_attach._pacer.lock
+    await lock.acquire()
+    sending = asyncio.create_task(right.network_attach._send_data(channel, b"synthetic private output\n"))
+    try:
+        await asyncio.sleep(0)
+        peer = left.commands.client.public_key
+        await right.application_command("deny", f"{peer} sapphire")
+        await right.application_command("allow", f"{peer} sapphire")
+        lock.release()
+        with pytest.raises(SendGuardRevoked):
+            await asyncio.wait_for(sending, 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.read(1), 1)
+    finally:
+        if lock.locked():
+            lock.release()
+        writer.close()
+        if not sending.done():
+            sending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await sending
+
+
+@pytest.mark.asyncio
+async def test_peer_restriction_then_restore_cannot_revive_paced_output(devices):
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    lock = right.network_attach._pacer.lock
+    await lock.acquire()
+    sending = asyncio.create_task(right.network_attach._send_data(channel, b"synthetic private output\n"))
+    try:
+        await asyncio.sleep(0)
+        peer = left.commands.client.public_key
+        right.set_peer_trust(peer, "agents")
+        assert channel.policy_guard is not None and not channel.policy_guard()
+        right.clear_peer_trust(peer)
+        lock.release()
+        with pytest.raises(SendGuardRevoked):
+            await asyncio.wait_for(sending, 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.read(1), 1)
+    finally:
+        if lock.locked():
+            lock.release()
+        writer.close()
+        if not sending.done():
+            sending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await sending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side", ["requester", "device"])
+async def test_learned_halt_then_resume_cannot_revive_paced_data(devices, monkeypatch, side):
+    from types import SimpleNamespace
+
+    from plugins.hub import halt_runtime
+
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    bridge = left if side == "requester" else right
+    channel = next(iter(bridge.network_attach._channels.values()))
+    lock = bridge.network_attach._pacer.lock
+    await lock.acquire()
+    sending = asyncio.create_task(bridge.network_attach._send_data(channel, b"synthetic private output\n"))
+    control = bridge.commands.client.control
+    original_book = control.halt_book
+    try:
+        await asyncio.sleep(0)
+        monkeypatch.setattr(control, "halt_book", lambda: SimpleNamespace(active=lambda: True))
+        monkeypatch.setattr(halt_runtime, "read_halt", lambda: {"scopes": {"test-network": {}}})
+        bridge._halt_changed("test-network")
+        assert channel.policy_guard is not None and not channel.policy_guard()
+        monkeypatch.setattr(control, "halt_book", original_book)
+        lock.release()
+        with pytest.raises(SendGuardRevoked):
+            await asyncio.wait_for(sending, 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.read(1), 1)
+    finally:
+        if lock.locked():
+            lock.release()
+        writer.close()
+        if not sending.done():
+            sending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await sending
+
+
+@pytest.mark.asyncio
+async def test_restricting_trust_keeps_an_explicitly_allowed_channel(devices):
+    left, right, _ = devices
+    allow(left, right)
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    try:
+        right.set_trust_level("agents")
+        await right.network_attach._send_data(channel, b"allowed output\n")
+        assert await asyncio.wait_for(reader.readline(), 5) == b"allowed output\n"
+    finally:
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_device_open_stays_withdrawn_after_trust_restored(devices):
+    left, right, notices = devices
+    original = right.network_attach._target
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_target(*args):
+        target = await original(*args)
+        entered.set()
+        await release.wait()
+        return target
+
+    right.network_attach._target = delayed_target
+    opening = asyncio.create_task(_open(left, right))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        right.set_trust_level("manual")
+        right.set_trust_level("open")
+        release.set()
+        with pytest.raises(AttachRefused, match="access changed"):
+            await asyncio.wait_for(opening, 5)
+        assert not right.network_attach._channels
+        assert not notices
+    finally:
+        release.set()
+        if not opening.done():
+            opening.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await opening
+
+
+@pytest.mark.asyncio
+async def test_failed_trust_save_still_fences_the_existing_channel(devices, monkeypatch):
+    left, right, _ = devices
+    opened = await _open(left, right)
+    reader, writer = await asyncio.open_unix_connection(opened)
+    assert await reader.readline() == b"agent here\n"
+    channel = next(iter(right.network_attach._channels.values()))
+    store = right._state()
+    monkeypatch.setattr(right, "_state", lambda: store)
+
+    def failed_save():
+        raise OSError("synthetic save failure")
+
+    monkeypatch.setattr(store, "save", failed_save)
+    try:
+        with pytest.raises(OSError, match="synthetic save failure"):
+            right.set_trust_level("manual")
+        assert channel.policy_guard is not None and not channel.policy_guard()
+    finally:
+        writer.close()
+
+
+def test_policy_guard_does_not_keep_finished_operations_alive():
+    import gc
+
+    attach = NetworkAttach(
+        request=lambda *_args, **_kwargs: None,
+        target=lambda *_args: None,
+        peer_name=lambda _peer: "peer",
+        notice=lambda _message: None,
+    )
+    guard = attach._capture_policy_guard("peer", "agent", requester=False)
+    assert len(attach._policy_leases) == 1 and guard()
+    del guard
+    gc.collect()
+    assert not attach._policy_leases
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("withdrawal", ["revoke", "reapprove", "halt", "shutdown"])
+@pytest.mark.parametrize("wait_at", ["relay", "pacer"])
+async def test_pending_open_is_fenced_before_relay_submission(devices, withdrawal, wait_at):
+    left, right, notices = devices
+    await handle(left, right)  # Warm the secure session before holding its carrier.
+    peer = right.commands.client.public_key
+    lock = (left.commands.client._send_lock if wait_at == "relay"
+            else left.network_attach._pacer.lock)
+    await lock.acquire()
+    task = asyncio.create_task(left.network_attach.open(peer, right.identity.agent_id, "sapphire"))
+    try:
+        for _ in range(500):
+            if any(not waiter.done() for waiter in (lock._waiters or ())):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("open did not reach the relay send lock")
+        if withdrawal in ("revoke", "reapprove"):
+            left.commands.client.revoke(peer)
+            if withdrawal == "reapprove":
+                left.commands.client.approve(peer)
+        elif withdrawal == "halt":
+            left.network_attach._halt_active = lambda: True
+        else:
+            left.network_attach._closed = True
+        lock.release()
+        with pytest.raises(AttachRefused):
+            await asyncio.wait_for(task, 5)
+        await asyncio.sleep(0.1)
+        assert not any(" opened " in notice for notice in notices)
+        assert not right.network_attach._channels
+    finally:
+        if lock.locked():
+            lock.release()
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["withdrawal", "cancel", "failure"])
+async def test_stale_request_cannot_discard_reapproved_secure_session(devices, ending):
+    left, right, _ = devices
+    await handle(left, right)
+    client = left.commands.client
+    peer = right.commands.client.public_key
+    secure = left.secure_transport
+    original = secure._transport_request
+    old_entered, new_entered = asyncio.Event(), asyncio.Event()
+    old_release, new_release = asyncio.Event(), asyncio.Event()
+    guarded_count = 0
+
+    async def held_carrier(key, method, payload, *, timeout, before_send=None):
+        nonlocal guarded_count
+        if before_send is not None:
+            guarded_count += 1
+            if guarded_count == 1:
+                old_entered.set()
+                await old_release.wait()
+                if ending == "failure":
+                    raise RelayError("synthetic old-request failure")
+            elif guarded_count == 2:
+                new_entered.set()
+                await new_release.wait()
+        kwargs = {"before_send": before_send} if before_send is not None else {}
+        return await original(key, method, payload, timeout=timeout, **kwargs)
+
+    async def allow():
+        pass
+
+    secure._transport_request = held_carrier
+    old = asyncio.create_task(secure.request(peer, "directory", {}, timeout=15, before_send=allow))
+    new = None
+    try:
+        await asyncio.wait_for(old_entered.wait(), 5)
+        client.revoke(peer)
+        client.approve(peer)
+        new = asyncio.create_task(secure.request(peer, "directory", {}, timeout=15, before_send=allow))
+        await asyncio.wait_for(new_entered.wait(), 5)
+        binding = secure._current_binding(peer)
+        replacement = secure._outbound[binding]
+        if ending == "cancel":
+            old.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old
+        else:
+            old_release.set()
+            expected = SendGuardRevoked if ending == "withdrawal" else RelayError
+            with pytest.raises(expected):
+                await asyncio.wait_for(old, 5)
+        assert secure._outbound.get(binding) is replacement
+        new_release.set()
+        assert "agents" in await asyncio.wait_for(new, 5)
+    finally:
+        old_release.set()
+        new_release.set()
+        for task in (old, new):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+
+@pytest.mark.asyncio
+async def test_open_response_after_reapproval_cannot_publish_old_channel(devices):
+    left, right, notices = devices
+    await handle(left, right)
+    peer = right.commands.client.public_key
+    client, secure = left.commands.client, left.secure_transport
+    original = secure._transport_request
+    response_received, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_response(key, method, payload, *, timeout, before_send=None):
+        kwargs = {"before_send": before_send} if before_send is not None else {}
+        response = await original(key, method, payload, timeout=timeout, **kwargs)
+        if before_send is not None:
+            response_received.set()
+            await release.wait()
+        return response
+
+    secure._transport_request = delayed_response
+    opening = asyncio.create_task(left.network_attach.open(peer, right.identity.agent_id, "sapphire"))
+    try:
+        await asyncio.wait_for(response_received.wait(), 5)
+        assert any(" opened " in notice for notice in notices)  # Already submitted remotely.
+        client.revoke(peer)
+        client.approve(peer)
+        release.set()
+        with pytest.raises(AttachRefused):
+            await asyncio.wait_for(opening, 5)
+        assert not left.network_attach._channels
+    finally:
+        release.set()
+        if not opening.done():
+            opening.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await opening
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["return", "cancel", "failure"])
+async def test_stale_identity_lookup_cannot_replace_new_secure_session(devices, ending):
+    left, right, _ = devices
+    await handle(left, right)
+    client = left.commands.client
+    peer = right.commands.client.public_key
+    secure = left.secure_transport
+    client.revoke(peer)
+    client.approve(peer)
+    original = secure._new_client_session
+    old_entered, old_release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def delayed_identity(binding):
+        nonlocal calls
+        calls += 1
+        state = await original(binding)
+        if calls == 1:
+            old_entered.set()
+            await old_release.wait()
+            if ending == "failure":
+                raise RelayError("synthetic identity lookup failure")
+        return state
+
+    secure._new_client_session = delayed_identity
+    old = asyncio.create_task(secure.ensure_session(peer, timeout=15))
+    try:
+        await asyncio.wait_for(old_entered.wait(), 5)
+        client.revoke(peer)
+        client.approve(peer)
+        await asyncio.wait_for(secure.ensure_session(peer, timeout=10), 10)
+        binding = secure._current_binding(peer)
+        replacement = secure._outbound[binding]
+        if ending == "cancel":
+            old.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old
+        else:
+            old_release.set()
+            with pytest.raises(RelayError):
+                await asyncio.wait_for(old, 5)
+        assert secure._outbound.get(binding) is replacement
+        assert "agents" in await secure.request(peer, "directory", {}, timeout=5)
+    finally:
+        old_release.set()
+        if not old.done():
+            old.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await old
 
 
 def test_every_relay_method_the_bridge_calls_or_serves_is_allowlisted():
