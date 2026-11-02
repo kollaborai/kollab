@@ -690,9 +690,19 @@ async def _assistant_set_synced(
     past this point, so the turns it already shows keep their ids.
     """
     try:
-        history = await session.refresh_history()
-    except Exception as exc:  # the page then waits for its next full load
+        history = await session.refresh_history(stale_raises=True)
+    except Exception as exc:
+        # A stale watermark replays the turn as history next to the transient
+        # rows it already shows and the page draws it twice (#666). Clear it
+        # so the next refresh reloads whole instead of appending a duplicate.
         logger.debug("history refresh for %s failed: %s", session.session_id, exc)
+        state = controller.state
+        try:
+            has_watermark = state is not None and state.get("synced") is not None
+        except (KeyError, TypeError, AttributeError):
+            has_watermark = False
+        if has_watermark:
+            controller.state["synced"] = None
         return
     controller.state["synced"] = {"history": len(history), "messages": message_count}
 
