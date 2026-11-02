@@ -358,6 +358,31 @@ fn webui_hosts() -> Option<String> {
     webui_hosts_from_args(std::env::args().skip(1))
 }
 
+/// Bindable non-loopback addresses this desktop launch will expose the web UI
+/// to: the explicit `--web-ui-hosts` value when given, otherwise the inherited
+/// KOLLAB_WEBUI_HOSTS. Loopback is never exposure; addresses kollab refuses to
+/// bind (public, unspecified, DNS names) never reach a socket, so they are not
+/// exposure either — the startup error page already shows kollab's refusal.
+fn exposure_notice(explicit: Option<&str>) -> Option<Vec<String>> {
+    let spec = match explicit {
+        Some(spec) => spec.to_string(),
+        None => std::env::var("KOLLAB_WEBUI_HOSTS").ok()?,
+    };
+    let mut exposed: Vec<String> = Vec::new();
+    for host in spec.split(',') {
+        let Ok(ip) = host.trim().trim_matches(['[', ']']).parse::<std::net::IpAddr>() else { continue };
+        let bindable = match ip {
+            std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+        };
+        let text = ip.to_string();
+        if !ip.is_loopback() && bindable && !exposed.contains(&text) {
+            exposed.push(text);
+        }
+    }
+    (!exposed.is_empty()).then_some(exposed)
+}
+
 /// Builds the `kollab --web-ui` command: its own session and process group
 /// (on Windows, no console window, so `stop_child` can end its tree), its
 /// output going to `log`.
@@ -396,9 +421,12 @@ fn spawn_webui(kollab: &Path, log: &Path, hosts: Option<&str>) -> std::io::Resul
     webui_command(kollab, log, hosts)?.spawn()
 }
 
-fn show_status(win: &WebviewWindow, state: &str, log: &str) {
+fn show_status(win: &WebviewWindow, state: &str, log: &str, warn: &str) {
     let mut url: Url = STATUS_PAGE.parse().expect("valid url");
     url.query_pairs_mut().append_pair("state", state).append_pair("log", log);
+    if !warn.is_empty() {
+        url.query_pairs_mut().append_pair("warn", warn);
+    }
     let _ = win.navigate(url);
 }
 
@@ -418,14 +446,14 @@ fn start_boot(app: &AppHandle, restart: bool) {
         if restart && !stop_spawned(&app) {
             while_current(&app, operation, || {
                 if let Some(win) = app.get_webview_window("main") {
-                    show_status(&win, "error", "The previous runtime has not stopped. Retry after it exits.");
+                    show_status(&win, "error", "The previous runtime has not stopped. Retry after it exits.", "");
                 }
             });
         } else {
             if restart {
                 while_current(&app, operation, || {
                     if let Some(win) = app.get_webview_window("main") {
-                        show_status(&win, "loading", "");
+                        show_status(&win, "loading", "", "");
                     }
                 });
             }
@@ -448,9 +476,11 @@ fn boot(app: &AppHandle, operation: u64) {
     }
     let Some(kollab) = pick_kollab() else {
         eprintln!("kollab-desktop: no kollab found, showing the install page");
-        while_current(app, operation, || show_status(&win, "install", ""));
+        while_current(app, operation, || show_status(&win, "install", "", ""));
         return;
     };
+    let notice = exposure_notice(webui_hosts().as_deref());
+    let warn = notice.as_ref().map(|hosts| hosts.join(", ")).unwrap_or_default();
     let log = app
         .path()
         .app_log_dir()
@@ -459,10 +489,15 @@ fn boot(app: &AppHandle, operation: u64) {
     let _ = std::fs::create_dir_all(log.parent().expect("log file has a folder"));
     let spawned = app.state::<Spawned>().0.lock().unwrap().spawn(operation, || spawn_webui(&kollab, &log, webui_hosts().as_deref()));
     match spawned {
-        Ok(true) => eprintln!("kollab-desktop: started {} --web-ui", kollab.display()),
+        Ok(true) => {
+            eprintln!("kollab-desktop: started {} --web-ui", kollab.display());
+            if notice.is_some() {
+                while_current(app, operation, || show_status(&win, "loading", "", &warn));
+            }
+        }
         Ok(false) => return,
         Err(err) => {
-            while_current(app, operation, || show_status(&win, "error", &format!("could not start {}: {err}", kollab.display())));
+            while_current(app, operation, || show_status(&win, "error", &format!("could not start {}: {err}", kollab.display()), ""));
             return;
         }
     }
@@ -471,7 +506,11 @@ fn boot(app: &AppHandle, operation: u64) {
         if !while_current(app, operation, || {}) { return; }
         if webui_running(&url) {
             eprintln!("kollab-desktop: web UI is up at {url}");
-            while_current(app, operation, || { let _ = win.navigate(url); });
+            if notice.is_some() {
+                while_current(app, operation, || show_status(&win, "running", "", &warn));
+            } else {
+                while_current(app, operation, || { let _ = win.navigate(url); });
+            }
             return;
         }
         // WNOWAIT leaves even an exited leader reserved until cleanup. try_wait
@@ -486,7 +525,7 @@ fn boot(app: &AppHandle, operation: u64) {
     eprintln!("kollab-desktop: the web UI did not answer, showing the error page");
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let lines: Vec<&str> = text.lines().collect();
-    while_current(app, operation, || show_status(&win, "error", &lines[lines.len().saturating_sub(40)..].join("\n")));
+    while_current(app, operation, || show_status(&win, "error", &lines[lines.len().saturating_sub(40)..].join("\n"), ""));
 }
 
 /// Stops the web UI this app started the way Ctrl+C would: SIGINT to its
@@ -996,6 +1035,14 @@ fn retry(app: AppHandle) {
     start_boot(&app, true);
 }
 
+/// Continues from the exposure warning page into the running web UI.
+#[tauri::command]
+fn proceed(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.navigate(ui_url());
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -1032,7 +1079,7 @@ pub fn run() {
                 eprintln!("kollab-desktop: window closed; hidden, the app keeps running in the menu bar");
             }
         })
-        .invoke_handler(tauri::generate_handler![retry])
+        .invoke_handler(tauri::generate_handler![retry, proceed])
         .setup(|app| {
             let hidden = std::env::args().any(|arg| arg == "--hidden"); // Launch at Login
             let handle = app.handle().clone();
@@ -1140,6 +1187,34 @@ mod tests {
         assert_eq!(parse(&["kollab-desktop", "--web-ui-hosts", ""]).as_deref(), Some(""));
         assert_eq!(parse(&["kollab-desktop"]).as_deref(), None);
         assert_eq!(parse(&["kollab-desktop", "--web-ui"]).as_deref(), None);
+    }
+
+    /// The desktop exposes the web UI when its configuration names bindable
+    /// non-loopback addresses: the explicit `--web-ui-hosts` value when given,
+    /// otherwise the inherited KOLLAB_WEBUI_HOSTS. Addresses kollab refuses to
+    /// bind never reach a socket, so they are not exposure; the startup error
+    /// page already shows that refusal.
+    #[test]
+    fn exposure_notice_resolves_the_launch_exposure_from_flag_and_env() {
+        std::env::remove_var("KOLLAB_WEBUI_HOSTS");
+        assert_eq!(exposure_notice(None), None, "no flag and no env stays on loopback");
+        assert_eq!(exposure_notice(Some("")), None, "an explicit empty value is a deliberate localhost-only launch");
+        assert_eq!(exposure_notice(Some("127.0.0.1")), None);
+        assert_eq!(exposure_notice(Some("[::1]")), None);
+        assert_eq!(exposure_notice(Some("10.0.0.7")), Some(vec!["10.0.0.7".to_string()]));
+        assert_eq!(exposure_notice(Some(" 192.168.1.20 , 127.0.0.1 ")), Some(vec!["192.168.1.20".to_string()]));
+        assert_eq!(exposure_notice(Some("[fd00::5]")), Some(vec!["fd00::5".to_string()]));
+        assert_eq!(exposure_notice(Some("fe80::1")), Some(vec!["fe80::1".to_string()]));
+        assert_eq!(exposure_notice(Some("10.0.0.7,10.0.0.7")), Some(vec!["10.0.0.7".to_string()]), "duplicates collapse");
+        assert_eq!(exposure_notice(Some("myhost.local")), None, "DNS names are refused by kollab, not exposure");
+        assert_eq!(exposure_notice(Some("0.0.0.0")), None, "unspecified addresses are refused by kollab");
+        assert_eq!(exposure_notice(Some("8.8.8.8")), None, "public addresses are refused by kollab");
+        std::env::set_var("KOLLAB_WEBUI_HOSTS", "10.0.0.7");
+        assert_eq!(exposure_notice(None), Some(vec!["10.0.0.7".to_string()]), "an inherited env value exposes too");
+        assert_eq!(exposure_notice(Some("")), None, "an explicit empty value overrides the inherited environment");
+        std::env::set_var("KOLLAB_WEBUI_HOSTS", "127.0.0.1");
+        assert_eq!(exposure_notice(None), None);
+        std::env::remove_var("KOLLAB_WEBUI_HOSTS");
     }
 
     #[test]
