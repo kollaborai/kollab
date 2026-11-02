@@ -12,10 +12,16 @@ Architecture mirrors the dreaming_loop in plugin.py:
 """
 
 import asyncio
+import hashlib
+import json
 import logging
+import socket
 import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -78,6 +84,323 @@ class TelegramNotifier(NotificationBackend):
         )
 
 
+DEFAULT_NTFY_PRIORITY_MAP = {
+    "message": 3,
+    "decision": 5,
+    "blocker": 5,
+    "done": 3,
+}
+NTFY_NOTIFICATION_KINDS = frozenset({"decision", "blocker", "done"})
+NTFY_DEDUPE_WINDOW_SECONDS = 600.0
+NTFY_DEDUPE_MAX_ENTRIES = 512
+NTFY_RETRY_ATTEMPTS = 3
+NTFY_TIMEOUT_SECONDS = 3.0
+NTFY_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def default_ntfy_config_path() -> Path:
+    """Return the local fallback config path at runtime, not import time."""
+    return Path.home() / ".config" / "marco-notify" / "config.json"
+
+
+def load_ntfy_settings(
+    config: Any, fallback_path: Optional[Path] = None
+) -> Dict[str, Any]:
+    """Resolve hub ntfy settings, falling back to local Marco Notify defaults.
+
+    Only the server and topic are read from the local fallback file. Tokens and
+    priority overrides are sourced from the Kollab hub config. Values are never
+    logged; parse and I/O errors identify only their exception type.
+    """
+    try:
+        plugins = config.get("plugins", {}) if config is not None else {}
+        hub_cfg = plugins.get("hub", {}) if isinstance(plugins, dict) else {}
+    except AttributeError, TypeError:
+        hub_cfg = {}
+    if not isinstance(hub_cfg, dict):
+        hub_cfg = {}
+
+    notify_cfg = hub_cfg.get("notify", {})
+    ntfy_cfg = notify_cfg.get("ntfy", {}) if isinstance(notify_cfg, dict) else {}
+    if not isinstance(ntfy_cfg, dict):
+        ntfy_cfg = {}
+
+    server = str(ntfy_cfg.get("server") or "").strip()
+    topic = str(ntfy_cfg.get("topic") or "").strip()
+    token = str(ntfy_cfg.get("token") or "").strip()
+
+    if not server or not topic:
+        path = (
+            Path(fallback_path)
+            if fallback_path is not None
+            else default_ntfy_config_path()
+        )
+        try:
+            fallback = json.loads(path.expanduser().read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            fallback = {}
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "could not read local ntfy defaults (%s)", type(exc).__name__
+            )
+            fallback = {}
+        if isinstance(fallback, dict):
+            server = server or str(fallback.get("ntfy_server") or "").strip()
+            topic = topic or str(fallback.get("ntfy_topic") or "").strip()
+
+    priority_map = dict(DEFAULT_NTFY_PRIORITY_MAP)
+    configured_priorities = ntfy_cfg.get("priority_map", {})
+    if isinstance(configured_priorities, dict):
+        for kind, value in configured_priorities.items():
+            normalized_kind = str(kind).strip().lower()
+            try:
+                priority = int(value)
+            except TypeError, ValueError:
+                continue
+            if normalized_kind in priority_map and 1 <= priority <= 5:
+                priority_map[normalized_kind] = priority
+            else:
+                logger.warning("ignored invalid ntfy priority mapping")
+
+    return {
+        "server": server,
+        "topic": topic,
+        "token": token,
+        "priority_map": priority_map,
+        "webui_agent_url_template": str(
+            ntfy_cfg.get("webui_agent_url_template") or ""
+        ).strip(),
+    }
+
+
+class NtfyDeliveryError(RuntimeError):
+    """A secret-safe ntfy failure that never includes request URLs or headers."""
+
+
+class NtfyNotifier(NotificationBackend):
+    """Deliver notifications to an ntfy topic with bounded retry and dedupe."""
+
+    def __init__(
+        self,
+        server: str,
+        topic: str,
+        token: str = "",
+        priority_map: Optional[Dict[str, int]] = None,
+        *,
+        client_factory: Optional[Callable[..., Any]] = None,
+        sleep: Optional[Callable[[float], Any]] = None,
+        monotonic: Optional[Callable[[], float]] = None,
+        timeout: float = NTFY_TIMEOUT_SECONDS,
+        max_attempts: int = NTFY_RETRY_ATTEMPTS,
+        backoff_seconds: float = NTFY_RETRY_BACKOFF_SECONDS,
+        dedupe_window_seconds: float = NTFY_DEDUPE_WINDOW_SECONDS,
+        max_dedupe_entries: int = NTFY_DEDUPE_MAX_ENTRIES,
+    ):
+        self.server = self._validate_server(server)
+        self.topic = self._validate_topic(topic)
+        self.token = str(token or "").strip()
+        if "\r" in self.token or "\n" in self.token:
+            raise ValueError("ntfy token must not contain newlines")
+
+        self.priority_map = dict(DEFAULT_NTFY_PRIORITY_MAP)
+        for kind, value in (priority_map or {}).items():
+            normalized_kind = str(kind).strip().lower()
+            try:
+                priority = int(value)
+            except TypeError, ValueError:
+                continue
+            if normalized_kind in self.priority_map and 1 <= priority <= 5:
+                self.priority_map[normalized_kind] = priority
+
+        self._url = f"{self.server}/{quote(self.topic, safe='-._')}"
+        self._client_factory = client_factory or httpx.AsyncClient
+        self._sleep = sleep or asyncio.sleep
+        self._monotonic = monotonic or time.monotonic
+        self.timeout = timeout
+        self.max_attempts = max(1, int(max_attempts))
+        self.backoff_seconds = max(0.0, float(backoff_seconds))
+        self.dedupe_window_seconds = max(0.0, float(dedupe_window_seconds))
+        self.max_dedupe_entries = max(1, int(max_dedupe_entries))
+        self._delivered: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._inflight: set[tuple[str, str]] = set()
+
+    @classmethod
+    def from_config(
+        cls, config: Any, fallback_path: Optional[Path] = None
+    ) -> Optional["NtfyNotifier"]:
+        """Build a notifier from hub config plus runtime fallback values."""
+        settings = load_ntfy_settings(config, fallback_path=fallback_path)
+        return cls.from_settings(settings)
+
+    @classmethod
+    def from_settings(cls, settings: Dict[str, Any]) -> Optional["NtfyNotifier"]:
+        """Build from resolved settings without rereading fallback files."""
+        if not settings.get("server") or not settings.get("topic"):
+            return None
+        try:
+            return cls(
+                server=settings["server"],
+                topic=settings["topic"],
+                token=settings.get("token", ""),
+                priority_map=settings.get("priority_map", {}),
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning("invalid ntfy configuration (%s)", type(exc).__name__)
+            return None
+
+    @staticmethod
+    def _validate_server(server: str) -> str:
+        value = str(server or "").strip().rstrip("/")
+        try:
+            parsed = urlsplit(value)
+            valid_host = bool(parsed.hostname)
+        except ValueError:
+            valid_host = False
+            parsed = None
+        if (
+            parsed is None
+            or parsed.scheme not in ("http", "https")
+            or not valid_host
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "ntfy server must be an http(s) URL without credentials, query, or fragment"
+            )
+        return value
+
+    @staticmethod
+    def _validate_topic(topic: str) -> str:
+        value = str(topic or "").strip()
+        if (
+            not value
+            or "/" in value
+            or any(char.isspace() or ord(char) < 32 for char in value)
+        ):
+            raise ValueError("ntfy topic must be a non-empty path segment")
+        return value
+
+    def _headers(self, payload: Dict[str, Any], sender: str) -> Dict[str, Any]:
+        kind = str(payload.get("notify_kind") or "message")
+        kind = kind.strip().lower()
+        if kind not in NTFY_NOTIFICATION_KINDS:
+            kind = "message"
+
+        title = payload.get("title") or f"Kollab · {sender} · {socket.gethostname()}"
+        title = " ".join(str(title).split())[:256]
+        headers: Dict[str, Any] = {
+            # ntfy supports UTF-8 headers; pass bytes because httpx only accepts
+            # ASCII for string-valued headers.
+            "Title": title.encode("utf-8"),
+            "Priority": str(self.priority_map.get(kind, self.priority_map["message"])),
+        }
+        if kind in NTFY_NOTIFICATION_KINDS:
+            headers["Tags"] = kind
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        click_url = payload.get("click_url") or payload.get("click")
+        if click_url:
+            try:
+                parsed_click = urlsplit(str(click_url))
+            except ValueError:
+                parsed_click = None
+            if (
+                parsed_click is not None
+                and parsed_click.scheme in ("http", "https")
+                and parsed_click.netloc
+                and not any(char in str(click_url) for char in "\r\n")
+            ):
+                headers["Click"] = str(click_url)
+        return headers
+
+    def _dedupe_key(self, sender: str, message: str) -> tuple[str, str]:
+        digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        return sender.casefold(), digest
+
+    def _is_recent_duplicate(self, key: tuple[str, str], now: float) -> bool:
+        expired = [
+            old_key
+            for old_key, sent_at in self._delivered.items()
+            if now - sent_at >= self.dedupe_window_seconds
+        ]
+        for old_key in expired:
+            self._delivered.pop(old_key, None)
+        return key in self._delivered or key in self._inflight
+
+    async def _post_with_retry(self, message: str, headers: Dict[str, Any]) -> None:
+        try:
+            async with self._client_factory(timeout=self.timeout) as client:
+                for attempt in range(1, self.max_attempts + 1):
+                    try:
+                        response = await client.post(
+                            self._url, content=message.encode("utf-8"), headers=headers
+                        )
+                    except httpx.HTTPError as exc:
+                        if attempt < self.max_attempts:
+                            delay = self.backoff_seconds * (2 ** (attempt - 1))
+                            logger.warning(
+                                "ntfy request failed (%s); retry %d/%d",
+                                type(exc).__name__,
+                                attempt,
+                                self.max_attempts,
+                            )
+                            await self._sleep(delay)
+                            continue
+                        raise NtfyDeliveryError(
+                            f"ntfy request failed after {attempt} attempts ({type(exc).__name__})"
+                        ) from None
+
+                    status = int(response.status_code)
+                    if 200 <= status < 300:
+                        return
+                    retryable = status == 429 or 500 <= status < 600
+                    if retryable and attempt < self.max_attempts:
+                        delay = self.backoff_seconds * (2 ** (attempt - 1))
+                        logger.warning(
+                            "ntfy returned HTTP %d; retry %d/%d",
+                            status,
+                            attempt,
+                            self.max_attempts,
+                        )
+                        await self._sleep(delay)
+                        continue
+                    raise NtfyDeliveryError(f"ntfy request failed (HTTP {status})")
+        except NtfyDeliveryError:
+            raise
+        except httpx.HTTPError as exc:
+            raise NtfyDeliveryError(
+                f"ntfy request failed ({type(exc).__name__})"
+            ) from None
+
+    async def send(self, message: str, payload: Dict[str, Any]) -> None:
+        body = str(message or "").strip()
+        if not body:
+            return
+        sender = str(
+            payload.get("sender") or payload.get("identity") or "unknown"
+        ).strip()
+        sender = sender or "unknown"
+        key = self._dedupe_key(sender, body)
+        now = self._monotonic()
+        if self._is_recent_duplicate(key, now):
+            logger.info("duplicate ntfy notification suppressed")
+            return
+
+        self._inflight.add(key)
+        try:
+            await self._post_with_retry(body, self._headers(payload, sender))
+        finally:
+            self._inflight.discard(key)
+
+        self._delivered[key] = now
+        self._delivered.move_to_end(key)
+        while len(self._delivered) > self.max_dedupe_entries:
+            self._delivered.popitem(last=False)
+
+
 class HubNotifier:
     """Background loop that checks for idle agents and fires notifications.
 
@@ -132,7 +455,8 @@ class HubNotifier:
           1. Explicit notify_channel setting
           2. Telegram if notify_telegram_token is set
           3. Webhook if notify_url is set
-          4. None (no credentials configured)
+          4. ntfy if hub settings or local fallback config are available
+          5. None (no credentials configured)
         """
         hub_cfg = self.config.get("plugins", {}).get("hub", {})
         explicit = hub_cfg.get("notify_channel", "")
@@ -147,6 +471,9 @@ class HubNotifier:
         url = hub_cfg.get("notify_url", "")
         if url:
             return "webhook"
+
+        if NtfyNotifier.from_config(self.config) is not None:
+            return "ntfy"
 
         return None
 
@@ -180,6 +507,14 @@ class HubNotifier:
                 )
                 return None
             return TelegramNotifier(token, chat_id)
+
+        elif channel == "ntfy":
+            backend = NtfyNotifier.from_config(self.config)
+            if backend is None:
+                logger.warning(
+                    "notify_channel=ntfy but server/topic are not configured"
+                )
+            return backend
 
         else:
             logger.warning(f"unknown notification channel: {channel}")
