@@ -180,8 +180,15 @@ class SecureConversationTransport:
         return {"certificate": self.certificate_b64}
 
     @asynccontextmanager
-    async def _request_guard(self, key: tuple[str, str, str]) -> AsyncIterator[None]:
-        """Serialize a binding while retaining locks for active callers/waiters."""
+    async def _request_guard(
+        self, key: tuple[str, str, str]
+    ) -> AsyncIterator[asyncio.Lock]:
+        """Serialize a binding while retaining locks for active callers/waiters.
+
+        The held lock is yielded so the session open can verify the lock
+        was not replaced mid-request by a peer revoke or reconnect; a
+        replaced lock means the session it guarded was superseded.
+        """
         request_lock = self._request_locks.get(key)
         if request_lock is None:
             if len(self._request_locks) >= MAX_SECURE_SESSIONS:
@@ -190,7 +197,7 @@ class SecureConversationTransport:
         self._request_lock_users[key] = self._request_lock_users.get(key, 0) + 1
         try:
             async with request_lock:
-                yield
+                yield request_lock
         finally:
             users = self._request_lock_users.get(key, 0)
             if users <= 1:
@@ -229,7 +236,7 @@ class SecureConversationTransport:
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
-                async with self._request_guard(key):
+                async with self._request_guard(key) as request_lock:
                     held = True
                     state = await self._open_locked(peer_key, key, binding, deadline, request_lock)
                     raw = _encode_frame({"v": 1, "method": method, "payload": payload})
@@ -358,7 +365,7 @@ class SecureConversationTransport:
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
-                async with self._request_guard(key):
+                async with self._request_guard(key) as request_lock:
                     held = True
                     await self._open_locked(peer_key, key, binding, deadline, request_lock)
         except asyncio.CancelledError:
