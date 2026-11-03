@@ -21,10 +21,11 @@ packages = ["src/kollabor_webui"]
 
 [tool.hatch.build.targets.sdist]
 # Source distributions need the frontend source and lockfile for reproducible
-# rebuilds, but never vendor the local dependency tree or generated Vite output.
+# rebuilds, but never vendor dependencies, compiler state, or generated output.
 exclude = [
     "/frontend/node_modules",
     "/frontend/dist",
+    "/frontend/**/*.tsbuildinfo",
 ]
 
 # hatch_build.py packages KOLLAB_FRONTEND_DIST or compiles isolated Vite output
