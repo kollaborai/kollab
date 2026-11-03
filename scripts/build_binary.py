@@ -63,7 +63,10 @@ UVX_PEX = ["uvx", "--python", PYTHON.rsplit(".", 1)[0], "--from", PEX]
 # machine, so a newer CI image cannot raise the floor unnoticed. Windows wheels
 # (win_amd64) carry no OS floor; the portable CPython sets it.
 FLOORS = {"macosx": (11, 0), "manylinux": (2, 28)}
-IMPORTS = "import kollabor.application, kollabor_cli_main, kollabor_engine, kollabor_webui, kollabor_voice, plugins"
+IMPORTS = (
+    "import kollabor.application, kollabor_cli_main, kollabor_engine, kollabor_webui, "
+    "kollabor_voice, kollabor_voice.module_runtime, plugins"
+)
 TLS_URL = "https://pypi.org/simple/kollab/"
 # Workspace members with no wheel of their own: the kollab wheel carries their code.
 BUNDLED = ("kollabor_voice-",)

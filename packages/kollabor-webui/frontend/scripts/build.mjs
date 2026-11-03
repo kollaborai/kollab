@@ -5,6 +5,7 @@ import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSy
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { build } from "vite";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -28,8 +29,14 @@ const loader = path.join(phone, "loader");
 mkdirSync(loader, { recursive: true });
 const shell = await bundle("phone-loader");
 writeFileSync(path.join(loader, "loader.js"), shell.js);
-for (const name of ["index.html", "manifest.webmanifest"])
-  copyFileSync(path.join(root, "src/phonelink/loader", name), path.join(loader, name));
+// The loader is cached for an hour. Change its URL whenever its contents change
+// so a freshly served invitation cannot accidentally run an older loader.
+const loaderRevision = createHash("sha256").update(shell.js).digest("hex").slice(0, 16);
+const index = readFileSync(path.join(root, "src/phonelink/loader/index.html"), "utf8");
+const loaderRef = 'src="./loader.js"';
+if (index.split(loaderRef).length !== 2) throw new Error("Expected one PhoneLink loader script reference");
+writeFileSync(path.join(loader, "index.html"), index.replace(loaderRef, `src="./loader.js?rev=${loaderRevision}"`));
+copyFileSync(path.join(root, "src/phonelink/loader/manifest.webmanifest"), path.join(loader, "manifest.webmanifest"));
 for (const name of ["apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon-maskable-512.png"])
   copyFileSync(path.join(root, "public", name), path.join(loader, name));
 
@@ -38,4 +45,4 @@ mkdirSync(app, { recursive: true });
 const phoneApp = await bundle("phone-app");
 writeFileSync(path.join(app, "phone-app.js.gz"), gzipSync(phoneApp.js, { level: 9 }));
 writeFileSync(path.join(app, "phone-app.css"), phoneApp.css ?? "");
-rmSync(scratch, { recursive: true, force: true });
+rmSync(scratch, { recursive: true });
