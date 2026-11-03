@@ -632,8 +632,16 @@ class LoadoutManager:
             model_value = acp_loadout_model(loadout, selected_profile)
             harness_entry = bool(loadout.implicit and not model_value)
             previous = current_profile if str(current_provider).lower() == "acp" else None
-            prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
-            prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
+            prior_binding = (
+                getattr(getattr(orchestrator, "runner", None), "binding", None)
+                if previous is not None
+                else None
+            )
+            prior_conversation = (
+                getattr(orchestrator, "binding_conversation_id", None)
+                if previous is not None
+                else None
+            )
             previous_loadout = getattr(orchestrator, "_loadout_override", None)
             previous_sessions = {
                 name: dict(picks) for name, picks in getattr(orchestrator, "_session_options", {}).items()
