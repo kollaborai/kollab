@@ -204,9 +204,12 @@ async def observe_test_owned_processes(root, report):
         (root / "detached", "detached_sdk", "owned-sdk-identity.json", False),
     )
     for workspace, key, filename, should_exit in entries:
-        if key.startswith("detached_") and report.get("phase") != "ready":
-            continue
         path = workspace / filename
+        if key.startswith("detached_") and report.get("phase") != "ready":
+            try:
+                path.stat()
+            except FileNotFoundError:
+                continue
         identity = report.get(key)
         if identity is None:
             try:
@@ -258,6 +261,48 @@ async def observe_test_owned_processes(root, report):
                     f"no safe signal authority; deferred to ephemeral CI runner: {error}"
                 )
     return problems, deferred
+
+
+async def observe_test_owned_processes_after_owner_shutdown(root, report):
+    """Recover owner evidence when possible, then always observe cleanup state."""
+    problems = []
+    if not isinstance(report, dict):
+        problems.append("owner report was not a JSON object")
+        report = {}
+
+    if not report:
+        try:
+            owner_report = (root / "owner-report.json").read_text()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            problems.append(f"unreadable owner report: {type(error).__name__}: {error}")
+        else:
+            try:
+                recovered = json.loads(owner_report)
+            except ValueError as error:
+                problems.append(f"unreadable owner report: {type(error).__name__}: {error}")
+            else:
+                if isinstance(recovered, dict):
+                    report = recovered
+                else:
+                    problems.append("owner report was not a JSON object")
+
+    try:
+        if "detached_daemon" in report and "detached_sdk" not in report:
+            sdk = read_sdk_identity(root / "detached")
+            if sdk is not None:
+                report["detached_sdk"] = sdk
+    except BaseException as error:
+        problems.append(f"detached SDK identity observation: {type(error).__name__}: {error}")
+
+    try:
+        cleanup_problems, deferred = await observe_test_owned_processes(root, report)
+        problems.extend(cleanup_problems)
+    except BaseException as error:
+        deferred = []
+        problems.append(f"identity observation: {type(error).__name__}: {error}")
+    return report, problems, deferred
 
 
 @pytest.mark.asyncio
@@ -345,18 +390,8 @@ async def test_owner_drop_retires_daemon_and_sdk_without_affecting_detached_agen
         except BaseException as error:
             problems.append(f"owner shutdown: {type(error).__name__}: {error}")
         # Retain all identity/evidence files, even when the qualification fails.
-        if not report and (root / "owner-report.json").exists():
-            report = json.loads((root / "owner-report.json").read_text())
-        if "detached_daemon" in report and "detached_sdk" not in report:
-            sdk = read_sdk_identity(root / "detached")
-            if sdk is not None:
-                report["detached_sdk"] = sdk
-        try:
-            cleanup_problems, deferred = await observe_test_owned_processes(root, report)
-            problems.extend(cleanup_problems)
-        except BaseException as error:
-            deferred = []
-            problems.append(f"identity observation: {type(error).__name__}: {error}")
+        report, identity_problems, deferred = await observe_test_owned_processes_after_owner_shutdown(root, report)
+        problems.extend(identity_problems)
         observation["identities"] = report
         observation["deferred_cleanup_no_safe_signal_authority"] = deferred
         remaining = []

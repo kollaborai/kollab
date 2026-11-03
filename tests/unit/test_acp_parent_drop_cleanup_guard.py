@@ -1,6 +1,7 @@
 """Fake-only checks for ACP parent-drop teardown without PID signal fallbacks."""
 
 import asyncio
+import json
 
 from tests.integration import test_acp_parent_drop as parent_drop
 
@@ -73,3 +74,37 @@ def test_missing_acp_cleanup_process_and_receipt_fail_closed_without_signaling(t
     assert any("missing sdk identity receipt" in problem for problem in problems)
     assert deferred == []
     assert signals == []
+
+
+def test_truncated_owner_report_still_observes_identity_and_reports_deferred_cleanup(tmp_path, monkeypatch):
+    (tmp_path / "owner-report.json").write_text('{"phase": "ready",')
+    owned = tmp_path / "owned"
+    detached = tmp_path / "detached"
+    owned.mkdir()
+    detached.mkdir()
+    for workspace in (owned, detached):
+        for process_name, pid in (("daemon", 4242), ("sdk", 4343)):
+            receipt = workspace / f"owned-{process_name}-identity.json"
+            receipt.write_text(json.dumps(_identity(pid, workspace)))
+
+    async def wait_dead(_identity):
+        return None
+
+    monkeypatch.setattr(parent_drop, "same_birth_alive", lambda _identity: True)
+    monkeypatch.setattr(parent_drop, "wait_dead", wait_dead)
+    calls = []
+    observe_owned_processes = parent_drop.observe_test_owned_processes
+
+    async def observe(root, report):
+        calls.append((root, report))
+        return await observe_owned_processes(root, report)
+
+    monkeypatch.setattr(parent_drop, "observe_test_owned_processes", observe)
+    report, problems, deferred = asyncio.run(
+        parent_drop.observe_test_owned_processes_after_owner_shutdown(tmp_path, {})
+    )
+
+    assert calls == [(tmp_path, {})]
+    assert report == {}
+    assert any("unreadable owner report" in problem for problem in problems)
+    assert {item["identity"] for item in deferred} == {"detached_daemon", "detached_sdk"}

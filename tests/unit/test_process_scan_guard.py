@@ -125,6 +125,46 @@ def test_process_table_detector_blocks_global_ps_but_allows_pid_targeting():
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        "tasklist.exe",
+        ["TASKLIST.EXE"],
+        [r"C:\Windows\System32\tasklist.exe"],
+        [r"C:\Windows\System32\TASKLIST.EXE"],
+    ],
+)
+def test_process_table_detector_blocks_windows_tasklist_executable_spellings(command):
+    assert is_process_table_enumeration_command(command)
+
+
+def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 1234
+
+        def children(self, *args, **kwargs):
+            return []
+
+        def parents(self):
+            return []
+
+        def environ(self):
+            return {}
+
+    fake_psutil = SimpleNamespace(Process=FakeProcess, process_iter=lambda *args, **kwargs: iter(()), pids=lambda: [])
+    fake_subprocess = SimpleNamespace(Popen=lambda *args, **kwargs: calls.append((args, kwargs)) or "launched")
+    fake_os = _fake_os(calls)
+    install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
+
+    for command in (["tasklist.exe"], [r"C:\Windows\System32\TASKLIST.EXE"]):
+        with pytest.raises(RuntimeError, match="blocked for unmarked test"):
+            fake_subprocess.Popen(command)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
     "selector",
     [
         ["--ppid", "1"],

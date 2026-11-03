@@ -205,6 +205,12 @@ def _shell_token_name(token: str) -> str:
     return token.strip("`$();")
 
 
+def _executable_name(token: str) -> str:
+    """Normalize an executable token across POSIX and Windows spellings."""
+    name = PurePath(_shell_token_name(token).replace("\\", "/")).name.casefold()
+    return name.removesuffix(".exe")
+
+
 def _valid_positive_pid_list(value: str) -> bool:
     if not re.fullmatch(r"[0-9]+(?:,[0-9]+)*", value):
         return False
@@ -288,7 +294,7 @@ def is_process_table_enumeration_command(command: Any) -> bool:
             nested = embedded.group(1) or embedded.group(2)
             if nested and is_process_table_enumeration_command(nested):
                 return True
-        name = PurePath(_shell_token_name(token).replace("\\", "/")).name
+        name = _executable_name(token)
         if name in {"sh", "bash", "zsh"}:
             shell_args = tokens[index + 1 :]
             for shell_index, option in enumerate(shell_args[:-1]):
@@ -308,9 +314,9 @@ def is_process_table_enumeration_command(command: Any) -> bool:
         # Docker's `ps` lists containers, not host processes. Shell command
         # substitution may prefix the token with `$(` in rendered prompt blocks.
         previous_token = _shell_token_name(tokens[index - 1]) if index > 0 else ""
-        previous_name = PurePath(previous_token.replace("\\", "/")).name
+        previous_name = _executable_name(previous_token)
         preceding_pair = (
-            tuple(PurePath(_shell_token_name(value).replace("\\", "/")).name for value in tokens[index - 2 : index])
+            tuple(_executable_name(value) for value in tokens[index - 2 : index])
             if index > 1
             else ()
         )
