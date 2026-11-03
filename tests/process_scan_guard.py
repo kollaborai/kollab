@@ -175,6 +175,9 @@ def host_process_scans_allowed(option_enabled: bool, environ: Mapping[str, str])
     return option_enabled and not host_process_scan_environment_errors(environ)
 
 
+_WINDOWS_EXECUTABLE_PREFIX = re.compile(r'''^\s*["']?(?:[A-Za-z]:\\|\\\\)''')
+
+
 def _command_tokens(command: Any) -> list[str] | None:
     if isinstance(command, os.PathLike):
         command = os.fspath(command)
@@ -182,6 +185,14 @@ def _command_tokens(command: Any) -> list[str] | None:
         command = os.fsdecode(command)
     if isinstance(command, str):
         try:
+            if _WINDOWS_EXECUTABLE_PREFIX.match(command):
+                tokens = shlex.split(command, posix=False)
+                return [
+                    token[1:-1]
+                    if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}
+                    else token
+                    for token in tokens
+                ]
             return shlex.split(command)
         except ValueError:
             # An incomplete shell parse is unknown, never evidence of safety.
@@ -446,6 +457,9 @@ def install_test_process_scan_guard(
     def guarded_popen(*args: Any, **kwargs: Any) -> Any:
         command = args[0] if args else kwargs.get("args")
         executable = kwargs.get("executable")
+        if executable is None and len(args) > 2:
+            # subprocess.Popen accepts `executable` as its third positional argument.
+            executable = args[2]
         executable_command = None
         if executable is not None:
             command_tokens = _command_tokens(command)

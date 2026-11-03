@@ -149,6 +149,8 @@ def test_process_table_detector_keeps_empty_commands_non_enumerating():
         ["TASKLIST.EXE"],
         [r"C:\Windows\System32\tasklist.exe"],
         [r"C:\Windows\System32\TASKLIST.EXE"],
+        r"C:\Windows\System32\TASKLIST.EXE /FO CSV",
+        r'"C:\Program Files\Windows NT\Accessories\TASKLIST.EXE" /FO CSV',
     ],
 )
 def test_process_table_detector_blocks_windows_tasklist_executable_spellings(command):
@@ -175,9 +177,22 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
     fake_os = _fake_os(calls)
     install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
 
-    for command in (["tasklist.exe"], [r"C:\Windows\System32\TASKLIST.EXE"]):
+    tasklist_strings = (
+        r"C:\Windows\System32\TASKLIST.EXE /FO CSV",
+        r'"C:\Program Files\Windows NT\Accessories\TASKLIST.EXE" /FO CSV',
+    )
+    for command in (
+        ["tasklist.exe"],
+        [r"C:\Windows\System32\TASKLIST.EXE"],
+        *tasklist_strings,
+    ):
         with pytest.raises(RuntimeError, match="blocked for unmarked test"):
             fake_subprocess.Popen(command)
+
+    for command in tasklist_strings:
+        for operation in (fake_os.system, fake_os.popen):
+            with pytest.raises(RuntimeError, match="blocked for unmarked test"):
+                operation(command)
 
     assert calls == []
 
@@ -448,7 +463,8 @@ def test_installed_guard_preserves_non_scan_spawn_and_exec_calls(monkeypatch):
     assert [name for name, _, _ in calls] == ["spawnlp", "posix_spawn", "execv"]
 
 
-def test_popen_executable_override_cannot_hide_a_process_scan(monkeypatch):
+@pytest.mark.parametrize("positional", [False, True], ids=["keyword", "positional"])
+def test_popen_executable_override_cannot_hide_a_process_scan(monkeypatch, positional):
     calls = []
 
     class FakeProcess:
@@ -468,11 +484,16 @@ def test_popen_executable_override_cannot_hide_a_process_scan(monkeypatch):
     fake_os = _fake_os(calls)
     install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
 
+    def popen(command):
+        if positional:
+            return fake_subprocess.Popen(command, -1, "/bin/ps")
+        return fake_subprocess.Popen(command, executable="/bin/ps")
+
     with pytest.raises(RuntimeError, match="blocked for unmarked test"):
-        fake_subprocess.Popen(["display-name", "-A"], executable="/bin/ps")
+        popen(["display-name", "-A"])
 
     assert calls == []
-    assert fake_subprocess.Popen(["display-name", "-p", "42", "-o", "pid"], executable="/bin/ps") is None
+    assert popen(["display-name", "-p", "42", "-o", "pid"]) is None
     assert len(calls) == 1
 
 
