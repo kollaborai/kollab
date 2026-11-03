@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import pytest_asyncio
+from kollabor_voice import module_runtime
 from kollabor_voice import service as service_module
 from kollabor_voice.audio import AudioSegment, SpeechSegmenter
 from kollabor_voice.client import VoiceClient
@@ -90,6 +91,72 @@ async def until(predicate, seconds=3):
     async with asyncio.timeout(seconds):
         while not predicate():
             await asyncio.sleep(0.01)
+
+
+def test_module_runner_uses_installed_package_without_host_site_packages(
+    tmp_path, monkeypatch
+):
+    host_site = tmp_path / "host-site-packages"
+    package_dir = host_site / "kollabor_voice"
+    shutil.copytree(Path(module_runtime.__file__).resolve().parent, package_dir)
+    (host_site / "pydantic.py").write_text(
+        "raise RuntimeError('host pydantic leaked into voice runtime')\n"
+    )
+    (package_dir / "_probe.py").write_text(
+        "import json, pydantic, kollabor_voice\n"
+        "print(json.dumps({'voice': kollabor_voice.__file__, 'pydantic': pydantic.__file__}))\n"
+    )
+    monkeypatch.setattr(module_runtime, "_PACKAGE_DIR", package_dir)
+    monkeypatch.setenv("PYTHONPATH", str(host_site))
+
+    env = module_runtime.isolated_env(os.environ)
+    result = subprocess.run(
+        module_runtime.module_command(sys.executable, "kollabor_voice._probe"),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    imports = json.loads(result.stdout)
+    assert Path(imports["voice"]).resolve() == (package_dir / "__init__.py").resolve()
+    assert Path(imports["pydantic"]).resolve() != (host_site / "pydantic.py").resolve()
+    assert str(Path(imports["pydantic"]).resolve()).startswith(sys.prefix)
+
+
+def test_module_runner_loads_editable_source_package():
+    result = subprocess.run(
+        module_runtime.module_command(sys.executable, "kollabor_voice.turn_errors"),
+        env=module_runtime.isolated_env(os.environ),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.returncode == 0
+
+
+def test_service_launcher_keeps_environment_allowlist_and_isolates_pythonpath(
+    root, monkeypatch
+):
+    captured = []
+    monkeypatch.setenv("PYTHONPATH", "/engine/site-packages")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-forwarded")
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    VoiceClient(root).launch()
+
+    args, kwargs = captured[0]
+    command = args[0]
+    assert command[0] == sys.executable
+    assert command[1:3] == ["-I", "-c"]
+    assert command[5] == "kollabor_voice.bootstrap"
+    assert command[6:8] == ["--root", str(root)]
+    assert kwargs["env"]["PYTHONPATH"] == ""
+    assert "OPENAI_API_KEY" not in kwargs["env"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
 
 
 @pytest_asyncio.fixture
@@ -192,19 +259,28 @@ def test_broken_runtime_marker_repairs_dependencies_before_launch(root, monkeypa
     (runtime / "bin/python").touch()
     (runtime / "ready.json").write_text(json.dumps({"requirements": pins}))
     calls, launches = [], []
+    monkeypatch.setenv("PYTHONPATH", "/engine/site-packages")
 
     def run(command, **kwargs):
-        calls.append(command)
+        calls.append((command, kwargs))
         if len(calls) == 1:
             raise subprocess.CalledProcessError(1, command)
 
     monkeypatch.setattr(sys, "argv", ["voice-bootstrap", "--root", str(root)])
     monkeypatch.setattr(bootstrap.shutil, "which", lambda _: "/mock/uv")
     monkeypatch.setattr(bootstrap.subprocess, "run", run)
-    monkeypatch.setattr(bootstrap.os, "execv", lambda *args: launches.append(args))
+    monkeypatch.setattr(bootstrap.os, "execve", lambda *args: launches.append(args))
     bootstrap.main()
-    assert "--reinstall" in calls[1]
+    assert "--reinstall" in calls[1][0]
     assert len(calls) == 3 and len(launches) == 1
+    assert all(kwargs["env"]["PYTHONPATH"] == "" for _, kwargs in calls)
+    exec_path, argv, env = launches[0]
+    assert exec_path == argv[0]
+    assert argv[1:3] == ["-I", "-c"]
+    assert argv[5] == "kollabor_voice.service"
+    assert argv[6:8] == ["--root", str(root)]
+    assert argv[8:10] == ["--lock-fd", str(launches[0][1][-1])]
+    assert env["PYTHONPATH"] == ""
     assert json.loads((root / "setup.json").read_text())["state"] == "starting"
 
 

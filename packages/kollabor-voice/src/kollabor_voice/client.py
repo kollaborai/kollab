@@ -18,6 +18,7 @@ from .control import (
     service_root,
     socket_path,
 )
+from .module_runtime import isolated_env, module_command
 
 
 class VoiceClient:
@@ -97,17 +98,17 @@ class VoiceClient:
             "SSL_CERT_DIR",
             "UV_CACHE_DIR",
         }
-        env = {key: value for key, value in os.environ.items() if key in allowed}
-        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+        env = isolated_env(
+            {key: value for key, value in os.environ.items() if key in allowed}
+        )
         with (logs / "service.log").open("ab") as log:
             subprocess.Popen(
-                [
+                module_command(
                     sys.executable,
-                    "-m",
                     "kollabor_voice.bootstrap",
                     "--root",
-                    str(self.root),
-                ],
+                    self.root,
+                ),
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=log,

@@ -1,7 +1,8 @@
 """LiveKit media bridge for phone calls (engine <-> room over stdio pipes).
 
-The engine spawns ``<prepared voice python> -m kollabor_voice.phone_audio_bridge``
-with pipes; argv never carries a token. stdin lines are JSON:
+The Engine runs this module with the prepared voice interpreter and Kollab's
+exact ``kollabor_voice`` package path; argv never carries a token. stdin lines
+are JSON:
 ``{"type": "start", "url": ..., "token": ..., "rate_in": 16000,
 "rate_out": 24000}`` exactly once, then ``{"type": "mic", "n": int,
 "pcm": base64}`` and ``{"type": "close"}``. stdout lines are

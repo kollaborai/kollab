@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release publishing uses a reviewed main controller, immutable tagged source, the existing repository PyPI token only in isolated upload steps, and verified GitHub assets.
 
 ### Fixed
-- Managed LiveKit workers and PhoneLink bridges load Kollab's voice package without inheriting Engine site-packages, so Python 3.14 dependencies cannot override the prepared Python 3.12 runtime.
+- The voice service, LiveKit workers, PhoneLink bridges, and managed transcription and classifier workers no longer inherit another interpreter's site-packages.
 
 ## [0.19.0] - 2026-11-03
 

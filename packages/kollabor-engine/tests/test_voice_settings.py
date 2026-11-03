@@ -23,6 +23,7 @@ from kollabor_engine.voice_livekit import LiveKitRuntime
 from kollabor_engine.voice_runtime_host import RuntimeHostError
 from kollabor_engine.voice_settings import DEFAULT_PROMPT, VoiceSettingsService
 from kollabor_engine.voice_types import SpeechReadiness
+from kollabor_voice import module_runtime
 from kollabor_voice.client import VoiceClient
 from kollabor_voice.control import VoiceError, install_identity, manifest
 from test_voice_livekit_runtime import FakeSession
@@ -118,7 +119,7 @@ def test_worker_uses_prepared_voice_runtime(tmp_path, monkeypatch):
     assert cmd[0] == str(python)
     assert cmd[1:3] == ["-I", "-c"]
     assert "run_module" in cmd[3]
-    assert cmd[4] == str(Path(kollabor_voice.__file__).resolve().parent)
+    assert cmd[4] == str(Path(module_runtime.__file__).resolve().parent)
     assert cmd[5] == "kollabor_voice.livekit_worker"
     assert env == {"PYTHONPATH": ""}
 
@@ -151,7 +152,7 @@ def test_child_imports_installed_voice_package_without_engine_site_packages(
     )
     monkeypatch.setenv("KOLLAB_VOICE_PYTHON", sys.executable)
     monkeypatch.setenv("PYTHONPATH", str(engine_site))
-    monkeypatch.setattr(kollabor_voice, "__file__", str(package_dir / "__init__.py"))
+    monkeypatch.setattr(module_runtime, "_PACKAGE_DIR", package_dir)
 
     runtime = LiveKitRuntime(
         engine_url=lambda: "",
