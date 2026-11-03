@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-03
+
 ### Fixed
+- PhoneLink chat reuses unchanged polling snapshots so typing and scrolling stay responsive. Completed voice turns remain visible until saved history replaces them.
 - A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
 - Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
 - Detached daemon SIGTERM cancels its top-level async task so application cleanup
@@ -29,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the window keep addressing it (#671).
 
 ### Added
+- PhoneLink carries microphone input and spoken replies through the phone while the computer's LiveKit signaling and media stay on loopback (#440).
 - The Web UI Agents sidebar shows a small type glyph after local-session and offline names (coder `▸`, research `◈`, default `●`); rows without type metadata and all remote rows stay unmarked (#655).
 - Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
 - Team launches now support member selection or exclusions across the CLI,
@@ -354,6 +358,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attach, `kollab service` and goal turns use `pid_alive`, so the hub keeps
   live agents. On every platform an exited agent that was never reaped now
   counts as stopped (#268).
+
+### Known limitations
+- PhoneLink voice passed recorded-input Android emulator testing. Final iPhone playback and transcript-persistence testing remains pending (#440).
 
 ## [0.18.5] - 2026-10-26
 
