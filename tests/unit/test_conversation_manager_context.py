@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.append(".")
 
 from kollabor_ai.conversation_manager import ConversationManager
@@ -13,6 +15,12 @@ class MockConfig:
         return default
 
     _conversations_dir = Path("/tmp/test_conversations_context")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_conversations_dir(tmp_path):
+    """Point ConversationManager at a per-test temp dir instead of /tmp."""
+    MockConfig._conversations_dir = tmp_path / "conversations"
 
 
 def _make_manager():
