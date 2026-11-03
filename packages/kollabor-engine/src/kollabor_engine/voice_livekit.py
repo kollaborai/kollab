@@ -42,6 +42,29 @@ WORKER_ERROR_PREFIX = "WORKER_ERROR"  # or "WORKER_ERROR <reason>" when it canno
 WORKER_SHORTAGE_PREFIX = "WORKER_SHORTAGE"  # "WORKER_SHORTAGE <reason>": out of memory
 # The worker waits up to 1200 s for its models (a first-run download), then joins.
 WORKER_READY_TIMEOUT_S = 1260.0
+_VOICE_MODULE_BOOTSTRAP = """\
+import importlib.util, runpy, sys
+package_dir, module_name = sys.argv[1:3]
+spec = importlib.util.spec_from_file_location(
+    "kollabor_voice", package_dir + "/__init__.py",
+    submodule_search_locations=[package_dir],
+)
+package = importlib.util.module_from_spec(spec)
+sys.modules["kollabor_voice"] = package
+spec.loader.exec_module(package)
+sys.argv = [module_name, *sys.argv[3:]]
+runpy.run_module(module_name, run_name="__main__")
+"""
+
+
+def _voice_module_command(
+    python: str, package_dir: str, module_name: str
+) -> tuple[list[str], dict[str, str]]:
+    return [python, "-I", "-c", _VOICE_MODULE_BOOTSTRAP, package_dir, module_name], {
+        "PYTHONPATH": ""
+    }
+
+
 SERVER_READY_TIMEOUT_S = 15.0
 WORKER_TOKEN_TTL_S = 3600
 STALE_SERVICE_EXIT_S = (
@@ -533,8 +556,22 @@ class LiveKitRuntime:
             python = str(prepared)
         import kollabor_voice
 
-        src = str(Path(kollabor_voice.__file__).resolve().parent.parent)
-        return [python, "-m", "kollabor_voice.livekit_worker"], {"PYTHONPATH": src}
+        package_dir = str(Path(kollabor_voice.__file__).resolve().parent)
+        # Never put the Engine's site-packages on the prepared interpreter's
+        # import path. Load Kollab's pure-Python package from its exact directory
+        # while leaving stdlib and third-party imports to the prepared runtime.
+        return _voice_module_command(
+            python, package_dir, "kollabor_voice.livekit_worker"
+        )
+
+    def _child_env(self, cmd_env: dict[str, str]) -> dict[str, str]:
+        env = dict(os.environ)
+        env.update(cmd_env)
+        env.update(self._worker_env)
+        # Child imports must use its own interpreter's site-packages, never the
+        # Engine's paths inherited from its launcher or a caller override.
+        env["PYTHONPATH"] = ""
+        return env
 
     async def start_session(self, binding: VoiceSessionBinding) -> WorkerHandle:
         cmd, cmd_env = self._worker_command()  # fail before starting any server
@@ -560,9 +597,7 @@ class LiveKitRuntime:
             "engine_url": self._engine_url(),
             "engine_token": self._engine_token(),
         }
-        env = dict(os.environ)
-        env.update(cmd_env)
-        env.update(self._worker_env)
+        env = self._child_env(cmd_env)
         env["KOLLAB_VOICE_WORKER_CONFIG"] = json.dumps(config)
         with self._log("livekit-worker.log") as log:
             process = await asyncio.create_subprocess_exec(
@@ -616,9 +651,7 @@ class LiveKitRuntime:
             },
             separators=(",", ":"),
         )
-        env = dict(os.environ)
-        env.update(cmd_env)
-        env.update(self._worker_env)
+        env = self._child_env(cmd_env)
         with self._log("phone-audio-bridge.log") as log:
             process = await asyncio.create_subprocess_exec(
                 *cmd,

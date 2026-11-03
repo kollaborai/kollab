@@ -21,6 +21,11 @@ them, and no voice screen shows classifier controls, status or decisions.
   Silero VAD, the v1-mini turn detector, VAD interruption. Parakeet does
   speech-to-text and VibeVoice Carter text-to-speech, both through the one voice
   service owner.
+- The Engine starts the worker and PhoneLink bridge with the prepared voice
+  interpreter. It loads Kollab's pure-Python `kollabor_voice` package from that
+  package's exact directory and clears inherited `PYTHONPATH`; the child gets
+  standard library and third-party dependencies only from its own interpreter,
+  never the Engine interpreter's `site-packages`.
 - A final transcript becomes a turn of the selected Kollab session: the worker's
   `llm_node` POSTs `/voice/sessions/{id}/turns` and reads NDJSON lines
   (`{"text"}` per sentence, then `{"done", "turn_id"}`). Replies are spoken
