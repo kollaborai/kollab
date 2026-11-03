@@ -1731,52 +1731,66 @@ async def _handle_cli_hub(hub_args: list) -> None:
         import socket as _socket
         import time as _time
 
-        agents = []
-        for f in presence_dir.glob("*.json"):
-            try:
-                with open(f) as fh:
-                    data = json.load(fh)
-                pid = data.get("pid", 0)
-                # Pid must exist
-                if os.name == "nt":
-                    # os.kill(pid, 0) sends Ctrl+C on Windows, so ask the process table (#268).
-                    from kollabor_config import proc_ctl
+        from plugins.hub.presence import all_presence_dirs
 
-                    if not proc_ctl.pid_alive(pid):
-                        f.unlink(missing_ok=True)
-                        continue
-                else:
-                    try:
-                        os.kill(pid, 0)
-                    except (OSError, ProcessLookupError):
-                        f.unlink(missing_ok=True)
-                        continue
-                # Pid alive but heartbeat stale = recycled pid, clean up
-                heartbeat_age = _time.time() - (data.get("last_heartbeat") or 0)
-                if heartbeat_age > 30:
-                    sock = data.get("socket_path", "")
-                    alive = False
-                    if sock:
+        agents_by_id = {}
+        for scan_dir in all_presence_dirs(extra_dirs=[presence_dir]):
+            for f in scan_dir.glob("*.json"):
+                try:
+                    with open(f) as fh:
+                        data = json.load(fh)
+                    pid = data.get("pid", 0)
+                    # Pid must exist
+                    if os.name == "nt":
+                        # os.kill(pid, 0) sends Ctrl+C on Windows, so ask the process table (#268).
+                        from kollabor_config import proc_ctl
+
+                        if not proc_ctl.pid_alive(pid):
+                            f.unlink(missing_ok=True)
+                            continue
+                    else:
                         try:
-                            if os.name == "nt":  # an endpoint file, not a socket (#268)
-                                from kollabor_config import local_ipc
+                            os.kill(pid, 0)
+                        except (OSError, ProcessLookupError):
+                            f.unlink(missing_ok=True)
+                            continue
+                    # Pid alive but heartbeat stale = recycled pid, clean up
+                    heartbeat_age = _time.time() - (data.get("last_heartbeat") or 0)
+                    if heartbeat_age > 30:
+                        sock = data.get("socket_path", "")
+                        alive = False
+                        if sock:
+                            try:
+                                if os.name == "nt":  # an endpoint file, not a socket (#268)
+                                    from kollabor_config import local_ipc
 
-                                local_ipc.connect_blocking(sock, 1.0).close()
-                            else:
-                                s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-                                s.settimeout(1.0)
-                                s.connect(sock)
-                                s.close()
-                            alive = True
-                        except Exception:
-                            pass
-                    if not alive:
-                        f.unlink(missing_ok=True)
-                        continue
-                agents.append(data)
-            except Exception:
-                continue
-        return agents
+                                    local_ipc.connect_blocking(sock, 1.0).close()
+                                else:
+                                    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                                    s.settimeout(1.0)
+                                    s.connect(sock)
+                                    s.close()
+                                alive = True
+                            except Exception:
+                                pass
+                        if not alive:
+                            f.unlink(missing_ok=True)
+                            continue
+                    key = str(data.get("agent_id") or data.get("socket_path") or f)
+                    previous = agents_by_id.get(key)
+                    if previous:
+                        try:
+                            previous_heartbeat = float(previous.get("last_heartbeat") or 0)
+                            current_heartbeat = float(data.get("last_heartbeat") or 0)
+                        except (TypeError, ValueError):
+                            previous_heartbeat = current_heartbeat = 0
+                        if previous_heartbeat >= current_heartbeat:
+                            continue
+                    data["_presence_path"] = str(f)
+                    agents_by_id[key] = data
+                except Exception:
+                    continue
+        return list(agents_by_id.values())
 
     def _find_agent(identity: str) -> Optional[dict]:
         for a in _get_live_agents():
@@ -1800,7 +1814,12 @@ async def _handle_cli_hub(hub_args: list) -> None:
         return pid_alive(pid)  # a zombie is not alive: the window may not have reaped it
 
     async def _stop_agent_record(agent: dict, reason: str) -> tuple[bool, str]:
-        return await stop_agent_record(agent, reason, presence_dir=presence_dir)
+        record = dict(agent)
+        presence_path = record.pop("_presence_path", None)
+        record_presence_dir = Path(presence_path).parent if presence_path else presence_dir
+        return await stop_agent_record(
+            record, reason, presence_dir=record_presence_dir
+        )
 
     # --- config helpers for on/off/user ---
     from kollabor_config.config_utils import get_existing_global_config_path

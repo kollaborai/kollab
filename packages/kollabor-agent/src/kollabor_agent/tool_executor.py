@@ -84,6 +84,363 @@ class ToolExecutionResult:
         )
 
 
+def _is_blocked_kollab_spawn(
+    command: str, *, background: bool = False, _depth: int = 0
+) -> bool:
+    """Detect Kollab agent launches and all-agent stops through common wrappers."""
+    import ast
+    import re
+    import shlex
+
+    assignment = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+    shell_names = {"sh", "bash", "dash", "zsh", "ksh"}
+    python_name = re.compile(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?")
+    separators = {";", "&", "&&", "|", "||", "(", ")"}
+
+    def basename(token: str) -> str:
+        return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+    def suspicious_launch(text: str, is_background: bool) -> bool:
+        target = re.search(
+            r"\b(?:kollab|main\.py|kollabor_cli_main)\b", text, re.IGNORECASE
+        )
+        dangerous = re.search(
+            r"--agent(?:=|\b)|--detached(?:=|\b)|"
+            r"--hub(?:=|\s+)(?:stop|kill)(?:\s+|=)all",
+            text,
+            re.IGNORECASE,
+        )
+        return bool(target and (is_background or dangerous))
+
+    def blocked_args(args: list[str], is_background: bool) -> bool:
+        if is_background:
+            return True
+        lowered = [str(arg).lower() for arg in args]
+        if any(
+            arg == "--agent"
+            or arg.startswith("--agent=")
+            or arg == "--detached"
+            or arg.startswith("--detached=")
+            for arg in lowered
+        ):
+            return True
+        for index, arg in enumerate(lowered[:-2]):
+            if (
+                arg == "--hub"
+                and lowered[index + 1] in {"stop", "kill"}
+                and lowered[index + 2] == "all"
+            ):
+                return True
+        return any(
+            arg in {"--hub=stop", "--hub=kill"} and lowered[index + 1] == "all"
+            for index, arg in enumerate(lowered[:-1])
+        )
+
+    def python_code_spawns(code: str, is_background: bool, depth: int) -> bool:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return False
+        spawn_calls = {
+            "Popen",
+            "run",
+            "call",
+            "check_call",
+            "check_output",
+            "system",
+            "exec",
+            "execv",
+            "execve",
+            "execvp",
+            "execvpe",
+            "getoutput",
+            "popen",
+            "create_subprocess_exec",
+            "create_subprocess_shell",
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            name = (
+                function.id
+                if isinstance(function, ast.Name)
+                else getattr(function, "attr", "")
+            )
+            if name not in spawn_calls and not name.startswith(("spawn", "exec")):
+                continue
+            for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
+                try:
+                    value = ast.literal_eval(argument)
+                except ValueError, TypeError:
+                    continue
+                if isinstance(value, str):
+                    if _is_blocked_kollab_spawn(
+                        value, background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                elif isinstance(value, (list, tuple)) and all(
+                    isinstance(item, str) for item in value
+                ):
+                    if scan_tokens(list(value), is_background, depth + 1):
+                        return True
+        return False
+
+    def unwrap(
+        tokens: list[str], is_background: bool, depth: int
+    ) -> tuple[list[str], bool]:
+        tokens = list(tokens)
+        while tokens:
+            executable = basename(tokens[0]).removesuffix(".exe")
+            if assignment.match(tokens[0]):
+                tokens = tokens[1:]
+                continue
+
+            if executable == "env":
+                index = 1
+                while index < len(tokens):
+                    token = tokens[index]
+                    if token == "--":
+                        index += 1
+                        break
+                    if token in {"-u", "--unset", "-C", "--chdir"}:
+                        index += 2
+                    elif token.startswith("--unset=") or token.startswith("--chdir="):
+                        index += 1
+                    elif token in {"-S", "--split-string"} and index + 1 < len(tokens):
+                        return [], _is_blocked_kollab_spawn(
+                            tokens[index + 1],
+                            background=is_background,
+                            _depth=depth + 1,
+                        )
+                    elif token.startswith("-") or assignment.match(token):
+                        index += 1
+                    else:
+                        break
+                tokens = tokens[index:]
+                continue
+            if executable == "nohup":
+                tokens = tokens[1:]
+                if tokens and tokens[0] == "--":
+                    tokens = tokens[1:]
+                continue
+            if executable == "setsid":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += 1
+                tokens = tokens[index:]
+                continue
+            if executable == "time":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    if tokens[index] in {"-f", "--format", "-o", "--output"}:
+                        index += 2
+                    elif tokens[index] == "--":
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                tokens = tokens[index:]
+                continue
+            if executable == "stdbuf":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    if tokens[index] in {"-i", "-o", "-e"}:
+                        index += 2
+                    elif tokens[index] == "--":
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                tokens = tokens[index:]
+                continue
+            if executable in {"command", "exec"}:
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    token = tokens[index]
+                    if token == "--":
+                        index += 1
+                        break
+                    if executable == "exec" and token in {"-a", "--argv0"}:
+                        index += 2
+                    elif executable == "exec" and token in {"-c", "-l"}:
+                        index += 1
+                    elif executable == "command" and token in {"-p", "-v", "-V"}:
+                        index += 1
+                    else:
+                        break
+                tokens = tokens[index:]
+                continue
+            if executable == "xargs":
+                index = 1
+                value_options = {
+                    "-a",
+                    "--arg-file",
+                    "-I",
+                    "--replace",
+                    "-L",
+                    "--max-lines",
+                    "-n",
+                    "--max-args",
+                    "-d",
+                    "--delimiter",
+                    "-P",
+                    "--max-procs",
+                }
+                while index < len(tokens):
+                    token = tokens[index]
+                    if token == "--":
+                        index += 1
+                        break
+                    if token in value_options:
+                        index += 2
+                    elif token.startswith("-"):
+                        index += 1
+                    else:
+                        break
+                tokens = tokens[index:]
+                continue
+            if executable in {"sudo", "doas"}:
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    if tokens[index] in {
+                        "-u",
+                        "--user",
+                        "-g",
+                        "--group",
+                        "-h",
+                        "--host",
+                        "-p",
+                        "--prompt",
+                    }:
+                        index += 2
+                    else:
+                        index += 1
+                tokens = tokens[index:]
+                continue
+            if executable == "nice":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += 2 if tokens[index] in {"-n", "--adjustment"} else 1
+                tokens = tokens[index:]
+                continue
+            if executable == "timeout":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += (
+                        2
+                        if tokens[index] in {"-k", "--kill-after", "-s", "--signal"}
+                        else 1
+                    )
+                if index < len(tokens):
+                    index += 1  # timeout duration
+                tokens = tokens[index:]
+                continue
+            if (
+                executable in {"uv", "poetry", "pipenv", "pipx"}
+                and len(tokens) > 1
+                and tokens[1] == "run"
+            ):
+                tokens = tokens[2:]
+                continue
+            break
+        return tokens, False
+
+    def inspect_segment(tokens: list[str], is_background: bool, depth: int) -> bool:
+        if not tokens:
+            return False
+        tokens, nested_result = unwrap(tokens, is_background, depth)
+        if nested_result:
+            return True
+        if not tokens:
+            return False
+
+        executable = basename(tokens[0]).removesuffix(".exe")
+        args = tokens[1:]
+        if executable in shell_names:
+            for index, token in enumerate(args[:-1]):
+                if token == "-c" or (
+                    token.startswith("-")
+                    and not token.startswith("--")
+                    and "c" in token[1:]
+                ):
+                    return _is_blocked_kollab_spawn(
+                        args[index + 1], background=is_background, _depth=depth + 1
+                    )
+            return False
+
+        if python_name.fullmatch(executable):
+            index = 0
+            while index < len(args):
+                token = args[index]
+                if token == "-c" and index + 1 < len(args):
+                    return python_code_spawns(args[index + 1], is_background, depth)
+                if token == "-m" and index + 1 < len(args):
+                    module = args[index + 1].split(":", 1)[0].lower()
+                    if module in {"kollabor_cli_main", "kollabor"}:
+                        return blocked_args(args[index + 2 :], is_background)
+                    return False
+                if token in {"-X", "-W"}:
+                    index += 2
+                    continue
+                if token.startswith("-"):
+                    index += 1
+                    continue
+                script = basename(token)
+                if script in {"main.py", "kollabor_cli_main.py", "kollabor_cli_main"}:
+                    return blocked_args(args[index + 1 :], is_background)
+                return False
+            return False
+
+        if executable in {
+            "kollab",
+            "main.py",
+            "kollabor_cli_main",
+            "kollabor_cli_main.py",
+        }:
+            return blocked_args(args, is_background)
+        return False
+
+    def scan_tokens(tokens: list[str], is_background: bool, depth: int) -> bool:
+        if depth > 8:
+            return suspicious_launch(" ".join(tokens), is_background)
+        segment: list[str] = []
+        for token in tokens:
+            if token in separators:
+                if inspect_segment(segment, is_background or token == "&", depth):
+                    return True
+                segment = []
+            else:
+                segment.append(token)
+        if inspect_segment(segment, is_background, depth):
+            return True
+
+        # Catch shell command substitutions without treating ordinary quoted
+        # mentions (e.g. echo 'kollab --agent') as executable commands.
+        for token in tokens:
+            nested_commands = re.findall(
+                r"\$\(([^()]*)\)|`([^`]+)`|[<>]\(([^()]*)\)", token
+            )
+            for groups in nested_commands:
+                nested = next((group for group in groups if group), "")
+                if nested and _is_blocked_kollab_spawn(
+                    nested, background=is_background, _depth=depth + 1
+                ):
+                    return True
+        return False
+
+    if _depth > 8:
+        return suspicious_launch(command, background)
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = list(lexer)
+    except ValueError:
+        return suspicious_launch(command, background)
+    return scan_tokens(tokens, background, _depth)
+
+
 class ToolExecutor:
     """Execute tools with unified interface for terminal, MCP, and file operations.
 
@@ -1059,20 +1416,15 @@ class ToolExecutor:
         # Block agents from spawning kollab processes via terminal.
         # Agents MUST use hub_spawn to spawn peers -- direct spawning
         # bypasses the hub mesh and creates invisible rogue processes.
-        import re as _re
-
-        _spawn_pat = _re.compile(
-            r"^\s*(?:python3?\s+main\.py|kollab)\s+.*(?:--detached|--agent|&\s*$)",
-            _re.IGNORECASE,
-        )
-        if _spawn_pat.search(command):
+        if _is_blocked_kollab_spawn(command, background=bool(background)):
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type=tool_type,
                 success=False,
                 error=(
                     "spawning agents via terminal is blocked. "
-                    "use <hub_spawn name=\"agent-name\">task</hub_spawn> instead."
+                    "CLI stop-all is also blocked; use /hub stop all for agents "
+                    "owned by this caller. Use <hub_spawn> to spawn peers."
                 ),
             )
 

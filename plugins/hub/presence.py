@@ -15,6 +15,75 @@ from kollabor_config.hub_paths import hub_socket_root
 
 logger = logging.getLogger(__name__)
 
+
+def _system_home_directory() -> Path:
+    """Return the account's home without trusting an overridable HOME value."""
+    if os.name != "nt":
+        try:
+            import pwd
+
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (AttributeError, ImportError, KeyError, OSError):
+            pass
+    return Path.home()
+
+
+def all_presence_dirs(extra_dirs: Optional[List[Path]] = None) -> List[Path]:
+    """Return known current and legacy presence directories without creating them.
+
+    Presence is normally under ``~/.kollab/projects/*/hub/presence`` or the
+    legacy ``~/.kollab/hub/presence``. Include the effective config root and
+    the OS account home so an ``env HOME=...`` wrapper cannot hide existing
+    agents. The shared socket root is also searched for older colocated
+    presence layouts; validate it before trusting files beneath it.
+    """
+    from kollabor_config.config_utils import get_config_directory
+
+    config_roots = {
+        Path(get_config_directory()),
+        _system_home_directory() / ".kollab",
+    }
+    candidates = set(extra_dirs or [])
+
+    for root in config_roots:
+        candidates.update({root / "presence", root / "hub" / "presence"})
+        projects_root = root / "projects"
+        candidates.update(projects_root.glob("*/presence"))
+        candidates.update(projects_root.glob("*/hub/presence"))
+
+    socket_roots = {Path(SOCKET_DIR_ROOT), Path(hub_socket_root())}
+    if os.name == "nt":
+        socket_roots.add(_system_home_directory() / ".kollab" / "hub-sockets")
+
+    for root in socket_roots:
+        if root.is_symlink():
+            logger.debug("Skipping symlinked shared hub root %s", root)
+            continue
+        try:
+            secure_socket_dir(root, create=False)
+        except (OSError, RuntimeError) as exc:
+            logger.debug("Skipping untrusted shared hub root %s: %s", root, exc)
+            continue
+
+        # Some older layouts colocated state with sockets; current layouts keep
+        # only endpoint files here. The private root validation above prevents
+        # trusting presence JSON planted by another local user.
+        candidates.update({root, root / "presence", root / "hub" / "presence"})
+        if root.is_dir():
+            try:
+                children = list(root.iterdir())
+            except OSError:
+                children = []
+            for child in children:
+                if child.is_symlink() or not child.is_dir():
+                    continue
+                candidates.update(
+                    {child, child / "presence", child / "hub" / "presence"}
+                )
+
+    return sorted(candidates, key=str)
+
+
 # The same per-platform root is used by the engine's discovery fallback.
 SOCKET_DIR_ROOT = hub_socket_root()
 
@@ -426,20 +495,34 @@ class PresenceManager:
         """Read all presence files without cleaning up dead ones.
 
         Used by stop command so it can attempt shutdown signals even
-        on agents that are dying or have stale sockets.  The caller
-        is responsible for cleanup after the operation.
+        on agents that are dying or have stale sockets. Searches every known
+        runtime root, including the OS-account home and shared socket root,
+        while leaving cleanup to the caller.
         """
-        agents = []
-        for f in self._presence_dir.glob("*.json"):
-            if not include_self and f.stem == self.identity.agent_id:
-                continue
-            try:
-                with open(f) as fh:
-                    data = json.load(fh)
-                agents.append(AgentRuntime.from_presence_dict(data))
-            except (json.JSONDecodeError, Exception) as e:
-                logger.debug(f"Bad presence file {f}: {e}")
-        return agents
+        agents: Dict[str, AgentRuntime] = {}
+        timestamps: Dict[str, float] = {}
+        for presence_dir in all_presence_dirs(extra_dirs=[self._presence_dir]):
+            for f in presence_dir.glob("*.json"):
+                if not include_self and f.stem == self.identity.agent_id:
+                    continue
+                try:
+                    with open(f) as fh:
+                        data = json.load(fh)
+                    agent_id = str(data.get("agent_id") or f.stem)
+                    if not include_self and agent_id == self.identity.agent_id:
+                        continue
+                    timestamp = 0.0
+                    for field in ("last_heartbeat", "started_at"):
+                        try:
+                            timestamp = max(timestamp, float(data.get(field) or 0))
+                        except (TypeError, ValueError):
+                            continue
+                    if agent_id not in agents or timestamp > timestamps[agent_id]:
+                        agents[agent_id] = AgentRuntime.from_presence_dict(data)
+                        timestamps[agent_id] = timestamp
+                except Exception as e:
+                    logger.debug(f"Bad presence file {f}: {e}")
+        return list(agents.values())
 
     @staticmethod
     def _socket_responds(socket_path: str) -> bool:

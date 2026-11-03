@@ -360,3 +360,95 @@ def test_signal_session_sends_through_handle_while_child_unreaped():
 def test_signal_session_fails_closed_without_handle():
     assert HubPlugin._signal_session(SimpleNamespace(pid=4242), 15) is False
     assert HubPlugin._signal_session(None, 15) is False
+
+
+def test_scan_all_presence_includes_home_shared_and_legacy_roots(tmp_path, monkeypatch):
+    """stop-all must see agents outside a spoofed HOME and current project."""
+    import json
+    import os
+
+    from kollabor_agent.runtime import AgentRuntime
+    from kollabor_config import config_utils
+    from plugins.hub import presence
+
+    actual_home = tmp_path / "actual-home"
+    redirected_home = tmp_path / "redirected-home"
+    shared_root = tmp_path / "kollabor-hub"
+    current_presence = (
+        redirected_home / ".kollab" / "projects" / "current" / "hub" / "presence"
+    )
+    shared_root.mkdir(mode=0o700)
+
+    monkeypatch.setenv("HOME", str(redirected_home))
+    monkeypatch.setattr(
+        config_utils, "get_config_directory", lambda: redirected_home / ".kollab"
+    )
+    monkeypatch.setattr(presence, "get_presence_dir", lambda: current_presence)
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", shared_root)
+    monkeypatch.setattr(presence, "_system_home_directory", lambda: actual_home)
+
+    def write_agent(directory, agent_id, last_heartbeat=1):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{agent_id}.json").write_text(
+            json.dumps(
+                {
+                    "agent_id": agent_id,
+                    "identity": agent_id,
+                    "pid": os.getpid(),
+                    "socket_path": str(shared_root / f"{agent_id}.sock"),
+                    "last_heartbeat": last_heartbeat,
+                }
+            )
+        )
+
+    write_agent(current_presence, "caller")
+    write_agent(
+        actual_home / ".kollab" / "projects" / "home-project" / "hub" / "presence",
+        "home-agent",
+    )
+    write_agent(actual_home / ".kollab" / "hub" / "presence", "legacy-agent")
+    write_agent(
+        redirected_home / ".kollab" / "projects" / "override" / "hub" / "presence",
+        "override-agent",
+    )
+    write_agent(shared_root / "project" / "hub" / "presence", "shared-agent")
+    # A duplicate session record must not cause stop-all to signal it twice.
+    write_agent(shared_root / "duplicate" / "presence", "home-agent", last_heartbeat=2)
+
+    manager = presence.PresenceManager(AgentRuntime(agent_id="caller"))
+    agents = manager.scan_all_presence()
+
+    agent_ids = [agent.agent_id for agent in agents]
+    assert set(agent_ids) == {
+        "home-agent",
+        "legacy-agent",
+        "override-agent",
+        "shared-agent",
+    }
+    assert agent_ids.count("home-agent") == 1
+    home_agent = next(agent for agent in agents if agent.agent_id == "home-agent")
+    assert home_agent.last_heartbeat == 2
+
+
+def test_system_home_directory_ignores_home_override(tmp_path, monkeypatch):
+    """Resolve the OS account home even if a process overrides HOME."""
+    import os
+
+    import pytest
+
+    if os.name == "nt":
+        pytest.skip("pwd is unavailable on Windows")
+
+    import pwd
+    from types import SimpleNamespace
+
+    from plugins.hub import presence
+
+    actual_home = tmp_path / "actual-home"
+    redirected_home = tmp_path / "redirected-home"
+    monkeypatch.setenv("HOME", str(redirected_home))
+    monkeypatch.setattr(
+        pwd, "getpwuid", lambda _uid: SimpleNamespace(pw_dir=str(actual_home))
+    )
+
+    assert presence._system_home_directory() == actual_home
