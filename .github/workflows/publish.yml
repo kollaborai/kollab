@@ -1,202 +1,175 @@
-name: Publish to PyPI
+name: Publish release
 
+# Run the reviewed controller on main; an existing release tag selects source.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated release tag (vX.Y.Z)
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+  queue: max
 
 jobs:
-  # Every platform's binary is built and checked before anything is published,
-  # so a release ships with its binaries or not at all.
-  binaries:
-    uses: ./.github/workflows/binaries.yml
-    with:
-      version: ${{ github.ref_name }}
-
-  publish:
-    needs: binaries
+  validate:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      version: ${{ steps.source.outputs.version }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      tag_object: ${{ steps.source.outputs.tag_object }}
+      controller_sha: ${{ steps.source.outputs.controller_sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: actions/setup-python@v6
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
+      - name: Resolve reviewed source and immutable tag object
+        id: source
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          WORKFLOW_REF: ${{ github.ref }}
+          CONTROLLER_SHA: ${{ github.sha }}
+        run: python scripts/release_publish.py source --tag "$RELEASE_TAG" --workflow-ref "$WORKFLOW_REF" --controller "$CONTROLLER_SHA" --output "$GITHUB_OUTPUT"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+  source-validation:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          cache-suffix: ${{ github.job }}  # one cache per job, see ci.yml
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - name: Check tagged versions and changelog copies
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          python scripts/check_version_parity.py --expected "$RELEASE_TAG"
+          cmp CHANGELOG.md kollabor/updates/CHANGELOG.md
 
-      - name: Install build tools
-        run: uv pip install --system build twine
+  binaries:
+    needs: [validate, source-validation]
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.validate.outputs.tag }}
+      source_ref: ${{ needs.validate.outputs.source_sha }}
 
-      - name: Download the frontend already used by the binaries and service
-        uses: actions/download-artifact@v8
+  build-packages:
+    needs: [validate, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: frontend-dist
           path: ${{ runner.temp }}/kollab-frontend
-
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Verify release consistency
-        # Enforce the release invariant on the pristine tagged commit BEFORE any
-        # rewrite: every versioned surface (engine, workspace packages, web
-        # frontend bundle, desktop Tauri config), the changelog entry, and the
-        # packaged changelog copy must already agree with the tag. If they
-        # don't, the tag was cut without a prep PR -- fail fast rather than
-        # silently repairing in CI. This is the drift gate: a tag that slips
-        # past local release prep is refused here, before any build or upload.
-        run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          fail=0
-          python scripts/check_version_parity.py --expected "v$VERSION" || fail=1
-          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
-            echo "::error::CHANGELOG.md has no '## [$VERSION]' entry"
-            fail=1
-          fi
-          if ! cmp -s CHANGELOG.md kollabor/updates/CHANGELOG.md; then
-            echo "::error::CHANGELOG.md and kollabor/updates/CHANGELOG.md differ (must be byte-identical)"
-            fail=1
-          fi
-          if [ "$fail" != 0 ]; then
-            echo "::error::Release consistency check failed. Land a prep PR that bumps all versions + adds the changelog entry, then tag the merged commit."
-            exit 1
-          fi
-          echo "Release consistency verified: versions, changelog entry, and packaged copy all agree with $VERSION."
-
-      - name: Update all package versions
-        run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          echo "Setting all packages to version $VERSION"
-
-          # Root pyproject.toml
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
-
-          # Sub-packages
-          for pkg in packages/*/pyproject.toml; do
-            sed -i "s/^version = \".*\"/version = \"$VERSION\"/" "$pkg"
-          done
-
-          # Update inter-package dep constraints
-          for pkg in packages/*/pyproject.toml pyproject.toml; do
-            sed -i "s/\"kollabor-events>=.*\"/\"kollabor-events>=$VERSION\"/" "$pkg"
-            sed -i "s/\"kollabor-config>=.*\"/\"kollabor-config>=$VERSION\"/" "$pkg"
-            sed -i "s/\"kollabor-ai>=.*\"/\"kollabor-ai>=$VERSION\"/" "$pkg"
-            sed -i "s/\"kollabor-agent>=.*\"/\"kollabor-agent>=$VERSION\"/" "$pkg"
-            sed -i "s/\"kollabor-plugins>=.*\"/\"kollabor-plugins>=$VERSION\"/" "$pkg"
-            sed -i "s/\"kollabor-rpc>=.*\"/\"kollabor-rpc>=$VERSION\"/" "$pkg"
-            sed -i "s/\"kollabor-tui>=.*\"/\"kollabor-tui>=$VERSION\"/" "$pkg"
-            sed -i "s/\"kollabor-engine>=.*\"/\"kollabor-engine>=$VERSION\"/" "$pkg"
-            sed -i "s/\"kollabor-webui>=.*\"/\"kollabor-webui>=$VERSION\"/" "$pkg"
-          done
-
-      - name: Build and publish sub-packages
+      - name: Build ten packages from the exact tag with the selected frontend
         env:
           KOLLAB_FRONTEND_DIST: ${{ runner.temp }}/kollab-frontend
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
-          PACKAGES=(
-            kollabor-events
-            kollabor-ai
-            kollabor-rpc
-            kollabor-config
-            kollabor-plugins
-            kollabor-tui
-            kollabor-agent
-            kollabor-engine
-            kollabor-webui
-          )
-          for pkg in "${PACKAGES[@]}"; do
-            echo "=== Publishing $pkg ==="
-            uv build --out-dir "packages/$pkg/dist" --package "$pkg"
-            twine upload "packages/$pkg/dist/"*
+          for pkg in kollabor-events kollabor-ai kollabor-rpc kollabor-config kollabor-plugins kollabor-tui kollabor-agent kollabor-engine kollabor-webui; do
+            uv build --package "$pkg" --out-dir "$RUNNER_TEMP/pypi-dist"
           done
+          uv build --out-dir "$RUNNER_TEMP/pypi-dist"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: pypi-distributions
+          path: ${{ runner.temp }}/pypi-dist/*
+          if-no-files-found: error
 
-      - name: Build and publish root package
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          echo "=== Publishing kollab ==="
-          uv build --out-dir dist --package kollab
-          twine upload dist/*
-
-      - name: Commit version bump
-        run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml packages/*/pyproject.toml uv.lock
-          if git diff --cached --quiet; then
-            echo "Versions already match the release tag; nothing to commit."
-          else
-            git commit -m "Release v$VERSION"
-            # main is protected, so a bot push may be rejected. Don't fail the
-            # release over it -- the artifacts are built from the tag, and a hard
-            # failure here would skip the Homebrew dispatch step below.
-            git push origin HEAD:main \
-              || echo "::warning::version-bump push rejected (protected branch); skipping"
-          fi
-
-      - name: Update Homebrew tap
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
-            echo "HOMEBREW_TAP_TOKEN is not configured; cannot update Homebrew tap" >&2
-            exit 1
-          fi
-          curl --fail-with-body -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${HOMEBREW_TAP_TOKEN}" \
-            https://api.github.com/repos/kollaborai/homebrew-tap/dispatches \
-            -d "{\"event_type\":\"pypi-release\",\"client_payload\":{\"version\":\"${VERSION}\"}}"
-
-
-  # Its own job, so a failure here re-runs alone ("Re-run failed jobs") without
-  # publishing to PyPI twice.
-  release:
-    needs: [binaries, publish]
+  publish-packages:
+    needs: [validate, build-packages]
     runs-on: ubuntu-latest
+    environment:
+      name: pypi-publish
+      url: https://pypi.org/project/kollab/
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.controller_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pypi-distributions
+          path: dist
+      - name: Verify all package metadata, existing digests and tag identity
+        id: plan
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_publish.py plan-pypi --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --tag-object "$TAG_OBJECT" --dist dist --upload upload --output "$GITHUB_OUTPUT"
+      - name: Publish workspace packages with PyPI trusted publishing
+        if: steps.plan.outputs.workspace_count != '0'
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: upload/workspace/
+      - name: Verify workspace publication before exposing the root package
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: python scripts/release_publish.py verify-pypi --tag "$RELEASE_TAG" --dist dist --workspace-only
+      - name: Publish kollab after its dependencies
+        if: steps.plan.outputs.root_count != '0'
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: upload/root/
+      - name: Verify the complete published package set
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: python scripts/release_publish.py verify-pypi --tag "$RELEASE_TAG" --dist dist
 
-      - name: Download the binaries
-        uses: actions/download-artifact@v8
+  release:
+    needs: [validate, binaries, publish-packages]
+    runs-on: ubuntu-latest
+    environment: github-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.controller_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: kollab-*
           path: dist/bin
           merge-multiple: true
-
-      - name: Create GitHub Release with the binaries
+      - name: Publish a complete draft without replacing existing assets
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          # The in-app update check (VersionCheckService) and a binary's /upgrade
-          # read /releases/latest, and install.sh downloads its binary from it.
-          # Verify CLI, macOS desktop, Linux desktop and Windows installer
-          # payloads and checksums before uploading the complete release set.
-          python scripts/desktop_release.py --version "$TAG" verify dist/bin --windows required
-          ls -l dist/bin
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/bin/* --clobber
-          else
-            gh release create "$TAG" dist/bin/* --title "$TAG" --generate-notes --verify-tag \
-              --notes "The Windows installer is unsigned, so Windows SmartScreen shows \"Windows protected your PC\" on first run: choose More info, then Run anyway."
-          fi
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
+        run: python scripts/release_publish.py github --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --tag-object "$TAG_OBJECT" --dist dist/bin
