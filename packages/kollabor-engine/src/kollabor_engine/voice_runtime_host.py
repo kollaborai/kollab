@@ -146,6 +146,7 @@ class _SessionRecord:
     start_task: asyncio.Task[None] | None = None
     stop_reason: StopReason | None = None
     handed_out_at: float = 0.0  # monotonic: create returned it or a join ticket was issued
+    listeners: int = 0  # open events streams: a session someone listens to is in use
 
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
@@ -440,6 +441,22 @@ class EngineRuntimeHost:
                 # Never reveal another owner's session.
                 raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
             return record.binding
+
+    async def listener_opened(self, voice_session_id: VoiceSessionId) -> None:
+        """An events stream opened: while anyone listens, the session is in use."""
+        async with self._lock:
+            record = self._sessions.get(voice_session_id)
+            if record is not None:
+                record.listeners += 1
+
+    async def listener_closed(self, voice_session_id: VoiceSessionId) -> None:
+        """An events stream closed: the abandonment grace starts at the disconnect."""
+        async with self._lock:
+            record = self._sessions.get(voice_session_id)
+            if record is None:
+                return
+            record.listeners = max(record.listeners - 1, 0)
+            record.handed_out_at = time.monotonic()
 
     async def shutdown(self) -> None:
         """Fence all session generations, stop ready handles, and drain starts/stops."""
@@ -772,6 +789,11 @@ class EngineRuntimeHost:
             record = self._sessions.get(binding.voice_session_id)
             if record is None:
                 return
+            if record.listeners > 0:
+                # Someone is still listening to this session's events (a phone
+                # page over HTTP, never in the room): it is in use, so keep
+                # waiting, exactly as for a page that is still joining.
+                continue
             if time.monotonic() - record.handed_out_at >= HANDOUT_GRACE_S:
                 break
             # A page was just given this session (a reload near the end of the
