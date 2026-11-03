@@ -133,6 +133,18 @@ What option A still cannot stop, stated so nobody claims more:
   that started agents (`plugins/hub/plugin.py:_handle_stop_command`). The
   presence PID and row boot time are compared with the tracked `AgentSession`
   PID and the OS process creation time; there is no timestamp grace window.
+  On Windows, the scan also validates and includes an inherited external
+  project-state selection, even when a terminal child has changed cwd. It
+  cross-checks that selection against `KOLLAB_PROJECT_ROOT` when available
+  and requires the private owner marker for an external state path; incomplete,
+  inconsistent, or unverified selections fail closed. A
+  caller-owned graceful stop carries the selected agent ID, PID and start time
+  to the socket server; a replacement generation refuses the request before
+  acknowledging shutdown. Caller-owned cleanup leaves the identity-named
+  socket and presence row untouched, so a stale snapshot cannot unlink a
+  replacement's listener or race its presence record. Cleanup is deferred to
+  normal presence discovery. Named operator stops retain their existing socket
+  cleanup behavior.
   The tracked Popen object is a child-management reference, not an atomic OS
   identity token. `AgentSession.process_lock` serializes every in-process
   lifecycle poll, wait, and signal for that child: `AgentSession.is_alive`,
@@ -141,9 +153,9 @@ What option A still cannot stop, stated so nobody claims more:
   holds it over its complete terminate/wait/kill/reap sequence. This prevents
   this process's lifecycle reaper from freeing the child PID during POSIX
   `send_signal`'s internal poll-then-signal sequence. If `send_signal` observes
-  On POSIX, if `send_signal` observes an exited child, it declines to signal;
-  if the child exits after that check, the shared lock prevents this process
-  from reaping it until the signal call returns. This is a process-local
+  an exited child, it declines to signal; if the child exits after that check,
+  the shared lock prevents this process from reaping it until the signal call
+  returns. This is a process-local
   serialization guarantee, not a kernel identity primitive; a
   caller that bypasses the shared lock is outside it. The orchestrator starts
   the detached child directly rather than keeping the short-lived parent of a

@@ -117,29 +117,38 @@ def test_cli_stop_all_refuses_background_terminal_context_after_marker_filter(
     stop.assert_not_awaited()
 
 
-def test_cli_stop_all_scans_validated_windows_external_project_state(
+def test_cli_stop_all_scans_inherited_windows_state_after_terminal_cwd_changes(
     tmp_path, capsys, monkeypatch
 ):
-    """Windows project state can live outside ~/.kollab/projects."""
+    """A changed terminal cwd must not hide the inherited external state."""
     from kollabor.cli import _cli_is_hub_agent_context
+    from kollabor_config import config_utils
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     project = tmp_path / "workspace"
     project.mkdir()
+    terminal_project = tmp_path / "terminal-cwd-project"
+    terminal_project.mkdir()
     selected_state = tmp_path / "selected-state"
     presence_dir = selected_state / "hub" / "presence"
     presence_dir.mkdir(parents=True)
+    config_utils._write_project_owner(
+        selected_state, config_utils._project_owner(project, None)
+    )
     _presence(presence_dir, "parent-agent", pid=4242)
 
     monkeypatch.setattr(
         "kollabor_config.config_utils.get_config_directory", lambda: config_dir
     )
     monkeypatch.setattr("kollabor_config.config_utils.IS_WINDOWS", True)
+    # The tool child has changed cwd to another repository, but retains the
+    # anchored project-state selection inherited from its owning agent.
     monkeypatch.setattr(
-        "plugins.hub.project_scope.resolve_project_root", lambda: project
+        "plugins.hub.project_scope.resolve_project_root", lambda: terminal_project
     )
     monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
+    monkeypatch.setenv("KOLLAB_PROJECT_ROOT", str(project))
     monkeypatch.setenv("KOLLAB_PROJECT_DATA_PROJECT", str(project))
     monkeypatch.setenv("KOLLAB_PROJECT_DATA_DIR", str(selected_state))
     monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
@@ -178,6 +187,40 @@ def test_cli_stop_all_fails_closed_for_invalid_windows_state_selection(
     monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
     monkeypatch.setenv("KOLLAB_PROJECT_DATA_PROJECT", str(project))
     monkeypatch.setenv("KOLLAB_PROJECT_DATA_DIR", str(tmp_path / "missing-state"))
+    monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
+    monkeypatch.delenv("KOLLAB_AGENT_PID", raising=False)
+
+    assert _cli_is_hub_agent_context() is True
+
+
+def test_cli_stop_all_fails_closed_when_child_overrides_windows_state_selection(
+    tmp_path, monkeypatch
+):
+    """A changed data selection cannot hide its inherited project root."""
+    from kollabor.cli import _cli_is_hub_agent_context
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    trusted_project = tmp_path / "trusted-project"
+    trusted_project.mkdir()
+    decoy_project = tmp_path / "decoy-project"
+    decoy_project.mkdir()
+    decoy_state = tmp_path / "empty-decoy-state"
+    decoy_state.mkdir()
+
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_config_directory", lambda: config_dir
+    )
+    monkeypatch.setattr("kollabor_config.config_utils.IS_WINDOWS", True)
+    monkeypatch.setattr(
+        "plugins.hub.project_scope.resolve_project_root", lambda: trusted_project
+    )
+    monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
+    monkeypatch.setenv("KOLLAB_PROJECT_ROOT", str(trusted_project))
+    # A terminal child can override both state-selection variables. The
+    # independent project-root marker still anchors ancestry to its owner.
+    monkeypatch.setenv("KOLLAB_PROJECT_DATA_PROJECT", str(decoy_project))
+    monkeypatch.setenv("KOLLAB_PROJECT_DATA_DIR", str(decoy_state))
     monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
     monkeypatch.delenv("KOLLAB_AGENT_PID", raising=False)
 

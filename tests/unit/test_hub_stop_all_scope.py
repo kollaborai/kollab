@@ -368,9 +368,14 @@ def test_stop_all_never_signals_reused_pid_after_mid_stop_exit(monkeypatch):
             lambda: _orch({"helper": session}),
         )
 
-        async def exiting_shutdown(socket_path, reason="", timeout=3.0):
+        async def exiting_shutdown(socket_path, reason="", timeout=3.0, **generation):
             # the tracked process dies during the awaited shutdown window;
             # graceful path "fails" so the sweep reaches its fallback
+            assert generation == {
+                "expected_agent_id": "agent-helper",
+                "expected_pid": 4242,
+                "expected_started_at": now - 5,
+            }
             session.is_alive = False
             return False
 
@@ -435,7 +440,12 @@ def test_stop_all_withholds_escalation_when_session_dies_after_guard(monkeypatch
 
         session.proc = ReapedProc()
 
-        async def fail_shutdown(socket_path, reason="", timeout=3.0):
+        async def fail_shutdown(socket_path, reason="", timeout=3.0, **generation):
+            assert generation == {
+                "expected_agent_id": "agent-helper",
+                "expected_pid": 4242,
+                "expected_started_at": now - 5,
+            }
             return False
 
         monkeypatch.setattr(

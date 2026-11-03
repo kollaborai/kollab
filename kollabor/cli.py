@@ -1605,19 +1605,52 @@ def _cli_is_hub_agent_context() -> bool:
         ]
         if config_utils.IS_WINDOWS:
             # Windows permits an explicitly selected project state directory
-            # outside ~/.kollab/projects. Validate the selection without
-            # creating or claiming any state, then include it in the ancestry
-            # scan just like the normal project roots.
+            # outside ~/.kollab/projects. A terminal child can change cwd, so
+            # use the inherited project selection that belongs to that state
+            # path instead of resolving the child's current repository.
             from plugins.hub.project_scope import resolve_project_root
 
-            selected_state_dir = config_utils._windows_project_state_dir(
-                resolve_project_root(), config_dir, create_new=False
+            selected_project = os.environ.get("KOLLAB_PROJECT_DATA_PROJECT", "").strip()
+            configured_root = os.environ.get("KOLLAB_PROJECT_ROOT", "").strip()
+            project_root = (
+                Path(configured_root).expanduser().resolve()
+                if configured_root
+                else resolve_project_root()
             )
-            if (
-                selected_state_dir.resolve().parent
-                != (config_dir / "projects").resolve()
-            ):
-                hub_dirs.append(selected_state_dir / "hub")
+            if selected_project:
+                selected_project_root = Path(selected_project).expanduser().resolve()
+                if configured_root:
+                    if (
+                        selected_project_root
+                        != Path(configured_root).expanduser().resolve()
+                    ):
+                        raise config_utils.ProjectStateLocationError(
+                            "selected project state disagrees with KOLLAB_PROJECT_ROOT"
+                        )
+                elif selected_project_root != project_root:
+                    raise config_utils.ProjectStateLocationError(
+                        "external project state selection has no trusted project root"
+                    )
+                project_root = selected_project_root
+            selected_state_dir = config_utils._windows_project_state_dir(
+                project_root, config_dir, create_new=False
+            )
+            selected_hub_dir = selected_state_dir / "hub"
+            selected_hub_resolved = selected_hub_dir.resolve()
+            if all(path.resolve() != selected_hub_resolved for path in hub_dirs):
+                # External selections are environment-provided and can be
+                # changed by a terminal child. Require the existing private
+                # project owner claim before letting one replace the trusted
+                # current/default ancestry scan roots.
+                expected_owner = config_utils._project_owner(project_root, None)
+                if (
+                    config_utils._read_project_owner(selected_state_dir)
+                    != expected_owner
+                ):
+                    raise config_utils.ProjectStateLocationError(
+                        "cannot verify selected external project state for Hub ancestry scan"
+                    )
+                hub_dirs.append(selected_hub_dir)
         agent_pids = set()
         for hub_dir in hub_dirs:
             for path in _directory_children(hub_dir / "presence"):

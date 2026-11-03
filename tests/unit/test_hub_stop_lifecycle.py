@@ -1,14 +1,18 @@
 """Hub stop lifecycle tests."""
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
+from plugins.hub.messenger import AgentMessenger, AgentSocketServer
 from plugins.hub.plugin import HubPlugin
+from plugins.hub.presence import PresenceManager
 
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
 # a child that exits at once and is never reaped by its parent
@@ -151,6 +155,193 @@ def test_stop_peer_reports_failure_only_if_pid_survives_sigkill(monkeypatch):
 
         assert result == "stop timed out (pid survived SIGKILL)"
         assert plugin._presence.cleaned == []
+
+    asyncio.run(run_test())
+
+
+def test_caller_owned_stop_does_not_signal_or_unlink_replacement_generation(
+    tmp_path, monkeypatch
+):
+    """A replacement listener rejects the old snapshot and stays usable."""
+
+    async def run_test():
+        monkeypatch.setattr("plugins.hub.presence.get_presence_dir", lambda: tmp_path)
+        presence = PresenceManager(SimpleNamespace(agent_id="caller"))
+        replacement_row = tmp_path / "agent-helper.json"
+        shutdowns = []
+        process = SimpleNamespace(returncode=None)
+        process.pid = 12001
+
+        class TrackedProcess:
+            pid = process.pid
+
+            def poll(self):
+                return process.returncode
+
+            def send_signal(self, sig):
+                raise AssertionError(f"stale session received {sig}")
+
+        class TrackedSession:
+            pid = process.pid
+            start_time = 10.0
+            proc = TrackedProcess()
+            process_lock = threading.RLock()
+
+            @property
+            def is_alive(self):
+                return self.proc.poll() is None
+
+        session = TrackedSession()
+
+        async def replacement_status():
+            return {
+                "network": "replacement",
+                "device": "laptop",
+                "trust": "open",
+                "agents": [],
+            }
+
+        server = AgentSocketServer(
+            "agent-helper",
+            lambda _message: None,
+            on_shutdown=shutdowns.append,
+            on_network_status=replacement_status,
+            socket_name=f"stop-gen-{os.getpid()}-{time.time_ns()}",
+        )
+        server._identity_info = SimpleNamespace(
+            agent_id="agent-helper", pid=12002, started_at=20.0
+        )
+        socket_path = str(await server.start())
+        try:
+            replacement_row.write_text(
+                json.dumps(
+                    {
+                        # Identity and agent_id are reused, but this is a
+                        # different process generation on the same socket.
+                        "agent_id": "agent-helper",
+                        "identity": "helper",
+                        "pid": 12002,
+                        "started_at": 20.0,
+                        "socket_path": socket_path,
+                    }
+                )
+            )
+            selected = SimpleNamespace(
+                identity="helper",
+                agent_id="agent-helper",
+                pid=12001,
+                started_at=10.0,
+                socket_path=socket_path,
+            )
+            plugin = HubPlugin()
+            plugin._presence = presence
+            # The snapshot matched when selected and immediately before its
+            # socket call. The original child exits as the replacement
+            # receives the request, modeling the async connect race.
+            monkeypatch.setattr(plugin, "_presence_generation_matches", lambda *_: True)
+            matches_generation = server._shutdown_target_matches
+
+            def replacement_takes_over(message):
+                process.returncode = 0
+                return matches_generation(message)
+
+            server._shutdown_target_matches = replacement_takes_over
+
+            result = await plugin._stop_peer_agent(
+                selected, reason="test stop all", session=session
+            )
+
+            assert "tracked-process guard" in result
+            assert shutdowns == []
+            assert json.loads(replacement_row.read_text())["pid"] == 12002
+            assert server.socket_path.exists()
+            assert await AgentMessenger.request_network_status(socket_path) == {
+                "type": "network_status",
+                "network": "replacement",
+                "device": "laptop",
+                "trust": "open",
+                "agents": [],
+            }
+        finally:
+            await server.stop()
+
+    asyncio.run(run_test())
+
+
+def test_generation_check_fails_closed_with_older_socket_server(monkeypatch):
+    """An older receiver gets no shutdown action when it cannot prove scope."""
+
+    async def run_test():
+        requests = []
+
+        class OldReceiver:
+            async def readline(self):
+                return b'{"type":"error","msg":"unknown shutdown_generation_check"}'
+
+        class FakeWriter:
+            def write(self, data):
+                requests.append(json.loads(data.decode()))
+
+            async def drain(self):
+                return None
+
+            def close(self):
+                return None
+
+            async def wait_closed(self):
+                return None
+
+        async def fake_open(*_args, **_kwargs):
+            return OldReceiver(), FakeWriter()
+
+        monkeypatch.setattr(AgentMessenger, "_open", staticmethod(fake_open))
+        result = await AgentMessenger.signal_shutdown(
+            "/fake/identity.sock",
+            reason="test stop all",
+            expected_agent_id="agent-helper",
+            expected_pid=12001,
+            expected_started_at=10.0,
+        )
+
+        assert result is False
+        assert requests == [
+            {
+                "action": "shutdown_generation_check",
+                "expected_agent_id": "agent-helper",
+                "expected_pid": 12001,
+                "expected_started_at": 10.0,
+            }
+        ]
+
+    asyncio.run(run_test())
+
+
+def test_generation_check_accepts_the_selected_socket_server_generation():
+    """The current receiver accepts a matching generation on one connection."""
+
+    async def run_test():
+        shutdowns = []
+        server = AgentSocketServer(
+            "agent-helper",
+            lambda _message: None,
+            on_shutdown=shutdowns.append,
+            socket_name=f"stop-gen-ok-{os.getpid()}-{time.time_ns()}",
+        )
+        server._identity_info = SimpleNamespace(
+            agent_id="agent-helper", pid=12001, started_at=10.0
+        )
+        socket_path = str(await server.start())
+        try:
+            assert await AgentMessenger.signal_shutdown(
+                socket_path,
+                reason="test stop all",
+                expected_agent_id="agent-helper",
+                expected_pid=12001,
+                expected_started_at=10.0,
+            )
+            assert shutdowns == ["test stop all"]
+        finally:
+            await server.stop()
 
     asyncio.run(run_test())
 

@@ -14419,6 +14419,21 @@ class HubPlugin(BasePlugin):
         """
         return session is None or bool(getattr(session, "is_alive", False))
 
+    def _cleanup_stopped_peer(self, agent, session) -> bool:
+        """Clean up a stopped peer without crossing its selected generation.
+
+        Named operator stops have no tracked session and retain the existing
+        presence-plus-socket cleanup. Caller-owned stop-all defers cleanup to
+        normal presence discovery; it cannot atomically compare-and-unlink a
+        presence row or identity-named socket that may have been replaced.
+        """
+        if not self._presence:
+            return False
+        if session is None:
+            self._presence.cleanup_agent(agent)
+            return True
+        return False
+
     def _signal_session(
         self, session, sig, *, expected_pid=None, expected_started_at=None
     ) -> bool:
@@ -14447,9 +14462,10 @@ class HubPlugin(BasePlugin):
             if expected_started_at is not None:
                 process_created_at = self._session_process_create_time(session)
                 try:
-                    if process_created_at is None or float(
-                        expected_started_at
-                    ) < process_created_at:
+                    if (
+                        process_created_at is None
+                        or float(expected_started_at) < process_created_at
+                    ):
                         return False
                 except (TypeError, ValueError, OverflowError):
                     return False
@@ -14494,88 +14510,112 @@ class HubPlugin(BasePlugin):
         if not self._presence:
             return "hub not active"
 
-        if not getattr(agent, "socket_path", ""):
-            self._presence.cleanup_agent(agent)
-            return "no socket, cleaned up"
-
-        try:
-            success = await AgentMessenger.signal_shutdown(
-                agent.socket_path,
-                reason=reason,
-                timeout=3.0,
-            )
-        except Exception as e:
-            success = False
-            logger.debug(f"shutdown signal failed for {agent.identity}: {e}")
-
         guard = (
             "process exited during stop wait; fallback signals withheld "
             "(tracked-process guard)"
         )
 
+        # Revalidate the selected child generation before the first socket
+        # request. The receiver also checks this generation after the async
+        # connect, because a replacement may bind the identity socket while
+        # this task is waiting.
+        if session is not None and not self._presence_generation_matches(
+            session, agent
+        ):
+            self._cleanup_stopped_peer(agent, session)
+            return guard
+
+        if not getattr(agent, "socket_path", ""):
+            cleaned = self._cleanup_stopped_peer(agent, session)
+            if session is not None and not cleaned:
+                return "no socket; presence cleanup deferred"
+            return "no socket, cleaned up"
+
+        try:
+            generation = (
+                {
+                    "expected_agent_id": getattr(agent, "agent_id", None),
+                    "expected_pid": getattr(agent, "pid", None),
+                    "expected_started_at": getattr(agent, "started_at", None),
+                }
+                if session is not None
+                else {}
+            )
+            success = await AgentMessenger.signal_shutdown(
+                agent.socket_path,
+                reason=reason,
+                timeout=3.0,
+                **generation,
+            )
+        except Exception as e:
+            success = False
+            logger.debug(f"shutdown signal failed for {agent.identity}: {e}")
+
         if success:
             if await self._wait_for_agent_exit(agent, timeout=STOP_GRACE_SECONDS):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return "stopped"
 
             if not self._signal_allowed(session):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return guard
 
             killed = self._escalate_agent(agent, session, signal.SIGTERM)
             if session is not None and not killed:
                 # Child is gone or cannot be checked; never fall back to raw
                 # os.kill for a caller-owned session.
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return guard
             if killed and await self._wait_for_agent_exit(
                 agent, timeout=STOP_TERM_SECONDS
             ):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGTERM after graceful timeout)"
             if not self._signal_allowed(session):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return guard
 
             killed = self._escalate_agent(agent, session, signal.SIGKILL)
             if session is not None and not killed:
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return guard
             if killed and await self._wait_for_agent_exit(
                 agent, timeout=STOP_KILL_SECONDS
             ):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGKILL — was unresponsive)"
             return "stop timed out (pid survived SIGKILL)"
 
         if not self._signal_allowed(session):
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return guard
 
         killed = self._escalate_agent(agent, session, signal.SIGTERM)
         if session is not None and not killed:
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return guard
         if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return "killed (SIGTERM fallback)"
 
         if not self._agent_pid_alive(getattr(agent, "pid", 0)):
-            self._presence.cleanup_agent(agent)
+            cleaned = self._cleanup_stopped_peer(agent, session)
+            if session is not None and not cleaned:
+                return "already dead; presence cleanup deferred"
             return "already dead, cleaned up"
 
         if not self._signal_allowed(session):
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return guard
 
         killed = self._escalate_agent(agent, session, signal.SIGKILL)
         if session is not None and not killed:
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return guard
         if killed and await self._wait_for_agent_exit(
             agent, timeout=STOP_KILL_SECONDS
         ):
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return "killed (SIGKILL fallback)"
 
         return "failed (pid survived SIGKILL)"
