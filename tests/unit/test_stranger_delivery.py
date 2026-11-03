@@ -404,7 +404,11 @@ async def test_a_send_to_a_denied_agent_gone_from_the_roster_says_unknown_agent(
 
 
 @pytest.mark.asyncio
-async def test_revoke_removes_the_link_at_the_relay_and_nothing_is_delivered(people, relay):
+async def test_revoke_removes_the_link_at_the_relay_and_nothing_is_delivered(
+    people, relay, monkeypatch
+):
+    # Exercise the authorized human flow, not the agent-shell refusal guard.
+    monkeypatch.setattr("plugins.hub.halt_runtime.tool_shell_refusal", lambda: "")
     ana, marco = people
     await open_path(ana, marco)
     await allow(marco, ana)

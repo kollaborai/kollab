@@ -152,3 +152,60 @@ export function shownMessagesChanged(shown: ReadonlyArray<Message>, loaded: Read
     );
   });
 }
+
+const TRANSIENT_ROW_ID = /^(?:user|assistant)-.+-(\d+)$/;
+
+const transientText = (content: unknown): string => {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) =>
+      part && typeof part === "object" && (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string"
+        ? (part as { text: string }).text
+        : "")
+    .join("\n")
+    .trim();
+};
+
+const transientRole = (message: Message): string =>
+  String((message as { role?: unknown }).role ?? "");
+
+/**
+ * The turn a window just ran renders as transient rows (user-<session>-<n>,
+ * assistant-<session>-<n>) while its stored rows are still unwritten. When
+ * the sync point missed the turn -- the engine's history refresh failed, or
+ * read the mirror before the rows landed -- the next reload replays the turn
+ * as a tail next to those rows, and assistant-ui draws it twice until a
+ * manual reload (#666). Drop the trailing transient block once every row in
+ * it exists in the kept history with the same role and text, and the tail's
+ * first row matches the block's same-role row; null keeps the rows as they
+ * are, so a replay that proves nothing never hides content.
+ */
+export function dropTransientTurnDuplicates<T extends Message>(
+  shown: ReadonlyArray<T>,
+  tail: ReadonlyArray<T>,
+): T[] | null {
+  if (!tail.length) return null;
+  let blockStart = shown.length;
+  while (
+    blockStart > 0 &&
+    TRANSIENT_ROW_ID.test(String(shown[blockStart - 1].id ?? ""))
+  ) {
+    blockStart -= 1;
+  }
+  if (blockStart === shown.length) return null;
+  const block = shown.slice(blockStart);
+  const kept = shown.slice(0, blockStart);
+  const anchor = tail[0];
+  const anchorRow = block.find(
+    (message) => transientRole(message) === transientRole(anchor) &&
+      transientText(message.content) === transientText(anchor.content),
+  );
+  if (!anchorRow) return null;
+  const covered = (message: Message) => kept.some((candidate) =>
+    transientRole(candidate) === transientRole(message) &&
+    transientText(candidate.content) === transientText(message.content));
+  if (!block.every(covered)) return null;
+  return shown.slice(0, blockStart);
+}

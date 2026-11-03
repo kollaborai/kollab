@@ -35,23 +35,31 @@ class Pair:
         self.agent_path = str(self.dir / "agent.sock")
         self.agent_lines = []
         self.agent_writers = []
+        mac_request = self._to(SERVER, MAC)
+        server_request = self._to(MAC, SERVER)
         self.mac = NetworkAttach(
-            request=self._to(SERVER, MAC),
+            request=mac_request,
+            guarded_request=mac_request,
+            capture_peer_guard=lambda _: lambda: True,
             target=self._agent_socket if mac_runs_agent else self._no_agents,
             peer_name=lambda key: "server" if key == SERVER else "mac",
             notice=self.notices.append,
         )
         self.server = NetworkAttach(
-            request=self._to(MAC, SERVER),
+            request=server_request,
+            guarded_request=server_request,
+            capture_peer_guard=lambda _: lambda: True,
             target=target or self._agent_socket,
             peer_name=lambda key: "mac" if key == MAC else "server",
             notice=self.notices.append,
         )
 
     def _to(self, peer, sender):
-        async def request(to, method, payload, timeout):
+        async def request(to, method, payload, timeout, before_send=None):
             assert to == peer
             await asyncio.sleep(self.latency)
+            if before_send is not None:
+                await before_send()
             side = self.server if peer == SERVER else self.mac
             return await side.receive(sender, method, payload)
 
@@ -255,7 +263,6 @@ def test_keepalives_never_take_the_seq_of_real_data(monkeypatch):
 
 
 def test_an_idle_channel_closes_once_the_device_withdraws_it(monkeypatch):
-    monkeypatch.setattr(network_attach, "RECHECK_SECONDS", 0.0)
     monkeypatch.setattr(network_attach, "IDLE_SECONDS", 0.02)
 
     async def run():
@@ -271,9 +278,7 @@ def test_an_idle_channel_closes_once_the_device_withdraws_it(monkeypatch):
     asyncio.run(run())
 
 
-def test_a_line_sent_after_the_device_withdraws_it_never_reaches_the_agent(monkeypatch):
-    monkeypatch.setattr(network_attach, "RECHECK_SECONDS", 0.0)
-
+def test_a_line_sent_after_the_device_withdraws_it_never_reaches_the_agent():
     async def run():
         pair = Pair()
         await pair.start_agent()
@@ -283,6 +288,51 @@ def test_a_line_sent_after_the_device_withdraws_it_never_reaches_the_agent(monke
         await writer.drain()
         assert await asyncio.wait_for(reader.read(), 3) == b""
         assert pair.agent_lines == []
+        await pair.stop()
+
+    asyncio.run(run())
+
+
+def test_a_line_within_the_cached_allow_window_after_a_revoke_never_reaches_the_agent():
+    """Regression for #524: no recheck has run and trust flipped mid-window.
+
+    The open and the first line populate the device's cached allow; the flip
+    to reject lands a moment later. The very next line must be refused all
+    the same -- a frame is delivered only if the rules allow it at delivery
+    time, not if they allowed it a second ago. The first line, delivered and
+    answered before the revoke, stays (data in flight is not recalled).
+    """
+
+    async def run():
+        pair = Pair()
+        await pair.start_agent()
+        reader, writer = await _opened(pair)
+        writer.write(b"before\n")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.readline(), 3) == b"BEFORE\n"
+        pair.refuse = "server uses trust manual"
+        writer.write(b"after\n")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), 3) == b""
+        assert pair.agent_lines == [b"before\n"]
+        await pair.stop()
+
+    asyncio.run(run())
+
+
+def test_a_withdrawn_device_stops_sending_agent_output_at_once():
+    """Regression for #524, the other direction: the device's pump asks its
+    rules before it sends, so agent output written after the revoke never
+    reaches the withdrawn peer."""
+
+    async def run():
+        pair = Pair()
+        await pair.start_agent()
+        reader, _ = await _opened(pair)
+        pair.refuse = "server uses trust manual"
+        pair.agent_writers[0].write(b"secret out\n")
+        await pair.agent_writers[0].drain()
+        assert await asyncio.wait_for(reader.read(), 3) == b""
         await pair.stop()
 
     asyncio.run(run())
