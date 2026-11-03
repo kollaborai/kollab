@@ -701,6 +701,162 @@ async def test_bridge_close_joins_inflight_secondary_membership_start(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_bridge_close_cancels_queued_secondary_start_before_first_turn(
+    tmp_path, monkeypatch
+):
+    """Shutdown cancels a queued start before it can install membership work."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import plugins.hub.enrollment_client as enrollment_client
+    import plugins.hub.relay_agent as relay_agent
+
+    commands_created = []
+    issuers_created = []
+
+    class _Client:
+        def __init__(self):
+            self._store = SimpleNamespace(key="b" * 32)
+            self.request_handler = None
+
+        def set_request_handler(self, handler):
+            self.request_handler = handler
+
+    class _Commands:
+        def __init__(self, *_args, **_kwargs):
+            self.client = _Client()
+            self.resume_calls = 0
+            self.close_calls = 0
+            commands_created.append(self)
+
+        async def resume(self):
+            self.resume_calls += 1
+            await asyncio.Event().wait()
+
+        async def close(self):
+            self.close_calls += 1
+
+    class _PrimaryCommands:
+        def __init__(self):
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+
+    class _Transport:
+        def __init__(self, *_args):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    class _EnrollmentBridge:
+        def __init__(self, *_args, **_kwargs):
+            self._enrollment_issuer = None
+
+    class _Issuer:
+        def __init__(self, _bridge):
+            self.start_calls = 0
+            self.close_calls = 0
+            self.recovery_task = None
+            issuers_created.append(self)
+
+        def start_recovery(self):
+            self.start_calls += 1
+
+            async def recover():
+                await asyncio.Event().wait()
+
+            self.recovery_task = asyncio.create_task(recover())
+
+        async def close(self):
+            self.close_calls += 1
+            if self.recovery_task is not None and not self.recovery_task.done():
+                self.recovery_task.cancel()
+                await asyncio.gather(self.recovery_task, return_exceptions=True)
+
+    monkeypatch.setattr(relay_agent, "RelayCommands", _Commands)
+    monkeypatch.setattr(relay_agent, "_MembershipEnrollmentBridge", _EnrollmentBridge)
+    monkeypatch.setattr(relay_agent, "SecureConversationTransport", _Transport)
+    monkeypatch.setattr(enrollment_client, "EnrollmentIssuer", _Issuer)
+
+    primary = SimpleNamespace(slug="primary", state_dir=tmp_path)
+    secondary = SimpleNamespace(slug="secondary", state_dir=tmp_path)
+    owner_releases = []
+    bridge = relay_agent.RelayAgentBridge.__new__(relay_agent.RelayAgentBridge)
+    bridge.plugin = SimpleNamespace(config=None, _socket_server=None)
+    bridge.workspace = tmp_path
+    bridge.owner = SimpleNamespace(
+        owner=lambda: object(), release=lambda: owner_releases.append(True)
+    )
+    bridge.memberships = SimpleNamespace(
+        primary=lambda: primary, list=lambda: [primary, secondary]
+    )
+    bridge._membership_contexts = {}
+    bridge._membership_start_tasks = set()
+    bridge._closed = False
+    bridge.active = None
+    bridge._loop_task = None
+    bridge._resume_task = None
+    bridge._directory_task = None
+    bridge._arrivals_task = None
+    bridge._enrollment_issuer = None
+    bridge.peer_mesh = None
+    bridge.config_sync = None
+    bridge.membership_sync = None
+    bridge.halt_sync = None
+    bridge.network_attach = None
+    bridge.secure_transport = _Transport()
+    primary_transport = bridge.secure_transport
+    bridge.commands = _PrimaryCommands()
+    primary_commands = bridge.commands
+    bridge._close_task = None
+
+    bridge._start_secondary_memberships()
+    assert len(bridge._membership_start_tasks) == 1
+    startup_task = next(iter(bridge._membership_start_tasks))
+    context = bridge._membership_contexts[secondary.slug]
+    secondary_commands = commands_created[0]
+    issuer = issuers_created[0]
+
+    # No await has yielded to the newly created coroutine: close must cancel it
+    # before its first turn can install a handler or launch resume/recovery work.
+    assert not startup_task.done()
+    assert not context._started
+
+    try:
+        await bridge.close()
+        await asyncio.sleep(0)
+
+        assert startup_task.done() and startup_task.cancelled()
+        assert not context._started
+        assert context._closed
+        assert secondary_commands.client.request_handler is None
+        assert secondary_commands.resume_calls == 0
+        assert context.resume_task is None
+        assert issuer.start_calls == 0
+        assert issuer.recovery_task is None
+        assert issuer.close_calls == 1
+        assert secondary_commands.close_calls == 1
+        assert bridge._membership_start_tasks == set()
+        assert bridge._membership_contexts == {}
+        assert primary_commands.close_calls == 1
+        assert primary_transport.close_calls == 1
+        assert owner_releases == [True]
+        assert bridge._close_task.done()
+    finally:
+        await asyncio.gather(bridge.close(), return_exceptions=True)
+        pending = [startup_task]
+        if bridge._close_task is not None:
+            pending.append(bridge._close_task)
+        if context._close_task is not None:
+            pending.append(context._close_task)
+        if issuer.recovery_task is not None:
+            pending.append(issuer.recovery_task)
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_bridge_close_isolates_and_logs_secondary_context_failures(caplog):
     import logging
     from types import SimpleNamespace
