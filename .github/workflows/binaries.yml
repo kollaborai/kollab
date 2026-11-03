@@ -5,8 +5,9 @@ name: Binaries
 # tag and attaches the results to the GitHub Release, where install.sh and
 # /upgrade download them.
 #
-# Packaging runs only for a release tag or by hand (workflow_dispatch, e.g. on
-# release/X.Y.Z before tagging). Pull requests and branch pushes build nothing
+# Packaging runs only for a release tag or by hand (workflow_dispatch). A
+# writer-branch run is rehearsal; pre-tag proof must identify the merged source.
+# Pull requests and branch pushes build nothing
 # here: PR CI was waiting on this matrix.
 #
 # desktop-windows runs for every release, like desktop and desktop-linux: its

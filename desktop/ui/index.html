@@ -20,6 +20,7 @@
           font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; }
     pre.command { -webkit-user-select: all; }
     #log { max-height: 40vh; }
+    .warn { margin: 0 0 16px; padding: 10px 12px; border-radius: 8px; background: #b45309; color: #fff; font-weight: 500; }
     button { margin-top: 8px; padding: 8px 22px; border: 0; border-radius: 8px; background: var(--accent); color: var(--on-accent);
              font: inherit; font-weight: 600; cursor: pointer; }
     .spinner { width: 22px; height: 22px; margin: 22px auto 0; border: 2px solid var(--panel); border-top-color: var(--fg);
@@ -38,6 +39,7 @@
       <h1>Starting Kollab</h1>
       <p>Waiting for the web UI on this computer.</p>
       <div class="spinner"></div>
+      <p id="warn" class="warn" hidden></p>
     </section>
 
     <section id="install" hidden>
@@ -54,14 +56,30 @@
       <pre id="log"></pre>
       <button>Retry</button>
     </section>
+
+    <section id="running" hidden>
+      <h1>Kollab Is Running</h1>
+      <p class="warn">The web UI is also reachable from your network at:</p>
+      <pre id="exposed"></pre>
+      <p>Anyone on those networks can open this UI. Continue only if you trust them.</p>
+      <button>Continue</button>
+    </section>
   </main>
   <script>
     const params = new URLSearchParams(location.search);
     const state = params.get('state') || 'loading';
+    const warn = params.get('warn') || '';
     for (const section of document.querySelectorAll('section')) section.hidden = section.id !== state;
     document.getElementById('log').textContent = params.get('log') || '(no output)';
+    const warnBanner = document.getElementById('warn');
+    if (warn && state === 'loading') {
+      warnBanner.textContent = 'Also reachable from your network: ' + warn;
+      warnBanner.hidden = false;
+    }
+    document.getElementById('exposed').textContent = warn || '(none)';
     for (const button of document.querySelectorAll('button')) {
-      button.onclick = () => window.__TAURI_INTERNALS__.invoke('retry');
+      const command = button.closest('section').id === 'running' ? 'proceed' : 'retry';
+      button.onclick = () => window.__TAURI_INTERNALS__.invoke(command);
     }
   </script>
 </body>

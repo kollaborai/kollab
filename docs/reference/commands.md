@@ -673,7 +673,7 @@ type / in the input box to open the command menu.
   communication:
     status                        show hub status and online agents
     whoami                        show your hub identity
-    msg <agent> <message>         send message to peer
+    msg <agent|operator-alias> <message>  send to peer or ntfy operator route
     broadcast <message>           broadcast to all peers
 
   agent management:
@@ -702,7 +702,7 @@ type / in the input box to open the command menu.
   automation:
     cron add|list|delete|clear    schedule recurring messages
     tasks list|mine|assign|...    task management
-    notify enable|disable|...     notification settings
+    notify enable|disable|channel|test|status  notification settings, incl. ntfy
     bridge status|send|...        messaging bridge (Telegram)
 
 ### terminal
@@ -992,6 +992,9 @@ grant (see below).
   syntax:
     <hub_msg to="identity">message content</hub_msg>
     <hub_msg to="agent@device">message content</hub_msg>
+
+    `<hub_msg to="operator-alias">message content</hub_msg>`
+    `<hub_msg to="identity" notify_kind="decision">message content</hub_msg>`
     <hub_msg to="agent@device" thread="<grant-id>">exact authorized request</hub_msg>   (trust manual only)
 
   how it works:
@@ -1007,8 +1010,14 @@ grant (see below).
     - remote relay messages follow their authenticated destination and are not
       local open-channel broadcasts
 
+    - default operator aliases (`operator`, `boss`, `human`) and the configured
+      hub user name (falling back to OS `USER`) route to ntfy
+    - `notify_kind="decision"`, `"blocker"`, or `"done"` can mark an ordinary
+      agent message for an ntfy alert; it is separate from relay `kind`
+
   limitations:
-    - local target must be a known hub identity (e.g. "lapis", "jarvis")
+    - local target must be a known hub identity, operator alias, or configured
+      hub user name (falling back to OS `USER`)
     - remote target must be the exact agent@device from the roster; agent names
       alone are ambiguous across devices
     - under trust `manual`, remote sends require human authorization for the
@@ -1018,6 +1027,13 @@ grant (see below).
     - offline delivery is supported for durable pool identities; capture still
       requires a live peer or orchestrator session
     - NOT for orchestrator-managed agents (use <message> instead)
+
+    - relay `kind` stays `message`, `question`, or `answer`; `kind="decision"`
+      is invalid; each attribute has one purpose and `notify_kind` is optional
+    - during an active manual-trust relay turn, notifications may only be a
+      bounded question to the authenticated sender; operator alerts are blocked
+    - direct operator delivery requires ntfy server/topic configuration; status
+      reports readiness without printing its server, topic, or token
 
   example:
     <hub_msg to="peridot">can you review the auth changes I just
