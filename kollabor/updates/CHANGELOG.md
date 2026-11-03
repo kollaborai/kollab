@@ -240,8 +240,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or unavailable when the asking peer departs, and the hub shows ACP agents as
   working while a harness turn runs, from the same display lifecycle a native
   turn uses (#483).
-- Shell and ACP orphan tests clean up their detached helpers after failures or
-  interruption instead of leaving long-running processes (#570).
+- Shell and ACP orphan tests use bounded PID-and-birth checks; surviving
+  detached helpers defer to the ephemeral CI runner after cleanup failures
+  or interruption (#570).
 - Web UI: a message sent while a native agent is busy streams its own reply.
   Its stream used to end on the completion of the turn already running, and
   the reply never streamed. The engine now sends a request id with every chat

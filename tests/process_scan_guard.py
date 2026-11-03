@@ -30,8 +30,8 @@ HOST_PROCESS_SCAN_TESTS = {
             "test_close_after_started_worker_releases_queue_and_is_repeatable",
             "test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_process",
             "test_startup_failure_recovers_orphan_after_root_exited_before_ownership_read",
-            "test_orphan_fixture_cleans_up_when_runner_close_raises",
-            "test_startup_orphan_fixture_cleans_up_when_product_cleanup_is_broken",
+            "test_orphan_fixture_defers_cleanup_when_runner_close_raises",
+            "test_startup_orphan_fixture_defers_when_product_cleanup_is_broken",
             "test_queued_turn_after_cancel_rebases_generation",
             "test_queued_turn_keeps_first_generation_updates",
             "test_compliant_cancel_preserves_process_session_and_single_consumer",
@@ -175,7 +175,7 @@ def host_process_scans_allowed(option_enabled: bool, environ: Mapping[str, str])
     return option_enabled and not host_process_scan_environment_errors(environ)
 
 
-def _command_tokens(command: Any) -> list[str]:
+def _command_tokens(command: Any) -> list[str] | None:
     if isinstance(command, os.PathLike):
         command = os.fspath(command)
     if isinstance(command, bytes):
@@ -184,10 +184,12 @@ def _command_tokens(command: Any) -> list[str]:
         try:
             return shlex.split(command)
         except ValueError:
-            return []
+            # An incomplete shell parse is unknown, never evidence of safety.
+            return None
     if isinstance(command, Sequence):
         return [_token_text(part) for part in command]
-    return []
+    # Only known argument shapes can be classified. Unknown forms fail closed.
+    return None
 
 
 def _token_text(part: Any) -> str:
@@ -287,8 +289,10 @@ def _ps_has_only_pid_and_format_options(options: Sequence[str]) -> bool:
 
 
 def is_process_table_enumeration_command(command: Any) -> bool:
-    """Block common host process listings but allow Docker and PID-targeted tools."""
+    """Block host listings and unparseable commands; allow Docker and PID targets."""
     tokens = _command_tokens(command)
+    if tokens is None:
+        return True
     for index, token in enumerate(tokens):
         for embedded in re.finditer(r"\$\(([^()]*)\)|`([^`]*)`", token):
             nested = embedded.group(1) or embedded.group(2)
@@ -445,6 +449,8 @@ def install_test_process_scan_guard(
         executable_command = None
         if executable is not None:
             command_tokens = _command_tokens(command)
+            if command_tokens is None:
+                return block_process_table_command(*args, **kwargs)
             executable_command = [executable, *command_tokens[1:]]
         if is_process_table_enumeration_command(command) or (
             executable_command is not None and is_process_table_enumeration_command(executable_command)

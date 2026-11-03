@@ -127,6 +127,24 @@ def test_process_table_detector_blocks_global_ps_but_allows_pid_targeting():
 @pytest.mark.parametrize(
     "command",
     [
+        "ps -A 'unterminated",
+        'sh -c "ps -A',
+        ["/bin/sh", "-c", "ps -A 'unterminated"],
+        object(),
+    ],
+)
+def test_process_table_detector_fails_closed_when_command_is_unparseable(command):
+    assert is_process_table_enumeration_command(command)
+
+
+def test_process_table_detector_keeps_empty_commands_non_enumerating():
+    assert not is_process_table_enumeration_command("")
+    assert not is_process_table_enumeration_command([])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "tasklist.exe",
         ["TASKLIST.EXE"],
         [r"C:\Windows\System32\tasklist.exe"],
@@ -255,6 +273,13 @@ def test_installed_guard_blocks_enumeration_apis_before_the_original_call(monkey
         lambda: fake_os.popen('echo "$(ps -p 42 auxww)"'),
         lambda: fake_os.popen("pgrep -af python"),
         lambda: fake_os.system("echo $(ps -A)"),
+        lambda: fake_subprocess.Popen("ps -A 'unterminated", shell=True),
+        lambda: fake_subprocess.Popen(
+            "display-name 'unterminated", executable="/bin/echo"
+        ),
+        lambda: fake_os.system("ps -A 'unterminated"),
+        lambda: fake_os.popen('echo "$(ps -A)'),
+        lambda: fake_subprocess.Popen(object()),
     ):
         with pytest.raises(RuntimeError):
             operation()
@@ -375,6 +400,10 @@ def test_installed_guard_blocks_process_scans_through_spawn_and_exec_apis(monkey
         lambda: fake_os.execle("ps", "ps", "-p", "42", "-C", "python", {}),
         lambda: fake_os.execlp("ps", "ps", "-p", "42", "-C", "python"),
         lambda: fake_os.execlpe("ps", "ps", "-p", "42", "--user", "root", {}),
+        # Unknown spawn/exec argument shapes must fail closed before launch.
+        lambda: fake_os.spawnv(0, "/bin/ps", "ps -A"),
+        lambda: fake_os.posix_spawn("/bin/ps", object(), {}),
+        lambda: fake_os.execv("/bin/ps", None),
     )
     for operation in operations:
         with pytest.raises(RuntimeError, match="blocked for unmarked test"):
