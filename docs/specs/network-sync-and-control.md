@@ -115,24 +115,29 @@ What option A still cannot stop, stated so nobody claims more:
 
 ### Today
 
-- `kollab --hub stop all` (`kollabor/cli.py:1752`) stops the agents of this
-  project folder only: hub socket shutdown, then SIGTERM, then SIGKILL
-  (`_stop_agent_record`, `kollabor/cli.py:1607`). Run from an agent context
-  (KOLLAB_TOOL_SHELL/KOLLAB_AGENT_PID markers present) it refuses outright —
-  no CLI flag can override it, because agents control argv — so a spawned
-  agent cannot bypass the caller-scoped sweep by shelling to the CLI; the
-  operator's own shell carries no markers and is unaffected.
+- `kollab --hub stop all` (`kollabor/cli.py`) stops the agents of this project
+  folder only: hub socket shutdown, then SIGTERM, then SIGKILL
+  (`_stop_agent_record`). It refuses when tool-shell markers are present or
+  when the CLI process or one of its OS ancestors matches a Hub presence PID
+  from any local project (`_cli_is_hub_agent_context`). The ancestry check covers ordinary
+  foreground and background terminal-tool children even when the background
+  terminal filters those markers; an unreadable context fails closed. No CLI
+  flag can override the refusal because agents control argv. This is an
+  accident guard for normal tool launches, not a security boundary against
+  arbitrary same-user code that deliberately detaches, as described in the
+  threat model above.
   `/hub stop all` in the TUI is scoped to the
   agents that session started: peers launched by other lanes or the operator
   are immune, and the startup status advertises the command only to sessions
-  that started agents (`plugins/hub/plugin.py:14227`). Fallback escalation
-  revalidates the orchestrator's process handle at signal time and signals
-  through the tracked Popen handle itself (`proc.send_signal`): a reaped
-  child can no longer be signaled and an unreaped exited child holds its PID
-  as a zombie, so a recycled PID is never signaled even when the tracked
-  process exits between the liveness check and the signal (PID-reuse guard,
-  fail closed). Raw `os.kill` by PID remains only on the operator's
-  session-less single-stop path.
+  that started agents (`plugins/hub/plugin.py:_handle_stop_command`). The
+  presence PID must match the live orchestrator session and its Popen handle;
+  the row's boot time must be no earlier than the OS process creation time.
+  There is no timestamp grace window. Fallback escalation verifies the
+  selected PID again and signals through that Popen handle (`proc.send_signal`):
+  a reaped child cannot be signaled and an unreaped exited child holds its PID
+  as a zombie, so a recycled PID is not signaled across the check-to-signal
+  race. Raw `os.kill` by PID remains only on the operator's session-less
+  single-stop path.
 - A remote handle is refused: "spawn, stop and wake stay local"
   (`plugins/hub/plugin.py:12352`). No network-wide stop exists.
 - `kollab service` agents come back by themselves: systemd `Restart=always`

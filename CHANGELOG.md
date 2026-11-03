@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- An agent running `/hub stop all` in a TUI session now stops only the agents that session started: peers launched by other sessions or the operator are immune and reported in the result, and the command is advertised only to sessions that started agents; the operator CLI `kollab --hub stop all` remains the mesh-wide stop (#669).
+- An agent running `/hub stop all` in a TUI session now stops only the agents that session started: peers launched by other sessions or the operator are immune and reported in the result, and the command is advertised only to sessions that started agents. The operator CLI remains mesh-wide, but refuses normal foreground or background tool children by checking ancestry against Hub presence in any local project, even when a terminal tool filters context markers or changes the working directory. Stop-all ownership uses the live Popen child and its OS process creation time, with no 120-second timestamp window (#669).
 - A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
 - Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
 - Detached daemon SIGTERM cancels its top-level async task so application cleanup

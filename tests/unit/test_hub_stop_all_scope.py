@@ -7,6 +7,7 @@ callers with nothing of their own to stop.
 """
 
 import asyncio
+import signal
 import time
 from types import SimpleNamespace
 
@@ -28,8 +29,25 @@ def _peer(identity, pid, started_at=None):
 
 
 def _session(pid, start_time, alive=True):
-    """Fake orchestrator AgentSession: pid + start_time + liveness."""
-    return SimpleNamespace(pid=pid, start_time=start_time, is_alive=alive)
+    """Fake orchestrator AgentSession: PID, Popen handle, and liveness."""
+
+    class FakeProc:
+        def __init__(self):
+            self.pid = pid
+
+        def poll(self):
+            return None if alive else 0
+
+    return SimpleNamespace(
+        pid=pid, start_time=start_time, is_alive=alive, proc=FakeProc()
+    )
+
+
+def _patch_process_create_time(monkeypatch, plugin):
+    """Use the fake session's captured OS start time in scope tests."""
+    monkeypatch.setattr(
+        plugin, "_session_process_create_time", lambda session: session.start_time
+    )
 
 
 def _orch(agents):
@@ -52,6 +70,7 @@ def test_stop_all_only_sweeps_agents_the_caller_started(monkeypatch):
             ]
         )
         plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
+        _patch_process_create_time(monkeypatch, plugin)
         monkeypatch.setattr(
             plugin,
             "_get_orchestrator",
@@ -156,6 +175,7 @@ def test_stop_all_ignores_stale_row_sharing_caller_pid(monkeypatch):
             ]
         )
         plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
+        _patch_process_create_time(monkeypatch, plugin)
         monkeypatch.setattr(
             plugin,
             "_get_orchestrator",
@@ -179,6 +199,48 @@ def test_stop_all_ignores_stale_row_sharing_caller_pid(monkeypatch):
     asyncio.run(run_test())
 
 
+def test_stop_all_rejects_recent_stale_presence_within_old_120_second_window(
+    monkeypatch,
+):
+    """A stale row 90 seconds before this process started is not this session.
+
+    The former symmetric 120-second timestamp window accepted this reused PID.
+    """
+
+    async def run_test():
+        now = time.time()
+        plugin = HubPlugin()
+        session = _session(4242, now - 10)
+        plugin._presence = SimpleNamespace(
+            scan_all_presence=lambda: [
+                _peer("previous-owner", 4242, started_at=now - 100)
+            ],
+            cleanup_agent=lambda agent: None,
+        )
+        plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
+        _patch_process_create_time(monkeypatch, plugin)
+        monkeypatch.setattr(
+            plugin,
+            "_get_orchestrator",
+            lambda: _orch({"helper": session}),
+        )
+
+        stopped = []
+
+        async def fake_stop(agent, reason="", session=None):
+            stopped.append(agent.identity)
+            return "stopped"
+
+        monkeypatch.setattr(plugin, "_stop_peer_agent", fake_stop)
+        result = await plugin._handle_stop_command("all")
+
+        assert stopped == []
+        assert "previous-owner" in result
+        assert "no agents started by you" in result
+
+    asyncio.run(run_test())
+
+
 def test_stop_all_never_kills_by_reused_pid_of_dead_session(monkeypatch):
     """A tracked session whose process already exited must not make its old
     PID a kill token: the live process now holding that PID is immune."""
@@ -193,6 +255,7 @@ def test_stop_all_never_kills_by_reused_pid_of_dead_session(monkeypatch):
             ]
         )
         plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
+        _patch_process_create_time(monkeypatch, plugin)
         monkeypatch.setattr(
             plugin,
             "_get_orchestrator",
@@ -231,6 +294,7 @@ def test_stop_all_never_signals_reused_pid_after_mid_stop_exit(monkeypatch):
             cleanup_agent=lambda agent: None,
         )
         plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
+        _patch_process_create_time(monkeypatch, plugin)
         monkeypatch.setattr(
             plugin,
             "_get_orchestrator",
@@ -284,6 +348,7 @@ def test_stop_all_withholds_escalation_when_session_dies_after_guard(monkeypatch
             cleanup_agent=lambda agent: None,
         )
         plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
+        _patch_process_create_time(monkeypatch, plugin)
         monkeypatch.setattr(
             plugin,
             "_get_orchestrator",
@@ -294,8 +359,19 @@ def test_stop_all_withholds_escalation_when_session_dies_after_guard(monkeypatch
         monkeypatch.setattr(
             HubPlugin, "_signal_allowed", staticmethod(lambda session: True)
         )
-        # session stays "alive" through selection; the death is modeled as
-        # landing between the guard and the signal (guard forced true).
+
+        # The selection guard passes, but the Popen handle reports that the
+        # selected process has exited before the signal call.
+        class ReapedProc:
+            pid = 4242
+
+            def poll(self):
+                return 0
+
+            def send_signal(self, sig):
+                raise AssertionError("a reaped process handle must not signal")
+
+        session.proc = ReapedProc()
 
         async def fail_shutdown(socket_path, reason="", timeout=3.0):
             return False
@@ -338,7 +414,7 @@ def test_signal_session_noops_when_child_already_reaped():
         def send_signal(self, sig):
             raise AssertionError("send_signal must not run on a reaped child")
 
-    assert HubPlugin._signal_session(SimpleNamespace(proc=FakeProc()), 15) is False
+    assert HubPlugin()._signal_session(SimpleNamespace(proc=FakeProc()), 15) is False
 
 
 def test_signal_session_sends_through_handle_while_child_unreaped():
@@ -353,10 +429,50 @@ def test_signal_session_sends_through_handle_while_child_unreaped():
         def send_signal(self, sig):
             recorded.append(sig)
 
-    assert HubPlugin._signal_session(SimpleNamespace(proc=FakeProc()), 15) is True
+    assert HubPlugin()._signal_session(SimpleNamespace(proc=FakeProc()), 15) is True
     assert recorded == [15]
 
 
 def test_signal_session_fails_closed_without_handle():
-    assert HubPlugin._signal_session(SimpleNamespace(pid=4242), 15) is False
-    assert HubPlugin._signal_session(None, 15) is False
+    plugin = HubPlugin()
+    assert plugin._signal_session(SimpleNamespace(pid=4242), 15) is False
+    assert plugin._signal_session(None, 15) is False
+
+
+def test_signal_session_rejects_handle_for_a_different_presence_pid():
+    recorded = []
+
+    class FakeProc:
+        pid = 1111
+
+        def poll(self):
+            return None
+
+        def send_signal(self, sig):
+            recorded.append(sig)
+
+    session = SimpleNamespace(pid=1111, proc=FakeProc())
+
+    assert HubPlugin()._signal_session(session, 15, expected_pid=2222) is False
+    assert recorded == []
+
+
+def test_escalation_rechecks_presence_generation_before_signaling(monkeypatch):
+    recorded = []
+
+    class FakeProc:
+        pid = 1111
+
+        def poll(self):
+            return None
+
+        def send_signal(self, sig):
+            recorded.append(sig)
+
+    plugin = HubPlugin()
+    session = SimpleNamespace(pid=1111, proc=FakeProc())
+    agent = _peer("helper", 1111, started_at=100.0)
+    monkeypatch.setattr(plugin, "_session_process_create_time", lambda session: 101.0)
+
+    assert plugin._escalate_agent(agent, session, signal.SIGTERM) is False
+    assert recorded == []

@@ -157,10 +157,6 @@ _DEFAULT_OPERATOR_ALIASES = frozenset({"boss", "human", "operator"})
 STOP_GRACE_SECONDS = 1.5
 STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
-# Presence rows are written once at child boot; session.start_time at spawn.
-# started_at - start_time equals boot latency (>= 0); this tolerance covers slow
-# boots so PID reuse by an unrelated process cannot pass a generation check.
-PRESENCE_GENERATION_TOLERANCE_SECONDS = 120
 REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 
 _ACP_BUSY_SHUTDOWN_WAIT_SECONDS = 5.0
@@ -13542,20 +13538,46 @@ class HubPlugin(BasePlugin):
 
     def _presence_generation_matches(self, session, agent) -> bool:
         """True when presence row and tracked session are the same process
-        generation (fail closed on missing timestamps).
+        generation (fail closed on missing or inconsistent process identity).
 
-        Compares the presence row's boot start time against the session's
-        spawn start time. A row written by a different (stale or reused-PID)
-        process cannot land within the tolerance of our own spawn time.
+        The tracked Popen handle and OS process creation time identify the
+        session. Presence from an older PID generation predates that process;
+        there is no timestamp grace window that can make it look current.
         """
-        started_at = getattr(agent, "started_at", None)
-        session_start = getattr(session, "start_time", None)
-        if started_at is None or session_start is None:
+        agent_pid = getattr(agent, "pid", None)
+        session_pid = getattr(session, "pid", None)
+        proc = getattr(session, "proc", None)
+        if (
+            not agent_pid
+            or agent_pid != session_pid
+            or proc is None
+            or getattr(proc, "pid", None) != session_pid
+            or not getattr(session, "is_alive", False)
+        ):
             return False
-        return (
-            abs(float(session_start) - float(started_at))
-            <= PRESENCE_GENERATION_TOLERANCE_SECONDS
-        )
+
+        started_at = getattr(agent, "started_at", None)
+        process_created_at = self._session_process_create_time(session)
+        if started_at is None or process_created_at is None:
+            return False
+        try:
+            return float(started_at) >= float(process_created_at)
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _session_process_create_time(session) -> Optional[float]:
+        """Read the kernel creation time for a tracked Popen child."""
+        proc = getattr(session, "proc", None)
+        pid = getattr(session, "pid", None)
+        if proc is None or not pid or getattr(proc, "pid", None) != pid:
+            return None
+        try:
+            import psutil
+
+            return float(psutil.Process(pid).create_time())
+        except Exception:  # noqa: BLE001 - inability to prove generation fails closed
+            return None
 
     def _resolve_identity_to_agent_name(self, identity: str) -> Optional[str]:
         """Resolve a hub identity (gem name) to the orchestrator agent name.
@@ -14398,19 +14420,33 @@ class HubPlugin(BasePlugin):
         """
         return session is None or bool(getattr(session, "is_alive", False))
 
-    @staticmethod
-    def _signal_session(session, sig) -> bool:
+    def _signal_session(
+        self, session, sig, *, expected_pid=None, expected_started_at=None
+    ) -> bool:
         """Send ``sig`` through the tracked Popen handle (issue #669 r3).
 
-        Handle signaling is PID-reuse immune: ``Popen.send_signal`` no-ops
-        once the child is reaped (returncode set), and an exited-but-unreaped
-        child holds its PID as a zombie, so a recycled PID is unreachable.
-        Returns False — no signal sent, fail closed — when there is no handle
-        or the child is already reaped.
+        Recheck the selected presence generation immediately before signaling.
+        The Popen handle then checks/reaps its child before issuing the signal;
+        keeping the signal on that handle avoids a raw-PID fallback if the
+        child has exited. Returns False when identity cannot be proven.
         """
         proc = getattr(session, "proc", None) if session is not None else None
         if proc is None:
             return False
+        if expected_pid is not None and (
+            getattr(session, "pid", None) != expected_pid
+            or getattr(proc, "pid", None) != expected_pid
+        ):
+            return False
+        if expected_started_at is not None:
+            process_created_at = self._session_process_create_time(session)
+            try:
+                if process_created_at is None or float(
+                    expected_started_at
+                ) < process_created_at:
+                    return False
+            except (TypeError, ValueError, OverflowError):
+                return False
         if proc.poll() is not None:
             return False
         try:
@@ -14427,7 +14463,12 @@ class HubPlugin(BasePlugin):
         single-stop path falls back to raw ``os.kill`` by PID (issue #669 r3).
         """
         if session is not None:
-            return self._signal_session(session, sig)
+            return self._signal_session(
+                session,
+                sig,
+                expected_pid=getattr(agent, "pid", None),
+                expected_started_at=getattr(agent, "started_at", None),
+            )
         if sig == signal.SIGKILL:
             return self._hard_kill_agent(agent)
         return self._force_kill_agent(agent)

@@ -1542,6 +1542,55 @@ async def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
     return not pid_alive(pid)
 
 
+def _current_process_and_ancestors() -> set[int]:
+    """Return this process and its OS parent chain, nearest parent first."""
+    import psutil
+
+    current = psutil.Process(os.getpid())
+    return {current.pid, *(parent.pid for parent in current.parents())}
+
+
+def _cli_is_hub_agent_context() -> bool:
+    """Whether a mesh-wide CLI stop was launched from a local Hub agent.
+
+    Tool-shell environment markers are a deny-only hint: background terminal
+    commands intentionally strip them. Process ancestry is checked against
+    presence records from every local Hub project so changing the command's
+    working directory cannot hide its agent parent. If that context cannot be
+    read, fail closed.
+    """
+    from plugins.hub.network_halt import TOOL_SHELL_VARS
+
+    if any(os.environ.get(var) for var in TOOL_SHELL_VARS):
+        return True
+
+    try:
+        from kollabor_config.config_utils import get_config_directory
+
+        process_ids = _current_process_and_ancestors()
+        config_dir = get_config_directory()
+        hub_dirs = [
+            config_dir / "hub",
+            *sorted((config_dir / "projects").glob("*/hub")),
+        ]
+        agent_pids = set()
+        for hub_dir in hub_dirs:
+            for path in (hub_dir / "presence").glob("*.json"):
+                with path.open() as fh:
+                    data = json.load(fh)
+                if not isinstance(data, dict):
+                    raise ValueError(f"invalid Hub presence record: {path.name}")
+                pid = int(data.get("pid") or 0)
+                if pid > 0:
+                    agent_pids.add(pid)
+        return bool(process_ids & agent_pids)
+    except Exception as exc:  # noqa: BLE001 - uncertainty must not grant mesh-wide stop
+        logging.getLogger(__name__).warning(
+            "cannot verify Hub CLI caller ancestry; refusing stop all: %s", exc
+        )
+        return True
+
+
 def _cleanup_presence_for_pid(presence_dir: Path, pid: int) -> None:
     if not pid:
         return
@@ -1922,19 +1971,14 @@ async def _handle_cli_hub(hub_args: list) -> None:
         target = rest[0]
 
         if target == "all":
-            # Issue #669 r3: agent contexts carry trusted-shell markers
-            # (KOLLAB_TOOL_SHELL/KOLLAB_AGENT_PID), so a spawned agent could
-            # otherwise bypass the caller-scoped /hub stop all by shelling to
-            # this CLI and stopping agents it does not own. Refuse
-            # unconditionally: --confirm is argv and agents control argv, so
-            # no CLI flag can be an operator override. The operator's own
-            # shell carries no markers and is unaffected.
-            from plugins.hub.network_halt import TOOL_SHELL_VARS
-
-            if any(os.environ.get(var) for var in TOOL_SHELL_VARS):
+            # The mesh-wide CLI path belongs to an operator shell. Environment
+            # markers alone are insufficient because background terminal
+            # commands filter them, so also check the caller's process tree.
+            # --confirm is argv and cannot grant an agent an override.
+            if _cli_is_hub_agent_context():
                 print(
-                    "refusing `stop all`: agent-context markers present; agents "
-                    "may not stop other agents (run from an operator shell).",
+                    "refusing `stop all`: agent-context present; agents may "
+                    "only stop agents they started (run from an operator shell).",
                     file=sys.stderr,
                 )
                 sys.exit(2)
