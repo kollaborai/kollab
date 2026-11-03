@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import-not-found]
 
+from kollabor.state.remote import ReloadNeededError
 from kollabor_ai.message_content import (
     MessageContent,
     contains_image_content,
@@ -236,6 +237,12 @@ async def send_message(
             if body.goal_reply_id is not None:
                 kwargs["private_goal_reply_id"] = body.goal_reply_id
         accepted = await session.send_message(body.content, **kwargs)
+    except ReloadNeededError as e:
+        # The daemon's code no longer matches the checkout: retries cannot
+        # succeed. Say so plainly instead of "daemon unreachable" (#571).
+        session.unsubscribe(queue)
+        logger.warning("send_message reload-needed for %s: %s", session_id, e)
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         session.unsubscribe(queue)
         logger.error("send_message failed for %s: %s", session_id, e)
@@ -683,9 +690,19 @@ async def _assistant_set_synced(
     past this point, so the turns it already shows keep their ids.
     """
     try:
-        history = await session.refresh_history()
-    except Exception as exc:  # the page then waits for its next full load
+        history = await session.refresh_history(stale_raises=True)
+    except Exception as exc:
+        # A stale watermark replays the turn as history next to the transient
+        # rows it already shows and the page draws it twice (#666). Clear it
+        # so the next refresh reloads whole instead of appending a duplicate.
         logger.debug("history refresh for %s failed: %s", session.session_id, exc)
+        state = controller.state
+        try:
+            has_watermark = state is not None and state.get("synced") is not None
+        except (KeyError, TypeError, AttributeError):
+            has_watermark = False
+        if has_watermark:
+            controller.state["synced"] = None
         return
     controller.state["synced"] = {"history": len(history), "messages": message_count}
 

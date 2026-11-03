@@ -24,6 +24,20 @@ from .local import LocalStateService
 logger = logging.getLogger(__name__)
 
 
+def _error_result(exc: Exception) -> dict[str, Any]:
+    """The daemon's error result, flagging a code-on-disk mismatch (#571).
+
+    A long-lived daemon lazy-imports modules on first use; when such a module
+    has left the checkout after the daemon started, the failure repeats on
+    every turn until the agent restarts. Flag it so clients can say so
+    instead of surfacing a bare error string.
+    """
+    result: dict[str, Any] = {"error": str(exc)}
+    if isinstance(exc, ModuleNotFoundError):
+        result["reload_needed"] = True
+    return result
+
+
 def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -> None:
     """Register all StateService RPC handlers on an RpcServer instance.
 
@@ -599,7 +613,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         try:
             text = await state_service.hub_send_msg(target, content)
         except (ValueError, Exception) as e:
-            return {"error": str(e)}
+            return _error_result(e)
         return {"text": text}
 
     async def _list_hub_agents(params: dict[str, Any]) -> dict[str, Any]:
@@ -617,7 +631,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         try:
             text = await state_service.send_hub_user_message(target, content)
         except Exception as e:
-            return {"error": str(e)}
+            return _error_result(e)
         return {"text": text}
 
     async def _hub_broadcast(params: dict[str, Any]) -> dict[str, Any]:
@@ -628,7 +642,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         try:
             text = await state_service.hub_broadcast(content, force=bool(force))
         except (ValueError, Exception) as e:
-            return {"error": str(e)}
+            return _error_result(e)
         return {"text": text}
 
     async def _cancel_current_request(params: dict[str, Any]) -> dict[str, Any]:
@@ -636,7 +650,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             turn = params.get("voice_turn_id")
             return await state_service.cancel_current_request(voice_turn_id=str(turn) if turn else None)
         except Exception as e:
-            return {"error": str(e)}
+            return _error_result(e)
 
     async def _send_message(params: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -662,7 +676,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
                 kwargs["goal_conversation_uid"] = params.get("goal_conversation_uid")
             return await state_service.send_message(params.get("message", ""), **kwargs)
         except Exception as e:
-            return {"error": str(e)}
+            return _error_result(e)
 
     async def _poll_goal_reply(params: dict[str, Any]) -> dict[str, Any]:
         reply_id = params.get("reply_id")

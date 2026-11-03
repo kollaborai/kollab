@@ -474,7 +474,9 @@ async def test_accept_rollback_keeps_a_pre_existing_binding_on_consume_failure(t
 
 
 @pytest.mark.asyncio
-async def test_revoke_drops_the_peer_device_binding(tmp_path):
+async def test_revoke_drops_the_peer_device_binding(tmp_path, monkeypatch):
+    # Exercise the authorized human flow, not the agent-shell refusal guard.
+    monkeypatch.setattr("plugins.hub.halt_runtime.tool_shell_refusal", lambda: "")
     _hub, bridge = _local_hub(tmp_path)
     peer_key = SigningKey.generate().verify_key.encode().hex()
     bridge.bind_peer_device(peer_key, "laptop-kollab")

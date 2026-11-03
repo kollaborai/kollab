@@ -12,6 +12,7 @@ import pathlib
 import time
 from types import SimpleNamespace
 
+import kollabor_engine.session as session_module
 import pytest
 from kollabor_engine.history_store import read_history_from_disk
 from kollabor_engine.routes import sessions as sessions_route
@@ -625,3 +626,64 @@ async def test_whatever_replaces_the_seed_announces_it_once(registry, conversati
     assert emitted == [{"type": "history_updated"}]
     await session.refresh_history()
     assert emitted == [{"type": "history_updated"}]
+
+
+def _snapshot_omock():
+    async def get_conversation(since=None, anchor=None):
+        return SimpleNamespace(
+            messages=[],
+            since=999,
+            anchor="",
+            session_id="",
+            metadata={},
+        )
+    return get_conversation
+
+
+@pytest.mark.asyncio
+async def test_refresh_history_can_report_staleness_for_the_synced_caller(
+    registry, conversations, monkeypatch
+):
+    """Ordinary callers get the cached mirror when the daemon is slow or
+    erroring; the synced watermark must refuse it (issue #666).
+
+    A watermark set from a stale mirror misses the turn the window just ran,
+    so the next history reload replays that turn as a tail next to the
+    transient rows it already rendered and the turn draws twice."""
+    from kollabor_engine.session import HistoryRefreshUnavailable
+
+    _, workspace_root = conversations
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(SilentState())  # never answers -> timeout
+    registry[session.session_id] = session
+    monkeypatch.setattr(
+        session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02
+    )
+    cached = await session.refresh_history()
+    assert cached == []
+    with pytest.raises(HistoryRefreshUnavailable):
+        await session.refresh_history(stale_raises=True)
+
+
+@pytest.mark.asyncio
+async def test_stale_raises_covers_an_unjoinable_tail(registry, conversations):
+    """A tail past what the mirror holds cannot be joined; for the synced
+    caller that is staleness, not a usable history (issue #666)."""
+    from kollabor_engine.session import HistoryRefreshUnavailable
+
+    _, workspace_root = conversations
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    state = SimpleNamespace(
+        get_permission_state=lambda: SimpleNamespace(approval_mode="CONFIRM_ALL"),
+        get_active_profile=lambda: SimpleNamespace(
+            name="openai-oauth", model="gpt", provider="openai"
+        ),
+        get_system_info=lambda: SimpleNamespace(cwd="/nowhere"),
+        get_conversation=_snapshot_omock(),
+    )
+    session.daemon = _daemon(state)
+    registry[session.session_id] = session
+    cached = await session.refresh_history()
+    assert cached == []
+    with pytest.raises(HistoryRefreshUnavailable):
+        await session.refresh_history(stale_raises=True)
