@@ -531,10 +531,24 @@ class LiveKitRuntime:
                     retryable=True,
                 )
             python = str(prepared)
-        import kollabor_voice
+        from kollabor_voice.module_runtime import module_command
 
-        src = str(Path(kollabor_voice.__file__).resolve().parent.parent)
-        return [python, "-m", "kollabor_voice.livekit_worker"], {"PYTHONPATH": src}
+        # Never put the Engine's site-packages on the prepared interpreter's
+        # import path. Load Kollab's pure-Python package from its exact directory
+        # while leaving stdlib and third-party imports to the prepared runtime.
+        return module_command(python, "kollabor_voice.livekit_worker"), {
+            "PYTHONPATH": ""
+        }
+
+    def _child_env(self, cmd_env: dict[str, str]) -> dict[str, str]:
+        env = dict(os.environ)
+        env.update(cmd_env)
+        env.update(self._worker_env)
+        # Child imports must use its own interpreter's site-packages, never the
+        # Engine's paths inherited from its launcher or a caller override.
+        from kollabor_voice.module_runtime import isolated_env
+
+        return isolated_env(env)
 
     async def start_session(self, binding: VoiceSessionBinding) -> WorkerHandle:
         cmd, cmd_env = self._worker_command()  # fail before starting any server
@@ -560,9 +574,7 @@ class LiveKitRuntime:
             "engine_url": self._engine_url(),
             "engine_token": self._engine_token(),
         }
-        env = dict(os.environ)
-        env.update(cmd_env)
-        env.update(self._worker_env)
+        env = self._child_env(cmd_env)
         env["KOLLAB_VOICE_WORKER_CONFIG"] = json.dumps(config)
         with self._log("livekit-worker.log") as log:
             process = await asyncio.create_subprocess_exec(
@@ -616,9 +628,7 @@ class LiveKitRuntime:
             },
             separators=(",", ":"),
         )
-        env = dict(os.environ)
-        env.update(cmd_env)
-        env.update(self._worker_env)
+        env = self._child_env(cmd_env)
         with self._log("phone-audio-bridge.log") as log:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -637,7 +647,7 @@ class LiveKitRuntime:
         return handle
 
     async def _bridge_command(self) -> tuple[list[str], dict[str, str]]:
-        # Same prepared interpreter and PYTHONPATH as the worker; the bridge
+        # Same prepared interpreter and package loader as the worker; the bridge
         # is a different module in the same voice package.
         cmd, env = self._worker_command()
         if cmd[-1].endswith("kollabor_voice.livekit_worker"):

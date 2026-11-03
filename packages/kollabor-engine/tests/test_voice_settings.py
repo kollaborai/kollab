@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
+import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import kollabor_voice
 import pytest
 from fastapi import FastAPI
 from kollabor_engine import voice_settings as voice_settings_module
@@ -19,6 +23,7 @@ from kollabor_engine.voice_livekit import LiveKitRuntime
 from kollabor_engine.voice_runtime_host import RuntimeHostError
 from kollabor_engine.voice_settings import DEFAULT_PROMPT, VoiceSettingsService
 from kollabor_engine.voice_types import SpeechReadiness
+from kollabor_voice import module_runtime
 from kollabor_voice.client import VoiceClient
 from kollabor_voice.control import VoiceError, install_identity, manifest
 from test_voice_livekit_runtime import FakeSession
@@ -111,8 +116,66 @@ def test_worker_uses_prepared_voice_runtime(tmp_path, monkeypatch):
     python = _prepare_runtime(tmp_path)
     runtime = LiveKitRuntime(engine_url=lambda: "", engine_token=lambda: "")
     cmd, env = runtime._worker_command()
-    assert cmd == [str(python), "-m", "kollabor_voice.livekit_worker"]
-    assert env["PYTHONPATH"].endswith("kollabor-voice/src")
+    assert cmd[0] == str(python)
+    assert cmd[1:3] == ["-I", "-c"]
+    assert "run_module" in cmd[3]
+    assert cmd[4] == str(Path(module_runtime.__file__).resolve().parent)
+    assert cmd[5] == "kollabor_voice.livekit_worker"
+    assert env == {"PYTHONPATH": ""}
+
+
+def test_bridge_uses_same_isolated_voice_package_bootstrap(tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    python = _prepare_runtime(tmp_path)
+    runtime = LiveKitRuntime(engine_url=lambda: "", engine_token=lambda: "")
+    cmd, env = asyncio.run(runtime._bridge_command())
+    assert cmd[0] == str(python)
+    assert cmd[1:3] == ["-I", "-c"]
+    assert "run_module" in cmd[3]
+    assert cmd[5] == "kollabor_voice.phone_audio_bridge"
+    assert env == {"PYTHONPATH": ""}
+
+
+@pytest.mark.parametrize("bridge", [False, True])
+def test_child_imports_installed_voice_package_without_engine_site_packages(
+    tmp_path, monkeypatch, bridge
+):
+    engine_site = tmp_path / "engine-site-packages"
+    package_dir = engine_site / "kollabor_voice"
+    shutil.copytree(Path(kollabor_voice.__file__).resolve().parent, package_dir)
+    (engine_site / "pydantic.py").write_text(
+        "raise RuntimeError('engine pydantic leaked into voice runtime')\n"
+    )
+    (package_dir / "_path_probe.py").write_text(
+        "import json, pydantic, kollabor_voice\n"
+        "print(json.dumps({'voice': kollabor_voice.__file__, 'pydantic': pydantic.__file__}))\n"
+    )
+    monkeypatch.setenv("KOLLAB_VOICE_PYTHON", sys.executable)
+    monkeypatch.setenv("PYTHONPATH", str(engine_site))
+    monkeypatch.setattr(module_runtime, "_PACKAGE_DIR", package_dir)
+
+    runtime = LiveKitRuntime(
+        engine_url=lambda: "",
+        engine_token=lambda: "",
+        worker_env={"PYTHONPATH": str(engine_site)},
+    )
+    if bridge:
+        cmd, cmd_env = asyncio.run(runtime._bridge_command())
+    else:
+        cmd, cmd_env = runtime._worker_command()
+    cmd[-1] = "kollabor_voice._path_probe"
+    child_env = runtime._child_env(cmd_env)
+
+    assert child_env["PYTHONPATH"] == ""
+    result = subprocess.run(
+        cmd, env=child_env, text=True, capture_output=True, check=True
+    )
+    imports = json.loads(result.stdout)
+    assert Path(imports["voice"]).resolve() == (package_dir / "__init__.py").resolve()
+    assert Path(imports["pydantic"]).resolve() != (
+        engine_site / "pydantic.py"
+    ).resolve()
+    assert str(Path(imports["pydantic"]).resolve()).startswith(sys.prefix)
 
 
 def test_worker_env_override_wins(tmp_path, monkeypatch):
@@ -151,7 +214,9 @@ async def test_first_voice_start_installs_voice_and_shows_each_step(rig, tmp_pat
 
     cmd = await _start_voice(rig, monkeypatch, ensure=ensure)
     assert seen == ["Installing voice support"]
-    assert cmd == [str(installed[0]), "-m", "kollabor_voice.livekit_worker"]
+    assert cmd[0] == str(installed[0])
+    assert cmd[1:3] == ["-I", "-c"]
+    assert cmd[5] == "kollabor_voice.livekit_worker"
 
 
 async def test_failed_voice_setup_says_why(rig, tmp_path, monkeypatch):
