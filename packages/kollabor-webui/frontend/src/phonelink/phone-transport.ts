@@ -142,6 +142,132 @@ const lost = () =>
  * absent from the roster. The engine legitimately restarts and re-registers,
  * so a briefly missing roster entry must not terminate the link.
  */
+// Separate quotas keep chat/event requests available during a three-packet
+// media window, with a fourth call slot reserved for close/control operations.
+type RequestLane = "normal" | "call";
+
+export type CallPacket = {
+  op: "call_open" | "call_tick" | "call_close";
+  id: string;
+} & Record<string, Json>;
+export type CallResult = Record<string, Json>;
+
+// Hands out seq numbers in call order. Each job waits for the previous one, so
+// seq stays in step with the order packets reach the wire.
+export class WireSequence {
+  private next = 0;
+  private chain: Promise<unknown> = Promise.resolve();
+
+  run<T>(make: (seq: number) => Promise<T>): Promise<T> {
+    const job = this.chain.then(() => make(this.next++));
+    this.chain = job.catch(() => undefined);
+    return job;
+  }
+}
+
+// Decompression and concurrent requests can complete out of order. Keep a
+// bounded replay window rather than treating every reordered reply as a replay.
+export class ReplySequenceWindow {
+  private highest = -1;
+  private seen = new Set<number>();
+
+  accept(sequence: unknown): boolean {
+    if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) ||
+        sequence < 0 || sequence <= this.highest - 512 || this.seen.has(sequence))
+      return false;
+    this.highest = Math.max(this.highest, sequence);
+    this.seen.add(sequence);
+    for (const value of this.seen)
+      if (value <= this.highest - 512) this.seen.delete(value);
+    return true;
+  }
+}
+
+// Six requests at most: two normal and four call operations. This matches the
+// host's per-peer dispatch budget. Waiters stay FIFO within each lane.
+export class RequestSlots {
+  private active: Record<RequestLane, number> = { normal: 0, call: 0 };
+  private waiters: Array<{ lane: RequestLane; wake: () => void }> = [];
+
+  limitFor(lane: RequestLane) {
+    return lane === "call" ? 4 : 2;
+  }
+
+  get inUse() {
+    return this.active.normal + this.active.call;
+  }
+
+  async acquire(lane: RequestLane) {
+    if (
+      this.active[lane] < this.limitFor(lane) &&
+      !this.waiters.some((waiter) => waiter.lane === lane)
+    ) {
+      this.active[lane] += 1;
+      return;
+    }
+    await new Promise<void>((wake) => this.waiters.push({ lane, wake }));
+  }
+
+  release(lane: RequestLane) {
+    this.active[lane] -= 1;
+    const index = this.waiters.findIndex(
+      (waiter) => waiter.lane === lane,
+    );
+    if (index < 0) return;
+    const [waiter] = this.waiters.splice(index, 1);
+    this.active[lane] += 1;
+    waiter.wake();
+  }
+}
+
+// Packet slots alone do not bound open HTTP exchanges: a startup burst can
+// send every start before its uploads and reads. Leave four of the computer's
+// sixteen exchanges free while holding each lease until end or cancel ACK.
+class HttpExchanges {
+  private active = new Set<() => void>();
+  private waiting: Array<{
+    resolve: (release: () => void) => void;
+    reject: (reason: unknown) => void;
+    cleanup: () => void;
+  }> = [];
+
+  acquire(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    if (this.active.size < 12) return Promise.resolve(this.lease());
+    return new Promise((resolve, reject) => {
+      const abort = () => {
+        this.waiting = this.waiting.filter((entry) => entry !== waiter);
+        waiter.cleanup();
+        reject(signal?.reason);
+      };
+      const waiter = { resolve, reject, cleanup: () => signal?.removeEventListener("abort", abort) };
+      this.waiting.push(waiter);
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  private lease(): () => void {
+    const release = () => {
+      if (!this.active.delete(release)) return;
+      const waiter = this.waiting.shift();
+      if (waiter) {
+        waiter.cleanup();
+        waiter.resolve(this.lease());
+      }
+    };
+    this.active.add(release);
+    return release;
+  }
+
+  reset() {
+    this.active.clear();
+    for (const waiter of this.waiting.splice(0)) {
+      waiter.cleanup();
+      waiter.reject(lost());
+    }
+  }
+}
+
 export const HOST_MISSING_GRACE_MS = 15_000;
 
 /** What a relay peers frame means for the tracked host session. Pure so the
@@ -189,9 +315,8 @@ export function hostSnapshotDecision(
   }
   if (typeof host.session !== "string" || !ID.test(host.session))
     return { action: "lost", why: "invalid" };
-  // The engine's relay session changes on its own restarts and reconnects.
-  // The roster row is still signed by the same host key, so the new session
-  // is adopted instead of dropping the whole phone link.
+  // A new relay session retains the approved host identity, but its packet
+  // session must be replaced by a fresh handshake before requests resume.
   return knownSession && knownSession !== host.session
     ? { action: "changed", session: host.session }
     : { action: "present", session: host.session };
@@ -326,6 +451,12 @@ async function sealed(identity: PhoneIdentity): Promise<PhoneIdentity> {
   try {
     const { key, sign, box } = await importSeed(seed);
     await keyStore("readwrite", (store) => store.put({ sign, box }, identity.id));
+    // WebKit can commit an X25519 CryptoKey but return no record when reading
+    // it (WebKit #312279). Keep the seed until both keys survive a round trip.
+    const saved = await keyStore<PhoneKeys | undefined>("readonly", (store) =>
+      store.get(identity.id),
+    );
+    if (!saved?.sign || !saved.box) return identity;
     return {
       id: identity.id,
       room: identity.room,
@@ -455,10 +586,10 @@ export class PhoneTransport {
   private frameCompression = false;
   private chunkSize = LEGACY_CHUNK;
   private zeroBodyAutorun = false;
-  private sent = 0;
-  private received = -1;
-  private active = 0;
-  private slots: Array<() => void> = [];
+  private wire = new WireSequence();
+  private received = new ReplySequenceWindow();
+  private slots = new RequestSlots();
+  private httpExchanges = new HttpExchanges();
   private sending: Promise<void> = Promise.resolve();
   private lastSend = 0;
   private closed = false;
@@ -582,7 +713,7 @@ export class PhoneTransport {
       this.hostMissingTimer = null;
       // Still missing after the grace window: run the normal socket-close
       // path so the phone reports offline and reconnects on its own.
-      if (this.hostMissingSince) this.socket?.close();
+      if (this.hostMissingSince) this.closeSocket();
     }, remaining);
   }
 
@@ -594,19 +725,38 @@ export class PhoneTransport {
   }
 
   connect(): Promise<void> {
-    if (this.outgoing && this.socket?.readyState === WebSocket.OPEN)
-      return Promise.resolve();
+    if (this.closed) return Promise.reject(lost());
     if (this.opening) return this.opening;
+    if (this.incoming && this.outgoing && this.socket?.readyState === WebSocket.OPEN)
+      return Promise.resolve();
     this.opening = this.open()
       .catch((error) => {
         this.reportDiagnostic("relay_error");
-        this.socket?.close();
+        this.closeSocket();
         throw error;
       })
       .finally(() => {
         this.opening = null;
       });
     return this.opening;
+  }
+
+  private resetPacketSession() {
+    this.httpExchanges.reset();
+    for (const key of [this.incoming, this.outgoing])
+      if (key) sodium.memzero(key);
+    this.incoming = this.outgoing = null;
+    this.frameCompression = false;
+    this.chunkSize = LEGACY_CHUNK;
+    this.zeroBodyAutorun = false;
+    for (const request of this.pending.values()) request.reject(lost());
+    this.pending.clear();
+  }
+
+  private closeSocket(socket = this.socket) {
+    if (!socket) return;
+    if (this.socket === socket) this.resetPacketSession();
+    socket.close();
   }
 
   /** This link's keys: sealed WebCrypto keys, or the seed where the browser has none. */
@@ -669,7 +819,7 @@ export class PhoneTransport {
         if (!settled) {
           settled = true;
           reject(lost());
-          socket.close();
+          this.closeSocket(socket);
         }
       }, 15000);
       socket.onmessage = (event) => {
@@ -705,7 +855,7 @@ export class PhoneTransport {
                   }),
                 ),
               )
-              .catch(() => socket.close());
+              .catch(() => this.closeSocket(socket));
           } else if (frame.type === "registered") {
             if (
               frame.protocol !== PROTOCOL ||
@@ -731,8 +881,13 @@ export class PhoneTransport {
               this.armHostMissingTimer(decision.missingSinceMs);
             } else {
               this.hostMissingSince = 0;
-              if (decision.action === "changed")
+              if (decision.action === "changed") {
                 this.reportDiagnostic("relay_host_session_changed");
+                // The ephemeral packet keys bind both relay session IDs.
+                // Retain approval, but reconnect and exchange fresh keys before
+                // sending requests to a restarted host.
+                throw lost();
+              }
               this.hostSession = decision.session;
             }
             if (!settled) {
@@ -758,7 +913,7 @@ export class PhoneTransport {
             settled = true;
             reject(lost());
           }
-          socket.close();
+          this.closeSocket(socket);
         }
       };
       socket.onerror = () => {
@@ -768,6 +923,7 @@ export class PhoneTransport {
           clearTimeout(timer);
           reject(lost());
         }
+        this.closeSocket(socket);
       };
       socket.onclose = (event) => {
         clearTimeout(timer);
@@ -782,13 +938,7 @@ export class PhoneTransport {
         });
         this.clearHostMissingTimer();
         this.hostMissingSince = 0;
-        this.incoming = this.outgoing = null;
-
-        this.frameCompression = false;
-        this.chunkSize = LEGACY_CHUNK;
-        this.zeroBodyAutorun = false;
-        for (const request of this.pending.values()) request.reject(lost());
-        this.pending.clear();
+        this.resetPacketSession();
         if (!this.closed) {
           this.onState("offline", this.pairingCode);
           if (this.identity.approved && !this.retry) {
@@ -798,12 +948,22 @@ export class PhoneTransport {
             });
             this.retry = setTimeout(() => {
               this.retry = null;
-              void this.connect().catch(() => undefined);
+              // A closed handshake can still be waiting on WebCrypto. Let it
+              // settle before starting the replacement; otherwise this retry
+              // merely joins the doomed handshake and no later retry remains.
+              const opening = this.opening;
+              void (async () => {
+                if (opening) await opening.catch(() => undefined);
+                if (!this.closed && this.identity.approved)
+                  await this.connect().catch(() => undefined);
+              })();
             }, 3000);
           }
         }
       };
     });
+    const hostSession = this.hostSession;
+    const phoneSession = this.session;
     const ephemeral = sodium.crypto_box_keypair();
     let response: Json;
     for (;;) {
@@ -857,18 +1017,27 @@ export class PhoneTransport {
     );
     const binding = join(
       sodium.from_string(PHONE_PROTOCOL),
-      sodium.from_hex(this.hostSession + this.session),
+      sodium.from_hex(hostSession + phoneSession),
     );
-    this.outgoing = await sha256(
-      join(shared, binding, sodium.from_string("phone-to-host")),
-    );
-    this.incoming = await sha256(
-      join(shared, binding, sodium.from_string("host-to-phone")),
-    );
-    sodium.memzero(shared);
-    sodium.memzero(ephemeral.privateKey);
-    this.sent = 0;
-    this.received = -1;
+    let outgoing: Uint8Array;
+    let incoming: Uint8Array;
+    try {
+      outgoing = await sha256(join(shared, binding, sodium.from_string("phone-to-host")));
+      incoming = await sha256(join(shared, binding, sodium.from_string("host-to-phone")));
+    } finally {
+      sodium.memzero(shared);
+      sodium.memzero(ephemeral.privateKey);
+    }
+    if (this.closed || this.socket !== socket || socket.readyState !== WebSocket.OPEN ||
+        this.hostSession !== hostSession || this.session !== phoneSession) {
+      sodium.memzero(outgoing);
+      sodium.memzero(incoming);
+      throw lost();
+    }
+    this.outgoing = outgoing;
+    this.incoming = incoming;
+    this.wire = new WireSequence();
+    this.received = new ReplySequenceWindow();
     this.identity.approved = true;
     this.reconnectCount = 0;
     this.reportDiagnostic("relay_socket_opened");
@@ -924,13 +1093,20 @@ export class PhoneTransport {
     if (body.kind !== "response" || !payload) throw lost();
     const pending = this.pending.get(payload.reply_to);
     if (!pending || payload.method !== pending.method) return;
-    if (payload.error)
+    if (payload.error) {
       pending.reject(
         new Error(
           "Your computer refused this app request. Check PhoneLink there.",
         ),
       );
-    else if (payload.result && typeof payload.result === "object")
+      // An authenticated transport failure can mean the computer invalidated
+      // this packet session after a roster gap. Re-handshake before later
+      // requests; never automatically replay a possibly applied operation.
+      if (payload.error === "failed" &&
+          (pending.method === "phone_http" || pending.method === "phone_diagnostic")) {
+        this.closeSocket();
+      }
+    } else if (payload.result && typeof payload.result === "object")
       pending.resolve(payload.result);
     else pending.reject(lost());
   }
@@ -986,17 +1162,20 @@ export class PhoneTransport {
 
   private async request(
     method: string,
-    arguments_: Json,
+    arguments_: Json | (() => Promise<Json>),
     signal?: AbortSignal,
     timeout = 30000,
+    lane: RequestLane = "normal",
   ): Promise<Json> {
-    if (this.active >= 3)
-      await new Promise<void>((resolve) => this.slots.push(resolve));
-    else this.active += 1;
+    await this.slots.acquire(lane);
     const id = randomId();
     let timer: ReturnType<typeof setTimeout>;
     let abort: () => void = () => {};
     try {
+      if (signal?.aborted || this.closed) throw signal?.reason ?? lost();
+      // A builder runs only once a slot is held, so seq follows wire order.
+      const args =
+        typeof arguments_ === "function" ? await arguments_() : arguments_;
       if (signal?.aborted || this.closed) throw signal?.reason ?? lost();
       return await new Promise<Json>((resolve, reject) => {
         this.pending.set(id, { method, resolve, reject });
@@ -1019,7 +1198,7 @@ export class PhoneTransport {
         }, timeout);
         void this.send(
           "request",
-          { method, arguments: arguments_, timeout_ms: timeout },
+          { method, arguments: args, timeout_ms: timeout },
           id,
         ).catch(reject);
       });
@@ -1027,60 +1206,96 @@ export class PhoneTransport {
       clearTimeout(timer!);
       signal?.removeEventListener("abort", abort);
       this.pending.delete(id);
-      const next = this.slots.shift();
-      if (next) next();
-      else this.active -= 1;
+      this.slots.release(lane);
     }
   }
 
-  private async packet(data: Json, signal?: AbortSignal) {
+  private async packet(
+    data: Json,
+    signal?: AbortSignal,
+    lane: RequestLane = "normal",
+    timeout = 30000,
+  ) {
     if (!this.outgoing || !this.incoming) throw lost();
-    const nonce = sodium.randombytes_buf(24);
-    const encoded = await encodePhoneFrame(
-      sodium.from_string(JSON.stringify({ ...data, seq: this.sent++ })),
-      this.frameCompression,
-    );
+    const outgoing = this.outgoing;
+    const incoming = this.incoming;
+    const received = this.received;
+    // seq is assigned and encoded in one chain, so it matches wire order.
+    const build = () =>
+      this.wire.run(async (seq) => {
+        if (this.outgoing !== outgoing) throw lost();
+        const nonce = sodium.randombytes_buf(24);
+        const encoded = await encodePhoneFrame(
+          sodium.from_string(JSON.stringify({ ...data, seq })),
+          this.frameCompression,
+        );
+        if (this.outgoing !== outgoing) throw lost();
+        return {
+          packet: base64(
+            join(nonce, sodium.crypto_secretbox_easy(encoded, nonce, outgoing)),
+          ),
+        } as Json;
+      });
     const response = await this.request(
       "phone_http",
-      {
-        packet: base64(
-          join(
-            nonce,
-            sodium.crypto_secretbox_easy(encoded, nonce, this.outgoing),
-          ),
-        ),
-      },
+      build,
       signal,
+      timeout,
+      lane,
     );
     const raw = unbase64(response.packet);
     const decrypted = sodium.crypto_secretbox_open_easy(
       raw.slice(24),
       raw.slice(0, 24),
-      this.incoming,
+      incoming,
     );
     const decoded = await decodePhoneFrame(decrypted, this.frameCompression);
     const result = JSON.parse(sodium.to_string(decoded));
-    if (!Number.isSafeInteger(result.seq) || result.seq <= this.received)
+    if (this.incoming !== incoming || this.received !== received || !received.accept(result.seq))
       throw lost();
-    this.received = result.seq;
     if (result.error) throw new Error(result.error);
     return result as Json;
   }
 
+  // One call op (open, tick or close) over the encrypted packet, in the reserved
+  // lane. A failure rejects with the broker's stable code (call_busy, ...).
+  async callPacket(data: CallPacket, signal?: AbortSignal): Promise<CallResult> {
+    // Bridge readiness can take ten seconds; teardown is capped at five.
+    // Leave relay headroom for those operations without extending media stalls.
+    const timeout = data.op === "call_open" ? 15_000 : data.op === "call_close" ? 8_000 : 3_000;
+    return (await this.packet(data, signal, "call", timeout)) as CallResult;
+  }
+
   async fetch(path: string, init: RequestInit = {}): Promise<Response> {
     await this.connect();
-    const request = new Request(new URL(path, location.origin), init);
-    const body = new Uint8Array(await request.arrayBuffer());
-    if (body.length > MAX_BODY)
-      throw new Error("PhoneLink uploads are limited to 8 MB.");
-    const id = randomId();
-    const cancel = () => {
-      void this.packet({ op: "cancel", id }).catch(() => undefined);
-    };
     const signal = init.signal ?? undefined;
-    signal?.addEventListener("abort", cancel, { once: true });
+    const session = this.incoming;
+    const release = await this.httpExchanges.acquire(signal);
+    let cancel = async () => { release(); };
     try {
-      await this.packet(
+      const packet = (data: Json) => {
+        if (signal?.aborted) throw signal.reason;
+        if (this.closed || this.incoming !== session) throw lost();
+        return this.packet(data, signal);
+      };
+      const request = new Request(new URL(path, location.origin), init);
+      const body = new Uint8Array(await request.arrayBuffer());
+      if (body.length > MAX_BODY)
+        throw new Error("PhoneLink uploads are limited to 8 MB.");
+      const id = randomId();
+      let cancelling: Promise<void> | null = null;
+      cancel = () => {
+        signal?.removeEventListener("abort", cancel);
+        return cancelling ??= (this.incoming === session && !this.closed
+          ? this.packet({ op: "cancel", id }).then(() => undefined)
+          : Promise.resolve()).catch(() => {
+            // An unacknowledged cancel may still occupy the computer's bound.
+            // Retire this packet session so all its exchanges are invalidated.
+            if (this.incoming === session) this.closeSocket();
+          }).finally(release);
+      };
+      signal?.addEventListener("abort", cancel, { once: true });
+      await packet(
         {
           op: "start",
           id,
@@ -1089,27 +1304,27 @@ export class PhoneTransport {
           headers: Array.from(request.headers),
           size: body.length,
         },
-        signal,
       );
       for (let offset = 0; offset < body.length; offset += this.chunkSize)
-        await this.packet(
+        await packet(
           {
             op: "write",
             id,
             offset,
             data: base64(body.slice(offset, offset + this.chunkSize)),
           },
-          signal,
         );
       if (body.length > 0 || !this.zeroBodyAutorun)
-        await this.packet({ op: "run", id }, signal);
+        await packet({ op: "run", id });
       let first: Json;
       do {
-        first = await this.packet({ op: "read", id }, signal);
+        first = await packet({ op: "read", id });
       } while (first.type === "waiting");
       if (first.type !== "headers") throw lost();
-      const transport = this;
-      const cleanup = () => signal?.removeEventListener("abort", cancel);
+      const cleanup = () => {
+        signal?.removeEventListener("abort", cancel);
+        release();
+      };
       const initialData = typeof first.data === "string" ? unbase64(first.data) : null;
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -1123,7 +1338,7 @@ export class PhoneTransport {
           try {
             let event: Json;
             do {
-              event = await transport.packet({ op: "read", id }, signal);
+              event = await packet({ op: "read", id });
             } while (event.type === "waiting");
             if (event.type === "data") {
               controller.enqueue(unbase64(event.data));
@@ -1136,14 +1351,12 @@ export class PhoneTransport {
               controller.close();
             } else throw new Error(event.error ?? "The app request failed.");
           } catch (error) {
-            cleanup();
-            cancel();
+            void cancel();
             controller.error(error);
           }
         },
         cancel() {
-          cleanup();
-          cancel();
+          return cancel();
         },
       });
       if ([204, 205, 304].includes(first.status)) {
@@ -1158,8 +1371,7 @@ export class PhoneTransport {
         headers: first.headers,
       });
     } catch (error) {
-      signal?.removeEventListener("abort", cancel);
-      cancel();
+      void cancel();
       throw error;
     }
   }
@@ -1201,12 +1413,13 @@ export class PhoneTransport {
   }
 
   close() {
+    this.httpExchanges.reset();
     this.closed = true;
     this.diagnosticQueue = [];
     if (this.retry) clearTimeout(this.retry);
     this.clearHostMissingTimer();
     this.hostMissingSince = 0;
-    this.socket?.close();
+    this.closeSocket();
     for (const key of [
       this.hostBox,
       this.incoming,

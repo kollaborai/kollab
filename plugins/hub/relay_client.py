@@ -119,7 +119,9 @@ def _application_payload_limit(method: str) -> int:
     )
 MAX_PEER_PENDING = 4
 MAX_DISPATCH = 16
-MAX_PEER_DISPATCH = 4
+# PhoneLink reserves two app requests plus three media packets and one close.
+# The global dispatch cap still bounds competing approved peers.
+MAX_PEER_DISPATCH = 6
 MAX_REQUEST_TIMEOUT = 300
 APPLICATION_ERRORS = frozenset(
     {"busy", "not_supported", "failed", "deadline", "cancelled"}
@@ -1040,7 +1042,9 @@ class RelayClient:
                 async for message in ws:
                     if message.type == aiohttp.WSMsgType.TEXT:
                         try:
-                            await self._handle_frame(strict_json(message.data))
+                            await self._handle_frame(
+                                strict_json(message.data, limit=MAX_FRAME)
+                            )
                         except RelayFrameShapeError as exc:
                             # Well-formed text that is not a JSON object: a
                             # healthy socket must not reconnect over it.
@@ -1061,7 +1065,7 @@ class RelayClient:
         message = await ws.receive()
         if message.type != aiohttp.WSMsgType.TEXT:
             raise RelayError("relay expected a text frame")
-        return strict_json(message.data)
+        return strict_json(message.data, limit=MAX_FRAME)
 
     def _set_peers(self, frame):
         if (

@@ -1125,7 +1125,11 @@ class EngineSession:
                     usage_turn = (str(event.get("request_id") or ""), int(event.get("turn_id") or 0))
                     if self._acp_usage_display_turn in (None, usage_turn):
                         self.acp_turn_usage = dict(event.get("turn_usage") or {})
-                    await self.refresh_history()
+                    # This awaited completion refresh may be queued behind an
+                    # older, non-notifying user_message refresh. Announce the
+                    # digest it finds so pages that fetched the warm mirror
+                    # once at turn_complete can replace their transient reply.
+                    await self.refresh_history(notify=True)
                     self.last_turn_error = (
                         {"message": turn_error, "history_length": len(self.history)}
                         if turn_error

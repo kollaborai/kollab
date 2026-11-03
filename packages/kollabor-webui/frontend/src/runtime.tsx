@@ -337,8 +337,15 @@ function historyToMessages(
   const callsById = new Map<string, RestoredToolCall>();
   // The ACP request that produced a reply: a passive window swaps its live
   // copy of that reply for this row (see historyReplacesLiveTurn).
-  const replyMetadata = (metadata: Record<string, unknown> | null) =>
-    asString(metadata?.request_id) ? { metadata: { custom: { requestId: asString(metadata?.request_id) } } } : {};
+  const replyMetadata = (metadata: Record<string, unknown> | null) => {
+    const requestId = asString(metadata?.request_id);
+    const voiceTurnId = asString(metadata?.voice_turn_id);
+    const custom = {
+      ...(requestId ? { requestId } : {}),
+      ...(voiceTurnId ? { voiceTurnId } : {}),
+    };
+    return Object.keys(custom).length ? { metadata: { custom } } : {};
+  };
   const restoredStatus = (metadata: Record<string, unknown> | null): ThreadMessageLike["status"] => {
     const reason = asString(metadata?.stop_reason);
     if (metadata?.provider === "acp" && reason && reason !== "end_turn") {
@@ -859,8 +866,8 @@ export function EngineRuntimeProvider({
   // A turn this page did not start (another window, the agent's terminal, a
   // peer's message) streams through App's event subscription. Its events fold
   // into one ephemeral assistant message so a passive window watches the
-  // reply arrive; nothing is persisted — the history reload at turn_complete
-  // replaces it, and a page that runs the turn itself ignores these.
+  // reply arrive; only the matching canonical history row replaces it. A page
+  // that runs the turn itself ignores these.
   const liveTurn = useRef<LiveTurn>(emptyLiveTurn());
   const settleTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => {
@@ -895,17 +902,17 @@ export function EngineRuntimeProvider({
       if (next.held && next.parts === previous.parts) return;  // held back: nothing new to show
       const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
       if (!shown) return;
-      // A turn that ended is dropped now: the reload its event triggers appends
-      // the finished (or stopped) reply from history, and keeping both would
-      // show it twice (assistant-ui keeps every message by id). A stopped turn
-      // stays, no longer running, until its own turn_complete brings that reply.
+      // Keep this live copy outside synced bookkeeping until history carries
+      // the matching reply. App retries after terminal events; replacing by an
+      // unrelated assistant row could silently lose a delayed voice reply.
       const kept = shown.messages.filter((message) => !isLiveMessage(message));
       const live = liveMessage(next);
       if (!live && kept.length === shown.messages.length) return;
       importLiveState(live ? [...kept, live] : kept);
-      // Bounded: if the history never carries the reply, the text goes anyway.
+      // Completed replies stay visible until canonical history catches up.
+      // Preserve the prior bounded cleanup for cancellation and error states.
       clearTimeout(settleTimer.current);
-      if (next.settled && live) {
+      if (next.settled && next.settled !== "complete" && live) {
         settleTimer.current = setTimeout(() => {
           if (liveTurn.current.parts !== next.parts || !liveTurn.current.settled) return;
           liveTurn.current = replacedLiveTurn(liveTurn.current);  // a held turn starts now
