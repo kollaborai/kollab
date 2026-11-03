@@ -943,8 +943,17 @@ class RelayAgentBridge:
         if startup_tasks:
             await asyncio.gather(*startup_tasks, return_exceptions=True)
         self._membership_start_tasks.clear()
-        for context in contexts.values():
-            await context.close()
+        for slug, context in contexts.items():
+            try:
+                await context.close()
+            except Exception as exc:
+                # Keep teardown moving without logging exception text that could
+                # contain membership state.
+                logger.warning(
+                    "secondary network membership %s failed to close (%s)",
+                    slug,
+                    type(exc).__name__,
+                )
 
     async def _receive_membership(self, slug, peer, method, payload, *, _secure=False):
         """Slug-addressed inbound entry: route into the shared _receive body

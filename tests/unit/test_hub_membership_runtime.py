@@ -688,3 +688,72 @@ async def test_bridge_close_joins_inflight_secondary_membership_start(tmp_path, 
         await asyncio.gather(*pending, return_exceptions=True)
         if bridge._close_task is None:
             await context.close()
+
+
+@pytest.mark.asyncio
+async def test_bridge_close_isolates_and_logs_secondary_context_failures(caplog):
+    import logging
+    from types import SimpleNamespace
+
+    import plugins.hub.relay_agent as relay_agent
+
+    class _Context:
+        def __init__(self, failure=None):
+            self.failure = failure
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+            if self.failure is not None:
+                raise self.failure
+
+    class _Commands:
+        def __init__(self):
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+
+    failed_first = _Context(RuntimeError("private membership state"))
+    failed_second = _Context(ValueError("another private detail"))
+    healthy = _Context()
+    commands = _Commands()
+    owner_releases = []
+    bridge = relay_agent.RelayAgentBridge.__new__(relay_agent.RelayAgentBridge)
+    bridge._closed = False
+    bridge._close_task = None
+    bridge._membership_contexts = {
+        "first": failed_first,
+        "second": failed_second,
+        "healthy": healthy,
+    }
+    bridge._membership_start_tasks = set()
+    bridge.active = None
+    bridge._loop_task = None
+    bridge._resume_task = None
+    bridge._directory_task = None
+    bridge._arrivals_task = None
+    bridge._enrollment_issuer = None
+    bridge.plugin = SimpleNamespace()
+    bridge.peer_mesh = None
+    bridge.config_sync = None
+    bridge.membership_sync = None
+    bridge.halt_sync = None
+    bridge.network_attach = None
+    bridge.secure_transport = None
+    bridge.commands = commands
+    bridge.owner = SimpleNamespace(release=lambda: owner_releases.append(True))
+
+    with caplog.at_level(logging.WARNING, logger=relay_agent.__name__):
+        await bridge.close()
+
+    assert failed_first.close_calls == 1
+    assert failed_second.close_calls == 1
+    assert healthy.close_calls == 1
+    assert bridge._membership_contexts == {}
+    assert commands.close_calls == 1
+    assert owner_releases == [True]
+    assert "secondary network membership first failed to close (RuntimeError)" in caplog.text
+    assert "secondary network membership second failed to close (ValueError)" in caplog.text
+    assert "private membership state" not in caplog.text
+    assert "another private detail" not in caplog.text
