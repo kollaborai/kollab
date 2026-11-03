@@ -91,7 +91,10 @@ async function writeStored(value: Stored) {
 
 async function download(transport: PhoneTransport, path: string, limit: number) {
   const response = await transport.fetch(path);
-  if (!response.ok) throw new Error("Your computer could not send the app.");
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error("Your computer could not send the app.");
+  }
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (bytes.length > limit) throw new AppRefused("The app from your computer was refused: it is too large. Nothing was run.");
   return bytes;
@@ -204,6 +207,9 @@ async function main() {
       offline = true;
     }
     transport.installFetch();
+    // The verified app uses the same authenticated phone session for audio.
+    (window as Window & { __KOLLAB_PHONE_CALL__?: typeof transport.callPacket }).__KOLLAB_PHONE_CALL__ =
+      transport.callPacket.bind(transport);
     running = true;
     banner(offline ? "Reconnecting to your computer… Keep Kollab running there." : "");
     failureEvent = "render_failure";

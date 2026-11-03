@@ -18,6 +18,7 @@ import os
 import secrets
 import shutil
 import ssl
+import struct
 import sys
 import time
 from pathlib import Path
@@ -25,6 +26,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from kollabor_engine import phone_link
 from kollabor_engine.history_paging import build_history_page, resolve_history_output
 from kollabor_engine.phone_link import PhoneLink, decode_phone_frame
@@ -42,7 +44,9 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
     app_dir = scratch / "app"
     shutil.copytree(DIST / "app", app_dir, dirs_exist_ok=True)
     phone_link.app_directory = lambda: app_dir
-    phone_portal.static_directory = lambda: DIST / "loader"
+    phone_portal.static_directory = lambda: Path(
+        os.environ.get("KOLLAB_TEST_LOADER_DIR", str(DIST / "loader"))
+    )
 
     engine = FastAPI()
     synthetic_session_id = "synthetic-phone-history"
@@ -65,6 +69,10 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
     })
     metrics = {
         "phone_sessions": 0,
+        "command_reads": 0,
+        "voice_mic_frames": 0,
+        "voice_mic_nonzero": False,
+        "voice_closes": 0,
         "history_starts": [],
         "history_reads": [],
         "history_output_ref": False,
@@ -119,12 +127,56 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
     async def permissions(session_id: str):
         return {"pending_prompts": [], "approval_mode": "trust_all"}
 
+    @engine.get("/sessions/{session_id}/commands")
+    async def commands(session_id: str):
+        metrics["command_reads"] += 1
+        return {"session_id": session_id, "commands": [{"name": "voice", "description": "Voice"}]}
+
+    voice_id = "11111111-2222-4333-8444-555555555555"
+    voice_view = {
+        "voice_session_id": voice_id, "control_session_id": synthetic_session_id,
+        "conversation_session_id": synthetic_session_id, "agent_id": "scratch",
+        "thread_id": None, "voice_provider_profile_id": "scratch", "voice_prompt_revision": "1",
+        "state": "ready", "generation": 1, "detail": None, "retryable": False,
+    }
+
+    @engine.post("/sessions/{session_id}/voice")
+    async def create_voice(session_id: str):
+        return voice_view
+
+    @engine.delete("/voice/sessions/{session_id}")
+    async def stop_voice(session_id: str):
+        return {**voice_view, "state": "stopped"}
+
+    @engine.get("/voice/sessions/{session_id}/events")
+    async def voice_events(session_id: str):
+        async def events():
+            while True:
+                yield ": keepalive\n\n"
+                await asyncio.sleep(1)
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    class ScratchVoiceBridge:
+        async def send_mic(self, n, pcm):
+            metrics["voice_mic_frames"] += 1
+            metrics["voice_mic_nonzero"] |= any(pcm)
+
+        def take_output(self):
+            return struct.pack("<h", 5000) * 4800
+
+        async def close(self):
+            metrics["voice_closes"] += 1
+
+    async def open_voice_bridge(session_id, generation):
+        assert session_id == voice_id and generation == 1
+        return ScratchVoiceBridge()
+
 
     @engine.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def anything(path: str):
         return []
 
-    manager = PhoneLink(engine, scratch / "phones")
+    manager = PhoneLink(engine, scratch / "phones", open_phone_bridge=open_voice_bridge)
     await manager.start()
 
     async def handle_phone_request(identifier, peer, method, payload):

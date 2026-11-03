@@ -106,8 +106,26 @@ def test_a_phone_reaches_only_the_roots_the_app_calls():
     # #368: widening this is a decision. The app calls each of these, nothing else.
     assert phone_link.API_ROOTS == {
         "sessions", "agents", "profiles", "workspaces", "mcp", "hub", "sidebar",
-        "rosters", "teams", "prompts", "phone-app",
+        "rosters", "teams", "prompts", "voice", "phone-app",
     }  # fmt: skip
+
+
+def test_phone_voice_routes_are_narrowly_scoped():
+    for method, path in [
+        ("POST", "/sessions/s1/voice"),
+        ("GET", "/voice/sessions/v1"),
+        ("GET", "/voice/sessions/v1/events"),
+        ("DELETE", "/voice/sessions/v1"),
+    ]:
+        assert phone_link.voice_route_allowed(method, path)
+    for method, path in [
+        ("POST", "/voice/sessions/v1/join"),
+        ("POST", "/voice/sessions/v1/turns"),
+        ("POST", "/voice/sessions/v1/events"),
+        ("GET", "/voice/settings"),
+        ("DELETE", "/sessions/s1/voice"),
+    ]:
+        assert not phone_link.voice_route_allowed(method, path)
 
 
 @pytest.mark.asyncio
