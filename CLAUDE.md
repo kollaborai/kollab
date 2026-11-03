@@ -945,11 +945,14 @@ checkout source-read-only.
 
 After pushing the tag, dispatch `.github/workflows/publish.yml` from reviewed
 `main` with `-f tag=vX.Y.Z`. It resolves the immutable tagged source, builds
-and checks all binaries/desktop assets, publishes ten packages with PyPI
-Trusted Publishing, then publishes the complete GitHub Release. Upload jobs
-execute controller code from main, while builds use the tagged source SHA.
-Versions and changelog copies must already match the tag. Homebrew independently
-reconciles PyPI hourly; verify its formula update separately.
+and checks all binaries/desktop assets, publishes ten packages with the
+repository `PYPI_API_TOKEN` secret, then publishes the complete GitHub Release.
+The token is referenced only by the two PyPI upload action steps; the protected
+`pypi-publish` environment constrains the upload job but does not scope the
+repository secret. Upload jobs execute controller code from main, while builds
+use the tagged source SHA. Versions and changelog copies must already match
+the tag. Homebrew independently reconciles PyPI hourly; verify its formula
+update separately.
 
 Canonical checklist: `docs/release-process.md`. Full agent playbook:
 `bundles/skills/release-manager/SKILL.md`.

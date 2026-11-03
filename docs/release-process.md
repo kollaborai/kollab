@@ -212,42 +212,45 @@ scripts/docker-runtime.sh smoke
    main, step 6) and verify the installed release version. Report the source
    checkout's version separately if main has since advanced.
 
-### Publishing authority and first activation
+### Publishing authority and activation
 
-Use PyPI Trusted Publishing for all ten normal distributions: `kollab` and
-the nine packages in `scripts/publish.py:PACKAGES`. `kollabor-voice` is not
-a separate normal distribution; its code remains bundled with `kollab`.
-For each existing PyPI project, configure a GitHub publisher with owner
-`kollaborai`, repository `kollab`, workflow `publish.yml` and environment
-`pypi-publish`. The environment name is required in this setup.
-See [PyPI's publisher setup](https://docs.pypi.org/trusted-publishers/adding-a-publisher/)
-and [publishing guide](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
+The workflow uploads all ten normal distributions with the existing GitHub
+repository Actions secret `PYPI_API_TOKEN`: `kollab` and the nine packages in
+`scripts/publish.py:PACKAGES`. `kollabor-voice` is not a separate normal
+distribution; its code remains bundled with `kollab`. The pinned PyPA upload
+action receives that secret only in its two upload steps, as user `__token__`
+and password, and disables attestations because PyPI attestations require
+Trusted Publishing. No browser sign-in or PyPI publisher setup is required.
 
-Before enabling a disabled publisher, create and read back the GitHub
-`pypi-publish` and `github-release` environments. Each uses a custom
-deployment branch policy allowing only the branch `main`. No additional
-human reviewer is required. Preserve the protected-main review/check gates
-and immutable `v*` tag rules. Remove the obsolete repository
-`PYPI_API_TOKEN` and `HOMEBREW_TAP_TOKEN` secrets after the new setup is
-verified; this removes their Actions copies, not the underlying account tokens.
-The current workflow references neither secret.
+`PYPI_API_TOKEN` is a repository secret, so its Actions availability is
+repository-wide; the `pypi-publish` environment does not relocate or scope the
+secret. The workflow references it only in the package-upload job, which is
+protected by that environment. The job runs reviewed controller code from
+`main`, without executing tagged build hooks. Keep the token out of validation,
+source/build, binary, and GitHub Release jobs, command lines, logs, files,
+artifacts, and outputs. Never print its value. Confirm that the secret exists
+without reading or displaying it.
+
+Create and read back the GitHub `pypi-publish` and `github-release`
+environments. Each uses a custom deployment branch policy allowing only
+`main`. No additional human reviewer is required. Preserve the protected-main
+review/check gates and immutable `v*` tag rules. Do not remove the existing
+`PYPI_API_TOKEN` secret or change repository secrets as part of release setup.
 
 Build jobs have only `contents: read`, do not persist checkout credentials,
-and receive no PyPI credentials or OIDC permission. Release build jobs disable
-automatic uv and npm action caches; manual binary runs cannot select arbitrary
-source through a dispatch input. Science's GitHub metadata
-lookup still receives a step-scoped read-only GitHub token. Only the PyPI
-upload job has `id-token: write`; only the GitHub release job has
-`contents: write`. Both run controller code from the reviewed main commit,
-without executing tagged build hooks in those jobs. Repository write access
-already permits GitHub release writes; default read-only workflow permissions
-are a default, not a permission ceiling. Environment policies and the PyPI
-publisher binding constrain the PyPI release authority.
+and receive no PyPI credential. Release build jobs disable automatic uv and npm
+action caches; manual binary runs cannot select arbitrary source through a
+dispatch input. The GitHub metadata lookup receives a step-scoped read-only
+GitHub token. Only the GitHub Release job has `contents: write`. Repository
+write access already permits GitHub release writes; default read-only workflow
+permissions are a default, not a permission ceiling. The protected upload-job
+environment and the secret references in that job constrain where this
+workflow uses the PyPI token, but do not change the repository secret's scope.
 
-After configuration and the reviewed workflow merge, enable with
-`gh workflow enable publish.yml` if necessary, then dispatch from `main`
-with the existing tag. Verify the run's resolved source matches the recorded
-release commit before accepting its artifacts.
+After the reviewed workflow merge, enable with `gh workflow enable publish.yml`
+if necessary, then dispatch from `main` with the existing tag. Verify the run's
+resolved source matches the recorded release commit before accepting its
+artifacts.
 
 ### Partial publication and Homebrew
 

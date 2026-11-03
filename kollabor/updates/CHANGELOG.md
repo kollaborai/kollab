@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- Release publishing uses a reviewed main controller, immutable tagged source, isolated PyPI Trusted Publishing and verified GitHub assets without stored publishing tokens.
+- Release publishing uses a reviewed main controller, immutable tagged source, the existing repository PyPI token only in isolated upload steps, and verified GitHub assets.
 
 ## [0.19.0] - 2026-11-03
 
