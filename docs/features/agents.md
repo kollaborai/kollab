@@ -100,6 +100,17 @@ the `openai-oauth` provider profile. `lapis` is not an agent bundle, and
 `research` is not automatically a live hub identity just because a `research`
 bundle exists.
 
+## Sidebar Type Marks
+
+The Web UI Agents sidebar places a small, muted glyph after each local-session or
+offline agent name to identify its bundle (for example, coder `▸`, research `◈`, or
+default `●`). Hovering the mark shows the full bundle name, which is also exposed to
+screen readers. An unknown custom bundle gets a generic mark labeled with its actual
+type; when type metadata is missing, no mark is shown. Network/remote rows are also
+unmarked because their data does not include a bundle type; matching a remote name to
+a local roster entry could show the wrong type. The mark does not change identity,
+workspace grouping, or row actions.
+
 ## Hub Rosters and Teams
 
 Hub names and team charts are JSON libraries (see

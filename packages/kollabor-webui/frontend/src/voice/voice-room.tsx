@@ -7,6 +7,9 @@ import { createLiveKitRoom } from "./livekit-room";
 import { VoiceRoomController } from "./room-controller";
 import { isActive, isInterrupting, needsSpeechModel, remoteNotice, roomReachable, type VoiceRoomState } from "./room-state";
 import { voiceApi } from "./voice-api";
+import { createPhoneAudio, phoneCallTransport } from "./phone-audio";
+import type { PhoneTransport } from "../phonelink/phone-transport";
+import { inPhoneApp } from "../utils/page-route";
 
 type Ctx = { api: EngineApi; controller: VoiceRoomController; sessionId: string };
 const VoiceRoomContext = createContext<Ctx | null>(null);
@@ -22,7 +25,16 @@ export function VoiceRoomProvider({
   children: ReactNode;
 }) {
   const value = useMemo(
-    () => ({ api, controller: new VoiceRoomController(voiceApi(api), createLiveKitRoom), sessionId }),
+    () => {
+      const callPacket = (window as Window & { __KOLLAB_PHONE_CALL__?: PhoneTransport["callPacket"] }).__KOLLAB_PHONE_CALL__;
+      const phoneAudio = inPhoneApp(window.location.pathname)
+        ? createPhoneAudio({
+            checkAvailable: () => { if (!callPacket) throw new Error("Phone voice needs an updated PhoneLink connection service."); },
+            transport: phoneCallTransport({ callPacket: callPacket ?? (async () => { throw new Error("PhoneLink is disconnected."); }) }),
+          })
+        : undefined;
+      return { api, controller: new VoiceRoomController(voiceApi(api), createLiveKitRoom, phoneAudio), sessionId };
+    },
     [api, sessionId],
   );
   useEffect(() => () => void value.controller.stop("session_switch"), [value]);
@@ -31,7 +43,8 @@ export function VoiceRoomProvider({
 
 const NO_SUBSCRIBE = () => () => undefined;
 
-const REACHABLE = typeof window !== "undefined" && roomReachable(window.location.hostname);
+const REACHABLE = typeof window !== "undefined" &&
+  (roomReachable(window.location.hostname) || inPhoneApp(window.location.pathname));
 
 export function useVoiceRoom() {
   const ctx = useContext(VoiceRoomContext);
@@ -144,7 +157,7 @@ export function VoiceRoomBar() {
   if (!ctx || !room || !REACHABLE) return null;
   const active = isActive(room);
   if (!active && !room.error) return null;
-  const notice = remoteNotice(room);
+  const notice = remoteNotice(room, inPhoneApp(window.location.pathname));
   // A fixable setup step reads as a notice with a button, not as a red error.
   const setupStep = !active && needsSpeechModel(room.error);
   const interrupting = isInterrupting(room);
@@ -208,7 +221,11 @@ export function VoiceRoomBar() {
           </div>
         )
       ) : null}
-      {setupStep ? <InstallSpeechModelButton ctx={ctx} /> : null}
+      {setupStep ? (
+        inPhoneApp(window.location.pathname)
+          ? <div role="note">Install the speech model in Voice settings on your computer, then try again.</div>
+          : <InstallSpeechModelButton ctx={ctx} />
+      ) : null}
       {active && notice ? (
         <div role="note" data-slot="aui_voice-room-remote">
           {notice}

@@ -192,18 +192,18 @@ async def _engine_lifespan(app: FastAPI):
                 logger.warning("PhoneLink is unavailable in this engine; local chat remains available")
         yield
     finally:
-        voice = getattr(app.state, "voice", None)
-        if voice is not None:
-            try:
-                await voice.shutdown()
-            except Exception:
-                logger.exception("Voice shutdown failed")
         phone_link = getattr(app.state, "phone_link", None)
         if phone_link is not None:
             try:
                 await phone_link.close()
             except Exception:
                 logger.exception("PhoneLink close failed")
+        voice = getattr(app.state, "voice", None)
+        if voice is not None:
+            try:
+                await voice.shutdown()
+            except Exception:
+                logger.exception("Voice shutdown failed")
         try:
             for session in list(_sessions.values()):
                 try:
@@ -245,10 +245,12 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         version="0.1.0",
         lifespan=_engine_lifespan,
     )
+    _wire_voice(app, port)
     from .phone_link import PhoneLink
 
-    app.state.phone_link = PhoneLink(app, port=port)
-    _wire_voice(app, port)
+    app.state.phone_link = PhoneLink(
+        app, port=port, open_phone_bridge=app.state.voice.open_phone_bridge
+    )
     if port is not None:
         from .handover import HandoverStore
 

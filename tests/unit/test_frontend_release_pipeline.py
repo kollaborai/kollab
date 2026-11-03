@@ -35,12 +35,12 @@ def test_binary_service_and_pypi_consume_one_frontend_artifact():
         step["run"] for step in binaries["build"]["steps"] if "scripts/build_binary.py" in step.get("run", "")
     )
     assert '--frontend-dist "$RUNNER_TEMP/kollab-frontend"' in binary
-    assert publish["publish"]["needs"] == "binaries"
+    assert "binaries" in publish["build-packages"]["needs"]
     assert any(
         step["with"] == {"name": "frontend-dist", "path": selected}
-        for step in artifact_steps(publish["publish"], "download")
+        for step in artifact_steps(publish["build-packages"], "download")
     )
-    package = next(step for step in publish["publish"]["steps"] if "--package \"$pkg\"" in step.get("run", ""))
+    package = next(step for step in publish["build-packages"]["steps"] if "--package \"$pkg\"" in step.get("run", ""))
     assert package["env"]["KOLLAB_FRONTEND_DIST"] == selected
 
 

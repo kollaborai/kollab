@@ -12,7 +12,7 @@ Read `oss-maintainers` first. You keep PRs moving; you do not judge or land them
 ## Hard limits specific to PRs
 
 - Never `gh pr merge`, `gh pr review --approve`, `gh pr ready`, `--enable-auto`/`--disable-auto`.
-  In this repo un-drafting a writer's PR arms auto-merge (`.github/workflows/auto-merge.yml`).
+  The designated integrator owns readiness and merge after the repository's gates.
 - Never push to a PR branch, rebase, or resolve conflicts. That is coder work via koordinator.
 - Never re-run or cancel workflows.
 

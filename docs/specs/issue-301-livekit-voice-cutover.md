@@ -13,13 +13,19 @@ them, and no voice screen shows classifier controls, status or decisions.
 
 - The Engine owns one local `livekit-server` (loopback, per-run key) and one
   agent worker per voice session (`kollabor_engine/voice_livekit.py`). The
-  server gets free ports for signaling and for ICE over TCP (`--rtc.tcp_port`):
-  its ICE/TCP default, 7881, is one port per machine, so a second server
-  (another Engine, LiveKit's own demo) exited at startup.
+  server gets separate free ports for signaling and a loopback-only ICE/UDP
+  mux. RTC IP filtering includes only `127.0.0.1/32`; external IP discovery and
+  ICE/TCP fallback are disabled because LiveKit's TCP mux ignores its bind
+  address. Multiple engines use separate media sockets.
 - The worker (`kollabor_voice/livekit_worker.py`) runs an `AgentSession`:
   Silero VAD, the v1-mini turn detector, VAD interruption. Parakeet does
   speech-to-text and VibeVoice Carter text-to-speech, both through the one voice
   service owner.
+- The Engine and voice service start managed modules with their target
+  interpreter. Each child loads Kollab's pure-Python `kollabor_voice` package
+  from its exact directory in isolated mode; standard library and third-party
+  dependencies come from that child interpreter, never another interpreter's
+  `site-packages`.
 - A final transcript becomes a turn of the selected Kollab session: the worker's
   `llm_node` POSTs `/voice/sessions/{id}/turns` and reads NDJSON lines
   (`{"text"}` per sentence, then `{"done", "turn_id"}`). Replies are spoken
@@ -91,10 +97,10 @@ them, and no voice screen shows classifier controls, status or decisions.
 - A stop before the session exists (create still in flight) ends the session
   create makes, and the mic does not start again until it has; a stop while
   the room is being built never connects it.
-- `livekit-server` takes signaling on loopback only, so only a page served from
-  this computer gets the room. Its ICE ports listen on every interface, but
-  answer only peers that joined through signaling. Elsewhere the mic is the
-  `/voice` toggle (the computer running the agent listens), as before.
+- `livekit-server` takes signaling and media on loopback only, so only local
+  clients get the room. PhoneLink sends microphone
+  and speaker audio through its encrypted phone session to a local room bridge;
+  it does not expose signaling. Other remote pages retain the `/voice` toggle.
 
 ## Talk-over
 
@@ -260,8 +266,22 @@ is `KOLLAB_VOICE_ROOT`, default `~/.kollab/voice`). Each starts over past 5 MB.
 ## Open
 
 - PhoneLink: the phone reaches the Engine through the encrypted relay channel,
-  which carries no WebRTC media. Phone voice needs the phone's audio bridged over
-  that channel into the room (or a reachable TURN path).
+  which now carries bounded PCM call packets into an Engine-owned loopback
+  room bridge. The bridge explicitly publishes `SOURCE_MICROPHONE`, matching
+  RoomIO's speech-input filter. Browser playback reserves space in its 600 ms
+  FIFO before transferring each packet; dropped samples are reported.
+  Capture also has a 600 ms waiting FIFO. Up to three 200 ms media packets
+  can be in flight; credit advances only after the oldest response's audio
+  is admitted in order. The broker publishes microphone frames serially and
+  caches three completed responses, so an identical retry never republishes
+  input. Altered retries and sequence gaps close the call. Two app requests
+  and a separate close/control slot remain available alongside the three
+  media requests, within the host's six-request peer budget.
+  Bridge open has a 15-second RPC deadline around its 10-second readiness wait;
+  close has eight seconds around capped teardown. Media packet replies retain
+  their three-second deadline and identical-packet retry.
+  Recorded-input emulator and physical-phone speech/reply acceptance remain
+  required before closing this item.
 
 ## Checklist
 
