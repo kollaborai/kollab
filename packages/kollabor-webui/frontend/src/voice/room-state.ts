@@ -48,8 +48,8 @@ export const isActive = (s: VoiceRoomState) =>
 
 /**
  * livekit-server listens on this computer's loopback only (voice_livekit.py), so
- * only a page served from this computer can join a room. Elsewhere (PhoneLink,
- * a phone on the LAN) the mic stays the /voice toggle.
+ * only a page served from this computer can join a room directly. PhoneLink
+ * uses an encrypted audio bridge; other remote pages use the /voice toggle.
  */
 export const roomReachable = (hostname: string) => ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
 
@@ -57,9 +57,9 @@ export const roomReachable = (hostname: string) => ["localhost", "127.0.0.1", "[
 export const isInterrupting = (s: VoiceRoomState) => s.userSpeaking && s.state === "speaking";
 
 /** The assistant's reply goes to a remote LLM URL: show the notice. */
-export const remoteNotice = (s: VoiceRoomState): string | null =>
+export const remoteNotice = (s: VoiceRoomState, phone = false): string | null =>
   s.view?.remote_llm
-    ? `Remote LLM is listening${s.view.remote_llm_host ? ` (${s.view.remote_llm_host})` : ""}. Your transcript and session context are sent to it. Audio stays on this machine.`
+    ? `Remote LLM is listening${s.view.remote_llm_host ? ` (${s.view.remote_llm_host})` : ""}. Your transcript and session context are sent to it. ${phone ? "Audio is sent to your computer through PhoneLink." : "Audio stays on this machine."}`
     : null;
 
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);

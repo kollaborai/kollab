@@ -109,3 +109,44 @@ test("a saved link with neither key nor seed is refused", async () => {
   storage(null, bare as PhoneIdentity);
   await assert.rejects(phoneIdentity(), /saved link is invalid/);
 });
+
+test("a committed key write that cannot be read never discards the seed", async () => {
+  const approved = identity(true, 1);
+  const values = storage(null, approved);
+  const original = globalThis.indexedDB;
+  let writes = 0;
+  let reads = 0;
+  Object.assign(globalThis, {
+    indexedDB: {
+      open: () => {
+        const open = {
+          onsuccess: null as (() => void) | null,
+          result: {
+            close: () => {},
+            transaction: () => {
+              const transaction = {
+                oncomplete: null as (() => void) | null,
+                objectStore: () => ({
+                  put: () => { writes++; return { result: approved.id }; },
+                  get: () => { reads++; return { result: undefined }; },
+                }),
+              };
+              queueMicrotask(() => transaction.oncomplete?.());
+              return transaction;
+            },
+          },
+        };
+        queueMicrotask(() => open.onsuccess?.());
+        return open;
+      },
+    },
+  });
+  try {
+    assert.deepEqual(await phoneIdentity(), approved);
+    assert.equal(writes, 1);
+    assert.equal(reads, 1);
+    assert.deepEqual(JSON.parse(values.get(permanentKey)!), approved);
+  } finally {
+    Object.assign(globalThis, { indexedDB: original });
+  }
+});

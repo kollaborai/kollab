@@ -432,6 +432,29 @@ async def test_pending_and_dispatch_capacity_are_bounded(pair, monkeypatch, scop
 
 
 @pytest.mark.asyncio
+async def test_phone_media_chat_and_close_fit_the_peer_dispatch_budget(pair):
+    left, right, _ = pair
+    admitted = []
+
+    async def handle(peer, method, payload):
+        admitted.append(payload["index"])
+        await asyncio.Event().wait()
+
+    right.set_request_handler(handle)
+    # Browser clients have their own admission pool: two app requests, three
+    # media packets and one close/control request must fit without a busy reply.
+    for index in range(6):
+        await right._handle_frame(encrypted(left, right, "request", {
+            "method": "message", "arguments": {"index": index}, "timeout_ms": 30_000,
+        }))
+    await until(lambda: len(admitted) == 6)
+    assert len(right._dispatch) == 6
+    with pytest.raises(RelayError, match="busy"):
+        await left.request(right.public_key, "message", {"index": 6})
+    assert len(admitted) == 6
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "payload", [{"text": "x" * transport.MAX_APPLICATION_PAYLOAD}, {"x": 1.5}, {"x": -1}, ["not object"]]
 )

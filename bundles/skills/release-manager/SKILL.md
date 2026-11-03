@@ -27,10 +27,10 @@ release scope
   = GitHub Release/update-check marker, carrying the four platform binaries
 ```
 
-The source tree must already contain the correct versions before the tag is created. Do
-not rely on CI to repair version files after tagging. Kollab's publish workflow currently
-rewrites versions in its temporary checkout; that is a defense-in-depth check, not the
-release source of truth.
+The source tree must already contain the correct versions before the tag is created.
+The publisher checks those versions without repairing source. A reviewed main controller
+may publish an earlier tagged commit: record controller SHA and tagged source SHA
+separately, and never move the tag to pick up workflow changes.
 
 ## Scope and safety
 
@@ -67,8 +67,8 @@ Inspect these surfaces every time; do not trust this list if the repository chan
 - `kollabor/version.py`: source-mode CLI version resolution; it reads the repository
   `pyproject.toml` when that file is present.
 - `docs/release-process.md`: repository checklist and release-owner expectations.
-- `.github/workflows/publish.yml`: tag trigger, package build/upload, GitHub Release creation,
-  version-bump behavior, and Homebrew dispatch.
+- `.github/workflows/publish.yml`: main-only manual controller, immutable tagged source,
+  isolated PyPI token upload, and verified GitHub Release assets.
 - `scripts/publish.py`: local build/upload path and package dependency order.
 - `scripts/smoke_test.sh`: clean Docker/PyPI installation smoke test.
 
@@ -226,14 +226,21 @@ a release tag ONLY when Marco explicitly instructs them to):
 2. Verify the tag resolves to the recorded release commit and that the tag name matches all
    metadata before pushing it.
 3. Push the exact tag intentionally. Do not push `--tags` broadly.
-4. Watch the tag-triggered `publish.yml` workflow to a terminal result. A queued or green
-   local command is not publication proof.
+4. Confirm the repository `PYPI_API_TOKEN` secret exists without reading or
+   displaying its value, and confirm the protected main-only publishing
+   environments. The workflow references the repository secret only in the two
+   pinned PyPI upload action steps; its `pypi-publish` environment protects the
+   upload job but does not relocate or scope the repository secret. Then dispatch
+   `gh workflow run publish.yml --ref main -f tag=vX.Y.Z`.
+   Watch it to a terminal result. Record controller `head_sha`, resolved release
+   `source_sha` and tag object separately. A queued or green local command is not proof.
 5. Confirm every intended workspace package and `kollab` was built and uploaded. Check for
    partial publication; do not call the release complete if only some packages landed.
 6. Confirm the GitHub Release exists for the exact tag. The update checker reads GitHub's
    latest release, so a PyPI upload without a GitHub Release is incomplete.
-7. Confirm the Homebrew dispatch succeeded when the workflow requires it; report it
-   separately from PyPI/GitHub success.
+7. Verify the Homebrew tap's hourly PyPI reconciliation, or dispatch its existing
+   `update-kollab-formula.yml` workflow with the version. Its install/test gate and
+   committed formula are separate evidence from PyPI/GitHub success.
 
 If publication partially fails, stop further retries, record the exact package/workflow
 state, and choose a recovery plan. Never create a second tag with the same version or

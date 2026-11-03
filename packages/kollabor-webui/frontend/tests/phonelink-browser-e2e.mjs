@@ -48,11 +48,25 @@ const waitForMetrics = async (predicate, timeout = 15_000) => {
 };
 
 console.error("launching");
-const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined, args: ["--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessChecks,BlockInsecurePrivateNetworkRequests"] });
+const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined, args: ["--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessChecks,BlockInsecurePrivateNetworkRequests", "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--mute-audio"] });
 let failed = null;
 try {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: "block" });
   const page = await context.newPage();
+  await context.addInitScript(() => {
+    window.__phoneAudioPlayed = 0;
+    const Native = window.AudioWorkletNode;
+    window.AudioWorkletNode = class extends Native {
+      constructor(...args) {
+        super(...args);
+        const post = this.port.postMessage.bind(this.port);
+        this.port.postMessage = (message, ...rest) => {
+          if (message?.type === "play") window.__phoneAudioPlayed += message.pcm.byteLength;
+          return post(message, ...rest);
+        };
+      }
+    };
+  });
   const fetched = [];
 
   const network = [];
@@ -161,6 +175,21 @@ try {
     await page.getByText("Synthetic PhoneLink History", { exact: true }).first().click();
   }
   await historyViewport.waitFor({ state: "visible", timeout: 15000 });
+  await waitForMetrics((metrics) => metrics.command_reads > 0);
+  await page.getByRole("textbox", { name: "Message input" }).fill("/voice");
+  await page.getByText("Voice", { exact: true }).first().waitFor({ state: "visible" });
+  await page.getByRole("textbox", { name: "Message input" }).fill("");
+  await page.getByRole("button", { name: "Start voice mode" }).click();
+  await waitForMetrics((metrics) => metrics.voice_mic_frames >= 2 && metrics.voice_mic_nonzero);
+  await page.waitForFunction(() => window.__phoneAudioPlayed > 0, null, { timeout: 15000 });
+  await page.getByRole("button", { name: "Stop voice room" }).click();
+  await waitForMetrics((metrics) => metrics.voice_closes > 0);
+  const voiceMetrics = await control("GET", "/metrics");
+  await page.getByRole("button", { name: "Start voice mode" }).click();
+  await waitForMetrics((metrics) => metrics.voice_mic_frames > voiceMetrics.voice_mic_frames);
+  await page.getByRole("button", { name: "Stop voice room" }).click();
+  const finalVoiceMetrics = await waitForMetrics((metrics) => metrics.voice_closes >= 2);
+  console.error("PHONE_AUDIO_E2E", JSON.stringify({ micFrames: finalVoiceMetrics.voice_mic_frames, nonzero: finalVoiceMetrics.voice_mic_nonzero, closes: finalVoiceMetrics.voice_closes, playbackBytes: await page.evaluate(() => window.__phoneAudioPlayed) }));
   await page.getByText("synthetic-history-170", { exact: false }).first().waitFor({
     state: "attached",
     timeout: 15000,
