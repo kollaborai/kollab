@@ -190,9 +190,9 @@ scripts/docker-runtime.sh smoke
    source SHA, while upload jobs check out the controller SHA. Record both
    SHAs, the annotated tag object, run ID/URL and artifact digests in private
    release evidence. Never move the tag to pick up publishing changes.
-   A direct `binaries.yml` dispatch is a rehearsal; pass the recorded full SHA
-   as `-f source_ref=<SHA>` and verify its checkout rather than inferring
-   source from the controller's `head_sha`.
+   A direct `binaries.yml` dispatch is a rehearsal and builds its selected
+   workflow revision; it accepts no alternate source input. Use the publishing
+   controller for an existing tag, without changing or creating refs.
    Each platform stages a hash/version-checked native CLI from
    the same workflow; absent version inputs use `pyproject.toml`, while a
    supplied tag must match it. macOS and Linux desktop asset names therefore
@@ -233,7 +233,9 @@ verified; this removes their Actions copies, not the underlying account tokens.
 The current workflow references neither secret.
 
 Build jobs have only `contents: read`, do not persist checkout credentials,
-and receive no PyPI credentials or OIDC permission. Science's GitHub metadata
+and receive no PyPI credentials or OIDC permission. Release build jobs disable
+automatic uv and npm action caches; manual binary runs cannot select arbitrary
+source through a dispatch input. Science's GitHub metadata
 lookup still receives a step-scoped read-only GitHub token. Only the PyPI
 upload job has `id-token: write`; only the GitHub release job has
 `contents: write`. Both run controller code from the reviewed main commit,

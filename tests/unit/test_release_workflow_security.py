@@ -87,3 +87,18 @@ def test_actions_are_immutable_and_root_upload_follows_dependency_verification()
     root = next(i for i, s in enumerate(steps) if s.get("with", {}).get("packages-dir") == "upload/root/")
     assert workspace < verify < root
     assert "publish-packages" in workflow("publish.yml")["jobs"]["release"]["needs"]
+
+
+def test_direct_binary_dispatch_cannot_select_alternate_source_or_share_build_caches():
+    binaries = workflow("binaries.yml")
+    events = binaries.get("on", binaries.get(True))
+    assert events["workflow_dispatch"] is None
+    assert events["workflow_call"]["inputs"]["source_ref"]["required"] is True
+    for document in (binaries, workflow("publish.yml")):
+        for job in document["jobs"].values():
+            for step in job.get("steps", []):
+                action = step.get("uses", "")
+                if action.startswith("astral-sh/setup-uv@"):
+                    assert step["with"]["enable-cache"] is False
+                if action.startswith("actions/setup-node@"):
+                    assert step["with"]["package-manager-cache"] is False

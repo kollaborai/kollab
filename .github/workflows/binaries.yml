@@ -27,11 +27,6 @@ on:
         required: true
         type: string
   workflow_dispatch:
-    inputs:
-      source_ref:
-        description: Immutable source commit (blank uses the selected workflow revision)
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -53,6 +48,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - name: Compile the selected frontend once
         working-directory: packages/kollabor-webui/frontend
@@ -107,7 +103,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          cache-suffix: ${{ github.job }}  # one cache per job, see ci.yml
+          enable-cache: false
 
       - name: Download the selected frontend
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -166,7 +162,7 @@ jobs:
       - name: Install uv (desktop_release.py stages the runtime with uvx)
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          cache-suffix: ${{ github.job }}
+          enable-cache: false
 
       - name: Test Apple signing helper and documented build commands
         run: python desktop/tests/test_apple_signing.py
@@ -180,6 +176,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
+          package-manager-cache: false
 
       # The npm package ships the prebuilt CLI; `cargo install` compiled it on every run.
       - name: Check pinned Tauri CLI
@@ -266,7 +263,7 @@ jobs:
       - name: Install uv (desktop_release.py stages the runtime with uvx)
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          cache-suffix: ${{ github.job }}
+          enable-cache: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -281,6 +278,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
+          package-manager-cache: false
 
       - name: Check pinned Tauri CLI
         run: npx --yes @tauri-apps/cli@2.12.0 --version
@@ -354,7 +352,7 @@ jobs:
       - name: Install uv (the runtime build and staging run uvx)
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          cache-suffix: ${{ github.job }}
+          enable-cache: false
 
       - name: Download the selected frontend
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -385,6 +383,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
+          package-manager-cache: false
 
       - name: Check pinned Tauri CLI
         run: npx --yes @tauri-apps/cli@2.12.0 --version
