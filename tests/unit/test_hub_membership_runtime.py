@@ -601,7 +601,7 @@ async def test_bridge_close_joins_inflight_secondary_membership_start(tmp_path, 
     commands = commands_created[0]
     issuer = issuers_created[0]
 
-    caller_task = asyncio.current_task()
+    close_caller_cancelled = asyncio.Event()
 
     async def release_cancelled_startup_cleanup():
         await startup_cancelled.wait()
@@ -610,12 +610,15 @@ async def test_bridge_close_joins_inflight_secondary_membership_start(tmp_path, 
         close_entered_during_startup_cleanup.append(context_close_entered.is_set())
         release_startup_cleanup.set()
 
-    async def cancel_close_caller_during_context_cleanup():
+    async def cancel_close_caller_during_context_cleanup(close_caller):
         await close_entered.wait()
-        caller_task.cancel()
+        close_caller.cancel()
+        await asyncio.sleep(0)
+        close_caller_cancelled.set()
 
     release_startup_task = asyncio.create_task(release_cancelled_startup_cleanup())
-    cancel_task = asyncio.create_task(cancel_close_caller_during_context_cleanup())
+    close_caller = None
+    cancel_task = None
     try:
         await asyncio.wait_for(
             asyncio.gather(handler_installed.wait(), startup_started.wait(), resume_started.wait()),
@@ -631,9 +634,13 @@ async def test_bridge_close_joins_inflight_secondary_membership_start(tmp_path, 
 
         # The real start has installed its handler and resume/recovery tasks. Keep
         # its bridge-owned startup task pending until bridge.close cancels it.
-        with pytest.raises(asyncio.CancelledError):
-            await bridge.close()
+        close_caller = asyncio.create_task(bridge.close())
+        cancel_task = asyncio.create_task(
+            cancel_close_caller_during_context_cleanup(close_caller)
+        )
         await close_entered.wait()
+        await close_caller_cancelled.wait()
+        assert not close_caller.done()
 
         # The test controller releases cancellation cleanup, but does not await
         # the startup task. The context-close observation proves bridge close
@@ -648,6 +655,8 @@ async def test_bridge_close_joins_inflight_secondary_membership_start(tmp_path, 
         assert issuer.recovery_task is None or issuer.recovery_task.done()
 
         release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close_caller
         await bridge._close_task
 
         assert context_close_entered.is_set()
@@ -674,11 +683,12 @@ async def test_bridge_close_joins_inflight_secondary_membership_start(tmp_path, 
                 task.cancel()
         if context.resume_task is not None and not context.resume_task.done():
             context.resume_task.cancel()
-        for task in (cancel_task, release_startup_task):
-            if not task.done():
+        helper_tasks = (cancel_task, release_startup_task, close_caller)
+        for task in helper_tasks:
+            if task is not None and not task.done():
                 task.cancel()
         pending = list(startup_tasks)
-        pending.extend((cancel_task, release_startup_task))
+        pending.extend(task for task in helper_tasks if task is not None)
         if bridge._close_task is not None:
             pending.append(bridge._close_task)
         if context.resume_task is not None:
@@ -757,3 +767,103 @@ async def test_bridge_close_isolates_and_logs_secondary_context_failures(caplog)
     assert "secondary network membership second failed to close (ValueError)" in caplog.text
     assert "private membership state" not in caplog.text
     assert "another private detail" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_bridge_close_completes_cleanup_when_cancelled_mid_close(caplog):
+    import asyncio
+    import logging
+    from types import SimpleNamespace
+
+    import plugins.hub.relay_agent as relay_agent
+
+    class _Context:
+        def __init__(self, started=None, release=None):
+            self.started = started
+            self.release = release
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+            if self.started is not None:
+                self.started.set()
+            if self.release is not None:
+                await self.release.wait()
+
+    class _Closer:
+        def __init__(self):
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+
+    first_close_started = asyncio.Event()
+    release_first_close = asyncio.Event()
+    first = _Context(first_close_started, release_first_close)
+    second = _Context()
+    issuer = _Closer()
+    peer_mesh = _Closer()
+    commands = _Closer()
+    owner_releases = []
+    bridge = relay_agent.RelayAgentBridge.__new__(relay_agent.RelayAgentBridge)
+    bridge._closed = False
+    bridge._close_task = None
+    bridge._membership_contexts = {"first": first, "second": second}
+    bridge._membership_start_tasks = set()
+    bridge.active = None
+    bridge._loop_task = None
+    bridge._resume_task = None
+    bridge._directory_task = None
+    bridge._arrivals_task = None
+    bridge._enrollment_issuer = issuer
+    bridge.plugin = SimpleNamespace()
+    bridge.peer_mesh = peer_mesh
+    bridge.config_sync = None
+    bridge.membership_sync = None
+    bridge.halt_sync = None
+    bridge.network_attach = None
+    bridge.secure_transport = None
+    bridge.commands = commands
+    bridge.owner = SimpleNamespace(release=lambda: owner_releases.append(True))
+    close_caller = None
+    owned_close_task = None
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=relay_agent.__name__):
+            close_caller = asyncio.create_task(bridge.close())
+            await asyncio.wait_for(first_close_started.wait(), timeout=2)
+            owned_close_task = bridge._close_task
+            assert owned_close_task is not None and not owned_close_task.done()
+
+            close_caller.cancel()
+            await asyncio.sleep(0)
+            assert not close_caller.done()
+
+            # Also exercise cancellation of the bridge-owned teardown task.
+            owned_close_task.cancel()
+            release_first_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(close_caller, timeout=2)
+
+        assert owned_close_task.done() and owned_close_task.cancelled()
+        assert first.close_calls == 1
+        assert second.close_calls == 1
+        assert issuer.close_calls == 1
+        assert peer_mesh.close_calls == 1
+        assert commands.close_calls == 1
+        assert owner_releases == [True]
+        assert bridge._membership_contexts == {}
+        assert bridge._enrollment_issuer is None
+        assert bridge.peer_mesh is None
+        assert "relay agent shutdown was cancelled; cleanup completed" in caplog.text
+    finally:
+        release_first_close.set()
+        pending = [
+            task
+            for task in (close_caller, owned_close_task)
+            if task is not None and not task.done()
+        ]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)

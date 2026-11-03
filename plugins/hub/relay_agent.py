@@ -933,27 +933,63 @@ class RelayAgentBridge:
             if self._membership_contexts.get(slug) is context:
                 self._membership_contexts.pop(slug, None)
 
-    async def _stop_secondary_memberships(self) -> None:
-        """Cancel and join in-flight starts before closing their contexts."""
+    async def _finish_shutdown_operation(
+        self, awaitable
+    ) -> tuple[bool, BaseException | None]:
+        """Wait for a shutdown operation despite cancellation of its owner."""
+        task = asyncio.ensure_future(awaitable)
+        cancellation_requested = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                cancellation_requested |= bool(
+                    current_task and current_task.cancelling()
+                )
+            except Exception:
+                break
+        try:
+            task.result()
+        except asyncio.CancelledError as exc:
+            return cancellation_requested, exc
+        except Exception as exc:
+            return cancellation_requested, exc
+        return cancellation_requested, None
+
+    async def _close_shutdown_resource(self, name: str, awaitable) -> bool:
+        """Close one resource without letting failure skip remaining teardown."""
+        cancellation_requested, error = await self._finish_shutdown_operation(
+            awaitable
+        )
+        if error is not None:
+            logger.warning("%s failed to close (%s)", name, type(error).__name__)
+        return cancellation_requested
+
+    async def _stop_secondary_memberships(self) -> bool:
+        """Cancel and join starts, then close every secondary context."""
+        cancellation_requested = False
         contexts, self._membership_contexts = self._membership_contexts, {}
         startup_tasks = tuple(self._membership_start_tasks)
         for task in startup_tasks:
             if not task.done():
                 task.cancel()
         if startup_tasks:
-            await asyncio.gather(*startup_tasks, return_exceptions=True)
+            interrupted, error = await self._finish_shutdown_operation(
+                asyncio.gather(*startup_tasks, return_exceptions=True)
+            )
+            cancellation_requested |= interrupted
+            if error is not None:
+                logger.warning(
+                    "secondary membership startup tasks failed to stop (%s)",
+                    type(error).__name__,
+                )
         self._membership_start_tasks.clear()
         for slug, context in contexts.items():
-            try:
-                await context.close()
-            except Exception as exc:
-                # Keep teardown moving without logging exception text that could
-                # contain membership state.
-                logger.warning(
-                    "secondary network membership %s failed to close (%s)",
-                    slug,
-                    type(exc).__name__,
-                )
+            cancellation_requested |= await self._close_shutdown_resource(
+                f"secondary network membership {slug}", context.close()
+            )
+        return cancellation_requested
 
     async def _receive_membership(self, slug, peer, method, payload, *, _secure=False):
         """Slug-addressed inbound entry: route into the shared _receive body
@@ -1145,17 +1181,39 @@ class RelayAgentBridge:
         # Keep the full teardown alive if the caller is canceled. In
         # particular, secondary contexts have already been detached from the
         # bridge map before their startup tasks are joined.
-        await asyncio.shield(close_task)
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is None or not current_task.cancelling():
+                raise
+            # Caller cancellation is deferred until the owned teardown finishes.
+            while not close_task.done():
+                try:
+                    await asyncio.shield(close_task)
+                except asyncio.CancelledError:
+                    if close_task.done():
+                        break
+            raise
 
     async def _close_resources(self):
         self._closed = True
+        cancellation_requested = False
         if self.active and not self.active.finished:
-            await self._stop_active("interrupted", "receiving agent stopped")
+            interrupted, error = await self._finish_shutdown_operation(
+                self._stop_active("interrupted", "receiving agent stopped")
+            )
+            cancellation_requested |= interrupted
+            if error is not None:
+                logger.warning(
+                    "active relay session failed to stop (%s)",
+                    type(error).__name__,
+                )
         # Secondaries close before the primary's task teardown: their
         # inbound adapters must be detached while their clients can still
         # respond to in-flight requests. Join startup first so it cannot
         # reinstall a handler or create resume work after cleanup.
-        await self._stop_secondary_memberships()
+        cancellation_requested |= await self._stop_secondary_memberships()
         tasks = (
             self._loop_task,
             self._resume_task,
@@ -1165,36 +1223,76 @@ class RelayAgentBridge:
         for task in tasks:
             if task:
                 task.cancel()
-        await asyncio.gather(*(t for t in tasks if t), return_exceptions=True)
-        if self._enrollment_issuer is not None:
-            await self._enrollment_issuer.close()
+        background_tasks = tuple(task for task in tasks if task)
+        if background_tasks:
+            interrupted, error = await self._finish_shutdown_operation(
+                asyncio.gather(*background_tasks, return_exceptions=True)
+            )
+            cancellation_requested |= interrupted
+            if error is not None:
+                logger.warning(
+                    "relay agent background tasks failed to stop (%s)",
+                    type(error).__name__,
+                )
+        issuer = self._enrollment_issuer
+        if issuer is not None:
+            cancellation_requested |= await self._close_shutdown_resource(
+                "enrollment issuer", issuer.close()
+            )
             self._enrollment_issuer = None
         socket_server = getattr(self.plugin, "_socket_server", None)
         if socket_server is not None:
-            socket_server.set_peer_forward_handler(None)
-            socket_server.set_peer_secure_handler(None)
-            socket_server.set_peer_identity_resolver(None)
-        if self.peer_mesh is not None:
-            await self.peer_mesh.close()
-            self.peer_mesh = None
-        if self.config_sync is not None:
-            await self.config_sync.close()
-            self.config_sync = None
-        if self.membership_sync is not None:
-            await self.membership_sync.close()
-            self.membership_sync = None
-        if self.halt_sync is not None:
-            await self.halt_sync.close()
-            self.halt_sync = None
-        if self.network_attach is not None:
-            await self.network_attach.close()
-            self.network_attach = None
-        if self.secure_transport is not None:
-            self.secure_transport.close()
+            handlers = (
+                ("peer forward handler", socket_server.set_peer_forward_handler),
+                ("peer secure handler", socket_server.set_peer_secure_handler),
+                ("peer identity resolver", socket_server.set_peer_identity_resolver),
+            )
+            for name, detach in handlers:
+                try:
+                    detach(None)
+                except Exception as exc:
+                    logger.warning(
+                        "failed to detach %s (%s)", name, type(exc).__name__
+                    )
+        for attr, name in (
+            ("peer_mesh", "peer mesh"),
+            ("config_sync", "configuration sync"),
+            ("membership_sync", "membership sync"),
+            ("halt_sync", "halt sync"),
+            ("network_attach", "network attach"),
+        ):
+            resource = getattr(self, attr)
+            if resource is not None:
+                cancellation_requested |= await self._close_shutdown_resource(
+                    name, resource.close()
+                )
+                setattr(self, attr, None)
+        secure_transport = self.secure_transport
+        if secure_transport is not None:
+            try:
+                secure_transport.close()
+            except Exception as exc:
+                logger.warning(
+                    "secure transport failed to close (%s)", type(exc).__name__
+                )
             self.secure_transport = None
         if self.commands:
-            await self.commands.close()
-        self.owner.release()
+            cancellation_requested |= await self._close_shutdown_resource(
+                "relay agent commands", self.commands.close()
+            )
+        try:
+            self.owner.release()
+        except Exception as exc:
+            logger.warning("relay agent owner failed to release (%s)", type(exc).__name__)
+        current_task = asyncio.current_task()
+        cancellation_requested |= bool(
+            current_task and current_task.cancelling()
+        )
+        if cancellation_requested:
+            logger.warning("relay agent shutdown was cancelled; cleanup completed")
+            raise asyncio.CancelledError(
+                "relay agent shutdown cancelled after cleanup"
+            )
 
     async def _run(self):
         next_election = 0.0

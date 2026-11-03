@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - The voice service, LiveKit workers, PhoneLink bridges, and managed transcription and classifier workers no longer inherit another interpreter's site-packages.
-- Hub shutdown now waits for in-flight secondary membership starts and isolates per-peer close failures so one failing peer does not prevent remaining cleanup (#356).
+- Hub shutdown now joins in-flight secondary membership starts, isolates per-peer close failures, and finishes remaining cleanup before propagating cancellation (#356).
 
 ## [0.19.0] - 2026-11-03
 
