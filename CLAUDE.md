@@ -900,7 +900,8 @@ Version managed centrally in `pyproject.toml`:
 
 Files reading version: `kollabor/application.py`, `kollabor/cli.py`, `kollabor_config.loader`
 
-To update the semantic version: only modify `pyproject.toml`.
+To prepare a release version, update the root and workspace metadata, frontend
+and desktop versions together, then run `scripts/check_version_parity.py`.
 
 Build provenance is separate from the release version. Python wheel/binary
 builds embed the exact source branch and full HEAD SHA in `kollabor._build_info`;
@@ -942,11 +943,13 @@ checkout source-read-only.
    `main` to current `origin/main`; if it advanced after tagging, report its
    SHA and source version separately from the tagged release version.
 
-The tag triggers `.github/workflows/publish.yml` → the four platform binaries
-(`binaries.yml`, built and checked before anything publishes) → PyPI + Homebrew
-tap → GitHub Release with the binaries attached. Its first step, **Verify
-release consistency**, fails if the tagged commit's versions/changelog do not
-already match the tag.
+After pushing the tag, dispatch `.github/workflows/publish.yml` from reviewed
+`main` with `-f tag=vX.Y.Z`. It resolves the immutable tagged source, builds
+and checks all binaries/desktop assets, publishes ten packages with PyPI
+Trusted Publishing, then publishes the complete GitHub Release. Upload jobs
+execute controller code from main, while builds use the tagged source SHA.
+Versions and changelog copies must already match the tag. Homebrew independently
+reconciles PyPI hourly; verify its formula update separately.
 
 Canonical checklist: `docs/release-process.md`. Full agent playbook:
 `bundles/skills/release-manager/SKILL.md`.
