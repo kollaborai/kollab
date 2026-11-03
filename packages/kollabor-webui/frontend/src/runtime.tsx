@@ -38,7 +38,12 @@ import type {
 } from "./api";
 import { isToolOutputBatch } from "./api";
 import { GoalCancellationTracker } from "./utils/goal-cancel";
-import { mergeMissingHistoryMessages, reconcileBoundaryToolResults, shownMessagesChanged } from "./history-merge";
+import {
+  dropTransientTurnDuplicates,
+  mergeMissingHistoryMessages,
+  reconcileBoundaryToolResults,
+  shownMessagesChanged,
+} from "./history-merge";
 import {
   apartFromLive,
   applyLiveEvent,
@@ -1089,7 +1094,11 @@ export function EngineRuntimeProvider({
     if (replaced) liveTurn.current = replacedLiveTurn(liveTurn.current);
     const held = replaced ? liveMessage(liveTurn.current) : null;  // the queued turn it held back
     const liveShown = replaced ? (held ? [held] : []) : shown.messages.filter(isLiveMessage);
-    const messages = [...merged.messages, ...liveShown];
+    // A stale sync point replays the run's own rows next to the transient
+    // ones it already drew (#666); drop the transient block when the tail
+    // carries the same turn, proven row by row before anything is hidden.
+    const deduped = dropTransientTurnDuplicates(merged.messages, tail);
+    const messages = [...(deduped ?? merged.messages), ...liveShown];
     runtime.thread.importExternalState({
       ...shown,
       messages,
