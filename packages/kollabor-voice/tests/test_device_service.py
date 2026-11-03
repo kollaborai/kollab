@@ -102,15 +102,33 @@ def test_module_runner_uses_installed_package_without_host_site_packages(
     (host_site / "pydantic.py").write_text(
         "raise RuntimeError('host pydantic leaked into voice runtime')\n"
     )
+    (host_site / "pydantic_core.py").write_text(
+        "raise RuntimeError('host pydantic_core leaked into voice runtime')\n"
+    )
     (package_dir / "_probe.py").write_text(
-        "import json, pydantic, sysconfig, kollabor_voice\n"
+        "import json, pydantic, pydantic_core, kollabor_voice\n"
         "print(json.dumps({'voice': kollabor_voice.__file__, "
-        "'pydantic': pydantic.__file__, 'purelib': sysconfig.get_paths()['purelib']}))\n"
+        "'pydantic': pydantic.__file__, 'pydantic_core': pydantic_core.__file__}))\n"
     )
     monkeypatch.setattr(module_runtime, "_PACKAGE_DIR", package_dir)
     monkeypatch.setenv("PYTHONPATH", str(host_site))
 
     env = module_runtime.isolated_env(os.environ)
+    baseline = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import json, pydantic, pydantic_core; "
+            "print(json.dumps({'pydantic': pydantic.__file__, "
+            "'pydantic_core': pydantic_core.__file__}))",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    runtime_imports = json.loads(baseline.stdout)
     result = subprocess.run(
         module_runtime.module_command(sys.executable, "kollabor_voice._probe"),
         env=env,
@@ -120,10 +138,10 @@ def test_module_runner_uses_installed_package_without_host_site_packages(
     )
     imports = json.loads(result.stdout)
     assert Path(imports["voice"]).resolve() == (package_dir / "__init__.py").resolve()
-    pydantic_path = Path(imports["pydantic"]).resolve()
-    runtime_site = Path(imports["purelib"]).resolve()
-    assert pydantic_path != (host_site / "pydantic.py").resolve()
-    assert pydantic_path.is_relative_to(runtime_site)
+    for dependency in ("pydantic", "pydantic_core"):
+        assert Path(imports[dependency]).resolve() == Path(
+            runtime_imports[dependency]
+        ).resolve()
 
 
 def test_module_runner_loads_editable_source_package():
