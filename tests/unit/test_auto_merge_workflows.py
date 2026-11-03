@@ -13,6 +13,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CODEOWNERS_BODY = "* @maarco @kollaborai\n/.github/CODEOWNERS @maarco @kollaborai\n"
+CODEOWNERS_B64 = base64.encodebytes(CODEOWNERS_BODY.encode()).decode("ascii")
 
 
 def _workflow(name):
@@ -64,6 +65,7 @@ def test_manual_notice_has_no_write_authority_or_github_calls(tmp_path):
 )
 @pytest.mark.parametrize("existing_ruleset", [True, False])
 def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path, existing_ruleset):
+    assert CODEOWNERS_B64.endswith("\n") and "\n" in CODEOWNERS_B64[:-1]
     fakebin = tmp_path / "bin"
     fakebin.mkdir()
     log = tmp_path / "calls.jsonl"
@@ -105,7 +107,7 @@ def test_branch_protection_setup_does_not_change_auto_merge_setting(tmp_path, ex
         PATH=f"{fakebin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
         FAKE_GH_LOG=str(log),
         FAKE_RULESET=str(tmp_path / "applied-ruleset.json"),
-        FAKE_CODEOWNERS=base64.b64encode(CODEOWNERS_BODY.encode()).decode(),
+        FAKE_CODEOWNERS=CODEOWNERS_B64,
         FAKE_EXISTING_RULESET=str(existing_ruleset).lower(),
     )
 
@@ -213,7 +215,7 @@ else:
         PATH=f"{fakebin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
         FAKE_GH_LOG=str(log),
         FAKE_RULESET=str(saved),
-        FAKE_CODEOWNERS=base64.b64encode(CODEOWNERS_BODY.encode()).decode(),
+        FAKE_CODEOWNERS=CODEOWNERS_B64,
         FAKE_READBACK_CASE=readback_case,
     )
 
@@ -253,7 +255,7 @@ def test_branch_protection_apply_refuses_until_expected_codeowners_is_on_main(tm
         "    print('example/project')\n"
         "elif args[0] == 'api' and '/contents/.github/CODEOWNERS?ref=main' in args[1]:\n"
         "    body = os.environ['FAKE_MAIN_CODEOWNERS'].encode()\n"
-        "    print(json.dumps({'encoding': 'base64', 'content': base64.b64encode(body).decode()}))\n"
+        "    print(json.dumps({'encoding': 'base64', 'content': base64.encodebytes(body).decode()}))\n"
         "else:\n"
         "    sys.exit(2)\n"
     )
@@ -310,7 +312,7 @@ def test_branch_protection_apply_requires_write_access_for_both_codeowners(tmp_p
         "    print('example/project')\n"
         "elif args[0] == 'api' and '/contents/.github/CODEOWNERS?ref=main' in args[1]:\n"
         "    body = os.environ['FAKE_MAIN_CODEOWNERS'].encode()\n"
-        "    print(json.dumps({'encoding': 'base64', 'content': base64.b64encode(body).decode()}))\n"
+        "    print(json.dumps({'encoding': 'base64', 'content': base64.encodebytes(body).decode()}))\n"
         "elif args[0] == 'api' and '/collaborators/maarco/permission' in args[1]:\n"
         "    print('read')\n"
         "else:\n"
@@ -413,7 +415,7 @@ def test_branch_protection_check_requires_one_code_owner_approval_and_visible_em
         FAKE_BYPASS=bypass,
         FAKE_APPROVAL_COUNT=str(approval_count),
         FAKE_CODEOWNER_REVIEW=str(code_owner_review).lower(),
-        FAKE_CODEOWNERS=base64.b64encode(CODEOWNERS_BODY.encode()).decode(),
+        FAKE_CODEOWNERS=CODEOWNERS_B64,
     )
     script = str(ROOT / ".github" / "scripts" / "setup-branch-protection.sh")
     subprocess.run(["bash", script], cwd=ROOT, env=env, input="", text=True, capture_output=True, check=True, timeout=5)
