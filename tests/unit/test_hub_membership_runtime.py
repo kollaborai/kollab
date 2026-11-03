@@ -14,18 +14,12 @@ Contract under test:
 import hashlib
 import json
 import os
-import stat
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from nacl.signing import SigningKey
 
-from plugins.hub.device_record import (
-    NETWORKS_DIR_NAME,
-    origin_slug,
-    workspace_dir,
-)
+from plugins.hub.device_record import NETWORKS_DIR_NAME, origin_slug
 from plugins.hub.membership_runtime import (
     MAX_MEMBERSHIPS_PER_WORKSPACE,
     Membership,
@@ -396,3 +390,301 @@ async def test_membership_context_starts_and_closes_enrollment_issuer(home, tmp_
     assert issuer.started is True
     await context.close()
     issuer.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_membership_context_start_failure_closes_partial_resources():
+    import asyncio
+
+    resume_started = asyncio.Event()
+
+    class _Client:
+        def __init__(self):
+            self.handler = None
+
+        def set_request_handler(self, handler):
+            self.handler = handler
+
+    class _Commands:
+        def __init__(self):
+            self.client = _Client()
+            self.close_calls = 0
+            self.resume_task = None
+
+        async def resume(self):
+            self.resume_task = asyncio.current_task()
+            resume_started.set()
+            await asyncio.Event().wait()
+
+        async def close(self):
+            self.close_calls += 1
+
+    class _Issuer:
+        def __init__(self):
+            self.close_calls = 0
+
+        def start_recovery(self):
+            raise RuntimeError("issuer startup failed")
+
+        async def close(self):
+            self.close_calls += 1
+
+    commands = _Commands()
+    issuer = _Issuer()
+    context = MembershipContext(
+        Membership(slug="secondary", state_dir=Path("/tmp/secondary")),
+        commands,
+        _RecordingTransport(),
+        inbound=lambda *_args: None,
+        enrollment_issuer=issuer,
+    )
+
+    with pytest.raises(RuntimeError, match="issuer startup failed"):
+        await context.start()
+
+    assert resume_started.is_set()
+    assert commands.resume_task is not None
+    assert commands.resume_task.done() and commands.resume_task.cancelled()
+    assert commands.client.handler is None
+    assert issuer.close_calls == 1
+    assert commands.close_calls == 1
+
+    # Repeated close and a stale start cannot recreate or double-close resources.
+    await context.close()
+    await context.start()
+    assert commands.client.handler is None
+    assert issuer.close_calls == 1
+    assert commands.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_bridge_close_joins_inflight_secondary_membership_start(tmp_path, monkeypatch):
+    """Shutdown joins startup cancellation before closing secondary resources."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import plugins.hub.enrollment_client as enrollment_client
+    import plugins.hub.relay_agent as relay_agent
+
+    handler_installed = asyncio.Event()
+    resume_started = asyncio.Event()
+    startup_started = asyncio.Event()
+    release_startup = asyncio.Event()
+    startup_cancelled = asyncio.Event()
+    release_startup_cleanup = asyncio.Event()
+    context_close_entered = asyncio.Event()
+    context_close_start_states = []
+    release_resume = asyncio.Event()
+    close_entered = asyncio.Event()
+    release_close = asyncio.Event()
+    close_entered_during_startup_cleanup = []
+    commands_created = []
+    issuers_created = []
+    startup_tasks = []
+    original_create_task = asyncio.create_task
+
+    def capture_create_task(coro, *, name=None, **kwargs):
+        task = original_create_task(coro, name=name, **kwargs)
+        if name and name.startswith("kollab-membership-start-"):
+            startup_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", capture_create_task)
+
+    class _Client:
+        def __init__(self):
+            self._store = SimpleNamespace(key="a" * 32)
+            self.request_handler = None
+
+        def set_request_handler(self, handler):
+            self.request_handler = handler
+            if handler is not None:
+                handler_installed.set()
+
+    class _Commands:
+        def __init__(self, *_args, **_kwargs):
+            self.client = _Client()
+            self.agent_bridge = None
+            self.close_calls = 0
+            commands_created.append(self)
+
+        async def resume(self):
+            resume_started.set()
+            await release_resume.wait()
+
+        async def close(self):
+            self.close_calls += 1
+            close_entered.set()
+            await release_close.wait()
+
+    class _EnrollmentBridge:
+        def __init__(self, *_args, **_kwargs):
+            self._enrollment_issuer = None
+
+    class _Issuer:
+        def __init__(self, _bridge):
+            self.start_calls = 0
+            self.close_calls = 0
+            self.recovery_task = None
+            issuers_created.append(self)
+
+        def start_recovery(self):
+            self.start_calls += 1
+
+            async def recover():
+                await asyncio.Event().wait()
+
+            self.recovery_task = asyncio.create_task(recover())
+
+        async def close(self):
+            self.close_calls += 1
+            if self.recovery_task is not None:
+                self.recovery_task.cancel()
+                await asyncio.gather(self.recovery_task, return_exceptions=True)
+
+    monkeypatch.setattr(relay_agent, "RelayCommands", _Commands)
+    monkeypatch.setattr(relay_agent, "_MembershipEnrollmentBridge", _EnrollmentBridge)
+    monkeypatch.setattr(relay_agent, "SecureConversationTransport", lambda *_args: object())
+    monkeypatch.setattr(enrollment_client, "EnrollmentIssuer", _Issuer)
+
+    original_start = relay_agent.MembershipContext.start
+
+    async def gated_start(context):
+        await original_start(context)
+        startup_started.set()
+        try:
+            await release_startup.wait()
+        except asyncio.CancelledError:
+            startup_cancelled.set()
+            await release_startup_cleanup.wait()
+            raise
+
+    monkeypatch.setattr(relay_agent.MembershipContext, "start", gated_start)
+
+    original_context_close = relay_agent.MembershipContext.close
+
+    async def observed_context_close(context):
+        context_close_start_states.append((startup_tasks[0].done(), startup_tasks[0].cancelled()))
+        context_close_entered.set()
+        await original_context_close(context)
+
+    monkeypatch.setattr(relay_agent.MembershipContext, "close", observed_context_close)
+
+    primary = SimpleNamespace(slug="primary", state_dir=tmp_path)
+    secondary = SimpleNamespace(slug="secondary", state_dir=tmp_path)
+    owner_releases = []
+    bridge = relay_agent.RelayAgentBridge.__new__(relay_agent.RelayAgentBridge)
+    bridge.plugin = SimpleNamespace(config=None)
+    bridge.workspace = tmp_path
+    bridge.owner = SimpleNamespace(owner=lambda: object(), release=lambda: owner_releases.append(True))
+    bridge.memberships = SimpleNamespace(primary=lambda: primary, list=lambda: [primary, secondary])
+    bridge._membership_contexts = {}
+    bridge._membership_start_tasks = set()
+    bridge._closed = False
+    bridge.active = None
+    bridge._loop_task = None
+    bridge._resume_task = None
+    bridge._directory_task = None
+    bridge._arrivals_task = None
+    bridge._enrollment_issuer = None
+    bridge.peer_mesh = None
+    bridge.config_sync = None
+    bridge.membership_sync = None
+    bridge.halt_sync = None
+    bridge.network_attach = None
+    bridge.secure_transport = None
+    bridge.commands = None
+
+    bridge._start_secondary_memberships()
+    assert len(startup_tasks) == 1
+    context = bridge._membership_contexts[secondary.slug]
+    commands = commands_created[0]
+    issuer = issuers_created[0]
+
+    caller_task = asyncio.current_task()
+
+    async def release_cancelled_startup_cleanup():
+        await startup_cancelled.wait()
+        # Give close its next turn while startup cleanup remains gated.
+        await asyncio.sleep(0)
+        close_entered_during_startup_cleanup.append(context_close_entered.is_set())
+        release_startup_cleanup.set()
+
+    async def cancel_close_caller_during_context_cleanup():
+        await close_entered.wait()
+        caller_task.cancel()
+
+    release_startup_task = asyncio.create_task(release_cancelled_startup_cleanup())
+    cancel_task = asyncio.create_task(cancel_close_caller_during_context_cleanup())
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(handler_installed.wait(), startup_started.wait(), resume_started.wait()),
+            timeout=5,
+        )
+        assert handler_installed.is_set()
+        assert resume_started.is_set()
+        assert startup_tasks[0] in bridge._membership_start_tasks
+        assert not startup_tasks[0].done()
+        assert issuer.start_calls == 1
+        assert issuer.recovery_task is not None
+        assert not issuer.recovery_task.done()
+
+        # The real start has installed its handler and resume/recovery tasks. Keep
+        # its bridge-owned startup task pending until bridge.close cancels it.
+        with pytest.raises(asyncio.CancelledError):
+            await bridge.close()
+        await close_entered.wait()
+
+        # The test controller releases cancellation cleanup, but does not await
+        # the startup task. The context-close observation proves bridge close
+        # waited for that owned task before entering secondary resource teardown.
+        assert close_entered_during_startup_cleanup == [False]
+        assert context_close_start_states == [(True, True)]
+        assert startup_tasks[0].done() and startup_tasks[0].cancelled()
+        assert not bridge._membership_start_tasks
+        assert not bridge._close_task.done()
+        assert commands.client.request_handler is None
+        assert context.resume_task is None or context.resume_task.done()
+        assert issuer.recovery_task is None or issuer.recovery_task.done()
+
+        release_close.set()
+        await bridge._close_task
+
+        assert context_close_entered.is_set()
+        assert commands.client.request_handler is None
+        assert handler_installed.is_set()
+        assert resume_started.is_set()
+        assert issuer.recovery_task is None or issuer.recovery_task.done()
+        assert issuer.start_calls == 1
+        assert len(startup_tasks) == 1
+        assert not bridge._membership_start_tasks
+        bridge._start_secondary_memberships()
+        assert len(startup_tasks) == 1
+        assert bridge._membership_contexts == {}
+        assert commands.close_calls == 1
+        assert issuer.close_calls == 1
+        assert owner_releases == [True]
+    finally:
+        release_close.set()
+        release_resume.set()
+        release_startup.set()
+        release_startup_cleanup.set()
+        for task in startup_tasks:
+            if not task.done():
+                task.cancel()
+        if context.resume_task is not None and not context.resume_task.done():
+            context.resume_task.cancel()
+        for task in (cancel_task, release_startup_task):
+            if not task.done():
+                task.cancel()
+        pending = list(startup_tasks)
+        pending.extend((cancel_task, release_startup_task))
+        if bridge._close_task is not None:
+            pending.append(bridge._close_task)
+        if context.resume_task is not None:
+            pending.append(context.resume_task)
+        if issuer.recovery_task is not None:
+            pending.append(issuer.recovery_task)
+        await asyncio.gather(*pending, return_exceptions=True)
+        if bridge._close_task is None:
+            await context.close()

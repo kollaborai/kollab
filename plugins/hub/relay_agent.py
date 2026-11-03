@@ -248,6 +248,7 @@ class RelayAgentBridge:
         self.memberships = Memberships(self.workspace)
         self._membership_runtimes: dict[str, RelayCommands] = {}
         self._membership_contexts: dict[str, MembershipContext] = {}
+        self._membership_start_tasks: set[asyncio.Task[None]] = set()
         self.directory = directory or LocalAgentDirectory()
         self.commands: RelayCommands | None = None
         self.store: ConversationStore | None = None
@@ -278,6 +279,7 @@ class RelayAgentBridge:
         self._next_event_wake = 0.0
         self._outbox_lock = asyncio.Lock()
         self._enrollment_issuer = None
+        self._close_task: asyncio.Task[None] | None = None
         self.secure_transport: SecureConversationTransport | None = None
         self.config_sync: ConfigSyncService | None = None
         self.membership_sync: MembershipSync | None = None
@@ -859,7 +861,7 @@ class RelayAgentBridge:
         validation (approvals, links, grants) always reads THAT membership's
         state. Config-sync and peer mesh stay primary-only (design v2 §4).
         """
-        if self.owner.owner() is None:
+        if self._closed or self.owner.owner() is None:
             return
         try:
             primary = self.memberships.primary().slug
@@ -903,17 +905,46 @@ class RelayAgentBridge:
                 )
                 continue
             self._membership_contexts[membership.slug] = context
-            asyncio.create_task(
+            task = asyncio.create_task(
                 context.start(), name=f"kollab-membership-start-{membership.slug}"
             )
+            self._membership_start_tasks.add(task)
+            task.add_done_callback(
+                lambda completed, slug=membership.slug, context=context: (
+                    self._secondary_membership_start_done(slug, context, completed)
+                )
+            )
 
-    def _stop_secondary_memberships(self) -> None:
+    def _secondary_membership_start_done(
+        self, slug: str, context: MembershipContext, task: asyncio.Task[None]
+    ) -> None:
+        self._membership_start_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception as exc:
+            # Avoid logging exception text that could contain membership state.
+            logger.warning(
+                "secondary network membership %s failed to start (%s)",
+                slug,
+                type(exc).__name__,
+            )
+            if self._membership_contexts.get(slug) is context:
+                self._membership_contexts.pop(slug, None)
+
+    async def _stop_secondary_memberships(self) -> None:
+        """Cancel and join in-flight starts before closing their contexts."""
         contexts, self._membership_contexts = self._membership_contexts, {}
+        startup_tasks = tuple(self._membership_start_tasks)
+        for task in startup_tasks:
+            if not task.done():
+                task.cancel()
+        if startup_tasks:
+            await asyncio.gather(*startup_tasks, return_exceptions=True)
+        self._membership_start_tasks.clear()
         for context in contexts.values():
-            try:
-                asyncio.get_running_loop().create_task(context.close())
-            except RuntimeError:
-                pass
+            await context.close()
 
     async def _receive_membership(self, slug, peer, method, payload, *, _secure=False):
         """Slug-addressed inbound entry: route into the shared _receive body
@@ -1090,15 +1121,32 @@ class RelayAgentBridge:
 
     async def close(self):
         self._closed = True
+        # Cancel queued starts before yielding to the owned cleanup task, so a
+        # start already in the event loop's ready queue cannot install its
+        # handler after shutdown has been requested.
+        for task in tuple(getattr(self, "_membership_start_tasks", ())):
+            if not task.done():
+                task.cancel()
+        close_task = getattr(self, "_close_task", None)
+        if close_task is None:
+            close_task = asyncio.create_task(
+                self._close_resources(), name="kollab-relay-agent-close"
+            )
+            self._close_task = close_task
+        # Keep the full teardown alive if the caller is canceled. In
+        # particular, secondary contexts have already been detached from the
+        # bridge map before their startup tasks are joined.
+        await asyncio.shield(close_task)
+
+    async def _close_resources(self):
+        self._closed = True
         if self.active and not self.active.finished:
             await self._stop_active("interrupted", "receiving agent stopped")
         # Secondaries close before the primary's task teardown: their
         # inbound adapters must be detached while their clients can still
-        # respond to in-flight requests.
-        contexts = list(self._membership_contexts.values())
-        self._membership_contexts.clear()
-        for context in contexts:
-            await context.close()
+        # respond to in-flight requests. Join startup first so it cannot
+        # reinstall a handler or create resume work after cleanup.
+        await self._stop_secondary_memberships()
         tasks = (
             self._loop_task,
             self._resume_task,
