@@ -117,6 +117,73 @@ def test_cli_stop_all_refuses_background_terminal_context_after_marker_filter(
     stop.assert_not_awaited()
 
 
+def test_cli_stop_all_scans_validated_windows_external_project_state(
+    tmp_path, capsys, monkeypatch
+):
+    """Windows project state can live outside ~/.kollab/projects."""
+    from kollabor.cli import _cli_is_hub_agent_context
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    project = tmp_path / "workspace"
+    project.mkdir()
+    selected_state = tmp_path / "selected-state"
+    presence_dir = selected_state / "hub" / "presence"
+    presence_dir.mkdir(parents=True)
+    _presence(presence_dir, "parent-agent", pid=4242)
+
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_config_directory", lambda: config_dir
+    )
+    monkeypatch.setattr("kollabor_config.config_utils.IS_WINDOWS", True)
+    monkeypatch.setattr(
+        "plugins.hub.project_scope.resolve_project_root", lambda: project
+    )
+    monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
+    monkeypatch.setenv("KOLLAB_PROJECT_DATA_PROJECT", str(project))
+    monkeypatch.setenv("KOLLAB_PROJECT_DATA_DIR", str(selected_state))
+    monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
+    monkeypatch.delenv("KOLLAB_AGENT_PID", raising=False)
+
+    stop = AsyncMock(return_value=(True, "stopped"))
+    monkeypatch.setattr("kollabor.cli.stop_agent_record", stop)
+    monkeypatch.setattr(
+        "plugins.hub.presence.get_presence_dir", lambda: config_dir / "hub" / "presence"
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(_handle_cli_hub(["stop", "all"]))
+
+    assert exc.value.code == 2
+    assert "agent-context" in capsys.readouterr().err
+    stop.assert_not_awaited()
+    assert _cli_is_hub_agent_context() is True
+
+
+def test_cli_stop_all_fails_closed_for_invalid_windows_state_selection(
+    tmp_path, monkeypatch
+):
+    """An invalid selected state path cannot make ancestry look empty."""
+    from kollabor.cli import _cli_is_hub_agent_context
+
+    project = tmp_path / "workspace"
+    project.mkdir()
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_config_directory", lambda: tmp_path / "config"
+    )
+    monkeypatch.setattr("kollabor_config.config_utils.IS_WINDOWS", True)
+    monkeypatch.setattr(
+        "plugins.hub.project_scope.resolve_project_root", lambda: project
+    )
+    monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
+    monkeypatch.setenv("KOLLAB_PROJECT_DATA_PROJECT", str(project))
+    monkeypatch.setenv("KOLLAB_PROJECT_DATA_DIR", str(tmp_path / "missing-state"))
+    monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
+    monkeypatch.delenv("KOLLAB_AGENT_PID", raising=False)
+
+    assert _cli_is_hub_agent_context() is True
+
+
 def test_cli_stop_all_refuses_when_process_ancestry_cannot_be_read(
     tmp_path, capsys, monkeypatch
 ):

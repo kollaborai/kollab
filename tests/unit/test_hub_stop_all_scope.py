@@ -8,9 +8,14 @@ callers with nothing of their own to stop.
 
 import asyncio
 import signal
+import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
+from kollabor_agent.tool_definitions.hub import hub_stop
+from plugins.agent_orchestrator.models import AgentSession
+from plugins.agent_orchestrator.orchestrator import AgentOrchestrator
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.startup_messages import (
     HUB_STARTUP_TIPS,
@@ -39,8 +44,31 @@ def _session(pid, start_time, alive=True):
             return None if alive else 0
 
     return SimpleNamespace(
-        pid=pid, start_time=start_time, is_alive=alive, proc=FakeProc()
+        pid=pid,
+        start_time=start_time,
+        is_alive=alive,
+        proc=FakeProc(),
+        process_lock=threading.RLock(),
     )
+
+
+def test_hub_stop_model_rules_describe_caller_owned_scope():
+    assert "named local agent" in hub_stop.description
+    assert "In the 'all' case" in hub_stop.description
+    assert "immune" in hub_stop.parameters[0].description
+    rendered = hub_stop.to_markdown()
+    assert "only agents you started" in rendered
+    assert "peers started by others" in rendered
+
+    prompt = (
+        Path(__file__).resolve().parents[2]
+        / "bundles"
+        / "agents"
+        / "system"
+        / "hub-collaboration.md"
+    ).read_text()
+    assert "target `all` stops only agents you started" in prompt
+    assert "peers started by other agents or the operator are immune" in prompt
 
 
 def _patch_process_create_time(monkeypatch, plugin):
@@ -318,10 +346,11 @@ def test_stop_all_never_kills_by_reused_pid_of_dead_session(monkeypatch):
 
 
 def test_stop_all_never_signals_reused_pid_after_mid_stop_exit(monkeypatch):
-    """TOCTOU guard: the sweep validates ownership before dispatch, but the
-    tracked process can exit during the awaited shutdown window. Once it
-    exits its PID may be reused, so fallback escalation must revalidate at
-    signal time and withhold raw-pid signals (fail closed)."""
+    """The tracked session can exit during the async shutdown wait.
+
+    Final escalation must recheck the child under its shared process lock and
+    withhold raw-pid signals when the tracked child has exited.
+    """
 
     async def run_test():
         now = time.time()
@@ -365,17 +394,13 @@ def test_stop_all_never_signals_reused_pid_after_mid_stop_exit(monkeypatch):
         result = await plugin._handle_stop_command("all")
 
         assert kills == [], f"signaled {kills} after the tracked process exited"
-        assert "PID-reuse guard" in result
+        assert "tracked-process guard" in result
 
     asyncio.run(run_test())
 
 
 def test_stop_all_withholds_escalation_when_session_dies_after_guard(monkeypatch):
-    """Garnet r3 interleaving: the pre-dispatch liveness guard passes, then
-    the tracked process exits BEFORE the signal is sent. Escalation must
-    signal through the tracked Popen handle (a no-op once the child is
-    reaped, fail-closed without a handle) -- never raw os.kill by PID,
-    because the just-exited PID can already belong to another process."""
+    """A pre-dispatch liveness check cannot authorize a later raw-PID signal."""
 
     async def run_test():
         now = time.time()
@@ -392,14 +417,13 @@ def test_stop_all_withholds_escalation_when_session_dies_after_guard(monkeypatch
             "_get_orchestrator",
             lambda: _orch({"helper": session}),
         )
-        # Force the guard to pass: the exit lands in the window AFTER the
-        # guard check, BEFORE the signal — exactly the check-then-use race.
+        # Force the advisory guard to pass; the tracked Popen reports the exit
+        # when final escalation takes the session lock.
         monkeypatch.setattr(
             HubPlugin, "_signal_allowed", staticmethod(lambda session: True)
         )
 
-        # The selection guard passes, but the Popen handle reports that the
-        # selected process has exited before the signal call.
+        # The child is already reported as exited when the signal path checks.
         class ReapedProc:
             pid = 4242
 
@@ -434,14 +458,13 @@ def test_stop_all_withholds_escalation_when_session_dies_after_guard(monkeypatch
         result = await plugin._handle_stop_command("all")
 
         assert kills == [], f"raw-signaled {kills} after the guard passed"
-        assert "PID-reuse guard" in result
+        assert "tracked-process guard" in result
 
     asyncio.run(run_test())
 
 
 def test_signal_session_noops_when_child_already_reaped():
-    """Popen.send_signal checks returncode: a reaped child can never be
-    signaled, so its recycled PID is unreachable through the handle."""
+    """A tracked child already observed as exited is not signaled."""
 
     class FakeProc:
         returncode = 0
@@ -452,7 +475,8 @@ def test_signal_session_noops_when_child_already_reaped():
         def send_signal(self, sig):
             raise AssertionError("send_signal must not run on a reaped child")
 
-    assert HubPlugin()._signal_session(SimpleNamespace(proc=FakeProc()), 15) is False
+    session = SimpleNamespace(proc=FakeProc(), process_lock=threading.RLock())
+    assert HubPlugin()._signal_session(session, 15) is False
 
 
 def test_signal_session_sends_through_handle_while_child_unreaped():
@@ -467,7 +491,8 @@ def test_signal_session_sends_through_handle_while_child_unreaped():
         def send_signal(self, sig):
             recorded.append(sig)
 
-    assert HubPlugin()._signal_session(SimpleNamespace(proc=FakeProc()), 15) is True
+    session = SimpleNamespace(proc=FakeProc(), process_lock=threading.RLock())
+    assert HubPlugin()._signal_session(session, 15) is True
     assert recorded == [15]
 
 
@@ -475,6 +500,17 @@ def test_signal_session_fails_closed_without_handle():
     plugin = HubPlugin()
     assert plugin._signal_session(SimpleNamespace(pid=4242), 15) is False
     assert plugin._signal_session(None, 15) is False
+
+
+def test_signal_session_requires_shared_lifecycle_lock():
+    class FakeProc:
+        def poll(self):
+            return None
+
+        def send_signal(self, sig):
+            raise AssertionError("must not signal without the shared lifecycle lock")
+
+    assert HubPlugin()._signal_session(SimpleNamespace(proc=FakeProc()), 15) is False
 
 
 def test_signal_session_rejects_handle_for_a_different_presence_pid():
@@ -489,7 +525,7 @@ def test_signal_session_rejects_handle_for_a_different_presence_pid():
         def send_signal(self, sig):
             recorded.append(sig)
 
-    session = SimpleNamespace(pid=1111, proc=FakeProc())
+    session = SimpleNamespace(pid=1111, proc=FakeProc(), process_lock=threading.RLock())
 
     assert HubPlugin()._signal_session(session, 15, expected_pid=2222) is False
     assert recorded == []
@@ -508,9 +544,95 @@ def test_escalation_rechecks_presence_generation_before_signaling(monkeypatch):
             recorded.append(sig)
 
     plugin = HubPlugin()
-    session = SimpleNamespace(pid=1111, proc=FakeProc())
+    session = SimpleNamespace(pid=1111, proc=FakeProc(), process_lock=threading.RLock())
     agent = _peer("helper", 1111, started_at=100.0)
     monkeypatch.setattr(plugin, "_session_process_create_time", lambda session: 101.0)
 
     assert plugin._escalate_agent(agent, session, signal.SIGTERM) is False
     assert recorded == []
+
+
+def test_hub_signal_serializes_with_orchestrator_child_reaping():
+    wait_entered = threading.Event()
+    release_wait = threading.Event()
+    signal_entered = threading.Event()
+    signal_lock_attempted = threading.Event()
+
+    class ObservableLock:
+        def __init__(self):
+            self._lock = threading.RLock()
+
+        def __enter__(self):
+            if threading.current_thread().name == "signal-agent":
+                signal_lock_attempted.set()
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self._lock.release()
+
+    class BlockingProc:
+        pid = 4242
+
+        def __init__(self):
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            wait_entered.set()
+            if not release_wait.wait(timeout=2):
+                raise TimeoutError("test did not release fake process wait")
+            self.returncode = 0
+            return 0
+
+        def kill(self):
+            self.returncode = -signal.SIGKILL
+
+        def send_signal(self, sig):
+            signal_entered.set()
+
+    proc = BlockingProc()
+    session = AgentSession(
+        name="helper",
+        full_name="project-helper",
+        status="running",
+        start_time=time.time(),
+        proc=proc,
+        pid=proc.pid,
+        process_lock=ObservableLock(),
+    )
+    orchestrator = object.__new__(AgentOrchestrator)
+    orchestrator.agents = {session.name: session}
+    stop_results = []
+    signal_results = []
+
+    def reap_child():
+        stop_results.append(orchestrator._kill_session(session.full_name))
+
+    def signal_child():
+        signal_results.append(HubPlugin()._signal_session(session, signal.SIGTERM))
+
+    reaper = threading.Thread(target=reap_child)
+    signaler = threading.Thread(target=signal_child, name="signal-agent")
+    reaper.start()
+    try:
+        assert wait_entered.wait(timeout=1)
+        signaler.start()
+        assert signal_lock_attempted.wait(timeout=1)
+        assert not signal_entered.wait(timeout=0.1)
+    finally:
+        release_wait.set()
+        reaper.join(timeout=2)
+        if signaler.ident is not None:
+            signaler.join(timeout=2)
+
+    assert not reaper.is_alive()
+    assert not signaler.is_alive()
+    assert stop_results == [True]
+    assert signal_results == [False]
+    assert not signal_entered.is_set()

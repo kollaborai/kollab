@@ -13540,9 +13540,11 @@ class HubPlugin(BasePlugin):
         """True when presence row and tracked session are the same process
         generation (fail closed on missing or inconsistent process identity).
 
-        The tracked Popen handle and OS process creation time identify the
-        session. Presence from an older PID generation predates that process;
-        there is no timestamp grace window that can make it look current.
+        The tracked child PID and OS process creation time are compared with
+        the presence row. The Popen handle is a child-management reference,
+        not an atomic kernel identity token. Presence from an older PID
+        generation predates that process; there is no timestamp grace window
+        that can make it look current.
         """
         agent_pid = getattr(agent, "pid", None)
         session_pid = getattr(session, "pid", None)
@@ -14318,10 +14320,11 @@ class HubPlugin(BasePlugin):
                     owned_sessions.append(session)
                 else:
                     immune.append(agent.identity)
-            # Carry each target's session into the stop call: the sweep's
-            # ownership gate runs before dispatch, but the tracked process can
-            # exit during the awaited shutdown window. The session's Popen
-            # handle is the only signal-time identity proof (issue #669 r2).
+            # Carry each target's session into the stop call. The sweep's
+            # ownership gate runs before dispatch, but the process may exit
+            # during the awaited shutdown window. Final escalation uses the
+            # session's shared process lock to serialize Popen polling,
+            # reaping, and signal dispatch (issue #669).
             stop_results = await asyncio.gather(
                 *[
                     self._stop_peer_agent(
@@ -14407,59 +14410,62 @@ class HubPlugin(BasePlugin):
 
     @staticmethod
     def _signal_allowed(session) -> bool:
-        """Signal-time ownership revalidation (issue #669 r2, PID-reuse TOCTOU).
+        """Advisory liveness recheck before escalation (issue #669).
 
-        The sweep's ownership gates run before dispatch, but the shutdown wait
-        is async: the tracked process can exit mid-stop, and once it exits its
-        PID may be reused by an unrelated process. Raw-pid escalation
-        (SIGTERM/SIGKILL by number) would then signal that process. The
-        orchestrator's own Popen handle is the identity proof — while
-        ``is_alive`` the PID still belongs to our child. Fail closed when the
-        session died mid-stop; ``session=None`` (operator single-stop path)
-        keeps the existing behavior.
+        This check does not make a later signal safe by itself. The final
+        Popen poll and signal operation must hold the session's shared process
+        lock. ``session=None`` is the operator single-stop path and retains
+        its existing raw-PID behavior.
         """
         return session is None or bool(getattr(session, "is_alive", False))
 
     def _signal_session(
         self, session, sig, *, expected_pid=None, expected_started_at=None
     ) -> bool:
-        """Send ``sig`` through the tracked Popen handle (issue #669 r3).
+        """Signal a tracked child while serializing its Popen lifecycle calls.
 
-        Recheck the selected presence generation immediately before signaling.
-        The Popen handle then checks/reaps its child before issuing the signal;
-        keeping the signal on that handle avoids a raw-PID fallback if the
-        child has exited. Returns False when identity cannot be proven.
+        On POSIX, Python's Popen.send_signal() polls and then signals by
+        numeric PID.
+        Hold the same session lock as AgentSession.is_alive and
+        AgentOrchestrator._kill_session across the final check and dispatch so
+        this process cannot reap the child between those operations. This is
+        process-local serialization, not an atomic kernel identity guarantee.
+        Returns False if the session, lock, or selected generation is missing.
         """
         proc = getattr(session, "proc", None) if session is not None else None
-        if proc is None:
+        process_lock = (
+            getattr(session, "process_lock", None) if session is not None else None
+        )
+        if proc is None or process_lock is None:
             return False
-        if expected_pid is not None and (
-            getattr(session, "pid", None) != expected_pid
-            or getattr(proc, "pid", None) != expected_pid
-        ):
-            return False
-        if expected_started_at is not None:
-            process_created_at = self._session_process_create_time(session)
-            try:
-                if process_created_at is None or float(
-                    expected_started_at
-                ) < process_created_at:
-                    return False
-            except (TypeError, ValueError, OverflowError):
+        with process_lock:
+            if expected_pid is not None and (
+                getattr(session, "pid", None) != expected_pid
+                or getattr(proc, "pid", None) != expected_pid
+            ):
                 return False
-        if proc.poll() is not None:
-            return False
-        try:
-            proc.send_signal(sig)
-            return True
-        except (ProcessLookupError, OSError):
-            return False
+            if expected_started_at is not None:
+                process_created_at = self._session_process_create_time(session)
+                try:
+                    if process_created_at is None or float(
+                        expected_started_at
+                    ) < process_created_at:
+                        return False
+                except (TypeError, ValueError, OverflowError):
+                    return False
+            if proc.poll() is not None:
+                return False
+            try:
+                proc.send_signal(sig)
+                return True
+            except (ProcessLookupError, OSError):
+                return False
 
     def _escalate_agent(self, agent, session, sig) -> bool:
         """Escalate a stop signal for ``agent`` under ``session`` ownership.
 
-        Caller-owned sweep targets are signaled through the tracked Popen
-        handle (``_signal_session``); only the session-less operator
+        Caller-owned sweep targets use the serialized tracked-child path
+        (``_signal_session``); only the session-less operator
         single-stop path falls back to raw ``os.kill`` by PID (issue #669 r3).
         """
         if session is not None:
@@ -14481,9 +14487,9 @@ class HubPlugin(BasePlugin):
         that exit too. This avoids the first-run lie where status still sees
         the agent online and a second stop is needed.
 
-        ``session`` is the orchestrator's spawned-process handle for caller-
-        owned agents; when present, every raw-pid escalation is gated on it
-        (signal-time PID-reuse guard, fail closed).
+        ``session`` is the orchestrator's tracked child for caller-owned
+        agents; when present, escalation shares its process lock and fails
+        closed if that child has exited or cannot be checked.
         """
         if not self._presence:
             return "hub not active"
@@ -14504,7 +14510,7 @@ class HubPlugin(BasePlugin):
 
         guard = (
             "process exited during stop wait; fallback signals withheld "
-            "(PID-reuse guard)"
+            "(tracked-process guard)"
         )
 
         if success:
@@ -14518,8 +14524,8 @@ class HubPlugin(BasePlugin):
 
             killed = self._escalate_agent(agent, session, signal.SIGTERM)
             if session is not None and not killed:
-                # Handle gone or child already reaped: the PID is no longer
-                # ours to signal — never fall back to raw os.kill (r3).
+                # Child is gone or cannot be checked; never fall back to raw
+                # os.kill for a caller-owned session.
                 self._presence.cleanup_agent(agent)
                 return guard
             if killed and await self._wait_for_agent_exit(

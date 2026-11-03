@@ -1591,6 +1591,7 @@ def _cli_is_hub_agent_context() -> bool:
         return True
 
     try:
+        from kollabor_config import config_utils
         from kollabor_config.config_utils import get_config_directory
 
         process_ids = _current_process_and_ancestors()
@@ -1602,6 +1603,21 @@ def _cli_is_hub_agent_context() -> bool:
             config_dir / "hub",
             *(project_dir / "hub" for project_dir in project_dirs),
         ]
+        if config_utils.IS_WINDOWS:
+            # Windows permits an explicitly selected project state directory
+            # outside ~/.kollab/projects. Validate the selection without
+            # creating or claiming any state, then include it in the ancestry
+            # scan just like the normal project roots.
+            from plugins.hub.project_scope import resolve_project_root
+
+            selected_state_dir = config_utils._windows_project_state_dir(
+                resolve_project_root(), config_dir, create_new=False
+            )
+            if (
+                selected_state_dir.resolve().parent
+                != (config_dir / "projects").resolve()
+            ):
+                hub_dirs.append(selected_state_dir / "hub")
         agent_pids = set()
         for hub_dir in hub_dirs:
             for path in _directory_children(hub_dir / "presence"):

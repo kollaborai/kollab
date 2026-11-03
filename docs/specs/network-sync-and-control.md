@@ -131,14 +131,23 @@ What option A still cannot stop, stated so nobody claims more:
   agents that session started: peers launched by other lanes or the operator
   are immune, and the startup status advertises the command only to sessions
   that started agents (`plugins/hub/plugin.py:_handle_stop_command`). The
-  presence PID must match the live orchestrator session and its Popen handle;
-  the row's boot time must be no earlier than the OS process creation time.
-  There is no timestamp grace window. Fallback escalation verifies the
-  selected PID again and signals through that Popen handle (`proc.send_signal`).
-  The orchestrator starts the detached child directly and keeps its Popen
-  handle, rather than keeping the short-lived parent of a second detach fork.
-  A reaped child cannot be signaled and an unreaped exited child holds its PID
-  as a zombie. Raw `os.kill` by PID remains available on session-less
+  presence PID and row boot time are compared with the tracked `AgentSession`
+  PID and the OS process creation time; there is no timestamp grace window.
+  The tracked Popen object is a child-management reference, not an atomic OS
+  identity token. `AgentSession.process_lock` serializes every in-process
+  lifecycle poll, wait, and signal for that child: `AgentSession.is_alive`,
+  orchestrator `_kill_session`, and Hub `_signal_session` share the lock.
+  Hub holds it across the final poll and `Popen.send_signal`; the orchestrator
+  holds it over its complete terminate/wait/kill/reap sequence. This prevents
+  this process's lifecycle reaper from freeing the child PID during POSIX
+  `send_signal`'s internal poll-then-signal sequence. If `send_signal` observes
+  On POSIX, if `send_signal` observes an exited child, it declines to signal;
+  if the child exits after that check, the shared lock prevents this process
+  from reaping it until the signal call returns. This is a process-local
+  serialization guarantee, not a kernel identity primitive; a
+  caller that bypasses the shared lock is outside it. The orchestrator starts
+  the detached child directly rather than keeping the short-lived parent of a
+  second detach fork. Raw `os.kill` by PID remains available on session-less
   single-target `/hub stop`, including the `<hub_stop>` tool route through
   `_handle_hub_stop_tool`.
 - A remote handle is refused: "spawn, stop and wake stay local"
