@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.19.0] - 2026-11-03
 
 ### Fixed
+- Web UI source archives exclude local TypeScript build metadata, keeping generated compiler state out of published packages.
 - PhoneLink chat reuses unchanged polling snapshots so typing and scrolling stay responsive. Completed voice turns remain visible until saved history replaces them.
 - A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
 - Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
