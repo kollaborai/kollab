@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import FastAPI
+from kollabor_engine import voice_settings as voice_settings_module
 from kollabor_engine.routes import voice as voice_routes
 from kollabor_engine.voice_control import VoiceControl
 from kollabor_engine.voice_livekit import LiveKitRuntime
@@ -333,6 +334,46 @@ async def test_settings_roundtrip_hides_key(rig):
     assert res.json()["model"] == "m2" and res.json()["api_key_configured"] is True
     res = await rig.http.put("/voice/settings", json={"api_key_action": "clear"})
     assert res.json()["api_key_configured"] is False and not rig.secrets.keys
+
+
+async def test_readiness_reports_the_device_engines_and_transcription_state(monkeypatch):
+    status = {
+        "state": "ready",
+        "transcription": {"state": "loading", "engine": "whisper"},
+        "speech": {"state": "ready", "engine": "kokoro"},
+    }
+
+    async def call(_client, op):
+        assert op == "status"
+        return status
+
+    monkeypatch.setattr(VoiceClient, "call", call)
+
+    config = FakeConfig()
+    config.data[voice_settings_module.PREFIX + "tts_engine"] = "vibevoice"
+    settings = VoiceSettingsService(config=config, secrets=FakeSecrets())
+    response = await settings.get_settings()
+    readiness = response["readiness"]
+
+    assert response["tts_engine"] == "vibevoice"
+    assert readiness["stt_state"] == "starting"
+    assert readiness["tts_engine"] == "kokoro"
+    assert readiness["stt_engine"] == "whisper"
+
+
+async def test_readiness_without_voice_service_does_not_claim_engines(monkeypatch):
+    async def call(_client, op):
+        assert op == "status"
+        raise OSError("service unavailable")
+
+    monkeypatch.setattr(VoiceClient, "call", call)
+
+    readiness = await voice_settings_module._default_readiness()
+
+    assert readiness.stt_state == "error"
+    assert readiness.tts_state == "error"
+    assert readiness.stt_engine == "unknown"
+    assert readiness.tts_engine == "unknown"
 
 
 async def test_settings_validation_keeps_last_good_and_never_echoes_key(rig):
