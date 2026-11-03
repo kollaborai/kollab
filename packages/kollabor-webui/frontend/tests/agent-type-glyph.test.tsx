@@ -37,9 +37,35 @@ describe("AgentTypeGlyph", () => {
     expect(AGENT_TYPE_GLYPHS.coordinator).toBe(AGENT_TYPE_GLYPHS.koordinator);
   });
 
-  it("uses the explicit pool type before its bundle or session fallback", () => {
-    expect(resolveSidebarAgentType({ agent_type: "research", agent: "coder" }, "default")).toBe("research");
-    expect(resolveSidebarAgentType({ agent_type: "", agent: "coder" }, "default")).toBe("coder");
+  it("uses the session bundle before type metadata from its roster entry", () => {
+    expect(resolveSidebarAgentType({ agent_type: "research", agent: "coder" }, "default")).toBe("default");
+    expect(resolveSidebarAgentType({ agent_type: "", agent: "coder" }, "research")).toBe("research");
+  });
+
+  it("uses each session bundle when one identity runs different bundles across workspaces", () => {
+    const poolByName = new Map([
+      ["shared-agent", { name: "shared-agent", agent_type: "research", agent: "research" }],
+    ]);
+    const sessions = [
+      { identity: "shared-agent", workspace: "/projects/research", agent: "research" },
+      { identity: "shared-agent", workspace: "/projects/coding", agent: "coder" },
+    ];
+
+    const glyphs = sessions.map((session) => {
+      const type = resolveSidebarAgentType(poolByName.get(session.identity), session.agent);
+      return {
+        workspace: session.workspace,
+        type,
+        markup: renderToStaticMarkup(<AgentTypeGlyph type={type} />),
+      };
+    });
+
+    expect(glyphs.map(({ workspace, type }) => [workspace, type])).toEqual([
+      ["/projects/research", "research"],
+      ["/projects/coding", "coder"],
+    ]);
+    expect(glyphs[0].markup).toContain(AGENT_TYPE_GLYPHS.research);
+    expect(glyphs[1].markup).toContain(AGENT_TYPE_GLYPHS.coder);
   });
 
   it("uses the session bundle when a present roster entry has blank type fields", () => {

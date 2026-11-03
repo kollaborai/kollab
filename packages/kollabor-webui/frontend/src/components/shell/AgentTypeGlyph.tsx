@@ -32,13 +32,16 @@ function nonBlank(value?: string): string | undefined {
   return trimmed || undefined;
 }
 
-/** Resolve the visible type from roster data, with a session bundle as fallback. */
+/** Prefer the bundle recorded on this session; roster entries are scoped by name. */
 export function resolveSidebarAgentType(
   entry?: AgentTypeSource,
-  fallback?: string,
+  sessionBundle?: string,
 ): string | undefined {
+  const currentBundle = nonBlank(sessionBundle);
+  if (currentBundle) return currentBundle;
+
   const entryType = nonBlank(entry?.agent_type) ?? nonBlank(entry?.agent);
-  return entryType ?? nonBlank(fallback) ?? (entry ? "default" : undefined);
+  return entryType ?? (entry ? "default" : undefined);
 }
 
 export function AgentTypeGlyph({ type }: { type?: string }) {
