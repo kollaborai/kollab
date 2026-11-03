@@ -175,7 +175,7 @@ def host_process_scans_allowed(option_enabled: bool, environ: Mapping[str, str])
     return option_enabled and not host_process_scan_environment_errors(environ)
 
 
-_WINDOWS_EXECUTABLE_PREFIX = re.compile(r'''^\s*["']?(?:[A-Za-z]:\\|\\\\)''')
+_WINDOWS_PATH_MARKER = re.compile(r'''(?:[A-Za-z]:\\|\\\\)''')
 
 
 def _command_tokens(command: Any) -> list[str] | None:
@@ -185,7 +185,7 @@ def _command_tokens(command: Any) -> list[str] | None:
         command = os.fsdecode(command)
     if isinstance(command, str):
         try:
-            if _WINDOWS_EXECUTABLE_PREFIX.match(command):
+            if _WINDOWS_PATH_MARKER.search(command):
                 tokens = shlex.split(command, posix=False)
                 return [
                     token[1:-1]
@@ -318,6 +318,14 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                 )
                 if command_option and is_process_table_enumeration_command(shell_args[shell_index + 1]):
                     return True
+        if name == "cmd":
+            command_args = tokens[index + 1 :]
+            for shell_index, option in enumerate(command_args[:-1]):
+                if option.casefold() in {"/c", "/k"}:
+                    nested_command = " ".join(command_args[shell_index + 1 :])
+                    if is_process_table_enumeration_command(nested_command):
+                        return True
+                    break
         if name in {"pgrep", "pidof", "top", "htop", "pstree", "tasklist"}:
             return True
         if name == "lsof":

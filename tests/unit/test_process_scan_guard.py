@@ -128,6 +128,7 @@ def test_process_table_detector_blocks_global_ps_but_allows_pid_targeting():
     "command",
     [
         "ps -A 'unterminated",
+        r'cmd /c "C:\Windows\System32\TASKLIST.EXE',
         'sh -c "ps -A',
         ["/bin/sh", "-c", "ps -A 'unterminated"],
         object(),
@@ -146,6 +147,9 @@ def test_process_table_detector_keeps_empty_commands_non_enumerating():
     "command",
     [
         "tasklist.exe",
+        r"cmd /c C:\Windows\System32\TASKLIST.EXE",
+        r'cmd /k "TASKLIST.EXE /FO CSV"',
+        r'cmd /c "TASKLIST.EXE /FO CSV"',
         ["TASKLIST.EXE"],
         [r"C:\Windows\System32\tasklist.exe"],
         [r"C:\Windows\System32\TASKLIST.EXE"],
@@ -180,6 +184,9 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
     tasklist_strings = (
         r"C:\Windows\System32\TASKLIST.EXE /FO CSV",
         r'"C:\Program Files\Windows NT\Accessories\TASKLIST.EXE" /FO CSV',
+        r"cmd /c C:\Windows\System32\TASKLIST.EXE",
+        r'cmd /c "C:\Program Files\Windows NT\Accessories\TASKLIST.EXE" /FO CSV',
+        r'cmd /c "C:\Windows\System32\TASKLIST.EXE /FO CSV"',
     )
     for command in (
         ["tasklist.exe"],
