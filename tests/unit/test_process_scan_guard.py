@@ -1,10 +1,10 @@
 """Unit tests for the fail-closed host-process scan policy."""
 
 import ast
-import subprocess
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
-import psutil
 import pytest
 
 from tests.process_scan_guard import (
@@ -12,6 +12,7 @@ from tests.process_scan_guard import (
     guarded_process_enumeration,
     host_process_scan_environment_errors,
     host_process_scans_allowed,
+    install_test_process_scan_guard,
     is_process_table_enumeration_command,
 )
 
@@ -25,6 +26,13 @@ CI_ENVIRONMENT = {
     "RUNNER_OS": "Linux",
     "RUNNER_ENVIRONMENT": "github-hosted",
 }
+
+
+def _fake_os(calls):
+    return SimpleNamespace(
+        system=lambda command, *args, **kwargs: calls.append(("system", command)) or "system result",
+        popen=lambda command, *args, **kwargs: calls.append(("popen", command)) or "popen result",
+    )
 
 
 def test_scan_manifest_names_existing_live_process_tests():
@@ -72,16 +80,71 @@ def test_process_table_detector_blocks_global_ps_but_allows_pid_targeting():
 
     assert is_process_table_enumeration_command(["/bin/ps", "-axo", "pid,ppid"])
     assert is_process_table_enumeration_command(["/bin/ps", "-E", "-axww", "-o", "pid=,command="])
+    for command in (
+        ["ps", "-p", "42", "auxww"],
+        ["ps", "-p", "42", "axww"],
+        ["ps", "-p42", "auxww"],
+        ["ps", "--pid=42", "axww"],
+        ["ps", "-p", "42", "uaxww"],
+        ["ps", "-p", "42", "-xww"],
+        ["ps", "-p", "42", "-d"],
+        ["ps", "-p", "42", "-N"],
+        "ps -p 42 auxww",
+    ):
+        assert is_process_table_enumeration_command(command), command
     assert is_process_table_enumeration_command("/bin/sh -c 'ps -A -o pid'")
     assert is_process_table_enumeration_command(["/bin/bash", "-lc", "ps -A"])
+    assert is_process_table_enumeration_command(["pgrep", "-af", "python"])
+    assert is_process_table_enumeration_command(["top", "-l", "1"])
+    assert is_process_table_enumeration_command(["pstree", "-p"])
+    assert is_process_table_enumeration_command(["lsof", "-i"])
+    assert is_process_table_enumeration_command(["lsof", "-p", "^1"])
+    assert is_process_table_enumeration_command(["lsof", "-p", "0"])
+    assert is_process_table_enumeration_command(["lsof", "-p", "42,^99"])
+    assert is_process_table_enumeration_command(["lsof", "-p", "42", "-u", "root"])
+    assert is_process_table_enumeration_command(["lsof", "-p", "42", "-i"])
+    assert is_process_table_enumeration_command(["lsof", "-p4242", "-u", "root"])
+    assert not is_process_table_enumeration_command(["lsof", "-p", "4242"])
+    assert not is_process_table_enumeration_command(["lsof", "-p", "42,99"])
+    assert not is_process_table_enumeration_command(["lsof", "-p4242"])
     assert is_process_table_enumeration_command(["ps"])
     assert is_process_table_enumeration_command(["ps", "-o", "pid"])
     assert not is_process_table_enumeration_command(["ps", "-p", "4242", "-o", "pid"])
+    assert not is_process_table_enumeration_command(["ps", "-p4242", "-o", "pid"])
+    assert not is_process_table_enumeration_command(["ps", "--pid=4242", "--format=pid"])
+    assert not is_process_table_enumeration_command(["ps", "-p", "42,99", "-o", "pid"])
+    assert not is_process_table_enumeration_command(["ps", "-p", "42", "-o", "auxww"])
+    assert is_process_table_enumeration_command(["ps", "-p", "0", "-o", "pid"])
+    assert is_process_table_enumeration_command(["ps", "-p", "42", "-o", "pid", "auxww"])
+    assert is_process_table_enumeration_command("echo $(ps -A)")
+    assert is_process_table_enumeration_command("echo `pgrep python`")
+    assert is_process_table_enumeration_command(b"ps -A")
+    assert is_process_table_enumeration_command([b"ps", b"-p", b"42", b"--ppid", b"1"])
+    assert is_process_table_enumeration_command(Path("/bin/ps"))
     assert not is_process_table_enumeration_command(["/usr/bin/python3", "-c", "print('not a process scan')"])
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        ["--ppid", "1"],
+        ["--sid", "1"],
+        ["-g", "1"],
+        ["-G", "1"],
+        ["-t", "pts/1"],
+        ["-C", "python"],
+        ["--user", "root"],
+    ],
+)
+def test_pid_targeted_ps_rejects_other_selectors(selector):
+    assert is_process_table_enumeration_command(["ps", "-p", "42", *selector])
 
 
 def test_docker_container_listing_is_not_host_process_enumeration():
     assert not is_process_table_enumeration_command(["docker", "ps", "-q"])
+    assert not is_process_table_enumeration_command(["docker", "container", "ps", "-q"])
+    assert not is_process_table_enumeration_command(["docker", "compose", "ps", "-q"])
+    assert not is_process_table_enumeration_command(["docker-compose", "ps", "-q"])
     assert not is_process_table_enumeration_command(["/bin/sh", "-c", 'echo "$(docker ps -q)"'])
     assert is_process_table_enumeration_command(["/bin/sh", "-c", "docker exec service ps -A"])
 
@@ -105,11 +168,265 @@ def test_authorized_process_enumeration_wrapper_preserves_original_call():
     assert guarded(4) == 5
 
 
-def test_global_autouse_guard_blocks_process_iter():
-    with pytest.raises(RuntimeError, match="blocked for unmarked test"):
-        psutil.process_iter()
+def test_installed_guard_blocks_enumeration_apis_before_the_original_call(monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, *args, **kwargs):
+            calls.append(("children", self.pid, args, kwargs))
+            return []
+
+        def parents(self):
+            calls.append(("parents", self.pid))
+            return []
+
+        def parent(self):
+            calls.append(("parent", self.pid))
+            return None
+
+        def environ(self):
+            calls.append(("environ", self.pid))
+            return {"FAKE": "value"}
+
+    fake_psutil = SimpleNamespace(
+        Process=FakeProcess,
+        process_iter=lambda *args, **kwargs: calls.append(("process_iter", args, kwargs)) or iter(()),
+        pids=lambda: calls.append(("pids",)) or [1234],
+    )
+    fake_subprocess = SimpleNamespace(Popen=lambda *args, **kwargs: calls.append(("Popen", args, kwargs)) or "launched")
+    fake_os = _fake_os(calls)
+
+    install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
+
+    for operation in (
+        fake_psutil.process_iter,
+        fake_psutil.pids,
+        lambda: FakeProcess(1234).children(recursive=True),
+        lambda: FakeProcess(1234).parent(),
+        lambda: FakeProcess(1234).parents(),
+        lambda: FakeProcess(1234).environ(),
+        lambda: fake_subprocess.Popen(["/bin/ps", "-A", "-o", "pid="]),
+        lambda: fake_subprocess.Popen(["ps", "-p", "42", "auxww"]),
+        lambda: fake_os.system("ps -A"),
+        lambda: fake_os.system("ps -p 42 axww"),
+        lambda: fake_os.popen('echo "$(ps -p 42 auxww)"'),
+        lambda: fake_os.popen("pgrep -af python"),
+        lambda: fake_os.system("echo $(ps -A)"),
+    ):
+        with pytest.raises(RuntimeError):
+            operation()
+
+    assert calls == []
 
 
-def test_global_autouse_guard_blocks_broad_ps_before_launch():
+def test_installed_guard_allows_environment_reads_for_the_test_process(monkeypatch):
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, *args, **kwargs):
+            return []
+
+        def parents(self):
+            return []
+
+        def environ(self):
+            return {"FAKE": "value"}
+
+    fake_psutil = SimpleNamespace(Process=FakeProcess, process_iter=lambda *args, **kwargs: iter(()), pids=lambda: [])
+    fake_subprocess = SimpleNamespace(Popen=lambda *args, **kwargs: "launched")
+    fake_os = _fake_os([])
+    install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
+    assert FakeProcess(os.getpid()).environ() == {"FAKE": "value"}
+
+
+def test_installed_guard_blocks_broad_ps_before_launch(monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 1234
+
+        def children(self, *args, **kwargs):
+            return []
+
+        def parents(self):
+            return []
+
+        def environ(self):
+            return {}
+
+    fake_psutil = SimpleNamespace(Process=FakeProcess, process_iter=lambda *args, **kwargs: iter(()), pids=lambda: [])
+    fake_subprocess = SimpleNamespace(Popen=lambda *args, **kwargs: calls.append((args, kwargs)) or "launched")
+    fake_os = _fake_os(calls)
+    install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
     with pytest.raises(RuntimeError, match="blocked for unmarked test"):
-        subprocess.Popen(["/bin/ps", "-A", "-o", "pid="])
+        fake_subprocess.Popen(["/bin/ps", "-A", "-o", "pid="])
+    assert calls == []
+
+
+def test_installed_guard_blocks_process_scans_through_spawn_and_exec_apis(monkeypatch):
+    calls = []
+
+    def record(name):
+        def operation(*args, **kwargs):
+            calls.append((name, args, kwargs))
+            return 0
+
+        return operation
+
+    class FakeProcess:
+        pid = 1234
+
+        def children(self, *args, **kwargs):
+            return []
+
+        def parents(self):
+            return []
+
+        def environ(self):
+            return {}
+
+    fake_psutil = SimpleNamespace(
+        Process=FakeProcess,
+        process_iter=lambda *args, **kwargs: iter(()),
+        pids=lambda: [],
+    )
+    fake_subprocess = SimpleNamespace(Popen=record("Popen"))
+    fake_os = _fake_os(calls)
+    fake_os.spawnv = record("spawnv")
+    fake_os.spawnve = record("spawnve")
+    fake_os.spawnvp = record("spawnvp")
+    fake_os.spawnvpe = record("spawnvpe")
+    fake_os.spawnl = record("spawnl")
+    fake_os.spawnle = record("spawnle")
+    fake_os.spawnlp = record("spawnlp")
+    fake_os.spawnlpe = record("spawnlpe")
+    fake_os.posix_spawn = record("posix_spawn")
+    fake_os.posix_spawnp = record("posix_spawnp")
+    fake_os.execv = record("execv")
+    fake_os.execve = record("execve")
+    fake_os.execvp = record("execvp")
+    fake_os.execvpe = record("execvpe")
+    fake_os.execl = record("execl")
+    fake_os.execle = record("execle")
+    fake_os.execlp = record("execlp")
+    fake_os.execlpe = record("execlpe")
+    install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
+
+    operations = (
+        lambda: fake_os.spawnv(0, "/bin/ps", ["ps", "-p", "42", "--ppid", "1"]),
+        lambda: fake_os.spawnve(0, "ps", ["ps", "-p", "42", "--ppid", "1"], {}),
+        lambda: fake_os.spawnvp(0, "ps", ["ps", "-p", "42", "--ppid", "1"]),
+        lambda: fake_os.spawnvpe(0, "ps", ["ps", "-p", "42", "--ppid", "1"], {}),
+        lambda: fake_os.spawnl(0, "ps", "ps", "-p", "42", "-g", "1"),
+        lambda: fake_os.spawnle(0, "ps", "ps", "-p", "42", "-G", "1", {}),
+        lambda: fake_os.spawnlp(0, "ps", "ps", "-p", "42", "-t", "pts/1"),
+        lambda: fake_os.spawnlpe(0, "ps", "ps", "-p", "42", "-g", "1", {}),
+        lambda: fake_os.posix_spawn("/bin/ps", ["ps", "-p", "42", "-C", "python"], {}),
+        lambda: fake_os.posix_spawnp("ps", ["ps", "-p", "42", "--sid", "1"], {}),
+        lambda: fake_os.execv("/bin/ps", ["ps", "-p", "42", "--sid", "1"]),
+        lambda: fake_os.execve("/bin/ps", ["ps", "-p", "42", "--sid", "1"], {}),
+        lambda: fake_os.execvp("ps", ["ps", "-p", "42", "-t", "pts/1"]),
+        lambda: fake_os.execvpe("ps", ["ps", "-p", "42", "-t", "pts/1"], {}),
+        lambda: fake_os.execl("ps", "ps", "-p", "42", "-C", "python"),
+        lambda: fake_os.execle("ps", "ps", "-p", "42", "-C", "python", {}),
+        lambda: fake_os.execlp("ps", "ps", "-p", "42", "-C", "python"),
+        lambda: fake_os.execlpe("ps", "ps", "-p", "42", "--user", "root", {}),
+    )
+    for operation in operations:
+        with pytest.raises(RuntimeError, match="blocked for unmarked test"):
+            operation()
+
+    assert calls == []
+
+
+def test_installed_guard_preserves_non_scan_spawn_and_exec_calls(monkeypatch):
+    calls = []
+
+    def record(name):
+        def operation(*args, **kwargs):
+            calls.append((name, args, kwargs))
+            return 17
+
+        return operation
+
+    class FakeProcess:
+        pid = 1234
+
+        def children(self, *args, **kwargs):
+            return []
+
+        def parents(self):
+            return []
+
+        def environ(self):
+            return {}
+
+    fake_psutil = SimpleNamespace(Process=FakeProcess, process_iter=lambda *args, **kwargs: iter(()), pids=lambda: [])
+    fake_subprocess = SimpleNamespace(Popen=record("Popen"))
+    fake_os = _fake_os(calls)
+    fake_os.spawnlp = record("spawnlp")
+    fake_os.posix_spawn = record("posix_spawn")
+    fake_os.execv = record("execv")
+    install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
+
+    assert fake_os.spawnlp(0, "sleep", "sleep", "30") == 17
+    assert fake_os.posix_spawn("/usr/bin/python3", ["python3", "-c", "pass"], {}) == 17
+    assert fake_os.execv("/usr/bin/python3", ["python3", "-c", "pass"]) == 17
+    assert [name for name, _, _ in calls] == ["spawnlp", "posix_spawn", "execv"]
+
+
+def test_popen_executable_override_cannot_hide_a_process_scan(monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 1234
+
+        def children(self, *args, **kwargs):
+            return []
+
+        def parents(self):
+            return []
+
+        def environ(self):
+            return {}
+
+    fake_psutil = SimpleNamespace(Process=FakeProcess, process_iter=lambda *args, **kwargs: iter(()), pids=lambda: [])
+    fake_subprocess = SimpleNamespace(Popen=lambda *args, **kwargs: calls.append((args, kwargs)))
+    fake_os = _fake_os(calls)
+    install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
+
+    with pytest.raises(RuntimeError, match="blocked for unmarked test"):
+        fake_subprocess.Popen(["display-name", "-A"], executable="/bin/ps")
+
+    assert calls == []
+    assert fake_subprocess.Popen(["display-name", "-p", "42", "-o", "pid"], executable="/bin/ps") is None
+    assert len(calls) == 1
+
+
+def test_installed_guard_allows_non_scan_os_commands_without_running_them(monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 1234
+
+        def children(self, *args, **kwargs):
+            return []
+
+        def parents(self):
+            return []
+
+        def environ(self):
+            return {}
+
+    fake_psutil = SimpleNamespace(Process=FakeProcess, process_iter=lambda *args, **kwargs: iter(()), pids=lambda: [])
+    fake_subprocess = SimpleNamespace(Popen=lambda *args, **kwargs: "launched")
+    fake_os = _fake_os(calls)
+    install_test_process_scan_guard(fake_psutil, fake_subprocess, monkeypatch, os_module=fake_os)
+
+    assert fake_os.system("clear") == "system result"
+    assert fake_os.popen("stty size") == "popen result"
+    assert calls == [("system", "clear"), ("popen", "stty size")]

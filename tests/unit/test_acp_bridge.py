@@ -13,7 +13,7 @@ from acp.schema import PermissionOption, ToolCallStart
 
 from kollabor.llm import acp_bridge as bridge_mod
 from kollabor.llm.acp_bridge import ACPError, ACPPermissionBridge, ACPProfile, ACPRunner
-from tests.unit._owned_processes import bounded_child_command, cleanup_pidfile
+from tests.unit._owned_processes import asyncio_child_signal_is_reap_serialized, bounded_child_command
 
 
 @pytest.mark.asyncio
@@ -399,20 +399,20 @@ def _orphan_env(child_file, mode):
 
 
 def _capture_test_subprocesses(monkeypatch, *, wait_for_exit=False):
-    """Retain direct child identities independently of ACPRunner's tracking."""
+    """Retain asyncio child owners independently of ACPRunner's tracking.
+
+    POSIX ``Process.terminate`` and ``Process.kill`` still signal a numeric PID;
+    these handles are not pidfds. Cleanup calls them only on the event loop that
+    owns the transport, after checking its return code and without an intervening
+    await, then waits on that same owner.
+    """
     original_spawn = asyncio.create_subprocess_exec
     captured = []
 
     async def spawn(*args, **kwargs):
         process = await original_spawn(*args, **kwargs)
-        # Save the direct child handle before any identity lookup can fail.
-        captured.append((process, None))
-        try:
-            owner = psutil.Process(process.pid)
-            owner.create_time()
-        except psutil.NoSuchProcess:
-            owner = None
-        captured[-1] = (process, owner)
+        # Retain the child owner; do not resolve a detached PID as a fallback.
+        captured.append(process)
         if wait_for_exit:
             # Model a root exiting before ACPRunner can inspect its tree.
             await asyncio.wait_for(process.wait(), timeout=3)
@@ -424,22 +424,27 @@ def _capture_test_subprocesses(monkeypatch, *, wait_for_exit=False):
 
 async def _cleanup_test_subprocesses(captured):
     errors = []
-    for process, owner in reversed(captured):
+    safe_signal = asyncio_child_signal_is_reap_serialized()
+    for process in reversed(captured):
         try:
-            if process.returncode is None:
-                with contextlib.suppress(psutil.NoSuchProcess, ProcessLookupError):
-                    if owner is not None:
-                        owner.terminate()
-                    else:
-                        process.terminate()  # retained direct child handle
+            if process.returncode is None and safe_signal:
+                with contextlib.suppress(ProcessLookupError):
+                    # POSIX methods still use the owner's numeric PID. This call
+                    # is serialized with reaping only on supported runtimes.
+                    process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=2)
             except asyncio.TimeoutError:
-                with contextlib.suppress(psutil.NoSuchProcess, ProcessLookupError):
-                    if owner is not None:
-                        owner.kill()
-                    else:
-                        process.kill()
+                if not safe_signal:
+                    errors.append(
+                        RuntimeError(
+                            "asyncio child did not exit and this runtime has no safe signal path; "
+                            "defer cleanup to the ephemeral CI runner"
+                        )
+                    )
+                    continue
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
                 await asyncio.wait_for(process.wait(), timeout=2)
         except Exception as exc:
             errors.append(exc)
@@ -447,17 +452,16 @@ async def _cleanup_test_subprocesses(captured):
         raise ExceptionGroup("test subprocess cleanup failed", errors)
 
 
-async def _cleanup_orphan_test(runner, captured, child_file):
+async def _cleanup_orphan_test(runner, captured):
     try:
         # The code under test can be broken, raise, or hang; it is not the
         # authority for the test's own process cleanup.
         with contextlib.suppress(Exception):
             await asyncio.wait_for(runner.close(), timeout=12)
     finally:
-        try:
-            await _cleanup_test_subprocesses(captured)
-        finally:
-            cleanup_pidfile(child_file)
+        # The detached fixture has its own owner-death check and alarm. We do
+        # not signal its bare PID if the retained direct-child handle is gone.
+        await _cleanup_test_subprocesses(captured)
 
 
 
@@ -470,7 +474,6 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_pro
                                   cwd=str(tmp_path), env=_orphan_env(child_file, mode)))
     captured = _capture_test_subprocesses(monkeypatch)
     outsider = None
-    outsider_owner = None
 
     def child_identity():
         if not child_file.exists():
@@ -490,8 +493,6 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_pro
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
         )
-        outsider_owner = psutil.Process(outsider.pid)
-        outsider_owner.create_time()
         await runner.prompt("create only the owned fixture")
         if mode == "prompt":
             for _ in range(200):
@@ -503,10 +504,10 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_pro
         assert child_file.exists()
         child = child_identity()
         assert child is None or not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
-        assert outsider.returncode is None and outsider_owner.is_running()
+        assert outsider.returncode is None
         assert not runner._owned_processes and runner._process_nonce is None
     finally:
-        await _cleanup_orphan_test(runner, captured, child_file)
+        await _cleanup_orphan_test(runner, captured)
 
 
 @pytest.mark.parametrize("older", [False, True])
@@ -562,7 +563,7 @@ async def test_startup_failure_recovers_orphan_after_root_exited_before_ownershi
                 assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
         assert runner._process_nonce is None and not runner._owned_processes
     finally:
-        await _cleanup_orphan_test(runner, captured, child_file)
+        await _cleanup_orphan_test(runner, captured)
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
@@ -582,9 +583,9 @@ async def test_orphan_fixture_cleans_up_when_runner_close_raises(tmp_path, monke
     async def broken_close(self):
         raise RuntimeError("injected close failure")
 
-    async def observe_cleanup(runner, captured, child_file):
+    async def observe_cleanup(runner, captured):
         try:
-            await original_cleanup(runner, captured, child_file)
+            await original_cleanup(runner, captured)
         finally:
             captured_processes.extend(captured)
 
@@ -597,7 +598,7 @@ async def test_orphan_fixture_cleans_up_when_runner_close_raises(tmp_path, monke
                 tmp_path, "prompt", monkeypatch
             )
         assert len(captured_processes) >= 2  # adapter and independently spawned outsider
-        assert all(process.returncode is not None for process, _ in captured_processes)
+        assert all(process.returncode is not None for process in captured_processes)
         identity = json.loads((tmp_path / "child.json").read_text())
         with contextlib.suppress(psutil.NoSuchProcess):
             child = psutil.Process(identity["pid"])

@@ -1,8 +1,16 @@
-"""Policy helpers for tests that need host-wide process enumeration."""
+"""Policy helpers for tests that need host-wide process enumeration.
+
+This is a guardrail against accidental scans through common public APIs, not a
+sandbox. References captured before the fixture, raw procfs/proc interfaces,
+native APIs, private psutil platform helpers, and separately launched child
+code can bypass it; tests needing those are outside this guard's coverage and
+must not treat it as an isolation boundary.
+"""
 
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from collections.abc import Callable, Mapping, Sequence
 from functools import wraps
@@ -168,21 +176,119 @@ def host_process_scans_allowed(option_enabled: bool, environ: Mapping[str, str])
 
 
 def _command_tokens(command: Any) -> list[str]:
+    if isinstance(command, os.PathLike):
+        command = os.fspath(command)
+    if isinstance(command, bytes):
+        command = os.fsdecode(command)
     if isinstance(command, str):
         try:
             return shlex.split(command)
         except ValueError:
             return []
     if isinstance(command, Sequence):
-        return [os.fspath(part) if isinstance(part, os.PathLike) else str(part) for part in command]
+        return [_token_text(part) for part in command]
     return []
 
 
+def _token_text(part: Any) -> str:
+    if isinstance(part, os.PathLike):
+        part = os.fspath(part)
+    return os.fsdecode(part) if isinstance(part, bytes) else str(part)
+
+
+def _shell_token_name(token: str) -> str:
+    """Normalize punctuation around commands embedded in shell substitutions."""
+    if "$(" in token:
+        token = token.rsplit("$(", 1)[-1]
+    elif "`" in token:
+        token = token.rsplit("`", 1)[-1]
+    return token.strip("`$();")
+
+
+def _valid_positive_pid_list(value: str) -> bool:
+    if not re.fullmatch(r"[0-9]+(?:,[0-9]+)*", value):
+        return False
+    return all(any(digit != "0" for digit in pid) for pid in value.split(","))
+
+
+def _lsof_has_only_positive_pid_selectors(options: Sequence[str]) -> bool:
+    selectors = 0
+    index = 0
+    while index < len(options):
+        option = _shell_token_name(options[index])
+        if option == "-p":
+            if index + 1 >= len(options):
+                return False
+            value = _shell_token_name(options[index + 1])
+            if not _valid_positive_pid_list(value):
+                return False
+            selectors += 1
+            index += 2
+            continue
+        if option.startswith("-p") and not option.startswith("--") and len(option) > 2:
+            if not _valid_positive_pid_list(option[2:]):
+                return False
+            selectors += 1
+            index += 1
+            continue
+        # lsof combines selection criteria in ways that can broaden a PID
+        # query (for example `-p 42 -u root`). Keep only the exact PID grammar.
+        return False
+    return selectors > 0
+
+
+def _ps_has_only_pid_and_format_options(options: Sequence[str]) -> bool:
+    """Accept only a positive PID selector and explicit output-format flags.
+
+    ``ps`` selector semantics vary across Unix implementations. An allowlist is
+    safer than trying to enumerate every option that can broaden ``-p``.
+    """
+    selectors = 0
+    index = 0
+    while index < len(options):
+        option = _shell_token_name(options[index])
+        value: str | None = None
+        if option in {"-p", "--pid"}:
+            if index + 1 >= len(options):
+                return False
+            value = _shell_token_name(options[index + 1])
+            index += 2
+        elif option.startswith("--pid="):
+            value = option.partition("=")[2]
+            index += 1
+        elif option.startswith("-p") and not option.startswith("--"):
+            value = option[2:]
+            index += 1
+        elif option in {"-o", "--format"}:
+            if index + 1 >= len(options):
+                return False
+            format_value = _shell_token_name(options[index + 1])
+            if not format_value or format_value.startswith("-"):
+                return False
+            index += 2
+            continue
+        elif option.startswith("--format="):
+            if not option.partition("=")[2]:
+                return False
+            index += 1
+            continue
+        else:
+            return False
+        if not _valid_positive_pid_list(value):
+            return False
+        selectors += 1
+    return selectors > 0
+
+
 def is_process_table_enumeration_command(command: Any) -> bool:
-    """Block broad host ``ps`` commands but allow Docker container listings."""
+    """Block common host process listings but allow Docker and PID-targeted tools."""
     tokens = _command_tokens(command)
     for index, token in enumerate(tokens):
-        name = PurePath(token).name
+        for embedded in re.finditer(r"\$\(([^()]*)\)|`([^`]*)`", token):
+            nested = embedded.group(1) or embedded.group(2)
+            if nested and is_process_table_enumeration_command(nested):
+                return True
+        name = PurePath(_shell_token_name(token).replace("\\", "/")).name
         if name in {"sh", "bash", "zsh"}:
             shell_args = tokens[index + 1 :]
             for shell_index, option in enumerate(shell_args[:-1]):
@@ -191,47 +297,75 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                 )
                 if command_option and is_process_table_enumeration_command(shell_args[shell_index + 1]):
                     return True
+        if name in {"pgrep", "pidof", "top", "htop", "pstree", "tasklist"}:
+            return True
+        if name == "lsof":
+            if not _lsof_has_only_positive_pid_selectors(tokens[index + 1 :]):
+                return True
         if name != "ps":
             continue
 
         # Docker's `ps` lists containers, not host processes. Shell command
         # substitution may prefix the token with `$(` in rendered prompt blocks.
-        previous_token = tokens[index - 1] if index > 0 else ""
-        if PurePath(previous_token.lstrip("$(")).name == "docker":
+        previous_token = _shell_token_name(tokens[index - 1]) if index > 0 else ""
+        previous_name = PurePath(previous_token.replace("\\", "/")).name
+        preceding_pair = (
+            tuple(PurePath(_shell_token_name(value).replace("\\", "/")).name for value in tokens[index - 2 : index])
+            if index > 1
+            else ()
+        )
+        if previous_name in {"docker", "docker-compose"} or preceding_pair in {
+            ("docker", "container"),
+            ("docker", "compose"),
+        }:
             continue
 
-        options = tokens[index + 1 :]
-        for option in options:
-            if option in {
-                "-A",
-                "-e",
-                "--all",
-                "-U",
-                "-u",
-                "ax",
-                "aux",
-                "-ax",
-                "-aux",
-                "-ef",
-                "-eF",
-            }:
-                return True
-            if option.startswith(("-U", "-u")) and len(option) > 2:
-                return True
-            if option.startswith("-") and len(option) > 2:
-                flags = option[1:]
-                if "A" in flags or "e" in flags or {"a", "x"} <= set(flags):
-                    return True
-
-        has_pid_selector = any(
-            option in {"-p", "--pid"}
-            or option.startswith("--pid=")
-            or (option.startswith("-p") and option[2:].isdigit())
-            for option in options
-        )
-        if not has_pid_selector:
+        if not _ps_has_only_pid_and_format_options(tokens[index + 1 :]):
             return True
     return False
+
+
+def _path_and_argv(path: Any, argv: Any) -> list[str] | None:
+    """Return an executable plus its arguments, or None when it cannot be parsed."""
+    if path is None or not isinstance(argv, Sequence) or isinstance(argv, (str, bytes)):
+        return None
+    executable = _token_text(path)
+    arguments = [_token_text(value) for value in argv]
+    # The executable path is authoritative; argv[0] is only a display name.
+    return [executable, *arguments[1:]] if arguments else [executable]
+
+
+def _os_process_launch_command(name: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> list[str] | None:
+    """Extract the effective executable and argv from public os launch APIs."""
+    if name.startswith("posix_spawn"):
+        path = args[0] if args else kwargs.get("path")
+        argv = args[1] if len(args) > 1 else kwargs.get("argv")
+        return _path_and_argv(path, argv)
+
+    if name.startswith("spawn"):
+        positional_offset = 1  # mode precedes file/path
+        path = args[positional_offset] if len(args) > positional_offset else kwargs.get("file")
+        if name[5:6] == "v":
+            argv = args[2] if len(args) > 2 else kwargs.get("args")
+            return _path_and_argv(path, argv)
+        if name[5:6] == "l":
+            values = list(args[2:])
+            if name.endswith("e") and values:
+                values.pop()  # trailing environment mapping in *le/*lpe
+            return _path_and_argv(path, values)
+        return None
+
+    if name.startswith("exec"):
+        path = args[0] if args else kwargs.get("path", kwargs.get("file"))
+        if name[4:5] == "v":
+            argv = args[1] if len(args) > 1 else kwargs.get("argv", kwargs.get("args"))
+            return _path_and_argv(path, argv)
+        if name[4:5] == "l":
+            values = list(args[1:])
+            if name.endswith("e") and values:
+                values.pop()  # trailing environment mapping in *le/*lpe
+            return _path_and_argv(path, values)
+    return None
 
 
 def guarded_process_enumeration(operation: str, original: Callable[..., Any], *, allowed: bool) -> Callable[..., Any]:
@@ -247,3 +381,112 @@ def guarded_process_enumeration(operation: str, original: Callable[..., Any], *,
         )
 
     return blocked
+
+
+def install_test_process_scan_guard(
+    psutil_module: Any,
+    subprocess_module: Any,
+    patch: Any,
+    *,
+    os_module: Any = os,
+) -> None:
+    """Block common process discovery APIs and command launch wrappers in one test.
+
+    ``Process.children`` uses the platform PID source internally on supported
+    psutil versions, so guard it directly as well as the public ``pids`` API.
+    Tests that need live process-table access are separately marked and run only
+    in the approved CI job; ordinary tests must use exact process handles. This
+    does not intercept raw procfs/native access or private psutil implementation
+    APIs, and is not a sandbox against code deliberately bypassing it.
+    """
+    process_type = psutil_module.Process
+    for name in ("process_iter", "pids"):
+        patch.setattr(
+            psutil_module,
+            name,
+            guarded_process_enumeration(f"psutil.{name}", getattr(psutil_module, name), allowed=False),
+        )
+
+    for name in ("children", "parent", "parents"):
+        original = getattr(process_type, name, None)
+        if not callable(original):
+            continue
+        patch.setattr(
+            process_type,
+            name,
+            guarded_process_enumeration(f"psutil.Process.{name}", original, allowed=False),
+        )
+
+    original_environ = process_type.environ
+
+    @wraps(original_environ)
+    def guarded_environ(process: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(process, "pid", None) != os.getpid():
+            raise RuntimeError("process environment reads are restricted to the current test process")
+        return original_environ(process, *args, **kwargs)
+
+    patch.setattr(process_type, "environ", guarded_environ)
+
+    original_popen = subprocess_module.Popen
+    block_process_table_command = guarded_process_enumeration(
+        "subprocess.Popen process-table command", original_popen, allowed=False
+    )
+
+    @wraps(original_popen)
+    def guarded_popen(*args: Any, **kwargs: Any) -> Any:
+        command = args[0] if args else kwargs.get("args")
+        executable = kwargs.get("executable")
+        executable_command = None
+        if executable is not None:
+            command_tokens = _command_tokens(command)
+            executable_command = [executable, *command_tokens[1:]]
+        if is_process_table_enumeration_command(command) or (
+            executable_command is not None and is_process_table_enumeration_command(executable_command)
+        ):
+            return block_process_table_command(*args, **kwargs)
+        return original_popen(*args, **kwargs)
+
+    patch.setattr(subprocess_module, "Popen", guarded_popen)
+
+    for name in ("system", "popen"):
+        original = getattr(os_module, name)
+        block_process_table_command = guarded_process_enumeration(
+            f"os.{name} process-table command", original, allowed=False
+        )
+
+        @wraps(original)
+        def guarded_os_command(
+            *args: Any,
+            _original=original,
+            _blocked=block_process_table_command,
+            **kwargs: Any,
+        ) -> Any:
+            command = args[0] if args else kwargs.get("cmd")
+            if is_process_table_enumeration_command(command):
+                return _blocked(*args, **kwargs)
+            return _original(*args, **kwargs)
+
+        patch.setattr(os_module, name, guarded_os_command)
+
+    for name in dir(os_module):
+        if not name.startswith(("spawn", "posix_spawn", "exec")):
+            continue
+        original = getattr(os_module, name)
+        if not callable(original):
+            continue
+        block_process_launch = guarded_process_enumeration(f"os.{name} process-table command", original, allowed=False)
+
+        @wraps(original)
+        def guarded_os_process_launch(
+            *args: Any,
+            _name=name,
+            _original=original,
+            _blocked=block_process_launch,
+            **kwargs: Any,
+        ) -> Any:
+            command = _os_process_launch_command(_name, args, kwargs)
+            if command is None or is_process_table_enumeration_command(command):
+                return _blocked(*args, **kwargs)
+            return _original(*args, **kwargs)
+
+        patch.setattr(os_module, name, guarded_os_process_launch)

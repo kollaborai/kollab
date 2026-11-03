@@ -1,25 +1,68 @@
 """Test-only ownership safeguards for deliberately detached POSIX processes.
 
-These helpers never scan for or signal unrelated processes. Identity files contain
-both PID and creation time; a group is signalled only while its own watchdog or
-another identity-checked test member is still alive in that private group. The
-watchdog also bounds leaks if pytest dies before a test's ``finally`` block.
+These helpers never scan for or signal unrelated processes. A private process
+group is signalled only by its own live watchdog, while that watchdog keeps the
+group ID from being recycled. PID files are never sufficient authority to
+signal a process; callers need a retained direct-child handle. If the watchdog
+is missing or dies, callers wait a bounded time for recorded identities, then
+report that cleanup is deferred to the ephemeral CI runner; they do not signal
+a numeric PID or PGID as a fallback.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
 import shlex
-import signal
 import sys
 import time
+from collections.abc import Iterable
+from importlib import import_module
 from pathlib import Path
 
 import psutil
 
 WATCHDOG_SECONDS = 60
+
+
+def asyncio_child_signal_is_reap_serialized() -> bool:
+    """Whether the active stdlib watcher serializes reaping on its event loop.
+
+    POSIX ``Process.terminate/kill`` still signal numeric PIDs. Enable them
+    only for the known CPython selector loop's pidfd watcher, or its threaded
+    watcher when waitid(WNOWAIT) prevents a background reap before the event
+    loop callback. Unknown loops/watchers fail closed. Windows uses the
+    subprocess process handle for signaling.
+    """
+    if sys.implementation.name != "cpython":
+        return False
+    if os.name == "nt":
+        return True
+    if os.name != "posix":
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+
+    try:
+        unix_events = import_module("asyncio.unix_events")
+    except ImportError:
+        return False
+    loop_type = getattr(unix_events, "_UnixSelectorEventLoop", None)
+    if loop_type is None or type(loop) is not loop_type:
+        return False
+    watcher = getattr(loop, "_watcher", None)
+    pidfd_watcher_type = getattr(unix_events, "_PidfdChildWatcher", None)
+    if pidfd_watcher_type is not None and type(watcher) is pidfd_watcher_type:
+        return hasattr(os, "pidfd_open")
+    threaded_watcher_type = getattr(unix_events, "_ThreadedChildWatcher", None)
+    if threaded_watcher_type is not None and type(watcher) is threaded_watcher_type:
+        return hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
+    return False
+
 
 # A non-detached test child still needs to exit if pytest itself is killed.
 _BOUNDED_CHILD = r"""
@@ -47,6 +90,10 @@ def bounded_child_command() -> list[str]:
 # any test workload. Its handshake is atomic; the shell waits for it before
 # starting a workload. If pytest is killed, the watchdog sees its owner's
 # death; if that check fails for any reason, its hard deadline still expires.
+# Cleanup requests also go through the watchdog, which verifies and signals
+# its own group while it is alive. The live member prevents the PGID from being
+# recycled before the group signal. This bound applies only while the watchdog
+# remains alive; otherwise callers report survivors and defer to runner teardown.
 _WATCHDOG = r"""
 import json, os, signal, sys, time
 from pathlib import Path
@@ -65,15 +112,20 @@ ready = Path(ready)
 tmp = ready.with_suffix(ready.suffix + ".tmp")
 tmp.write_text(json.dumps({"pid": os.getpid(), "birth": psutil.Process().create_time(), "pgid": group}))
 os.replace(tmp, ready)
+stop_request = ready.with_suffix(ready.suffix + ".stop")
 deadline = time.monotonic() + limit
 while time.monotonic() < deadline:
     try:
+        if stop_request.exists():
+            break
         if not owner.is_running() or owner.status() == psutil.STATUS_ZOMBIE or owner.create_time() != owner_birth:
             break
     except psutil.Error:
         break
     time.sleep(0.1)
 try:
+    if os.getpgrp() != group or os.getsid(0) != group:
+        raise SystemExit("watchdog left its private process group")
     os.killpg(group, signal.SIGKILL)
 except ProcessLookupError:
     pass
@@ -134,49 +186,88 @@ def wait_for_exit(process: psutil.Process, timeout: float = 5) -> None:
     raise psutil.TimeoutExpired(timeout, pid=process.pid)
 
 
-def cleanup_pidfile(path: Path) -> None:
-    """Kill only the still-matching process in a test-owned identity file."""
+def wait_for_recorded_identities(identities: Iterable[tuple[int, float]], timeout: float = 5) -> None:
+    """Observe exact recorded PIDs for a bounded time without signaling them.
+
+    A PID whose creation time changed is treated as the old identity's exit.
+    If a same-birth process remains or cannot be verified by the deadline, the
+    caller must report deferred cleanup; this helper never falls back to kill.
+    """
+    checked = tuple(identities)
+    for pid, birth in checked:
+        if type(pid) is not int or pid <= 1 or type(birth) not in (int, float) or not math.isfinite(birth):
+            raise ValueError("invalid recorded process identity; no signal attempted")
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("timeout must be finite and nonnegative")
+
+    deadline = time.monotonic() + timeout
+    while True:
+        pending = []
+        for pid, birth in checked:
+            try:
+                process = psutil.Process(pid)
+                if process.create_time() != birth:
+                    continue
+                if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                    pending.append(pid)
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.Error as exc:
+                raise RuntimeError(f"could not verify recorded process {pid}; no signal attempted") from exc
+
+        if not pending:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"recorded processes remain after {timeout:g}s: {pending}; "
+                "no PID/PGID fallback; defer cleanup to the ephemeral CI runner"
+            )
+        time.sleep(min(0.05, remaining))
+
+
+def cleanup_pidfile(path: Path, *, process=None) -> None:
+    """Clean up only through a retained direct-child handle, never a bare PID."""
     data = _identity(path)
-    if not data or data["pid"] == os.getpid():
+    if not data or process is None or data["pid"] == os.getpid():
+        return
+    # The retained Popen handle is the authority: poll() either reaps an exited
+    # direct child or returns None while this process is still its sole reaper.
+    # The caller must serialize this synchronous call with every poll/wait on
+    # that handle; this helper adds no lock. Popen's kill() still sends a numeric
+    # PID signal; the unreaped-child/sole-reaper condition prevents reuse here,
+    # but this is not an atomic OS process handle.
+    if process.pid != data["pid"] or process.poll() is not None:
         return
     try:
-        process = psutil.Process(data["pid"])
-        if process.create_time() != data["birth"]:
-            return  # PID was reused; it is not the process the test created.
         process.kill()
-        wait_for_exit(process)
-    except psutil.NoSuchProcess:
+    except ProcessLookupError:
         return
+    process.wait(timeout=5)
 
 
-def cleanup_group(pgid: int, ready: Path, *, anchors=()) -> None:
-    """Kill a private group only with a live, identity-checked test member.
+def _request_watchdog_stop(ready: Path) -> None:
+    request = ready.with_suffix(ready.suffix + ".stop")
+    try:
+        fd = os.open(request, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return
+    os.close(fd)
 
-    Anchors must be captured while the group's verified watchdog is alive. They
-    preserve group ownership if the code under test kills the watchdog first.
+
+def cleanup_group(pgid: int, ready: Path) -> None:
+    """Ask the group's live watchdog to stop its own group, else fail closed.
+
+    The parent never resolves or signals a numeric PID. If startup has not
+    published its identity yet, or the watchdog has already exited, a stop
+    request is harmless: only this test's watchdog reads this private path.
+    There is intentionally no anchor fallback: after a watchdog dies, the
+    caller observes exact recorded identities for a bounded time and reports
+    survivors for ephemeral-runner cleanup.
     """
     if type(pgid) is not int or pgid <= 1 or pgid == os.getpgrp():
         return
     data = _identity(ready)
-    if not data or data.get("pgid") != pgid or data["pid"] == os.getpid():
+    if data is not None and data.get("pgid") != pgid:
         return
-    try:
-        guard = psutil.Process(data["pid"])
-        if guard.create_time() == data["birth"] and str(ready) in guard.cmdline() and os.getpgid(guard.pid) == pgid:
-            os.killpg(pgid, signal.SIGKILL)
-            return
-    except psutil.NoSuchProcess, ProcessLookupError:
-        pass
-    for process, birth in anchors:
-        try:
-            if (
-                process.pid != os.getpid()
-                and process.is_running()
-                and process.create_time() == birth
-                and process.status() != psutil.STATUS_ZOMBIE
-                and os.getpgid(process.pid) == pgid
-            ):
-                os.killpg(pgid, signal.SIGKILL)
-                return
-        except psutil.NoSuchProcess, ProcessLookupError:
-            pass
+    _request_watchdog_stop(ready)

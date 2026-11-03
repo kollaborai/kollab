@@ -17,10 +17,9 @@ from tests.process_scan_guard import (
     HOST_PROCESS_SCAN_OPTION,
     HOST_PROCESS_SCAN_SKIP_REASON,
     HOST_PROCESS_SCAN_TESTS,
-    guarded_process_enumeration,
     host_process_scan_environment_errors,
     host_process_scans_allowed,
-    is_process_table_enumeration_command,
+    install_test_process_scan_guard,
 )
 
 
@@ -86,32 +85,13 @@ def pytest_collection_modifyitems(config, items) -> None:
 
 @pytest.fixture(autouse=True)
 def _block_unmarked_host_process_enumeration(request, monkeypatch):
-    """Block host-wide enumeration unless this marked test has CI authorization."""
+    """Block process discovery unless this marked test has CI authorization."""
     is_authorized_live_test = request.node.get_closest_marker(
         HOST_PROCESS_SCAN_MARKER
     ) is not None and _host_process_scans_allowed(request.config)
     if is_authorized_live_test:
         return
-
-    original_process_iter = psutil.process_iter
-    monkeypatch.setattr(
-        psutil,
-        "process_iter",
-        guarded_process_enumeration("psutil.process_iter", original_process_iter, allowed=False),
-    )
-
-    original_popen = subprocess.Popen
-    block_process_table_command = guarded_process_enumeration(
-        "subprocess.Popen process-table command", original_popen, allowed=False
-    )
-
-    def guarded_popen(*args, **kwargs):
-        command = args[0] if args else kwargs.get("args")
-        if is_process_table_enumeration_command(command):
-            return block_process_table_command(*args, **kwargs)
-        return original_popen(*args, **kwargs)
-
-    monkeypatch.setattr(subprocess, "Popen", guarded_popen)
+    install_test_process_scan_guard(psutil, subprocess, monkeypatch)
 
 
 @pytest.fixture(autouse=True)

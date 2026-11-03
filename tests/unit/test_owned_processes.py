@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -51,7 +52,7 @@ def test_pidfile_cleanup_stops_its_process(tmp_path):
         process = psutil.Process(child.pid)
         identity = tmp_path / "child.json"
         identity.write_text(json.dumps({"pid": child.pid, "birth": process.create_time()}))
-        owned.cleanup_pidfile(identity)
+        owned.cleanup_pidfile(identity, process=child)
         child.wait(timeout=5)
         assert not _alive(process)
     finally:
@@ -61,13 +62,33 @@ def test_pidfile_cleanup_stops_its_process(tmp_path):
 
 
 def test_pidfile_cleanup_refuses_a_reused_pid(tmp_path, monkeypatch):
-    process = psutil.Process()
     identity = tmp_path / "other.json"
-    identity.write_text(json.dumps({"pid": process.pid, "birth": process.create_time() - 100}))
-    signals = []
-    monkeypatch.setattr(psutil.Process, "kill", lambda self: signals.append(self.pid))
+    identity.write_text(json.dumps({"pid": 123456, "birth": 100.0}))
+    lookups = []
+
+    def process_lookup(pid):
+        lookups.append(pid)
+        raise AssertionError("PID-only cleanup must not resolve or signal a process")
+
+    monkeypatch.setattr(owned.psutil, "Process", process_lookup)
     owned.cleanup_pidfile(identity)
-    assert signals == []
+    assert lookups == []
+
+
+def test_pidfile_cleanup_uses_only_a_matching_direct_child_handle(tmp_path):
+    identity = tmp_path / "child.json"
+    identity.write_text(json.dumps({"pid": 123456, "birth": 100.0}))
+    calls = []
+    process = SimpleNamespace(
+        pid=123456,
+        poll=lambda: None,
+        kill=lambda: calls.append("kill"),
+        wait=lambda timeout: calls.append(("wait", timeout)),
+    )
+
+    owned.cleanup_pidfile(identity, process=process)
+
+    assert calls == ["kill", ("wait", 5)]
 
 
 def test_pidfile_cleanup_rejects_invalid_data(tmp_path):
@@ -133,7 +154,6 @@ except psutil.Error:
         if driver.poll() is None:
             driver.kill()
         driver.wait(timeout=5)
-        owned.cleanup_pidfile(identity_file)
         if driver.stderr:
             driver.stderr.close()
 
@@ -146,36 +166,6 @@ def test_group_cleanup_refuses_an_unrelated_watchdog(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "killpg", lambda *args: signals.append(args))
     owned.cleanup_group(os.getpgrp(), ready)
     assert not signals
-
-
-def test_group_cleanup_uses_only_identity_checked_anchors(tmp_path, monkeypatch):
-    group = os.getpgrp() + 100000
-    ready = tmp_path / "guard.json"
-    ready.write_text(json.dumps({"pid": 999999, "birth": 10.0, "pgid": group}))
-    signals = []
-
-    class Anchor:
-        pid = 999998
-
-        def is_running(self):
-            return True
-
-        def create_time(self):
-            return 123.0
-
-        def status(self):
-            return psutil.STATUS_RUNNING
-
-    def missing_guard(pid):
-        raise psutil.NoSuchProcess(pid)
-
-    monkeypatch.setattr(psutil, "Process", missing_guard)
-    monkeypatch.setattr(os, "getpgid", lambda pid: group)
-    monkeypatch.setattr(os, "killpg", lambda *args: signals.append(args))
-    owned.cleanup_group(group, ready, anchors=[(Anchor(), 122.0)])
-    assert not signals
-    owned.cleanup_group(group, ready, anchors=[(Anchor(), 123.0)])
-    assert signals == [(group, owned.signal.SIGKILL)]
 
 
 @pytest.mark.parametrize("exit_mode", ["kill_owner", "term_owner", "deadline"])
@@ -244,12 +234,6 @@ except psutil.Error:
         driver.wait(timeout=5)
         if pgid is not None:
             owned.cleanup_group(pgid, ready)
-        for process in (sleeper, guard):
-            if process and _alive(process):
-                try:
-                    process.kill()
-                except psutil.NoSuchProcess:
-                    pass
         if driver.stderr:
             driver.stderr.close()
 
@@ -299,6 +283,5 @@ except psutil.Error:
         if driver.poll() is None:
             driver.kill()
         driver.wait(timeout=5)
-        owned.cleanup_pidfile(child_file)
         if driver.stderr:
             driver.stderr.close()
