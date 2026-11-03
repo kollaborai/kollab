@@ -103,8 +103,9 @@ def test_module_runner_uses_installed_package_without_host_site_packages(
         "raise RuntimeError('host pydantic leaked into voice runtime')\n"
     )
     (package_dir / "_probe.py").write_text(
-        "import json, pydantic, kollabor_voice\n"
-        "print(json.dumps({'voice': kollabor_voice.__file__, 'pydantic': pydantic.__file__}))\n"
+        "import json, pydantic, sysconfig, kollabor_voice\n"
+        "print(json.dumps({'voice': kollabor_voice.__file__, "
+        "'pydantic': pydantic.__file__, 'purelib': sysconfig.get_paths()['purelib']}))\n"
     )
     monkeypatch.setattr(module_runtime, "_PACKAGE_DIR", package_dir)
     monkeypatch.setenv("PYTHONPATH", str(host_site))
@@ -119,8 +120,10 @@ def test_module_runner_uses_installed_package_without_host_site_packages(
     )
     imports = json.loads(result.stdout)
     assert Path(imports["voice"]).resolve() == (package_dir / "__init__.py").resolve()
-    assert Path(imports["pydantic"]).resolve() != (host_site / "pydantic.py").resolve()
-    assert str(Path(imports["pydantic"]).resolve()).startswith(sys.prefix)
+    pydantic_path = Path(imports["pydantic"]).resolve()
+    runtime_site = Path(imports["purelib"]).resolve()
+    assert pydantic_path != (host_site / "pydantic.py").resolve()
+    assert pydantic_path.is_relative_to(runtime_site)
 
 
 def test_module_runner_loads_editable_source_package():
