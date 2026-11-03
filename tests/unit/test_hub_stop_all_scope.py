@@ -94,6 +94,44 @@ def test_stop_all_only_sweeps_agents_the_caller_started(monkeypatch):
     asyncio.run(run_test())
 
 
+def test_stop_all_does_not_infer_detached_child_ownership_from_launcher_pid(
+    monkeypatch,
+):
+    """A presence PID never inherits ownership from a different Popen PID."""
+
+    async def run_test():
+        now = time.time()
+        plugin = HubPlugin()
+        plugin._presence = SimpleNamespace(
+            scan_all_presence=lambda: [_peer("helper", 222, started_at=now - 5)]
+        )
+        plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
+        _patch_process_create_time(monkeypatch, plugin)
+        # Models the old double-detach shape: Popen owns the wrapper PID, while
+        # the presence record belongs to its detached child.
+        monkeypatch.setattr(
+            plugin,
+            "_get_orchestrator",
+            lambda: _orch({"helper": _session(111, now - 7, alive=True)}),
+        )
+
+        stopped = []
+
+        async def fake_stop(agent, reason="", session=None):
+            stopped.append(agent.identity)
+            return "stopped"
+
+        monkeypatch.setattr(plugin, "_stop_peer_agent", fake_stop)
+
+        result = await plugin._handle_stop_command("all")
+
+        assert stopped == []
+        assert "helper" in result
+        assert "no agents started by you" in result
+
+    asyncio.run(run_test())
+
+
 def test_stop_all_with_no_started_agents_stops_nothing(monkeypatch):
     async def run_test():
         plugin = HubPlugin()

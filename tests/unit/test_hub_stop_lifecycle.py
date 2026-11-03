@@ -60,7 +60,9 @@ def test_stop_peer_waits_after_shutdown_ack_then_sigterms(monkeypatch):
             signal_shutdown,
         )
         monkeypatch.setattr(plugin, "_wait_for_agent_exit", wait_for_exit)
-        monkeypatch.setattr(plugin, "_force_kill_agent", lambda agent: kills.append(agent.pid) or True)
+        monkeypatch.setattr(
+            plugin, "_force_kill_agent", lambda agent: kills.append(agent.pid) or True
+        )
 
         result = await plugin._stop_peer_agent(agent, reason="test")
 
@@ -104,7 +106,9 @@ def test_stop_peer_escalates_to_sigkill_when_sigterm_fails(monkeypatch):
         monkeypatch.setattr(plugin, "_wait_for_agent_exit", wait_for_exit)
         monkeypatch.setattr(plugin, "_force_kill_agent", lambda agent: True)
         monkeypatch.setattr(
-            plugin, "_hard_kill_agent", lambda agent: hard_kills.append(agent.pid) or True
+            plugin,
+            "_hard_kill_agent",
+            lambda agent: hard_kills.append(agent.pid) or True,
         )
 
         result = await plugin._stop_peer_agent(agent, reason="test")
@@ -257,16 +261,32 @@ def test_stop_all_stops_peers_concurrently():
                 started_at=boot,
             ),
         ]
+
+        class TrackedProc:
+            def __init__(self, pid):
+                self.pid = pid
+
+            def poll(self):
+                return None
+
+        sessions = {
+            identity: SimpleNamespace(
+                pid=pid,
+                start_time=boot - 0.2,
+                proc=TrackedProc(pid),
+                is_alive=True,
+            )
+            for identity, pid in (("lapis", 101), ("sapphire", 102))
+        }
+        # The synthetic Popen sessions represent the direct detached children
+        # now started by AgentOrchestrator, and these PIDs are the presence PIDs.
+        plugin._session_process_create_time = lambda session: session.start_time
+
         # stop all only sweeps agents the caller started (#669); ownership
         # is pid + liveness + process generation, not a bare PID match
         plugin.event_bus = SimpleNamespace(
             get_service=lambda name: SimpleNamespace(
-                orchestrator=SimpleNamespace(
-                    get_all_agents=lambda: {
-                        "lapis": SimpleNamespace(pid=101, start_time=boot - 0.2),
-                        "sapphire": SimpleNamespace(pid=102, start_time=boot - 0.2),
-                    }
-                )
+                orchestrator=SimpleNamespace(get_all_agents=lambda: dict(sessions))
             )
         )
 

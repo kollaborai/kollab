@@ -121,7 +121,8 @@ What option A still cannot stop, stated so nobody claims more:
   when the CLI process or one of its OS ancestors matches a Hub presence PID
   from any local project (`_cli_is_hub_agent_context`). The ancestry check covers ordinary
   foreground and background terminal-tool children even when the background
-  terminal filters those markers; an unreadable context fails closed. No CLI
+  terminal filters those markers; errors while enumerating an existing Hub
+  directory fail closed. No CLI
   flag can override the refusal because agents control argv. This is an
   accident guard for normal tool launches, not a security boundary against
   arbitrary same-user code that deliberately detaches, as described in the
@@ -133,11 +134,13 @@ What option A still cannot stop, stated so nobody claims more:
   presence PID must match the live orchestrator session and its Popen handle;
   the row's boot time must be no earlier than the OS process creation time.
   There is no timestamp grace window. Fallback escalation verifies the
-  selected PID again and signals through that Popen handle (`proc.send_signal`):
-  a reaped child cannot be signaled and an unreaped exited child holds its PID
-  as a zombie, so a recycled PID is not signaled across the check-to-signal
-  race. Raw `os.kill` by PID remains only on the operator's session-less
-  single-stop path.
+  selected PID again and signals through that Popen handle (`proc.send_signal`).
+  The orchestrator starts the detached child directly and keeps its Popen
+  handle, rather than keeping the short-lived parent of a second detach fork.
+  A reaped child cannot be signaled and an unreaped exited child holds its PID
+  as a zombie. Raw `os.kill` by PID remains available on session-less
+  single-target `/hub stop`, including the `<hub_stop>` tool route through
+  `_handle_hub_stop_tool`.
 - A remote handle is refused: "spawn, stop and wake stay local"
   (`plugins/hub/plugin.py:12352`). No network-wide stop exists.
 - `kollab service` agents come back by themselves: systemd `Restart=always`
@@ -514,7 +517,8 @@ keys, the managed-config record or MCP settings.
   normally; and `-p` pipe runs and ACP stdio, which
   print the halted line and exit with code 75 (`EX_TEMPFAIL`), so cron jobs do
   not hang (N7).
-- `--detached` (R3-F11): the check runs in the forked child, after it detached.
+- `--detached` (R3-F11): the check runs in the detached child, after it is
+  separated from its launcher (the CLI fork or a supervisor-owned direct spawn).
   The parent returns as today; the child becomes the waiter, so the waiter
   holds the detached process's own argv and environment.
 - A waiter captures its full argv and environment at process entry, before

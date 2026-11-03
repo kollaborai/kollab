@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shlex
+import stat
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -1202,8 +1203,9 @@ async def async_main() -> None:
         has_cli_command = True
         args.pipe = False
 
-    # --detached renders full TUI (to /dev/null) so attach clients get rich output.
-    # stdout/stderr are already redirected to /dev/null in cli_main().
+    # --detached renders the full TUI so attach clients get rich output.
+    # Standalone launches redirect stdout/stderr; an owning supervisor may
+    # keep captured output connected to its directly tracked child.
 
     # Determine if we're in pipe mode and what the input is.
     # Pipe mode ONLY when:
@@ -1550,6 +1552,30 @@ def _current_process_and_ancestors() -> set[int]:
     return {current.pid, *(parent.pid for parent in current.parents())}
 
 
+def _directory_children(
+    directory: Path, *, directories_only: bool = False
+) -> list[Path]:
+    """List direct children without pathlib.glob's suppressed scan errors.
+
+    These roots are optional until created, but once present their directory
+    scan must complete. Missing directories are empty; other I/O failures
+    propagate to the caller's fail-closed guard.
+    """
+    try:
+        directory.stat()
+    except FileNotFoundError:
+        return []
+
+    children = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            child = Path(entry.path)
+            if directories_only and not stat.S_ISDIR(child.stat().st_mode):
+                continue
+            children.append(child)
+    return children
+
+
 def _cli_is_hub_agent_context() -> bool:
     """Whether a mesh-wide CLI stop was launched from a local Hub agent.
 
@@ -1569,13 +1595,18 @@ def _cli_is_hub_agent_context() -> bool:
 
         process_ids = _current_process_and_ancestors()
         config_dir = get_config_directory()
+        project_dirs = _directory_children(
+            config_dir / "projects", directories_only=True
+        )
         hub_dirs = [
             config_dir / "hub",
-            *sorted((config_dir / "projects").glob("*/hub")),
+            *(project_dir / "hub" for project_dir in project_dirs),
         ]
         agent_pids = set()
         for hub_dir in hub_dirs:
-            for path in (hub_dir / "presence").glob("*.json"):
+            for path in _directory_children(hub_dir / "presence"):
+                if not path.name.endswith(".json"):
+                    continue
                 with path.open() as fh:
                     data = json.load(fh)
                 if not isinstance(data, dict):
@@ -3067,7 +3098,8 @@ def cli_main() -> None:
     """Synchronous entry point for pip-installed CLI command."""
     _update_before_launch()
 
-    # --detached: fork into a fully detached daemon process.
+    # --detached: unless already detached by a supervisor, fork into a fully
+    # detached daemon process.
     # Shell backgrounding (&) doesn't work because zsh suspends
     # processes that touch the TTY (SIGTTOU). Instead, we fork,
     # create a new session (setsid), redirect all fds, and let
@@ -3085,7 +3117,8 @@ def cli_main() -> None:
         )
 
         if os.environ.pop(DETACHED_CHILD_ENV, "") == "1":
-            # Already forked, detached and exec'd by the code below.
+            # Already detached before cli_main; do not create another process
+            # so the supervisor's Popen continues to refer to this agent.
             detached_runtime = True
         elif os.environ.pop(SERVICE_ENV, "") == "1":
             detached_runtime = True
@@ -3177,7 +3210,7 @@ def cli_main() -> None:
     try:
         _run_async_main_with_sigterm_cleanup(detached_runtime)
     except Exception as e:
-        # Can't print if detached (stdout is /dev/null), but try anyway
+        # Some detached launches redirect stdout; try the current stream anyway.
         try:
             print(f"\n\nFatal error: {e}")
         except Exception:

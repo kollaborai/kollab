@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -132,6 +133,50 @@ def test_cli_stop_all_refuses_when_process_ancestry_cannot_be_read(
     )
     monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
     monkeypatch.delenv("KOLLAB_AGENT_PID", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(_handle_cli_hub(["stop", "all"]))
+
+    assert exc.value.code == 2
+    assert "agent-context" in capsys.readouterr().err
+    stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "blocked_relative_path",
+    [
+        "projects",
+        "hub/presence",
+        "projects/agent-project/hub/presence",
+    ],
+)
+def test_cli_stop_all_refuses_when_hub_directory_iteration_fails(
+    tmp_path, capsys, monkeypatch, blocked_relative_path
+):
+    """Unreadable project or presence directories must not look empty.
+
+    pathlib.Path.glob suppresses some scandir OSErrors, which could otherwise
+    make an agent caller indistinguishable from an operator shell.
+    """
+    blocked = tmp_path / blocked_relative_path
+    blocked.mkdir(parents=True)
+    real_scandir = os.scandir
+
+    def scandir(path):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == blocked:
+            raise PermissionError("presence directory unreadable")
+        return real_scandir(path)
+
+    monkeypatch.setattr("kollabor.cli.os.scandir", scandir)
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_config_directory", lambda: tmp_path
+    )
+    monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
+    monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
+    monkeypatch.delenv("KOLLAB_AGENT_PID", raising=False)
+
+    stop = AsyncMock(return_value=(True, "stopped"))
+    monkeypatch.setattr("kollabor.cli.stop_agent_record", stop)
 
     with pytest.raises(SystemExit) as exc:
         asyncio.run(_handle_cli_hub(["stop", "all"]))
