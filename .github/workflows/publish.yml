@@ -109,7 +109,6 @@ jobs:
       url: https://pypi.org/project/kollab/
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -130,20 +129,26 @@ jobs:
           TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
           GH_TOKEN: ${{ github.token }}
         run: python scripts/release_publish.py plan-pypi --tag "$RELEASE_TAG" --source "$SOURCE_SHA" --tag-object "$TAG_OBJECT" --dist dist --upload upload --output "$GITHUB_OUTPUT"
-      - name: Publish workspace packages with PyPI trusted publishing
+      - name: Publish workspace packages with the repository PyPI token
         if: steps.plan.outputs.workspace_count != '0'
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: upload/workspace/
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: false
       - name: Verify workspace publication before exposing the root package
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: python scripts/release_publish.py verify-pypi --tag "$RELEASE_TAG" --dist dist --workspace-only
-      - name: Publish kollab after its dependencies
+      - name: Publish kollab with the repository PyPI token after its dependencies
         if: steps.plan.outputs.root_count != '0'
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: upload/root/
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: false
       - name: Verify the complete published package set
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}

@@ -27,7 +27,7 @@ def test_write_authority_is_scoped_to_publishers():
     for name, job in jobs.items():
         permissions = job.get("permissions", {})
         if name == "publish-packages":
-            assert permissions == {"contents": "read", "id-token": "write"}
+            assert permissions == {"contents": "read"}
             assert job["environment"]["name"] == "pypi-publish"
         elif name == "release":
             assert permissions == {"contents": "write"}
@@ -35,11 +35,33 @@ def test_write_authority_is_scoped_to_publishers():
         else:
             assert not any(value == "write" for value in permissions.values())
     text = (ROOT / ".github/workflows/publish.yml").read_text()
-    assert "secrets." not in text
+    assert "id-token" not in text
     assert "skip-existing" not in text
     assert "--clobber" not in text
     assert "git push" not in text
     assert "HOMEBREW_TAP_TOKEN" not in text
+
+
+def test_pypi_token_is_available_only_to_the_two_pinned_upload_actions():
+    jobs = workflow("publish.yml")["jobs"]
+    token_steps = []
+    for job_name, job in jobs.items():
+        for step in job.get("steps", []):
+            serialized = str(step)
+            if "PYPI_API_TOKEN" in serialized:
+                token_steps.append((job_name, step))
+    assert len(token_steps) == 2
+    for job_name, step in token_steps:
+        assert job_name == "publish-packages"
+        assert step["uses"] == (
+            "pypa/gh-action-pypi-publish@"
+            "7245906fb61fa33a13554f9d5fb856fe61758086"
+        )
+        assert step["with"]["user"] == "__token__"
+        assert step["with"]["password"] == "${{ secrets.PYPI_API_TOKEN }}"
+        assert step["with"]["attestations"] is False
+    for job_name in ("validate", "source-validation", "binaries", "build-packages", "release"):
+        assert "PYPI_API_TOKEN" not in str(jobs[job_name])
 
 
 def test_publisher_runs_controller_code_and_does_not_build_packages():
