@@ -36,7 +36,9 @@ Source work lands through a DRAFT PR from the owning worktree. Keep commits
 scoped to owned paths, use Conventional Commits, and require independent review
 and all configured checks on the exact PR head against current `main`. Update
 a PR branch with ordinary merges; never rebase or force-push. Marco authorizes
-a concrete plan or bounded PR batch; within it, the designated integrator may
+a concrete plan or bounded PR batch (a class order in his own words, such as
+"merge as many ready PRs as you can tonight", counts; see
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`); within it, the designated integrator may
 mark ready and merge after its review/base/CI/thread gates pass, without
 repeating permission per listed PR. A different AI agent must review every PR's
 exact final head and record the required GitHub approval as whichever account,
