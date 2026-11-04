@@ -294,6 +294,29 @@ async def create_session(body: CreateSessionRequest, request: Request):
                 )
             )
             if new_mcp_servers:
+                previous_mcp_settings: dict[str, bool] = {}
+                try:
+                    for name in new_mcp_servers:
+                        try:
+                            status = await attached_session.state.test_mcp_server(name)
+                        except ValueError:
+                            # Unconfigured servers are ignored by _apply_mcp_servers.
+                            continue
+                        previous_mcp_settings[name] = bool(status.get("enabled", False))
+                except Exception as snapshot_error:
+                    logger.exception(
+                        "session %s: could not snapshot MCP settings before attaching %s",
+                        attached_session.session_id,
+                        new_mcp_servers,
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "Existing session resumed, but current MCP server settings "
+                            "could not be read; retry the attach."
+                        ),
+                    ) from snapshot_error
+
                 attached_session.mcp_server_names = (
                     existing_mcp_servers + new_mcp_servers
                 )
@@ -301,19 +324,50 @@ async def create_session(body: CreateSessionRequest, request: Request):
                     await attached_session._apply_mcp_servers()
                 except Exception as e:
                     attached_session.mcp_server_names = existing_mcp_servers
+                    rollback_failures: list[str] = []
+                    for name, was_enabled in previous_mcp_settings.items():
+                        if was_enabled:
+                            continue
+                        try:
+                            await attached_session.state.disable_mcp_server(name)
+                        except Exception as rollback_error:
+                            rollback_failures.append(name)
+                            logger.exception(
+                                "session %s: failed to restore MCP server %s to disabled "
+                                "after attach failure: %s",
+                                attached_session.session_id,
+                                name,
+                                rollback_error,
+                            )
+
+                    try:
+                        await attached_session.state.reload_mcp_servers()
+                    except Exception as rollback_error:
+                        rollback_failures.append("reload")
+                        logger.exception(
+                            "session %s: failed to reload MCP servers after rollback: %s",
+                            attached_session.session_id,
+                            rollback_error,
+                        )
+
                     logger.error(
                         "session %s: could not apply MCP servers %s: %s",
                         attached_session.session_id,
                         new_mcp_servers,
                         e,
                     )
-                    raise HTTPException(
-                        status_code=503,
-                        detail=(
+                    if rollback_failures:
+                        detail = (
+                            "Existing session resumed, but requested MCP server attachment "
+                            "failed; MCP rollback was incomplete. Inspect engine logs before you "
+                            "retry the attach."
+                        )
+                    else:
+                        detail = (
                             "Existing session resumed, but requested MCP server "
                             "attachment failed; retry the attach."
-                        ),
-                    ) from e
+                        )
+                    raise HTTPException(status_code=503, detail=detail) from e
             return attached_session.to_dict()
 
     # Load profile from credentials or ProfileManager

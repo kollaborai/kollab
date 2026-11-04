@@ -522,6 +522,12 @@ def test_mentiko_attach_resumes_live_daemon_without_second_system_prompt_root(
     async def fake_apply_mcp_servers(session):
         attached_mcp_servers.extend(session.mcp_server_names)
 
+    async def fake_test_mcp_server(_name):
+        return {"found": True, "enabled": False}
+
+    async def fake_mcp_state_call(*_args):
+        return None
+
     async def fake_adopt(cls, found, **kwargs):
         adopted.append(found["session_id"])
         session = cls(
@@ -532,7 +538,14 @@ def test_mentiko_attach_resumes_live_daemon_without_second_system_prompt_root(
         )
         session.conversation_id = Path(found["session_log"]).stem
         session.daemon = SimpleNamespace(
-            pid=found["daemon_pid"], alive=True, launcher=None, state=SimpleNamespace()
+            pid=found["daemon_pid"],
+            alive=True,
+            launcher=None,
+            state=SimpleNamespace(
+                test_mcp_server=fake_test_mcp_server,
+                disable_mcp_server=fake_mcp_state_call,
+                reload_mcp_servers=fake_mcp_state_call,
+            ),
         )
         return session
 
@@ -602,3 +615,214 @@ def test_mentiko_attach_resumes_live_daemon_without_second_system_prompt_root(
         if record.get("type") == "system_prompt" and record.get("parentUuid") is None
     ]
     assert len(system_roots) == 1
+
+
+@pytest.mark.asyncio
+async def test_mentiko_attach_rolls_back_persisted_mcp_settings_and_preserves_history(
+    monkeypatch, registry, tmp_path, caplog
+):
+    """Real adoption must roll back partial MCP writes and preserve disk history."""
+    import httpx
+
+    from kollabor.state import LocalStateService
+    from kollabor.state.handlers import register_state_handlers
+    from kollabor_agent import MCPManager
+    from kollabor_rpc import RpcServer
+
+    session_id = "mcp-attach"
+    conversation_id = f"session_{session_id}"
+    session_log = tmp_path / f"{conversation_id}.jsonl"
+    records = [
+        {
+            "type": "system_prompt",
+            "parentUuid": None,
+            "message": {
+                "role": "system",
+                "content": "existing system prompt",
+                "metadata": {"uuid": "system-root"},
+            },
+        },
+        {
+            "type": "user",
+            "parentUuid": "system-root",
+            "timestamp": "2026-11-03T12:00:00Z",
+            "message": {
+                "role": "user",
+                "content": "hello from the existing transcript",
+                "metadata": {"uuid": "turn-1", "parentUuid": "system-root"},
+            },
+        },
+        {
+            "type": "assistant",
+            "parentUuid": "turn-1",
+            "timestamp": "2026-11-03T12:00:01Z",
+            "message": {
+                "role": "assistant",
+                "content": "existing reply",
+                "metadata": {"uuid": "turn-2", "parentUuid": "turn-1"},
+            },
+        },
+    ]
+    original_log = "\n".join(json.dumps(record) for record in records) + "\n"
+    session_log.write_text(original_log)
+
+    mcp_manager = MCPManager(mcp_dir=tmp_path / "mcp")
+    mcp_manager.save_config(
+        {
+            "servers": {
+                "already-enabled": {"command": "unused", "enabled": True},
+                "retry-server": {"command": "unused", "enabled": False},
+            }
+        }
+    )
+
+    class FailingMCPIntegration:
+        def __init__(self):
+            self.reload_calls = 0
+            self.server_connections = {}
+            self.tool_registry = {}
+
+        async def reload_mcp_servers(self):
+            self.reload_calls += 1
+            # Model reload tearing down active connections before discovery.
+            self.server_connections.clear()
+            if self.reload_calls <= 2:
+                raise RuntimeError(f"simulated MCP reload failure {self.reload_calls}")
+            return {"configured": 2, "discovered": 2, "reconnected": 0}
+
+    mcp_integration = FailingMCPIntegration()
+    conversation_history = [
+        SimpleNamespace(
+            role="user",
+            content="hello from the existing transcript",
+            timestamp="2026-11-03T12:00:00Z",
+            metadata={"uuid": "turn-1", "parentUuid": "system-root"},
+        ),
+        SimpleNamespace(
+            role="assistant",
+            content="existing reply",
+            timestamp="2026-11-03T12:00:01Z",
+            metadata={"uuid": "turn-2", "parentUuid": "turn-1"},
+        ),
+    ]
+    llm_service = SimpleNamespace(
+        config={},
+        conversation_history=conversation_history,
+        mcp_integration=mcp_integration,
+    )
+    state_service = LocalStateService(llm_service, SimpleNamespace())
+    # Keep MCPManager real but scope its persistent settings to this test.
+    state_service._mcp_manager = lambda: mcp_manager
+    rpc_server = RpcServer()
+    register_state_handlers(rpc_server, state_service)
+
+    socket_dir = tempfile.mkdtemp(prefix="kad-", dir="/tmp")
+    socket_path = str(Path(socket_dir) / "daemon.sock")
+    attach_frames = []
+
+    async def fake_daemon(reader, writer):
+        try:
+            attach_frames.append(json.loads(await reader.readline()))
+            writer.write(b'{"type":"attach_ack"}\n')
+            await writer.drain()
+            while line := await reader.readline():
+                frame = json.loads(line)
+                if frame.get("action") == "rpc_request":
+                    reply = await rpc_server.handle_wire(frame)
+                    writer.write((json.dumps(reply, default=str) + "\n").encode())
+                    await writer.drain()
+        except (BrokenPipeError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (BrokenPipeError, ConnectionError):
+                pass
+
+    listener = await asyncio.start_unix_server(fake_daemon, path=socket_path)
+    monkeypatch.setattr(EngineSession, "_disk_conversation_dir", lambda _self: tmp_path)
+    monkeypatch.setattr(
+        HubBridge,
+        "discover_sessions",
+        lambda self, use_cache=False: [
+            _row(
+                session_id,
+                pid=os.getpid(),
+                socket_path=socket_path,
+                session_log=str(session_log),
+                workspace=str(tmp_path),
+            )
+        ],
+    )
+
+    payload = {
+        "session_id": session_id,
+        "credentials": {
+            "provider": "openai",
+            "api_key": "test-api-key",
+            "model": "test-model",
+        },
+        "mcp_servers": ["already-enabled", "retry-server"],
+    }
+    headers = {"x-mentiko-session-token": "test-session-token"}
+    app = server.create_app()
+
+    async def history(client):
+        response = await client.get(f"/sessions/{session_id}/history")
+        assert response.status_code == 200, response.text
+        return response.json()["history"]
+
+    try:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                failed = await client.post("/sessions", headers=headers, json=payload)
+                assert failed.status_code == 503, failed.text
+                assert "retry the attach" in failed.json()["detail"]
+                assert "rollback was incomplete" in failed.json()["detail"]
+
+                # The persisted snapshot restores both values, not just wrapper
+                # metadata, even though the rollback reload also failed.
+                assert mcp_manager.get_server_status(
+                    "already-enabled", mcp_integration
+                )["enabled"] is True
+                assert mcp_manager.get_server_status(
+                    "retry-server", mcp_integration
+                )["enabled"] is False
+                assert any(
+                    "failed to reload MCP servers after rollback" in record.getMessage()
+                    for record in caplog.records
+                )
+
+                failed_history = await history(client)
+                assert [entry["content"] for entry in failed_history] == [
+                    "hello from the existing transcript",
+                    "existing reply",
+                ]
+                assert failed_history[0]["metadata"]["parentUuid"] == "system-root"
+                assert failed_history[1]["metadata"]["parentUuid"] == "turn-1"
+                assert session_log.read_text() == original_log
+
+                retried = await client.post("/sessions", headers=headers, json=payload)
+                assert retried.status_code == 200, retried.text
+                retry_history = await history(client)
+                assert retry_history == failed_history
+                assert session_log.read_text() == original_log
+
+                repeated = await client.post("/sessions", headers=headers, json=payload)
+                assert repeated.status_code == 200, repeated.text
+                assert await history(client) == failed_history
+                assert session_log.read_text() == original_log
+
+        assert len(attach_frames) == 1
+        assert attach_frames[0]["action"] == "attach"
+        assert mcp_integration.reload_calls == 3
+    finally:
+        session = registry.get(session_id)
+        if session is not None:
+            await session.shutdown(stop_daemon=False)
+        listener.close()
+        await listener.wait_closed()
+        shutil.rmtree(socket_dir, ignore_errors=True)
