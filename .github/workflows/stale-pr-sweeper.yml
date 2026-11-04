@@ -1,0 +1,60 @@
+name: Stale PR sweeper
+
+# Issue #718. Daily sweep of open PRs with no new commit AND no review
+# activity for 5+ days (drafts included, listed first). Output is ONE digest
+# (this run's summary plus an artifact) and the `stale` label added to each
+# flagged PR. Flag-only by design: the script has no close, comment, label
+# removal, or draft-state code path. Humans and koordinator decide actions.
+# A workflow is used instead of a hub cron because scheduled automation must
+# run regardless of whether any local hub agent is online, and the GitHub
+# token already carries the least-privilege read/label scope needed here.
+
+on:
+  schedule:
+    # 08:17 America/Phoenix daily; odd minute avoids top-of-hour load.
+    - cron: "17 15 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only; skip applying the stale label"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: stale-pr-sweeper
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: stale-pr-sweeper
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Sweep open PRs (flag-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          args=(--days 5 --digest /tmp/stale-pr-digest.md --summary "$GITHUB_STEP_SUMMARY")
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python3 .github/scripts/stale_pr_sweeper.py "${args[@]}"
+
+      - name: Upload digest artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: stale-pr-digest
+          path: /tmp/stale-pr-digest.md
+          if-no-files-found: ignore
+          retention-days: 30
