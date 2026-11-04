@@ -37,14 +37,16 @@ capability endpoint before offering a QR code.
   save it (WebCrypto Ed25519 and X25519, and IndexedDB), the link is sealed:
   its private keys are non-extractable WebCrypto keys in IndexedDB, which
   script on the page can use but cannot copy out, and its seed is no longer
-  in browser storage. A link an older loader saved with its seed is sealed at
+  in browser storage. Both keys must be readable after the write before the
+  seed is discarded; browsers that cannot restore them keep using the seed.
+  A link an older loader saved with its seed is sealed at
   the first launch that can save it, with no new pairing. Until then, and in
   a browser that cannot, the raw seed stays in browser storage, as before.
 - Scanning requests access. Only an explicit local approval pins that phone's
   key. An invitation admits at most one phone and expires after five minutes.
 - A phone runs the full app and reaches the engine roots that app calls:
   `sessions`, `agents`, `profiles`, `workspaces`, `mcp`, `hub`, `sidebar`,
-  `rosters`, `teams`, `prompts` and `phone-app` (`API_ROOTS` in
+  `rosters`, `teams`, `prompts`, selected voice routes and `phone-app` (`API_ROOTS` in
   `kollabor_engine/phone_link.py`). Everything else is the computer's only:
   PhoneLink management, the network and connect panels, and updates. A lost
   phone keeps that reach until you revoke it on the computer.
@@ -52,6 +54,11 @@ capability endpoint before offering a QR code.
   It is not enrolled for network configuration sync or given an agent identity.
   Provider calls and tools still run on the computer; no credential setup is
   needed on the phone. Approve only phones you trust with the app's controls.
+- The chat microphone starts a voice session using the phone's microphone and
+  speaker. Audio travels inside the encrypted PhoneLink session to a bridge on
+  the computer; the LiveKit server remains on loopback. Stop, disconnect and
+  revocation close the call. A typed `/voice` command controls the computer's
+  microphone instead.
 - The existing authenticated, session-bound relay envelopes carry a dedicated
   phone channel. A fresh ephemeral key exchange protects the HTTP content per
   connection; reconnect invalidates the old session and its requests.
@@ -60,7 +67,9 @@ capability endpoint before offering a QR code.
   Chat streaming, explicit Stop, history, and normal tool approvals retain
   their existing engine behavior. Dropping a stream does not cancel agent work.
 - Saved phone identities reconnect after an engine restart, even without a
-  running terminal agent. Revoke immediately
+  running terminal agent. A changed relay session triggers a new encrypted
+  handshake with the same approved identity; packet keys from the previous
+  session are never reused. Revoke immediately
   withdraws that phone's access. No status says connected until the phone has
   completed its authenticated session.
 - One engine owns PhoneLink for this computer at a time. Another running engine
@@ -98,9 +107,16 @@ PhoneLink negotiates gzip frames and larger 160 KiB chunks when both peers
 support them. Decompression is bounded to 256 KiB per packet; legacy phones keep
 the 8 KiB, uncompressed behavior. Relay application payloads remain 24 KiB for
 ordinary messages, while PhoneLink frames use a separate 320 KiB payload bound
-and a 512 KiB relay frame bound. The history cursor-signing key is separate
+and a 512 KiB relay frame bound. Both the computer's WebSocket and its outer
+JSON parser use that frame bound; decrypted packets keep their smaller
+method-specific limits. The history cursor-signing key is separate
 from the rotating engine token and is stored in the user's Kollab config
 directory with mode 0600.
+
+The loader queues app fetches at twelve open HTTP exchanges, below the
+computer's sixteen-exchange limit. A response holds its exchange until its
+body ends or cancellation is acknowledged. Reconnection invalidates queued
+work from the old packet session; application actions are never replayed.
 
 The synthetic acceptance path uses 220 messages (about 1.8 MB), including a
 1.2 MB tool result. The browser/relay/engine test measured a 148,047-byte,
@@ -198,6 +214,14 @@ starting Kollab:
 ```sh
 KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui
 ```
+
+The same list can be passed per launch as `kollab --web-ui --web-ui-hosts
+192.168.1.20`, which overrides the environment value for that launch. An
+explicitly empty value forces `127.0.0.1` only for that launch. The desktop app
+accepts the same `--web-ui-hosts IP[,IP]` argument and forwards it to kollab,
+and shows the exposure warning in its own window before opening the UI.
+Whenever the WebUI binds any address other than `127.0.0.1`, startup prints an
+exposure warning (#674).
 
 The WebUI port defaults to `8080` and can be changed with `KOLLAB_WEBUI_PORT`.
 The engine remains on loopback; browser requests reach it through the WebUI proxy.

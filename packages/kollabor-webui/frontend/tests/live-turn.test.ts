@@ -87,13 +87,15 @@ test("acp_update builds a harness card and later updates merge into it", () => {
   });
 });
 
-test("acp_passthrough tool events and non-tool updates carry nothing", () => {
+test("acp text chunks render while acp_passthrough tool events stay hidden", () => {
   let turn = emptyLiveTurn();
   turn = applyLiveEvent(turn, { type: "tool_start", acp_passthrough: true, tool_id: "t9", tool_name: "x" });
-  turn = applyLiveEvent(turn, { type: "acp_update", update: { sessionUpdate: "agent_message_chunk" } });
+  turn = applyLiveEvent(turn, { type: "acp_update", request_id: "r-text", update: {
+    sessionUpdate: "agent_message_chunk", content: { type: "text", text: "spoken reply" },
+  } });
   turn = applyLiveEvent(turn, { type: "hub_message" });
   turn = applyLiveEvent(turn, { type: "history_updated" });
-  assert.equal(liveMessage(turn), null);
+  assert.deepEqual(liveMessage(turn)?.content, [{ type: "text", text: "spoken reply" }]);
 });
 
 test("nothing renders before the first token or tool", () => {
@@ -170,6 +172,13 @@ test("a running turn is replaced only by a row with its own request id", () => {
   assert.equal(historyReplacesLiveTurn(live, [reply("A")]), false);
   assert.equal(historyReplacesLiveTurn(live, [reply()]), false);
   assert.equal(historyReplacesLiveTurn(live, [reply("B")]), true);
+});
+
+test("a settled voice reply waits for its own voice turn history row", () => {
+  let turn = applyLiveEvent(emptyLiveTurn(), asked("voice reply", "voice-1"));
+  turn = applyLiveEvent(turn, { type: "turn_complete", request_id: "voice-1" });
+  assert.equal(historyReplacesLiveTurn(turn, [{ role: "assistant", metadata: { custom: { voiceTurnId: "voice-2" } } }]), false);
+  assert.equal(historyReplacesLiveTurn(turn, [{ role: "assistant", metadata: { custom: { voiceTurnId: "voice-1" } } }]), true);
 });
 
 test("another request's terminal event never ends the live turn, its first chunk is kept", () => {

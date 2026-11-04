@@ -467,7 +467,7 @@ and network trust apply as for any agent.
 
 | Tool | Does |
 |---|---|
-| `hub_msg(to, message, thread?)` | sends. With a thread handle it posts on that thread, which must be one the agent received or started, and sets `reply_to` to the latest message from `to` there, if any: to an agent that never wrote on the thread it is a new request. Without a handle it starts a new thread. Returns the thread handle, or why it was refused (not online, trust) |
+| `hub_msg(to, message, thread?)` | sends. With a thread handle it posts on that thread, which must be one the agent received or started, and sets `reply_to` to the latest message from `to` there, if any: to an agent that never wrote on the thread it is a new request. Without a handle it starts a new thread. Returns `{status, delivery, thread}`: `status` is `sent` only when the recipient's hub socket acked this message (`delivery: confirmed`) or a network peer accepted it (`delivery: accepted`); `queued` when it sits in the recipient's mailbox; `unconfirmed` when nothing acked it; a refusal is `ended` with the reason in `text`. Never a blank reason |
 | `hub_ask(to, question, thread?, timeout=300)` | sends a request: like `hub_msg`, but never with `reply_to`, so the agent asked owes an answer (unless it answers a question back, below). Waits, and returns `{status, from, thread, text, earlier}`; status is `answered`, `ended`, `question`, `busy`, `timeout` or `stopped` |
 | `hub_status()` | who is online, here and on the network |
 | `hub_agents()` | the names it can message |

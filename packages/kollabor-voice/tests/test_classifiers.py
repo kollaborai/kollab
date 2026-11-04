@@ -3,8 +3,10 @@
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 import pytest
+from kollabor_voice import assets, bootstrap, laya
 from kollabor_voice.classifiers import (
     DecisionRequest,
     ProviderClassifier,
@@ -14,6 +16,7 @@ from kollabor_voice.classifiers import (
 )
 from kollabor_voice.control import VoiceError
 from kollabor_voice.laya import LayaWorker
+from kollabor_voice.qwen import QwenWorker
 
 
 def test_classifier_default_and_corrupt_preference(tmp_path):
@@ -78,6 +81,55 @@ async def test_fifty_prepare_calls_load_one_worker(tmp_path):
     worker.prepare()
     assert len(started) == 1
     await worker.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_type", "name", "module_name"),
+    [
+        (LayaWorker, "laya", "kollabor_voice.laya_worker"),
+        (QwenWorker, "qwen", "kollabor_voice.qwen_worker"),
+    ],
+)
+async def test_classifier_child_uses_isolated_package_module_command(
+    tmp_path, monkeypatch, worker_type, name, module_name
+):
+    monkeypatch.setenv("PYTHONPATH", "/voice-engine/site-packages")
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_runtime",
+        lambda *_args, **_kwargs: Path(sys.executable),
+    )
+    monkeypatch.setattr(
+        assets,
+        "ensure_models",
+        lambda _root, _progress, _models: {name: tmp_path / f"{name}-model"},
+    )
+    real_create = asyncio.create_subprocess_exec
+    observed = {}
+
+    async def capture(*command, **kwargs):
+        observed.update(command=command, env=kwargs["env"])
+        return await real_create(
+            sys.executable,
+            "-c",
+            "import json,time; print(json.dumps({'ready': True, 'cold_seconds': 0}), flush=True); time.sleep(60)",
+            **kwargs,
+        )
+
+    monkeypatch.setattr(laya.asyncio, "create_subprocess_exec", capture)
+    worker = worker_type(tmp_path)
+    await worker._prepare()
+    try:
+        assert worker.state["state"] == "ready"
+        assert observed["command"][1:3] == ("-I", "-c")
+        assert observed["command"][5] == module_name
+        assert observed["command"][6:8] == ("--model", str(tmp_path / f"{name}-model"))
+        assert observed["env"]["PYTHONPATH"] == ""
+        assert observed["env"]["HF_HUB_OFFLINE"] == "1"
+        assert observed["env"]["TRANSFORMERS_OFFLINE"] == "1"
+    finally:
+        await worker.close()
 
 
 @pytest.mark.asyncio

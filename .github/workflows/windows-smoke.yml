@@ -26,11 +26,16 @@ on:
       - .github/workflows/windows-smoke.yml
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   import-smoke:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v6
         with:
@@ -127,6 +132,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v6
         with:

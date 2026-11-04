@@ -1,56 +1,196 @@
 name: Auto-merge
 
-# Arms GitHub auto-merge (merge commit) on a PR into main, so it merges itself
-# once the three required checks (ci/tests, ci/standards-check,
-# ci/security-scan) pass. Branch protection enforces those checks for everyone;
-# auto-merge never skips them.
-#
-# Guards:
-# - pull_request, never pull_request_target: a fork's run gets a read-only
-#   token and no secrets, and the job skips forks anyway.
-# - Only this repository's own branches, opened by a person (no bots) who has
-#   write access here, checked against the API at run time. Anything else does
-#   not arm.
-# - Drafts never arm. Open a PR as a draft to hold it and mark it ready to arm
-#   it; `gh pr merge <n> --disable-auto` disarms one, and a later push does not
-#   re-arm it.
-# - No checkout and no third-party actions: the job runs two gh commands, and
-#   every PR value reaches the shell through env, never inline.
-#
-# A merge made through the workflow token starts no push-to-main CI run
-# (GitHub starts no workflows from GITHUB_TOKEN events); the PR's own required
-# checks gate every merge.
+# pr-gates merge bot (#722). OFF unless vars.PR_GATES_AUTO_MERGE is "on" or
+# "dry-run" (unset = off). Judges the PR's CURRENT head SHA against every gate
+# and, only in "on" mode, merges as the configured identity with
+# --match-head-commit. Never --admin, never a ruleset bypass. Never checks out
+# or runs PR code. Every trigger here (pull_request_target, workflow_run,
+# status, workflow_dispatch) runs the DEFAULT-BRANCH copy of this file, so a PR
+# cannot rewrite the gate it is judged by. Reviews arrive via the secret-less
+# "Auto-merge relay" workflow because pull_request_review runs the PR's copy.
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, reopened, ready_for_review]
+  pull_request_target:
+    types: [ready_for_review, synchronize, labeled, unlabeled, reopened]
+  workflow_run:
+    workflows: ["CI", "Auto-merge relay", "PR Gates DoD"]
+    types: [completed]
+  status: {}
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to evaluate"
+        required: true
+      dry_run:
+        description: "Log decisions only; never merge"
+        type: boolean
+        default: true
 
 permissions: {}
 
+concurrency:
+  group: pr-gates-auto-merge-${{ github.event.pull_request.number || github.event.workflow_run.head_sha || github.event.sha || inputs.pr }}
+  cancel-in-progress: false
+
 jobs:
-  arm:
-    name: auto-merge
+  evaluate:
     if: >-
-      github.event.pull_request.head.repo.full_name == github.repository
-      && github.event.pull_request.draft == false
-      && github.event.pull_request.user.type == 'User'
+      (vars.PR_GATES_AUTO_MERGE == 'on' || vars.PR_GATES_AUTO_MERGE == 'dry-run' ||
+       (github.event_name == 'workflow_dispatch' && inputs.dry_run)) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') &&
+      (github.event_name != 'status' ||
+       (github.event.state == 'success' &&
+        github.event.context == (vars.PR_GATES_REVIEW_CONTEXT || 'review/independent')))
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+    outputs:
+      merges: ${{ steps.gate.outputs.merges }}
     steps:
-      - name: Arm auto-merge for a writer's PR
+      - id: gate
+        name: Evaluate gates on the current head SHA
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
+          EV_PR: ${{ github.event.pull_request.number || inputs.pr }}
+          EV_RUN_PRS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          EV_SHA: ${{ github.event.workflow_run.head_sha || github.event.sha }}
+          REVIEW_CONTEXT: ${{ vars.PR_GATES_REVIEW_CONTEXT || 'review/independent' }}
+          REVIEWER_LOGINS: ${{ vars.PR_GATES_REVIEWER_LOGINS }}
+          APPROVER_LOGINS: ${{ vars.PR_GATES_APPROVER_LOGINS }}
+          HOLD_LABELS: ${{ vars.PR_GATES_HOLD_LABELS || 'merge/hold,hold,do-not-merge,status/blocked' }}
+          OPT_IN_LABEL: ${{ vars.PR_GATES_OPT_IN_LABEL }}
+          MANUAL_PATHS: ${{ vars.PR_GATES_MANUAL_PATHS || '.github/' }}
         run: |
-          permission=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission)
-          case "$permission" in
-            admin|write) ;;
-            *) echo "$AUTHOR has $permission access here: not arming auto-merge"; exit 0 ;;
-          esac
-          gh pr merge "$PR_URL" --auto --merge
+          set -euo pipefail
+          default_branch="$(gh api "repos/$REPO" --jq .default_branch)"
+
+          prs=""
+          if [[ "$EV_PR" =~ ^[0-9]+$ ]]; then
+            prs="$EV_PR"
+          else
+            prs="$(jq -r '.[]?.number // empty' <<<"$EV_RUN_PRS" 2>/dev/null || true)"
+            if [[ -z "$prs" && "$EV_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              prs="$(gh api "repos/$REPO/commits/$EV_SHA/pulls" --jq '.[] | select(.state == "open") | .number')"
+            fi
+          fi
+          if [[ -z "$prs" ]]; then echo "No open PR for this event."; exit 0; fi
+
+          req="$(gh api "repos/$REPO/rules/branches/$default_branch" \
+            --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]]')"
+          if [[ "$(jq length <<<"$req")" == 0 ]]; then
+            echo "No required checks found on $default_branch; nothing can be judged green (fail closed)." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          merges=""
+          for pr in $prs; do
+            log() { echo "PR #$pr: $*"; echo "- PR #$pr: $*" >> "$GITHUB_STEP_SUMMARY"; }
+            p="$(gh api "repos/$REPO/pulls/$pr")"
+            sha="$(jq -r .head.sha <<<"$p")"
+            author="$(jq -r .user.login <<<"$p")"
+            [[ "$(jq -r .state <<<"$p")" == open ]] || { log "skip: not open"; continue; }
+            [[ "$(jq -r .draft <<<"$p")" == false ]] || { log "skip: draft"; continue; }
+            [[ "$(jq -r .base.ref <<<"$p")" == "$default_branch" ]] || { log "skip: base is not $default_branch"; continue; }
+            [[ "$(jq -r .head.repo.full_name <<<"$p")" == "$REPO" ]] || { log "skip: fork head"; continue; }
+
+            hold="$(jq -r --arg h "$HOLD_LABELS" '($h | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $hs
+              | [.labels[].name | select(IN($hs[]))] | .[0] // empty' <<<"$p")"
+            [[ -z "$hold" ]] || { log "skip: hold label '$hold'"; continue; }
+            if [[ -n "$OPT_IN_LABEL" ]] && ! jq -e --arg l "$OPT_IN_LABEL" 'any(.labels[]; .name == $l)' <<<"$p" >/dev/null; then
+              log "skip: missing opt-in label '$OPT_IN_LABEL'"; continue
+            fi
+
+            files="$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" --jq '.[].filename')"
+            manual="$(jq -rn --arg f "$files" --arg m "$MANUAL_PATHS" '($m | split(",") | map(select(length > 0))) as $ms
+              | $f | split("\n") | map(select(. as $x | any($ms[]; . as $pfx | $x | startswith($pfx)))) | .[0] // empty')"
+            [[ -z "$manual" ]] || { log "skip: touches manual-merge path ($manual)"; continue; }
+
+            runs="$(gh api --paginate "repos/$REPO/commits/$sha/check-runs?per_page=100" --jq '.check_runs[]' | jq -s '.')"
+            statuses="$(gh api --paginate "repos/$REPO/commits/$sha/statuses?per_page=100" --jq '.[]' | jq -s '.')"
+
+            # Required checks: latest run per name, from the pinned app when the rule pins one.
+            missing="$(jq -rn --argjson req "$req" --argjson runs "$runs" --argjson st "$statuses" --arg rc "$REVIEW_CONTEXT" '
+              [ $req[] | select(.context != $rc) | . as $r
+                | ([ $runs[] | select(.name == $r.context and ($r.integration_id == null or .app.id == $r.integration_id)) ]
+                   | sort_by(.started_at) | last) as $cr
+                | ([ $st[] | select(.context == $r.context and $r.integration_id == null) ] | .[0]) as $s
+                | select(($cr.conclusion // "") != "success" and ($s.state // "") != "success") | $r.context ] | join(",")')"
+            [[ -z "$missing" ]] || { log "skip: required checks not green on $sha: $missing"; continue; }
+
+            # Independent pinned-head review: newest status for the context on THIS sha,
+            # posted by an allowed reviewer identity that is not the PR author.
+            if [[ -z "$REVIEWER_LOGINS" ]]; then log "skip: PR_GATES_REVIEWER_LOGINS unset (fail closed)"; continue; fi
+            rv="$(jq -c --arg c "$REVIEW_CONTEXT" '[.[] | select(.context == $c)] | .[0] // empty' <<<"$statuses")"
+            [[ -n "$rv" && "$(jq -r .state <<<"$rv")" == success ]] || { log "skip: $REVIEW_CONTEXT not success on $sha"; continue; }
+            rv_by="$(jq -r .creator.login <<<"$rv")"
+            jq -en --arg l "$REVIEWER_LOGINS" --arg u "$rv_by" 'any($l | split(",")[] | gsub("\\s"; ""); . == $u)' >/dev/null \
+              || { log "skip: $REVIEW_CONTEXT posted by '$rv_by', not an allowed reviewer"; continue; }
+            [[ "$rv_by" != "$author" ]] || { log "skip: $REVIEW_CONTEXT posted by the PR author"; continue; }
+
+            # Approval on the exact head by a non-author; no outstanding CHANGES_REQUESTED.
+            reviews="$(gh api --paginate "repos/$REPO/pulls/$pr/reviews?per_page=100" --jq '.[]' | jq -s '.')"
+            approval="$(jq -r --arg a "$author" --arg sha "$sha" --arg ap "$APPROVER_LOGINS" '
+              def allowed($u): $ap == "" or any($ap | split(",")[] | gsub("\\s"; ""); . == $u);
+              [ .[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED") ]
+              | group_by(.user.login) | map(sort_by(.submitted_at) | last) as $latest
+              | if any($latest[]; .state == "CHANGES_REQUESTED") then "changes_requested"
+                else ([ $latest[] | select(.state == "APPROVED" and .commit_id == $sha and .user.login != $a and allowed(.user.login)) | .id ]
+                      | .[0] // "none" | tostring) end' <<<"$reviews")"
+            [[ "$approval" =~ ^[0-9]+$ ]] || { log "skip: approval on $sha: $approval"; continue; }
+
+            unresolved="$(gh api graphql --paginate -F owner="${REPO%/*}" -F name="${REPO#*/}" -F pr="$pr" -f query='
+              query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
+                repository(owner: $owner, name: $name) { pullRequest(number: $pr) {
+                  reviewThreads(first: 100, after: $endCursor) {
+                    pageInfo { hasNextPage endCursor } nodes { isResolved } } } } }' \
+              --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' \
+              | jq -s add)"
+            [[ "$unresolved" == 0 ]] || { log "skip: $unresolved unresolved review threads"; continue; }
+
+            p2="$(gh api "repos/$REPO/pulls/$pr")"
+            [[ "$(jq -r .head.sha <<<"$p2")" == "$sha" ]] || { log "skip: head moved during evaluation"; continue; }
+            ms="$(jq -r .mergeable_state <<<"$p2")"
+            [[ "$ms" == clean ]] || { log "skip: mergeable_state=$ms (behind/blocked/unstable/unknown)"; continue; }
+
+            ids="$(jq -r '[.[] | select(.conclusion == "success") | "\(.name)=\(.id)"] | join(" ")' <<<"$runs")"
+            log "ELIGIBLE head=$sha approving_review=$approval $REVIEW_CONTEXT=$rv_by check_runs: $ids"
+            merges+="$pr:$sha "
+          done
+          echo "merges=${merges% }" >> "$GITHUB_OUTPUT"
+
+  merge:
+    needs: evaluate
+    if: >-
+      needs.evaluate.outputs.merges != '' &&
+      vars.PR_GATES_AUTO_MERGE == 'on' &&
+      !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # PR_GATES_MERGE_TOKEN is an ENVIRONMENT secret; the environment's deployment
+    # branch policy allows only the default branch.
+    environment: pr-gates
+    permissions: {}
+    steps:
+      - name: Merge with a pinned head (no --admin)
+        env:
+          GH_TOKEN: ${{ secrets.PR_GATES_MERGE_TOKEN }}
+          REPO: ${{ github.repository }}
+          MERGES: ${{ needs.evaluate.outputs.merges }}
+          METHOD: ${{ vars.PR_GATES_MERGE_METHOD || 'merge' }}
+        run: |
+          set -euo pipefail
+          case "$METHOD" in merge|squash|rebase) ;; *) echo "::error::invalid PR_GATES_MERGE_METHOD '$METHOD'"; exit 1 ;; esac
+          who="$(gh api user --jq .login)"
+          for item in $MERGES; do
+            pr="${item%%:*}"; sha="${item#*:}"
+            if [[ "$(gh pr view "$pr" --repo "$REPO" --json state --jq .state)" != OPEN ]]; then
+              echo "PR #$pr is no longer open; skipping."; continue
+            fi
+            gh pr merge "$pr" --repo "$REPO" "--$METHOD" --match-head-commit "$sha"
+            echo "Merged PR #$pr at head $sha as $who ($METHOD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          done

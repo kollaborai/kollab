@@ -201,6 +201,7 @@ async def test_approved_phone_streams_authenticated_app_without_engine_token(set
     assert (await packet(op="read", id=identifier))["headers"] == [["content-type", "text/event-stream; charset=utf-8"]]
     assert base64.b64decode((await packet(op="read", id=identifier))["data"]) == b"data: first\n\n"
     await packet(op="cancel", id=identifier)
+    assert (await packet(op="cancel", id=identifier))["ok"]
     await asyncio.wait_for(stopped.wait(), 1)
     assert not manager.exchanges
 

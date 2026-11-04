@@ -1,7 +1,10 @@
 """A wheel must consume selected fresh assets or fail without touching source dist."""
 
 import importlib.util
+import shutil
+import subprocess
 import sys
+import tarfile
 import types
 import zipfile
 from pathlib import Path
@@ -134,3 +137,49 @@ def test_standalone_source_distribution_requires_its_packaged_changelog(hook):
         instance.initialize("standard", {})
     (frontend / "CHANGELOG.md").write_text("packaged canonical notes")
     instance.initialize("standard", {})
+
+
+def test_real_source_archive_excludes_frontend_build_metadata(tmp_path):
+    """The actual sdist rules must keep local compiler state out of uploads."""
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is required for the source-archive build check")
+    source = ROOT / "packages/kollabor-webui"
+    package = tmp_path / "kollabor-webui"
+    package.mkdir()
+    for name in ("pyproject.toml", "hatch_build.py", "README.md"):
+        shutil.copy2(source / name, package / name)
+    module = package / "src/kollabor_webui"
+    module.mkdir(parents=True)
+    (module / "__init__.py").write_text("")
+    frontend = package / "frontend"
+    (frontend / "src").mkdir(parents=True)
+    (frontend / "src/main.ts").write_text("export const source = true;\n")
+    (frontend / "CHANGELOG.md").write_text("packaged release notes")
+    generated = (
+        frontend / "tsconfig.tsbuildinfo",
+        frontend / "cache/compiler.tsbuildinfo",
+        frontend / "node_modules/local-package/index.js",
+        frontend / "dist/index.html",
+    )
+    for path in generated:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("local generated state")
+    output = tmp_path / "artifacts"
+    result = subprocess.run(
+        [uv, "build", "--sdist", "--no-sources", "--out-dir", str(output), str(package)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    (archive_path,) = output.glob("*.tar.gz")
+    with tarfile.open(archive_path) as archive:
+        names = archive.getnames()
+        assert any(name.endswith("/frontend/src/main.ts") for name in names)
+        assert any(name.endswith("/frontend/CHANGELOG.md") for name in names)
+        assert not any(name.endswith(".tsbuildinfo") for name in names)
+        assert not any("/frontend/node_modules/" in name for name in names)
+        assert not any("/frontend/dist/" in name for name in names)
+    assert all(path.read_text() == "local generated state" for path in generated)
