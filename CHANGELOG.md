@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Closed-PR review and first-push check-run collection in the throughput KPI paginates all pages and fails closed on repeated pages, malformed responses, or pagination-cap exhaustion rather than reporting partial metrics (#747).
+- Coordinators can page through all of their unresolved hub dispatches with `<hub_dispatch_list page="N" per_page="N"/>` (newest first, 10 per page, at most 50) and read any one of their dispatches in full with `<hub_dispatch_read dispatch_id="ID"/>`. Both are read-only, limited to dispatches the coordinator assigned, and off by default: enable with `plugins.hub.dispatch_list_enabled`. When enabled, the rebirth recovery summary names them in its overflow line; its bounded size is unchanged (#656).
+- Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
+
+### Fixed
+- A hub message reports `sent` only when the recipient's hub acks that message: ACP `hub_msg` results now carry `delivery` (`confirmed`, `accepted`, `queued` or `unconfirmed`), and a queued or unacked message no longer reads as sent (#609).
+- `kollab --hub capture` shows the hub messages an agent sent and received again; they were dropped whenever a heartbeat's state snapshot was in the capture window (#609).
+- A failed send names its cause: an exception with no message reports its type instead of a blank `Tool execution error:`, and a refused message always gives a reason (#609).
+- Connect's join code shows why it could not be made when the network's discovery origin is not on port 443 (`Enrollment needs port 443, but this network's origin uses port <port>.`), instead of a reason-less "could not create a code". Enrollment still requires port 443 (#693).
 
 ## [0.19.1] - 2026-11-03
 
