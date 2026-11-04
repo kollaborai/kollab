@@ -195,11 +195,15 @@ review and exact-head gates. Automatic arming remains disabled because the
 ruleset cannot verify the independent AI review; the separate exact-head audit
 remains required. Do not arm GitHub auto-merge manually.
 
-The optional merge bot (`.github/workflows/auto-merge.yml`, #722) is a separate
-path and ships off: the workflow is disabled on GitHub and `PR_GATES_AUTO_MERGE`
-is unset. Turning it on is a repository owner's decision; see
-`docs/operations/pr-gates-auto-merge.md`. While it is off, the integrator merges
-as described below.
+The merge bot (`.github/workflows/auto-merge.yml`, #722) is a separate path and
+is enabled in this repository. The repository variable `PR_GATES_AUTO_MERGE`
+decides what it does: `dry-run` logs what it would merge, `on` also merges, and
+unset turns it off. It merges a PR only when every gate holds on the current
+head, including the commit status `review/independent`, which the approving
+account posts after an independent review of that exact head. It leaves any PR
+touching `.github/` to the integrator, who otherwise merges as described below.
+Changing the variable is a repository owner's decision; see
+`docs/operations/pr-gates-auto-merge.md`.
 
 A PR must be current with `main`, have the required approval, all configured
 checks green, and all review conversations resolved. After the bootstrap above,
@@ -291,6 +295,15 @@ exception: `ci/binary-smoke` runs one quick Linux binary smoke build on every
 PR and main push (about 49 seconds, no artifacts). It proves the build works
 early; it is not a required merge check. CodeQL (`Analyze (...)`) also runs on
 PRs and is not a required merge check.
+
+The definition-of-done check (`.github/workflows/pr-gates-dod.yml`, #724) grades
+each PR with one check run, `dod/ready-for-review`. It runs the base branch's copy
+and no PR code, and it is not a required merge check. A failing grade still keeps
+the merge bot from merging. `signed_commits` stays out of it until agent commits
+are signed (#755).
+
+The throughput report (`.github/scripts/pr_throughput_kpi.py`, #729) is opt-in and
+runs by hand. It is not a check.
 
 The stale PR sweeper (`.github/workflows/stale-pr-sweeper.yml`) runs daily and
 on demand (`dry_run` reports without labeling). It lists open PRs with no new

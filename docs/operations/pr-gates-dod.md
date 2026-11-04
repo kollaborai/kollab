@@ -39,6 +39,9 @@ still gates merge.
 
 ## Configuration
 
+This repository runs it with `enabled = true` and without `signed_commits`,
+which would fail every agent PR until agent commits are signed (#755).
+
 Everything lives in `.github/pr-gates.toml`. The feature is disabled by
 default; `enabled = false` fully disables it (nothing posts, every exit
 code is 0).

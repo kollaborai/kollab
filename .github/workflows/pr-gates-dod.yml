@@ -1,8 +1,7 @@
 name: PR Gates DoD
 
-# Definition-of-done check (#724). Disabled by default via
-# .github/pr-gates.toml (pr_gates.dod.enabled = false); the job then exits 0
-# and posts nothing. When enabled, the script posts exactly ONE check run
+# Definition-of-done check (#724). Controlled by .github/pr-gates.toml
+# (pr_gates.dod.enabled): when false, the job exits 0 and posts nothing. When true, the script posts exactly ONE check run
 # (pr_gates.dod.check_name, default dod/ready-for-review) whose summary
 # names every failed item. It never posts comments.
 
