@@ -887,8 +887,10 @@ not any agent in the writer's lane), works in a scratch environment, runs the
 tests, and posts a PR verdict recording the pinned head SHA, base SHA,
 commands run, and PASS or FAIL; review waits while the head is BEHIND or
 DIRTY against `main`, and a moved head or a relevant base move voids the
-verdict. A head moved only by merging `main`, with no conflict outside the
-changelogs, keeps its verdict once a reviewer checks that merge delta. Review
+verdict. A head moved only by merging `main` keeps its verdict only when an
+independent reviewer posts an addendum pinned to the new head and base,
+confirming the PR's own diff is unchanged apart from changelog lines and that
+nothing merged from `main` touches what the PR changes or relies on. Review
 findings are fixed red-first: land the failing regression test (alone, or
 marked strict `xfail`) before the fix, and the fix flips it green without
 editing the test; a finding no test can reproduce, such as wording in a doc,

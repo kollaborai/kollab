@@ -108,6 +108,8 @@ in `docs/product-ready-checklist.md`.
 - [ ] An independent clean-room review verdict is posted as a PR comment
   recording the pinned head SHA, base SHA, exact commands run, and PASS or
   FAIL; the reviewer worked in a scratch environment and ran the tests itself.
+  A head moved only by merging `main` may carry the reviewer's addendum instead,
+  as `SOFTWARE_DEVELOPMENT_LIFECYCLE.md` describes.
 - [ ] Independent review started only while the PR head was current with
   `main` (not BEHIND or DIRTY), and the verdict names the base SHA it covered.
 - [ ] Every review finding has a failing regression test landed before its

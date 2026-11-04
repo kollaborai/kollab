@@ -129,9 +129,11 @@ gh pr create --draft --head issue-8-version-display --title "fix(cli): correct v
   base, and all review conversations must be resolved before merge. If the
   head moves after review, or `main` moves past the recorded base with
   conflicting or relevant changes, the verdict is void and the review is
-  redone. A head that moved only by merging `main`, with no conflict outside
-  the changelogs, keeps its verdict once a reviewer checks that merge delta on
-  the new head.
+  redone. A head that moved only by merging `main` keeps its verdict only when
+  an independent reviewer posts an addendum pinned to the new head and base,
+  confirming that the PR's own diff is unchanged apart from changelog lines and
+  that nothing merged from `main` touches what the PR changes or relies on.
+  Otherwise the review is redone.
 - When `main` advances, update the writer branch by fetching and merging
   `origin/main` into it, then push normally. If the remote PR branch advanced,
   fetch and merge that branch too. Resolve conflicts only within owned paths;
