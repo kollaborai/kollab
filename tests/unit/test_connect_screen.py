@@ -681,3 +681,22 @@ async def test_rendered_frame_fits_the_terminal(size, monkeypatch):
     body = [(x, y, line) for x, y, line in renderer.lines if y >= 3]
     assert body and all(x + len(line) <= width and y < height for x, y, line in body)
     await view.on_complete()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_offer_shows_its_reason_not_the_generic_line(monkeypatch):
+    """The screen consumes the refusal the offer answer carries (#693), so an
+    operator sees the real cause instead of "could not create a code"."""
+    monkeypatch.setattr(_TIME, lambda: 1_000)
+    refusal = "Enrollment needs port 443, but this network's origin uses port 8443."
+
+    async def refused(domain):
+        return {"error": "connect offer could not be created", "reason": refusal}
+
+    view, renderer, _ = await _open(None, create=refused)
+
+    text = await _text(view, renderer)
+
+    assert refusal in text
+    assert "could not create a code" not in text
+    await view.on_complete()

@@ -1,8 +1,9 @@
 """LiveKit voice worker: one livekit-agents AgentSession per voice session.
 
-Run by the Engine as `<voice runtime python> -m kollabor_voice.livekit_worker`
-with KOLLAB_VOICE_WORKER_CONFIG (JSON: livekit_url, worker_token, room,
-voice_session_id, generation, engine_url, engine_token).
+Run by the Engine with the prepared voice interpreter and Kollab's exact
+`kollabor_voice` package path. `KOLLAB_VOICE_WORKER_CONFIG` is JSON containing
+livekit_url, worker_token, room, voice_session_id, generation, engine_url and
+engine_token.
 
 The session mirrors ~/dev/livekit-demo: Silero VAD, the local v1-mini turn
 detector, VAD interruptions. Speech-to-text and text-to-speech are nodes over

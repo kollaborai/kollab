@@ -8,8 +8,9 @@ import type { ReadonlyJSONObject } from "assistant-stream/utils";
  * every other window watching the session only hears the session's event
  * stream (token / acp_update / tool events). These build an ephemeral
  * assistant message here so a passive window sees the reply as it streams.
- * Nothing is persisted: the history reload at turn_complete replaces it, so
- * the id must stay fixed through a turn and stay out of the synced bookkeeping.
+ * Nothing is persisted: App reconciles history after terminal events and this
+ * live copy stays visible until its matching saved assistant row arrives. Its
+ * id stays fixed through a turn and out of the synced bookkeeping.
  */
 
 export const LIVE_MESSAGE_ID = "live-turn";
@@ -137,6 +138,16 @@ export function applyLiveEvent(current: LiveTurn, event: EventLike): LiveTurn {
   if (type === "acp_update") {
     const update = isRecord(event.update) ? event.update : null;
     if (!update) return current;
+    if (update.sessionUpdate === "agent_message_chunk") {
+      const content = isRecord(update.content) ? update.content : null;
+      const delta = typeof content?.text === "string" ? content.text : "";
+      if (!delta) return current;
+      const parts = [...turn.parts];
+      const last = parts[parts.length - 1];
+      if (last?.type === "text") parts[parts.length - 1] = { type: "text", text: last.text + delta };
+      else parts.push({ type: "text", text: delta });
+      return grown(parts);
+    }
     if (update.sessionUpdate !== "tool_call" && update.sessionUpdate !== "tool_call_update") return current;
     const toolCallId = String(update.toolCallId ?? update.tool_call_id ?? "");
     if (!toolCallId) return current;
@@ -196,14 +207,22 @@ const SETTLED_STATUS: Record<string, NonNullable<ThreadMessageLike["status"]>> =
 type HistoryRow = { role?: string; metadata?: { custom?: Record<string, unknown> } };
 
 /**
- * Whether history rows just appended carry the reply the live turn showed.
- * A running turn is replaced only by a row with its own request id; a settled
- * one by any new assistant row (the row may predate request ids on disk).
+ * Whether newly appended history rows carry the reply the live turn showed.
+ * Prefer the exact request/voice id; use an unmarked assistant row only for a
+ * settled legacy turn whose saved history predates request ids.
  */
 export function historyReplacesLiveTurn(turn: LiveTurn, tail: ReadonlyArray<HistoryRow>): boolean {
   if (!turn.requestId || !turn.parts.length || turn.settled === "replaced") return false;
-  return tail.some((row) => row.role === "assistant" &&
-    (!!turn.settled || row.metadata?.custom?.requestId === turn.requestId));
+  return tail.some((row) => {
+    if (row.role !== "assistant") return false;
+    const requestId = row.metadata?.custom?.requestId;
+    const voiceTurnId = row.metadata?.custom?.voiceTurnId;
+    if (requestId === turn.requestId || voiceTurnId === turn.requestId) return true;
+    // Older saved ACP rows may have no request marker. Keep the historical
+    // fallback for those rows, but never let a different marked turn replace
+    // this one.
+    return !!turn.settled && typeof requestId !== "string" && typeof voiceTurnId !== "string";
+  });
 }
 
 /**

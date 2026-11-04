@@ -106,6 +106,7 @@ test("talking over the assistant shows interrupting; remote LLM shows the notice
   assert.equal(remoteNotice(speaking), null);
   const remote = { ...speaking, view: view({ remote_llm: true, remote_llm_host: "api.example.com" }) };
   assert.match(remoteNotice(remote) ?? "", /Remote LLM is listening \(api\.example\.com\)/);
+  assert.match(remoteNotice(remote, true) ?? "", /Audio is sent to your computer through PhoneLink/);
 });
 
 test("barge_in and latency events land in state", () => {
@@ -175,6 +176,46 @@ test("the mic opens only inside start, after join and connect; stop releases it"
   await h.controller.stop();
   assert.deepEqual(h.calls.slice(4), ["mic:false", "disconnect", "stop:user"]);
   assert.equal(h.controller.getState().state, "stopped");
+});
+
+test("phone voice unlocks on tap, bypasses browser LiveKit join, and stops capture", async () => {
+  const h = harness();
+  const calls: string[] = [];
+  const phone = {
+    prepare: () => calls.push("prepare"),
+    start: async () => void calls.push("audio-start"),
+    stop: async () => void calls.push("audio-stop"),
+    onError: () => undefined,
+    droppedBytes: 0,
+    queuedBytes: 0,
+    droppedMicFrames: 0,
+  };
+  const controller = new VoiceRoomController(h.api, async () => h.room, phone);
+  const starting = controller.start("s1", null);
+  assert.deepEqual(calls, ["prepare"]);
+  await starting;
+  assert.deepEqual(calls, ["prepare", "audio-start"]);
+  assert.ok(!h.calls.includes("join") && !h.calls.includes("mic:true"));
+  await controller.stop();
+  assert.deepEqual(calls, ["prepare", "audio-start", "audio-stop"]);
+});
+
+test("stopping a pending phone start closes capture before the create response", async () => {
+  const h = harness({ hold: "create" });
+  const calls: string[] = [];
+  const phone = {
+    prepare: () => calls.push("prepare"), start: async () => undefined,
+    stop: async () => void calls.push("audio-stop"), onError: () => undefined,
+    droppedBytes: 0, queuedBytes: 0, droppedMicFrames: 0,
+  };
+  const controller = new VoiceRoomController(h.api, async () => h.room, phone);
+  const starting = controller.start("s1", null);
+  const stopping = controller.stop();
+  await Promise.resolve();
+  assert.deepEqual(calls, ["prepare", "audio-stop"]);
+  h.release();
+  await Promise.all([starting, stopping]);
+  assert.ok(h.calls.includes("stop:user"));
 });
 
 test("a refused join surfaces the error and never asks for the mic", async () => {

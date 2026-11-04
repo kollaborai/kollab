@@ -31,8 +31,8 @@ def test_socket_root_uses_the_platform(monkeypatch, tmp_path, platform):
     assert not profile.exists()
 
 
-def test_writer_and_engine_share_the_platform_root():
-    # A fresh process is not affected by the unit suite's isolated Hub fixture.
+def test_presence_writer_uses_the_platform_root():
+    # A fresh process checks the writer root without the unit suite's Hub fixture.
     code = (
         "from plugins.hub.presence import SOCKET_DIR_ROOT; "
         "from kollabor_config.hub_paths import hub_socket_root; "
@@ -42,7 +42,7 @@ def test_writer_and_engine_share_the_platform_root():
 
 
 @pytest.mark.parametrize("nested", [False, True])
-def test_bridge_fallback_finds_literal_identity_under_shared_root(
+def test_bridge_never_guesses_unpublished_socket_under_shared_root(
     monkeypatch, tmp_path, nested
 ):
     root = tmp_path / "profile [test]" / "hub-sockets"
@@ -50,20 +50,20 @@ def test_bridge_fallback_finds_literal_identity_under_shared_root(
     directory.mkdir(parents=True)
     endpoint = directory / "ruby[1].sock"
     endpoint.touch()
-    monkeypatch.setattr(hub_bridge, "hub_socket_root", lambda: root)
+    monkeypatch.setattr(hub_bridge, "hub_socket_root", lambda: root, raising=False)
 
     bridge = hub_bridge.HubBridge()
     agent = {"identity": "ruby[1]", "agent_id": "ruby-id"}
     monkeypatch.setattr(bridge, "get_agents", lambda use_cache=True: [agent])
-    assert bridge._socket_path_for_agent(agent) == endpoint
-    assert bridge.discover_sessions(use_cache=False)[0]["socket_path"] == str(endpoint)
+    assert bridge._socket_path_for_agent(agent) is None
+    assert bridge.discover_sessions(use_cache=False) == []
 
 
 def test_presence_path_takes_precedence_and_missing_root_is_not_created(
     monkeypatch, tmp_path
 ):
     root = tmp_path / "absent"
-    monkeypatch.setattr(hub_bridge, "hub_socket_root", lambda: root)
+    monkeypatch.setattr(hub_bridge, "hub_socket_root", lambda: root, raising=False)
     bridge = hub_bridge.HubBridge()
     explicit = tmp_path / "published.sock"
 
