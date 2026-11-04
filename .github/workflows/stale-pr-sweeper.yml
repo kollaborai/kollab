@@ -1,0 +1,86 @@
+name: Stale PR sweeper
+
+# Issue #718. Daily sweep of open PRs with no new commit AND no review
+# activity for 5+ days (drafts included, listed first). Output is ONE digest
+# (this run's summary plus an artifact) and the `status/stale` label added
+# to each flagged PR; `status/no-stale` opts a PR out entirely. Flag-only by
+# design: the script has no close, comment, label
+# removal, or draft-state code path. Humans and koordinator decide actions.
+# A workflow is used instead of a hub cron because scheduled automation must
+# run regardless of whether any local hub agent is online, and the GitHub
+# token already carries the least-privilege read/label scope needed here.
+
+on:
+  schedule:
+    # 08:17 America/Phoenix daily; odd minute avoids top-of-hour load.
+    - cron: "17 15 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only; skip applying the stale label"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: stale-pr-sweeper
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: stale-pr-sweeper
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Sweep open PRs (flag-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          args=(--days 5 --digest /tmp/stale-pr-digest.md --summary "$GITHUB_STEP_SUMMARY")
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python3 .github/scripts/stale_pr_sweeper.py "${args[@]}"
+
+      - name: Notify operator (best-effort ntfy)
+        # Secondary channel per the approved delivery contract. The digest
+        # itself stays authoritative in the step summary and the artifact.
+        # No NTFY_TOPIC secret/var -> warning + skip; a failed POST can
+        # never fail this workflow. There is no other delivery route.
+        if: always()
+        continue-on-error: true
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC || vars.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ vars.NTFY_SERVER || 'https://ntfy.sh' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$NTFY_TOPIC" ]; then
+            echo "::warning::NTFY_TOPIC secret/var not set - skipping operator notify (best-effort, see PR body setup note)."
+            exit 0
+          fi
+          count="$(sed -n 's/^\*\*\([0-9][0-9]*\) stale PR.*/\1/p' /tmp/stale-pr-digest.md 2>/dev/null || true)"
+          [ -n "$count" ] || count="?"
+          curl -fsS --max-time 10 \
+            -H "Title: stale PR sweep: ${count} flagged" \
+            -H "Tags: bookmark_tabs" \
+            -d "Full digest in the run summary: ${RUN_URL}" \
+            "$NTFY_SERVER/$NTFY_TOPIC" \
+            || echo "::warning::ntfy notify failed (best-effort, ignored)."
+
+      - name: Upload digest artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: stale-pr-digest
+          path: /tmp/stale-pr-digest.md
+          if-no-files-found: ignore
+          retention-days: 30
