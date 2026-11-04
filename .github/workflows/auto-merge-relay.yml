@@ -1,0 +1,23 @@
+name: Auto-merge relay
+
+# pull_request_review runs the PR's OWN copy of a workflow, so this one holds no
+# secrets and no permissions. Its successful completion wakes "Auto-merge"
+# (default-branch copy) through workflow_run. A skipped run is not "success",
+# so non-approval reviews do not wake it.
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions: {}
+
+jobs:
+  relay:
+    if: github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Relay approval
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.review.commit_id }}
+        run: echo "Approval on PR #$PR at $SHA; Auto-merge will re-evaluate."
