@@ -74,8 +74,10 @@ async def _open_remote(handle: str) -> Optional[EngineSession]:
     return await _adopt(found) if found else None
 
 
-async def open_named_session(request: Request) -> None:
-    """Attach the live agent a session route names, the first time one does.
+async def open_named_session(
+    request: Request, *, session_id: Optional[str] = None
+) -> Optional[EngineSession]:
+    """Attach a discovered live agent named by a route or proxy request.
 
     Every live agent on this computer is listed (HubBridge.discover_sessions),
     but only sessions in the registry answer the session routes. A terminal
@@ -84,9 +86,12 @@ async def open_named_session(request: Request) -> None:
     computer of this folder's network; an unknown id falls through to the
     route's own 404.
     """
-    session_id = request.path_params.get("session_id")
-    if not session_id or session_id in _sessions:
-        return
+    session_id = session_id or request.path_params.get("session_id")
+    if not session_id:
+        return None
+    existing = _sessions.get(session_id)
+    if existing is not None:
+        return existing
     opening = _adopting.get(session_id)
     if opening is None:
         found = next(
@@ -134,7 +139,7 @@ async def open_named_session(request: Request) -> None:
         _adopting[session_id] = opening
         opening.add_done_callback(lambda _: _adopting.pop(session_id, None))
     try:
-        await asyncio.shield(opening)
+        return await asyncio.shield(opening)
     except Exception as e:
         logger.warning("could not open session %s: %s", session_id, e)
         raise HTTPException(status_code=503, detail=f"could not open this agent: {e}")
