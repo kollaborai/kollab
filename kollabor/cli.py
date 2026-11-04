@@ -1580,11 +1580,12 @@ def _cli_is_hub_agent_context() -> bool:
     """Whether a mesh-wide CLI stop was launched from a local Hub agent.
 
     Tool-shell environment markers are a deny-only hint: background terminal
-    commands intentionally strip them. Process ancestry is checked against
-    presence records from every local Hub project so changing the command's
-    working directory cannot hide its agent parent. If that context cannot be
-    read, fail closed.
+    commands intentionally strip them. Process ancestry is checked against all
+    known local Hub presence roots, including legacy and shared-socket layouts,
+    so changing the command's working directory or HOME cannot hide its agent
+    parent. If that context cannot be read, fail closed.
     """
+
     from plugins.hub.network_halt import TOOL_SHELL_VARS
 
     if any(os.environ.get(var) for var in TOOL_SHELL_VARS):
@@ -1593,6 +1594,7 @@ def _cli_is_hub_agent_context() -> bool:
     try:
         from kollabor_config import config_utils
         from kollabor_config.config_utils import get_config_directory
+        from plugins.hub import presence as hub_presence
 
         process_ids = _current_process_and_ancestors()
         config_dir = get_config_directory()
@@ -1603,6 +1605,7 @@ def _cli_is_hub_agent_context() -> bool:
             config_dir / "hub",
             *(project_dir / "hub" for project_dir in project_dirs),
         ]
+        extra_presence_dirs = []
         if config_utils.IS_WINDOWS:
             # Windows permits an explicitly selected project state directory
             # outside ~/.kollab/projects. A terminal child can change cwd, so
@@ -1651,9 +1654,13 @@ def _cli_is_hub_agent_context() -> bool:
                         "cannot verify selected external project state for Hub ancestry scan"
                     )
                 hub_dirs.append(selected_hub_dir)
+                extra_presence_dirs.append(selected_hub_dir / "presence")
+        presence_dirs = hub_presence.all_presence_dirs(
+            extra_dirs=extra_presence_dirs, strict=True
+        )
         agent_pids = set()
-        for hub_dir in hub_dirs:
-            for path in _directory_children(hub_dir / "presence"):
+        for presence_dir in presence_dirs:
+            for path in _directory_children(presence_dir):
                 if not path.name.endswith(".json"):
                     continue
                 with path.open() as fh:

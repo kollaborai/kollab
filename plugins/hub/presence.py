@@ -28,14 +28,28 @@ def _system_home_directory() -> Path:
     return Path.home()
 
 
-def all_presence_dirs(extra_dirs: Optional[List[Path]] = None) -> List[Path]:
+def _strict_directory_children(directory: Path) -> List[Path]:
+    """List child directories; only a missing optional root counts as empty."""
+    try:
+        entries = os.scandir(directory)
+    except FileNotFoundError:
+        return []
+    with entries:
+        return [Path(entry.path) for entry in entries if entry.is_dir()]
+
+
+def all_presence_dirs(
+    extra_dirs: Optional[List[Path]] = None, *, strict: bool = False
+) -> List[Path]:
     """Return known current and legacy presence directories without creating them.
 
     Presence is normally under ``~/.kollab/projects/*/hub/presence`` or the
     legacy ``~/.kollab/hub/presence``. Include the effective config root and
     the OS account home so an ``env HOME=...`` wrapper cannot hide existing
     agents. The shared socket root is also searched for older colocated
-    presence layouts; validate it before trusting files beneath it.
+    presence layouts; validate it before trusting files beneath it. Strict
+    callers receive directory-scan and trust failures instead of a partial
+    root list; missing optional directories remain empty.
     """
     from kollabor_config.config_utils import get_config_directory
 
@@ -48,8 +62,15 @@ def all_presence_dirs(extra_dirs: Optional[List[Path]] = None) -> List[Path]:
     for root in config_roots:
         candidates.update({root / "presence", root / "hub" / "presence"})
         projects_root = root / "projects"
-        candidates.update(projects_root.glob("*/presence"))
-        candidates.update(projects_root.glob("*/hub/presence"))
+        if strict:
+            project_dirs = _strict_directory_children(projects_root)
+            candidates.update(project_dir / "presence" for project_dir in project_dirs)
+            candidates.update(
+                project_dir / "hub" / "presence" for project_dir in project_dirs
+            )
+        else:
+            candidates.update(projects_root.glob("*/presence"))
+            candidates.update(projects_root.glob("*/hub/presence"))
 
     socket_roots = {Path(SOCKET_DIR_ROOT), Path(hub_socket_root())}
     if os.name == "nt":
@@ -57,11 +78,15 @@ def all_presence_dirs(extra_dirs: Optional[List[Path]] = None) -> List[Path]:
 
     for root in socket_roots:
         if root.is_symlink():
+            if strict:
+                raise RuntimeError(f"refusing symlinked shared hub root {root}")
             logger.debug("Skipping symlinked shared hub root %s", root)
             continue
         try:
             secure_socket_dir(root, create=False)
         except (OSError, RuntimeError) as exc:
+            if strict:
+                raise
             logger.debug("Skipping untrusted shared hub root %s: %s", root, exc)
             continue
 
@@ -69,17 +94,25 @@ def all_presence_dirs(extra_dirs: Optional[List[Path]] = None) -> List[Path]:
         # only endpoint files here. The private root validation above prevents
         # trusting presence JSON planted by another local user.
         candidates.update({root, root / "presence", root / "hub" / "presence"})
-        if root.is_dir():
+        if strict:
+            children = _strict_directory_children(root)
+        elif root.is_dir():
             try:
                 children = list(root.iterdir())
             except OSError:
                 children = []
-            for child in children:
-                if child.is_symlink() or not child.is_dir():
-                    continue
-                candidates.update(
-                    {child, child / "presence", child / "hub" / "presence"}
-                )
+        else:
+            children = []
+        for child in children:
+            if child.is_symlink():
+                if strict:
+                    raise RuntimeError(
+                        f"refusing symlinked entry in shared hub root {child}"
+                    )
+                continue
+            if not child.is_dir():
+                continue
+            candidates.update({child, child / "presence", child / "hub" / "presence"})
 
     return sorted(candidates, key=str)
 

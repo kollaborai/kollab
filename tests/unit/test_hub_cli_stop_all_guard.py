@@ -117,6 +117,81 @@ def test_cli_stop_all_refuses_background_terminal_context_after_marker_filter(
     stop.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "presence_location",
+    ["shared-root", "account-home-legacy", "account-home-project"],
+)
+def test_cli_stop_all_guard_scans_all_runtime_roots_for_agent_ancestry(
+    tmp_path, monkeypatch, presence_location
+):
+    """Redirected HOME and shared socket roots cannot hide an agent parent."""
+    from kollabor.cli import _cli_is_hub_agent_context
+    from kollabor_config import config_utils
+    from plugins.hub import presence
+    from plugins.hub.network_halt import TOOL_SHELL_VARS
+
+    redirected_home = tmp_path / "redirected-home"
+    actual_home = tmp_path / "actual-home"
+    config_dir = redirected_home / ".kollab"
+    shared_root = tmp_path / "shared-hub"
+    monkeypatch.setenv("HOME", str(redirected_home))
+    monkeypatch.setattr(config_utils, "get_config_directory", lambda: config_dir)
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(presence, "_system_home_directory", lambda: actual_home)
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", shared_root)
+    monkeypatch.setattr(presence, "hub_socket_root", lambda: shared_root)
+    monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
+    for var in TOOL_SHELL_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("KOLLAB_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("KOLLAB_PROJECT_DATA_PROJECT", raising=False)
+    monkeypatch.delenv("KOLLAB_PROJECT_DATA_DIR", raising=False)
+
+    presence_dirs = {
+        "shared-root": shared_root / "presence",
+        "account-home-legacy": actual_home / ".kollab" / "hub" / "presence",
+        "account-home-project": (
+            actual_home / ".kollab" / "projects" / "agent-project" / "hub" / "presence"
+        ),
+    }
+    presence_dir = presence_dirs[presence_location]
+    presence_dir.mkdir(parents=True)
+    _presence(presence_dir, "inherited-agent", pid=4242)
+
+    assert _cli_is_hub_agent_context() is True
+
+
+def test_cli_stop_all_guard_fails_closed_when_shared_root_scan_fails(
+    tmp_path, monkeypatch
+):
+    from kollabor.cli import _cli_is_hub_agent_context
+    from kollabor_config import config_utils
+    from plugins.hub import presence
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    shared_root = tmp_path / "shared-hub"
+    shared_root.mkdir()
+    monkeypatch.setattr(config_utils, "get_config_directory", lambda: config_dir)
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(presence, "_system_home_directory", lambda: tmp_path / "home")
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", shared_root)
+    monkeypatch.setattr(presence, "hub_socket_root", lambda: shared_root)
+    monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
+    monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
+    monkeypatch.delenv("KOLLAB_AGENT_PID", raising=False)
+    real_scandir = os.scandir
+
+    def scandir(path):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == shared_root:
+            raise PermissionError("shared presence root unreadable")
+        return real_scandir(path)
+
+    monkeypatch.setattr("kollabor.cli.os.scandir", scandir)
+
+    assert _cli_is_hub_agent_context() is True
+
+
 def test_cli_stop_all_scans_inherited_windows_state_after_terminal_cwd_changes(
     tmp_path, capsys, monkeypatch
 ):
