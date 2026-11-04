@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,9 @@ WORKFLOW_FILE = REPO_ROOT / ".github" / "workflows" / "pr-gates-dod.yml"
 
 spec = importlib.util.spec_from_file_location("pr_gates_dod", SCRIPT)
 pr_gates_dod = importlib.util.module_from_spec(spec)
+# Register before exec: dataclasses resolves string annotations through
+# sys.modules[cls.__module__]; without this the module fails to import.
+sys.modules["pr_gates_dod"] = pr_gates_dod
 spec.loader.exec_module(pr_gates_dod)
 
 
@@ -143,7 +147,10 @@ def test_signed_commits_pass_and_fail(tmp_path: Path) -> None:
     ok = pr_gates_dod.evaluate(cfg, make_data())
     assert "signed_commits" not in ok.failed_names()
     bad = pr_gates_dod.evaluate(
-        cfg, make_data(commits=[pr_gates_dod.Commit(sha="c" * 40, message="m", verified=False)])
+        cfg,
+        make_data(
+            commits=[pr_gates_dod.Commit(sha="c" * 40, message="m", verified=False)]
+        ),
     )
     assert "signed_commits" in bad.failed_names()
 
@@ -227,7 +234,9 @@ def test_regression_test_covered_and_uncovered(tmp_path: Path) -> None:
                 "kollabor/x.py",
                 "tests/unit/test_guard.py",
             ],
-            changed_file_contents={"tests/unit/test_guard.py": "def test_f14_bypass(): ..."},
+            changed_file_contents={
+                "tests/unit/test_guard.py": "def test_f14_bypass(): ..."
+            },
             **data_kw,
         ),
     )
@@ -236,7 +245,9 @@ def test_regression_test_covered_and_uncovered(tmp_path: Path) -> None:
         cfg,
         make_data(
             changed_files=["kollabor/x.py", "tests/unit/test_guard.py"],
-            changed_file_contents={"tests/unit/test_guard.py": "def test_unrelated(): ..."},
+            changed_file_contents={
+                "tests/unit/test_guard.py": "def test_unrelated(): ..."
+            },
             **data_kw,
         ),
     )
@@ -276,10 +287,10 @@ def test_summary_text_lists_failed_items(tmp_path: Path) -> None:
 # --- posting: one check run, never comments ---------------------------------
 
 
-def test_post_check_run_posts_once_with_configured_name(
-    tmp_path, monkeypatch
-) -> None:
-    cfg = pr_gates_dod.load_config(make_config(tmp_path, ENABLED + '\ncheck_name = "dod/custom"\n'))
+def test_post_check_run_posts_once_with_configured_name(tmp_path, monkeypatch) -> None:
+    cfg = pr_gates_dod.load_config(
+        make_config(tmp_path, ENABLED + '\ncheck_name = "dod/custom"\n')
+    )
     report = pr_gates_dod.evaluate(cfg, make_data())
     calls: list[tuple[str, dict]] = []
 
@@ -342,7 +353,9 @@ def test_workflow_file_exists_least_privilege() -> None:
 def test_audit_lines_record_actions(tmp_path, capsys) -> None:
     cfg = pr_gates_dod.load_config(make_config(tmp_path, ENABLED))
     report = pr_gates_dod.evaluate(cfg, make_data())
-    pr_gates_dod.audit("post_check_run", repo="o/r", name=cfg.check_name, outcome=report.outcome)
+    pr_gates_dod.audit(
+        "post_check_run", repo="o/r", name=cfg.check_name, outcome=report.outcome
+    )
     out = capsys.readouterr().out
     assert "post_check_run" in out
     assert "dod/ready-for-review" in out

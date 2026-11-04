@@ -1,0 +1,40 @@
+name: PR Gates DoD
+
+# Definition-of-done check (#724). Disabled by default via
+# .github/pr-gates.toml (pr_gates.dod.enabled = false); the job then exits 0
+# and posts nothing. When enabled, the script posts exactly ONE check run
+# (pr_gates.dod.check_name, default dod/ready-for-review) whose summary
+# names every failed item. It never posts comments.
+
+on:
+  pull_request:
+    branches: [main, "release/**", "integration/**"]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  dod:
+    name: definition-of-done
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Run pr-gates definition-of-done check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/pr_gates_dod.py \
+            --config .github/pr-gates.toml \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --post

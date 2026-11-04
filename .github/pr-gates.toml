@@ -1,0 +1,29 @@
+# pr-gates: per-PR quality gates (#724). Fully disabled by default; flipping
+# `enabled` to true turns on the definition-of-done check. See
+# docs/operations/pr-gates-dod.md for what each key does and the enable steps.
+
+[pr_gates.dod]
+enabled = false
+# Name of the single check run posted on each PR (configurable).
+check_name = "dod/ready-for-review"
+# Which checks run; remove or comment out entries to toggle a check off.
+checks = [
+  "signed_commits",
+  "docs_paths",
+  "threads_resolved",
+  "base_current",
+  "conventional_title",
+  "linked_issue",
+  "regression_test",
+]
+
+# Maps a regex over changed paths to the docs that must also be updated in
+# the same PR. Un-comment to require e.g. CHANGELOG.md for package changes.
+[pr_gates.dod.docs_paths]
+# "^packages/" = ["CHANGELOG.md"]
+
+# Generic regression-test profile (#721): finding ids found in review
+# comments must appear in a changed test file under one of test_paths.
+[pr_gates.dod.regression_profile]
+finding_id_pattern = "F\\d+"
+test_paths = ["tests/"]
