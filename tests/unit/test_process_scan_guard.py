@@ -177,6 +177,7 @@ def test_process_table_detector_recurses_into_powershell_command_payloads():
         )
         for process_provider_command in (
             "Get-CimInstance Win32_Process",
+            "Get-CimInstance -ClassName Win32_Process",
             "Get-WmiObject Win32_Process",
             "gcim Win32_Process",
             "gwmi Win32_Process",
@@ -253,6 +254,7 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
 
     for command in (
         ["powershell.exe", "-NoProfile", "-Command", "Get-CimInstance Win32_Process"],
+        ["powershell.exe", "-NoProfile", "-Command", "Get-CimInstance -ClassName Win32_Process"],
         ["powershell.exe", "-NoProfile", "-Command", "Get-WmiObject Win32_Process"],
     ):
         with pytest.raises(RuntimeError, match="blocked for unmarked test"):
