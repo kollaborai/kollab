@@ -444,10 +444,7 @@ def _enrich_closed(
         except (GhError, RuntimeError) as exc:
             errors.append(f"PR #{number} reviews: {exc}")
         try:
-            commits = (
-                api.get(f"repos/{repo}/pulls/{number}/commits?per_page={PER_PAGE}")
-                or []
-            )
+            commits = _paginate_rest_list(api, f"repos/{repo}/pulls/{number}/commits")
             # CI runs on pushed heads, so the earliest commit with check runs is
             # the head of the first push, even when that push held several commits.
             for commit in commits:
