@@ -879,7 +879,15 @@ record the GitHub approval as whichever account, `kollaborai` or `maarco`, is
 not the PR author. GitHub prohibits author self-approval. Record reviewer
 identity and exact reviewed SHA in private maintainer audit evidence; keep the
 GitHub approval plain, with no AI attribution or footer. A new head requires
-fresh review and CI. Every merge uses
+fresh review and CI. The review is clean-room and starts only on a current
+base: the reviewer has not seen the code before the review (not the author,
+not any agent in the writer's lane), works in a scratch environment, runs the
+tests, and posts a PR verdict recording the pinned head SHA, base SHA,
+commands run, and PASS or FAIL; review waits while the head is BEHIND or
+DIRTY against `main`, and a moved head or a relevant base move voids the
+verdict. Review findings are fixed red-first: land the failing regression
+test (alone, or marked strict `xfail`) before the fix, and the fix flips it
+green without editing the test. Every merge uses
 `kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
 After code-owner enforcement is enabled, `.github/CODEOWNERS` covers every
 path and protects itself; one of `@maarco` or `@kollaborai` must approve. The
