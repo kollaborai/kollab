@@ -13265,15 +13265,17 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: the knock screen is unavailable"
 
-    def _offer_failed(self) -> dict[str, str]:
-        """A failed offer, with the network's refusal line when that is why (#355).
+    def _offer_failed(self, refusal: str = "") -> dict[str, str]:
+        """A failed offer, with the reason it failed when we know it (#355, #693).
 
-        The line comes from this machine's state, never from exception text.
+        `refusal` is the issuer's own fixed line for a refusal made before any relay
+        request (#693). Otherwise the network's admit line is used (#355). Both come
+        from this machine's state, never from exception text.
         """
-        reason = ""
+        reason = refusal if isinstance(refusal, str) else ""
         try:
             commands = getattr(self._relay_agent, "commands", None)
-            if commands is not None:
+            if not reason and commands is not None:
                 reason = commands.client.control.admit_refusal()
         except Exception:
             reason = ""
@@ -13300,6 +13302,8 @@ class HubPlugin(BasePlugin):
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
             return {"error": "invalid connect offer request"}
+        from .enrollment_client import EnrollmentProtocolError
+
         try:
             if self._identity is None or self._rpc_server is None:
                 return {"error": "connect enrollment is unavailable"}
@@ -13308,6 +13312,10 @@ class HubPlugin(BasePlugin):
             if create is None:
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
+        except EnrollmentProtocolError as exc:
+            # The issuer refused before any relay request; say why (#693).
+            logger.warning("connect offer refused: %s", exc.refusal or exc.code)
+            return self._offer_failed(exc.refusal)
         except Exception:
             return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
