@@ -20,43 +20,223 @@ def _workflow(name):
     return yaml.load((ROOT / ".github" / "workflows" / name).read_text(), Loader=yaml.BaseLoader)
 
 
-@pytest.mark.parametrize(
-    "event,action",
-    [
-        ("pull_request", "opened"),
-        ("pull_request", "reopened"),
-        ("pull_request", "ready_for_review"),
-        ("pull_request", "synchronize"),
-        ("pull_request_target", "opened"),
-        ("push", None),
-        ("workflow_run", "completed"),
-    ],
+AUTO_MERGE_SHA = "a" * 40
+REPO_API = "repos/example/project"
+FAKE_GH_FOR_GATE = """#!{python}
+import json, os, subprocess, sys
+args = sys.argv[1:]
+state = json.load(open(os.environ["FAKE_GH_STATE"]))
+target = next(a for a in args[1:] if a == "graphql" or a.startswith("repos/"))
+pages = state["graphql"] if target == "graphql" else [state[target.split("?")[0]]]
+if "--paginate" not in args:
+    pages = pages[:1]
+jq_filter = args[args.index("--jq") + 1] if "--jq" in args else "."
+for page in pages:
+    sys.stdout.write(subprocess.run(
+        ["jq", "-rc", jq_filter], input=json.dumps(page),
+        capture_output=True, text=True, check=True,
+    ).stdout)
+"""
+needs_gate_tools = pytest.mark.skipif(
+    not shutil.which("bash") or not shutil.which("jq"),
+    reason="the merge bot's gate step uses bash and jq",
 )
-def test_auto_arming_cannot_start_from_repository_events(event, action):
-    triggers = _workflow("auto-merge.yml")["on"]
-    assert set(triggers) == {"workflow_dispatch"}
-    assert event not in triggers, (event, action)
 
 
-@pytest.mark.skipif(not shutil.which("bash"), reason="GitHub's Linux runner uses bash")
-def test_manual_notice_has_no_write_authority_or_github_calls(tmp_path):
-    workflow = _workflow("auto-merge.yml")
-    assert workflow["permissions"] == {}
+def _threads(resolved_flags):
+    nodes = [{"isResolved": flag} for flag in resolved_flags]
+    return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}}
+
+
+def _gate_state():
+    commit = f"{REPO_API}/commits/{AUTO_MERGE_SHA}"
+    return {
+        REPO_API: {"default_branch": "main"},
+        f"{REPO_API}/rules/branches/main": [
+            {
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [{"context": "ci/tests", "integration_id": 15368}]},
+            }
+        ],
+        f"{REPO_API}/pulls/7": {
+            "state": "open",
+            "draft": False,
+            "base": {"ref": "main"},
+            "head": {"sha": AUTO_MERGE_SHA, "repo": {"full_name": "example/project"}},
+            "user": {"login": "author"},
+            "labels": [],
+            "mergeable_state": "clean",
+        },
+        f"{REPO_API}/pulls/7/files": [{"filename": "src/app.py"}],
+        f"{commit}/check-runs": {
+            "check_runs": [
+                {
+                    "id": 1,
+                    "name": "ci/tests",
+                    "conclusion": "success",
+                    "started_at": "2026-11-04T00:00:00Z",
+                    "app": {"id": 15368},
+                }
+            ]
+        },
+        f"{commit}/statuses": [
+            {"context": "review/independent", "state": "success", "creator": {"login": "reviewer[bot]"}}
+        ],
+        f"{REPO_API}/pulls/7/reviews": [
+            {
+                "id": 99,
+                "state": "APPROVED",
+                "commit_id": AUTO_MERGE_SHA,
+                "user": {"login": "owner"},
+                "submitted_at": "2026-11-04T00:00:00Z",
+            }
+        ],
+        "graphql": [_threads([True])],
+    }
+
+
+def _run_gate(tmp_path, state, env_overrides=None):
+    """Run the bot's real evaluate step against a fake gh; returns (stdout, merges output)."""
     fakebin = tmp_path / "bin"
     fakebin.mkdir()
-    marker = tmp_path / "gh-called"
     gh = fakebin / "gh"
-    gh.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    gh.write_text(FAKE_GH_FOR_GATE.replace("{python}", sys.executable))
     gh.chmod(0o755)
-    env = {"PATH": f"{fakebin}{os.pathsep}{os.defpath}"}
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps(state))
+    output = tmp_path / "github_output"
+    env = {
+        "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_GH_STATE": str(state_file),
+        "GITHUB_OUTPUT": str(output),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        "REPO": "example/project",
+        "EV_PR": "7",
+        "EV_RUN_PRS": "null",
+        "EV_SHA": "",
+        "REVIEW_CONTEXT": "review/independent",
+        "REVIEWER_LOGINS": "reviewer[bot]",
+        "APPROVER_LOGINS": "",
+        "HOLD_LABELS": "merge/hold",
+        "OPT_IN_LABEL": "",
+        "MANUAL_PATHS": ".github/",
+        **(env_overrides or {}),
+    }
+    step = _workflow("auto-merge.yml")["jobs"]["evaluate"]["steps"][0]
+    proc = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout, output.read_text() if output.exists() else ""
 
-    for job in workflow["jobs"].values():
-        assert job.get("permissions", {}) == {}
+
+def test_merge_bot_runs_no_pr_code_and_merges_only_when_turned_on():
+    workflow = _workflow("auto-merge.yml")
+    # Each trigger runs the default-branch copy, so a PR cannot rewrite its own gate.
+    assert set(workflow["on"]) == {"pull_request_target", "workflow_run", "status", "workflow_dispatch"}
+    assert workflow["permissions"] == {}
+    jobs = workflow["jobs"]
+    assert set(jobs["evaluate"]["permissions"].values()) == {"read"}
+    assert jobs["merge"]["permissions"] == {}
+    assert jobs["merge"]["environment"] == "pr-gates"
+    assert "vars.PR_GATES_AUTO_MERGE == 'on'" in jobs["merge"]["if"]
+    for job in jobs.values():
         for step in job["steps"]:
             assert "uses" not in step
-            subprocess.run(["bash", "-e", "-c", step["run"]], env=env, check=True, timeout=5)
+            assert "--admin" not in step["run"]
+    assert "--match-head-commit" in jobs["merge"]["steps"][0]["run"]
 
-    assert not marker.exists()
+    relay = _workflow("auto-merge-relay.yml")
+    assert set(relay["on"]) == {"pull_request_review"}
+    assert relay["permissions"] == {}
+    assert all("uses" not in step for job in relay["jobs"].values() for step in job["steps"])
+
+
+@needs_gate_tools
+def test_merge_bot_lists_a_pr_when_every_gate_holds(tmp_path):
+    stdout, merges = _run_gate(tmp_path, _gate_state())
+    assert "ELIGIBLE" in stdout
+    assert f"merges=7:{AUTO_MERGE_SHA}" in merges
+
+
+def _set(path, **fields):
+    return lambda state: state[path].update(fields)
+
+
+def _set_review(**fields):
+    return lambda state: state[f"{REPO_API}/pulls/7/reviews"][0].update(fields)
+
+
+def _set_value(path, value):
+    return lambda state: state.__setitem__(path, value)
+
+
+_STATUSES = f"{REPO_API}/commits/{AUTO_MERGE_SHA}/statuses"
+_CHECK_RUNS = f"{REPO_API}/commits/{AUTO_MERGE_SHA}/check-runs"
+
+
+@needs_gate_tools
+@pytest.mark.parametrize(
+    "change,env,expected",
+    [
+        (_set(f"{REPO_API}/pulls/7", draft=True), None, "skip: draft"),
+        (
+            _set(f"{REPO_API}/pulls/7", head={"sha": AUTO_MERGE_SHA, "repo": {"full_name": "fork/project"}}),
+            None,
+            "skip: fork head",
+        ),
+        (_set(f"{REPO_API}/pulls/7", labels=[{"name": "merge/hold"}]), None, "hold label"),
+        (
+            _set_value(f"{REPO_API}/pulls/7/files", [{"filename": ".github/workflows/ci.yml"}]),
+            None,
+            "manual-merge path",
+        ),
+        (_set_value(f"{REPO_API}/rules/branches/main", []), None, "No required checks"),
+        (
+            _set_value(_CHECK_RUNS, {"check_runs": [{"id": 1, "name": "ci/tests", "conclusion": "failure",
+                                                     "started_at": "2026-11-04T00:00:00Z", "app": {"id": 15368}}]}),
+            None,
+            "required checks not green",
+        ),
+        (_set_value(_STATUSES, []), None, "not success"),
+        (None, {"REVIEWER_LOGINS": ""}, "fail closed"),
+        (None, {"REVIEWER_LOGINS": "someone-else"}, "not an allowed reviewer"),
+        (
+            _set_value(_STATUSES, [{"context": "review/independent", "state": "success",
+                                    "creator": {"login": "author"}}]),
+            {"REVIEWER_LOGINS": "author"},
+            "posted by the PR author",
+        ),
+        (_set_review(commit_id="b" * 40), None, "approval on"),
+        (_set_review(user={"login": "author"}), None, "approval on"),
+        (_set_review(state="CHANGES_REQUESTED"), None, "changes_requested"),
+        (_set_value("graphql", [_threads([True] * 100), _threads([False])]), None, "1 unresolved review threads"),
+        (_set(f"{REPO_API}/pulls/7", mergeable_state="behind"), None, "mergeable_state=behind"),
+    ],
+    ids=[
+        "draft",
+        "fork-head",
+        "hold-label",
+        "manual-path",
+        "no-required-checks",
+        "required-check-red",
+        "no-review-status",
+        "no-reviewer-configured",
+        "reviewer-not-allowed",
+        "review-by-author",
+        "approval-on-old-head",
+        "approval-by-author",
+        "changes-requested",
+        "unresolved-thread-on-page-2",
+        "behind-base",
+    ],
+)
+def test_merge_bot_fails_closed(tmp_path, change, env, expected):
+    state = _gate_state()
+    if change:
+        change(state)
+    stdout, merges = _run_gate(tmp_path, state, env)
+    assert expected in stdout
+    assert "ELIGIBLE" not in stdout
+    assert f"7:{AUTO_MERGE_SHA}" not in merges
 
 
 @pytest.mark.skipif(
