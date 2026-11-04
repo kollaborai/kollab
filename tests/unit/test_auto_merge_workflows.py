@@ -138,6 +138,9 @@ def test_merge_bot_runs_no_pr_code_and_merges_only_when_turned_on():
     assert jobs["merge"]["permissions"] == {}
     assert jobs["merge"]["environment"] == "pr-gates"
     assert "vars.PR_GATES_AUTO_MERGE == 'on'" in jobs["merge"]["if"]
+    # A dispatched dry run may evaluate with the variable unset, but never reaches the merge job.
+    assert "inputs.dry_run" in jobs["evaluate"]["if"]
+    assert "!(github.event_name == 'workflow_dispatch' && inputs.dry_run)" in jobs["merge"]["if"]
     for job in jobs.values():
         for step in job["steps"]:
             assert "uses" not in step

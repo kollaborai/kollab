@@ -186,7 +186,7 @@ remains required. Do not arm GitHub auto-merge manually.
 
 The optional merge bot (`.github/workflows/auto-merge.yml`, #722) is a separate
 path and ships off: the workflow is disabled on GitHub and `PR_GATES_AUTO_MERGE`
-is unset. Turning it on is human-only; see
+is unset. Turning it on is a repository owner's decision; see
 `docs/operations/pr-gates-auto-merge.md`. While it is off, the integrator merges
 as described below.
 

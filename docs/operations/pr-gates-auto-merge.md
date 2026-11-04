@@ -4,17 +4,21 @@
 holds on the PR's current head. It ships off and merges nothing until a
 repository owner turns it on.
 
-## Why nothing runs today
+## The three switches
 
-Three separate switches are all off:
+It merges only when all three are on:
 
-1. The workflow is disabled on GitHub (`gh workflow enable` turns it on).
-2. The repository variable `PR_GATES_AUTO_MERGE` is unset. `dry-run` evaluates
-   and logs only; `on` also merges.
-3. The `pr-gates` environment holds no `PR_GATES_MERGE_TOKEN`.
+1. The workflow is enabled on GitHub (`gh workflow enable`). It ships disabled.
+2. The repository variable `PR_GATES_AUTO_MERGE` is `on`. `dry-run` evaluates and
+   logs only. Unset means off.
+3. The `pr-gates` environment holds `PR_GATES_MERGE_TOKEN`.
 
-Turning it on changes what can merge to the default branch, so only a repository
-owner does it.
+Once the workflow is enabled, a manual dry run works with the variable unset,
+because step 4 below needs it. It only reads state and writes a run summary, and
+it cannot merge.
+
+Turning it on changes what can merge to the default branch, so it needs a
+repository owner's decision.
 
 ## What it checks
 
