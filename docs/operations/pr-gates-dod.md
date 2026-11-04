@@ -41,7 +41,7 @@ code is 0).
 | `pr_gates.dod.check_name` | `dod/ready-for-review` | Name of the posted check run. |
 | `pr_gates.dod.checks` | all seven checks | Which checks run. Remove an entry to toggle that check off. |
 | `pr_gates.dod.docs_paths` | `{}` | Maps a regex over changed paths to the doc files that must be updated in the same PR. |
-| `pr_gates.dod.regression_profile.finding_id_pattern` | `F\d+` | Generic finding-id shape searched for in review comments. |
+| `pr_gates.dod.regression_profile.finding_id_pattern` | `\bF\d+\b` | Generic finding-id shape searched for in review comments. |
 | `pr_gates.dod.regression_profile.test_paths` | `["tests/"]` | Where regression tests live; a changed file here must mention the finding id. |
 
 Example:
@@ -56,7 +56,7 @@ checks = ["signed_commits", "conventional_title", "linked_issue"]
 "^packages/" = ["CHANGELOG.md"]
 
 [pr_gates.dod.regression_profile]
-finding_id_pattern = "F\\d+"
+finding_id_pattern = "\\bF\\d+\\b"
 test_paths = ["tests/"]
 ```
 

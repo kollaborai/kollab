@@ -39,7 +39,7 @@ Configuration lives in ``.github/pr-gates.toml`` and is repo-agnostic:
    "^packages/" = ["CHANGELOG.md"]                  # regex -> required docs
 
    [pr_gates.dod.regression_profile]
-   finding_id_pattern = "F\\d+"                     # generic finding ids
+   finding_id_pattern = "\\bF\\d+\\b"               # generic finding ids
    test_paths = ["tests/"]                          # where tests live
 
 Turning ``enabled`` off fully disables the feature: nothing is posted and
@@ -76,7 +76,7 @@ ALL_CHECKS: tuple[str, ...] = (
 DEFAULT_CHECK_NAME = "dod/ready-for-review"
 # Generic finding-id shape (F14, F2, ...) -- not tied to any one review
 # convention. Repos configure their own via regression_profile.
-DEFAULT_FINDING_PATTERN = r"F\d+"
+DEFAULT_FINDING_PATTERN = r"\bF\d+\b"
 DEFAULT_TEST_PATHS: list[str] = ["tests/"]
 
 CONVENTIONAL_TITLE_RE = re.compile(
@@ -84,7 +84,8 @@ CONVENTIONAL_TITLE_RE = re.compile(
     r"(\([^)]+\))?!?:\s+.+"
 )
 LINKED_ISSUE_RE = re.compile(
-    r"(?:fixes|closes|resolves|references)\s+#\d+", re.IGNORECASE
+    r"\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|references?|refs?)\s+#\d+",
+    re.IGNORECASE,
 )
 TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
 
@@ -295,8 +296,15 @@ def _check_conventional_title(data: PRData) -> str:
 
 def _check_linked_issue(data: PRData) -> str:
     if not LINKED_ISSUE_RE.search(data.body or ""):
-        return "no 'Fixes #N' / 'Closes #N' / 'References #N' link in the body"
+        return "no 'Fixes #N' / 'Closes #N' / 'Refs #N' link in the body"
     return ""
+
+
+def _mentions_finding(content: str, finding: str) -> bool:
+    # Underscore separates, so test_f14_bypass names F14; conf1g and f12 do not
+    # name F1.
+    pattern = rf"(?<![a-z0-9]){re.escape(finding)}(?![a-z0-9])"
+    return re.search(pattern, content, re.IGNORECASE) is not None
 
 
 def _check_regression_test(cfg: DodConfig, data: PRData) -> str:
@@ -313,9 +321,7 @@ def _check_regression_test(cfg: DodConfig, data: PRData) -> str:
     ]
     uncovered: list[str] = []
     for finding in sorted(findings):
-        covered = any(
-            finding.lower() in content.lower() for _path, content in test_files
-        )
+        covered = any(_mentions_finding(content, finding) for _path, content in test_files)
         if not covered:
             uncovered.append(finding)
     if uncovered:
@@ -626,6 +632,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = load_config(args.config)
+        if not cfg.enabled:
+            print("pr-gates DoD is disabled (pr_gates.dod.enabled = false); exit 0.")
+            return 0
         data = collect_pr_data(args.repo, args.pr)
     except (ConfigError, RuntimeError, KeyError, ValueError) as exc:
         print(f"pr-gates DoD: error: {_redact(str(exc))}", file=sys.stderr)
@@ -633,9 +642,6 @@ def main(argv: list[str] | None = None) -> int:
 
     report = evaluate(cfg, data)
     print(report.summary())
-    if not cfg.enabled:
-        print("pr-gates DoD is disabled (pr_gates.dod.enabled = false); exit 0.")
-        return 0
 
     if args.post:
         if not args.head_sha:
