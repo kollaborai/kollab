@@ -994,7 +994,7 @@ wheels = [
 
 [[package]]
 name = "kollab"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -1092,7 +1092,7 @@ dev = [
 
 [[package]]
 name = "kollabor-agent"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-agent" }
 dependencies = [
     { name = "kollabor-ai" },
@@ -1111,7 +1111,7 @@ requires-dist = [
 
 [[package]]
 name = "kollabor-ai"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-ai" }
 dependencies = [
     { name = "aiohttp" },
@@ -1134,7 +1134,7 @@ requires-dist = [
 
 [[package]]
 name = "kollabor-config"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-config" }
 dependencies = [
     { name = "kollabor-events" },
@@ -1145,7 +1145,7 @@ requires-dist = [{ name = "kollabor-events", editable = "packages/kollabor-event
 
 [[package]]
 name = "kollabor-engine"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-engine" }
 dependencies = [
     { name = "assistant-stream" },
@@ -1189,12 +1189,12 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "kollabor-events"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-events" }
 
 [[package]]
 name = "kollabor-plugins"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-plugins" }
 dependencies = [
     { name = "kollabor-events" },
@@ -1205,12 +1205,12 @@ requires-dist = [{ name = "kollabor-events", editable = "packages/kollabor-event
 
 [[package]]
 name = "kollabor-rpc"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-rpc" }
 
 [[package]]
 name = "kollabor-tui"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-tui" }
 dependencies = [
     { name = "kollabor-events" },
@@ -1221,7 +1221,7 @@ requires-dist = [{ name = "kollabor-events", editable = "packages/kollabor-event
 
 [[package]]
 name = "kollabor-voice"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-voice" }
 
 [package.optional-dependencies]
@@ -1245,7 +1245,7 @@ provides-extras = ["full"]
 
 [[package]]
 name = "kollabor-webui"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "packages/kollabor-webui" }
 dependencies = [
     { name = "fastapi" },

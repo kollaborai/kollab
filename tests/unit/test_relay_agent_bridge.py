@@ -151,6 +151,7 @@ class ModelRecorder:
 class RecordingTaskLedger:
     def __init__(self):
         self.assignments = []
+        self.dispatch_reports = []
 
     def get(self, _task_id):
         return None
@@ -168,6 +169,32 @@ class RecordingTaskLedger:
 
     def resolve_reply(self, **_kwargs):
         return None
+
+    def record_dispatch_report(
+        self,
+        *,
+        task_id: str = "",
+        assignee: str,
+        thread_id: str = "",
+        message_id: str,
+        report: str,
+        worktree: str = "",
+        commit: str = "",
+        reply_to: str = "",
+    ) -> bool:
+        # This fake has no persisted dispatches, so no report can correlate.
+        details = {
+            "task_id": task_id,
+            "assignee": assignee,
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "report": report,
+            "worktree": worktree,
+            "commit": commit,
+            "reply_to": reply_to,
+        }
+        self.dispatch_reports.append((details, False))
+        return False
 
 
 @pytest_asyncio.fixture
@@ -482,6 +509,8 @@ async def test_relay_result_cannot_create_task_or_echo_to_external_bridge(bridge
     assert returned.metadata["relay_event_kind"] == "result"
     assert returned.metadata["hub_message_id"] == returned.metadata["relay_event_id"]
     assert ledger.assignments == []
+    assert ledger.dispatch_reports
+    assert all(accepted is False for _details, accepted in ledger.dispatch_reports)
     assert external_bridge.send.await_count == 0
     grants = left.store.contacts(left.commands.client.state.room)
     assert len(grants) == 1 and grants[0]["state"] == "completed"

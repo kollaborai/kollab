@@ -7,14 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- Release publishing uses a reviewed main controller, immutable tagged source, the existing repository PyPI token only in isolated upload steps, and verified GitHub assets.
-
 ### Fixed
 - Web hub mentions (@agent and @broadcast) now persist to the session JSONL like addressed LLM turns, so wake and broadcast turns survive resume and reload instead of vanishing on reload (#672).
 - An ordinary turn queued while a detached completion (hub mention or voice reply) runs now parents from the user row logged at its admission, so a concurrent completion can no longer re-parent the queued reply under the detached turn (#676).
 - Queue batches without an admission serial, including corrective nudges, cannot advance the conversation cursor or overwrite a tracked turn (#676).
-- The voice service, LiveKit workers, PhoneLink bridges, and managed transcription and classifier workers no longer inherit another interpreter's site-packages.
+
+## [0.19.1] - 2026-11-03
+
+### Changed
+- Release publishing runs from a reviewed controller on `main`, resolves immutable tagged source, limits the existing repository PyPI token to upload steps, and verifies GitHub release assets.
+
+### Fixed
+- Installed voice workers use their managed runtime dependencies without importing packages from Kollab's main interpreter, fixing startup failures caused by cross-version dependency imports.
 
 ## [0.19.0] - 2026-11-03
 
