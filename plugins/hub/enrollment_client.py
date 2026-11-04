@@ -106,10 +106,19 @@ ENROLLMENT_LOOKUP_PATH = "/relay/v1/enrollment/lookup"
 class EnrollmentProtocolError(ValueError):
     """A safe fixed enrollment-protocol failure code."""
 
-    def __init__(self, code: str, *, retry_after_seconds: float | None = None):
+    def __init__(
+        self,
+        code: str,
+        *,
+        retry_after_seconds: float | None = None,
+        reason: str = "",
+    ):
         local_codes = {"transport", "invalid_response", "session_changed", "internal", "network_mismatch"}
         self.code = code if code in _ALLOWED_ERRORS | local_codes else "transport"
         self.retry_after_seconds = retry_after_seconds
+        # A fixed, local line for the person about why this machine refused
+        # (#693). Never network text, never a code: the wire code stays as is.
+        self.reason = reason
         super().__init__(self.code)
 
 
@@ -3047,14 +3056,22 @@ class EnrollmentIssuer:
             raise EnrollmentProtocolError("conflict")
         try:
             discovery_origin = urlsplit(discovery.origin)
-            if (
-                discovery_origin.scheme != "https"
-                or not discovery_origin.hostname
-                or discovery_origin.port not in (None, 443)
-            ):
-                raise EnrollmentProtocolError("unavailable")
         except ValueError as exc:
             raise EnrollmentProtocolError("unavailable") from exc
+        if discovery_origin.scheme != "https" or not discovery_origin.hostname:
+            raise EnrollmentProtocolError(
+                "unavailable",
+                reason="This relay address is not https. Device codes only work on https port 443.",
+            )
+        if discovery_origin.port not in (None, 443):
+            # The port is an int from urlsplit; nothing else from the origin is shown.
+            raise EnrollmentProtocolError(
+                "unavailable",
+                reason=(
+                    f"This relay address uses port {discovery_origin.port}. "
+                    "Device codes only work on https port 443, so serve this network on 443."
+                ),
+            )
         manager = getattr(bridge.plugin, "_dns_identity", None)
         identity = bridge.identity
         designation = getattr(identity, "identity", None)

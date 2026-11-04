@@ -13047,18 +13047,19 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: the knock screen is unavailable"
 
-    def _offer_failed(self) -> dict[str, str]:
-        """A failed offer, with the network's refusal line when that is why (#355).
+    def _offer_failed(self, cause: str = "") -> dict[str, str]:
+        """A failed offer, with the refusal line when that is why (#355, #693).
 
-        The line comes from this machine's state, never from exception text.
+        The network's admission line comes from this machine's state; ``cause``
+        is a fixed local line from the enrollment client. Never exception text.
         """
-        reason = ""
+        reason = cause if isinstance(cause, str) else ""
         try:
             commands = getattr(self._relay_agent, "commands", None)
             if commands is not None:
-                reason = commands.client.control.admit_refusal()
+                reason = commands.client.control.admit_refusal() or reason
         except Exception:
-            reason = ""
+            reason = cause if isinstance(cause, str) else ""
         failed = {"error": "connect offer could not be created"}
         return {**failed, "reason": reason} if reason else failed
 
@@ -13082,6 +13083,8 @@ class HubPlugin(BasePlugin):
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
             return {"error": "invalid connect offer request"}
+        from .enrollment_client import EnrollmentProtocolError
+
         try:
             if self._identity is None or self._rpc_server is None:
                 return {"error": "connect enrollment is unavailable"}
@@ -13090,6 +13093,10 @@ class HubPlugin(BasePlugin):
             if create is None:
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
+        except EnrollmentProtocolError as exc:
+            # Refused before any relay request: say why, and leave a local trace (#693).
+            logger.warning("connect offer refused: %s", exc.reason or exc.code)
+            return self._offer_failed(exc.reason)
         except Exception:
             return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
