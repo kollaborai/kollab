@@ -540,6 +540,16 @@ class VoiceControl:
     ) -> VoiceSessionTicket:
         return await self.host.issue_join_ticket(OWNER_ID, voice_session_id, request)
 
+    async def open_phone_bridge(self, voice_session_id: str, generation: int):
+        from .phone_audio import PhoneCallError
+
+        binding = await self.host.get_binding(OWNER_ID, voice_session_id)
+        if binding.generation != generation:
+            raise PhoneCallError("call_stale")
+        return await self.host.run_if_current(
+            binding, lambda: self.runtime.start_phone_bridge(binding)
+        )
+
     async def stop(
         self, voice_session_id: str, request: StopVoiceSessionRequest
     ) -> VoiceSessionView:
@@ -551,6 +561,14 @@ class VoiceControl:
         view = await self.host.get_status(OWNER_ID, voice_session_id)
         assert isinstance(view, VoiceSessionView)
         return self._decorate(view)
+
+    async def listener_opened(self, voice_session_id: str) -> None:
+        """Tell the host an events stream opened (the session is in use)."""
+        await self.host.listener_opened(voice_session_id)
+
+    async def listener_closed(self, voice_session_id: str) -> None:
+        """Tell the host an events stream closed (the grace starts at the disconnect)."""
+        await self.host.listener_closed(voice_session_id)
 
     async def subscribe(
         self, voice_session_id: str, cursor_value: str | None

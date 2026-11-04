@@ -402,6 +402,33 @@ class TestBuildHookCallback:
         await callback(event.data, event)
         assert event.cancelled is True
 
+    @pytest.mark.asyncio
+    async def test_decision_block_cancels(self, loader):
+        """Issue #664: "block" (the Claude Code Stop-hook decision value)
+        must behave as a synonym of "deny" instead of being silently
+        ignored."""
+        callback = loader._build_hook_callback(
+            command='echo \'{"decision": "block", "reason": "needs another pass"}\'',
+            event_type=EventType.TOOL_CALL_PRE,
+            event_name="PreToolUse",
+            matcher="",
+            timeout=5,
+            is_async=False,
+            failure_filter=False,
+        )
+
+        event = Event(
+            type=EventType.TOOL_CALL_PRE,
+            data={"tool_name": "test"},
+            source="test",
+        )
+
+        result = await callback(event.data, event)
+        assert event.cancelled is True
+        assert result == {
+            "data": {"_hook_blocked": True, "_hook_reason": "needs another pass"}
+        }
+
 
 class TestLoadAndRegister:
     @pytest.mark.asyncio

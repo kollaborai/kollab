@@ -1,5 +1,6 @@
-import { refreshesOnEvent } from "./live-follow";
+import { refreshesOnEvent, tracksStreamedRequest } from "./live-follow";
 import type { SessionEvent } from "./api";
+import { createHistoryReconciliation } from "./history-reconciliation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
@@ -81,6 +82,7 @@ import {
   clearHistoryPagesIfCurrent,
 } from "./history-cache";
 import { agentName, sessionHeading } from "@/utils/session-display";
+import { reuseIfEqual } from "@/utils/state-snapshot";
 import { createSessionRefreshGate } from "@/utils/session-refresh";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
@@ -465,6 +467,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   } | null>(null);
   const historyPagesRef = useRef(new Map<string, HistoryPage>());
   const historyRefreshVersion = useRef(0);
+  const retryHistoryReconciliationRef = useRef<((sessionId: string) => boolean) | null>(null);
   type PendingPermissions = NonNullable<Parameters<typeof buildInitialState>[3]>;
   const historyContextRef = useRef(new Map<string, {
     sessions: Session[];
@@ -548,9 +551,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     const isCurrent = sessionGate.startList();
     const result = await api.listSessions();
     const next = result.sessions || [];
-    if (isCurrent()) setSessions(next);
-    setNetwork(result.network ?? { device: "", remote: [] });
-    setOffline(result.offline ?? []);
+    if (isCurrent()) setSessions((current) => reuseIfEqual(current, next));
+    const network = result.network ?? { device: "", remote: [] };
+    const offline = result.offline ?? [];
+    setNetwork((current) => reuseIfEqual(current, network));
+    setOffline((current) => reuseIfEqual(current, offline));
     syncHidden(hiddenStamp, result.hidden);
     syncOrder(orderStamp, {
       order: result.order ?? [],
@@ -561,7 +566,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     // in sync after any CRUD operation
     api
       .listProfiles()
-      .then((p) => setProfiles(p.profiles || []))
+      .then((p) => setProfiles((current) => reuseIfEqual(current, p.profiles || [])))
       .catch(() => {});
     return next;
   }, [stampHidden, syncHidden, stampOrder, syncOrder, sessionGate]);
@@ -894,6 +899,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const retryHistory = useCallback(() => {
     const sessionId = activeIdRef.current;
     if (!sessionId) return;
+    if (retryHistoryReconciliationRef.current?.(sessionId)) return;
     const version = ++historyRefreshVersion.current;
     const stillCurrent = () => activeIdRef.current === sessionId && historyRefreshVersion.current === version;
     void loadState(sessionId, sessions, false, stillCurrent).then((nextState) => {
@@ -919,26 +925,134 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   useEffect(() => {
     const controller = new AbortController();
     const retryTimerRef = { current: null as number | null };
-    const refreshActiveState = async (sessionId: string) => {
+    const streamedRequestIds = new Set<string>();
+    let activeReconciliation: {
+      owner: object;
+      sessionId: string;
+      requestId: string;
+      conversationUid: string | null;
+      cancel: () => void;
+      refreshNow: () => boolean;
+    } | null = null;
+    const cancelReconciliation = () => {
+      activeReconciliation?.cancel();
+      activeReconciliation = null;
+      retryHistoryReconciliationRef.current = null;
+    };
+    const refreshActiveState = async (
+      sessionId: string,
+      stillOwned: () => boolean = () => true,
+      refreshSessions = true,
+    ): Promise<EngineState | null> => {
       const version = ++historyRefreshVersion.current;
       const stillCurrent = () => !controller.signal.aborted && activeId === sessionId
-        && historyRefreshVersion.current === version;
+        && historyRefreshVersion.current === version && stillOwned();
       try {
         // A thread built from the engine's disk seed is no prefix of the
         // daemon's history, so the daemon's answer replaces it whole.
         const seeded = staleHistoryRef.current.has(sessionId);
-        const nextSessions = await loadSessions();
-        if (!stillCurrent()) return;
+        const nextSessions = refreshSessions
+          ? await loadSessions()
+          : historyContextRef.current.get(sessionId)?.sessions ?? [];
+        if (!stillCurrent()) return null;
         const nextState = await loadState(sessionId, nextSessions, true, stillCurrent);
-        if (!stillCurrent()) return;
+        if (!stillCurrent()) return null;
         // Still the seed: the daemon's answer comes as history_updated.
-        if (seeded && staleHistoryRef.current.has(sessionId)) return;
+        if (seeded && staleHistoryRef.current.has(sessionId)) return null;
         updateOpenHistory(sessionId, nextState, seeded);
         refreshSignalRef.current += 1;
         setRefreshSignal(refreshSignalRef.current);
+        return nextState;
       } catch {
         // Retry on the next event or polling cycle.
+        return null;
       }
+    };
+    const startReconciliation = (sessionId: string, requestId: string) => {
+      cancelReconciliation();
+      const owner = {};
+      const shown = initialStateRef.current;
+      const reconciliation = {
+        owner,
+        sessionId,
+        requestId,
+        conversationUid: shown?.sessionId === sessionId ? shown.conversationUid ?? null : null,
+        cancel: () => {},
+        refreshNow: () => false,
+      };
+      const isCurrent = () => !controller.signal.aborted && activeIdRef.current === sessionId
+        && activeReconciliation?.owner === owner
+        && (!reconciliation.conversationUid ||
+          initialStateRef.current?.conversationUid === reconciliation.conversationUid);
+      const retries = createHistoryReconciliation({
+        isCurrent,
+        refresh: async () => {
+          const nextState = await refreshActiveState(sessionId, isCurrent, false);
+          if (!nextState) return false;
+          if (!reconciliation.conversationUid) {
+            reconciliation.conversationUid = nextState.conversationUid ?? null;
+          }
+          const matches = nextState.messages.some((message) => {
+            if (message.role !== "assistant") return false;
+            const custom = (message.metadata as { custom?: Record<string, unknown> } | undefined)?.custom;
+            return custom?.requestId === requestId || custom?.voiceTurnId === requestId;
+          });
+          if (matches) {
+            if (activeReconciliation?.owner === owner) {
+              activeReconciliation = null;
+              retryHistoryReconciliationRef.current = null;
+            }
+            return true;
+          }
+          setHistoryStatus({
+            sessionId,
+            kind: "loading",
+            message: "Waiting for the streamed reply to appear in conversation history…",
+          });
+          return false;
+        },
+        onExhausted: () => {
+          if (!isCurrent()) return;
+          setHistoryStatus({
+            sessionId,
+            kind: "error",
+            message: "This streamed reply is still visible, but conversation history has not caught up. Retry to check again.",
+          });
+        },
+      });
+      reconciliation.cancel = retries.cancel;
+      reconciliation.refreshNow = retries.refreshNow;
+      activeReconciliation = reconciliation;
+      retryHistoryReconciliationRef.current = (retrySessionId) => {
+        if (retrySessionId !== sessionId || activeReconciliation?.owner !== owner) return false;
+        startReconciliation(sessionId, requestId);
+        return true;
+      };
+      retries.start();
+    };
+    const refreshAfterEndedReconciliation = (reconciliation: NonNullable<typeof activeReconciliation>) => {
+      const owner = reconciliation.owner;
+      void refreshActiveState(reconciliation.sessionId, () => activeReconciliation?.owner === owner)
+        .then((nextState) => {
+          if (!nextState || activeReconciliation?.owner !== owner) return;
+          const found = nextState.messages.some((message) => {
+            if (message.role !== "assistant") return false;
+            const custom = (message.metadata as { custom?: Record<string, unknown> } | undefined)?.custom;
+            return custom?.requestId === reconciliation.requestId || custom?.voiceTurnId === reconciliation.requestId;
+          });
+          if (found) {
+            reconciliation.cancel();
+            activeReconciliation = null;
+            retryHistoryReconciliationRef.current = null;
+            return;
+          }
+          if (reconciliation.conversationUid && initialStateRef.current?.conversationUid !== reconciliation.conversationUid) return;
+          setHistoryStatus({
+            sessionId: reconciliation.sessionId,
+            kind: "error",
+            message: "This streamed reply is still visible, but conversation history has not caught up. Retry to check again.",
+          });
+        });
     };
     const resetEventActivity = () => {
       eventActivityRef.current = NO_LIVE_ACTIVITY;
@@ -964,7 +1078,26 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             // message just landed in the history, mid-turn or not.
             // permission_request: a turn this page did not start (typed in the
             // agent's terminal) waits on a prompt this page can answer too.
-            if (refreshesOnEvent(type)) void refreshActiveState(activeId);
+            const requestId = typeof event.request_id === "string" ? event.request_id : "";
+            if (requestId && tracksStreamedRequest(event)) {
+              streamedRequestIds.add(requestId);
+              if (streamedRequestIds.size > 32) {
+                streamedRequestIds.delete(streamedRequestIds.values().next().value!);
+              }
+            }
+            if (type === "turn_complete" && requestId && streamedRequestIds.delete(requestId)) {
+              startReconciliation(activeId, requestId);
+            } else if ((type === "turn_cancelled" || type === "error") && requestId) {
+              streamedRequestIds.delete(requestId);
+              if (refreshesOnEvent(type)) void refreshActiveState(activeId);
+            } else if (refreshesOnEvent(type)) {
+              if (activeReconciliation?.sessionId === activeId &&
+                  (type === "history_updated" || type === "user_message")) {
+                if (!activeReconciliation.refreshNow()) refreshAfterEndedReconciliation(activeReconciliation);
+              } else {
+                void refreshActiveState(activeId);
+              }
+            }
             // A turn this page did not start still streams here: fold the
             // events into the ephemeral live message (a no-op while this
             // page runs the turn itself through the transport).
@@ -975,7 +1108,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             // Open, so nothing slips past from here. An event fired while the
             // stream was down (or before it existed, like the history_updated
             // that replaces a seed) left no trace: reconcile from history.
-            void refreshActiveState(activeId);
+            if (activeReconciliation?.sessionId === activeId) {
+              if (!activeReconciliation.refreshNow()) refreshAfterEndedReconciliation(activeReconciliation);
+            }
+            else void refreshActiveState(activeId);
           });
         } catch {
           if (controller.signal.aborted) break;
@@ -988,6 +1124,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     void followEvents();
     return () => {
       controller.abort();
+      cancelReconciliation();
       if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
     };
   }, [activeId, loadSessions, loadState, updateOpenHistory]);
@@ -1002,7 +1139,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           const isCurrent = sessionGate.startList();
           const next = await loadSessions();
           if (!controller.signal.aborted) {
-            if (isCurrent()) setSessions(next);
+            if (isCurrent()) setSessions((current) => reuseIfEqual(current, next));
             // Deleted elsewhere (another tab, the CLI, a dead daemon): close it
             // instead of retrying its streams every second. Only when the open
             // session did not change mid-request, so a new one is never closed.
@@ -1011,7 +1148,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               setActiveId(null);
               setInitialState(null);
             } else {
-              setInitialState((state) => state ? { ...state, sessions: next } : state);
+              setInitialState((state) => {
+                if (!state) return state;
+                const sessions = reuseIfEqual(state.sessions, next);
+                return sessions === state.sessions ? state : { ...state, sessions };
+              });
             }
           }
           // Live hub state for the sidebar gems; skip the update when nothing

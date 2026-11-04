@@ -23,7 +23,8 @@ def test_cache_is_bounded_across_merges_edits_and_deletes(tmp_path):
     for n in range(8292):
         store.add_entry(f"**Shared hub routing memory {n}** Same issue repeated")
     assert store.count() == 1
-    assert _cached_summary_count(store) <= 8192
+    # One live memory keeps only the minimum allowance, not every incoming summary (#567).
+    assert _cached_summary_count(store) <= 8
 
     entry = store.get_all()[0]
     store.update_entry(entry.id, body="Updated body", summary="Edited routing memory")
@@ -31,7 +32,35 @@ def test_cache_is_bounded_across_merges_edits_and_deletes(tmp_path):
     assert store.count() == 1
     assert store.delete_entry(entry.id) is not None
     assert crystal_store.CrystalStore(tmp_path).count() == 0
-    assert _cached_summary_count(store) <= 8192
+    assert _cached_summary_count(store) <= 8
+
+
+def test_cache_scales_with_the_live_vault_under_pressure(tmp_path):
+    entries = [
+        crystal_store.CrystalEntry(
+            id=f"crys-{n + 1:03d}", date="2026-10-01", keywords=[f"topic{n}"],
+            summary=f"memory {n} about routing and sessions", body="body",
+        )
+        for n in range(100)
+    ]
+    (tmp_path / "crystallized.md").write_text("\n".join(entry.to_block() for entry in entries))
+    store = crystal_store.CrystalStore(tmp_path)
+    assert store.count() == 100
+
+    # A scan over the live vault keeps every live summary cached.
+    for entry in entries:
+        store._words(entry.summary)
+    assert _cached_summary_count(store) == 100
+    # A power of two at least twice the live vault: 2 * 100 rounds up to 256.
+    assert store._summary_words_limit == 256
+
+    # 5,000 transient summaries pass through the same vault and evict its working set.
+    for n in range(5000):
+        store._words(f"transient probe number {n}")
+    assert _cached_summary_count(store) == 256
+    assert entries[0].summary not in store._summary_words
+    # An evicted live summary is tokenized again, to the same tokens.
+    assert store._words(entries[0].summary) == summary_tokens(entries[0].summary)
 
 
 def test_eviction_recomputes_the_same_tokens_and_caches_are_per_store(tmp_path, monkeypatch):
@@ -53,7 +82,7 @@ def test_eviction_recomputes_the_same_tokens_and_caches_are_per_store(tmp_path, 
     for n in range(8192):
         first._words(f"A distinct summary number {n}")
 
-    assert _cached_summary_count(first) <= 8192
+    assert _cached_summary_count(first) <= 8
     assert first._words(original) == expected
     assert calls.count(original) == 2
     assert _cached_summary_count(second) == 0

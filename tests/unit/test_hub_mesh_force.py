@@ -155,6 +155,7 @@ class TestHubMeshForce(unittest.IsolatedAsyncioTestCase):
         plugin._resolve_scope = MagicMock(return_value="direct")
         plugin._task_ledger = MagicMock()
         plugin._task_ledger.get_active_for.return_value = []
+        plugin._task_ledger.record_dispatch.return_value = {"status": "dispatching"}
 
         await plugin._handle_hub_msg_tool(
             {
