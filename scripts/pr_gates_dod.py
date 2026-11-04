@@ -205,7 +205,8 @@ class PRData:
     review_comment_bodies: tuple[str, ...]
     default_branch: str
     default_branch_head: str
-    base_sha: str
+    merge_base_sha: str
+    commits_behind_base: int
     changed_file_contents: dict[str, str] = field(default_factory=dict)
 
 
@@ -277,10 +278,11 @@ def _check_threads_resolved(data: PRData) -> str:
 
 
 def _check_base_current(data: PRData) -> str:
-    if data.base_sha != data.default_branch_head:
+    if data.merge_base_sha != data.default_branch_head:
         return (
-            f"base {data.base_sha[:10]} is behind {data.default_branch} head "
-            f"{data.default_branch_head[:10]}; update the branch from main"
+            f"PR head is {data.commits_behind_base} commit(s) behind "
+            f"{data.default_branch} head {data.default_branch_head[:10]} "
+            f"(merge-base {data.merge_base_sha[:10]}); update the branch from main"
         )
     return ""
 
@@ -441,41 +443,74 @@ def _gh(*args: str) -> Any:
     return json.loads(proc.stdout) if proc.stdout.strip() else None
 
 
+PAGE_SIZE = 100
+
+
+def _gh_paginate(endpoint: str) -> list[dict[str, Any]]:
+    """Collect every page of a REST list endpoint; a short page ends the loop."""
+    items: list[dict[str, Any]] = []
+    page = 1
+    sep = "&" if "?" in endpoint else "?"
+    while True:
+        batch = _gh("api", f"{endpoint}{sep}per_page={PAGE_SIZE}&page={page}")
+        if not isinstance(batch, list):
+            raise RuntimeError(
+                f"expected a JSON list from {endpoint} page {page}; failing closed"
+            )
+        items.extend(batch)
+        if len(batch) < PAGE_SIZE:
+            return items
+        page += 1
+
+
 def collect_pr_data(repo: str, pr: int, *, root: str = ".") -> PRData:
     """Collect PR facts with the gh CLI against the checked-out PR head."""
     pull = _gh("api", f"repos/{repo}/pulls/{pr}")
-    commits_raw = _gh("api", f"repos/{repo}/pulls/{pr}/commits")
-    files_raw = _gh("api", f"repos/{repo}/pulls/{pr}/files?per_page=100")
-    review_comments = _gh("api", f"repos/{repo}/pulls/{pr}/comments?per_page=100")
-    issue_comments = _gh("api", f"repos/{repo}/issues/{pr}/comments?per_page=100")
+    commits_raw = _gh_paginate(f"repos/{repo}/pulls/{pr}/commits")
+    files_raw = _gh_paginate(f"repos/{repo}/pulls/{pr}/files")
+    review_comments = _gh_paginate(f"repos/{repo}/pulls/{pr}/comments")
+    issue_comments = _gh_paginate(f"repos/{repo}/issues/{pr}/comments")
 
     default_branch = pull["base"]["ref"]
     branch_info = _gh("api", f"repos/{repo}/branches/{default_branch}")
+    # base_current must judge the PR head, not two base-branch facts: a PR
+    # cut from an old point passes or fails by its merge-base with the
+    # target branch, so compare head against the branch tip.
+    head_sha = pull["head"]["sha"]
+    compare = _gh("api", f"repos/{repo}/compare/{default_branch}...{head_sha}")
 
     threads_query = (
-        "query($owner: String!, $name: String!, $pr: Int!) { "
+        "query($owner: String!, $name: String!, $pr: Int!, $cursor: String) { "
         "repository(owner: $owner, name: $name) { "
         "pullRequest(number: $pr) { "
-        "reviewThreads(first: 100) { nodes { isResolved } } } } }"
+        "reviewThreads(first: 100, after: $cursor) { "
+        "pageInfo { hasNextPage endCursor } nodes { isResolved } } } } }"
     )
     owner, name = repo.split("/", 1)
-    graphql = _gh(
-        "api",
-        "graphql",
-        "-f",
-        f"owner={owner}",
-        "-f",
-        f"name={name}",
-        # -F (capital) coerces to a real Int; -f sends a string and the
-        # query declares $pr as Int!.
-        "-F",
-        f"pr={pr}",
-        "-f",
-        f"query={threads_query}",
-    )
-    thread_nodes = graphql["data"]["repository"]["pullRequest"]["reviewThreads"][
-        "nodes"
-    ]
+    thread_nodes: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        graphql_args: list[str] = [
+            "api",
+            "graphql",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            # -F (capital) coerces to a real Int; -f sends a string and the
+            # query declares $pr as Int!.
+            "-F",
+            f"pr={pr}",
+        ]
+        if cursor:
+            graphql_args += ["-f", f"cursor={cursor}"]
+        graphql_args += ["-f", f"query={threads_query}"]
+        graphql = _gh(*graphql_args)
+        connection = graphql["data"]["repository"]["pullRequest"]["reviewThreads"]
+        thread_nodes.extend(connection["nodes"])
+        if not connection["pageInfo"]["hasNextPage"]:
+            break
+        cursor = connection["pageInfo"]["endCursor"]
     unresolved = sum(1 for node in thread_nodes if not node.get("isResolved"))
 
     commits = tuple(
@@ -513,7 +548,8 @@ def collect_pr_data(repo: str, pr: int, *, root: str = ".") -> PRData:
         review_comment_bodies=comment_bodies,
         default_branch=default_branch,
         default_branch_head=branch_info["commit"]["sha"],
-        base_sha=pull["base"]["sha"],
+        merge_base_sha=compare["merge_base_commit"]["sha"],
+        commits_behind_base=compare["behind_by"],
         changed_file_contents=contents,
     )
 

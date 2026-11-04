@@ -57,7 +57,8 @@ def make_data(**overrides):
         review_comment_bodies=[],
         default_branch="main",
         default_branch_head="d" * 40,
-        base_sha="d" * 40,
+        merge_base_sha="d" * 40,
+        commits_behind_base=0,
     )
     base.update(overrides)
     return pr_gates_dod.PRData(**base)
@@ -191,11 +192,17 @@ def test_threads_resolved_pass_and_fail(tmp_path: Path) -> None:
 def test_base_current_pass_and_fail(tmp_path: Path) -> None:
     cfg = pr_gates_dod.load_config(make_config(tmp_path, ENABLED))
     ok = pr_gates_dod.evaluate(
-        cfg, make_data(default_branch_head="d" * 40, base_sha="d" * 40)
+        cfg,
+        make_data(default_branch_head="d" * 40, merge_base_sha="d" * 40),
     )
     assert "base_current" not in ok.failed_names()
     bad = pr_gates_dod.evaluate(
-        cfg, make_data(default_branch_head="e" * 40, base_sha="d" * 40)
+        cfg,
+        make_data(
+            default_branch_head="e" * 40,
+            merge_base_sha="d" * 40,
+            commits_behind_base=3,
+        ),
     )
     assert "base_current" in bad.failed_names()
 
@@ -410,7 +417,13 @@ def _install_fake_gh(monkeypatch, calls, pull_payload, branch_tip, pages):
             return graph_pages[cursor]
         endpoint = args[1]
         if endpoint.startswith("repos/o/r/compare/"):
-            return pages.get("compare")  # default None: head contains base tip
+            if "compare" not in pages:  # default: head contains base tip
+                return {
+                    "merge_base_commit": {"sha": branch_tip},
+                    "behind_by": 0,
+                    "ahead_by": 0,
+                }
+            return pages["compare"]
         if endpoint.startswith("repos/o/r/branches/"):
             return {"commit": {"sha": branch_tip}}
         for prefix, by_page in pages["rest"].items():
@@ -537,7 +550,7 @@ def test_collect_threads_follow_graphql_pagination(monkeypatch):
     _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
     data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
     assert data.unresolved_threads == 2  # one unresolved thread lives on page 2
-    graphql_calls = [a for a in calls if a[0] == "graphql"]
+    graphql_calls = [a for a in calls if a[:2] == ["api", "graphql"]]
     assert len(graphql_calls) == 2, "reviewThreads second page never requested"
     assert any(
         "cursor=CUR1" in flag for flag in graphql_calls[1]
