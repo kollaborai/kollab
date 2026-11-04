@@ -97,11 +97,15 @@ def _remember_owned_members(pgid, ready, pids_file, owned_members):
 
 
 def _owned_process_snapshot(owned_members):
-    """Build the sweep input from test-owned handles without reading a host process table."""
+    """Build a test-owned sweep input with runtime process start epochs."""
     tree, info, known = {}, {}, {}
+    runtime_info = hr.process_info()
     current = psutil.Process()
     current_birth = current.create_time()
-    info[current.pid] = (current_birth, current.name(), "")
+    current_info = runtime_info.get(current.pid)
+    if current_info is None:
+        raise AssertionError(f"test process {current.pid} missing from runtime process info")
+    info[current.pid] = (current_info[0], current.name(), "")
     tree[current.pid] = (current.ppid(), os.getpgrp(), os.getsid(0))
 
     for pgid, members in owned_members.items():
@@ -109,6 +113,9 @@ def _owned_process_snapshot(owned_members):
             try:
                 if process.create_time() != birth or os.getpgid(pid) != pgid:
                     continue
+                runtime_row = runtime_info.get(pid)
+                if runtime_row is None:
+                    raise AssertionError(f"owned process {pid} missing from runtime process info")
                 ppid = process.ppid()
                 name = process.name()
                 executable = process.exe()
@@ -116,13 +123,55 @@ def _owned_process_snapshot(owned_members):
                 if process.create_time() != birth or os.getpgid(pid) != pgid:
                     continue
                 tree[pid] = (ppid, pgid, sid)
-                info[pid] = (birth, name, "")
+                info[pid] = (runtime_row[0], name, "")
                 known[pid] = nh.Proc(pid, ppid, [name], {}, "", executable)
             except psutil.NoSuchProcess, ProcessLookupError:
                 continue
     if current.create_time() != current_birth:
         raise AssertionError("the test process identity changed while building its owned snapshot")
     return tree, info, known
+
+
+@posix_only
+def test_owned_process_snapshot_uses_runtime_start_epochs(monkeypatch):
+    class FakeProcess:
+        def __init__(self, pid, birth, parent, process_name, executable):
+            self.pid = pid
+            self.birth = birth
+            self.parent = parent
+            self.process_name = process_name
+            self.executable = executable
+
+        def create_time(self):
+            return self.birth
+
+        def ppid(self):
+            return self.parent
+
+        def name(self):
+            return self.process_name
+
+        def exe(self):
+            return self.executable
+
+    current = FakeProcess(101, 10.25, 1, "python", "/usr/bin/python")
+    workload = FakeProcess(202, 20.25, 101, "sleep", "/usr/bin/sleep")
+    runtime_info = {
+        101: (1000.75, "runtime-python", ""),
+        202: (2000.75, "runtime-sleep", ""),
+    }
+    monkeypatch.setattr(psutil, "Process", lambda: current)
+    monkeypatch.setattr(hr, "process_info", lambda: runtime_info)
+    monkeypatch.setattr(os, "getpgid", lambda pid: 202 if pid == 202 else 101)
+    monkeypatch.setattr(os, "getpgrp", lambda: 101)
+    monkeypatch.setattr(os, "getsid", lambda pid: 202 if pid == 202 else 101)
+
+    _, info, _ = _owned_process_snapshot({202: {(202, workload.birth): (workload, workload.birth)}})
+
+    assert info == {
+        101: (1000.75, "python", ""),
+        202: (2000.75, "sleep", ""),
+    }
 
 
 # ------------------------------------------------------------------ 1. the overnight orphan, for real
