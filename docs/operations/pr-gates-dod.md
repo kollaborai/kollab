@@ -19,6 +19,14 @@ still gates merge.
   `pr_gates.dod.check_name` (default `dod/ready-for-review`). The posted
   check carries the verdict; the workflow job itself stays green so the
   outcome is reported in one place only.
+- Trust: CI runs the base branch's copy of the workflow and script
+  (`pull_request_target`) and reads the PR only through the API, so a PR cannot
+  change its own grade or reach the token. A change to the script or the config
+  takes effect once it is on the base branch.
+- Freshness: it grades again when a PR is opened, pushed, edited, reopened or
+  marked ready. A grade is a snapshot: a later review comment or a new commit on
+  `main` does not rerun it, and the `main` ruleset still enforces both at merge.
+  Re-run the job from the PR's Checks tab for a fresh grade.
 - Local: agents run the same script before pushing or requesting review:
 
   ```bash
