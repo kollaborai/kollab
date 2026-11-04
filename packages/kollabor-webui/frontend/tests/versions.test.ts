@@ -39,6 +39,22 @@ test("unavailable build values are explicit and never blank", () => {
   const rows = versionRows(null, "", { branch: "unknown", sha: "unknown" });
   assert.deepEqual(
     rows.map((row) => row.value),
-    ["unknown", "unknown", "unknown", "unknown", "unknown @ unknown"],
+    ["unknown", "unknown", "unknown", "unknown", "Unavailable"],
   );
+  assert.equal(rows[4]?.title, "Build identity unavailable");
+});
+
+test("detached build shows the known commit without an unknown branch", () => {
+  const rows = versionRows(null, "", {
+    branch: "unknown",
+    sha: "7cb2712bde6128d1f99e7dc0aae9b4af0b02ea3e",
+  });
+  assert.equal(rows[4]?.value, "7cb2712b");
+  assert.equal(rows[4]?.title, "7cb2712bde6128d1f99e7dc0aae9b4af0b02ea3e");
+});
+
+test("known branch remains visible when commit identity is unavailable", () => {
+  const rows = versionRows(null, "", { branch: "feature/known", sha: "unknown" });
+  assert.equal(rows[4]?.value, "feature/known (commit unavailable)");
+  assert.equal(rows[4]?.title, "feature/known (commit unavailable)");
 });
