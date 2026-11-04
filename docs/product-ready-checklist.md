@@ -70,7 +70,8 @@ Keep the PR draft while any required evidence or work is outstanding.
   was clear; existing dirty work, branches, and worktrees were preserved; the
   maintainer integration checkout had no source edits.
 - [ ] The PR remains a draft until its designated integrator marks it ready
-  within Marco's authorized integration plan, after a different AI agent
+  within Marco's authorized integration plan, batch, or class order, after a
+  different AI agent
   reviews the exact final head and records approval using whichever account
   (`kollaborai` or `maarco`) is not the PR author. Record reviewer identity
   and exact reviewed SHA in private maintainer audit evidence. Keep the GitHub
