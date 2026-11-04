@@ -1815,6 +1815,11 @@ class LLMService:
             ),
             admission_parent or self.current_parent_uuid,
         )
+        # Expose this ticket while the admitted batch is running so callbacks
+        # caused by the turn can capture its serial before they yield. Do not
+        # assign it again after the await: an older batch must not restore its
+        # ticket over a later batch that started while it was suspended.
+        self._continue_serial = batch_serial
         batch_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
             current_parent_uuid=batch_parent_uuid,
@@ -1823,7 +1828,6 @@ class LLMService:
         # Completion publishes through the admission-serial protocol: a
         # later-admitted mention that completed while this batch ran keeps
         # the cursor; a same-turn tool-loop continuation below writes on.
-        self._continue_serial = batch_serial
         self.publish_cursor(batch_uuid, batch_serial)
 
     async def _continue_conversation(self):
@@ -2142,16 +2146,15 @@ class LLMService:
         # detached completions resolve by admission order, not wall clock
         # (#676 r7).
         turn_serial = self.claim_turn_serial()
+        admission_parent_uuid = self.current_parent_uuid
         user_uuid = await self.conversation_logger.log_user_message(
-            display_text, parent_uuid=self.current_parent_uuid
+            display_text, parent_uuid=admission_parent_uuid
         )
         self.publish_cursor(user_uuid, turn_serial)
-        # Freeze this turn's chain position now (the row just logged). A
-        # detached completion — a hub mention, a voice reply — can advance the
-        # shared pointer before the queue starts this batch; the batch must
-        # parent from what admission captured, not from the mutable pointer
-        # (#676).
-        admitted_parent_uuid = self.current_parent_uuid
+        # This queue item belongs under the user row created for its admission,
+        # even if another completion won the shared cursor during the logger
+        # await. Never re-read mutable current_parent_uuid after yielding.
+        admitted_parent_uuid = user_uuid
 
         # Add to processing queue with overflow handling. Plain input rides a
         # zero-id TaggedInput so the capture travels with the item (#676); a

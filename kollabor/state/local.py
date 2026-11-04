@@ -3951,9 +3951,19 @@ class LocalStateService(StateService):
         approvals = getattr(getattr(llm, "tool_executor", None), "yes_approvals", None)
         if isinstance(approvals, YesApprovals):
             approvals.reply_cut(turn_id)  # its ask was never heard whole: no yes answers it
+        # Capture lineage and ticket at RPC admission, before an after_turn
+        # callback or logger await can observe a different conversation cursor.
+        turn_serial = getattr(llm, "_continue_serial", None)
+        admitted_parent_uuid = llm.current_parent_uuid
         queue = getattr(llm, "_queue_processor", None)
         if queue is None:
-            return await self._cut_voice_reply(llm, turn_id, text)
+            return await self._cut_voice_reply(
+                llm,
+                turn_id,
+                text,
+                admitted_parent_uuid=admitted_parent_uuid,
+                turn_serial=turn_serial,
+            )
 
         def conversation():  # the live one: /resume and a new session change it
             return getattr(getattr(llm, "conversation_logger", None), "session_id", None)
@@ -3963,7 +3973,15 @@ class LocalStateService(StateService):
         async def cut() -> None:
             if conversation() != session:
                 return  # the talked-over turn is not in this conversation
-            if (await self._cut_voice_reply(llm, turn_id, text)).get("recorded"):
+            if (
+                await self._cut_voice_reply(
+                    llm,
+                    turn_id,
+                    text,
+                    admitted_parent_uuid=admitted_parent_uuid,
+                    turn_serial=turn_serial,
+                )
+            ).get("recorded"):
                 from kollabor_tui.display_tap import publish_semantic
 
                 publish_semantic(self._event_bus, "voice_reply_cut", turn_id=turn_id)
@@ -3972,7 +3990,15 @@ class LocalStateService(StateService):
         queue.after_turn(turn_id, cut)
         return {"recorded": False, "pending": True}
 
-    async def _cut_voice_reply(self, llm: Any, turn_id: str, text: str) -> dict[str, Any]:
+    async def _cut_voice_reply(
+        self,
+        llm: Any,
+        turn_id: str,
+        text: str,
+        *,
+        admitted_parent_uuid: str | None,
+        turn_serial: int | None,
+    ) -> dict[str, Any]:
         from kollabor_events.data_models import ConversationMessage
 
         history = llm.conversation_history
@@ -4011,8 +4037,12 @@ class LocalStateService(StateService):
                     logger.warning("could not log a voice talk-over cut", exc_info=True)
                     dropped = {}
                 # The next record threads under what is left, never a dropped one.
+                # Keep the admission ticket across the await so an older cut
+                # cannot overwrite a cursor published by a newer turn.
                 while llm.current_parent_uuid in dropped:
-                    llm.current_parent_uuid = dropped[llm.current_parent_uuid]
+                    next_parent_uuid = dropped[llm.current_parent_uuid]
+                    if not llm.publish_cursor(next_parent_uuid, turn_serial):
+                        break
             return {"recorded": bool(edits), "replaced": bool(edits)}
         if not text:
             return {"recorded": False}
@@ -4022,14 +4052,15 @@ class LocalStateService(StateService):
                 content=text,
                 metadata={"interrupted": True, "source": "voice", "turn_id": turn_id},
             ),
-            parent_uuid=llm.current_parent_uuid,
+            parent_uuid=admitted_parent_uuid,
         )
         try:  # the JSONL feeds /resume and the engine's disk-seeded history
-            llm.current_parent_uuid = await llm.conversation_logger.log_assistant_message(
+            logged_uuid = await llm.conversation_logger.log_assistant_message(
                 text,
-                parent_uuid=llm.current_parent_uuid,
+                parent_uuid=admitted_parent_uuid,
                 model=getattr(getattr(llm, "api_service", None), "model", None),
             )
+            llm.publish_cursor(logged_uuid, turn_serial)
         except Exception:
             logger.warning("could not log an interrupted voice reply", exc_info=True)
         return {"recorded": True}

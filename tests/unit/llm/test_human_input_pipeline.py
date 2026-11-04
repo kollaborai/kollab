@@ -705,6 +705,155 @@ async def test_native_only_generation_is_rejected_for_active_acp():
     }
     assert acp.admissions == []
     service._enqueue_with_overflow_strategy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_logger_await_cannot_reparent_an_admitted_user_turn():
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "native")
+    )
+    service._pending_agent_hud = []
+    service.current_parent_uuid = "pre-admission-parent"
+    service._turn_serial = 0
+    service._cursor_winner_serial = -1
+    service._continue_serial = None
+    logger_started, release_logger, enqueued = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    logged_parents: list[str | None] = []
+    captured_items: list[TaggedInput] = []
+
+    async def log_user_message(_content, *, parent_uuid=None):
+        logged_parents.append(parent_uuid)
+        logger_started.set()
+        await release_logger.wait()
+        return "user-row"
+
+    async def enqueue(item):
+        captured_items.append(item)
+        enqueued.set()
+
+    service._queue_processor = SimpleNamespace(
+        enqueue=enqueue,
+        process_message_batch=AsyncMock(return_value="assistant-row"),
+        continue_conversation=AsyncMock(return_value="parent-3"),
+        turn_completed=False,
+        is_processing=True,
+        processing_queue=SimpleNamespace(full=MagicMock(return_value=False)),
+    )
+    service._enqueue_with_overflow_strategy = enqueue
+    service.is_processing = True
+    service.cancel_processing = False
+    service.cancellation_message_shown = False
+    service.create_background_task = MagicMock()
+    service.message_display_service = SimpleNamespace(
+        display_user_message=MagicMock(), display_error_message=MagicMock()
+    )
+    service.conversation_logger = SimpleNamespace(log_user_message=log_user_message)
+    service._message_handler = SimpleNamespace(
+        handle_user_input=AsyncMock(return_value={"status": "native"})
+    )
+    assert await bus.register_hook(
+        Hook(
+            name="process_user_input",
+            plugin_name="llm_core",
+            event_type=EventType.USER_INPUT,
+            priority=HookPriority.LLM.value,
+            callback=service._handle_user_input,
+        )
+    )
+
+    task = asyncio.create_task(service.process_user_input("hello"))
+    try:
+        await asyncio.wait_for(logger_started.wait(), timeout=1)
+        assert logged_parents == ["pre-admission-parent"]
+
+        # Serial 2 publishes while serial 1 is suspended in the logger.
+        later_serial = service.claim_turn_serial()
+        assert service.publish_cursor("newer-hub-assistant", later_serial)
+        release_logger.set()
+        await asyncio.wait_for(task, timeout=1)
+        await asyncio.wait_for(enqueued.wait(), timeout=1)
+    finally:
+        release_logger.set()
+        if not task.done():
+            await task
+
+    [item] = captured_items
+    assert item.parent_uuid == "user-row"
+    assert item.admission_serial == 1
+    assert service.current_parent_uuid == "newer-hub-assistant"
+
+
+@pytest.mark.asyncio
+async def test_older_batch_completion_does_not_restore_its_continue_ticket():
+    first_started, second_started = asyncio.Event(), asyncio.Event()
+    release_first, release_second = asyncio.Event(), asyncio.Event()
+    service = object.__new__(LLMService)
+    service._pending_agent_hud = []
+    service.current_parent_uuid = "parent-before"
+    service._turn_serial = 1
+    service._cursor_winner_serial = -1
+    service._continue_serial = None
+
+    class GatedQueueProcessor:
+        async def process_message_batch(
+            self, *, messages, current_parent_uuid, request_ids
+        ):
+            serial = messages[0].admission_serial
+            assert service._continue_serial == serial
+            started, release = (
+                (first_started, release_first)
+                if serial == 1
+                else (second_started, release_second)
+            )
+            started.set()
+            await release.wait()
+            return f"assistant-{serial}"
+
+    service._queue_processor = GatedQueueProcessor()
+    first = TaggedInput(
+        content="first",
+        request_ids=("first",),
+        parent_uuid="user-1",
+        admission_serial=1,
+    )
+    second_serial = service.claim_turn_serial()
+    second = TaggedInput(
+        content="second",
+        request_ids=("second",),
+        parent_uuid="user-2",
+        admission_serial=second_serial,
+    )
+
+    first_task = asyncio.create_task(service._process_message_batch([first]))
+    try:
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        second_task = asyncio.create_task(service._process_message_batch([second]))
+        await asyncio.wait_for(second_started.wait(), timeout=1)
+        assert service._continue_serial == second_serial
+
+        # The older batch returns first; it must not reinstall ticket 1.
+        release_first.set()
+        await asyncio.wait_for(first_task, timeout=1)
+        assert service._continue_serial == second_serial
+
+        release_second.set()
+        await asyncio.wait_for(second_task, timeout=1)
+    finally:
+        release_first.set()
+        release_second.set()
+        if not first_task.done():
+            await first_task
+        if "second_task" in locals() and not second_task.done():
+            await second_task
+
+
 @pytest.mark.asyncio
 async def test_concurrent_pointer_advance_between_user_row_and_queue_start_cannot_reparent_turn():
     """A detached completion that advances ``current_parent_uuid`` between an
