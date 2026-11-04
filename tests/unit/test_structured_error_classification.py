@@ -142,14 +142,26 @@ def test_poisoned_text_does_not_fabricate_auth():
     assert info.retryable is True
 
 
-def test_untyped_exception_with_retry_words_in_text_is_not_retryable():
-    """Removed substring classification: text numbers are not retry signals."""
+def test_untyped_exception_uses_main_canonical_transient_markers():
+    """Main's bounded transient markers classify untyped failures (main-canonical).
+
+    After the #720 fix-cycle alignment, an untyped exception carrying main's
+    canonical transient markers (rate ``429``, server ``5xx`` /
+    ``Network error``) classifies exactly like main's retry loop does — main
+    is canonical for classification behavior. The markers are bounded regex
+    checks at the single classifier; timeout and connection stay typed-only.
+    """
     exc = RuntimeError(
         "job 429 failed after 500 attempts; Network error mentioned in a sentence"
     )
     info = structured_error_info(exc)
-    assert info.retryable is False
-    assert info.error_class == "RuntimeError"
+    assert info.retryable is True
+    assert info.error_class == "rate_limit"  # rate is checked first, like main
+
+    unmarked = RuntimeError("request timed out while streaming")
+    plain = structured_error_info(unmarked)
+    assert plain.retryable is False  # no timeout text fallback, like main
+    assert plain.error_class == "RuntimeError"
 
 
 def test_untyped_exception_with_typed_status_attribute_still_classifies():
@@ -447,12 +459,13 @@ def _llm_service(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_retry_loop_no_longer_classifies_rendered_text(tmp_path):
-    """A 429/5xx/Network-error inside an untyped message is not a retry signal.
+async def test_retry_loop_classification_matches_main_taxonomy(tmp_path):
+    """The retry loop follows main's canonical untyped classification.
 
-    Before #720 the retry loop regex-matched the rendered text; this exact
-    exception retried three times. Classification now reads the structured
-    snapshot, so it raises on the first failure.
+    Main-classified transient markers (429/5xx/Network error) retry through
+    bounded backoff exactly as main's loop does; a message with no marker
+    still raises on the first failure. Goal-image retry parity lives in
+    tests/unit/test_goal_image_requests.py.
     """
     service, provider = _llm_service(tmp_path)
     provider.call = AsyncMock(
@@ -464,7 +477,15 @@ async def test_retry_loop_no_longer_classifies_rendered_text(tmp_path):
     with pytest.raises(RuntimeError):
         await service.call_llm([{"role": "user", "content": "hi"}])
 
-    assert provider.call.await_count == 1
+    assert provider.call.await_count == 4  # first attempt + 3 retries, like main
+
+    service2, provider2 = _llm_service(tmp_path)
+    provider2.call = AsyncMock(side_effect=RuntimeError("opaque provider failure"))
+
+    with pytest.raises(RuntimeError):
+        await service2.call_llm([{"role": "user", "content": "hi"}])
+
+    assert provider2.call.await_count == 1
 
 
 @pytest.mark.asyncio

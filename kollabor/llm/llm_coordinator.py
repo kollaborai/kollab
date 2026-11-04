@@ -2339,7 +2339,7 @@ class LLMService:
             )
         except (RuntimeError, ValueError) as exc:
             error_class = getattr(exc, "error_class", None)
-            if error_class == "queue_full":
+            if error_class == "queue_full" or "full" in str(exc).lower():
                 return {"status": "rejected", "reason": "acp_queue_full"}
             if images and error_class == "images_unsupported":
                 return {"status": "rejected", "reason": "This harness can't take images."}

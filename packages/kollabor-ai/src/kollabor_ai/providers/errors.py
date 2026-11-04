@@ -594,12 +594,15 @@ def is_context_overflow(info: StructuredErrorInfo) -> bool:
 
 
 def structured_error_info(exc: BaseException) -> StructuredErrorInfo:
-    """Classify an exception from its type and typed attributes only.
+    """Classify an exception primarily from its type and typed attributes.
 
-    Never reads ``str(exc)``: rendered text is display data, not signal
-    (#549, #720). The exception's class plus its typed attributes
-    (``error_code``, ``status_code``, ``code``, ``provider``, ``retry_after``)
-    are the only inputs.
+    Typed classification comes first: the exception's class plus its typed
+    attributes (``error_code``, ``status_code``, ``code``, ``provider``,
+    ``retry_after``). For exceptions that carry no type, code, or status —
+    and only there — main's canonical bounded text markers for the
+    transient classes (``429``, ``5xx``, ``Network error``) decide, keeping
+    retry behavior identical to main's taxonomy (main is canonical; #549
+    teaches that arbitrary rendered text is never classification signal).
     """
 
     error_code = getattr(exc, "error_code", None)
@@ -688,8 +691,11 @@ def structured_error_info(exc: BaseException) -> StructuredErrorInfo:
             "provider", error_code, provider, retryable=False, cause=cause,
         )
 
-    # Untyped exception: attributes only, never its text. A "500" in a
-    # message is a number in a sentence, not a retry signal.
+    # Untyped exception: typed attributes first; then, and only then, main's
+    # canonical bounded text markers for the transient classes main still
+    # recognizes on untyped failures (rate \b429\b, server \b5\d{2}\b /
+    # "Network error"). Timeout and connection have no text fallback here —
+    # main classifies them from typed classes and codes alone.
     if rate_by_status:
         return StructuredErrorInfo(
             "rate_limit", error_code, provider,
@@ -699,6 +705,17 @@ def structured_error_info(exc: BaseException) -> StructuredErrorInfo:
         error_class = "server" if server_by_status else "transport"
         return StructuredErrorInfo(
             error_class, error_code, provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    text = str(exc)
+    if re.search(r"\b429\b", text):
+        return StructuredErrorInfo(
+            "rate_limit", error_code, provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    if re.search(r"\b5\d{2}\b", text) or "Network error" in text:
+        return StructuredErrorInfo(
+            "server", error_code, provider,
             retryable=True, retry_after=retry_after, cause=cause,
         )
     return StructuredErrorInfo(
