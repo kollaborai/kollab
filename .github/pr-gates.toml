@@ -1,14 +1,15 @@
-# pr-gates: per-PR quality gates (#724). Fully disabled by default; flipping
-# `enabled` to true turns on the definition-of-done check. See
+# pr-gates: per-PR quality gates (#724). `enabled` turns the definition-of-done
+# check on or off. See
 # docs/operations/pr-gates-dod.md for what each key does and the enable steps.
 
 [pr_gates.dod]
-enabled = false
+enabled = true
 # Name of the single check run posted on each PR (configurable).
 check_name = "dod/ready-for-review"
 # Which checks run; remove or comment out entries to toggle a check off.
 checks = [
-  "signed_commits",
+  # signed_commits stays out until agent commits are signed (#755): it would fail
+  # every agent PR.
   "docs_paths",
   "threads_resolved",
   "base_current",

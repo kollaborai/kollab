@@ -342,12 +342,11 @@ def test_disabled_never_posts(tmp_path, monkeypatch) -> None:
 # --- shipped files ----------------------------------------------------------
 
 
-def test_repo_config_ships_disabled() -> None:
-    text = CONFIG_FILE.read_text(encoding="utf-8")
-    assert "enabled" in text
+def test_repo_config_is_on_without_signed_commits() -> None:
     cfg = pr_gates_dod.load_config(CONFIG_FILE)
-    assert cfg.enabled is False
-
+    assert cfg.enabled is True
+    # Agent commits are not signed yet (#755), so this would fail every agent PR.
+    assert "signed_commits" not in cfg.checks
 
 def test_workflow_file_exists_least_privilege() -> None:
     text = WORKFLOW_FILE.read_text(encoding="utf-8")

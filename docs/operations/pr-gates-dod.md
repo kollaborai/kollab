@@ -39,6 +39,9 @@ still gates merge.
 
 ## Configuration
 
+This repository runs it with `enabled = true` and without `signed_commits`,
+which would fail every agent PR until agent commits are signed (#755).
+
 Everything lives in `.github/pr-gates.toml`. The feature is disabled by
 default; `enabled = false` fully disables it (nothing posts, every exit
 code is 0).
@@ -87,7 +90,9 @@ test_paths = ["tests/"]
 
 ## Rollout and rollback
 
-1. Merge with the toggle off (the shipped state).
+This repository has finished this rollout. To turn the check on in another one:
+
+1. Start with `enabled = false`.
 2. Set the config values in `.github/pr-gates.toml`.
 3. Do a supervised dry run on a test PR or lane.
 4. Get owner sign-off.

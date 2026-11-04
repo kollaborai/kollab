@@ -755,3 +755,33 @@ def test_post_merge_watcher_never_arms_and_still_dispatches_for_legacy_merges(tm
         assert any(call[0] == "api" and call[1].endswith("/actions/runs/77") for call in calls)
     if scenario in ("workflow-run-by-commit", "workflow-run-missing"):
         assert any(call[0] == "api" and "/commits/" in call[1] and call[1].endswith("/pulls") for call in calls)
+
+
+def _runs_under_bash(workflow, job, step):
+    """GitHub's default shell is Bash, except PowerShell on Windows runners."""
+    defaults = (job.get("defaults") or workflow.get("defaults") or {}).get("run") or {}
+    shell = step.get("shell") or defaults.get("shell")
+    if shell:
+        return shell.split()[0] == "bash"
+    return "windows" not in str(job.get("runs-on", "")).lower() and "== 'windows'" not in step.get("if", "").lower()
+
+
+def test_run_step_shell_follows_github_defaults():
+    linux, windows = {"runs-on": "ubuntu-latest"}, {"runs-on": "windows-latest"}
+    assert _runs_under_bash({}, linux, {})
+    assert not _runs_under_bash({}, windows, {})
+    assert _runs_under_bash({}, windows, {"shell": "bash"})
+    assert not _runs_under_bash({}, linux, {"shell": "pwsh"})
+    assert not _runs_under_bash({}, linux, {"if": "runner.os == 'Windows'"})
+    assert not _runs_under_bash({"defaults": {"run": {"shell": "pwsh"}}}, linux, {})
+
+
+def test_every_bash_run_step_in_a_workflow_parses():
+    # " #" starts a YAML comment in a plain scalar, which once cut the relay's echo in half.
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        workflow = _workflow(path.name)
+        for job_name, job in workflow["jobs"].items():
+            for step in job.get("steps", []):
+                if "run" in step and _runs_under_bash(workflow, job, step):
+                    parsed = subprocess.run(["bash", "-n"], input=step["run"], capture_output=True, text=True)
+                    assert parsed.returncode == 0, f"{path.name} {job_name}: {parsed.stderr}"
