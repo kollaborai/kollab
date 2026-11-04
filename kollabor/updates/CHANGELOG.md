@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
 - A definition-of-done check (`pr-gates`) runs configurable hygiene checks on every PR -- signed commits, docs-path rules, unresolved threads, base currency, Conventional Commit title, linked issue, and regression-test coverage of review finding ids -- and reports every failed item in exactly one check run (default `dod/ready-for-review`), never comments. Disabled by default via `pr_gates.dod.enabled = false` in `.github/pr-gates.toml`; usable as a local CLI before pushing (#724).
 
 ## [0.19.1] - 2026-11-03
