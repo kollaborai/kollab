@@ -47,7 +47,8 @@ exact reviewed SHA in private maintainer audit evidence. Keep the GitHub
 approval plain, with no AI attribution or footer. GitHub prohibits authors
 from approving their own PRs; do not attempt self-approval. A new head
 requires fresh independent review and
-CI. All merges use `kollaborai` only, as merge commits; never use `--admin` or a
+CI. A head moved only by merging `main`, with no conflict outside the changelogs,
+keeps its verdict once a reviewer checks that merge delta. All merges use `kollaborai` only, as merge commits; never use `--admin` or a
 ruleset bypass. Verify that identity cannot bypass applicable protection and
 stop if identity, bypass status, or gate evidence is uncertain. An emergency
 ruleset change requires separate explicit authorization. Writers never review

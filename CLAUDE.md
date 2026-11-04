@@ -887,9 +887,12 @@ not any agent in the writer's lane), works in a scratch environment, runs the
 tests, and posts a PR verdict recording the pinned head SHA, base SHA,
 commands run, and PASS or FAIL; review waits while the head is BEHIND or
 DIRTY against `main`, and a moved head or a relevant base move voids the
-verdict. Review findings are fixed red-first: land the failing regression
-test (alone, or marked strict `xfail`) before the fix, and the fix flips it
-green without editing the test. Every merge uses
+verdict. A head moved only by merging `main`, with no conflict outside the
+changelogs, keeps its verdict once a reviewer checks that merge delta. Review
+findings are fixed red-first: land the failing regression test (alone, or
+marked strict `xfail`) before the fix, and the fix flips it green without
+editing the test; a finding no test can reproduce, such as wording in a doc,
+says so in its fix commit instead. Every merge uses
 `kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
 After code-owner enforcement is enabled, `.github/CODEOWNERS` covers every
 path and protects itself; one of `@maarco` or `@kollaborai` must approve. The

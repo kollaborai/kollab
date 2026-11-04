@@ -129,7 +129,9 @@ gh pr create --draft --head issue-8-version-display --title "fix(cli): correct v
   base, and all review conversations must be resolved before merge. If the
   head moves after review, or `main` moves past the recorded base with
   conflicting or relevant changes, the verdict is void and the review is
-  redone.
+  redone. A head that moved only by merging `main`, with no conflict outside
+  the changelogs, keeps its verdict once a reviewer checks that merge delta on
+  the new head.
 - When `main` advances, update the writer branch by fetching and merging
   `origin/main` into it, then push normally. If the remote PR branch advanced,
   fetch and merge that branch too. Resolve conflicts only within owned paths;
@@ -350,7 +352,8 @@ green), then write the fix against it. The test flips green with no edits to
 the test itself; removing the strict `xfail` marker is the only permitted
 test change. The independent reviewer runs that test as the concrete repro
 instead of re-deriving one, and a fix commit that modifies its own regression
-test is flagged in review.
+test is flagged in review. A finding no test can reproduce, such as wording in
+a doc, says so in its fix commit instead.
 
 ## Release process
 
