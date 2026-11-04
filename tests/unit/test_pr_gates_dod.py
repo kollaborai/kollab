@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "pr_gates_dod.py"
@@ -355,6 +356,20 @@ def test_workflow_file_exists_least_privilege() -> None:
     assert "checks: write" in text
     assert "pull-requests: write" not in text
     assert "contents: read" in text
+
+
+def test_workflow_runs_the_base_copy_and_no_pr_code() -> None:
+    workflow = yaml.load(WORKFLOW_FILE.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    # Only pull_request_target runs the base branch's copy, so a PR cannot rewrite
+    # its own grade or reach the token.
+    assert list(workflow["on"]) == ["pull_request_target"]
+    # The title and body are graded, so an edit has to grade again.
+    assert {"opened", "synchronize", "reopened", "ready_for_review", "edited"} <= set(
+        workflow["on"]["pull_request_target"]["types"]
+    )
+    steps = workflow["jobs"]["dod"]["steps"]
+    checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout@"))
+    assert "ref" not in checkout.get("with", {})
 
 
 def test_audit_lines_record_actions(tmp_path, capsys) -> None:
