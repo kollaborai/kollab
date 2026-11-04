@@ -23,10 +23,7 @@ from kollabor_config.config_utils import (
     get_config_directory_candidates,
     get_project_data_dir_candidates,
 )
-<<<<<<< HEAD
 from kollabor_config.hub_paths import hub_project_socket_key, hub_socket_root
-=======
->>>>>>> origin/main
 
 logger = logging.getLogger(__name__)
 
