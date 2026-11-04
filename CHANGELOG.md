@@ -7,12 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- Release publishing uses a reviewed main controller, immutable tagged source, the existing repository PyPI token only in isolated upload steps, and verified GitHub assets.
-
 ### Fixed
 - An agent running `/hub stop all` in a TUI session now stops only the agents that session started: peers launched by other sessions or the operator are immune and reported in the result, and the command is advertised only to sessions that started agents. The operator CLI remains mesh-wide, but refuses normal foreground or background tool children by checking ancestry against Hub presence in any local project, even when a terminal tool filters context markers or changes the working directory. Stop-all ownership uses the live Popen child and its OS process creation time, with no 120-second timestamp window (#669).
-- The voice service, LiveKit workers, PhoneLink bridges, and managed transcription and classifier workers no longer inherit another interpreter's site-packages.
+
+## [0.19.1] - 2026-11-03
+
+### Changed
+- Release publishing runs from a reviewed controller on `main`, resolves immutable tagged source, limits the existing repository PyPI token to upload steps, and verifies GitHub release assets.
+
+### Fixed
+- Installed voice workers use their managed runtime dependencies without importing packages from Kollab's main interpreter, fixing startup failures caused by cross-version dependency imports.
 
 ## [0.19.0] - 2026-11-03
 
