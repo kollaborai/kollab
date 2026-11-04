@@ -871,7 +871,9 @@ changing those files. Do not edit, stage, commit, or push source there, and
 preserve existing dirty files and worktrees.
 
 Use scoped Conventional Commits and DRAFT PRs. Marco authorizes a concrete
-integration plan or bounded batch; its named integrator may mark covered PRs
+integration plan or bounded batch (a class order in his own words, such as
+"merge as many ready PRs as you can tonight", counts; see
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`); its named integrator may mark covered PRs
 ready and merge them after independent source review of the exact head, current
 base, required CI, and resolved conversations. Do not repeat permission for
 listed steps. A different AI agent must review every PR's exact final head and

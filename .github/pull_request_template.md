@@ -92,7 +92,7 @@ in `docs/product-ready-checklist.md`.
   was clear; existing dirty work, branches, and worktrees were preserved; the
   maintainer integration checkout had no source edits.
 - [ ] The PR remains a draft until its designated integrator marks it ready
-  within the maintainer-authorized integration plan, after a different AI
+  within the maintainer-authorized integration plan, batch, or class order, after a different AI
   agent reviews the exact final head, records approval as whichever account
   (`kollaborai` or `maarco`) is not the PR author, and required CI passes.
   Record reviewer identity and exact reviewed SHA in private maintainer audit
