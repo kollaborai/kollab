@@ -618,3 +618,129 @@ def test_base_current_flags_pr_head_behind_main(tmp_path: Path) -> None:
     )
     ok = pr_gates_dod.evaluate(cfg, fresh)
     assert "base_current" not in ok.failed_names()
+
+
+# --- pagination liveness (red-first regression tests) ------------------------------
+#
+# Bismuth's bounded probes against PR #740 at 0c1ee3a4 reproduced two hang
+# paths: a REST list endpoint that returns the same full page for every page
+# parameter loops _gh_paginate forever, and reviewThreads pagination that
+# advertises hasNextPage=true with a null or repeated endCursor loops the
+# GraphQL collector forever. A gate script must hang never and silently
+# truncate never, so both pathological shapes must fail closed with a loud
+# error within a bounded number of API calls. The fakes below enforce the
+# bound themselves (raising AssertionError past it) so a red run fails fast
+# instead of hanging.
+
+
+def test_gh_paginate_fails_closed_on_identical_consecutive_pages(monkeypatch):
+    calls: list[list] = []
+
+    def fake_gh(*args):
+        calls.append(list(args))
+        if len(calls) > 4:
+            raise AssertionError("unbounded loop: more than 4 pages requested")
+        return [_commit(f"{i:03d}" + "r" * 37) for i in range(100)]
+
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    with pytest.raises(RuntimeError, match="identical"):
+        pr_gates_dod._gh_paginate("repos/o/r/pulls/401/commits")
+    assert len(calls) <= 4
+
+
+def test_gh_paginate_fails_closed_on_page_cap(monkeypatch):
+    calls: list[list] = []
+
+    def fake_gh(*args):
+        calls.append(list(args))
+        if len(calls) > pr_gates_dod.PAGINATION_MAX_PAGES + 1:
+            raise AssertionError("unbounded loop: more than the documented page cap")
+        return [_commit(f"p{calls[-1][1]}-{i:03d}") for i in range(100)]
+
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    with pytest.raises(RuntimeError, match="failing closed"):
+        pr_gates_dod._gh_paginate("repos/o/r/pulls/401/commits")
+    assert len(calls) <= pr_gates_dod.PAGINATION_MAX_PAGES + 1
+
+
+def _thread_page(has_next, end_cursor):
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
+                        "nodes": [],
+                    }
+                }
+            }
+        }
+    }
+
+
+def test_thread_pagination_fails_closed_on_null_end_cursor(monkeypatch):
+    calls: list[list] = []
+
+    def fake_gh(*args):
+        calls.append(list(args))
+        graphql_calls = [c for c in calls if c[:2] == ["api", "graphql"]]
+        if len(graphql_calls) > 4:
+            raise AssertionError("unbounded loop: more than 4 graphql calls")
+        if args[:2] == ("api", "graphql"):
+            return _thread_page(True, None)  # hasNextPage but no cursor
+        if args[1] == f"repos/o/r/pulls/{PR_NUM}":
+            return {
+                "title": "t",
+                "body": "Fixes #1",
+                "base": {"ref": "main", "sha": BASE_TIP},
+                "head": {"sha": HEAD_SHA},
+            }
+        if args[1].startswith("repos/o/r/branches/"):
+            return {"commit": {"sha": BASE_TIP}}
+        if args[1].startswith("repos/o/r/compare/"):
+            return {
+                "merge_base_commit": {"sha": BASE_TIP},
+                "behind_by": 0,
+                "ahead_by": 0,
+            }
+        return []  # REST list endpoints: one empty page
+
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    with pytest.raises(RuntimeError, match="endCursor"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+    graphql_made = [c for c in calls if c[:2] == ["api", "graphql"]]
+    assert len(graphql_made) <= 4
+
+
+def test_thread_pagination_fails_closed_on_repeated_end_cursor(monkeypatch):
+    calls: list[list] = []
+
+    def fake_gh(*args):
+        calls.append(list(args))
+        graphql_calls = [c for c in calls if c[:2] == ["api", "graphql"]]
+        if len(graphql_calls) > 5:
+            raise AssertionError("unbounded loop: more than 5 graphql calls")
+        if args[:2] == ("api", "graphql"):
+            return _thread_page(True, "CUR1")  # same cursor on every page
+        if args[1] == f"repos/o/r/pulls/{PR_NUM}":
+            return {
+                "title": "t",
+                "body": "Fixes #1",
+                "base": {"ref": "main", "sha": BASE_TIP},
+                "head": {"sha": HEAD_SHA},
+            }
+        if args[1].startswith("repos/o/r/branches/"):
+            return {"commit": {"sha": BASE_TIP}}
+        if args[1].startswith("repos/o/r/compare/"):
+            return {
+                "merge_base_commit": {"sha": BASE_TIP},
+                "behind_by": 0,
+                "ahead_by": 0,
+            }
+        return []  # REST list endpoints: one empty page
+
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    with pytest.raises(RuntimeError, match="endCursor"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+    graphql_made = [c for c in calls if c[:2] == ["api", "graphql"]]
+    assert len(graphql_made) <= 5

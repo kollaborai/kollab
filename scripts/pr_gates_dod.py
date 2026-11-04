@@ -444,19 +444,47 @@ def _gh(*args: str) -> Any:
 
 
 PAGE_SIZE = 100
+# Liveness bound: 50 full pages of 100 items (5000) is far above any real
+# PR's commits, files, or comments. A gate script must hang never and
+# silently truncate never: hitting the cap is a loud fail-closed error,
+# never a silent stop and never an unbounded loop.
+PAGINATION_MAX_PAGES = 50
 
 
 def _gh_paginate(endpoint: str) -> list[dict[str, Any]]:
-    """Collect every page of a REST list endpoint; a short page ends the loop."""
+    """Collect every page of a REST list endpoint; fail closed, hang never.
+
+    Normal termination is a short page. Two guards make the loop
+    liveness-safe: identical consecutive pages (a server ignoring the page
+    parameter) abort immediately, and the PAGINATION_MAX_PAGES bound stops
+    any other runaway — both raise instead of looping forever.
+    """
     items: list[dict[str, Any]] = []
     page = 1
     sep = "&" if "?" in endpoint else "?"
+    previous_fingerprint: tuple[Any, ...] | None = None
     while True:
+        if page > PAGINATION_MAX_PAGES:
+            raise RuntimeError(
+                f"{endpoint} exceeded {PAGINATION_MAX_PAGES} pages of "
+                f"{PAGE_SIZE} items; failing closed instead of paginating forever"
+            )
         batch = _gh("api", f"{endpoint}{sep}per_page={PAGE_SIZE}&page={page}")
         if not isinstance(batch, list):
             raise RuntimeError(
                 f"expected a JSON list from {endpoint} page {page}; failing closed"
             )
+        fingerprint = (
+            len(batch),
+            repr(batch[0]) if batch else None,
+            repr(batch[-1]) if batch else None,
+        )
+        if fingerprint == previous_fingerprint:
+            raise RuntimeError(
+                f"{endpoint} returned an identical page at page {page}; "
+                "the API is ignoring pagination — failing closed"
+            )
+        previous_fingerprint = fingerprint
         items.extend(batch)
         if len(batch) < PAGE_SIZE:
             return items
@@ -489,7 +517,15 @@ def collect_pr_data(repo: str, pr: int, *, root: str = ".") -> PRData:
     owner, name = repo.split("/", 1)
     thread_nodes: list[dict[str, Any]] = []
     cursor: str | None = None
+    seen_cursors: set[str] = set()
+    pages = 0
     while True:
+        pages += 1
+        if pages > PAGINATION_MAX_PAGES:
+            raise RuntimeError(
+                f"reviewThreads pagination exceeded {PAGINATION_MAX_PAGES} pages; "
+                "failing closed instead of paginating forever"
+            )
         graphql_args: list[str] = [
             "api",
             "graphql",
@@ -510,7 +546,22 @@ def collect_pr_data(repo: str, pr: int, *, root: str = ".") -> PRData:
         thread_nodes.extend(connection["nodes"])
         if not connection["pageInfo"]["hasNextPage"]:
             break
-        cursor = connection["pageInfo"]["endCursor"]
+        next_cursor = connection["pageInfo"]["endCursor"]
+        # Advancing requires a non-null, never-seen endCursor: a null or
+        # repeated cursor with hasNextPage=true means the same page would
+        # repeat forever — fail closed, never silently continue.
+        if not next_cursor:
+            raise RuntimeError(
+                "reviewThreads pagination returned hasNextPage=true with a "
+                "null endCursor; failing closed"
+            )
+        if next_cursor in seen_cursors:
+            raise RuntimeError(
+                "reviewThreads pagination returned a repeated endCursor "
+                f"({next_cursor}); failing closed"
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
     unresolved = sum(1 for node in thread_nodes if not node.get("isResolved"))
 
     commits = tuple(
