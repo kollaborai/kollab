@@ -8,7 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Usage ledger (off by default, `plugins.usage_ledger.enabled`) records token counts, cache counts, wall time and estimated cost for every LLM turn, per agent, lane, PR, model and day, in a local owner-only JSONL file. Missing provider usage reads as missing, and models without a known price read as unpriced, never zero. `/usage` and `/usage json` report rollups, and optional budget alerts fire once per window (#723).
 - Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
+
+### Changed
+- The `LLM_REQUEST_POST` event payload carries the `provider` and a `usage_source` (`provider`, `estimated` or `none`) so consumers can tell reported usage from its absence.
 
 ## [0.19.1] - 2026-11-03
 
