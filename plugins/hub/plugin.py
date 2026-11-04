@@ -778,6 +778,7 @@ class HubPlugin(BasePlugin):
                     "identity": "",
                     "roster": DEFAULT_ROSTER,
                     "auto_help": False,
+                    "dispatch_list_enabled": False,
                     "mailbox_poll_interval": 5,
                     "dreaming_enabled": True,
                     "dreaming_idle_threshold": 300,
@@ -1428,6 +1429,54 @@ class HubPlugin(BasePlugin):
         tool_executor.register_plugin_handler(
             "hub_dispatch_verify", self._handle_hub_dispatch_verify_tool
         )
+
+        # Read-only paging over this coordinator's unresolved dispatches (#656).
+        # Opt-in: without plugins.hub.dispatch_list_enabled the tags are not
+        # registered, so the model never sees a tool that does not exist.
+        if self._dispatch_list_enabled():
+            hub_dispatch_list_pat = tag_pattern(
+                "hub_dispatch_list",
+                valid={"page": r"\d+", "per_page": r"\d+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_list(m):
+                attrs = tag_attrs(m.group(1))
+                return {
+                    "page": attrs.get("page", ""),
+                    "per_page": attrs.get("per_page", ""),
+                }
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_list",
+                hub_dispatch_list_pat,
+                "hub_dispatch_list",
+                _extract_hub_dispatch_list,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_list", self._handle_hub_dispatch_list_tool
+            )
+
+            hub_dispatch_read_pat = tag_pattern(
+                "hub_dispatch_read",
+                required={"dispatch_id": "some"},
+                valid={"dispatch_id": r"[0-9A-Za-z._:@-]+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_read(m):
+                attrs = tag_attrs(m.group(1))
+                return {"dispatch_id": attrs.get("dispatch_id", "").strip()}
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_read",
+                hub_dispatch_read_pat,
+                "hub_dispatch_read",
+                _extract_hub_dispatch_read,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_read", self._handle_hub_dispatch_read_tool
+            )
 
         # --- hub_reply ---
         # Shorthand for replying in-thread. The agent doesn't need to track
@@ -3488,6 +3537,119 @@ class HubPlugin(BasePlugin):
             output=f"Dispatch {dispatch_id} marked verified by {verified_by}.",
         )
 
+
+    def _dispatch_list_enabled(self) -> bool:
+        """Whether the opt-in dispatch list/read tags are on (default off)."""
+        try:
+            return bool(
+                self.config and self.config.get("plugins.hub.dispatch_list_enabled", False)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _dispatch_int_arg(value, default: int, maximum: int) -> int:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+        return min(max(number, 1), maximum)
+
+    async def _handle_hub_dispatch_list_tool(self, tool_data: dict):
+        """List one page of this coordinator's unresolved dispatches (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error="Dispatch listing is unavailable without an active identity and TaskLedger.",
+            )
+        page = self._dispatch_int_arg(tool_data.get("page", 1), 1, 10_000)
+        per_page = self._dispatch_int_arg(tool_data.get("per_page", 10), 10, 50)
+        try:
+            items, total = await asyncio.to_thread(
+                self._task_ledger.get_dispatches_page,
+                verified_by,
+                page=page,
+                per_page=per_page,
+            )
+        except Exception as e:
+            logger.exception("failed to list hub dispatches")
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error=f"Could not read dispatches: {e}",
+            )
+        if total == 0:
+            output = "no unresolved dispatches"
+        elif not items:
+            pages = -(-total // per_page)
+            output = (
+                f"no dispatches on page {page} ({total} unresolved; "
+                f"pages 1-{pages})"
+            )
+        else:
+            pages = -(-total // per_page)
+            lines = [
+                f"unresolved dispatches ({total} unresolved; page {page} of {pages}, "
+                "newest first):"
+            ]
+            for item in items:
+                lines.append(
+                    f"  [{item.get('status', 'unknown')}] dispatch "
+                    f"{item.get('dispatch_id', item.get('message_id', ''))} -> "
+                    f"{item.get('assignee', '')} (task {item.get('task_id', '')})"
+                )
+            output = "\n".join(lines)
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_list", success=True, output=output,
+        )
+
+    async def _handle_hub_dispatch_read_tool(self, tool_data: dict):
+        """Return one full dispatch record this coordinator assigned (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        dispatch_id = str(tool_data.get("dispatch_id", "") or "").strip()
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by or not dispatch_id:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="Provide a dispatch_id; reading needs an active identity and TaskLedger.",
+            )
+        try:
+            record = await asyncio.to_thread(self._task_ledger.get_dispatch, dispatch_id)
+        except Exception as e:
+            logger.exception("failed to read hub dispatch %s", dispatch_id)
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error=f"Could not read dispatch: {e}",
+            )
+        if not record or record.get("assigned_by") != verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="No dispatch with that ID is assigned by you.",
+            )
+        fields = (
+            "dispatch_id", "status", "task_id", "assignee", "assigned_by",
+            "directive", "thread_id", "worktree", "commit", "reported_worktree",
+            "reported_commit", "report", "delivery_error", "verified_by",
+            "verification_note", "created_at", "updated_at",
+        )
+        lines = []
+        for name in fields:
+            value = record.get(name)
+            if value not in (None, ""):
+                lines.append(f"{name}: {value}")
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_read", success=True,
+            output="\n".join(lines),
+        )
 
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
@@ -6015,6 +6177,7 @@ class HubPlugin(BasePlugin):
                     crystal_store=self._crystal_store,
                     global_crystal_store=self._global_crystal_store,
                     task_ledger=self._task_ledger,
+                    dispatch_paging=self._dispatch_list_enabled(),
                 )
 
                 # Release stale lane claims from previous session
