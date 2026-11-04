@@ -605,16 +605,21 @@ class EngineSession:
 
     # === conversation ===
 
-    async def _apply_mcp_servers(self) -> None:
-        """Enable the session's requested MCP servers on the live daemon.
+    async def _apply_mcp_servers(
+        self, server_names: Optional[List[str]] = None
+    ) -> None:
+        """Enable the selected MCP servers on the live daemon.
 
-        Mirrors the /sessions/{id}/mcp/{name}/connect route: enable each
-        server in the daemon's settings, then one hot-reload reconnects the
-        whole set. Unknown server names are surfaced in a warning instead of
-        failing session creation -- a bad name should degrade the tool set,
-        not take the session down.
+        By default, session creation enables the full requested list. An
+        adopted-session attach passes only newly requested names so an
+        unrelated attach cannot re-enable a server that was explicitly
+        disconnected. One hot-reload reconnects the whole enabled set. Unknown
+        names are warned about instead of failing session creation.
         """
-        for server_name in self.mcp_server_names:
+        requested_servers = (
+            self.mcp_server_names if server_names is None else server_names
+        )
+        for server_name in requested_servers:
             try:
                 await self.state.enable_mcp_server(server_name)
             except ValueError as e:

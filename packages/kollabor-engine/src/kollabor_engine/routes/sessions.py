@@ -388,7 +388,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
 
                     attached_session.mcp_server_names = existing_mcp_servers + new_mcp_servers
                     try:
-                        await attached_session._apply_mcp_servers()
+                        await attached_session._apply_mcp_servers(new_mcp_servers)
                     except asyncio.CancelledError:
                         attached_session.mcp_server_names = existing_mcp_servers
                         await _restore_mcp_settings(attached_session, previous_mcp_settings)
@@ -1519,31 +1519,37 @@ async def connect_server(session_id: str, server_name: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    snapshot = await _mcp_snapshot(session)
-    server = _find_server(snapshot, server_name)
-    if server is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"MCP server '{server_name}' not found in configuration",
-        )
-    if server.connected:
-        raise HTTPException(
-            status_code=409, detail=f"Server '{server_name}' is already connected"
-        )
+    async with session._mcp_lock:
+        snapshot = await _mcp_snapshot(session)
+        server = _find_server(snapshot, server_name)
+        if server is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"MCP server '{server_name}' not found in configuration",
+            )
+        if server.connected:
+            raise HTTPException(
+                status_code=409, detail=f"Server '{server_name}' is already connected"
+            )
 
-    await session.state.enable_mcp_server(server_name)
-    await session.state.reload_mcp_servers()
-    updated = await _mcp_snapshot(session)
-    server = _find_server(updated, server_name)
+        await session.state.enable_mcp_server(server_name)
+        await session.state.reload_mcp_servers()
+        names = list(session.mcp_server_names or [])
+        if server_name not in names:
+            names.append(server_name)
+        session.mcp_server_names = names
 
-    return {
-        "ok": True,
-        "server_name": server_name,
-        "status": "connected" if server and server.connected else "enabled",
-        "tool_count": server.tool_count if server else 0,
-        "tools": server.tools if server else [],
-        "session_id": session_id,
-    }
+        updated = await _mcp_snapshot(session)
+        server = _find_server(updated, server_name)
+
+        return {
+            "ok": True,
+            "server_name": server_name,
+            "status": "connected" if server and server.connected else "enabled",
+            "tool_count": server.tool_count if server else 0,
+            "tools": server.tools if server else [],
+            "session_id": session_id,
+        }
 
 
 @router.post("/{session_id}/mcp/{server_name}/disconnect")
@@ -1555,23 +1561,27 @@ async def disconnect_server(session_id: str, server_name: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    snapshot = await _mcp_snapshot(session)
-    server = _find_server(snapshot, server_name)
-    if server is None:
-        raise HTTPException(
-            status_code=404, detail=f"No such MCP server '{server_name}'"
-        )
+    async with session._mcp_lock:
+        snapshot = await _mcp_snapshot(session)
+        server = _find_server(snapshot, server_name)
+        if server is None:
+            raise HTTPException(
+                status_code=404, detail=f"No such MCP server '{server_name}'"
+            )
 
-    tools_removed = server.tool_count
-    await session.state.disable_mcp_server(server_name)
+        tools_removed = server.tool_count
+        await session.state.disable_mcp_server(server_name)
+        session.mcp_server_names = [
+            name for name in session.mcp_server_names or [] if name != server_name
+        ]
 
-    return {
-        "ok": True,
-        "server_name": server_name,
-        "status": "disconnected",
-        "tools_removed": tools_removed,
-        "session_id": session_id,
-    }
+        return {
+            "ok": True,
+            "server_name": server_name,
+            "status": "disconnected",
+            "tools_removed": tools_removed,
+            "session_id": session_id,
+        }
 
 
 @router.get("/{session_id}/mcp/{server_name}/tools")

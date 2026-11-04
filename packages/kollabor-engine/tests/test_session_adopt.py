@@ -541,8 +541,10 @@ def test_mentiko_attach_resumes_live_daemon_without_second_system_prompt_root(
             pid=5151, alive=True, launcher=None, state=SimpleNamespace()
         )
 
-    async def fake_apply_mcp_servers(session):
-        attached_mcp_servers.extend(session.mcp_server_names)
+    async def fake_apply_mcp_servers(session, server_names=None):
+        attached_mcp_servers.extend(
+            session.mcp_server_names if server_names is None else server_names
+        )
 
     async def fake_test_mcp_server(_name):
         return {"found": True, "enabled": False}
@@ -607,7 +609,7 @@ def test_mentiko_attach_resumes_live_daemon_without_second_system_prompt_root(
     assert attached_mcp_servers == ["mentiko", "marclone-memory"]
     assert registry[session_id].user_token == "test-session-token"
 
-    async def fail_mcp_servers(_session):
+    async def fail_mcp_servers(_session, _server_names=None):
         raise RuntimeError("daemon temporarily unavailable")
 
     monkeypatch.setattr(EngineSession, "_apply_mcp_servers", fail_mcp_servers)
@@ -1031,3 +1033,213 @@ async def test_cancelled_mcp_attach_finishes_rollback_before_retry(monkeypatch, 
     finally:
         state.release_first_reload.set()
         state.release_rollback.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_attach", [False, True], ids=["success", "rollback"])
+async def test_attach_does_not_reenable_disconnected_mcp_server(
+    monkeypatch, tmp_path, registry, fail_attach
+):
+    """Adding another server must not undo an explicit MCP disconnect."""
+    import httpx
+
+    from kollabor.state.snapshots import McpServerInfo, McpSnapshot
+
+    class MCPState:
+        def __init__(self):
+            self.enabled = {"server-a": True, "server-b": False}
+            self.connected = {"server-a": True, "server-b": False}
+            self.reload_calls = 0
+
+        async def get_mcp_state(self):
+            servers = [
+                McpServerInfo(
+                    name=name,
+                    enabled=self.enabled[name],
+                    connected=self.connected[name],
+                    tool_count=0,
+                    tools=[],
+                )
+                for name in self.enabled
+            ]
+            return McpSnapshot(
+                total_servers=len(servers),
+                connected_servers=sum(server.connected for server in servers),
+                servers=servers,
+            )
+
+        async def test_mcp_server(self, name):
+            return {"found": True, "enabled": self.enabled[name]}
+
+        async def enable_mcp_server(self, name):
+            self.enabled[name] = True
+
+        async def disable_mcp_server(self, name):
+            self.enabled[name] = False
+            self.connected[name] = False
+
+        async def reload_mcp_servers(self):
+            self.reload_calls += 1
+            if fail_attach and self.reload_calls == 1:
+                raise RuntimeError("simulated attach reload failure")
+            self.connected = dict(self.enabled)
+            return {}
+
+    state = MCPState()
+    session = EngineSession(
+        session_id="mcp-disconnect-attach",
+        profile=None,
+        workspace=str(tmp_path),
+        mcp_server_names=["server-a"],
+    )
+    session.daemon = SimpleNamespace(
+        state=state,
+        identity="koordinator",
+        agent_name="default",
+        pid=5153,
+        alive=True,
+        launcher=None,
+    )
+    registry[session.session_id] = session
+    _mock_named_session(monkeypatch, session)
+    app = server.create_app()
+    headers = {"x-mentiko-session-token": "test-session-token"}
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            disconnected = await client.post(
+                f"/sessions/{session.session_id}/mcp/server-a/disconnect"
+            )
+            assert disconnected.status_code == 200, disconnected.text
+            assert state.enabled["server-a"] is False
+
+            response = await client.post(
+                "/sessions",
+                headers=headers,
+                json=_attach_payload(session.session_id, ["server-b"]),
+            )
+
+    assert response.status_code == (503 if fail_attach else 200), response.text
+    assert state.enabled["server-a"] is False
+    assert state.enabled["server-b"] is (not fail_attach)
+    assert session.mcp_server_names == ([] if fail_attach else ["server-b"])
+
+
+@pytest.mark.asyncio
+async def test_connect_waits_until_attach_rollback_finishes(
+    monkeypatch, tmp_path, registry
+):
+    """A successful connect cannot be undone by an overlapping attach rollback."""
+    import httpx
+
+    from kollabor.state.snapshots import McpServerInfo, McpSnapshot
+
+    class GatedMCPState:
+        def __init__(self):
+            self.enabled = {"server-b": False}
+            self.connected = {"server-b": False}
+            self.reload_calls = 0
+            self.attach_reload_started = asyncio.Event()
+            self.release_attach_reload = asyncio.Event()
+            self.connect_snapshot_started = asyncio.Event()
+
+        async def get_mcp_state(self):
+            self.connect_snapshot_started.set()
+            server_info = McpServerInfo(
+                name="server-b",
+                enabled=self.enabled["server-b"],
+                connected=self.connected["server-b"],
+                tool_count=0,
+                tools=[],
+            )
+            return McpSnapshot(
+                total_servers=1,
+                connected_servers=int(server_info.connected),
+                servers=[server_info],
+            )
+
+        async def test_mcp_server(self, name):
+            return {"found": True, "enabled": self.enabled[name]}
+
+        async def enable_mcp_server(self, name):
+            self.enabled[name] = True
+
+        async def disable_mcp_server(self, name):
+            self.enabled[name] = False
+            self.connected[name] = False
+
+        async def reload_mcp_servers(self):
+            self.reload_calls += 1
+            if self.reload_calls == 1:
+                self.attach_reload_started.set()
+                await self.release_attach_reload.wait()
+                raise RuntimeError("simulated attach reload failure")
+            self.connected = dict(self.enabled)
+            return {}
+
+    state = GatedMCPState()
+    session = EngineSession(
+        session_id="mcp-connect-rollback",
+        profile=None,
+        workspace=str(tmp_path),
+        mcp_server_names=[],
+    )
+    session.daemon = SimpleNamespace(
+        state=state,
+        identity="koordinator",
+        agent_name="default",
+        pid=5154,
+        alive=True,
+        launcher=None,
+    )
+    registry[session.session_id] = session
+    _mock_named_session(monkeypatch, session)
+    app = server.create_app()
+    headers = {"x-mentiko-session-token": "test-session-token"}
+    attach_task = None
+    connect_task = None
+
+    async def attach(client):
+        return await client.post(
+            "/sessions",
+            headers=headers,
+            json=_attach_payload(session.session_id, ["server-b"]),
+        )
+
+    try:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                attach_task = asyncio.create_task(attach(client))
+                await asyncio.wait_for(state.attach_reload_started.wait(), timeout=2)
+
+                connect_task = asyncio.create_task(
+                    sessions_route.connect_server(session.session_id, "server-b")
+                )
+                # Give the route one event-loop turn. With the shared lock it
+                # waits before reading or mutating persisted MCP state.
+                await asyncio.sleep(0)
+                connect_overlapped = state.connect_snapshot_started.is_set()
+
+                state.release_attach_reload.set()
+                attach_response = await asyncio.wait_for(attach_task, timeout=2)
+                connect_response = await asyncio.wait_for(connect_task, timeout=2)
+    finally:
+        state.release_attach_reload.set()
+        for task in (attach_task, connect_task):
+            if task is not None and not task.done():
+                task.cancel()
+        pending = [task for task in (attach_task, connect_task) if task is not None]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    assert not connect_overlapped
+    assert attach_response.status_code == 503, attach_response.text
+    assert connect_response["ok"] is True
+    assert state.enabled["server-b"] is True
+    assert state.connected["server-b"] is True
+    assert session.mcp_server_names == ["server-b"]
+    assert state.reload_calls == 3  # failed apply, rollback, then serialized connect
