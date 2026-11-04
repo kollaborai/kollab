@@ -20,4 +20,5 @@ jobs:
         env:
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.review.commit_id }}
-        run: echo "Approval on PR #$PR at $SHA; Auto-merge will re-evaluate."
+        run: |
+          echo "Approval on PR #$PR at $SHA; Auto-merge will re-evaluate."
