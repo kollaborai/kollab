@@ -348,6 +348,60 @@ def test_enrich_closed_paginates_reviews_and_check_runs():
 
 
 @pytest.mark.parametrize("target", ["reviews", "check-runs"])
+def test_enrich_closed_degrades_only_the_pr_with_pagination_error(target):
+    def runner(args):
+        path = args[1]
+        if "/reviews?" in path:
+            pr_number = path.split("/pulls/")[1].split("/")[0]
+            if target == "reviews" and pr_number == "5":
+                return json.dumps({"not": "a review list"})
+            return json.dumps(
+                [
+                    {
+                        "id": f"review-{pr_number}",
+                        "state": "CHANGES_REQUESTED",
+                        "submitted_at": _iso(NOW - timedelta(hours=2)),
+                    }
+                ]
+            )
+        if "/commits?" in path:
+            pr_number = path.split("/pulls/")[1].split("/")[0]
+            return json.dumps([{"sha": f"sha-{pr_number}", "commit": {}}])
+        if "/check-runs?" in path:
+            sha = path.split("/commits/")[1].split("/")[0]
+            if target == "check-runs" and sha == "sha-5":
+                return json.dumps({"check_runs": []})
+            return json.dumps(
+                {
+                    "total_count": 1,
+                    "check_runs": [
+                        {"id": sha, "status": "completed", "conclusion": "success"}
+                    ],
+                }
+            )
+        raise AssertionError(f"unexpected gh call: {path}")
+
+    errors = []
+    result = kpi._enrich_closed(
+        kpi.GhApi(runner),
+        "o/r",
+        [
+            _pr(5, created=NOW - timedelta(hours=3)),
+            _pr(6, created=NOW - timedelta(hours=3)),
+        ],
+        errors,
+    )
+
+    assert result["time_to_first_review_hours_median"] == pytest.approx(1.0)
+    assert result["review_rounds_per_pr"] == pytest.approx(1.0)
+    assert result["first_push_pass_rate"] == 1.0
+    assert result["first_push_checked"] == (2 if target == "reviews" else 1)
+    assert len(errors) == 1
+    assert errors[0].startswith("PR #5")
+    assert "failing closed" in errors[0]
+
+
+@pytest.mark.parametrize("target", ["reviews", "check-runs"])
 def test_enrich_closed_fails_closed_on_repeated_page(target):
     repeated_reviews = [
         {
@@ -371,16 +425,24 @@ def test_enrich_closed_fails_closed_on_repeated_page(target):
         if "/pulls/5/commits?" in path:
             return json.dumps([{"sha": "abc", "commit": {}}])
         if "/check-runs?" in path:
+            if target == "reviews":
+                return json.dumps({"total_count": 0, "check_runs": []})
             return json.dumps(
                 {"total_count": 2 * kpi.PER_PAGE, "check_runs": repeated_checks}
             )
         raise AssertionError(f"unexpected gh call: {path}")
 
-    with pytest.raises(RuntimeError, match="identical"):
-        kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], [])
+    errors = []
+    result = kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], errors)
 
     repeated_endpoint = "pulls/5/reviews" if target == "reviews" else "check-runs"
     assert sum(repeated_endpoint in path for path in runner_calls) == 2
+    assert any(repeated_endpoint in error and "identical" in error for error in errors)
+    if target == "reviews":
+        assert result["review_rounds_per_pr"] is None
+    else:
+        assert result["first_push_pass_rate"] is None
+        assert result["first_push_checked"] == 0
 
 
 @pytest.mark.parametrize("target", ["reviews", "check-runs"])
@@ -408,6 +470,8 @@ def test_enrich_closed_fails_closed_at_page_cap(target, monkeypatch):
         if "/pulls/5/commits?" in path:
             return json.dumps([{"sha": "abc", "commit": {}}])
         if "/check-runs?" in path:
+            if target == "reviews":
+                return json.dumps({"total_count": 0, "check_runs": []})
             return json.dumps(
                 {
                     "total_count": 10 * kpi.PER_PAGE,
@@ -423,11 +487,19 @@ def test_enrich_closed_fails_closed_at_page_cap(target, monkeypatch):
             )
         raise AssertionError(f"unexpected gh call: {path}")
 
-    with pytest.raises(RuntimeError, match="failing closed"):
-        kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], [])
+    errors = []
+    result = kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], errors)
 
     capped_endpoint = "pulls/5/reviews" if target == "reviews" else "check-runs"
     assert sum(capped_endpoint in path for path in runner_calls) == 2
+    assert any(
+        capped_endpoint in error and "failing closed" in error for error in errors
+    )
+    if target == "reviews":
+        assert result["review_rounds_per_pr"] is None
+    else:
+        assert result["first_push_pass_rate"] is None
+        assert result["first_push_checked"] == 0
 
 
 @pytest.mark.parametrize("target", ["reviews", "check-runs"])
@@ -439,11 +511,21 @@ def test_enrich_closed_fails_closed_on_malformed_page(target):
         if "/pulls/5/commits?" in path:
             return json.dumps([{"sha": "abc", "commit": {}}])
         if "/check-runs?" in path:
+            if target == "reviews":
+                return json.dumps({"total_count": 0, "check_runs": []})
             return json.dumps({"check_runs": []})
         raise AssertionError(f"unexpected gh call: {path}")
 
-    with pytest.raises(RuntimeError, match="failing closed"):
-        kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], [])
+    errors = []
+    result = kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], errors)
+
+    endpoint = "pulls/5/reviews" if target == "reviews" else "check-runs"
+    assert any(endpoint in error and "failing closed" in error for error in errors)
+    if target == "reviews":
+        assert result["review_rounds_per_pr"] is None
+    else:
+        assert result["first_push_pass_rate"] is None
+        assert result["first_push_checked"] == 0
 
 
 @pytest.mark.parametrize("target", ["reviews", "check-runs"])

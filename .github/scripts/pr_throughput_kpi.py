@@ -429,7 +429,7 @@ def _paginate_check_runs(api: GhApi, endpoint: str) -> list[dict]:
 def _enrich_closed(
     api: GhApi, repo: str, prs: list[dict], errors: list[str]
 ) -> dict[str, Any]:
-    """Review and first-push CI data for closed PRs. Failures become errors."""
+    """Enrich closed PRs; record detail errors and omit failed metric contributions."""
     ttfr: list[float] = []
     rounds: list[int] = []
     ci: list[str] = []
@@ -441,7 +441,7 @@ def _enrich_closed(
             if hours is not None:
                 ttfr.append(hours)
             rounds.append(review_rounds(reviews))
-        except GhError as exc:
+        except (GhError, RuntimeError) as exc:
             errors.append(f"PR #{number} reviews: {exc}")
         try:
             commits = (
@@ -456,7 +456,7 @@ def _enrich_closed(
                 verdict = first_push_ci(check_runs)
                 if verdict is not None:
                     ci.append(verdict)
-        except GhError as exc:
+        except (GhError, RuntimeError) as exc:
             errors.append(f"PR #{number} first-push CI: {exc}")
     passed = sum(1 for v in ci if v == "pass")
     return {
