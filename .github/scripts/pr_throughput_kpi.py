@@ -448,14 +448,17 @@ def _enrich_closed(
                 api.get(f"repos/{repo}/pulls/{number}/commits?per_page={PER_PAGE}")
                 or []
             )
-            if commits:
-                sha = commits[0]["sha"]
+            # CI runs on pushed heads, so the earliest commit with check runs is
+            # the head of the first push, even when that push held several commits.
+            for commit in commits:
                 check_runs = _paginate_check_runs(
-                    api, f"repos/{repo}/commits/{sha}/check-runs"
+                    api, f"repos/{repo}/commits/{commit['sha']}/check-runs"
                 )
-                verdict = first_push_ci(check_runs)
-                if verdict is not None:
-                    ci.append(verdict)
+                if check_runs:
+                    verdict = first_push_ci(check_runs)
+                    if verdict is not None:
+                        ci.append(verdict)
+                    break
         except (GhError, RuntimeError) as exc:
             errors.append(f"PR #{number} first-push CI: {exc}")
     passed = sum(1 for v in ci if v == "pass")
@@ -513,9 +516,19 @@ def collect(
             max_pages=config.max_pages,
             stop_before=stop_before,
         )
-        open_raw, _ = fetch_pulls(
+        open_raw, open_covered = fetch_pulls(
             api, config.repo, "open", max_pages=config.max_pages, stop_before=None
         )
+        if open_covered is not None:
+            errors.append(
+                f"open PR list stopped at max_pages={config.max_pages}: "
+                "open counts are incomplete"
+            )
+        if covered is not None:
+            errors.append(
+                f"closed PR list stopped at max_pages={config.max_pages}: "
+                "throughput by author and lane is incomplete"
+            )
     except GhError as exc:
         errors.append(str(exc))
         report["status"] = "unavailable"

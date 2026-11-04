@@ -57,8 +57,9 @@ list could not be read.
 - **Time to first review.** Earliest non-pending review minus PR creation, as
   a median over closed PRs. A review submitted before the PR existed is missing.
 - **Review rounds per PR.** Mean count of `CHANGES_REQUESTED` reviews.
-- **CI pass rate on first push.** Check runs on the PR's first commit: `pass`
-  when all completed runs succeeded, `fail` when any failed, missing otherwise.
+- **CI pass rate on first push.** Check runs on the earliest PR commit that has
+  any, which is the head of its first push: `pass` when all completed runs
+  succeeded, `fail` when any failed, missing otherwise.
 - **Throughput by author and lane.** Closed PRs in the longest window, grouped
   by PR author and by the first label matching a `lane_labels` prefix.
 
@@ -69,9 +70,14 @@ input failed to fetch, or when a window starts before the oldest PR the fetch
 covered (`max_pages` reached). A real zero, such as no change requests, is
 still zero.
 
+When `max_pages` cuts off the open or closed PR list, the report status is
+`partial` and an error names the list, because open counts and throughput by
+author and lane would otherwise look complete.
+
 ## Not in this report
 
 - Cost per merged PR (#723): no cost source in the GitHub API.
 - Hub data: not wired in.
-- Scheduling: no workflow runs this on a timer. Scheduling and hub job
-  registration need owner sign-off.
+- Scheduling: no workflow or hub job runs this on a timer.
+
+These stay open on #729.
