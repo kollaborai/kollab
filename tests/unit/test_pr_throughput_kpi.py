@@ -1,0 +1,391 @@
+"""Tests for the PR throughput KPI report (issue #729).
+
+All GitHub access goes through an injected fake runner. No test touches the
+network or the real `gh` binary; a runner that is not expected to be called
+fails the test if it is.
+"""
+
+import importlib.util
+import json
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = REPO_ROOT / ".github" / "scripts" / "pr_throughput_kpi.py"
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("pr_throughput_kpi", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves its module through sys.modules at class creation.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+kpi = _load()
+NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+
+
+def _iso(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pr(number, *, created=None, closed=None, merged=None, updated=None, **extra):
+    created = created or NOW - timedelta(days=1)
+    updated = updated or closed or created
+    pr = {
+        "number": number,
+        "state": "closed" if closed else "open",
+        "created_at": _iso(created),
+        "updated_at": _iso(updated),
+        "closed_at": _iso(closed) if closed else None,
+        "merged_at": _iso(merged) if merged else None,
+        "user": {"login": "agent-a"},
+        "labels": [],
+    }
+    pr.update(extra)
+    return pr
+
+
+class FakeRunner:
+    """Routes `gh api <path>` calls to canned JSON by path substring."""
+
+    def __init__(self, routes=None, fail=None):
+        self.routes = routes or {}
+        self.fail = fail or set()
+        self.calls = []
+
+    def __call__(self, args):
+        assert args[0] == "api", args
+        path = args[1]
+        self.calls.append(path)
+        for needle in self.fail:
+            if needle in path:
+                raise kpi.GhError(f"gh api {path} failed: boom")
+        for needle, payload in self.routes.items():
+            if needle in path:
+                return json.dumps(payload)
+        raise AssertionError(f"unexpected gh call: {path}")
+
+
+def _no_network():
+    def runner(args):
+        raise AssertionError(f"runner must not be called: {args}")
+
+    return runner
+
+
+# ---------------------------------------------------------------- config
+
+
+def test_config_defaults_are_off_with_target_three():
+    cfg = kpi.parse_config({})
+    assert cfg.enabled is False
+    assert cfg.target_per_hour == 3
+    assert cfg.windows == (1, 8, 24)
+    assert cfg.stale_days == 5
+
+
+def test_config_reads_kpi_section_and_rejects_bad_values():
+    cfg = kpi.parse_config(
+        {
+            "kpi": {
+                "enabled": True,
+                "repo": "o/r",
+                "target_per_hour": 2.5,
+                "windows": [2, 6],
+            }
+        }
+    )
+    assert cfg.enabled and cfg.repo == "o/r"
+    assert cfg.target_per_hour == 2.5
+    assert cfg.windows == (2, 6)
+    with pytest.raises(kpi.ConfigError):
+        kpi.parse_config({"kpi": {"enabled": True}})  # repo is required
+    with pytest.raises(kpi.ConfigError):
+        kpi.parse_config({"kpi": {"target_per_hour": 0}})
+    with pytest.raises(kpi.ConfigError):
+        kpi.parse_config({"kpi": {"windows": [0]}})
+
+
+# ------------------------------------------------------- rolling rate
+
+
+def test_rolling_rate_counts_closures_inside_each_window():
+    prs = [
+        _pr(1, closed=NOW - timedelta(minutes=10), merged=NOW - timedelta(minutes=10)),
+        _pr(2, closed=NOW - timedelta(minutes=40)),
+        _pr(3, closed=NOW - timedelta(hours=5), merged=NOW - timedelta(hours=5)),
+        _pr(4, closed=NOW - timedelta(hours=30)),
+    ]
+    one = kpi.window_stats(prs, NOW, 1, 3.0, covered_since=None)
+    eight = kpi.window_stats(prs, NOW, 8, 3.0, covered_since=None)
+    day = kpi.window_stats(prs, NOW, 24, 3.0, covered_since=None)
+    assert one["closed"] == 2 and one["rate_per_hour"] == 2.0
+    assert eight["closed"] == 3 and eight["rate_per_hour"] == pytest.approx(3 / 8)
+    assert day["closed"] == 3  # PR 4 closed 30h ago is outside 24h
+    assert one["merged"] == 1 and one["closed_unmerged"] == 1
+
+
+def test_window_boundary_is_open_at_start_and_closed_at_now():
+    at_start = _pr(1, closed=NOW - timedelta(hours=1))
+    at_now = _pr(2, closed=NOW)
+    stats = kpi.window_stats([at_start, at_now], NOW, 1, 3.0, covered_since=None)
+    assert stats["closed"] == 1
+
+
+def test_meets_or_below_target_is_explicit():
+    three = [_pr(i, closed=NOW - timedelta(minutes=i + 1)) for i in range(3)]
+    met = kpi.window_stats(three, NOW, 1, 3.0, covered_since=None)
+    assert met["status"] == "meets" and met["pct_of_target"] == pytest.approx(100.0)
+    low = kpi.window_stats(three[:2], NOW, 1, 3.0, covered_since=None)
+    assert low["status"] == "below"
+    assert low["pct_of_target"] == pytest.approx(200 / 3)
+
+
+def test_truncated_fetch_reports_missing_not_zero():
+    # Only PRs updated after `covered_since` were fetched. A 1h window
+    # starting after that point is fully covered; a 24h window is not.
+    covered = NOW - timedelta(hours=2)
+    prs = [_pr(1, closed=NOW - timedelta(minutes=5))]
+    fresh = kpi.window_stats(prs, NOW, 1, 3.0, covered_since=covered)
+    old = kpi.window_stats(prs, NOW, 24, 3.0, covered_since=covered)
+    assert fresh["closed"] == 1
+    assert old["closed"] is None and old["rate_per_hour"] is None
+    assert old["status"] == "missing"
+
+
+# ------------------------------------------------------ supporting metrics
+
+
+def test_open_summary_counts_age_stale_conflicts_and_unknowns():
+    open_prs = [
+        _pr(
+            10,
+            created=NOW - timedelta(days=6),
+            updated=NOW - timedelta(days=6),
+            mergeable_state="dirty",
+        ),
+        _pr(
+            11,
+            created=NOW - timedelta(days=2),
+            updated=NOW - timedelta(hours=1),
+            mergeable_state="behind",
+        ),
+        _pr(
+            12,
+            created=NOW - timedelta(days=1),
+            updated=NOW - timedelta(hours=2),
+            mergeable_state="unknown",
+        ),
+    ]
+    summary = kpi.open_stats(open_prs, NOW, stale_days=5)
+    assert summary["open"] == 3
+    assert summary["oldest_age_days"] == pytest.approx(6.0)
+    assert summary["stale"] == 1
+    assert summary["conflicted"] == 1
+    assert summary["behind"] == 1
+    assert summary["merge_state_unknown"] == 1
+
+
+def test_open_summary_marks_unknown_merge_state_missing_when_not_fetched():
+    open_prs = [_pr(20, created=NOW - timedelta(days=1))]  # no detail fetched
+    summary = kpi.open_stats(open_prs, NOW, stale_days=5)
+    assert summary["conflicted"] is None
+    assert summary["behind"] is None
+
+
+def test_time_to_first_review_ignores_pending_and_missing_is_none():
+    pr = _pr(30, created=NOW - timedelta(hours=10), closed=NOW - timedelta(hours=1))
+    reviews = [
+        {"state": "PENDING", "submitted_at": None},
+        {"state": "COMMENTED", "submitted_at": _iso(NOW - timedelta(hours=7))},
+        {"state": "APPROVED", "submitted_at": _iso(NOW - timedelta(hours=8))},
+    ]
+    assert kpi.time_to_first_review_hours(pr, reviews) == pytest.approx(2.0)
+    assert kpi.time_to_first_review_hours(pr, []) is None
+
+
+def test_review_before_pr_creation_is_missing_not_zero():
+    pr = _pr(31, created=NOW - timedelta(hours=1))
+    reviews = [{"state": "COMMENTED", "submitted_at": _iso(NOW - timedelta(hours=5))}]
+    assert kpi.time_to_first_review_hours(pr, reviews) is None
+
+
+def test_review_rounds_count_change_requests_and_zero_is_real():
+    reviews = [
+        {"state": "CHANGES_REQUESTED", "submitted_at": _iso(NOW)},
+        {"state": "COMMENTED", "submitted_at": _iso(NOW)},
+        {"state": "CHANGES_REQUESTED", "submitted_at": _iso(NOW)},
+    ]
+    assert kpi.review_rounds(reviews) == 2
+    assert kpi.review_rounds([]) == 0
+
+
+def test_first_push_ci_verdict_pass_fail_or_missing():
+    def run(conclusion, status="completed"):
+        return {"status": status, "conclusion": conclusion}
+
+    assert kpi.first_push_ci([run("success"), run("skipped")]) == "pass"
+    assert kpi.first_push_ci([run("success"), run("failure")]) == "fail"
+    assert kpi.first_push_ci([run("success"), run(None, "in_progress")]) is None
+    assert kpi.first_push_ci([]) is None
+
+
+def test_throughput_by_author_and_lane():
+    closed = [
+        _pr(1, closed=NOW - timedelta(minutes=5), labels=[{"name": "lane/relay"}]),
+        _pr(2, closed=NOW - timedelta(minutes=6), user={"login": "agent-b"}),
+        _pr(3, closed=NOW - timedelta(hours=20), labels=[{"name": "lane/relay"}]),
+    ]
+    by_author = kpi.throughput_by(closed, NOW, 24, kpi.author_key)
+    assert by_author == {"agent-a": 2, "agent-b": 1}
+    by_lane = kpi.throughput_by(closed, NOW, 1, kpi.lane_key(["lane/"]))
+    assert by_lane == {"lane/relay": 1, "unassigned": 1}
+
+
+# --------------------------------------------------------- GitHub access
+
+
+def test_fetch_pulls_stops_at_updated_boundary_without_extra_pages():
+    cutoff = NOW - timedelta(hours=24)
+    page1 = [
+        _pr(1, closed=NOW - timedelta(hours=1)),
+        _pr(2, closed=NOW - timedelta(hours=30), updated=NOW - timedelta(hours=30)),
+    ]
+    runner = FakeRunner(
+        {"state=closed&sort=updated&direction=desc&per_page=100&page=1": page1}
+    )
+    api = kpi.GhApi(runner)
+    prs, covered = kpi.fetch_pulls(
+        api, "o/r", "closed", max_pages=10, stop_before=cutoff
+    )
+    assert [p["number"] for p in prs] == [1, 2]
+    assert covered is None  # boundary reached: everything in range is covered
+    assert len(runner.calls) == 1
+
+
+def test_fetch_pulls_truncates_at_max_pages_and_reports_coverage():
+    def full_page(start_minute):
+        return [
+            _pr(
+                n, closed=NOW - timedelta(minutes=n), updated=NOW - timedelta(minutes=n)
+            )
+            for n in range(start_minute, start_minute + kpi.PER_PAGE)
+        ]
+
+    page1, page2 = full_page(1), full_page(101)
+    runner = FakeRunner({"&page=1": page1, "&page=2": page2})
+    api = kpi.GhApi(runner)
+    prs, covered = kpi.fetch_pulls(
+        api, "o/r", "closed", max_pages=2, stop_before=NOW - timedelta(hours=24)
+    )
+    assert len(prs) == 2 * kpi.PER_PAGE
+    assert len(runner.calls) == 2
+    assert covered == NOW - timedelta(minutes=200)  # oldest updated_at fetched
+
+
+def test_gh_failure_yields_unavailable_report_with_missing_metrics():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r"}})
+    runner = FakeRunner(fail={"/pulls?"})
+    report = kpi.collect(kpi.GhApi(runner), cfg, NOW)
+    assert report["status"] == "unavailable"
+    assert report["windows"][0]["rate_per_hour"] is None
+    assert report["open"]["open"] is None
+    assert any("boom" in e for e in report["errors"])
+    md = kpi.render_markdown(report)
+    assert "missing" in md and "0.00" not in md
+
+
+# ------------------------------------------------------ report and output
+
+
+def test_collect_builds_full_report_from_mocked_api():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r"}})
+    closed = [
+        _pr(
+            5,
+            created=NOW - timedelta(hours=3),
+            closed=NOW - timedelta(minutes=30),
+            merged=NOW - timedelta(minutes=30),
+        ),
+    ]
+    opened = [_pr(6, created=NOW - timedelta(days=6), updated=NOW - timedelta(days=6))]
+    runner = FakeRunner(
+        {
+            "state=closed": closed,
+            "state=open": opened,
+            "pulls/5/reviews": [
+                {
+                    "state": "CHANGES_REQUESTED",
+                    "submitted_at": _iso(NOW - timedelta(hours=2)),
+                }
+            ],
+            "pulls/5/commits": [{"sha": "abc", "commit": {}}],
+            "commits/abc/check-runs": {
+                "check_runs": [{"status": "completed", "conclusion": "success"}]
+            },
+            "pulls/6": {"mergeable_state": "dirty"},
+        }
+    )
+    report = kpi.collect(kpi.GhApi(runner), cfg, NOW)
+    assert report["status"] == "ok"
+    assert report["windows"][0]["closed"] == 1
+    assert report["windows"][0]["merged"] == 1
+    assert report["review"]["time_to_first_review_hours_median"] == pytest.approx(1.0)
+    assert report["review"]["review_rounds_per_pr"] == pytest.approx(1.0)
+    assert report["ci"]["first_push_pass_rate"] == pytest.approx(1.0)
+    assert report["open"]["stale"] == 1
+    assert report["open"]["conflicted"] == 1
+
+
+def test_disabled_config_makes_no_gh_calls(tmp_path, capsys):
+    cfg_path = tmp_path / "kpi.json"
+    cfg_path.write_text(json.dumps({"kpi": {"enabled": False}}))
+    rc = kpi.main(["--config", str(cfg_path)], runner=_no_network())
+    assert rc == 0
+    assert "disabled" in capsys.readouterr().out
+
+
+def test_main_writes_json_markdown_and_step_summary(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "kpi.json"
+    cfg_path.write_text(json.dumps({"kpi": {"enabled": True, "repo": "o/r"}}))
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    runner = FakeRunner({"state=closed": [], "state=open": []})
+    json_out = tmp_path / "kpi.json.out"
+    md_out = tmp_path / "dashboard.md"
+    rc = kpi.main(
+        [
+            "--config",
+            str(cfg_path),
+            "--json-out",
+            str(json_out),
+            "--markdown-out",
+            str(md_out),
+            "--now",
+            _iso(NOW),
+        ],
+        runner=runner,
+    )
+    assert rc == 0
+    report = json.loads(json_out.read_text())
+    assert report["status"] == "ok"
+    assert report["windows"][0]["closed"] == 0  # real zero, not missing
+    assert "PR throughput" in md_out.read_text()
+    assert "PR throughput" in summary.read_text()
+
+
+def test_render_markdown_states_target_and_all_windows():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r"}})
+    report = kpi.collect(
+        kpi.GhApi(FakeRunner({"state=closed": [], "state=open": []})), cfg, NOW
+    )
+    md = kpi.render_markdown(report)
+    assert "target 3.0/h" in md
+    for hours in (1, 8, 24):
+        assert f"| {hours}h |" in md
