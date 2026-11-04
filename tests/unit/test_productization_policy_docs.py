@@ -61,9 +61,22 @@ def test_policy_doc_has_checklist():
 
 def test_policy_doc_maps_every_batch_issue_to_a_surface():
     text = POLICY.read_text()
-    missing = [n for n in MAPPED_ISSUES if not re.search(rf"#{n}\b", text)]
-    assert not missing, f"issues without a surface mapping: {missing}"
-    for line in text.splitlines():
-        if re.search(r"\|\s*#7\d\d\s*\|", line):
+    section = _section(text, "Mapping: #711-#730")
+    assert (
+        section is not None
+    ), "docs/productization.md needs a '## Mapping: #711-#730' section"
+    rows = []
+    for line in section.splitlines():
+        match = re.match(r"^\|\s*#(\d+)\s*\|", line)
+        if match:
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            assert len(cells) >= 3 and cells[1], f"empty surface cell: {line}"
+            rows.append((int(match.group(1)), cells))
+    row_ids = {issue for issue, _ in rows}
+    expected = set(MAPPED_ISSUES)
+    assert len(rows) == len(row_ids), f"duplicate surface-map rows: {sorted(row_ids)}"
+    assert row_ids == expected, (
+        f"surface-map rows must be exactly #711-#730; missing: "
+        f"{sorted(expected - row_ids)}, extra: {sorted(row_ids - expected)}"
+    )
+    for issue, cells in rows:
+        assert len(cells) >= 3 and cells[2], f"#{issue} maps to no surface: {cells}"
