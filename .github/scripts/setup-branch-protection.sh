@@ -79,6 +79,14 @@ for owner in maarco kollaborai; do
 done
 
 # integration_id 15368 is GitHub Actions: no other app can satisfy a check.
+# review/independent is posted per head SHA by the independent reviewer's
+# GitHub App (#722); pinning its app id means no user token, lane agent or
+# Actions workflow can forge it.
+review_app_id="${KOLLAB_REVIEW_APP_ID:?Set KOLLAB_REVIEW_APP_ID to the reviewer GitHub App id}"
+if [[ ! "$review_app_id" =~ ^[0-9]+$ ]]; then
+  echo "KOLLAB_REVIEW_APP_ID must be a numeric GitHub App id."
+  exit 1
+fi
 # Include bypass_actors explicitly in the API payload, then read the ruleset
 # back after applying it. `--check` also verifies that the visible list is empty.
 expected_bypass='[]'
@@ -107,11 +115,13 @@ ruleset='{
       "required_status_checks": [
         {"context": "ci/tests", "integration_id": 15368},
         {"context": "ci/standards-check", "integration_id": 15368},
-        {"context": "ci/security-scan", "integration_id": 15368}
+        {"context": "ci/security-scan", "integration_id": 15368},
+        {"context": "review/independent", "integration_id": REVIEW_APP_ID}
       ]
     }}
   ]
 }'
+ruleset="${ruleset/REVIEW_APP_ID/$review_app_id}"
 
 id="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name == "main protection") | .id')"
 
@@ -168,7 +178,8 @@ if ! diff <(echo "$expected") <(echo "$applied"); then
   exit 1
 fi
 
-# Automatic arming is disabled. Leave the separate auto-merge setting untouched.
+# pr-gates (#722) merges directly with --match-head-commit; GitHub's native
+# auto-merge setting stays untouched (off).
 gh api "repos/$repo" --method PATCH -F allow_merge_commit=true >/dev/null
 
-echo "Ruleset applied. One code-owner approval and required checks: ci/tests, ci/standards-check, ci/security-scan"
+echo "Ruleset applied. One code-owner approval and required checks: ci/tests, ci/standards-check, ci/security-scan, review/independent (app $review_app_id)"
