@@ -267,6 +267,38 @@ def test_plugin_offer_failure_uses_the_admit_refusal():
     assert hub._offer_failed() == {"error": "connect offer could not be created"}
 
 
+@pytest.mark.asyncio
+async def test_issuer_refusal_reaches_the_offer_answer_and_the_log(caplog):
+    """A refusal raised before any relay request (#693) keeps its own reason:
+    it is not replaced by the admit line, and it reaches the log."""
+    import logging
+
+    from plugins.hub.enrollment_client import EnrollmentProtocolError
+    from plugins.hub.plugin import HubPlugin
+
+    refusal = "Enrollment needs port 443, but this network's origin uses port 8443."
+    hub = HubPlugin.__new__(HubPlugin)
+
+    async def refuse(domain):
+        raise EnrollmentProtocolError("unavailable", refusal=refusal)
+
+    async def start():
+        return None
+
+    async def no_owner(op, args):
+        return False, None
+
+    hub._identity = object()
+    hub._rpc_server = object()
+    hub._start_relay_agent = start
+    hub._connect_via_owner = no_owner
+    hub._relay_agent = SimpleNamespace(create_enrollment_offer=refuse, commands=None)
+    with caplog.at_level(logging.WARNING, logger="plugins.hub.plugin"):
+        out = await hub._run_connect_enrollment_offer("kollabor.ai")
+    assert out == {"error": "connect offer could not be created", "reason": refusal}
+    assert refusal in caplog.text
+
+
 
 @pytest.mark.asyncio
 async def test_f4_a_network_with_one_counting_machine_says_so_in_the_state_line():
