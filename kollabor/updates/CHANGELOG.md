@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
+
 ### Fixed
 - fix(errors): structured error type/code propagates provider -> engine -> UI/ACP; classification reads code only, no rendered-text matching (#720, closes #549 misclassification class).
 
