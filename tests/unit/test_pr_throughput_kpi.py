@@ -674,3 +674,21 @@ def test_render_markdown_states_target_and_all_windows():
     assert "target 3.0/h" in md
     for hours in (1, 8, 24):
         assert f"| {hours}h |" in md
+
+
+def test_markdown_shows_unknown_merge_states():
+    """GitHub computes mergeable_state lazily. A count of 0 next to unknowns is not a real 0."""
+    report = {
+        "target_per_hour": 3.0,
+        "windows": [],
+        "open": {
+            "open": 2,
+            "oldest_age_days": 1.0,
+            "stale_days_threshold": 5,
+            "stale": 0,
+            "conflicted": 0,
+            "behind": 0,
+            "merge_state_unknown": 2,
+        },
+    }
+    assert "Merge state unknown: 2" in kpi.render_markdown(report)
