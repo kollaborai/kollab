@@ -955,14 +955,19 @@ async def _assistant_protocol_stream(stream, completion: Dict[str, Any]):
 
     if completion.get("completed"):
         usage = completion.get("usage") or {}
-        yield _assistant_protocol_chunk(
-            "message-finish",
-            finishReason=_assistant_finish_reason(usage.get("stopReason")),
-            usage={
+        finish_fields: Dict[str, Any] = {
+            "finishReason": _assistant_finish_reason(usage.get("stopReason")),
+            "usage": {
                 "inputTokens": int(usage.get("inputTokens", 0) or 0),
                 "outputTokens": int(usage.get("outputTokens", 0) or 0),
             },
-        )
+        }
+        if completion.get("error"):
+            # Structured run-status error record: class/code/provider/
+            # retryable/cause from the daemon event, display message along
+            # for the UI (#720). Older clients ignore the extra key.
+            finish_fields["error"] = completion["error"]
+        yield _assistant_protocol_chunk("message-finish", **finish_fields)
 
 
 @router.post("/{session_id}/assistant")
@@ -1420,6 +1425,12 @@ async def assistant_transport(
                         key: event[key]
                         for key in ("error_class", "code", "provider", "retryable", "cause")
                         if event.get(key) is not None
+                    }
+                    # The run-status surface must carry the structured fields
+                    # even when no message state persists — controller.add_error
+                    # is display text only (#720).
+                    completion["error"] = {
+                        "message": turn_error, **turn_error_fields,
                     }
                     if not persist_message_state:
                         # No message state to carry it: fail the run instead.

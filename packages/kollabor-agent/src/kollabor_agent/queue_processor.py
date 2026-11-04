@@ -1150,7 +1150,9 @@ class QueueProcessor:
                     except Exception as e:
                         logger.error(f"Queue processing error: {e}")
                         error_msg = str(e)
-                        if "'str' object has no attribute 'get'" in error_msg:
+                        # Typed classification only: the parse boundary raises
+                        # APIFormatMismatchError, never a text guess (#720).
+                        if structured_error_info(e).error_class == "api_format_mismatch":
                             error_msg = _API_FORMAT_MISMATCH_MESSAGE
                         self.last_turn_error = error_msg
                         self.message_display_service.display_error_message(error_msg)
@@ -2530,7 +2532,10 @@ class QueueProcessor:
             logger.error(f"Error processing message: {type(e).__name__}: {redact_error_media(str(e))}")
             self.renderer.update_thinking(False)
             error_msg = redact_error_media(str(e)) or f"{type(e).__name__} (no details)"
-            if "'str' object has no attribute 'get'" in error_msg:
+            # Typed classification only: the parse boundary raises
+            # APIFormatMismatchError; rendered text is display data (#720).
+            info = structured_error_info(e)
+            if info.error_class == "api_format_mismatch":
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
 
             # Publish a typed failure separately from the generic UI error.
@@ -2538,7 +2543,6 @@ class QueueProcessor:
             # request is never resubmitted automatically. Classification reads
             # the structured type/code snapshot only — never the rendered
             # message, which carries provider names and hints (#549, #720).
-            info = structured_error_info(e)
             error_code = info.error_code
             context_window_exceeded = is_context_overflow_info(info)
             event_bus = getattr(self, "event_bus", None)

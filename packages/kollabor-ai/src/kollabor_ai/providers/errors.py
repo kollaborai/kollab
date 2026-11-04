@@ -461,6 +461,28 @@ class EmptyResponseError(ProviderError):
         super().__init__(message, provider, error_code, original_error, safe_message)
 
 
+class APIFormatMismatchError(ProviderError):
+    """Provider payload is not the expected object shape.
+
+    Raised at a parse boundary when an endpoint returns a bare string or
+    another non-object payload where the protocol requires an object
+    (#720): the queue previously detected this by matching the rendered
+    AttributeError text. The typed error carries
+    ``error_code="api_format_mismatch"`` so classification reads the type,
+    never the message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        provider: str,
+        original_error: Optional[Exception] = None,
+    ):
+        super().__init__(
+            message, provider, "api_format_mismatch", original_error,
+        )
+
+
 def parse_retry_after(
     value: Any,
     *,
@@ -622,6 +644,11 @@ def structured_error_info(exc: BaseException) -> StructuredErrorInfo:
     if isinstance(exc, EmptyResponseError):
         return StructuredErrorInfo(
             "empty_response", error_code, provider, retryable=True, cause=cause,
+        )
+    if isinstance(exc, APIFormatMismatchError):
+        return StructuredErrorInfo(
+            "api_format_mismatch", error_code or "api_format_mismatch", provider,
+            retryable=False, cause=cause,
         )
     if isinstance(exc, APITimeoutError):
         return StructuredErrorInfo(

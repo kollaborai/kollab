@@ -48,10 +48,14 @@ class ACPError(RuntimeError):
         *,
         code: int | None = None,
         error_class: str | None = None,
+        cause: str | None = None,
     ):
         super().__init__(message)
         self.code = code
         self.error_class = error_class
+        # Safe cause floor: the original exception's TYPE NAME only, never
+        # its message (#720 — the same floor as StructuredErrorInfo.cause).
+        self.cause = cause
 
 
 def _on_windows() -> bool:
@@ -889,6 +893,7 @@ class ACPRunner:
             f"{self.profile.name}: {message[:2000]}",
             code=exc.code,
             error_class=error_class,
+            cause=type(exc).__name__,
         )
 
     async def start(self, binding: ACPBinding | None = None) -> str:
@@ -1024,7 +1029,8 @@ class ACPRunner:
             self._queue.put_nowait(admission)
         except asyncio.QueueFull as exc:
             raise ACPError(
-                "ACP prompt queue is full", error_class="queue_full"
+                "ACP prompt queue is full", error_class="queue_full",
+                cause=type(exc).__name__,
             ) from exc
         self._next_turn_id = turn_id
         return admission
@@ -1181,7 +1187,7 @@ class ACPRunner:
                 )
             else:
                 line = f"{self.profile.name}: harness request failed ({type(exc).__name__})"
-            raise ACPError(line) from exc
+            raise ACPError(line, cause=type(exc).__name__) from exc
         finally:
             if self.update_callback is not None:
                 self.update_callback({"kind": "turn_finished", "request_id": admission.request_id,

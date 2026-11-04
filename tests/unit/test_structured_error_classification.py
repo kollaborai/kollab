@@ -580,3 +580,154 @@ def test_publish_turn_error_forwards_cause_to_event(monkeypatch):
 
     event = captured[0]
     assert event["cause"] == "RuntimeError"
+
+
+# === round 2, finding A: the run-status surface carries the structured error ===
+# With no message state to persist, the route's only run-level error surface
+# was controller.add_error(display text). The wire's message-finish chunk is
+# the run-status record: it must carry the structured fields too (#720).
+
+
+@pytest.mark.asyncio
+async def test_run_finish_chunk_carries_structured_error():
+    from kollabor_engine.routes.messages import _assistant_protocol_stream
+
+    async def empty_stream():
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    completion = {
+        "completed": True,
+        "usage": {
+            "inputTokens": 1, "outputTokens": 2, "stopReason": "error",
+        },
+        "error": {
+            "message": "openai: bad key",
+            "error_class": "authentication",
+            "code": "authentication_error",
+            "provider": "openai",
+            "retryable": False,
+            "cause": "AuthenticationError",
+        },
+    }
+    chunks = []
+    async for chunk in _assistant_protocol_stream(empty_stream(), completion):
+        chunks.append(chunk)
+    finish = [c for c in chunks if getattr(c, "type", "") == "message-finish"][-1]
+    assert getattr(finish, "finishReason", None) == "error"
+    error = getattr(finish, "error", None)
+    assert error is not None, "message-finish must carry the structured error"
+    assert error["error_class"] == "authentication"
+    assert error["cause"] == "AuthenticationError"
+    assert error["code"] == "authentication_error"
+    assert error["provider"] == "openai"
+    assert error["retryable"] is False
+
+
+# === round 2, finding B: the ACP error type carries the safe cause ===
+# Same floor rule as everywhere else: the original exception's TYPE NAME,
+# never its message. It must survive into ACPError and the published
+# error event / end frame (bismuth's probe: code/class present, cause
+# dropped on the floor).
+
+
+def test_acp_error_stores_safe_cause():
+    from kollabor.llm.acp_bridge import ACPError
+
+    exc = ACPError(
+        "harness request failed", code=-32000,
+        error_class="authentication", cause="RequestError",
+    )
+    assert exc.cause == "RequestError"
+
+
+def test_request_error_forwards_safe_cause():
+    import acp as acp_sdk
+    from types import SimpleNamespace
+    from kollabor.llm.acp_bridge import ACPRunner
+
+    fake_self = SimpleNamespace(
+        profile=SimpleNamespace(name="codex", LOGIN_GUIDANCE={}),
+        _select_answer=lambda updates: "",
+    )
+    acp_error = ACPRunner._request_error(
+        fake_self, acp_sdk.RequestError(code=-32000, message="invalid api key"),
+    )
+    assert acp_error.error_class == "authentication"
+    assert acp_error.cause == "RequestError"
+    assert "invalid api key" not in (acp_error.cause or "")
+
+
+# === round 2, finding C: API format mismatch is a typed classification ===
+# The custom provider's parse boundaries raise a typed error when the
+# endpoint returns a non-object payload (bare string body, or an SSE data
+# line that is not an object). The queue no longer matches the rendered
+# AttributeError text to select the mismatch message — it reads the
+# structured class.
+
+
+def test_structured_error_info_classifies_api_format_mismatch():
+    from kollabor_ai.providers.errors import APIFormatMismatchError
+
+    exc = APIFormatMismatchError("not an object", "custom")
+    info = structured_error_info(exc)
+    assert info.error_class == "api_format_mismatch"
+    assert info.error_code == "api_format_mismatch"
+    assert info.retryable is False
+    assert info.provider == "custom"
+
+
+def test_custom_provider_rejects_non_object_json_body():
+    from unittest.mock import patch
+    from kollabor_ai.providers.custom_provider import CustomProvider
+    from kollabor_ai.providers.errors import APIFormatMismatchError
+
+    class _Resp:
+        status = 200
+        headers = {}
+
+        async def json(self):
+            return "just a string body"
+
+        async def text(self):
+            return '"just a string body"'
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Session:
+        def post(self, *args, **kwargs):
+            return _Resp()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    def _client_session(*args, **kwargs):
+        return _Session()
+
+    provider = CustomProvider.__new__(CustomProvider)
+    provider.base_url = "http://localhost:1"
+    provider._provider_name = "custom"
+    provider.provider_type = "custom"
+    provider.model = "test-model"
+    provider.resolve_media = False
+    provider.config = MagicMock(api_key=None, model="test-model", timeout=5)
+    with patch("kollabor_ai.providers.custom_provider.aiohttp.ClientSession", _client_session):
+        with pytest.raises(APIFormatMismatchError):
+            import asyncio
+            asyncio.run(provider._make_request(messages=[], tools=None, stream=False))
+
+
+def test_custom_provider_rejects_non_object_sse_data_line():
+    from kollabor_ai.providers.custom_provider import _coerce_sse_object
+    from kollabor_ai.providers.errors import APIFormatMismatchError
+
+    with pytest.raises(APIFormatMismatchError):
+        _coerce_sse_object("bare string payload", "custom")
+    assert _coerce_sse_object({"choices": []}, "custom") == {"choices": []}

@@ -17,6 +17,7 @@ from ..message_content import serialize_openai_chat_content
 from .base import LLMProvider
 from .errors import (
     APIConnectionError,
+    APIFormatMismatchError,
     APITimeoutError,
     EmptyResponseError,
     map_http_status_error,
@@ -42,6 +43,21 @@ from .transformers import (
 from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_sse_object(data: Any, provider_name: str) -> Dict[str, Any]:
+    """Require an SSE payload object; type the mismatch at the boundary.
+
+    Gateways occasionally emit a bare string (or array) as an SSE ``data:``
+    line. Parsing it as a chunk would raise ``AttributeError`` deep in the
+    loop, which the queue used to detect by matching that rendered text.
+    The typed error carries the classification instead (#720).
+    """
+    if not isinstance(data, dict):
+        raise APIFormatMismatchError(
+            "Custom API SSE data line is not a JSON object", provider_name,
+        )
+    return data
 
 
 class CustomConfig(ProviderConfig):
@@ -194,7 +210,17 @@ class CustomProvider(LLMProvider):
                             response.headers,
                         ) from safe_goal_error_cause(error)
 
-                    return dict(await response.json())
+                    raw = await response.json()
+                    if not isinstance(raw, dict):
+                        # A bare string (or array) body is an endpoint that
+                        # does not speak the OpenAI object protocol — typed
+                        # at this boundary so classification never reads the
+                        # rendered AttributeError text (#720).
+                        raise APIFormatMismatchError(
+                            "Custom API returned a non-object JSON body",
+                            self.provider_name,
+                        )
+                    return dict(raw)
         except asyncio.TimeoutError as e:
             raise APITimeoutError(
                 str(e),
@@ -383,6 +409,7 @@ class CustomProvider(LLMProvider):
                             data = json.loads(data_str)
                         except json.JSONDecodeError:
                             continue
+                        data = _coerce_sse_object(data, self.provider_name)
 
                         # Parse chunk. "choices" can be present but EMPTY on a
                         # trailing usage-only chunk (we request stream_options
