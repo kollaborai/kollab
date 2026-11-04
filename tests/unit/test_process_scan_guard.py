@@ -194,15 +194,16 @@ def test_process_table_detector_recurses_into_powershell_command_payloads():
         "[System.Diagnostics.Process]::GetProcesses()",
         "Invoke-Expression 'Get-CimInstance Win32_Process'",
         r"CimCmdlets\Get-CimInstance Win32_Process",
+        "$cmd='Get-CimInstance'; & $cmd -ClassName Win32_Process",
     ):
         encoded_cim = base64.b64encode(
             process_provider_script.encode("utf-16-le")
         ).decode("ascii")
-        assert is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", encoded_cim])
+        assert is_process_table_enumeration_command(["pwsh.exe", "-NoProfile", "-EncodedCommand", encoded_cim])
 
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    assert is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", encoded])
-    assert is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", "not-base64"])
+    assert is_process_table_enumeration_command(["pwsh.exe", "-NoProfile", "-EncodedCommand", encoded])
+    assert is_process_table_enumeration_command(["pwsh.exe", "-NoProfile", "-EncodedCommand", "not-base64"])
 
 
 @pytest.mark.parametrize(
@@ -222,7 +223,7 @@ def test_powershell_alternate_process_scans_fail_closed(script):
         command_string = f'{executable} -NoProfile -Command "{script}"'
         assert is_process_table_enumeration_command(command_string), command_string
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        encoded_command = [executable, "-EncodedCommand", encoded]
+        encoded_command = [executable, "-NoProfile", "-EncodedCommand", encoded]
         assert is_process_table_enumeration_command(encoded_command), encoded_command
 
 
@@ -252,9 +253,18 @@ def test_wmic_fails_closed_except_allowlisted_computer_system(command, expected)
     assert is_process_table_enumeration_command(command) is expected
 
 
-def test_encoded_benign_powershell_get_date_stays_allowed():
+@pytest.mark.parametrize("executable", ["powershell.exe", "pwsh.exe"])
+def test_powershell_get_date_requires_no_profile(executable):
     encoded = base64.b64encode("Get-Date".encode("utf-16-le")).decode("ascii")
-    assert not is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", encoded])
+
+    assert is_process_table_enumeration_command([executable, "-Command", "Get-Date"])
+    assert is_process_table_enumeration_command([executable, "-EncodedCommand", encoded])
+    assert not is_process_table_enumeration_command(
+        [executable, "-NoProfile", "-Command", "Get-Date"]
+    )
+    assert not is_process_table_enumeration_command(
+        [executable, "-NoProfile", "-EncodedCommand", encoded]
+    )
 
 
 
@@ -267,6 +277,7 @@ def test_encoded_benign_powershell_get_date_stays_allowed():
         "[System.Diagnostics.Process]::GetProcessesByName('python')",
         "$command = 'Get-Process'; & $command",
         "Write-Output harmless",
+        "$cmd='Get-CimInstance'; & $cmd -ClassName Win32_Process",
     ],
 )
 def test_unallowlisted_powershell_payloads_fail_closed(script):
@@ -276,7 +287,7 @@ def test_unallowlisted_powershell_payloads_fail_closed(script):
         command_string = f'{executable} -NoProfile -Command "{script}"'
         assert is_process_table_enumeration_command(command_string), command_string
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        encoded_command = [executable, "-EncodedCommand", encoded]
+        encoded_command = [executable, "-NoProfile", "-EncodedCommand", encoded]
         assert is_process_table_enumeration_command(encoded_command), encoded_command
 
 
@@ -291,6 +302,25 @@ def test_unallowlisted_powershell_payloads_fail_closed(script):
 )
 def test_uninspected_powershell_invocation_modes_fail_closed(command):
     assert is_process_table_enumeration_command(command), command
+
+
+def test_unrecognized_powershell_host_family_fails_closed():
+    script = "Get-CimInstance -ClassName Win32_Process"
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    for executable in (
+        "pwsh-preview",
+        "pwsh-preview.exe",
+        "powershell-preview.exe",
+        "powershell_ise.exe",
+        "powershell7.exe",
+        r"C:\Program Files\PowerShell\7\pwsh-preview.exe",
+    ):
+        assert is_process_table_enumeration_command(
+            [executable, "-NoProfile", "-Command", script]
+        )
+        assert is_process_table_enumeration_command(
+            [executable, "-NoProfile", "-EncodedCommand", encoded]
+        )
 
 
 def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch):
@@ -340,8 +370,11 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
         r"& 'C:\Windows\System32\TASKLIST.EXE' /FO CSV".encode("utf-16-le")
     ).decode("ascii")
     with pytest.raises(RuntimeError, match="blocked for unmarked test"):
-        fake_subprocess.Popen(["pwsh.exe", "-EncodedCommand", encoded])
+        fake_subprocess.Popen(["pwsh.exe", "-NoProfile", "-EncodedCommand", encoded])
 
+    encoded_get_date = base64.b64encode("Get-Date".encode("utf-16-le")).decode("ascii")
+    preview_scan = "Get-CimInstance -ClassName Win32_Process"
+    encoded_preview_scan = base64.b64encode(preview_scan.encode("utf-16-le")).decode("ascii")
     for command in (
         ["powershell.exe", "-NoProfile", "-Command", "Get-CimInstance Win32_Process"],
         ["powershell.exe", "-NoProfile", "-Command", "Get-CimInstance -ClassName Win32_Process"],
@@ -356,6 +389,11 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
         ["wmic.exe", "unknownclass", "get", "Name"],
         ["powershell.exe", "-NoProfile", "-Command", "Invoke-Expression 'Get-CimInstance Win32_Process'"],
         ["powershell.exe", "-NoProfile", "-Command", r"CimCmdlets\Get-CimInstance Win32_Process"],
+        ["pwsh.exe", "-Command", "Get-Date"],
+        ["pwsh.exe", "-EncodedCommand", encoded_get_date],
+        ["pwsh-preview.exe", "-NoProfile", "-Command", preview_scan],
+        ["pwsh-preview.exe", "-NoProfile", "-EncodedCommand", encoded_preview_scan],
+        ["pwsh.exe", "-NoProfile", "-Command", "$cmd='Get-CimInstance'; & $cmd -ClassName Win32_Process"],
     ):
         with pytest.raises(RuntimeError, match="blocked for unmarked test"):
             fake_subprocess.Popen(command)
@@ -366,12 +404,13 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
         "[System.Diagnostics.Process]::GetProcesses()",
         "Invoke-Expression 'Get-CimInstance Win32_Process'",
         r"CimCmdlets\Get-CimInstance Win32_Process",
+        "$cmd='Get-CimInstance'; & $cmd -ClassName Win32_Process",
     ):
         encoded_cim = base64.b64encode(
             process_provider_script.encode("utf-16-le")
         ).decode("ascii")
         with pytest.raises(RuntimeError, match="blocked for unmarked test"):
-            fake_subprocess.Popen(["pwsh.exe", "-EncodedCommand", encoded_cim])
+            fake_subprocess.Popen(["pwsh.exe", "-NoProfile", "-EncodedCommand", encoded_cim])
 
     assert calls == []
     safe_wmic_commands = [
@@ -381,11 +420,15 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
     for command in safe_wmic_commands:
         assert fake_subprocess.Popen(command) == "launched"
 
-    encoded_get_date = base64.b64encode("Get-Date".encode("utf-16-le")).decode("ascii")
-    encoded_get_date_command = ["pwsh.exe", "-EncodedCommand", encoded_get_date]
-    assert fake_subprocess.Popen(encoded_get_date_command) == "launched"
-    expected_calls = [((command,), {}) for command in safe_wmic_commands]
-    expected_calls.append(((encoded_get_date_command,), {}))
+    safe_powershell_commands = [
+        ["pwsh.exe", "-NoProfile", "-Command", "Get-Date"],
+        ["pwsh.exe", "-NoProfile", "-EncodedCommand", encoded_get_date],
+    ]
+    for command in safe_powershell_commands:
+        assert fake_subprocess.Popen(command) == "launched"
+    expected_calls = [
+        ((command,), {}) for command in safe_wmic_commands + safe_powershell_commands
+    ]
     assert calls == expected_calls
 
 

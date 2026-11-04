@@ -247,7 +247,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quoting, and checks nested `cmd /c` and `cmd /k` payloads. PowerShell scripts
   fail closed unless their exact payload is allowlisted as benign, including
   encoded commands; WMIC allows only explicit benign targets and WQL classes.
-  This blocks opaque scripts and process-table enumeration paths (#570).
+  PowerShell allowlisting requires `-NoProfile`; unhandled PowerShell-family
+  executable variants are opaque. This blocks process-table enumeration paths
+  (#570).
 - Web UI: a message sent while a native agent is busy streams its own reply.
   Its stream used to end on the completion of the turn already running, and
   the reply never streamed. The engine now sends a request id with every chat

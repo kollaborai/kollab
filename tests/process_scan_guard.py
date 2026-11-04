@@ -374,12 +374,20 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                 )
                 if command_option and is_process_table_enumeration_command(shell_args[shell_index + 1]):
                     return True
+        if name.startswith(("powershell", "pwsh")) and name not in {
+            "powershell",
+            "pwsh",
+        }:
+            return True
         if name in {"powershell", "pwsh"}:
             shell_args = tokens[index + 1 :]
             inspected_payload = False
+            no_profile = False
             for shell_index, option in enumerate(shell_args):
                 option_name = option.casefold()
                 if option_name in {"-c", "-command", "-commandwithargs", "-cwa"}:
+                    if not no_profile:
+                        return True
                     nested_command = " ".join(shell_args[shell_index + 1 :])
                     if (
                         not nested_command.strip()
@@ -390,7 +398,7 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     inspected_payload = True
                     break
                 if option_name in {"-e", "-ec", "-enc", "-encodedcommand"}:
-                    if shell_index + 2 != len(shell_args):
+                    if not no_profile or shell_index + 2 != len(shell_args):
                         return True
                     nested_command = _decode_powershell_encoded_command(shell_args[shell_index + 1])
                     if (
@@ -401,7 +409,10 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                         return True
                     inspected_payload = True
                     break
-                if option_name in {"-noprofile", "-nologo", "-noninteractive"}:
+                if option_name == "-noprofile":
+                    no_profile = True
+                    continue
+                if option_name in {"-nologo", "-noninteractive"}:
                     continue
                 # Unknown switches, script files, and positional forms are opaque.
                 return True
