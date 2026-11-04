@@ -75,6 +75,7 @@ def publish_turn_error(
         code=info.error_code,
         provider=info.provider,
         retryable=info.retryable,
+        cause=info.cause,
     )
 
 

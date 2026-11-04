@@ -1418,7 +1418,7 @@ async def assistant_transport(
                     # (#549, #720).
                     turn_error_fields = {
                         key: event[key]
-                        for key in ("error_class", "code", "provider", "retryable")
+                        for key in ("error_class", "code", "provider", "retryable", "cause")
                         if event.get(key) is not None
                     }
                     if not persist_message_state:

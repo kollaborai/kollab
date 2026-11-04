@@ -551,3 +551,32 @@ async def test_retry_wrapper_still_retries_typed_timeout_once():
     result = await QueueProcessor._call_llm_retry_once_on_timeout(harness)
     assert result == "recovered"
     assert harness.calls == 2
+
+
+def test_publish_turn_error_forwards_cause_to_event(monkeypatch):
+    """Issue #720 mandates the original cause end to end: info carries the
+    safe type name, the semantic event must carry it too (bismuth's probe:
+    info.to_dict() had cause, the event omitted it)."""
+    from kollabor_agent import queue_processor as qp
+
+    captured: list[dict] = []
+
+    def fake_publish(source, event_type, **fields):
+        captured.append({"type": event_type, **fields})
+
+    monkeypatch.setattr(qp, "publish_semantic", fake_publish)
+
+    exc = AuthenticationError(
+        "bad key",
+        "openai",
+        error_code="authentication_error",
+        original_error=RuntimeError("sdk cause"),
+    )
+    info = structured_error_info(exc)
+    assert info.cause == "RuntimeError"  # safe type name only
+    assert info.to_dict()["cause"] == "RuntimeError"  # never message text
+
+    qp.publish_turn_error(MagicMock(), f"openai: {exc}", info)
+
+    event = captured[0]
+    assert event["cause"] == "RuntimeError"

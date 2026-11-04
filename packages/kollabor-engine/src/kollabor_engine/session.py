@@ -1106,7 +1106,7 @@ class EngineSession:
                     # consumers read code/class, never message text (#549, #720).
                     turn_error_fields = {
                         key: event[key]
-                        for key in ("error_class", "code", "provider", "retryable")
+                        for key in ("error_class", "code", "provider", "retryable", "cause")
                         if event.get(key) is not None
                     }
 
