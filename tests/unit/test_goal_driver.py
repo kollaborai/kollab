@@ -152,11 +152,13 @@ class DriverTests(unittest.TestCase):
         driver, coord = self._make_driver(turn_script=script, chain=True)
         asyncio.run(driver.start(goal_id))
 
-        self.assertGreaterEqual(coord.continues, 2)
-        # one fresh claim per goal turn, ticket always the newest claim --
-        # never the queue's stale batch ticket
-        self.assertEqual(coord._turn_serial, coord.continues)
-        self.assertEqual(coord._continue_serial, coord._turn_serial)
+        # Deterministic script: turn 1 chains two scripted rounds, turn 2
+        # (auto_turn_limit=2) runs once -> exactly 3 goal-turn continuations.
+        self.assertEqual(coord.continues, 3)
+        # One fresh claim per goal turn, ticket always the newest claim --
+        # never the queue's stale batch ticket. Exact counts, no looser bound.
+        self.assertEqual(coord._turn_serial, 3)
+        self.assertEqual(coord._continue_serial, 3)
 
     def test_steering_is_internal_context_not_user_message(self):
         goal_id = self._create(auto_turn_limit=1)
