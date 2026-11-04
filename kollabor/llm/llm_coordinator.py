@@ -2344,7 +2344,9 @@ class LLMService:
             if images and error_class == "images_unsupported":
                 return {"status": "rejected", "reason": "This harness can't take images."}
             return _acp_unavailable_result(acp)
-        except Exception:
+        except Exception as exc:
+            if "full" in str(exc).lower():
+                return {"status": "rejected", "reason": "acp_queue_full"}
             return {"status": "rejected", "reason": "acp_admission_failed"}
         if voice:
             acp.voice_turns[admission.request_id] = voice

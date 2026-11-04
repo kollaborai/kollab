@@ -621,8 +621,12 @@ def structured_error_info(exc: BaseException) -> StructuredErrorInfo:
     retry_after = getattr(exc, "retry_after", None)
     status = getattr(exc, "status_code", None)
     transport_by_code = error_code in _RETRYABLE_TRANSPORT_CODES
+    server_by_code = isinstance(error_code, str) and error_code.startswith(
+        "server_error"
+    )
     rate_by_status = status == 429
     server_by_status = isinstance(status, int) and 500 <= status < 600
+    transient_by_status = status in (408, 409)
 
     if isinstance(exc, AuthenticationError):
         return StructuredErrorInfo(
@@ -681,10 +685,15 @@ def structured_error_info(exc: BaseException) -> StructuredErrorInfo:
                 "rate_limit", error_code or "rate_limit_error", provider,
                 retryable=True, retry_after=retry_after, cause=cause,
             )
-        if server_by_status or transport_by_code:
-            error_class = "server" if server_by_status else "transport"
+        if server_by_status or server_by_code or transport_by_code:
+            error_class = "server" if (server_by_status or server_by_code) else "transport"
             return StructuredErrorInfo(
                 error_class, error_code, provider,
+                retryable=True, retry_after=retry_after, cause=cause,
+            )
+        if transient_by_status:
+            return StructuredErrorInfo(
+                "transient_http", error_code, provider,
                 retryable=True, retry_after=retry_after, cause=cause,
             )
         return StructuredErrorInfo(
@@ -701,10 +710,15 @@ def structured_error_info(exc: BaseException) -> StructuredErrorInfo:
             "rate_limit", error_code, provider,
             retryable=True, retry_after=retry_after, cause=cause,
         )
-    if server_by_status or transport_by_code:
-        error_class = "server" if server_by_status else "transport"
+    if server_by_status or server_by_code or transport_by_code:
+        error_class = "server" if (server_by_status or server_by_code) else "transport"
         return StructuredErrorInfo(
             error_class, error_code, provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    if transient_by_status:
+        return StructuredErrorInfo(
+            "transient_http", error_code, provider,
             retryable=True, retry_after=retry_after, cause=cause,
         )
     text = str(exc)

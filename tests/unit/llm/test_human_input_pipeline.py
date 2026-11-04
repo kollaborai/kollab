@@ -516,6 +516,59 @@ async def test_acp_admission_rejects_full_queue_before_hooks():
     assert result == {"status": "rejected", "reason": "acp_queue_full"}
 
 
+@pytest.mark.asyncio
+async def test_broad_admission_exception_with_full_text_keeps_queue_full():
+    """Any admission exception whose text contains 'full' stays acp_queue_full.
+
+    Main's broad admission handler maps queue-full text to acp_queue_full
+    regardless of exception class; only the typed-first check narrows to
+    RuntimeError/ValueError. A non-RuntimeError admission failure carrying
+    the canonical queue-full text must not degrade to acp_admission_failed.
+    """
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+
+    class WeirdAdmissionError(Exception):
+        pass
+
+    class ACP:
+        active = True
+
+        async def steer(self, *args, **kwargs):
+            return False
+
+        def admit(self, *args, **kwargs):
+            raise WeirdAdmissionError("ACP prompt queue is full")
+
+    bus.register_service("acp_orchestrator", ACP())
+    result = await service._handle_user_input(
+        {"message": "hello"}, SimpleNamespace(source="state_rpc")
+    )
+    assert result == {"status": "rejected", "reason": "acp_queue_full"}
+
+    class PlainAdmissionError(Exception):
+        pass
+
+    class ACPOther:
+        active = True
+
+        async def steer(self, *args, **kwargs):
+            return False
+
+        def admit(self, *args, **kwargs):
+            raise PlainAdmissionError("registry exploded")
+
+    bus2 = EventBus()
+    service2 = object.__new__(LLMService)
+    service2.event_bus = bus2
+    bus2.register_service("acp_orchestrator", ACPOther())
+    result2 = await service2._handle_user_input(
+        {"message": "hello"}, SimpleNamespace(source="state_rpc")
+    )
+    assert result2 == {"status": "rejected", "reason": "acp_admission_failed"}
+
+
 
 @pytest.mark.asyncio
 async def test_public_submit_settles_acp_queue_full_rejection():

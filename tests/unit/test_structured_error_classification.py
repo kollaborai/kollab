@@ -172,6 +172,36 @@ def test_untyped_exception_with_typed_status_attribute_still_classifies():
     assert info.retryable is True
 
 
+def test_provider_error_server_code_prefix_is_retryable():
+    """Base retries error_code server_error* on ProviderError; classify it so.
+
+    Base retry loop (api_communication_service) treats a provider error whose
+    error_code startswith "server_error" as a server failure and retries it.
+    The structured classifier must agree or structured retries under-retry
+    relative to base behavior (bismuth probe, fix cycle 2).
+    """
+    exc = ProviderError("upstream unavailable", "acme", error_code="server_error")
+    info = structured_error_info(exc)
+    assert info.error_class == "server"
+    assert info.retryable is True
+
+
+@pytest.mark.parametrize("status", [408, 409])
+def test_typed_transient_status_is_retryable(status):
+    """Base retries typed status 408/409 as transient HTTP; classifier agrees."""
+    exc = ProviderError("slow upstream", "acme", error_code="weird_code")
+    exc.status_code = status
+    info = structured_error_info(exc)
+    assert info.error_class == "transient_http"
+    assert info.retryable is True
+
+    untyped = RuntimeError("opaque")
+    untyped.status_code = status  # typed attribute on an untyped class
+    plain = structured_error_info(untyped)
+    assert plain.error_class == "transient_http"
+    assert plain.retryable is True
+
+
 # === provider mappers: every provider path lands in the typed hierarchy ===
 
 
