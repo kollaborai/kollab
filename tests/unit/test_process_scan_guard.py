@@ -175,6 +175,26 @@ def test_process_table_detector_recurses_into_powershell_command_payloads():
         assert not is_process_table_enumeration_command(
             [executable, "-NoProfile", "-Command", "Get-Date"]
         )
+        for process_provider_command in (
+            "Get-CimInstance Win32_Process",
+            "Get-WmiObject Win32_Process",
+            "gcim Win32_Process",
+            "gwmi Win32_Process",
+            'Get-CimInstance -Query "SELECT * FROM Win32_Process"',
+            'Get-WmiObject -Query "SELECT * FROM Win32_Process"',
+        ):
+            assert is_process_table_enumeration_command(
+                [executable, "-NoProfile", "-Command", process_provider_command]
+            )
+
+    for process_provider_script in (
+        "Get-CimInstance Win32_Process",
+        "Get-WmiObject Win32_Process",
+    ):
+        encoded_cim = base64.b64encode(
+            process_provider_script.encode("utf-16-le")
+        ).decode("ascii")
+        assert is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", encoded_cim])
 
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     assert is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", encoded])
@@ -230,6 +250,23 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
     ).decode("ascii")
     with pytest.raises(RuntimeError, match="blocked for unmarked test"):
         fake_subprocess.Popen(["pwsh.exe", "-EncodedCommand", encoded])
+
+    for command in (
+        ["powershell.exe", "-NoProfile", "-Command", "Get-CimInstance Win32_Process"],
+        ["powershell.exe", "-NoProfile", "-Command", "Get-WmiObject Win32_Process"],
+    ):
+        with pytest.raises(RuntimeError, match="blocked for unmarked test"):
+            fake_subprocess.Popen(command)
+
+    for process_provider_script in (
+        "Get-CimInstance Win32_Process",
+        "Get-WmiObject Win32_Process",
+    ):
+        encoded_cim = base64.b64encode(
+            process_provider_script.encode("utf-16-le")
+        ).decode("ascii")
+        with pytest.raises(RuntimeError, match="blocked for unmarked test"):
+            fake_subprocess.Popen(["pwsh.exe", "-EncodedCommand", encoded_cim])
 
     assert calls == []
 

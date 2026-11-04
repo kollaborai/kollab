@@ -245,8 +245,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or interruption (#570).
 - The process-scan guard preserves Windows path separators, rejects malformed
   command quoting, and inspects nested `cmd /c`, `cmd /k`, and PowerShell
-  command payloads (including encoded commands) to block `tasklist` and
-  `Get-Process` listings (#570).
+  command payloads (including encoded commands). It blocks `tasklist`,
+  `Get-Process`, and CIM/WMI commands to keep process listings fail-closed
+  (#570).
 - Web UI: a message sent while a native agent is busy streams its own reply.
   Its stream used to end on the completion of the turn already running, and
   the reply never streamed. The engine now sends a request id with every chat

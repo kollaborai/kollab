@@ -357,6 +357,8 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     if is_process_table_enumeration_command(nested_command):
                         return True
                     break
+        # CIM/WMI accept arbitrary class and WQL query forms. Block these
+        # cmdlets wholesale instead of guessing whether a query lists processes.
         if name in {
             "pgrep",
             "pidof",
@@ -366,6 +368,10 @@ def is_process_table_enumeration_command(command: Any) -> bool:
             "tasklist",
             "get-process",
             "gps",
+            "get-ciminstance",
+            "gcim",
+            "get-wmiobject",
+            "gwmi",
         }:
             return True
         if name == "lsof":
