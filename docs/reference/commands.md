@@ -63,7 +63,7 @@ manage agents from CLI (no TUI needed):
   kollab --hub capture ruby 50           read a transcript of the last 50 events
   kollab --hub capture ruby 50 --raw     read the previous terminal rendering
   kollab --hub stop ruby                 send shutdown signal
-  kollab --hub stop all                  stop all agents (operator; refuses from agent shells)
+  kollab --hub stop all                  stop all agents (operator; refuses from Hub agent process trees)
   kollab --hub broadcast "stand down"    message all agents
 
   a remote target (agent@device) is delivered through one online local

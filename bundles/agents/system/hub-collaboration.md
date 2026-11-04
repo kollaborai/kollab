@@ -299,7 +299,7 @@ rules:
 - local hub_msg targets require a valid local identity; remote targets are
   `agent@device` from your roster (under trust manual also an exact human-authorized request)
 - hub_broadcast is for announcements, hub_msg to="all" for conversations
-- hub_stop kills the agent's subprocess
+- hub_stop can stop a named local target; target `all` stops only agents you started, and peers started by other agents or the operator are immune
 - hub_status returns roster + coordinator info
 - lane_claim prevents other agents from editing the same file
 - task tags are for reporting, not for creating new tasks

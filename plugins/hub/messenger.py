@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -1669,7 +1670,32 @@ class AgentSocketServer:
                     writer.write(resp.encode())
                     await writer.drain()
 
+                elif action == "shutdown_generation_check":
+                    if all(
+                        key in msg_data
+                        for key in (
+                            "expected_agent_id",
+                            "expected_pid",
+                            "expected_started_at",
+                        )
+                    ) and self._shutdown_target_matches(msg_data):
+                        identity = self._identity_info
+                        response = {
+                            "type": "generation_ok",
+                            "agent_id": self.agent_id,
+                            "pid": identity.pid,
+                            "started_at": identity.started_at,
+                        }
+                    else:
+                        response = {"type": "stale_target"}
+                    writer.write((json.dumps(response) + "\n").encode())
+                    await writer.drain()
+
                 elif action == "shutdown":
+                    if not self._shutdown_target_matches(msg_data):
+                        writer.write(b'{"type":"stale_target"}\n')
+                        await writer.drain()
+                        continue
                     reason = msg_data.get("reason", "")
                     logger.info(f"Shutdown requested: {reason or 'no reason given'}")
                     ack = json.dumps({"type": "ack"}) + "\n"
@@ -1891,6 +1917,58 @@ class AgentSocketServer:
     def set_identity(self, identity_dict: Dict) -> None:
         """Set the identity dict used for get_status responses."""
         self._identity = identity_dict
+
+    def _shutdown_target_matches(self, message: Dict[str, Any]) -> bool:
+        """Reject a stale stop-all request before it reaches a replacement.
+
+        Operator single-agent requests omit generation fields and keep their
+        existing behavior. Caller-owned stop-all supplies all three fields;
+        this socket instance must still be the exact selected Hub process.
+        """
+        keys = ("expected_agent_id", "expected_pid", "expected_started_at")
+        supplied = tuple(key in message for key in keys)
+        if not any(supplied):
+            return True
+        if not all(supplied):
+            return False
+
+        expected_agent_id = message.get("expected_agent_id")
+        expected_pid = message.get("expected_pid")
+        expected_started_at = message.get("expected_started_at")
+        identity = self._identity_info
+        if (
+            not isinstance(expected_agent_id, str)
+            or not expected_agent_id
+            or type(expected_pid) is not int
+            or expected_pid <= 0
+            or type(expected_started_at) not in (int, float)
+            or identity is None
+        ):
+            return False
+
+        actual_agent_id = getattr(identity, "agent_id", None)
+        actual_pid = getattr(identity, "pid", None)
+        actual_started_at = getattr(identity, "started_at", None)
+        if (
+            not isinstance(actual_agent_id, str)
+            or not actual_agent_id
+            or type(actual_pid) is not int
+            or actual_pid <= 0
+            or type(actual_started_at) not in (int, float)
+        ):
+            return False
+        try:
+            expected_start = float(expected_started_at)
+            actual_start = float(actual_started_at)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(expected_start) or not math.isfinite(actual_start):
+            return False
+        return (
+            expected_agent_id == self.agent_id == actual_agent_id
+            and expected_pid == actual_pid
+            and expected_start == actual_start
+        )
 
     def set_dns_auth(
         self,
@@ -3124,14 +3202,67 @@ class AgentMessenger:
         *,
         auth: Optional[Dict[str, Any]] = None,
         ssl_ctx: Any = None,
+        expected_agent_id: Optional[str] = None,
+        expected_pid: Optional[int] = None,
+        expected_started_at: Optional[float] = None,
     ) -> bool:
         """Signal an agent to shut down gracefully (unix or remote). Returns True if acked."""
         writer = None
         try:
+            target = (expected_agent_id, expected_pid, expected_started_at)
+            if any(value is not None for value in target) and (
+                not isinstance(expected_agent_id, str)
+                or not expected_agent_id
+                or type(expected_pid) is not int
+                or expected_pid <= 0
+                or type(expected_started_at) not in (int, float)
+            ):
+                return False
+            if any(value is not None for value in target):
+                try:
+                    if not math.isfinite(float(expected_started_at)):
+                        return False
+                except (TypeError, ValueError, OverflowError):
+                    return False
             reader, writer = await AgentMessenger._open(
                 socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
-            req = json.dumps({"action": "shutdown", "reason": reason}) + "\n"
+            generation = {}
+            if expected_agent_id is not None:
+                generation = {
+                    "expected_agent_id": expected_agent_id,
+                    "expected_pid": expected_pid,
+                    "expected_started_at": expected_started_at,
+                }
+                check = {
+                    "action": "shutdown_generation_check",
+                    **generation,
+                }
+                writer.write((json.dumps(check) + "\n").encode())
+                await writer.drain()
+                check_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+                if not check_line:
+                    return False
+                check_response = json.loads(check_line.decode().strip())
+                if (
+                    not isinstance(check_response, dict)
+                    or check_response.get("type") != "generation_ok"
+                    or check_response.get("agent_id") != expected_agent_id
+                    or check_response.get("pid") != expected_pid
+                    or type(check_response.get("pid")) is not int
+                    or type(check_response.get("started_at")) not in (int, float)
+                ):
+                    return False
+                try:
+                    if float(check_response["started_at"]) != float(
+                        expected_started_at
+                    ):
+                        return False
+                except (TypeError, ValueError, OverflowError):
+                    return False
+            request = {"action": "shutdown", "reason": reason}
+            request.update(generation)
+            req = json.dumps(request) + "\n"
             writer.write(req.encode())
             await writer.drain()
 

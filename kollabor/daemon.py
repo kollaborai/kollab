@@ -32,8 +32,9 @@ LAUNCH_ARGS_ENV = "KOLLAB_LAUNCH_ARGS"
 # reports `service` from that.
 SERVICE_ENV = "KOLLAB_SERVICE"
 SERVICE_PID_ENV = "KOLLAB_SERVICE_PID"
-# Set by exec_detached_child: this process was forked, detached and exec'd
-# already, so cli_main's --detached branch must not fork again.
+# Set when the process is already detached before cli_main, either by
+# exec_detached_child or by a supervisor that owns its Popen handle. The CLI
+# must not fork again or the supervisor would retain only the exiting parent.
 DETACHED_CHILD_ENV = "KOLLAB_DETACHED_CHILD"
 
 
