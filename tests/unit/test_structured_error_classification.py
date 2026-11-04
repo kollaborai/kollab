@@ -493,3 +493,61 @@ async def test_typed_provider_error_survives_the_retry_boundary(tmp_path):
 
     with pytest.raises(AuthenticationError):
         await service.call_llm([{"role": "user", "content": "hi"}])
+
+
+# === timeout retry wrapper: typed-only classification (#720) ===
+# The wrapper retries the identical provider request once on a timeout.
+# That retry duplicates side effects, so it must fire on typed timeouts
+# only: an untyped exception whose rendered text says "timed out" is a
+# sentence, not a signal (#720).
+
+
+def test_timeout_classification_reads_type_not_text():
+    from kollabor_agent.queue_processor import (
+        _is_timeout_exception as is_timeout,
+    )
+
+    # The probe: untyped exception whose message mimics a timeout.
+    assert is_timeout(RuntimeError("request timed out")) is False
+    assert is_timeout(RuntimeError("provider gave up: request timeout hit")) is False
+    # Typed timeouts classify by class name / structured class.
+    assert is_timeout(APITimeoutError("gave up", "openai")) is True
+    assert is_timeout(TimeoutError("wall clock")) is True
+
+
+@pytest.mark.asyncio
+async def test_retry_wrapper_does_not_retry_untyped_timeout_wording():
+    """Bismuth's probe: RuntimeError('request timed out') must surface, not retry."""
+    from kollabor_agent.queue_processor import QueueProcessor
+
+    class _Harness:
+        def __init__(self):
+            self._goal_scoped_call_llm = AsyncMock(
+                side_effect=RuntimeError("request timed out")
+            )
+
+    harness = _Harness()
+    with pytest.raises(RuntimeError):
+        await QueueProcessor._call_llm_retry_once_on_timeout(harness)
+    assert harness._goal_scoped_call_llm.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_wrapper_still_retries_typed_timeout_once():
+    """Typed timeouts keep the one identical retry (#452 contract)."""
+    from kollabor_agent.queue_processor import QueueProcessor
+
+    class _Harness:
+        def __init__(self):
+            self.calls = 0
+
+        async def _goal_scoped_call_llm(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise APITimeoutError("first attempt hit the wall", "openai")
+            return "recovered"
+
+    harness = _Harness()
+    result = await QueueProcessor._call_llm_retry_once_on_timeout(harness)
+    assert result == "recovered"
+    assert harness.calls == 2

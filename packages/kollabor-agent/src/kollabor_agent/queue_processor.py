@@ -436,19 +436,18 @@ _TIMEOUT_EXCEPTION_NAMES = frozenset(
         "ConnectionTimeoutError",
     }
 )
-_TIMEOUT_MESSAGE_MARKERS = ("timed out", "request timeout")
-
-
 def _is_timeout_exception(exc: BaseException) -> bool:
-    """Best-effort timeout classification across provider SDKs.
+    """Timeout classification across provider SDKs, by type only.
 
-    The SDKs raise unrelated timeout hierarchies, so match on the type
-    name and on common message markers instead of importing them all.
+    The SDKs raise unrelated timeout hierarchies, so match on the class
+    name and the structured boundary classification instead of importing
+    them all. Rendered message text is display data (#549, #720): an
+    untyped exception whose text says "timed out" is not a timeout, and
+    retrying on that guess duplicates side effects.
     """
     if type(exc).__name__ in _TIMEOUT_EXCEPTION_NAMES:
         return True
-    text = str(exc).lower()
-    return any(marker in text for marker in _TIMEOUT_MESSAGE_MARKERS)
+    return structured_error_info(exc).error_class == "timeout"
 
 
 
