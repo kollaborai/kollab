@@ -9,6 +9,7 @@ must not treat it as an isolation boundary.
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shlex
@@ -186,6 +187,9 @@ def _command_tokens(command: Any) -> list[str] | None:
     if isinstance(command, str):
         try:
             if _WINDOWS_PATH_MARKER.search(command):
+                # Non-POSIX shlex accepts unmatched quotes; validate first while
+                # retaining Windows backslashes in the tokens used for matching.
+                shlex.split(command)
                 tokens = shlex.split(command, posix=False)
                 return [
                     token[1:-1]
@@ -201,6 +205,15 @@ def _command_tokens(command: Any) -> list[str] | None:
         return [_token_text(part) for part in command]
     # Only known argument shapes can be classified. Unknown forms fail closed.
     return None
+
+
+def _decode_powershell_encoded_command(encoded: str) -> str | None:
+    """Decode PowerShell's UTF-16LE base64 command or report an unknown form."""
+    try:
+        command = base64.b64decode(encoded, validate=True).decode("utf-16-le")
+    except ValueError:
+        return None
+    return command.lstrip("\ufeff")
 
 
 def _token_text(part: Any) -> str:
@@ -318,6 +331,24 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                 )
                 if command_option and is_process_table_enumeration_command(shell_args[shell_index + 1]):
                     return True
+        if name in {"powershell", "pwsh"}:
+            shell_args = tokens[index + 1 :]
+            for shell_index, option in enumerate(shell_args):
+                option_name = option.casefold()
+                if option_name in {"-c", "-command", "-commandwithargs", "-cwa"}:
+                    nested_command = " ".join(shell_args[shell_index + 1 :])
+                    if nested_command.strip() == "-":
+                        return True
+                    if is_process_table_enumeration_command(nested_command):
+                        return True
+                    break
+                if option_name in {"-e", "-ec", "-enc", "-encodedcommand"}:
+                    if shell_index + 1 >= len(shell_args):
+                        return True
+                    nested_command = _decode_powershell_encoded_command(shell_args[shell_index + 1])
+                    if nested_command is None or is_process_table_enumeration_command(nested_command):
+                        return True
+                    break
         if name == "cmd":
             command_args = tokens[index + 1 :]
             for shell_index, option in enumerate(command_args[:-1]):
@@ -326,7 +357,16 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     if is_process_table_enumeration_command(nested_command):
                         return True
                     break
-        if name in {"pgrep", "pidof", "top", "htop", "pstree", "tasklist"}:
+        if name in {
+            "pgrep",
+            "pidof",
+            "top",
+            "htop",
+            "pstree",
+            "tasklist",
+            "get-process",
+            "gps",
+        }:
             return True
         if name == "lsof":
             if not _lsof_has_only_positive_pid_selectors(tokens[index + 1 :]):

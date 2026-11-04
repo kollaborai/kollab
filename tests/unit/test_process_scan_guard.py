@@ -1,6 +1,7 @@
 """Unit tests for the fail-closed host-process scan policy."""
 
 import ast
+import base64
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -129,6 +130,7 @@ def test_process_table_detector_blocks_global_ps_but_allows_pid_targeting():
     [
         "ps -A 'unterminated",
         r'cmd /c "C:\Windows\System32\TASKLIST.EXE',
+        r'cmd /c C:\Windows\System32\TASKLIST.EXE"',
         'sh -c "ps -A',
         ["/bin/sh", "-c", "ps -A 'unterminated"],
         object(),
@@ -161,6 +163,25 @@ def test_process_table_detector_blocks_windows_tasklist_executable_spellings(com
     assert is_process_table_enumeration_command(command)
 
 
+def test_process_table_detector_recurses_into_powershell_command_payloads():
+    script = r"& 'C:\Windows\System32\TASKLIST.EXE' /FO CSV"
+    for executable in ("powershell.exe", "pwsh.exe"):
+        command = f'{executable} -NoProfile -Command "{script}"'
+        assert is_process_table_enumeration_command(command)
+        assert is_process_table_enumeration_command([executable, "-NoProfile", "-Command", script])
+        assert is_process_table_enumeration_command(
+            [executable, "-NoProfile", "-Command", "Get-Process"]
+        )
+        assert not is_process_table_enumeration_command(
+            [executable, "-NoProfile", "-Command", "Get-Date"]
+        )
+
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    assert is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", encoded])
+    assert is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", "not-base64"])
+
+
+
 def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch):
     calls = []
 
@@ -187,6 +208,9 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
         r"cmd /c C:\Windows\System32\TASKLIST.EXE",
         r'cmd /c "C:\Program Files\Windows NT\Accessories\TASKLIST.EXE" /FO CSV',
         r'cmd /c "C:\Windows\System32\TASKLIST.EXE /FO CSV"',
+        r'cmd /c C:\Windows\System32\TASKLIST.EXE"',
+        r'''powershell.exe -NoProfile -Command "& 'C:\Windows\System32\TASKLIST.EXE' /FO CSV"''',
+        r'''pwsh.exe -NoProfile -Command "& 'C:\Windows\System32\TASKLIST.EXE' /FO CSV"''',
     )
     for command in (
         ["tasklist.exe"],
@@ -200,6 +224,12 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
         for operation in (fake_os.system, fake_os.popen):
             with pytest.raises(RuntimeError, match="blocked for unmarked test"):
                 operation(command)
+
+    encoded = base64.b64encode(
+        r"& 'C:\Windows\System32\TASKLIST.EXE' /FO CSV".encode("utf-16-le")
+    ).decode("ascii")
+    with pytest.raises(RuntimeError, match="blocked for unmarked test"):
+        fake_subprocess.Popen(["pwsh.exe", "-EncodedCommand", encoded])
 
     assert calls == []
 
