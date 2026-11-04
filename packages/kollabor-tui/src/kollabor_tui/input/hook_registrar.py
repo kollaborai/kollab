@@ -88,7 +88,7 @@ class HookRegistrar:
         for hook in self._registered_hooks:
             try:
                 if self.event_bus:
-                    await self.event_bus.unregister_hook(hook.plugin_name, hook.name)
+                    await self.event_bus.unregister_hook(hook)
             except Exception as e:
                 logger.error(f"Failed to unregister hook {hook.name}: {e}")
 
