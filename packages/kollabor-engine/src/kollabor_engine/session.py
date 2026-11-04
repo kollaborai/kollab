@@ -221,6 +221,8 @@ class EngineSession:
         self._history_conversation_uid: str | None = None
         self._history_authoritative = False
         self._history_lock = asyncio.Lock()
+        # Serializes same-session MCP attach snapshot/apply/rollback transactions.
+        self._mcp_lock = asyncio.Lock()
         # The mirror holds a disk seed the daemon has not replaced yet. A seed
         # is no prefix of the daemon's history (hub messages are logged apart),
         # so a page showing it replaces its thread whole when the daemon answers.
