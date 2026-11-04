@@ -1,0 +1,34 @@
+{
+  "name": "llm-fallback",
+  "description": "/llm fallback shows, sets and clears the loadout an agent switches to when its model can't serve a turn.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"kollabor\\\":{\\\"llm\\\":{\\\"active_profile\\\":\\\"openai-test\\\",\\\"profiles\\\":{\\\"openai-test\\\":{\\\"provider\\\":\\\"openai\\\",\\\"model\\\":\\\"gpt-5.5\\\",\\\"base_url\\\":\\\"https://api.openai.com/v1\\\",\\\"api_key\\\":\\\"sk-test-dummy\\\",\\\"supports_tools\\\":true}}}},\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; ln -s \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "show_captures": false,
+    "app_init_sleep": 8,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.25,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "❯|>", "timeout": 15, "description": "app ready" },
+    { "action": "section", "name": "no fallback by default" },
+    { "action": "slash_command", "command": "llm", "subcommand": "fallback" },
+    { "action": "wait_for", "pattern": "Fallback: none", "timeout": 10, "description": "shows no fallback" },
+    { "action": "section", "name": "set a fallback" },
+    { "action": "slash_command", "command": "llm", "subcommand": "fallback gpt-5.6-terra" },
+    { "action": "wait_for", "pattern": "runs the turn again", "timeout": 10, "description": "fallback saved" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Fallback: [^ ]*gpt-5.6-terra", "description": "names the chosen loadout" },
+    { "action": "slash_command", "command": "llm", "subcommand": "fallback" },
+    { "action": "wait_for", "pattern": "Set it with /llm fallback", "timeout": 10, "description": "shows the choice again" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Fallback: [^ ]*gpt-5.6-terra\\. Set it", "description": "the choice was kept" },
+    { "action": "section", "name": "unknown loadout and off" },
+    { "action": "slash_command", "command": "llm", "subcommand": "fallback nonesuch-model-xyz" },
+    { "action": "wait_for", "pattern": "No loadout matching 'nonesuch-model-xyz'", "timeout": 10, "description": "unknown name refused" },
+    { "action": "slash_command", "command": "llm", "subcommand": "fallback off" },
+    { "action": "wait_for", "pattern": "Fallback: none\\.", "timeout": 10, "description": "fallback cleared" }
+  ]
+}
