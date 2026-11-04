@@ -82,6 +82,11 @@ jobs:
 
           req="$(gh api "repos/$REPO/rules/branches/$default_branch" \
             --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]]')"
+          if [[ "$(jq length <<<"$req")" == 0 ]]; then
+            echo "No required checks found on $default_branch; nothing can be judged green (fail closed)." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           merges=""
           for pr in $prs; do
             log() { echo "PR #$pr: $*"; echo "- PR #$pr: $*" >> "$GITHUB_STEP_SUMMARY"; }
@@ -138,11 +143,13 @@ jobs:
                       | .[0] // "none" | tostring) end' <<<"$reviews")"
             [[ "$approval" =~ ^[0-9]+$ ]] || { log "skip: approval on $sha: $approval"; continue; }
 
-            unresolved="$(gh api graphql -F owner="${REPO%/*}" -F name="${REPO#*/}" -F pr="$pr" -f query='
-              query($owner: String!, $name: String!, $pr: Int!) {
+            unresolved="$(gh api graphql --paginate -F owner="${REPO%/*}" -F name="${REPO#*/}" -F pr="$pr" -f query='
+              query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
                 repository(owner: $owner, name: $name) { pullRequest(number: $pr) {
-                  reviewThreads(first: 100) { totalCount nodes { isResolved } } } } }' \
-              --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length')"
+                  reviewThreads(first: 100, after: $endCursor) {
+                    pageInfo { hasNextPage endCursor } nodes { isResolved } } } } }' \
+              --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' \
+              | jq -s add)"
             [[ "$unresolved" == 0 ]] || { log "skip: $unresolved unresolved review threads"; continue; }
 
             p2="$(gh api "repos/$REPO/pulls/$pr")"
