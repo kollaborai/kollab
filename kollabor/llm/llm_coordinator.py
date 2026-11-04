@@ -1728,18 +1728,17 @@ class LLMService:
         return self._turn_serial
 
     def publish_cursor(self, uuid: str | None, serial: int | None) -> bool:
-        """Advance the shared cursor unless a later admission already did.
+        """Advance the shared cursor for an admitted turn.
 
         A strictly later-admitted turn that already completed wins and this
         write is dropped. Same-serial writes (one turn advancing its own
         chain: user row, HUD insert, batch output, tool-loop continuation)
-        all land, exactly like the plain assignments they replace. A None
-        serial keeps the legacy unconditional behavior for untracked paths.
+        all land. Untracked work, including system nudges and bare payloads,
+        has no admission ticket and must not move the shared cursor.
         """
-        if serial is not None and serial < self._cursor_winner_serial:
+        if serial is None or serial < self._cursor_winner_serial:
             return False
-        if serial is not None:
-            self._cursor_winner_serial = serial
+        self._cursor_winner_serial = serial
         self.current_parent_uuid = uuid
         return True
 
@@ -1777,7 +1776,7 @@ class LLMService:
         # The batch's admission serial (#676 r7): the newest ticket carried
         # by any item in the batch, so the batch's cursor writes resolve by
         # the admission order of what it contains. None (system nudges,
-        # bare payloads) keeps the legacy unconditional write.
+        # bare payloads) means the batch may run but cannot advance the cursor.
         batch_serial = max(
             (
                 getattr(m, "admission_serial", None)

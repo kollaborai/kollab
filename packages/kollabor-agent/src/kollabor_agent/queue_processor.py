@@ -90,8 +90,8 @@ class QueuedInput:
     # #453): never resets the nudge budget, so it cannot loop.
     is_system_nudge: bool = False
     # Admission serial frozen at admission (#676 r7); see
-    # TaggedInput.admission_serial. Nudges leave it None and their batch
-    # write keeps the legacy unconditional pointer behavior.
+    # TaggedInput.admission_serial. Nudges leave it None; cursor writes for
+    # batches without an admission ticket are rejected by LLMService.
     admission_serial: int | None = None
     # Chain position frozen at admission (#676); see TaggedInput.parent_uuid.
     # Nudges leave it None and keep the pointer fallback.

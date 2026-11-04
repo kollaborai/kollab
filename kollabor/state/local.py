@@ -3286,8 +3286,9 @@ class LocalStateService(StateService):
             # the lineage capture (#676 r7): cursor writes resolve by
             # admission order, so the later-admitted mention legitimately
             # owns the cursor even when its captured parent went stale.
-            # Minimal coordinator doubles without the protocol keep the
-            # legacy unconditional cursor behavior (serial None).
+            # A real coordinator has both methods; a serial-less publish is
+            # rejected. Minimal doubles without publish_cursor keep the
+            # compatibility fallback in _execute_hub_message.
             claim_serial = getattr(self._llm_service, "claim_turn_serial", None)
             hub_serial = claim_serial() if callable(claim_serial) else None
             hub_coro = self._execute_hub_message(

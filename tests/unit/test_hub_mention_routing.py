@@ -1,19 +1,21 @@
 """Tests for chat-to-Hub mention routing."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 from kollabor.state.local import LocalStateService, parse_hub_mention
+from kollabor_ai.conversation_logger import KollaborConversationLogger
 
 
 class _CursorSerial:
-    """Mirror of the coordinator's admission-serial cursor protocol (#676).
+    """Mirror the coordinator's admission-serial cursor protocol (#676).
 
     ``claim_turn_serial`` hands out one monotonic ticket per admitted turn
-    (mention spawn / ordinary pipeline admission); ``publish_cursor`` moves
-    the shared pointer unless a strictly later-admitted turn already wrote
-    it. Every FakeLlm below speaks this protocol so the routing tests
-    exercise the same ordering contract the production pipeline does.
+    (mention spawn / ordinary pipeline admission). ``publish_cursor`` rejects
+    untracked writes and writes older than a cursor already published.
+    Every FakeLlm below speaks this protocol so the routing tests exercise
+    the same ordering contract the production pipeline does.
     """
 
     _turn_serial = 0
@@ -24,10 +26,9 @@ class _CursorSerial:
         return self._turn_serial
 
     def publish_cursor(self, uuid, serial) -> bool:
-        if serial is not None and serial < self._cursor_winner_serial:
+        if serial is None or serial < self._cursor_winner_serial:
             return False
-        if serial is not None:
-            self._cursor_winner_serial = serial
+        self._cursor_winner_serial = serial
         self.current_parent_uuid = uuid
         return True
 
@@ -116,7 +117,7 @@ def test_web_broadcasts_take_the_terminal_path() -> None:
     asyncio.run(scenario())
 
 
-def test_hub_mentions_persist_to_the_session_jsonl() -> None:
+def test_hub_mentions_log_the_typed_turn_through_the_logger() -> None:
     async def scenario() -> None:
         class FakeLogger:
             def __init__(self) -> None:
@@ -167,7 +168,7 @@ def test_hub_mentions_persist_to_the_session_jsonl() -> None:
     asyncio.run(scenario())
 
 
-def test_broadcasts_persist_to_the_session_jsonl() -> None:
+def test_broadcasts_log_the_typed_turn_through_the_logger() -> None:
     async def scenario() -> None:
         class FakeLogger:
             def __init__(self) -> None:
@@ -212,7 +213,7 @@ def test_broadcasts_persist_to_the_session_jsonl() -> None:
     asyncio.run(scenario())
 
 
-def test_failed_hub_mention_still_persists_the_typed_turn() -> None:
+def test_failed_hub_mention_still_logs_the_typed_turn() -> None:
     async def scenario() -> None:
         class FakeLogger:
             def __init__(self) -> None:
@@ -717,5 +718,68 @@ def test_ordinary_between_mentions_cannot_reclaim_from_later_admitted() -> None:
         }
         # m2 (admitted after the ordinary turn) keeps the cursor.
         assert llm.current_parent_uuid == records[("assistant", "sent to lapis")][1]
+
+    asyncio.run(scenario())
+
+
+def test_execute_hub_message_persists_one_jsonl_pair_on_success_and_failure(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        text = "@lapis inspect the queue"
+        parent_uuid = "conversation-root"
+
+        for case, fails, expected_assistant_text in (
+            ("success", False, "sent to lapis"),
+            ("failure", True, "hub unavailable"),
+        ):
+            logger = KollaborConversationLogger(tmp_path / case)
+
+            class FakeLlm(_CursorSerial):
+                def __init__(self) -> None:
+                    self.current_parent_uuid = parent_uuid
+                    self.conversation_logger = logger
+                    self.messages = []
+
+                def _add_conversation_message(self, role, content, *, metadata):
+                    self.messages.append((role, content, metadata))
+
+            llm = FakeLlm()
+            service = LocalStateService(llm, object())
+            if fails:
+                service.hub_send_msg = AsyncMock(
+                    side_effect=RuntimeError(expected_assistant_text)
+                )
+            else:
+                service.hub_send_msg = AsyncMock(return_value=expected_assistant_text)
+
+            await service._execute_hub_message(
+                text,
+                "lapis",
+                "inspect the queue",
+                parent_uuid=parent_uuid,
+                turn_serial=1,
+            )
+
+            records = [
+                json.loads(line)
+                for line in logger.session_file.read_text().splitlines()
+                if line.strip()
+            ]
+            assert len(records) == 2
+            assert [record["type"] for record in records] == ["user", "assistant"]
+
+            user_record, assistant_record = records
+            assert user_record["message"]["role"] == "user"
+            assert user_record["message"]["content"] == text
+            assert user_record["parentUuid"] == parent_uuid
+            assert assistant_record["message"]["role"] == "assistant"
+            assert assistant_record["parentUuid"] == user_record["uuid"]
+            assert any(
+                item.get("text") == expected_assistant_text
+                for item in assistant_record["message"]["content"]
+            )
+            assert llm.current_parent_uuid == assistant_record["uuid"]
+            service.hub_send_msg.assert_awaited_once_with("lapis", "inspect the queue")
 
     asyncio.run(scenario())

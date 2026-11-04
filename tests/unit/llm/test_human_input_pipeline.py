@@ -13,7 +13,7 @@ from kollabor.llm.agent_hud import AgentHudEntry
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.state import LocalStateService
 from kollabor.user_input_source import UserInputSource
-from kollabor_agent.queue_processor import TaggedInput
+from kollabor_agent.queue_processor import QueuedInput, TaggedInput
 from kollabor_events import EventBus, EventType, Hook, HookPriority
 
 
@@ -827,3 +827,65 @@ async def test_pending_hud_rebatch_of_typed_turn_keeps_admission_parent():
         f"admission-time capture, not the pointer a detached completion "
         f"advanced ({batch_kwargs['current_parent_uuid']})"
     )
+
+
+def test_stale_untracked_nudge_cannot_overwrite_newer_hub_cursor() -> None:
+    async def scenario() -> None:
+        nudge_started = asyncio.Event()
+        release_nudge = asyncio.Event()
+        nudge = QueuedInput(
+            content="finish the task",
+            voice={},
+            is_system_nudge=True,
+        )
+
+        class GatedQueueProcessor:
+            turn_completed = False
+
+            async def process_message_batch(
+                self, *, messages, current_parent_uuid, request_ids
+            ) -> str:
+                assert messages == [nudge]
+                assert nudge.admission_serial is None
+                assert current_parent_uuid == "parent-before-nudge"
+                nudge_started.set()
+                await release_nudge.wait()
+                return "stale-nudge-assistant"
+
+            async def continue_conversation(self, *, current_parent_uuid) -> str:
+                return "stale-nudge-continuation"
+
+        # Use the real LLMService batch/cursor methods. Only the queue's model
+        # execution is gated so the completion order is deterministic.
+        service = object.__new__(LLMService)
+        service._queue_processor = GatedQueueProcessor()
+        service._pending_agent_hud = []
+        service.current_parent_uuid = "parent-before-nudge"
+        service._turn_serial = 0
+        service._cursor_winner_serial = -1
+
+        nudge_task = asyncio.create_task(service._process_message_batch([nudge]))
+        hub_wake_serial = None
+        try:
+            await asyncio.wait_for(nudge_started.wait(), timeout=2)
+            # A tracked hub wake completes while the older untracked nudge is
+            # still waiting on the queue's model response.
+            hub_wake_serial = service.claim_turn_serial()
+            assert service.publish_cursor("newer-hub-wake", hub_wake_serial)
+        finally:
+            release_nudge.set()
+            await nudge_task
+
+        assert hub_wake_serial == 1
+        assert service._continue_serial is None
+        assert service._cursor_winner_serial == hub_wake_serial
+        assert service.current_parent_uuid == "newer-hub-wake"
+
+        # The nudge's follow-on tool-loop write is untracked as well.
+        await service._continue_conversation()
+        assert service._cursor_winner_serial == hub_wake_serial
+        assert service.current_parent_uuid == "newer-hub-wake"
+        assert service.publish_cursor("untracked-write", None) is False
+        assert service.current_parent_uuid == "newer-hub-wake"
+
+    asyncio.run(scenario())
