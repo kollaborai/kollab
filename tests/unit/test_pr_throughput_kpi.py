@@ -289,6 +289,208 @@ def test_fetch_pulls_truncates_at_max_pages_and_reports_coverage():
     assert covered == NOW - timedelta(minutes=200)  # oldest updated_at fetched
 
 
+def test_enrich_closed_paginates_reviews_and_check_runs():
+    pr = _pr(
+        5,
+        created=NOW - timedelta(hours=3),
+        closed=NOW - timedelta(minutes=30),
+        merged=NOW - timedelta(minutes=30),
+    )
+    review_page_1 = [
+        {
+            "id": f"review-{index}",
+            "state": "COMMENTED",
+            "submitted_at": _iso(NOW - timedelta(hours=2)),
+        }
+        for index in range(kpi.PER_PAGE)
+    ]
+    review_page_2 = [
+        {
+            "id": "review-last",
+            "state": "CHANGES_REQUESTED",
+            "submitted_at": _iso(NOW - timedelta(hours=1)),
+        }
+    ]
+    check_page_1 = [
+        {"id": f"check-{index}", "status": "completed", "conclusion": "success"}
+        for index in range(kpi.PER_PAGE)
+    ]
+    check_page_2 = [
+        {"id": "check-last", "status": "completed", "conclusion": "failure"}
+    ]
+    routes = {
+        "pulls/5/reviews?per_page=100&page=1": review_page_1,
+        "pulls/5/reviews?per_page=100&page=2": review_page_2,
+        "pulls/5/commits": [{"sha": "abc", "commit": {}}],
+        "commits/abc/check-runs?per_page=100&page=1": {
+            "total_count": kpi.PER_PAGE + 1,
+            "check_runs": check_page_1,
+        },
+        "commits/abc/check-runs?per_page=100&page=2": {
+            "total_count": kpi.PER_PAGE + 1,
+            "check_runs": check_page_2,
+        },
+    }
+    runner = FakeRunner(routes)
+    errors = []
+
+    result = kpi._enrich_closed(kpi.GhApi(runner), "o/r", [pr], errors)
+
+    assert errors == []
+    assert result["time_to_first_review_hours_median"] == pytest.approx(1.0)
+    assert result["review_rounds_per_pr"] == pytest.approx(1.0)
+    assert result["first_push_pass_rate"] == 0.0
+    assert result["first_push_checked"] == 1
+    assert any("pulls/5/reviews" in path and "page=2" in path for path in runner.calls)
+    assert any("check-runs" in path and "page=2" in path for path in runner.calls)
+    # Commits are intentionally left as one request: only commits[0] is used.
+    assert sum("pulls/5/commits" in path for path in runner.calls) == 1
+
+
+@pytest.mark.parametrize("target", ["reviews", "check-runs"])
+def test_enrich_closed_fails_closed_on_repeated_page(target):
+    repeated_reviews = [
+        {
+            "id": f"review-{index}",
+            "state": "COMMENTED",
+            "submitted_at": _iso(NOW - timedelta(hours=1)),
+        }
+        for index in range(kpi.PER_PAGE)
+    ]
+    repeated_checks = [
+        {"id": f"check-{index}", "status": "completed", "conclusion": "success"}
+        for index in range(kpi.PER_PAGE)
+    ]
+    runner_calls = []
+
+    def runner(args):
+        path = args[1]
+        runner_calls.append(path)
+        if "/pulls/5/reviews?" in path:
+            return json.dumps(repeated_reviews if target == "reviews" else [])
+        if "/pulls/5/commits?" in path:
+            return json.dumps([{"sha": "abc", "commit": {}}])
+        if "/check-runs?" in path:
+            return json.dumps(
+                {"total_count": 2 * kpi.PER_PAGE, "check_runs": repeated_checks}
+            )
+        raise AssertionError(f"unexpected gh call: {path}")
+
+    with pytest.raises(RuntimeError, match="identical"):
+        kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], [])
+
+    repeated_endpoint = "pulls/5/reviews" if target == "reviews" else "check-runs"
+    assert sum(repeated_endpoint in path for path in runner_calls) == 2
+
+
+@pytest.mark.parametrize("target", ["reviews", "check-runs"])
+def test_enrich_closed_fails_closed_at_page_cap(target, monkeypatch):
+    monkeypatch.setattr(kpi, "PAGINATION_MAX_PAGES", 2, raising=False)
+    runner_calls = []
+
+    def runner(args):
+        path = args[1]
+        runner_calls.append(path)
+        page = int(path.rsplit("page=", 1)[1]) if "page=" in path else 1
+        if "/pulls/5/reviews?" in path:
+            if target != "reviews":
+                return json.dumps([])
+            return json.dumps(
+                [
+                    {
+                        "id": f"review-{page}-{index}",
+                        "state": "COMMENTED",
+                        "submitted_at": _iso(NOW - timedelta(hours=1)),
+                    }
+                    for index in range(kpi.PER_PAGE)
+                ]
+            )
+        if "/pulls/5/commits?" in path:
+            return json.dumps([{"sha": "abc", "commit": {}}])
+        if "/check-runs?" in path:
+            return json.dumps(
+                {
+                    "total_count": 10 * kpi.PER_PAGE,
+                    "check_runs": [
+                        {
+                            "id": f"check-{page}-{index}",
+                            "status": "completed",
+                            "conclusion": "success",
+                        }
+                        for index in range(kpi.PER_PAGE)
+                    ],
+                }
+            )
+        raise AssertionError(f"unexpected gh call: {path}")
+
+    with pytest.raises(RuntimeError, match="failing closed"):
+        kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], [])
+
+    capped_endpoint = "pulls/5/reviews" if target == "reviews" else "check-runs"
+    assert sum(capped_endpoint in path for path in runner_calls) == 2
+
+
+@pytest.mark.parametrize("target", ["reviews", "check-runs"])
+def test_enrich_closed_fails_closed_on_malformed_page(target):
+    def runner(args):
+        path = args[1]
+        if "/pulls/5/reviews?" in path:
+            return json.dumps({"not": "a review list"} if target == "reviews" else [])
+        if "/pulls/5/commits?" in path:
+            return json.dumps([{"sha": "abc", "commit": {}}])
+        if "/check-runs?" in path:
+            return json.dumps({"check_runs": []})
+        raise AssertionError(f"unexpected gh call: {path}")
+
+    with pytest.raises(RuntimeError, match="failing closed"):
+        kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], [])
+
+
+@pytest.mark.parametrize("target", ["reviews", "check-runs"])
+def test_enrich_closed_discards_partial_metric_when_later_page_fails(target):
+    full_reviews = [
+        {
+            "id": f"review-{index}",
+            "state": "CHANGES_REQUESTED",
+            "submitted_at": _iso(NOW - timedelta(hours=1)),
+        }
+        for index in range(kpi.PER_PAGE)
+    ]
+    full_checks = [
+        {"id": f"check-{index}", "status": "completed", "conclusion": "success"}
+        for index in range(kpi.PER_PAGE)
+    ]
+    errors = []
+
+    def runner(args):
+        path = args[1]
+        if "/pulls/5/reviews?" in path:
+            if target != "reviews":
+                return json.dumps([])
+            if "&page=1" in path or "&page=" not in path:
+                return json.dumps(full_reviews)
+            raise kpi.GhError("reviews page 2 failed")
+        if "/pulls/5/commits?" in path:
+            return json.dumps([{"sha": "abc", "commit": {}}])
+        if "/check-runs?" in path:
+            if "&page=1" in path or "&page=" not in path:
+                return json.dumps(
+                    {"total_count": kpi.PER_PAGE + 1, "check_runs": full_checks}
+                )
+            raise kpi.GhError("check-runs page 2 failed")
+        raise AssertionError(f"unexpected gh call: {path}")
+
+    result = kpi._enrich_closed(kpi.GhApi(runner), "o/r", [_pr(5)], errors)
+
+    if target == "reviews":
+        assert result["review_rounds_per_pr"] is None
+        assert any("reviews page 2 failed" in error for error in errors)
+    else:
+        assert result["first_push_pass_rate"] is None
+        assert result["first_push_checked"] == 0
+        assert any("check-runs page 2 failed" in error for error in errors)
+
+
 def test_gh_failure_yields_unavailable_report_with_missing_metrics():
     cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r"}})
     runner = FakeRunner(fail={"/pulls?"})
@@ -327,7 +529,8 @@ def test_collect_builds_full_report_from_mocked_api():
             ],
             "pulls/5/commits": [{"sha": "abc", "commit": {}}],
             "commits/abc/check-runs": {
-                "check_runs": [{"status": "completed", "conclusion": "success"}]
+                "total_count": 1,
+                "check_runs": [{"status": "completed", "conclusion": "success"}],
             },
             "pulls/6": {"mergeable_state": "dirty"},
         }

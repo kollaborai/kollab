@@ -46,6 +46,8 @@ DEFAULT_WINDOWS = (1, 8, 24)
 DEFAULT_STALE_DAYS = 5
 DEFAULT_MAX_PAGES = 10
 PER_PAGE = 100
+# Bound detail-list pagination too; hitting the cap is an error, never a partial KPI.
+PAGINATION_MAX_PAGES = 50
 UNASSIGNED = "unassigned"
 
 Runner = Callable[[list[str]], str]
@@ -333,6 +335,97 @@ def fetch_pulls(
     return prs, oldest
 
 
+def _page_fingerprint(batch: list[dict]) -> tuple[int, str | None, str | None]:
+    return (
+        len(batch),
+        repr(batch[0]) if batch else None,
+        repr(batch[-1]) if batch else None,
+    )
+
+
+def _paginate_rest_list(api: GhApi, endpoint: str) -> list[dict]:
+    """Read all REST list pages, failing closed on loops or runaway results."""
+    items: list[dict] = []
+    previous_fingerprint: tuple[int, str | None, str | None] | None = None
+    separator = "&" if "?" in endpoint else "?"
+    for page in range(1, PAGINATION_MAX_PAGES + 1):
+        batch = api.get(f"{endpoint}{separator}per_page={PER_PAGE}&page={page}")
+        if not isinstance(batch, list):
+            raise RuntimeError(
+                f"{endpoint} returned a non-list page {page}; failing closed"
+            )
+        fingerprint = _page_fingerprint(batch)
+        if fingerprint == previous_fingerprint:
+            raise RuntimeError(
+                f"{endpoint} returned an identical page at page {page}; "
+                "the API may be ignoring pagination — failing closed"
+            )
+        previous_fingerprint = fingerprint
+        items.extend(batch)
+        if len(batch) < PER_PAGE:
+            return items
+    raise RuntimeError(
+        f"{endpoint} exceeded {PAGINATION_MAX_PAGES} pages of {PER_PAGE} items; "
+        "failing closed instead of paginating forever"
+    )
+
+
+def _paginate_check_runs(api: GhApi, endpoint: str) -> list[dict]:
+    """Read every check-run page, using total_count and hard liveness guards."""
+    runs: list[dict] = []
+    expected_total: int | None = None
+    previous_fingerprint: tuple[int, str | None, str | None] | None = None
+    separator = "&" if "?" in endpoint else "?"
+    for page in range(1, PAGINATION_MAX_PAGES + 1):
+        payload = api.get(f"{endpoint}{separator}per_page={PER_PAGE}&page={page}")
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"{endpoint} returned a non-object page {page}; failing closed"
+            )
+        total_count = payload.get("total_count")
+        batch = payload.get("check_runs")
+        if (
+            not isinstance(total_count, int)
+            or isinstance(total_count, bool)
+            or total_count < 0
+            or not isinstance(batch, list)
+        ):
+            raise RuntimeError(
+                f"{endpoint} returned invalid check-run page {page}; failing closed"
+            )
+        if expected_total is None:
+            expected_total = total_count
+        elif total_count != expected_total:
+            raise RuntimeError(
+                f"{endpoint} total_count changed from {expected_total} to "
+                f"{total_count} at page {page}; failing closed"
+            )
+        if len(runs) + len(batch) > expected_total:
+            raise RuntimeError(
+                f"{endpoint} returned more items than total_count at page {page}; "
+                "failing closed"
+            )
+        fingerprint = _page_fingerprint(batch)
+        if fingerprint == previous_fingerprint:
+            raise RuntimeError(
+                f"{endpoint} returned an identical page at page {page}; "
+                "the API may be ignoring pagination — failing closed"
+            )
+        previous_fingerprint = fingerprint
+        runs.extend(batch)
+        if len(runs) == expected_total:
+            return runs
+        if len(batch) < PER_PAGE:
+            raise RuntimeError(
+                f"{endpoint} returned a short page {page} before total_count "
+                f"{expected_total}; failing closed"
+            )
+    raise RuntimeError(
+        f"{endpoint} exceeded {PAGINATION_MAX_PAGES} pages of {PER_PAGE} items; "
+        "failing closed instead of paginating forever"
+    )
+
+
 def _enrich_closed(
     api: GhApi, repo: str, prs: list[dict], errors: list[str]
 ) -> dict[str, Any]:
@@ -343,10 +436,7 @@ def _enrich_closed(
     for pr in prs:
         number = pr["number"]
         try:
-            reviews = (
-                api.get(f"repos/{repo}/pulls/{number}/reviews?per_page={PER_PAGE}")
-                or []
-            )
+            reviews = _paginate_rest_list(api, f"repos/{repo}/pulls/{number}/reviews")
             hours = time_to_first_review_hours(pr, reviews)
             if hours is not None:
                 ttfr.append(hours)
@@ -360,13 +450,10 @@ def _enrich_closed(
             )
             if commits:
                 sha = commits[0]["sha"]
-                payload = (
-                    api.get(
-                        f"repos/{repo}/commits/{sha}/check-runs?per_page={PER_PAGE}"
-                    )
-                    or {}
+                check_runs = _paginate_check_runs(
+                    api, f"repos/{repo}/commits/{sha}/check-runs"
                 )
-                verdict = first_push_ci(payload.get("check_runs") or [])
+                verdict = first_push_ci(check_runs)
                 if verdict is not None:
                     ci.append(verdict)
         except GhError as exc:
