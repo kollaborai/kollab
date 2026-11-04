@@ -755,3 +755,13 @@ def test_post_merge_watcher_never_arms_and_still_dispatches_for_legacy_merges(tm
         assert any(call[0] == "api" and call[1].endswith("/actions/runs/77") for call in calls)
     if scenario in ("workflow-run-by-commit", "workflow-run-missing"):
         assert any(call[0] == "api" and "/commits/" in call[1] and call[1].endswith("/pulls") for call in calls)
+
+
+def test_every_workflow_run_step_parses_as_bash():
+    # " #" starts a YAML comment in a plain scalar, which once cut the relay's echo in half.
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        for job_name, job in _workflow(path.name)["jobs"].items():
+            for step in job.get("steps", []):
+                if "run" in step and step.get("shell", "bash") == "bash":
+                    parsed = subprocess.run(["bash", "-n"], input=step["run"], capture_output=True, text=True)
+                    assert parsed.returncode == 0, f"{path.name} {job_name}: {parsed.stderr}"
