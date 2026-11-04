@@ -610,6 +610,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"{_num(open_block.get('stale'), 'd')}",
         f"- Conflicted (dirty): {_num(open_block.get('conflicted'), 'd')}",
         f"- BEHIND base: {_num(open_block.get('behind'), 'd')}",
+        f"- Merge state unknown: {_num(open_block.get('merge_state_unknown'), 'd')}",
     ]
     review = report.get("review") or {}
     ci = report.get("ci") or {}
