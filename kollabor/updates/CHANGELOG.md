@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - The voice service, LiveKit workers, PhoneLink bridges, and managed transcription and classifier workers no longer inherit another interpreter's site-packages.
+- Mentiko attaches to an existing live hub session without spawning a second daemon or duplicating its system-prompt history (#708).
 
 ## [0.19.0] - 2026-11-03
 

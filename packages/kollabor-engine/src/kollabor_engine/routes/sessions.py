@@ -31,7 +31,7 @@ from ..history_paging import (
 )
 from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
-from ..server import get_session_registry
+from ..server import get_session_registry, open_named_session
 from ..session import INLINE_PROFILE, EngineSession
 from .rosters import apply_persona
 from .workspaces import remember_workspace
@@ -273,6 +273,48 @@ async def create_session(body: CreateSessionRequest, request: Request):
         for s in agent_data.get("mcp_servers", []):
             if s not in effective_mcp_servers:
                 effective_mcp_servers.append(s)
+
+    # Proxy clients may supply the ID for an existing hub-spawned session.
+    # Resume it through the same adoption path as session-scoped web requests;
+    # never initialize a second daemon against the existing conversation log.
+    if body.session_id:
+        attached_session = await open_named_session(
+            request, session_id=body.session_id
+        )
+        if attached_session is not None:
+            if user_token:
+                attached_session.user_token = user_token
+
+            existing_mcp_servers = list(attached_session.mcp_server_names or [])
+            new_mcp_servers = list(
+                dict.fromkeys(
+                    name
+                    for name in effective_mcp_servers
+                    if name not in existing_mcp_servers
+                )
+            )
+            if new_mcp_servers:
+                attached_session.mcp_server_names = (
+                    existing_mcp_servers + new_mcp_servers
+                )
+                try:
+                    await attached_session._apply_mcp_servers()
+                except Exception as e:
+                    attached_session.mcp_server_names = existing_mcp_servers
+                    logger.error(
+                        "session %s: could not apply MCP servers %s: %s",
+                        attached_session.session_id,
+                        new_mcp_servers,
+                        e,
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "Existing session resumed, but requested MCP server "
+                            "attachment failed; retry the attach."
+                        ),
+                    ) from e
+            return attached_session.to_dict()
 
     # Load profile from credentials or ProfileManager
     profile: Optional[LLMProfile] = None

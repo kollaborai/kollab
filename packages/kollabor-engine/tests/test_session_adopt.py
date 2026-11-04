@@ -472,3 +472,133 @@ def test_persistence_warning_is_actionable_and_clears_after_retry():
     session._notify_persistence_changed()
     assert session.to_dict()["persistence_warning"] is None
     assert attempts == 2
+
+
+def test_mentiko_attach_resumes_live_daemon_without_second_system_prompt_root(
+    monkeypatch, registry, tmp_path
+):
+    """A proxy reusing a live ID must attach, not append a second lineage root."""
+    session_id = "a1b2c3"
+    session_log = tmp_path / f"session_{session_id}.jsonl"
+    initial_root = {
+        "type": "system_prompt",
+        "parentUuid": None,
+        "message": {"role": "system", "content": "existing system prompt"},
+    }
+    session_log.write_text(json.dumps(initial_root) + "\n")
+    monkeypatch.setattr(
+        HubBridge,
+        "discover_sessions",
+        lambda self, use_cache=False: [
+            _row(session_id, session_log=str(session_log), workspace=str(tmp_path))
+        ],
+    )
+
+    spawned = []
+    adopted = []
+    attached_mcp_servers = []
+
+    async def fake_initialize(session):
+        spawned.append(session.session_id)
+        with session_log.open("a") as stream:
+            stream.write(
+                json.dumps(
+                    {
+                        "type": "system_prompt",
+                        "parentUuid": None,
+                        "message": {
+                            "role": "system",
+                            "content": "second daemon bootstrap with MCP tools",
+                        },
+                    }
+                )
+                + "\n"
+            )
+        await fake_apply_mcp_servers(session)
+        session.daemon = SimpleNamespace(
+            pid=5151, alive=True, launcher=None, state=SimpleNamespace()
+        )
+
+    async def fake_apply_mcp_servers(session):
+        attached_mcp_servers.extend(session.mcp_server_names)
+
+    async def fake_adopt(cls, found, **kwargs):
+        adopted.append(found["session_id"])
+        session = cls(
+            session_id=found["session_id"],
+            profile=None,
+            workspace=found.get("workspace"),
+            mcp_server_names=[],
+        )
+        session.conversation_id = Path(found["session_log"]).stem
+        session.daemon = SimpleNamespace(
+            pid=found["daemon_pid"], alive=True, launcher=None, state=SimpleNamespace()
+        )
+        return session
+
+    monkeypatch.setattr(EngineSession, "initialize", fake_initialize)
+    monkeypatch.setattr(EngineSession, "adopt", classmethod(fake_adopt))
+    monkeypatch.setattr(EngineSession, "_apply_mcp_servers", fake_apply_mcp_servers)
+    monkeypatch.setattr(
+        EngineSession,
+        "to_dict",
+        lambda session: {"session_id": session.session_id, "active": session.alive},
+    )
+
+    response = TestClient(server.create_app()).post(
+        "/sessions",
+        headers={"x-mentiko-session-token": "test-session-token"},
+        json={
+            "session_id": session_id,
+            "credentials": {
+                "provider": "openai",
+                "api_key": "test-api-key",
+                "model": "test-model",
+            },
+            "mcp_servers": ["mentiko", "marclone-memory"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    records = [json.loads(line) for line in session_log.read_text().splitlines()]
+    system_roots = [
+        record
+        for record in records
+        if record.get("type") == "system_prompt" and record.get("parentUuid") is None
+    ]
+    assert len(system_roots) == 1
+    assert spawned == []
+    assert adopted == [session_id]
+    assert attached_mcp_servers == ["mentiko", "marclone-memory"]
+    assert registry[session_id].user_token == "test-session-token"
+
+    async def fail_mcp_servers(_session):
+        raise RuntimeError("daemon temporarily unavailable")
+
+    monkeypatch.setattr(EngineSession, "_apply_mcp_servers", fail_mcp_servers)
+    failed_response = TestClient(server.create_app()).post(
+        "/sessions",
+        headers={"x-mentiko-session-token": "retry-session-token"},
+        json={
+            "session_id": session_id,
+            "credentials": {
+                "provider": "openai",
+                "api_key": "test-api-key",
+                "model": "test-model",
+            },
+            "mcp_servers": ["mentiko", "marclone-memory", "retry-server"],
+        },
+    )
+
+    assert failed_response.status_code == 503
+    assert "retry the attach" in failed_response.json()["detail"]
+    assert registry[session_id].mcp_server_names == ["mentiko", "marclone-memory"]
+    assert spawned == []
+    assert adopted == [session_id]
+    records = [json.loads(line) for line in session_log.read_text().splitlines()]
+    system_roots = [
+        record
+        for record in records
+        if record.get("type") == "system_prompt" and record.get("parentUuid") is None
+    ]
+    assert len(system_roots) == 1
