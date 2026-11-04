@@ -96,6 +96,33 @@ def test_boundary_exact_threshold_is_stale():
     assert sweeper.is_stale(pr, NOW, days=5)
 
 
+# --- status/no-stale exemptions ---------------------------------------------
+
+
+def test_no_stale_label_opts_out_of_flagging():
+    pr = _pr(25, created=NOW - timedelta(days=10), last_commit=NOW - timedelta(days=10))
+    pr["labels"] = [{"name": "status/no-stale"}]
+    assert sweeper.is_stale(pr, NOW, days=5)  # the clock still says stale
+    assert sweeper.is_exempt(pr)
+    assert sweeper.sweep_candidates([pr], NOW, 5) == []
+
+
+def test_exempt_prs_absent_from_digest_rows():
+    plain = _pr(26, last_commit=NOW - timedelta(days=6), body="Fixes #9")
+    exempt = _pr(27, last_commit=NOW - timedelta(days=6))
+    exempt["labels"] = [{"name": "status/no-stale"}]
+    rows = sweeper.collect_rows([plain, exempt], {}, NOW, 5)
+    assert [r["number"] for r in rows] == [26]
+
+
+def test_digest_footer_reports_exempt_count():
+    rows = sweeper.collect_rows([], {}, NOW, 5)
+    digest = sweeper.build_digest(rows, NOW, 5, dry_run=True, exempted=3)
+    assert "3 PR(s) skipped as exempt (status/no-stale)." in digest
+    without = sweeper.build_digest(rows, NOW, 5, dry_run=True)
+    assert "skipped as exempt" not in without
+
+
 # --- linked issues ---------------------------------------------------------
 
 
@@ -177,15 +204,17 @@ def test_action_behind_suggests_rebase_update():
 
 
 def test_action_close_candidate_for_old_draft():
-    pr = _pr(15, draft=True, last_commit=NOW - timedelta(days=25))
-    action = sweeper.suggested_action(pr, [5], "even with main", 25.0, {})
-    assert action.startswith("close candidate (draft, 25d inactive)")
+    # Rulebook escalation: drafts are proposed for closure at 45 days.
+    pr = _pr(15, draft=True, last_commit=NOW - timedelta(days=50))
+    action = sweeper.suggested_action(pr, [5], "even with main", 50.0, {})
+    assert action.startswith("close candidate (draft, 50d inactive)")
 
 
 def test_action_close_for_very_old_any_pr():
-    pr = _pr(16, last_commit=NOW - timedelta(days=50))
-    action = sweeper.suggested_action(pr, [5], "even with main", 50.0, {})
-    assert action.startswith("close (50d inactive)")
+    # Any PR, draft or not, is proposed for closure at 60 days.
+    pr = _pr(16, last_commit=NOW - timedelta(days=65))
+    action = sweeper.suggested_action(pr, [5], "even with main", 65.0, {})
+    assert action.startswith("close (65d inactive)")
 
 
 def test_action_consolidate_for_shared_issue():
@@ -266,7 +295,8 @@ def test_digest_marks_unproven_ci_for_moved_heads():
 
 
 def test_label_constant_is_stale():
-    assert sweeper.STALE_LABEL == "stale"
+    assert sweeper.STALE_LABEL == "status/stale"
+    assert sweeper.EXEMPT_LABEL == "status/no-stale"
 
 
 def test_dry_run_never_invokes_gh(monkeypatch):
@@ -294,7 +324,7 @@ def test_label_command_is_add_only(monkeypatch):
     result = sweeper.add_stale_label(23, "kollaborai/kollab", dry_run=False)
     assert result == "LABELED"
     cmd = captured["cmd"]
-    assert "--add-label" in cmd and "stale" in cmd
+    assert "--add-label" in cmd and "status/stale" in cmd
     for forbidden in (
         "--remove-label",
         "--close",

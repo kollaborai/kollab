@@ -3,7 +3,8 @@
 
 Implements kollaborai/kollab#718. Every open PR with no new commit AND no
 review activity for 5+ days is listed in a single digest (drafts first) and
-labeled `stale`. The sweeper only flags: it never closes, never comments per
+labeled `status/stale`, unless the PR opts out with `status/no-stale`. The
+sweeper only flags: it never closes, never comments per
 PR, never removes labels, and never touches draft state.
 
 Activity means commits and reviews only. Label edits, comments, and metadata
@@ -28,10 +29,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-STALE_LABEL = "stale"
+STALE_LABEL = "status/stale"
+EXEMPT_LABEL = "status/no-stale"
 DEFAULT_DAYS = 5
-DRAFT_CLOSE_DAYS = 21
-ANY_CLOSE_DAYS = 45
+# Close-escalation mirrors the team stale rulebook (45 days proposes closure,
+# 60 days proposes it for any PR regardless of draft state).
+DRAFT_CLOSE_DAYS = 45
+ANY_CLOSE_DAYS = 60
 # Sort key: drafts first, then most-inactive first.
 _DRAFT_RANK = {True: 0, False: 1}
 
@@ -91,6 +95,17 @@ def age_days(pr: dict, now: datetime) -> float:
 
 def is_stale(pr: dict, now: datetime, days: int = DEFAULT_DAYS) -> bool:
     return inactivity_days(pr, now) >= days
+
+
+def is_exempt(pr: dict) -> bool:
+    """status/no-stale opts a PR out of sweeper flagging entirely."""
+    names = {label.get("name") for label in (pr.get("labels") or [])}
+    return EXEMPT_LABEL in names
+
+
+def sweep_candidates(prs: list[dict], now: datetime, days: int) -> list[dict]:
+    """Stale by the activity clock and not opted out via status/no-stale."""
+    return [p for p in prs if is_stale(p, now, days) and not is_exempt(p)]
 
 
 def head_vs_main(pr: dict, compare: dict | None) -> str:
@@ -197,6 +212,7 @@ def build_digest(
     now: datetime,
     days: int,
     dry_run: bool,
+    exempted: int = 0,
 ) -> str:
     """Single markdown digest; drafts first, then most-inactive first."""
     ordered = sorted(
@@ -244,15 +260,17 @@ def build_digest(
         "Method: inactivity = days since the latest commit or review "
         "(labels/comments/metadata do not count). The sweeper never closes, "
         "comments per PR, or removes labels; humans and koordinator decide.",
-        "",
     ]
+    if exempted:
+        lines.append(f"{exempted} PR(s) skipped as exempt ({EXEMPT_LABEL}).")
+    lines.append("")
     return "\n".join(lines)
 
 
 def collect_rows(
     prs: list[dict], compares: dict[int, dict], now: datetime, days: int
 ) -> list[dict]:
-    stale = [p for p in prs if is_stale(p, now, days)]
+    stale = sweep_candidates(prs, now, days)
     linked_by_number: dict[int, list[IssueRef]] = {}
     issue_groups: dict[IssueRef, list[int]] = {}
     for pr in stale:
@@ -386,9 +404,10 @@ def main(argv: list[str] | None = None) -> int:
 
     now = datetime.now(timezone.utc)
     prs = fetch_open_prs(repo)
-    stale_candidates = [p for p in prs if is_stale(p, now, args.days)]
+    candidates = sweep_candidates(prs, now, args.days)
+    exempted = sum(1 for p in prs if is_stale(p, now, args.days) and is_exempt(p))
     compares: dict[int, dict] = {}
-    for pr in stale_candidates:
+    for pr in candidates:
         head = pr.get("headRefOid")
         if head:
             try:
@@ -397,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"warn: compare for #{pr['number']}: {error}", file=sys.stderr)
 
     rows = collect_rows(prs, compares, now, args.days)
-    digest = build_digest(rows, now, args.days, args.dry_run)
+    digest = build_digest(rows, now, args.days, args.dry_run, exempted=exempted)
     print(digest)
 
     if args.digest:
