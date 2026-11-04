@@ -156,6 +156,17 @@ def test_merge_bot_runs_no_pr_code_and_merges_only_when_turned_on():
     assert all("uses" not in step for job in relay["jobs"].values() for step in job["steps"])
 
 
+def test_merge_bot_looks_again_when_the_dod_check_finishes():
+    # Marking a PR ready re-runs the check, so it is still running when the bot's
+    # ready_for_review run reads mergeable_state. Nothing else wakes the bot after it.
+    dod = _workflow("pr-gates-dod.yml")
+    assert "ready_for_review" in dod["on"]["pull_request_target"]["types"]
+    wakes = _workflow("auto-merge.yml")["on"]["workflow_run"]["workflows"]
+    assert dod["name"] in wakes
+    # This one wakes on Auto-merge, so waking on it would loop forever.
+    assert _workflow("ci-after-auto-merge.yml")["name"] not in wakes
+
+
 @needs_gate_tools
 def test_merge_bot_lists_a_pr_when_every_gate_holds(tmp_path):
     stdout, merges = _run_gate(tmp_path, _gate_state())
