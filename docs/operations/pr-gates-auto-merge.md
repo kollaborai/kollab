@@ -1,14 +1,15 @@
 # pr-gates merge bot
 
 `.github/workflows/auto-merge.yml` (#722) merges a PR by itself once every gate
-holds on the PR's current head. It ships off and merges nothing until a
-repository owner turns it on.
+holds on the PR's current head. It merges nothing until a repository owner turns
+it on. In this repository the workflow is enabled and the variable below decides
+what it does.
 
 ## The three switches
 
 It merges only when all three are on:
 
-1. The workflow is enabled on GitHub (`gh workflow enable`). It ships disabled.
+1. The workflow is enabled on GitHub (`gh workflow enable`).
 2. The repository variable `PR_GATES_AUTO_MERGE` is `on`. `dry-run` evaluates and
    logs only. Unset means off.
 3. The `pr-gates` environment holds `PR_GATES_MERGE_TOKEN`.
