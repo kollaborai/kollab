@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- ACP admissions that reuse a caller request ID keep their own history parent and completion ownership, so a reply is no longer recorded under the later input's row (#597). A rejected admission cancels only itself, not an earlier queued admission with the same ID.
+
 ## [0.19.1] - 2026-11-03
 
 ### Changed
