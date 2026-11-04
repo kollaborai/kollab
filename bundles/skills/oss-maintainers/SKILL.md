@@ -39,7 +39,7 @@ described after it.
 | assign people, request reviewers | batch approval |
 | close, reopen, lock, transfer an issue/PR | human does it, or approves that single item by number |
 | merge a PR covered by Marco's plan as `kollaborai` | designated integrator after review and gates; merge commit only, no admin or ruleset bypass |
-| enable or disable auto-merge | **never** (human only) |
+| enable or disable auto-merge | only on the owner's own words in chat |
 | mark a draft PR ready for review | **never** (reserved to the designated integrator) |
 | push, force-push, branch/tag/release create/move/delete, PyPI, Homebrew | **never** |
 | edit workflows, branch protection, rulesets, repo settings | **never** |

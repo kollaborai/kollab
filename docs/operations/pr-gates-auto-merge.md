@@ -1,14 +1,15 @@
 # pr-gates merge bot
 
 `.github/workflows/auto-merge.yml` (#722) merges a PR by itself once every gate
-holds on the PR's current head. It ships off and merges nothing until a
-repository owner turns it on.
+holds on the PR's current head. It merges nothing until a repository owner turns
+it on. In this repository the workflow is enabled and the variable below decides
+what it does.
 
 ## The three switches
 
 It merges only when all three are on:
 
-1. The workflow is enabled on GitHub (`gh workflow enable`). It ships disabled.
+1. The workflow is enabled on GitHub (`gh workflow enable`).
 2. The repository variable `PR_GATES_AUTO_MERGE` is `on`. `dry-run` evaluates and
    logs only. Unset means off.
 3. The `pr-gates` environment holds `PR_GATES_MERGE_TOKEN`.
@@ -37,7 +38,8 @@ the run summary names the reason.
 - A non-author approved this exact head (`PR_GATES_APPROVER_LOGINS` narrows who),
   and no reviewer's latest review requests changes.
 - Every review thread is resolved.
-- GitHub reports `mergeable_state` as `clean`.
+- GitHub reports `mergeable_state` as `clean`. A failing check that is not required,
+  such as `dod/ready-for-review`, makes it `unstable`, so the bot skips that PR.
 
 It then merges with `--match-head-commit`, using `PR_GATES_MERGE_METHOD` (default
 `merge`). It never uses `--admin`, and it never checks out or runs PR code.
@@ -47,8 +49,14 @@ It then merges with `--match-head-commit`, using `PR_GATES_MERGE_METHOD` (defaul
 1. Create the environment `pr-gates`, limit its deployment branches to the default
    branch, and add the secret `PR_GATES_MERGE_TOKEN`: a token for the merge account.
 2. Give the independent reviewer a way to post the commit status
-   `review/independent`, such as a GitHub App, and set
-   `PR_GATES_REVIEWER_LOGINS` to its login.
+   `review/independent`, and set `PR_GATES_REVIEWER_LOGINS` to every login that
+   may post it. The bot ignores a status posted by the PR's author. A GitHub App
+   can post it, or the approving account can, after reviewing that exact head:
+
+   ```bash
+   gh api -X POST repos/<owner>/<repo>/statuses/<sha> -f state=success \
+     -f context=review/independent -f description="Independent review passed at this head"
+   ```
 3. Run `gh workflow enable auto-merge.yml`.
 4. Run `gh workflow run auto-merge.yml -f pr=<number> -f dry_run=true`, then read
    the run summary.
