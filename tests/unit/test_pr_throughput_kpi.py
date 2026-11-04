@@ -573,6 +573,66 @@ def test_enrich_closed_discards_partial_metric_when_later_page_fails(target):
         assert any("check-runs page 2 failed" in error for error in errors)
 
 
+def test_enrich_closed_judges_the_earliest_commit_ci_ran_on():
+    closed = NOW - timedelta(minutes=30)
+    pr = _pr(5, created=NOW - timedelta(hours=3), closed=closed, merged=closed)
+    runner = FakeRunner(
+        {
+            "pulls/5/reviews": [],
+            "pulls/5/commits": [
+                {"sha": "early", "commit": {}},
+                {"sha": "pushed", "commit": {}},
+                {"sha": "later", "commit": {}},
+            ],
+            "commits/early/check-runs": {"total_count": 0, "check_runs": []},
+            "commits/pushed/check-runs": {
+                "total_count": 1,
+                "check_runs": [{"status": "completed", "conclusion": "failure"}],
+            },
+            "commits/later/check-runs": {
+                "total_count": 1,
+                "check_runs": [{"status": "completed", "conclusion": "success"}],
+            },
+        }
+    )
+    errors = []
+
+    result = kpi._enrich_closed(kpi.GhApi(runner), "o/r", [pr], errors)
+
+    assert errors == []
+    assert result["first_push_pass_rate"] == 0.0
+    assert result["first_push_checked"] == 1
+
+
+def test_collect_says_when_max_pages_cut_off_the_lists():
+    cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r", "max_pages": 1}})
+    recent = NOW - timedelta(minutes=30)
+    created = NOW - timedelta(hours=3)
+    closed = [
+        _pr(n, created=created, closed=recent, merged=recent, updated=recent)
+        for n in range(1, kpi.PER_PAGE + 1)
+    ]
+    still_open = [
+        _pr(n, created=created, updated=recent)
+        for n in range(1000, 1000 + kpi.PER_PAGE)
+    ]
+    runner = FakeRunner(
+        {
+            "pulls?state=closed": closed,
+            "pulls?state=open": still_open,
+            "/reviews": [],
+            "/commits": [],
+            "/pulls/": {"mergeable_state": "clean"},
+        }
+    )
+
+    report = kpi.collect(kpi.GhApi(runner), cfg, NOW)
+
+    assert report["status"] == "partial"
+    assert any("open PR list" in error for error in report["errors"])
+    assert any("closed PR list" in error for error in report["errors"])
+
+
 def test_gh_failure_yields_unavailable_report_with_missing_metrics():
     cfg = kpi.parse_config({"kpi": {"enabled": True, "repo": "o/r"}})
     runner = FakeRunner(fail={"/pulls?"})
