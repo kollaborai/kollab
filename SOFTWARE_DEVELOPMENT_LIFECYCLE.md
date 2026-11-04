@@ -29,6 +29,8 @@ here for detail.
   different AI agent must review every PR's exact final head
   and record the required GitHub approval with whichever account, `kollaborai`
   or `maarco`, is not the PR author. GitHub prohibits author self-approval.
+  That review is clean-room and posted as a recorded PASS or FAIL verdict on a
+  pinned head before the PR is merge-ready; see Pull request gates.
   Once the code-owner gate is enabled, that approval must also come from one
   of the two repository code owners. GitHub verifies the approving account,
   not which agent performed the review; keep independent reviewer identity and
@@ -120,9 +122,18 @@ gh pr create --draft --head issue-8-version-display --title "fix(cli): correct v
 - Push the lane branch normally and open a DRAFT PR against `main`. Agents do
   not mark their own PR ready or merge it. Note overlapping PRs and path
   ownership so the integrator can sequence them.
-- Review must name the exact PR head SHA and current `main` base SHA. Required
-  CI checks must be green on that head, the branch must include the current
-  base, and all review conversations must be resolved before merge.
+- Independent review starts only while the PR head is current with `main`:
+  `mergeStateStatus` is not BEHIND or DIRTY. Review must name the exact PR
+  head SHA and the `main` base SHA it was reviewed against. Required CI
+  checks must be green on that head, the branch must include the current
+  base, and all review conversations must be resolved before merge. If the
+  head moves after review, or `main` moves past the recorded base with
+  conflicting or relevant changes, the verdict is void and the review is
+  redone. A head that moved only by merging `main` keeps its verdict only when
+  an independent reviewer posts an addendum pinned to the new head and base,
+  confirming that the PR's own diff is unchanged apart from changelog lines and
+  that nothing merged from `main` touches what the PR changes or relies on.
+  Otherwise the review is redone.
 - When `main` advances, update the writer branch by fetching and merging
   `origin/main` into it, then push normally. If the remote PR branch advanced,
   fetch and merge that branch too. Resolve conflicts only within owned paths;
@@ -228,6 +239,17 @@ attribution or footer. GitHub prohibits authors from approving their own PRs;
 do not attempt self-approval. A new push
 dismisses stale approvals and requires fresh review and CI.
 
+The review itself is clean-room. The reviewer has not seen the code before the
+review: it is not the author and not any agent from the writer's lane. It
+works in a scratch environment with no shared checkout and no shared
+`~/.kollab` state (fresh clone or worktree, fresh venv), runs the tests
+itself, and posts the verdict on the PR. That PR comment records the pinned
+head SHA, the base SHA, the commands run, and PASS or FAIL. Reviewer identity
+and model stay in private maintainer audit evidence; the GitHub approval
+itself stays plain, with no AI attribution or footer. A PR is merge-ready
+only with such a verdict on its current head. CI green alone is not
+sufficient: CI plus an independent pinned-head review is the bar.
+
 Every merge uses `kollaborai` and a merge commit. Never use `--admin` or a
 ruleset bypass. If identity, bypass status, current base, required checks, or
 thread evidence is uncertain, stop. Before an authorized merge, recheck the
@@ -254,6 +276,8 @@ merge check.
   anything.
 - Respect package boundaries and follow existing patterns.
 - Add or update tests for new behavior, including failure modes.
+- Fix review findings red-first: land the failing regression test from the
+  finding before the fix, per Review and merge.
 - Run the targeted suite while iterating, then the full unit suite before
   opening the PR.
 - Python 3.14 is the language floor and the launch runtime.
@@ -322,6 +346,16 @@ review, base, CI, and thread-resolution gates pass. No extra permission request
 is needed for a merge already covered by that plan. Out-of-scope work requires
 a new authorization; release tags remain separately gated by Marco's explicit
 instruction.
+
+Review findings are fixed red-first. From each finding, write a regression
+test that reproduces it and fails on the current head, land that test alone
+(as its own commit, or as a strict `xfail` marker when the branch must stay
+green), then write the fix against it. The test flips green with no edits to
+the test itself; removing the strict `xfail` marker is the only permitted
+test change. The independent reviewer runs that test as the concrete repro
+instead of re-deriving one, and a fix commit that modifies its own regression
+test is flagged in review. A finding no test can reproduce, such as wording in
+a doc, says so in its fix commit instead.
 
 ## Release process
 
