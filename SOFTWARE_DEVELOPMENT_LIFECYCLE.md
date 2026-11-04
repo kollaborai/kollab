@@ -195,6 +195,12 @@ review and exact-head gates. Automatic arming remains disabled because the
 ruleset cannot verify the independent AI review; the separate exact-head audit
 remains required. Do not arm GitHub auto-merge manually.
 
+The optional merge bot (`.github/workflows/auto-merge.yml`, #722) is a separate
+path and ships off: the workflow is disabled on GitHub and `PR_GATES_AUTO_MERGE`
+is unset. Turning it on is a repository owner's decision; see
+`docs/operations/pr-gates-auto-merge.md`. While it is off, the integrator merges
+as described below.
+
 A PR must be current with `main`, have the required approval, all configured
 checks green, and all review conversations resolved. After the bootstrap above,
 the `main` ruleset requires one approving code-owner review, dismisses stale
