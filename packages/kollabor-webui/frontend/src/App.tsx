@@ -1,3 +1,4 @@
+import { sameVersionBase } from "./engine-version";
 import { refreshesOnEvent, tracksStreamedRequest } from "./live-follow";
 import type { SessionEvent } from "./api";
 import { createHistoryReconciliation } from "./history-reconciliation";
@@ -1210,7 +1211,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         if (!mounted) return;
         const bundle = __APP_VERSION__;
         const engine = (config?.engine_version || "").trim();
-        if (!engine || !bundle || engine === bundle) return;
+        // Source checkouts report a PEP 440 local version segment (+<sha8>, or
+        // +unknown without git metadata); compare base versions so a matching
+        // build does not flag a mismatch (#684).
+        if (!engine || !bundle || sameVersionBase(engine, bundle)) return;
         setVersionMismatch(
           `This page (v${bundle}) does not match the running engine (v${engine}). Reload after the engine finishes updating.`,
         );
