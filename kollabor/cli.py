@@ -3169,8 +3169,33 @@ def _run_async_main_with_sigterm_cleanup(detached_runtime: bool) -> None:
             signal_module.signal(signal_module.SIGTERM, previous_sigterm)
 
 
+def _is_tool_shell_agent_launch(argv: list[str]) -> bool:
+    """Return whether a marked tool child is trying to launch an agent."""
+    if not any(
+        marker in os.environ for marker in ("KOLLAB_TOOL_SHELL", "KOLLAB_AGENT_PID")
+    ):
+        return False
+
+    for argument in argv[1:]:
+        if argument == "--":
+            break
+        option = argument.split("=", 1)[0]
+        if option == "-a" or (option.startswith("--") and "--agent".startswith(option)):
+            return True
+        if argument.startswith("-a") and not argument.startswith("--"):
+            return True
+    return False
+
+
 def cli_main() -> None:
     """Synchronous entry point for pip-installed CLI command."""
+    if _is_tool_shell_agent_launch(sys.argv):
+        sys.stderr.write(
+            "error: nested --agent launches are blocked in tool/agent contexts; "
+            "use hub_spawn instead.\n"
+        )
+        raise SystemExit(2)
+
     _update_before_launch()
 
     # --detached: unless already detached by a supervisor, fork into a fully

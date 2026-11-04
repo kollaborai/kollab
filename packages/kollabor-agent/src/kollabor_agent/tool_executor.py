@@ -89,6 +89,7 @@ def _is_blocked_kollab_spawn(
 ) -> bool:
     """Detect Kollab agent launches and all-agent stops through common wrappers."""
     import ast
+    import base64
     import re
     import shlex
 
@@ -346,6 +347,112 @@ def _is_blocked_kollab_spawn(
             break
         return tokens, False
 
+    def inspect_windows_wrapper(
+        executable: str, args: list[str], is_background: bool, depth: int
+    ) -> bool | None:
+        if executable in shell_names or python_name.fullmatch(executable):
+            return None
+
+        def inspect_command(command_text: str) -> bool:
+            return _is_blocked_kollab_spawn(
+                command_text, background=is_background, _depth=depth + 1
+            )
+
+        def suspicious_wrapper() -> bool:
+            return suspicious_launch(f"{executable} {' '.join(args)}", is_background)
+
+        if executable in {"powershell", "pwsh"}:
+            index = 0
+            while index < len(args):
+                option = args[index].lower()
+                if option in {
+                    "-noprofile",
+                    "-nop",
+                    "-nologo",
+                    "-nol",
+                    "-noexit",
+                    "-noe",
+                    "-noninteractive",
+                    "-noni",
+                }:
+                    index += 1
+                    continue
+
+                if option in {"-command", "-commandwithargs", "-c"}:
+                    command_text = " ".join(args[index + 1 :]).strip()
+                    return command_text == "-" or (
+                        bool(command_text) and inspect_command(command_text)
+                    )
+
+                if option in {"-encodedcommand", "-enc", "-ec", "-e"}:
+                    if index + 1 >= len(args):
+                        return True
+                    try:
+                        command_text = (
+                            base64.b64decode(args[index + 1], validate=True)
+                            .decode("utf-16le")
+                            .lstrip("\ufeff")
+                        )
+                    except ValueError:
+                        return True
+                    return inspect_command(command_text)
+
+                if option in {
+                    "-executionpolicy",
+                    "-ep",
+                    "-inputformat",
+                    "-if",
+                    "-outputformat",
+                    "-of",
+                    "-version",
+                    "-v",
+                }:
+                    if index + 1 >= len(args):
+                        return suspicious_wrapper()
+                    index += 2
+                    continue
+
+                if option.startswith("-"):
+                    return suspicious_wrapper()
+                return inspect_command(" ".join(args[index:]))
+            return False
+
+        if executable == "cmd":
+            index = 0
+            while index < len(args):
+                option = args[index].lower()
+                if option in {"/d", "/s", "/q", "/a", "/u"}:
+                    index += 1
+                    continue
+                if option in {"/c", "/k"}:
+                    command_text = " ".join(args[index + 1 :]).strip()
+                    return bool(command_text) and inspect_command(command_text)
+                if option.startswith("/"):
+                    return suspicious_wrapper()
+                return inspect_command(" ".join(args[index:]))
+            return False
+
+        wrapper_options = {
+            "-c",
+            "-command",
+            "-commandwithargs",
+            "-e",
+            "-ec",
+            "-enc",
+            "-encodedcommand",
+            "/c",
+            "/k",
+        }
+        normalized = [argument.lower().split("=", 1)[0] for argument in args]
+        if any(option in wrapper_options for option in normalized):
+            if any(
+                option in {"-e", "-ec", "-enc", "-encodedcommand"}
+                for option in normalized
+            ):
+                return True
+            return suspicious_wrapper()
+        return None
+
     def inspect_segment(tokens: list[str], is_background: bool, depth: int) -> bool:
         if not tokens:
             return False
@@ -357,6 +464,9 @@ def _is_blocked_kollab_spawn(
 
         executable = basename(tokens[0]).removesuffix(".exe")
         args = tokens[1:]
+        windows_result = inspect_windows_wrapper(executable, args, is_background, depth)
+        if windows_result is not None:
+            return windows_result
         if executable in shell_names:
             for index, token in enumerate(args[:-1]):
                 if token == "-c" or (
