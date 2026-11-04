@@ -52,6 +52,7 @@ status: active
 - [Domain Discovery](specs/agent-domain-discovery-contract.md) - Signed descriptors and origin pins, separate from workspace authorization
 - [Agent DNS Reference](architecture/reference/agent-dns-reference.md) - Local identity registry and historical direct TCP/TLS transport
 - [A2A Workspace Receiver](operations/agent-a2a-workspace.md) - Explicit receiver setup, device membership, and scoped tool grants
+- [PR Gates DoD](operations/pr-gates-dod.md) - Configurable definition-of-done check per PR: one check run, no comment spam, off by default
 
 ## Architecture
 
