@@ -54,7 +54,9 @@ reviewer identity and exact reviewed SHA in private maintainer audit evidence;
 keep the GitHub approval plain, with no AI attribution or footer. GitHub
 prohibits author self-approval. This standing source-review instruction does
 not require a separate human approval; other GitHub comments and mutations still follow the
-batch-approval table. The authorized merge action is limited to covered PRs;
+batch-approval table. The authorized merge action is limited to covered PRs; a
+class order in Marco's own words covers every PR in its class that passes the
+gates (`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`), and no agent can narrow or cancel it;
 every merge uses `kollaborai` with a merge commit, never through `--admin` or a
 ruleset bypass.
 After the code-owner gate is enabled, `.github/CODEOWNERS` covers every path
