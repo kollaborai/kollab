@@ -343,7 +343,7 @@ def test_enrich_closed_paginates_reviews_and_check_runs():
     assert result["first_push_checked"] == 1
     assert any("pulls/5/reviews" in path and "page=2" in path for path in runner.calls)
     assert any("check-runs" in path and "page=2" in path for path in runner.calls)
-    # Commits are intentionally left as one request: only commits[0] is used.
+    # One page of commits means one request; longer lists page like the others.
     assert sum("pulls/5/commits" in path for path in runner.calls) == 1
 
 
@@ -593,6 +593,31 @@ def test_enrich_closed_judges_the_earliest_commit_ci_ran_on():
                 "total_count": 1,
                 "check_runs": [{"status": "completed", "conclusion": "success"}],
             },
+        }
+    )
+    errors = []
+
+    result = kpi._enrich_closed(kpi.GhApi(runner), "o/r", [pr], errors)
+
+    assert errors == []
+    assert result["first_push_pass_rate"] == 0.0
+    assert result["first_push_checked"] == 1
+
+
+def test_enrich_closed_finds_the_first_pushed_head_past_page_one():
+    closed = NOW - timedelta(minutes=30)
+    pr = _pr(5, created=NOW - timedelta(hours=3), closed=closed, merged=closed)
+    page_1 = [{"sha": f"early{n}", "commit": {}} for n in range(kpi.PER_PAGE)]
+    runner = FakeRunner(
+        {
+            "pulls/5/reviews": [],
+            "pulls/5/commits?per_page=100&page=1": page_1,
+            "pulls/5/commits?per_page=100&page=2": [{"sha": "pushed", "commit": {}}],
+            "commits/pushed/check-runs": {
+                "total_count": 1,
+                "check_runs": [{"status": "completed", "conclusion": "failure"}],
+            },
+            "/check-runs": {"total_count": 0, "check_runs": []},
         }
     )
     errors = []
