@@ -346,6 +346,15 @@ writer worktree, DRAFT PR, exact-head CI/review, explicit merge authorization,
 and merge commit by the designated integrator. Hotfix releases follow the
 normal release process after the fix is merged and `main` is synchronized.
 
+## Productization
+
+Enhancements ship as opt-in, default off, repo-agnostic product surfaces (skill,
+extension, agent, or plugin). The toggle defaults to off; repo, owner, check
+names, identities, schedules, and paths come from config or provider discovery.
+Hub job registration and ruleset or required-status changes need separate owner
+sign-off. The checklist to copy into the PR body and the #711-#730 surface
+mapping are in [docs/productization.md](docs/productization.md).
+
 ## Definition of done
 
 - The PR body contains the complete product-ready checklist from `docs/product-ready-checklist.md`, with evidence for completed items and a specific reason for every N/A.
