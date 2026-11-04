@@ -98,6 +98,28 @@ async def test_capability_loss_during_admission_returns_the_image_notice(during_
 
 
 @pytest.mark.asyncio
+async def test_untyped_capability_error_during_admission_still_maps_to_notice():
+    """An untyped ACPError carrying the capability-loss text maps to the notice.
+
+    Base maps the steer-path capability loss by message text (main is
+    canonical); the structured surface adds the typed images_unsupported
+    class as the primary signal. Either signal must land the image notice
+    instead of letting the ACPError escape admission.
+    """
+    runner = runner_with_capability(False)
+    steer = AsyncMock(side_effect=ACPError("This harness can't take images."))
+    acp = SimpleNamespace(supports_image_input=True, steer=steer, admit=runner.admit)
+    service = object.__new__(LLMService)
+    result = await service._admit_acp(acp, {
+        "message": [{"type": "text", "text": "Look"},
+                    {"type": "image", "image": "data:image/png;base64,YWJj"}],
+    }, "state_rpc")
+    assert result == {"status": "rejected", "reason": "This harness can't take images."}
+    assert steer.await_count == 1
+    assert runner._queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_image_url_is_rejected_instead_of_dropped():
     runner = runner_with_capability(True)
     acp = SimpleNamespace(supports_image_input=True, steer=AsyncMock(), admit=runner.admit)
