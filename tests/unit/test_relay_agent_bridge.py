@@ -412,6 +412,21 @@ async def test_relay_result_cannot_create_task_or_echo_to_external_bridge(bridge
             self._queue_processor = ContinuationQueue()
             self.scheduled = []
             self.contexts = []
+            self._turn_serial = 0
+            self._cursor_winner_serial = 0
+            self._continue_serial = None
+            self.current_parent_uuid = None
+
+        def claim_turn_serial(self):
+            self._turn_serial += 1
+            return self._turn_serial
+
+        def publish_cursor(self, uuid, serial):
+            if serial is None or serial < self._cursor_winner_serial:
+                return False
+            self._cursor_winner_serial = serial
+            self.current_parent_uuid = uuid
+            return True
 
         @property
         def is_processing(self):
