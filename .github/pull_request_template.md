@@ -106,6 +106,24 @@ in `docs/product-ready-checklist.md`.
   ruleset bypass. Work outside the plan needs new authorization, and release
   tags need separate explicit maintainer instruction.
 
+## Productization checklist
+
+Applies when this PR adds an enhancement that ships as a product surface
+(skill, extension, agent, or plugin). Check an item only when evidence supports
+it. For a non-applicable item, replace `[ ]` with `[x] N/A - <specific reason>`.
+Do not leave items blank, use a blanket N/A, or claim unverified work. The
+canonical policy, checklist, and #711-#730 surface mapping are in
+`docs/productization.md`.
+
+- [ ] Names its product surface: skill, extension, agent, or plugin.
+- [ ] Has an opt-in config toggle that defaults to off (name the key in the surface's docs).
+- [ ] Reads repo, owner, check names, identities, schedules, and paths from config or provider discovery; no literal `kollaborai/kollab` or personal host, device, or user names.
+- [ ] Documents the toggles and the enable steps.
+- [ ] Flags anything inherently Kollab-internal.
+- [ ] Hub job registration, ruleset, or required-status changes have recorded owner sign-off (these are not covered by a plain PR).
+- [ ] A failing regression test was written and seen to fail before the fix (#721).
+
+
 ## Risk and rollout notes
 
 <!-- Mention compatibility, migrations, known gaps, and follow-up work. -->
