@@ -46,10 +46,10 @@ It then merges with `--match-head-commit`, using `PR_GATES_MERGE_METHOD` (defaul
 
 ## When it looks
 
-The bot looks at a PR when CI, the definition-of-done check or an approval finishes,
-when `review/independent` succeeds, and when the PR is marked ready, reopened, relabeled
-or pushed to. A check still running at that moment also reads as `unstable`, so that
-run skips.
+The bot looks at a PR when CI, the definition-of-done check or the approval relay
+succeeds, when `review/independent` succeeds, and when the PR is marked ready, reopened,
+relabeled or pushed to. A failed run does not wake it. A check still running at that
+moment also reads as `unstable`, so that run skips.
 
 If the last thing to finish is none of those, such as CodeQL or a thread resolved last,
 nothing wakes it. Wake it with `gh workflow run auto-merge.yml -f pr=<number> -f dry_run=false`.
