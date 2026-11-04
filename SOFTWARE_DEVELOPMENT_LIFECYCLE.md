@@ -160,7 +160,8 @@ it covers every PR in that class that passes the gates above. A reviewer can
 still block a PR with findings, but no agent can narrow or cancel the order
 itself. Send a doubt about its scope to Marco and keep merging the PRs it
 clearly covers. An agent's paraphrase or an automated answer is not a class
-order, and a class order never covers release tags.
+order. A class order never covers release tags, and it covers a release PR only
+if it says so.
 
 ## Code-owner approval and bootstrap
 
