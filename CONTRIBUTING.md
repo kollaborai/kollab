@@ -167,6 +167,15 @@ Useful starting points:
 - [docs/release-process.md](docs/release-process.md)
 - [AGENTS.md](AGENTS.md)
 
+## Productization
+
+Every enhancement ships as an opt-in, default off, repo-agnostic product surface:
+a skill, extension, agent, or plugin. Its toggle defaults to off, and its repo,
+check names, identities, schedules, and paths come from config or provider
+discovery, never from a literal `kollaborai/kollab`. Flag anything that is
+inherently Kollab-internal. The full rule, checklist, and surface mapping for
+#711-#730 are in [docs/productization.md](docs/productization.md).
+
 ## Reporting Bugs
 
 Open a GitHub issue with:

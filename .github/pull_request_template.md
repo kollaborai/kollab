@@ -92,7 +92,7 @@ in `docs/product-ready-checklist.md`.
   was clear; existing dirty work, branches, and worktrees were preserved; the
   maintainer integration checkout had no source edits.
 - [ ] The PR remains a draft until its designated integrator marks it ready
-  within the maintainer-authorized integration plan, after a different AI
+  within the maintainer-authorized integration plan, batch, or class order, after a different AI
   agent reviews the exact final head, records approval as whichever account
   (`kollaborai` or `maarco`) is not the PR author, and required CI passes.
   Record reviewer identity and exact reviewed SHA in private maintainer audit
@@ -113,6 +113,24 @@ in `docs/product-ready-checklist.md`.
 - [ ] Every review finding has a failing regression test landed before its
   fix (as its own commit, or marked strict `xfail`); the fix flipped it green
   without editing the test, and removing that marker was the only test change.
+
+## Productization checklist
+
+Applies when this PR adds an enhancement that ships as a product surface
+(skill, extension, agent, or plugin). Check an item only when evidence supports
+it. For a non-applicable item, replace `[ ]` with `[x] N/A - <specific reason>`.
+Do not leave items blank, use a blanket N/A, or claim unverified work. The
+canonical policy, checklist, and #711-#730 surface mapping are in
+`docs/productization.md`.
+
+- [ ] Names its product surface: skill, extension, agent, or plugin.
+- [ ] Has an opt-in config toggle that defaults to off (name the key in the surface's docs).
+- [ ] Reads repo, owner, check names, identities, schedules, and paths from config or provider discovery; no literal `kollaborai/kollab` or personal host, device, or user names.
+- [ ] Documents the toggles and the enable steps.
+- [ ] Flags anything inherently Kollab-internal.
+- [ ] Hub job registration, ruleset, or required-status changes have recorded owner sign-off (these are not covered by a plain PR).
+- [ ] A failing regression test was written and seen to fail before the fix (#721).
+
 
 ## Risk and rollout notes
 

@@ -39,7 +39,7 @@ described after it.
 | assign people, request reviewers | batch approval |
 | close, reopen, lock, transfer an issue/PR | human does it, or approves that single item by number |
 | merge a PR covered by Marco's plan as `kollaborai` | designated integrator after review and gates; merge commit only, no admin or ruleset bypass |
-| enable or disable auto-merge | **never** (human only) |
+| enable or disable auto-merge | only on the owner's own words in chat |
 | mark a draft PR ready for review | **never** (reserved to the designated integrator) |
 | push, force-push, branch/tag/release create/move/delete, PyPI, Homebrew | **never** |
 | edit workflows, branch protection, rulesets, repo settings | **never** |
@@ -54,7 +54,9 @@ reviewer identity and exact reviewed SHA in private maintainer audit evidence;
 keep the GitHub approval plain, with no AI attribution or footer. GitHub
 prohibits author self-approval. This standing source-review instruction does
 not require a separate human approval; other GitHub comments and mutations still follow the
-batch-approval table. The authorized merge action is limited to covered PRs;
+batch-approval table. The authorized merge action is limited to covered PRs; a
+class order in Marco's own words covers every PR in its class that passes the
+gates (`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`), and no agent can narrow or cancel it;
 every merge uses `kollaborai` with a merge commit, never through `--admin` or a
 ruleset bypass.
 After the code-owner gate is enabled, `.github/CODEOWNERS` covers every path

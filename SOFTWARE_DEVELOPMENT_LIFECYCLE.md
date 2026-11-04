@@ -19,8 +19,9 @@ here for detail.
 ## Roles
 
 - Marco (operator): decides what ships and may authorize a concrete integration
-  plan or bounded PR batch. That authorization covers its listed work without a
-  separate permission request for each merge step. Marco retains release and
+  plan or bounded PR batch, including a class order (see Main protection and
+  merge authority). That authorization covers its work without a separate
+  permission request for each merge step. Marco retains release and
   tag authority; release tags always need his explicit instruction.
 - Designated integrator: one active named owner for the repository's merge
   queue. The integrator verifies each exact PR head, base, and required gates,
@@ -159,6 +160,16 @@ commit and no admin or ruleset bypass. Work outside the authorized scope require
 decision. This authority does not cover release tags, which require Marco's
 separate explicit instruction.
 
+A class order counts as a bounded PR batch. A class order is an order in
+Marco's own words that covers a class of PRs for a stated scope or time window,
+for example "merge as many ready PRs as you can tonight". It needs no PR list:
+it covers every PR in that class that passes the gates above. A reviewer can
+still block a PR with findings, but no agent can narrow or cancel the order
+itself. Send a doubt about its scope to Marco and keep merging the PRs it
+clearly covers. An agent's paraphrase or an automated answer is not a class
+order. A class order never covers release tags, and it covers a release PR only
+if it says so.
+
 ## Code-owner approval and bootstrap
 
 `.github/CODEOWNERS` assigns every path and the CODEOWNERS file itself to
@@ -190,6 +201,16 @@ designated integrator marks ready only for covered work after independent
 review and exact-head gates. Automatic arming remains disabled because the
 ruleset cannot verify the independent AI review; the separate exact-head audit
 remains required. Do not arm GitHub auto-merge manually.
+
+The merge bot (`.github/workflows/auto-merge.yml`, #722) is a separate path and
+is enabled in this repository. The repository variable `PR_GATES_AUTO_MERGE`
+decides what it does: `dry-run` logs what it would merge, `on` also merges, and
+unset turns it off. It merges a PR only when every gate holds on the current
+head, including the commit status `review/independent`, which the approving
+account posts after an independent review of that exact head. It leaves any PR
+touching `.github/` to the integrator, who otherwise merges as described below.
+Changing the variable is a repository owner's decision; see
+`docs/operations/pr-gates-auto-merge.md`.
 
 A PR must be current with `main`, have the required approval, all configured
 checks green, and all review conversations resolved. After the bootstrap above,
@@ -292,13 +313,30 @@ Desktop Mac/Linux builds (the `binaries` and `desktop` workflows) run only on
 release tags. They are never PR checks and never merge requirements. The one
 exception: `ci/binary-smoke` runs one quick Linux binary smoke build on every
 PR and main push (about 49 seconds, no artifacts). It proves the build works
-early; it is not a required merge check.
+early; it is not a required merge check. CodeQL (`Analyze (...)`) also runs on
+PRs and is not a required merge check.
+
+The definition-of-done check (`.github/workflows/pr-gates-dod.yml`, #724) grades
+each PR with one check run, `dod/ready-for-review`. It runs the base branch's copy
+and no PR code, and it is not a required merge check. A failing grade still keeps
+the merge bot from merging. `signed_commits` stays out of it until agent commits
+are signed (#755).
+
+The throughput report (`.github/scripts/pr_throughput_kpi.py`, #729) is opt-in and
+runs by hand. It is not a check.
+
+The stale PR sweeper (`.github/workflows/stale-pr-sweeper.yml`) runs daily and
+on demand (`dry_run` reports without labeling). It lists open PRs with no new
+commit and no review activity for 5+ days in one digest and adds the
+`status/stale` label; `status/no-stale` opts a PR out. It only flags: it never
+closes, comments on, or changes the draft state of a PR.
 
 ## Review and merge
 
 Every PR requires an independent source review of the exact head; the PR author
-cannot supply that review. Marco's explicit integration plan/batch is the merge
-authorization for the work it names. The designated integrator owns queue
+cannot supply that review. Marco's explicit integration plan, batch, or class
+order is the merge authorization for the work it covers. The designated
+integrator owns queue
 order, may mark covered PRs ready, and lands them with merge commits after the
 review, base, CI, and thread-resolution gates pass. No extra permission request
 is needed for a merge already covered by that plan. Out-of-scope work requires
@@ -326,6 +364,9 @@ Full mechanics: `docs/release-process.md`. Summary:
   ONLY when Marco explicitly instructs them to.
 - Before tagging, check all machines for unpushed work and prove the integration
   checkout HEAD equals `origin/main` at the intended release merge commit.
+- After the tag is pushed, dispatch `.github/workflows/publish.yml` from reviewed
+  `main` with `-f tag=vX.Y.Z`. It builds from the tagged source and publishes the
+  packages and the GitHub Release.
 
 ## Hotfixes
 
@@ -334,12 +375,21 @@ writer worktree, DRAFT PR, exact-head CI/review, explicit merge authorization,
 and merge commit by the designated integrator. Hotfix releases follow the
 normal release process after the fix is merged and `main` is synchronized.
 
+## Productization
+
+Enhancements ship as opt-in, default off, repo-agnostic product surfaces (skill,
+extension, agent, or plugin). The toggle defaults to off; repo, owner, check
+names, identities, schedules, and paths come from config or provider discovery.
+Hub job registration and ruleset or required-status changes need separate owner
+sign-off. The checklist to copy into the PR body and the #711-#730 surface
+mapping are in [docs/productization.md](docs/productization.md).
+
 ## Definition of done
 
 - The PR body contains the complete product-ready checklist from `docs/product-ready-checklist.md`, with evidence for completed items and a specific reason for every N/A.
 - Tracked task complete, tests green on the required CI checks.
-- The PR is covered by Marco's authorized concrete plan or batch (or is
-  individually authorized). The designated integrator independently reviews
+- The PR is covered by Marco's authorized concrete plan, batch, or class order
+  (or is individually authorized). The designated integrator independently reviews
   the exact head, verifies required CI, and merges it (or explicitly closes it).
 - The designated integrator fast-forwarded local `main` after merge:
   `git pull --ff-only origin main`.
