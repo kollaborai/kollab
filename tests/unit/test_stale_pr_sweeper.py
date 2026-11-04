@@ -380,3 +380,17 @@ def test_main_rejects_missing_repo(capsys, monkeypatch):
     # main() returns the exit code; the __main__ wrapper raises SystemExit.
     assert sweeper.main([]) == 2
     assert "--repo or $GH_REPO is required" in capsys.readouterr().err
+
+
+def test_workflow_notify_step_is_fail_soft():
+    """The ntfy step is best-effort and can never fail the sweep run."""
+    text = (REPO_ROOT / ".github" / "workflows" / "stale-pr-sweeper.yml").read_text(
+        encoding="utf-8"
+    )
+    # Topic comes from the existing secret/vars contract, never hardcoded.
+    assert "NTFY_TOPIC: ${{ secrets.NTFY_TOPIC || vars.NTFY_TOPIC }}" in text
+    assert '"$NTFY_SERVER/$NTFY_TOPIC"' in text
+    # Unset topic warns and skips; a failed POST warns and is ignored.
+    assert "::warning::NTFY_TOPIC" in text
+    assert 'echo "::warning::ntfy notify failed' in text
+    assert "continue-on-error: true" in text
