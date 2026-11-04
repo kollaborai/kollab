@@ -3912,7 +3912,7 @@ class HubPlugin(BasePlugin):
                     output="",
                     error=(
                         "Task assignment was not sent because its durable dispatch "
-                        f"record could not be saved: {e}"
+                        f"record could not be saved: {e or type(e).__name__}"
                     ),
                 )
             dispatch_id = msg.id
@@ -3985,7 +3985,7 @@ class HubPlugin(BasePlugin):
                     self._task_ledger.update_dispatch,
                     dispatch_id,
                     status="delivery_failed",
-                    delivery_error=f"routing failed: {e}",
+                    delivery_error=f"routing failed: {e or type(e).__name__}",
                 )
                 if not updated:
                     logger.warning(
@@ -4001,7 +4001,10 @@ class HubPlugin(BasePlugin):
                 tool_type="hub_msg",
                 success=False,
                 output="",
-                error=f"Task assignment could not be routed: {e}",
+                error=(
+                    "Task assignment could not be routed: "
+                    f"{e or type(e).__name__}"
+                ),
             )
         if dispatch_id:
             dispatch_status = "delivery_failed" if rejections else "in_flight"
@@ -4039,7 +4042,7 @@ class HubPlugin(BasePlugin):
         if rejections:
             parts = []
             for ident, reason in rejections:
-                parts.append(f"{ident}: {reason}")
+                parts.append(f"{ident}: {reason or 'refused with no reason given'}")
                 self._record_dispatch_failure(ident, reason)
             output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
                 # The reason already says what to do; force means nothing here.
@@ -4115,6 +4118,7 @@ class HubPlugin(BasePlugin):
         else:
             output = f"delivered to {target}"
 
+        metadata["delivery"] = self._delivery_evidence(msg, target)
         if any_wait and not warned:
             metadata["end_turn"] = True
         if not target.startswith("relay:") and not handle:
@@ -4126,6 +4130,30 @@ class HubPlugin(BasePlugin):
             output=output,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _delivery_evidence(msg: HubMessage, target: str) -> dict:
+        """How far a hub_msg got, for the sender to read.
+
+        ``confirmed``: a recipient's hub socket acked this message's id.
+        ``accepted``: a network peer accepted it (acceptance is not reading).
+        ``queued``: it sits in a mailbox; the recipient has not taken it.
+        ``unconfirmed``: nothing acked it and nothing queued it.
+        """
+        meta = msg.metadata or {}
+        acked = list(meta.get("_acked_by", []))
+        if meta.get("relay_receipt") or meta.get("network"):
+            state = "accepted"
+        elif meta.get("_queued_for") or meta.get("_socket_failed"):
+            state = "queued"
+        elif acked and (
+            target in acked or msg.scope != MessageScope.DIRECT.value
+        ):
+            state = "confirmed"
+        else:
+            state = "unconfirmed"
+        # Ids stay out: a tool result reaches attached clients and the model.
+        return {"state": state, "recipients": acked}
 
     async def _handle_hub_broadcast_tool(self, tool_data: dict):
         """Execute a hub_broadcast tool."""
@@ -9540,6 +9568,26 @@ class HubPlugin(BasePlugin):
         """Get the persona color for an identity, or a stable palette fallback."""
         return persona_color(identity)
 
+    def _publish_hub_display(
+        self, from_name: str, to_name: str, content: str, observing: bool
+    ) -> None:
+        """Publish a hub message box as a semantic event for `kollab --hub capture`.
+
+        The box itself is rendered output, which the JSON capture drops whenever a
+        semantic event (a heartbeat's state_snapshot) is in the ring. This copy is
+        semantic, so the transcript keeps the message. Never raises.
+        """
+        from kollabor_tui.display_tap import publish_semantic
+
+        publish_semantic(
+            getattr(self, "_display_tap", None),
+            "hub_display",
+            sender=from_name,
+            target=to_name,
+            observing=observing,
+            text=f"{from_name} -> {to_name}\n{content}",
+        )
+
     def _render_hub_box(
         self, from_name: str, to_name: str, content: str, observing: bool = False
     ) -> None:
@@ -9551,6 +9599,7 @@ class HubPlugin(BasePlugin):
         Direct messages: bright colored ◆ marker
         Observed messages: dimmed colored ◇ marker
         """
+        self._publish_hub_display(from_name, to_name, content, observing)
         renderer = self.event_bus.get_service("renderer") if self.event_bus else None
         if not renderer or not hasattr(renderer, "message_coordinator"):
             return
@@ -11401,7 +11450,7 @@ class HubPlugin(BasePlugin):
                     **({"waiting": True} if (message.metadata or {}).get("acp_waiting") else {}),
                 )
             except RelayError as exc:
-                return [(message.to, str(exc))]
+                return [(message.to, str(exc) or type(exc).__name__)]
             refusal = _receipt_refusal(receipt)
             if refusal:
                 if receipt.get("reason") == "recipient_unavailable" or (
@@ -11839,6 +11888,12 @@ class HubPlugin(BasePlugin):
             target=agent.identity,
             detail=dial_target,
         )
+        if success:
+            # The receiver acked this message's id: it is the sender's proof
+            # of delivery (see _delivery_evidence).
+            acked = list(message.metadata.get("_acked_by", []))
+            if agent.identity not in acked:
+                message.metadata["_acked_by"] = [*acked, agent.identity]
         if not success:
             await AgentMessenger.send_to_file(agent.identity, message)
             # The sender has to hear that this was a mailbox drop, not a
