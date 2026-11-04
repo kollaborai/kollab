@@ -243,12 +243,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shell and ACP orphan tests use bounded PID-and-birth checks; surviving
   detached helpers defer to the ephemeral CI runner after cleanup failures
   or interruption (#570).
-- The process-scan guard preserves Windows path separators, rejects malformed
-  command quoting, and inspects nested `cmd /c`, `cmd /k`, and PowerShell
-  command payloads (including encoded commands). It blocks `tasklist`,
-  `wmic` process queries, `Get-Process`, CIM/WMI commands, .NET
-  `System.Diagnostics.Process` listings, and opaque PowerShell expressions
-  (#570).
+- The process-scan guard preserves Windows paths, rejects malformed command
+  quoting, and checks nested `cmd /c` and `cmd /k` payloads. PowerShell scripts
+  fail closed unless their exact payload is allowlisted as benign, including
+  encoded commands; WMIC allows only explicit benign targets and WQL classes.
+  This blocks opaque scripts and process-table enumeration paths (#570).
 - Web UI: a message sent while a native agent is busy streams its own reply.
   Its stream used to end on the completion of the turn already running, and
   the reply never streamed. The engine now sends a request id with every chat

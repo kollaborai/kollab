@@ -234,9 +234,21 @@ def test_powershell_alternate_process_scans_fail_closed(script):
         (r"C:\Windows\System32\wbem\wmic.exe process list brief", True),
         (["wmic.exe", "path", "Win32_Process", "get", "ProcessId"], True),
         (["wmic.exe", "computersystem", "get", "name"], False),
+        (
+            ["wmic.exe", "/query", "SELECT * FROM Win32_Process WHERE Name='python.exe'"],
+            True,
+        ),
+        (["wmic.exe", "/query", "SELECT * FROM %WMI_CLASS%"], True),
+        (["wmic.exe", "/query:SELECT * FROM %WMI_CLASS%"], True),
+        (["wmic.exe", "unknownclass", "get", "Name"], True),
+        (["wmic.exe", "/query", "SELECT * FROM Win32_ComputerSystem"], False),
+        (
+            ["wmic.exe", "process", "where", "Name='python.exe'", "get", "Name,ProcessId"],
+            True,
+        ),
     ],
 )
-def test_wmic_process_queries_are_blocked_but_other_classes_stay_allowed(command, expected):
+def test_wmic_fails_closed_except_allowlisted_computer_system(command, expected):
     assert is_process_table_enumeration_command(command) is expected
 
 
@@ -244,6 +256,41 @@ def test_encoded_benign_powershell_get_date_stays_allowed():
     encoded = base64.b64encode("Get-Date".encode("utf-16-le")).decode("ascii")
     assert not is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", encoded])
 
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "Get-Command Get-Process",
+        "Get-Process -PassThru",
+        "Start-Process -FilePath notepad.exe -PassThru",
+        "[System.Diagnostics.Process]::GetProcessesByName('python')",
+        "$command = 'Get-Process'; & $command",
+        "Write-Output harmless",
+    ],
+)
+def test_unallowlisted_powershell_payloads_fail_closed(script):
+    for executable in ("powershell.exe", "pwsh.exe"):
+        command = [executable, "-NoProfile", "-Command", script]
+        assert is_process_table_enumeration_command(command), command
+        command_string = f'{executable} -NoProfile -Command "{script}"'
+        assert is_process_table_enumeration_command(command_string), command_string
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        encoded_command = [executable, "-EncodedCommand", encoded]
+        assert is_process_table_enumeration_command(encoded_command), encoded_command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["pwsh.exe", "-File", "process_scan.ps1"],
+        ["pwsh.exe", "-File", "process_scan.ps1", "-Command", "Get-Date"],
+        ["pwsh.exe", "-NoProfile"],
+        ["pwsh.exe", "-Com", "Get-Date"],
+    ],
+)
+def test_uninspected_powershell_invocation_modes_fail_closed(command):
+    assert is_process_table_enumeration_command(command), command
 
 
 def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch):
@@ -301,6 +348,12 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
         ["powershell.exe", "-NoProfile", "-Command", "Get-WmiObject Win32_Process"],
         ["powershell.exe", "-NoProfile", "-Command", "[System.Diagnostics.Process]::GetProcesses()"],
         ["wmic.exe", "process", "list", "brief"],
+        ["pwsh.exe", "-NoProfile", "-Command", "Get-Command Get-Process"],
+        ["pwsh.exe", "-NoProfile", "-Command", "Write-Output harmless"],
+        ["pwsh.exe", "-NoProfile", "-Command", "$command = 'Get-Process'; & $command"],
+        ["pwsh.exe", "-File", "process_scan.ps1"],
+        ["wmic.exe", "/query", "SELECT * FROM %WMI_CLASS%"],
+        ["wmic.exe", "unknownclass", "get", "Name"],
         ["powershell.exe", "-NoProfile", "-Command", "Invoke-Expression 'Get-CimInstance Win32_Process'"],
         ["powershell.exe", "-NoProfile", "-Command", r"CimCmdlets\Get-CimInstance Win32_Process"],
     ):
@@ -321,10 +374,19 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
             fake_subprocess.Popen(["pwsh.exe", "-EncodedCommand", encoded_cim])
 
     assert calls == []
+    safe_wmic_commands = [
+        ["wmic.exe", "computersystem", "get", "name"],
+        ["wmic.exe", "/query", "SELECT * FROM Win32_ComputerSystem"],
+    ]
+    for command in safe_wmic_commands:
+        assert fake_subprocess.Popen(command) == "launched"
+
     encoded_get_date = base64.b64encode("Get-Date".encode("utf-16-le")).decode("ascii")
     encoded_get_date_command = ["pwsh.exe", "-EncodedCommand", encoded_get_date]
     assert fake_subprocess.Popen(encoded_get_date_command) == "launched"
-    assert calls == [((encoded_get_date_command,), {})]
+    expected_calls = [((command,), {}) for command in safe_wmic_commands]
+    expected_calls.append(((encoded_get_date_command,), {}))
+    assert calls == expected_calls
 
 
 @pytest.mark.parametrize(

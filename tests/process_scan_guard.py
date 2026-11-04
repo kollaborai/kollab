@@ -216,27 +216,47 @@ def _decode_powershell_encoded_command(encoded: str) -> str | None:
     return command.lstrip("\ufeff")
 
 
-_POWERSHELL_DYNAMIC_EVALUATION = re.compile(r"\b(?:Invoke-Expression|iex)\b", re.IGNORECASE)
-_POWERSHELL_DOTNET_PROCESS_SCAN = re.compile(
-    r"\[\s*(?:System\.)?Diagnostics\.Process\s*\]\s*::\s*GetProcesses(?:ByName)?\s*\(",
-    re.IGNORECASE,
-)
-_POWERSHELL_MODULE_QUALIFIED_PROCESS_PROVIDER = re.compile(
-    r"\b[\w.-]+\\(?:Get-Process|gps|Get-CimInstance|gcim|Get-WmiObject|gwmi)\b",
-    re.IGNORECASE,
+_POWERSHELL_SAFE_PAYLOADS = frozenset({"get-date"})
+_WMIC_SAFE_ALIASES = frozenset({"computersystem"})
+_WMIC_SAFE_WQL_CLASSES = frozenset({"win32_computersystem"})
+_WMIC_PROCESS_REFERENCE = re.compile(r"\b[\w]*process[\w]*\b", re.IGNORECASE)
+_WMIC_WQL_CLASS_REFERENCE = re.compile(
+    r"\b(?:from|join)\s+([A-Za-z_][\w.:/\\]*)", re.IGNORECASE
 )
 
 
 def _powershell_payload_requires_fail_closed(command: str) -> bool:
-    """Block opaque dynamic execution and process APIs PowerShell tokenization misses."""
-    return any(
-        pattern.search(command)
-        for pattern in (
-            _POWERSHELL_DYNAMIC_EVALUATION,
-            _POWERSHELL_DOTNET_PROCESS_SCAN,
-            _POWERSHELL_MODULE_QUALIFIED_PROCESS_PROVIDER,
-        )
+    """Allow only exact, reviewed benign payloads; do not guess at PowerShell semantics."""
+    return command.strip().casefold() not in _POWERSHELL_SAFE_PAYLOADS
+
+
+def _wmic_command_requires_fail_closed(arguments: Sequence[str]) -> bool:
+    """Allow only explicit benign WMIC targets; unknown aliases and queries fail closed."""
+    if not arguments:
+        return True
+
+    joined_arguments = " ".join(arguments)
+    if _WMIC_PROCESS_REFERENCE.search(joined_arguments):
+        return True
+
+    normalized_arguments = [_shell_token_name(value).casefold() for value in arguments]
+    query_requested = any(
+        value in {"/query", "-query"} or value.startswith(("/query:", "-query:"))
+        for value in normalized_arguments
     )
+    if query_requested:
+        classes = _WMIC_WQL_CLASS_REFERENCE.findall(joined_arguments)
+        normalized_classes = {
+            re.split(r"[:/\\]", class_name)[-1].casefold() for class_name in classes
+        }
+        return not normalized_classes or not normalized_classes <= _WMIC_SAFE_WQL_CLASSES
+
+    targets = [value for value in normalized_arguments if not value.startswith(("/", "-"))]
+    if not targets:
+        return True
+    if targets[0] == "path":
+        return len(targets) < 2 or targets[1] not in _WMIC_SAFE_WQL_CLASSES
+    return targets[0] not in _WMIC_SAFE_ALIASES
 
 
 def _token_text(part: Any) -> str:
@@ -336,7 +356,7 @@ def _ps_has_only_pid_and_format_options(options: Sequence[str]) -> bool:
 
 
 def is_process_table_enumeration_command(command: Any) -> bool:
-    """Block host listings and unparseable commands; allow Docker and PID targets."""
+    """Fail closed on host process tables; allow only narrow known-safe targets."""
     tokens = _command_tokens(command)
     if tokens is None:
         return True
@@ -356,19 +376,21 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     return True
         if name in {"powershell", "pwsh"}:
             shell_args = tokens[index + 1 :]
+            inspected_payload = False
             for shell_index, option in enumerate(shell_args):
                 option_name = option.casefold()
                 if option_name in {"-c", "-command", "-commandwithargs", "-cwa"}:
                     nested_command = " ".join(shell_args[shell_index + 1 :])
-                    if nested_command.strip() == "-":
+                    if (
+                        not nested_command.strip()
+                        or _powershell_payload_requires_fail_closed(nested_command)
+                        or is_process_table_enumeration_command(nested_command)
+                    ):
                         return True
-                    if _powershell_payload_requires_fail_closed(nested_command):
-                        return True
-                    if is_process_table_enumeration_command(nested_command):
-                        return True
+                    inspected_payload = True
                     break
                 if option_name in {"-e", "-ec", "-enc", "-encodedcommand"}:
-                    if shell_index + 1 >= len(shell_args):
+                    if shell_index + 2 != len(shell_args):
                         return True
                     nested_command = _decode_powershell_encoded_command(shell_args[shell_index + 1])
                     if (
@@ -377,7 +399,15 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                         or is_process_table_enumeration_command(nested_command)
                     ):
                         return True
+                    inspected_payload = True
                     break
+                if option_name in {"-noprofile", "-nologo", "-noninteractive"}:
+                    continue
+                # Unknown switches, script files, and positional forms are opaque.
+                return True
+            if not inspected_payload:
+                return True
+            continue
         if name == "cmd":
             command_args = tokens[index + 1 :]
             for shell_index, option in enumerate(command_args[:-1]):
@@ -386,15 +416,8 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     if is_process_table_enumeration_command(nested_command):
                         return True
                     break
-        if name == "wmic":
-            # WMIC's process provider exposes the host process table; preserve
-            # unrelated WMI class queries.
-            wmic_targets = {
-                _shell_token_name(value).casefold().replace("-", "_")
-                for value in tokens[index + 1 :]
-            }
-            if {"process", "win32_process"} & wmic_targets:
-                return True
+        if name == "wmic" and _wmic_command_requires_fail_closed(tokens[index + 1 :]):
+            return True
         # CIM/WMI accept arbitrary class and WQL query forms. Block these
         # cmdlets wholesale instead of guessing whether a query lists processes.
         if name in {
