@@ -41,7 +41,7 @@ class FakeQueueProcessor:
 class FakeCoordinator:
     """Just enough coordinator surface for the driver."""
 
-    def __init__(self, turn_script=None, pipe_mode=False):
+    def __init__(self, turn_script=None, pipe_mode=False, chain=False):
         self.profile_manager = SimpleNamespace(
             get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "openai")
         )
@@ -61,6 +61,12 @@ class FakeCoordinator:
         self.continues = 0
         # each entry: list of fake tool results produced by that turn
         self.turn_script = turn_script or []
+        # admission-serial surface the driver must claim per goal turn (#676)
+        self._turn_serial = 0
+        self._continue_serial: int | None = None
+        # chain=True keeps the turn open while scripted turns remain, so a
+        # test can drive the driver's chain loop (site two)
+        self.chain = chain
 
     async def inject_system_message(self, content: str, subtype: str = "") -> None:
         self.pending_hud.append((subtype, content))
@@ -84,7 +90,13 @@ class FakeCoordinator:
             batch = self.turn_script.pop(0)
             if self.on_tool_batch_hook and batch:
                 self.on_tool_batch_hook(batch)
-        self._queue_processor.turn_completed = True
+        self._queue_processor.turn_completed = not (
+            self.chain and self.turn_script
+        )
+
+    def claim_turn_serial(self) -> int:
+        self._turn_serial += 1
+        return self._turn_serial
 
     def create_background_task(self, coro, name=None):
         task = asyncio.get_running_loop().create_task(coro)
@@ -109,8 +121,10 @@ class DriverTests(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def _make_driver(self, turn_script=None) -> tuple[GoalTurnDriver, FakeCoordinator]:
-        coord = FakeCoordinator(turn_script)
+    def _make_driver(
+        self, turn_script=None, chain=False
+    ) -> tuple[GoalTurnDriver, FakeCoordinator]:
+        coord = FakeCoordinator(turn_script, chain=chain)
         driver = GoalTurnDriver(self.service, coord)
         coord.on_tool_batch_hook = driver._on_tool_batch
         return driver, coord
@@ -121,6 +135,28 @@ class DriverTests(unittest.TestCase):
         )
         goal_id: str = record.goal_id
         return goal_id
+
+    def test_goal_turns_claim_a_fresh_serial_per_turn(self):
+        """Each goal turn is an admitted turn and claims a fresh admission
+        serial before continuing (#676) -- the hub-wake contract. Reusing the
+        queue's stale ``_continue_serial`` made goal rows publish on an
+        already-consumed ticket, so the cursor ignored them and the next
+        wake re-parented before the goal's rows."""
+        goal_id = self._create(auto_turn_limit=2)
+        script = [
+            [{"tool_type": "terminal", "output": "one", "tool_id": "t1",
+              "success": True}],
+            [{"tool_type": "terminal", "output": "two", "tool_id": "t2",
+              "success": True}],
+        ]
+        driver, coord = self._make_driver(turn_script=script, chain=True)
+        asyncio.run(driver.start(goal_id))
+
+        self.assertGreaterEqual(coord.continues, 2)
+        # one fresh claim per goal turn, ticket always the newest claim --
+        # never the queue's stale batch ticket
+        self.assertEqual(coord._turn_serial, coord.continues)
+        self.assertEqual(coord._continue_serial, coord._turn_serial)
 
     def test_steering_is_internal_context_not_user_message(self):
         goal_id = self._create(auto_turn_limit=1)

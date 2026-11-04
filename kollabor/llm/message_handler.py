@@ -471,6 +471,10 @@ class MessageHandler:
                 # queue turn last populated the shared cursor.
                 turn_serial = coord.claim_turn_serial()
                 coord._continue_serial = turn_serial
+                # Fresh chain (#676): the wake's first continuation parents
+                # on the pointer (the mention reply this wake answers), not
+                # the previous chain's tail.
+                coord._batch_tail_uuid = None
                 qp.is_processing = True
                 # Set turn_completed=False so _continue_conversation does not
                 # inject pending_agent_hud as a new user message. Setting True

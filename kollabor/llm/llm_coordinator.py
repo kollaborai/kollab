@@ -114,6 +114,13 @@ class LLMService:
     _turn_serial = 0
     _cursor_winner_serial = -1
     _continue_serial: int | None = None
+    # Chain-local tail (#676): the last row of the batch/continuation chain
+    # a tool loop is walking, kept separate from the shared cursor pointer
+    # a mid-run mention completion may advance. _batch_tail_serial applies
+    # the continue-ticket discipline: an older suspended batch completing
+    # late must not clobber a newer batch's tail.
+    _batch_tail_uuid: str | None = None
+    _batch_tail_serial: int | None = None
 
     def _is_hidden_voice_message(self, message) -> bool:
         """The user message that carries a hidden voice turn's instruction."""
@@ -1733,8 +1740,9 @@ class LLMService:
         A strictly later-admitted turn that already completed wins and this
         write is dropped. Same-serial writes (one turn advancing its own
         chain: user row, HUD insert, batch output, tool-loop continuation)
-        all land. Untracked work, including system nudges and bare payloads,
-        has no admission ticket and must not move the shared cursor.
+        all land. Only an explicitly untracked write (serial None) is
+        rejected: batches claim a ticket at batch start (#676), so every
+        batch that runs holds one.
         """
         if serial is None or serial < self._cursor_winner_serial:
             return False
@@ -1775,8 +1783,11 @@ class LLMService:
         )
         # The batch's admission serial (#676 r7): the newest ticket carried
         # by any item in the batch, so the batch's cursor writes resolve by
-        # the admission order of what it contains. None (system nudges,
-        # bare payloads) means the batch may run but cannot advance the cursor.
+        # the admission order of what it contains. A batch with no ticket
+        # (system nudges, bare payloads) claims one at batch start (#676):
+        # the claim is strictly later than everything already admitted --
+        # the batch's true execution order -- so its output can advance the
+        # cursor instead of stranding it before the nudge rows.
         batch_serial = max(
             (
                 getattr(m, "admission_serial", None)
@@ -1785,6 +1796,8 @@ class LLMService:
             ),
             default=None,
         )
+        if batch_serial is None:
+            batch_serial = self.claim_turn_serial()
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
             merged_origin_context = merge_voice_origin_contexts(messages)
@@ -1825,6 +1838,16 @@ class LLMService:
             current_parent_uuid=batch_parent_uuid,
             request_ids=request_ids,
         )
+        # Seed the chain-local tail for this batch's tool-loop continuations
+        # (#676), under the same discipline as the continue ticket: an older
+        # suspended batch completing late must not clobber a newer batch's
+        # tail.
+        if (
+            self._batch_tail_serial is None
+            or batch_serial >= self._batch_tail_serial
+        ):
+            self._batch_tail_uuid = batch_uuid
+            self._batch_tail_serial = batch_serial
         # Completion publishes through the admission-serial protocol: a
         # later-admitted mention that completed while this batch ran keeps
         # the cursor; a same-turn tool-loop continuation below writes on.
@@ -1870,9 +1893,16 @@ class LLMService:
                 # (#676 r7): it publishes on that turn's admission serial
                 # so a later-admitted mention completion still wins over it.
                 self.publish_cursor(hud_uuid, self._continue_serial)
+        # Chain-local parenting (#676): a tool-loop continuation follows
+        # this chain's own last row, not the shared pointer -- a
+        # later-admitted mention that completed mid-batch keeps the cursor
+        # while the chain stays contiguous. None = chain start: parent on
+        # the pointer.
+        chain_parent = self._batch_tail_uuid or self.current_parent_uuid
         cont_uuid = await self._queue_processor.continue_conversation(
-            current_parent_uuid=self.current_parent_uuid,
+            current_parent_uuid=chain_parent,
         )
+        self._batch_tail_uuid = cont_uuid
         # Same-turn handoff (batch -> tool-loop continuation): publishes on
         # the batch's serial so later-admitted mention completions still win
         # over this chain, while the chain itself stays contiguous (#676 r7).

@@ -475,6 +475,15 @@ class GoalTurnDriver:
             # honest. The hub path sets False for the opposite reason:
             # it must NOT inject HUD mid-chain.
             qp.turn_completed = True
+            # A goal turn is an admitted turn (#676): claim a fresh serial
+            # so its rows and continuations publish past everything already
+            # admitted -- the hub-wake contract (message_handler). Reusing
+            # the queue's stale batch ticket made the cursor ignore goal
+            # rows, so the next wake re-parented before them.
+            self.coord._continue_serial = self.coord.claim_turn_serial()
+            # Fresh chain: the first goal turn parents on the pointer, not
+            # the previous chain's tail.
+            self.coord._batch_tail_uuid = None
             await self.coord._continue_conversation()
             chain_turns = 0
             while not qp.turn_completed and not qp.cancel_processing:
@@ -492,6 +501,9 @@ class GoalTurnDriver:
                     break
                 chain_turns += 1
                 try:
+                    # Each chain turn is its own admitted turn (#676): the
+                    # first turn's ticket is already consumed by its rows.
+                    self.coord._continue_serial = self.coord.claim_turn_serial()
                     await self.coord._continue_conversation()
                 except Exception as exc:
                     logger.error("goal turn continuation error: %s", exc)
