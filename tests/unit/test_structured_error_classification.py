@@ -693,8 +693,10 @@ def test_acp_error_stores_safe_cause():
 
 
 def test_request_error_forwards_safe_cause():
-    import acp as acp_sdk
     from types import SimpleNamespace
+
+    import acp as acp_sdk
+
     from kollabor.llm.acp_bridge import ACPRunner
 
     fake_self = SimpleNamespace(
@@ -730,6 +732,7 @@ def test_structured_error_info_classifies_api_format_mismatch():
 
 def test_custom_provider_rejects_non_object_json_body():
     from unittest.mock import patch
+
     from kollabor_ai.providers.custom_provider import CustomProvider
     from kollabor_ai.providers.errors import APIFormatMismatchError
 
@@ -782,3 +785,87 @@ def test_custom_provider_rejects_non_object_sse_data_line():
     with pytest.raises(APIFormatMismatchError):
         _coerce_sse_object("bare string payload", "custom")
     assert _coerce_sse_object({"choices": []}, "custom") == {"choices": []}
+
+# --- #754 fix: nested SSE/response shapes typed at the parse boundary ---
+
+def _make_custom_provider():
+    from kollabor_ai.providers.custom_provider import (
+        CustomConfig,
+        CustomProvider,
+    )
+
+    config = CustomConfig(
+        api_key="sk-test",
+        base_url="http://localhost:8000/v1",
+        model="test-model",
+    )
+    return CustomProvider(config)
+
+
+def test_coerce_rejects_non_object_choice_elements():
+    """{"choices": ["bad"]} passes the top-level object check but the
+    streaming parser indexes choices[0].get(...). The boundary must type
+    it as api_format_mismatch instead of leaking an AttributeError
+    (bismuth FAIL verdict on 82768244, P2)."""
+    import pytest as _pytest
+
+    from kollabor_ai.providers.custom_provider import (
+        APIFormatMismatchError,
+        _coerce_sse_object,
+    )
+
+    with _pytest.raises(APIFormatMismatchError):
+        _coerce_sse_object({"choices": ["bad"]}, "gateway")
+
+
+def test_coerce_rejects_non_object_delta():
+    from kollabor_ai.providers.custom_provider import (
+        APIFormatMismatchError,
+        _coerce_sse_object,
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        _coerce_sse_object({"choices": [{"delta": "oops"}]}, "gateway")
+
+
+@pytest.mark.asyncio
+async def test_non_stream_non_object_choice_is_typed_not_attribute_error():
+    from kollabor_ai.providers.errors import APIFormatMismatchError
+
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(return_value={"choices": ["bad"]})
+
+    with pytest.raises(APIFormatMismatchError):
+        await provider.call([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_scalar_message_is_typed_not_attribute_error():
+    from kollabor_ai.providers.errors import APIFormatMismatchError
+
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={"choices": [{"message": "oops"}]}
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        await provider.call([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_scalar_usage_is_typed_not_attribute_error():
+    from kollabor_ai.providers.errors import APIFormatMismatchError
+
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={
+            "choices": [
+                {"message": {"content": "ok"}, "finish_reason": "stop"}
+            ],
+            "usage": "oops",
+        }
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        await provider.call([{"role": "user", "content": "hi"}])
+

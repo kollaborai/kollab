@@ -2537,6 +2537,13 @@ class QueueProcessor:
             info = structured_error_info(e)
             if info.error_class == "api_format_mismatch":
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
+            elif "'str' object has no attribute 'get'" in error_msg:
+                # Bounded base-text fallback (restored from 72f6bc1d for
+                # #754): a payload-shape AttributeError past the parse
+                # boundaries still maps to the actionable mismatch message
+                # for display. Typed errors take precedence; this covers
+                # only that one exact shape-failure signature.
+                error_msg = _API_FORMAT_MISMATCH_MESSAGE
 
             # Publish a typed failure separately from the generic UI error.
             # Compaction hooks can react to context overflow, but the failed

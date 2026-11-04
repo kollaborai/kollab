@@ -8,11 +8,10 @@ import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 
-from ..goal_image_scope import safe_goal_error_cause
-
 import aiohttp
 from pydantic import field_validator
 
+from ..goal_image_scope import safe_goal_error_cause
 from ..message_content import serialize_openai_chat_content
 from .base import LLMProvider
 from .errors import (
@@ -57,7 +56,43 @@ def _coerce_sse_object(data: Any, provider_name: str) -> Dict[str, Any]:
         raise APIFormatMismatchError(
             "Custom API SSE data line is not a JSON object", provider_name,
         )
+    _validate_openai_shapes(data, provider_name)
     return data
+
+
+def _validate_openai_shapes(data: Dict[str, Any], provider_name: str) -> None:
+    """Validate the nested shapes the parser indexes into (#720, #754).
+
+    Gateways occasionally emit ``choices`` as a list of strings, or
+    ``message``/``usage`` as a scalar. The parser indexes into these
+    (``choices[0].get(...)``, ``message.get(...)``, ``usage.get(...)``);
+    validating at the parse boundary keeps the failure typed
+    (``APIFormatMismatchError``) instead of leaking an ``AttributeError``
+    that classification cannot read. Missing keys stay legal (optional
+    fields); only present-but-wrong shapes are rejected.
+    """
+    choices = data.get("choices")
+    if choices is not None and not isinstance(choices, list):
+        raise APIFormatMismatchError(
+            "Custom API 'choices' is not a list", provider_name,
+        )
+    for choice in choices or ():
+        if not isinstance(choice, dict):
+            raise APIFormatMismatchError(
+                "Custom API choice is not an object", provider_name,
+            )
+        for field in ("message", "delta"):
+            nested = choice.get(field)
+            if nested is not None and not isinstance(nested, dict):
+                raise APIFormatMismatchError(
+                    f"Custom API choice {field} is not an object",
+                    provider_name,
+                )
+    usage = data.get("usage")
+    if usage is not None and not isinstance(usage, dict):
+        raise APIFormatMismatchError(
+            "Custom API usage is not an object", provider_name,
+        )
 
 
 class CustomConfig(ProviderConfig):
@@ -246,6 +281,10 @@ class CustomProvider(LLMProvider):
         logger.debug(f"CustomProvider.call (model={self.model})")
 
         response_data = await self._make_request(messages, tools, stream=False)
+        # Validate the nested shapes the parser indexes into (choices
+        # elements, message, usage) before the .get chain (#754): typed at
+        # the parse boundary, not an AttributeError deep in parsing.
+        _validate_openai_shapes(response_data, self.provider_name)
 
         # Parse response (OpenAI-compatible format). "choices" can be
         # present but EMPTY on empty/aborted responses from local servers,
