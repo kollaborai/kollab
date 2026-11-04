@@ -1094,6 +1094,7 @@ class EngineSession:
         """
         queue = self.subscribe()
         turn_error = ""
+        turn_error_fields: Dict[str, Any] = {}
         try:
             while True:
                 event = await queue.get()
@@ -1101,6 +1102,13 @@ class EngineSession:
 
                 if etype == "error":
                     turn_error = str(event.get("message") or "") or "engine error"
+                    # Structured classification rides the event untouched so
+                    # consumers read code/class, never message text (#549, #720).
+                    turn_error_fields = {
+                        key: event[key]
+                        for key in ("error_class", "code", "provider", "retryable")
+                        if event.get(key) is not None
+                    }
 
                 elif etype == "turn_start" and event.get("generation") is not None:
                     # ACP can start another prompt while the prior completion
@@ -1131,11 +1139,16 @@ class EngineSession:
                     # once at turn_complete can replace their transient reply.
                     await self.refresh_history(notify=True)
                     self.last_turn_error = (
-                        {"message": turn_error, "history_length": len(self.history)}
+                        {
+                            "message": turn_error,
+                            "history_length": len(self.history),
+                            **turn_error_fields,
+                        }
                         if turn_error
                         else None
                     )
                     turn_error = ""
+                    turn_error_fields = {}
 
                 elif etype == "user_message":
                     # The daemon took a human's message into its history, from

@@ -6,6 +6,7 @@ Maps provider-specific exceptions to unified error types with safe user messages
 """
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from math import isfinite
@@ -518,6 +519,164 @@ def parse_retry_after_headers(
             pass
 
     return parse_retry_after(get_header("retry-after"), now=now)
+
+
+@dataclass(frozen=True)
+class StructuredErrorInfo:
+    """Machine-readable error classification, derived from type and code only.
+
+    Rendering an error message is a lossy one-way transform: provider names get
+    prefixed in, login hints get appended, media gets redacted. Classification
+    that reads that text cannot survive it (#549, #720). Everything downstream
+    of the provider boundary classifies through this snapshot instead.
+    """
+
+    error_class: str
+    error_code: Optional[str] = None
+    provider: Optional[str] = None
+    retryable: bool = False
+    retry_after: Optional[float] = None
+    cause: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "error_class": self.error_class,
+            "error_code": self.error_code,
+            "retryable": self.retryable,
+        }
+        if self.provider:
+            data["provider"] = self.provider
+        if self.retry_after is not None:
+            data["retry_after"] = self.retry_after
+        if self.cause:
+            data["cause"] = self.cause
+        return data
+
+
+CONTEXT_OVERFLOW_CODES = frozenset(
+    {
+        "model_context_window_exceeded",
+        "context_window_exceeded",
+        "context_length_exceeded",
+    }
+)
+
+_RETRYABLE_TRANSPORT_CODES = frozenset({"connection_error", "timeout"})
+
+
+def is_context_overflow(info: StructuredErrorInfo) -> bool:
+    """True for a structured classification that names a context overflow."""
+    return info.error_class == "context_length" or (
+        info.error_code is not None and info.error_code in CONTEXT_OVERFLOW_CODES
+    )
+
+
+def structured_error_info(exc: BaseException) -> StructuredErrorInfo:
+    """Classify an exception from its type and typed attributes only.
+
+    Never reads ``str(exc)``: rendered text is display data, not signal
+    (#549, #720). The exception's class plus its typed attributes
+    (``error_code``, ``status_code``, ``code``, ``provider``, ``retry_after``)
+    are the only inputs.
+    """
+
+    error_code = getattr(exc, "error_code", None)
+    if not error_code:
+        error_code = getattr(exc, "code", None)
+    nested = getattr(exc, "error", None)
+    if not error_code and isinstance(nested, dict):
+        error_code = nested.get("code")
+    if isinstance(error_code, str):
+        error_code = safe_provider_error_code(error_code) or None
+    else:
+        error_code = None
+    provider = getattr(exc, "provider", None)
+    original = getattr(exc, "original_error", None)
+    cause = type(original).__name__ if isinstance(original, BaseException) else None
+    retry_after = getattr(exc, "retry_after", None)
+    status = getattr(exc, "status_code", None)
+    transport_by_code = error_code in _RETRYABLE_TRANSPORT_CODES
+    rate_by_status = status == 429
+    server_by_status = isinstance(status, int) and 500 <= status < 600
+
+    if isinstance(exc, AuthenticationError):
+        return StructuredErrorInfo(
+            "authentication", error_code or "authentication_error", provider,
+            retryable=False, cause=cause,
+        )
+    if isinstance(exc, RateLimitError):
+        return StructuredErrorInfo(
+            "rate_limit", error_code or "rate_limit_error", provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    if isinstance(exc, ContextLengthExceededError):
+        return StructuredErrorInfo(
+            "context_length", error_code or "context_length_exceeded", provider,
+            retryable=False, cause=cause,
+        )
+    if isinstance(exc, InvalidRequestError):
+        return StructuredErrorInfo(
+            "invalid_request", error_code or "invalid_request", provider,
+            retryable=False, cause=cause,
+        )
+    if isinstance(exc, EmptyResponseError):
+        return StructuredErrorInfo(
+            "empty_response", error_code, provider, retryable=True, cause=cause,
+        )
+    if isinstance(exc, APITimeoutError):
+        return StructuredErrorInfo(
+            "timeout", error_code or "timeout", provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    if isinstance(exc, APIConnectionError):
+        return StructuredErrorInfo(
+            "connection", error_code or "connection_error", provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    if isinstance(exc, ServerError):
+        return StructuredErrorInfo(
+            "server", error_code, provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    if isinstance(exc, TransientHTTPError):
+        return StructuredErrorInfo(
+            "transient_http", error_code, provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    if isinstance(exc, ProviderError):
+        # A base-class error carries only what its mapper set. Classify by
+        # typed attributes; an unmapped status or code is not retryable.
+        if rate_by_status:
+            return StructuredErrorInfo(
+                "rate_limit", error_code or "rate_limit_error", provider,
+                retryable=True, retry_after=retry_after, cause=cause,
+            )
+        if server_by_status or transport_by_code:
+            error_class = "server" if server_by_status else "transport"
+            return StructuredErrorInfo(
+                error_class, error_code, provider,
+                retryable=True, retry_after=retry_after, cause=cause,
+            )
+        return StructuredErrorInfo(
+            "provider", error_code, provider, retryable=False, cause=cause,
+        )
+
+    # Untyped exception: attributes only, never its text. A "500" in a
+    # message is a number in a sentence, not a retry signal.
+    if rate_by_status:
+        return StructuredErrorInfo(
+            "rate_limit", error_code, provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    if server_by_status or transport_by_code:
+        error_class = "server" if server_by_status else "transport"
+        return StructuredErrorInfo(
+            error_class, error_code, provider,
+            retryable=True, retry_after=retry_after, cause=cause,
+        )
+    return StructuredErrorInfo(
+        type(exc).__name__, error_code, provider, retryable=False, cause=cause,
+    )
 
 
 def map_http_status_error(

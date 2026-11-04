@@ -18,14 +18,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from kollabor_ai.conversation_logger import utc_stamp
+from kollabor_ai.generated_image_artifacts import (
+    GeneratedImageArtifactStore,
+    redact_generated_image_data,
+)
 from kollabor_ai.goal_image_scope import (
     current_goal_image_request_scope,
     goal_image_diagnostics_active,
     guard_goal_image_diagnostics,
-)
-from kollabor_ai.generated_image_artifacts import (
-    GeneratedImageArtifactStore,
-    redact_generated_image_data,
 )
 from kollabor_ai.message_content import (
     MessageContentError,
@@ -38,14 +38,13 @@ from kollabor_ai.message_content import (
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_ai.providers.errors import (
-    APIConnectionError,
-    APITimeoutError,
     AuthenticationError,
     EmptyResponseError,
     ProviderError,
-    RateLimitError,
-    ServerError,
-    TransientHTTPError,
+    structured_error_info,
+)
+from kollabor_ai.providers.errors import (
+    is_context_overflow as is_context_overflow_info,
 )
 from kollabor_ai.providers.models import (
     GeneratedImageContent,
@@ -805,52 +804,20 @@ class APICommunicationService:
                 )
                 raise asyncio.CancelledError("API request cancelled by user")
             except Exception as e:
-                # Check if this is a retryable error
-                classification_text = str(e)
-                error_str = redact_error_media(classification_text)
-                status_code = getattr(e, "status_code", None)
-                error_code = getattr(e, "error_code", "")
-                is_typed_provider_error = isinstance(e, ProviderError)
-                is_rate_limit = (
-                    isinstance(e, RateLimitError)
-                    or error_code == "rate_limit_error"
-                    or status_code == 429
-                    or (
-                        not is_typed_provider_error
-                        and bool(re.search(r"\b429\b", classification_text))
-                    )
-                )
-                is_empty_response = isinstance(e, EmptyResponseError)
-                is_context_overflow = is_empty_response and (
-                    getattr(e, "error_code", "") == "context_window_exceeded"
-                )
+                # Classify by structured type and code only. Rendered text
+                # carries provider names, login hints, and redactions — none of
+                # it is classification signal (#549, #720).
+                info = structured_error_info(e)
+                error_str = redact_error_media(str(e))
+                error_code = getattr(e, "error_code", "") or info.error_code or ""
+                is_rate_limit = info.error_class == "rate_limit"
+                is_empty_response = info.error_class == "empty_response"
+                is_context_overflow = is_context_overflow_info(info)
 
                 # Server, connection, timeout, and network errors are transient.
-                is_server_error = (
-                    isinstance(e, ServerError)
-                    or (
-                        isinstance(error_code, str)
-                        and error_code.startswith("server_error")
-                    )
-                    or (isinstance(status_code, int) and 500 <= status_code < 600)
-                    or (
-                        not is_typed_provider_error
-                        and bool(re.search(r"\b5\d{2}\b", classification_text))
-                    )
-                    or (not is_typed_provider_error and "Network error" in classification_text)
-                )
-                is_transport_error = isinstance(
-                    e, (APIConnectionError, APITimeoutError)
-                ) or error_code in {
-                    "connection_error",
-                    "timeout",
-                }
-                is_transient_http = isinstance(
-                    e, TransientHTTPError
-                ) or status_code in {
-                    408,
-                    409,
-                }
+                is_server_error = info.error_class == "server"
+                is_transport_error = info.error_class in {"connection", "timeout"}
+                is_transient_http = info.error_class == "transient_http"
 
                 # A context overflow won't fix itself on retry — the request is
                 # the same size each time. Surface it at once so the user can
@@ -922,13 +889,10 @@ class APICommunicationService:
 
                     if is_rate_limit:
                         error_type = "Rate limited"
+                    elif info.error_class == "timeout":
+                        error_type = "Timeout"
                     elif is_transport_error:
-                        error_type = (
-                            "Timeout"
-                            if isinstance(e, APITimeoutError)
-                            or getattr(e, "error_code", "") == "timeout"
-                            else "Transport error"
-                        )
+                        error_type = "Transport error"
                     elif is_empty_response:
                         error_type = "Empty response"
                     else:
@@ -972,18 +936,12 @@ class APICommunicationService:
                     error=error_str,
                     duration=time.time() - request_start,
                 )
-                if goal_image_diagnostics_active():
-                    if any(phrase in classification_text.lower() for phrase in (
-                        "context window", "context_window", "context_length",
-                        "maximum context length", "too many tokens", "prompt is too long",
-                    )):
-                        error_code = "context_window_exceeded"
-                    if isinstance(e, ProviderError):
-                        raise e from None
-                    raise ProviderError(
-                        error_str, provider_name, error_code=error_code or None
-                    ) from None
-                if error_str != str(e):
+                # Typed provider errors keep their class so downstream
+                # classification survives to the event stream (#720); the
+                # boundary constructors already sanitize and redact them.
+                if isinstance(e, ProviderError):
+                    raise e from None
+                if goal_image_diagnostics_active() or error_str != str(e):
                     raise ProviderError(
                         error_str, provider_name, error_code=error_code or None
                     ) from None

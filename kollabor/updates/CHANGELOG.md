@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- fix(errors): structured error type/code propagates provider -> engine -> UI/ACP; classification reads code only, no rendered-text matching (#720, closes #549 misclassification class).
+
 ## [0.19.1] - 2026-11-03
 
 ### Changed
