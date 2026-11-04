@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Optional merge bot for maintainers: `.github/workflows/auto-merge.yml` can merge a PR once CI, an independent review of its exact head, approval and resolved conversations all hold. It ships off; `docs/operations/pr-gates-auto-merge.md` has the steps to turn it on.
 - Coordinators can page through all of their unresolved hub dispatches with `<hub_dispatch_list page="N" per_page="N"/>` (newest first, 10 per page, at most 50) and read any one of their dispatches in full with `<hub_dispatch_read dispatch_id="ID"/>`. Both are read-only, limited to dispatches the coordinator assigned, and off by default: enable with `plugins.hub.dispatch_list_enabled`. When enabled, the rebirth recovery summary names them in its overflow line; its bounded size is unchanged (#656).
 - Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
 
