@@ -361,3 +361,247 @@ def test_audit_lines_record_actions(tmp_path, capsys) -> None:
     assert "dod/ready-for-review" in out
     # Secrets are never logged: no token-like values in audit output.
     assert not re.search(r"(ghp_|github_pat_)[A-Za-z0-9_]+", out)
+
+
+# --- collector semantics (red-first regression tests) ------------------------------
+#
+# Two false-green defects (bismuth exact-head review of PR #740):
+#   1. collectors read only the first REST page (commits default page is 30,
+#      files/comments cap at 100) and the first GraphQL reviewThreads page,
+#      so later-page unsigned commits / finding ids / unresolved threads are
+#      silently ignored.
+#   2. base_current compared two base-branch facts (pull.base.sha vs default
+#      branch tip) and never the PR head, so a PR cut from an old point
+#      passed while missing commits from main. Correct contract: pass iff the
+#      PR head's merge-base with the target branch equals the target tip.
+#
+# These tests fail before the fix (TypeError/AttributeError against the old
+# PRData contract, short counts from single-page collection) and must be
+# green after it.
+
+
+def _install_fake_gh(monkeypatch, calls, pull_payload, branch_tip, pages):
+    """Route pr_gates_dod._gh to canned payloads; record every call."""
+
+    def fake_gh(*args):
+        calls.append(list(args))
+        if args[:2] == ("api", "graphql"):
+            cursor = None
+            for flag in args:
+                if flag.startswith("cursor="):
+                    cursor = flag.split("=", 1)[1]
+            graph_pages = pages.get("graphql")
+            if graph_pages is None:  # default: one terminal, empty page
+                return {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                    "nodes": [],
+                                }
+                            }
+                        }
+                    }
+                }
+            return graph_pages[cursor]
+        endpoint = args[1]
+        if endpoint.startswith("repos/o/r/compare/"):
+            return pages.get("compare")  # default None: head contains base tip
+        if endpoint.startswith("repos/o/r/branches/"):
+            return {"commit": {"sha": branch_tip}}
+        for prefix, by_page in pages["rest"].items():
+            if endpoint.startswith(prefix):
+                query = endpoint.split("?", 1)[1] if "?" in endpoint else ""
+                page = 1
+                for kv in query.split("&"):
+                    if kv.startswith("page="):
+                        page = int(kv.split("=", 1)[1])
+                return by_page[page]
+        if endpoint == f"repos/o/r/pulls/{PR_NUM}":
+            return pull_payload
+        return []  # unregistered REST list endpoint: default single empty page
+
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+
+
+PR_NUM = 401
+BASE_TIP = "d" * 40
+HEAD_SHA = "c" * 40
+MERGE_BASE_STALE = "m" * 40
+
+
+def _commit(sha, verified=True):
+    return {
+        "sha": sha,
+        "commit": {"message": "fix: x", "verification": {"verified": verified}},
+    }
+
+
+def _commits_pages():
+    page1 = [_commit(f"{i:03d}" + "a" * 37, verified=True) for i in range(100)]
+    page2 = [_commit(f"{i:03d}" + "b" * 37, verified=False) for i in range(100)]
+    page3 = [_commit("z" * 40, verified=False)]
+    return {1: page1, 2: page2, 3: page3}
+
+
+def test_collect_commits_reads_every_page(monkeypatch):
+    calls: list[list] = []
+    pull = {
+        "title": "t",
+        "body": "Fixes #1",
+        "base": {"ref": "main", "sha": BASE_TIP},
+        "head": {"sha": HEAD_SHA},
+    }
+    pages = {"rest": {f"repos/o/r/pulls/{PR_NUM}/commits": _commits_pages()}}
+    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+    assert len(data.commits) == 201
+    assert data.commits[-1].sha == "z" * 40
+    requested = [a[1] for a in calls if a[0] == "api" and "commits" in a[1]]
+    assert any("page=2" in e for e in requested), "second commits page never requested"
+    assert any("page=3" in e for e in requested), "third commits page never requested"
+    assert any(
+        "per_page=100" in e for e in requested
+    ), "commits fetched with REST default page size"
+
+
+def test_collect_files_and_comments_read_every_page(monkeypatch):
+    calls: list[list] = []
+    files = {
+        1: [{"filename": f"f{i}.py"} for i in range(100)],
+        2: [{"filename": "late.py"}],
+    }
+    review = {1: [{"body": f"r{i}"} for i in range(100)], 2: [{"body": "late-finding"}]}
+    pull = {
+        "title": "t",
+        "body": "Fixes #1",
+        "base": {"ref": "main", "sha": BASE_TIP},
+        "head": {"sha": HEAD_SHA},
+    }
+    pages = {
+        "rest": {
+            f"repos/o/r/pulls/{PR_NUM}/files": files,
+            f"repos/o/r/pulls/{PR_NUM}/comments": review,
+            f"repos/o/r/issues/{PR_NUM}/comments": {1: []},
+            f"repos/o/r/pulls/{PR_NUM}/commits": {1: []},
+        }
+    }
+    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+    assert len(data.changed_files) == 101 and "late.py" in data.changed_files
+    assert "late-finding" in data.review_comment_bodies
+
+
+def test_collect_threads_follow_graphql_pagination(monkeypatch):
+    calls: list[list] = []
+    nodes1 = [{"isResolved": True} for _ in range(99)] + [{"isResolved": False}]
+    nodes2 = [{"isResolved": True} for _ in range(6)] + [{"isResolved": False}]
+    page1 = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": True, "endCursor": "CUR1"},
+                        "nodes": nodes1,
+                    }
+                }
+            }
+        }
+    }
+    page2 = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": nodes2,
+                    }
+                }
+            }
+        }
+    }
+    pull = {
+        "title": "t",
+        "body": "Fixes #1",
+        "base": {"ref": "main", "sha": BASE_TIP},
+        "head": {"sha": HEAD_SHA},
+    }
+    pages = {
+        "rest": {f"repos/o/r/pulls/{PR_NUM}/commits": {1: []}},
+        "graphql": {None: page1, "CUR1": page2},
+    }
+    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+    assert data.unresolved_threads == 2  # one unresolved thread lives on page 2
+    graphql_calls = [a for a in calls if a[0] == "graphql"]
+    assert len(graphql_calls) == 2, "reviewThreads second page never requested"
+    assert any(
+        "cursor=CUR1" in flag for flag in graphql_calls[1]
+    ), "endCursor not passed"
+
+
+def test_collect_base_current_uses_compare_merge_base(monkeypatch):
+    calls: list[list] = []
+    compare = {
+        "merge_base_commit": {"sha": MERGE_BASE_STALE},
+        "behind_by": 5,
+        "ahead_by": 2,
+    }
+    pull = {
+        "title": "t",
+        "body": "Fixes #1",
+        "base": {"ref": "main", "sha": MERGE_BASE_STALE},
+        "head": {"sha": HEAD_SHA},
+    }
+    pages = {"rest": {f"repos/o/r/pulls/{PR_NUM}/commits": {1: []}}, "compare": compare}
+    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+    assert data.merge_base_sha == MERGE_BASE_STALE
+    assert data.commits_behind_base == 5
+    assert data.default_branch_head == BASE_TIP
+    assert any(
+        a[0] == "api" and a[1].startswith(f"repos/o/r/compare/main...{HEAD_SHA}")
+        for a in calls
+    ), "PR head never compared against the target branch"
+
+
+def test_base_current_flags_pr_head_behind_main(tmp_path: Path) -> None:
+    """The exact false-green: PR cut from an old point, main has moved on.
+
+    Old contract passed this (base-branch facts agreed); new contract must
+    fail base_current because the PR head's merge-base is behind main's tip.
+    """
+    cfg = pr_gates_dod.load_config(make_config(tmp_path, ENABLED))
+    data = pr_gates_dod.PRData(
+        title="fix: t",
+        body="Fixes #1\n",
+        commits=(),
+        changed_files=[],
+        unresolved_threads=0,
+        review_comment_bodies=(),
+        default_branch="main",
+        default_branch_head=BASE_TIP,
+        merge_base_sha=MERGE_BASE_STALE,
+        commits_behind_base=5,
+    )
+    report = pr_gates_dod.evaluate(cfg, data)
+    assert "base_current" in report.failed_names()
+    assert "behind" in report.detail_for("base_current")
+    fresh = pr_gates_dod.PRData(
+        title="fix: t",
+        body="Fixes #1\n",
+        commits=(),
+        changed_files=[],
+        unresolved_threads=0,
+        review_comment_bodies=(),
+        default_branch="main",
+        default_branch_head=BASE_TIP,
+        merge_base_sha=BASE_TIP,
+        commits_behind_base=0,
+    )
+    ok = pr_gates_dod.evaluate(cfg, fresh)
+    assert "base_current" not in ok.failed_names()
