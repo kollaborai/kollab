@@ -32,12 +32,30 @@ def test_the_core_check_refuses_an_unconfirmed_act(action):
     nh.require_confirmed("members", {})  # a read, not an act
 
 
+@pytest.fixture
+def person_caller(monkeypatch):
+    """The caller is a person's terminal. The actor guard reads the real process chain, so a test run
+    from an agent's tool shell (KOLLAB_TOOL_SHELL set, or a tool shell ancestor) would be refused by the
+    guard before the confirmation check and never reach the code under test."""
+    monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
+    monkeypatch.setattr(hr, "tool_shell_refusal", lambda: "")
+
+
 @pytest.mark.parametrize("action", ACTS)
-def test_the_daemon_refuses_an_unconfirmed_act(action):
+def test_the_daemon_refuses_an_unconfirmed_act(action, person_caller):
     bridge = object.__new__(RelayAgentBridge)
     with pytest.raises(RelayError) as err:
         asyncio.run(bridge.hub_halt_act(action, {}))
     assert "confirm" in str(err.value).lower()
+
+
+@pytest.mark.parametrize("action", ACTS)
+def test_an_agent_caller_is_refused_by_the_guard_before_confirmation(action, monkeypatch):
+    monkeypatch.setenv("KOLLAB_TOOL_SHELL", "1")
+    bridge = object.__new__(RelayAgentBridge)
+    with pytest.raises(RelayError) as err:
+        asyncio.run(bridge.hub_halt_act(action, {"confirmed": True}))
+    assert str(err.value) == nh.GUARD_REFUSAL
 
 
 @pytest.mark.parametrize("action", ACTS)
