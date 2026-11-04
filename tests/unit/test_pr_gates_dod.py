@@ -744,3 +744,71 @@ def test_thread_pagination_fails_closed_on_repeated_end_cursor(monkeypatch):
         pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
     graphql_made = [c for c in calls if c[:2] == ["api", "graphql"]]
     assert len(graphql_made) <= 5
+
+
+# --- second review round (issue #724) --------------------------------------
+
+
+def test_main_disabled_never_calls_github(tmp_path, monkeypatch, capsys) -> None:
+    """Off means off: no API calls, so a gh failure cannot turn the job red."""
+    cfg = make_config(tmp_path, "[pr_gates.dod]\nenabled = false\n")
+
+    def must_not_run(*_args, **_kwargs):
+        raise RuntimeError("disabled gate called GitHub")
+
+    monkeypatch.setattr(pr_gates_dod, "collect_pr_data", must_not_run)
+    assert pr_gates_dod.main(["--config", str(cfg), "--repo", "o/r", "--pr", "1"]) == 0
+    assert "disabled" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "test_content,covered",
+    [
+        ("def test_f1_keeps_order(): ...", True),
+        ("# Regression for F1.", True),
+        ("assert conf1g == 2", False),
+        ("def test_f12_other(): ...", False),
+        ("value = 0xabcf1", False),
+    ],
+)
+def test_regression_test_matches_whole_finding_id(tmp_path, test_content, covered) -> None:
+    cfg = pr_gates_dod.load_config(
+        make_config(tmp_path, '[pr_gates.dod]\nenabled = true\nchecks = ["regression_test"]\n')
+    )
+    data = make_data(
+        review_comment_bodies=("F1: the base check is wrong",),
+        changed_file_contents={"tests/test_x.py": test_content},
+    )
+    report = pr_gates_dod.evaluate(cfg, data)
+    assert report.failed_names() == ([] if covered else ["regression_test"])
+
+
+def test_default_finding_pattern_ignores_words_that_contain_an_id(tmp_path) -> None:
+    cfg = pr_gates_dod.load_config(
+        make_config(tmp_path, '[pr_gates.dod]\nenabled = true\nchecks = ["regression_test"]\n')
+    )
+    data = make_data(
+        review_comment_bodies=("Files are read as UTF8.",),
+        changed_file_contents={},
+    )
+    assert pr_gates_dod.evaluate(cfg, data).failed == []
+
+
+@pytest.mark.parametrize(
+    "body,linked",
+    [
+        ("Refs #722", True),
+        ("Fixed #1", True),
+        ("closed #2", True),
+        ("Resolves #3", True),
+        ("References #4", True),
+        ("See #5", False),
+        ("prefixes #6", False),
+    ],
+)
+def test_linked_issue_accepts_github_keywords_and_refs(tmp_path, body, linked) -> None:
+    cfg = pr_gates_dod.load_config(
+        make_config(tmp_path, '[pr_gates.dod]\nenabled = true\nchecks = ["linked_issue"]\n')
+    )
+    report = pr_gates_dod.evaluate(cfg, make_data(body=body))
+    assert report.failed_names() == ([] if linked else ["linked_issue"])
