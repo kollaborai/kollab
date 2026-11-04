@@ -50,15 +50,55 @@ new wiring.
 
 ## Branch and Pull Request Workflow
 
-1. Branch from `main`.
-2. Make a focused change.
-3. Run targeted validation.
-4. Update docs when behavior, setup, commands, config, or public APIs change.
-5. Open a pull request against `main`.
-6. Fill out the PR template, including commands run and rollout risk.
+In the Kollab maintainer workflow, every active writer owns one isolated
+worktree, branch, and file scope. Keep one writer per path at a time. Read-only
+reviewers may share a checkout. Contributors using a standalone clone may use a
+regular local branch when no other writer shares that checkout.
 
-Use clear commit messages that describe the user/operator-visible change. Avoid
-AI attribution footers.
+1. Inspect repository status and existing worktrees; preserve all existing
+   dirty files, branches, and worktrees. Claim a unique worktree path, branch,
+   and file scope before editing.
+2. For a new maintainer lane, fetch the intended base and create a new worktree
+   from current `origin/main` after confirming that path and branch are unused:
+
+   ```bash
+   git fetch origin main
+   git worktree add -b issue-123-fix ../kollab-wt/issue-123-fix origin/main
+   ```
+
+   Use `docs/<slug>` for documentation without an issue, or `codex/<scope>`
+   for a Codex-authored lane without an issue. Keep existing branch names.
+3. Make a focused change and run targeted validation from the owning worktree.
+   Do not add AI attribution, generated-by, or Co-Authored-By footers unless
+   explicitly requested.
+4. Update docs when behavior, setup, commands, config, or public APIs change.
+5. Push normally and open a DRAFT pull request against `main`. Keep review and
+   CI tied to the exact head; merge current `main` into the branch when needed.
+   Never rebase or force-push.
+6. Fill out the PR template, including commands run and rollout risk. Use
+   Conventional Commit messages. The project maintainer authorizes a concrete
+   integration plan; its designated integrator may mark covered PRs ready only
+   after a different AI agent reviews the exact final head and records its
+   approval as whichever account, `kollaborai` or `maarco`, is not the PR author.
+   Record reviewer identity and exact reviewed SHA in private maintainer audit
+   evidence. Keep the GitHub approval plain, with no AI attribution or footer.
+   GitHub prohibits author self-approval.
+   After the code-owner gate is enabled, every path is covered by
+   `.github/CODEOWNERS`: an external contributor needs approval from
+   `@maarco` or `@kollaborai`, and a PR authored under either account needs
+   approval from the other. GitHub enforces the account approval, not whether
+   an independent AI performed the review; record AI reviewer identity and the
+   exact head in private audit evidence. The maintainer bootstrap sequence is
+   in `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`.
+   A new head requires fresh review and CI.
+7. The designated integrator lands authorized PRs as `kollaborai` with merge
+   commits after verifying that identity cannot bypass applicable protection.
+   Never use `--admin` or a ruleset bypass; stop if identity, bypass status, or
+   gate evidence is uncertain. No repeated permission is needed for steps
+   already in the plan. Work outside its scope needs new authorization. Release
+   tags require separate explicit maintainer instruction. The integration
+   checkout remains source-read-only and may only fast-forward after a PR has
+   already merged. Do not automatically remove or delete worktrees or branches.
 
 ## Validation
 
@@ -126,6 +166,15 @@ Useful starting points:
 - [docs/architecture/README.md](docs/architecture/README.md)
 - [docs/release-process.md](docs/release-process.md)
 - [AGENTS.md](AGENTS.md)
+
+## Productization
+
+Every enhancement ships as an opt-in, default off, repo-agnostic product surface:
+a skill, extension, agent, or plugin. Its toggle defaults to off, and its repo,
+check names, identities, schedules, and paths come from config or provider
+discovery, never from a literal `kollaborai/kollab`. Flag anything that is
+inherently Kollab-internal. The full rule, checklist, and surface mapping for
+#711-#730 are in [docs/productization.md](docs/productization.md).
 
 ## Reporting Bugs
 
