@@ -53,6 +53,7 @@ status: active
 - [Agent DNS Reference](architecture/reference/agent-dns-reference.md) - Local identity registry and historical direct TCP/TLS transport
 - [pr-gates merge bot](operations/pr-gates-auto-merge.md) - Optional merge bot for maintainers: what it checks and how an owner turns it on
 - [A2A Workspace Receiver](operations/agent-a2a-workspace.md) - Explicit receiver setup, device membership, and scoped tool grants
+- [PR Gates DoD](operations/pr-gates-dod.md) - Configurable definition-of-done check per PR: one check run, no comment spam, off by default
 
 ## Architecture
 
