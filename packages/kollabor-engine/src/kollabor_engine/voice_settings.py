@@ -104,7 +104,10 @@ async def _default_readiness() -> SpeechReadiness:
         from kollabor_voice.client import VoiceClient
         from kollabor_voice.speech_adapter import map_readiness
 
-        mapped = map_readiness(await VoiceClient().call("status"))
+        status = await VoiceClient().call("status")
+        mapped = map_readiness(status)
+        transcription = status.get("transcription") or {}
+        speech = status.get("speech") or {}
         progress = (
             mapped.bytes_done / mapped.bytes_total
             if mapped.bytes_done is not None and mapped.bytes_total
@@ -112,18 +115,18 @@ async def _default_readiness() -> SpeechReadiness:
         )
         return SpeechReadiness(
             stt_state=mapped.state,
-            stt_engine="parakeet",
+            stt_engine=str(transcription.get("engine") or "unknown"),
             tts_state=mapped.state,
-            tts_engine="vibevoice",
+            tts_engine=str(speech.get("engine") or "unknown"),
             detail=mapped.detail or None,
             progress=progress,
         )
     except Exception as exc:  # the one service owns readiness; no retry loop here
         return SpeechReadiness(
             stt_state="error",
-            stt_engine="parakeet",
+            stt_engine="unknown",
             tts_state="error",
-            tts_engine="vibevoice",
+            tts_engine="unknown",
             detail=f"Voice service unavailable: {type(exc).__name__}",
         )
 

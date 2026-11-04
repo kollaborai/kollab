@@ -635,6 +635,7 @@ class AgentVault:
         crystal_store: Optional[Any] = None,
         global_crystal_store: Optional[Any] = None,
         task_ledger: Optional[Any] = None,
+        dispatch_paging: bool = False,
     ) -> str:
         """Build the context injection for when an agent is reborn.
 
@@ -651,6 +652,9 @@ class AgentVault:
             task_ledger: TaskLedger. Its active cards for this identity are
                 listed, since the ledger is the only source of current
                 assignments after a restart. Omitted when None.
+            dispatch_paging: Name the hub_dispatch_list / hub_dispatch_read
+                tags in the overflow line. Off unless the hub's opt-in
+                dispatch list tool is enabled.
         """
         meta = self.get_meta()
         last_active = meta.get("last_active_human", "never")
@@ -665,7 +669,9 @@ class AgentVault:
 
         if task_ledger is not None:
             self._append_ledger_section(lines, task_ledger)
-            self._append_dispatch_section(lines, task_ledger)
+            self._append_dispatch_section(
+                lines, task_ledger, dispatch_paging=dispatch_paging
+            )
 
         # The raw stream remains the audit trail, but message traffic is not
         # executable rebirth context. The current task ledger is authoritative
@@ -812,7 +818,9 @@ class AgentVault:
         uncommitted = sum(1 for line in status.stdout.splitlines() if line.strip())
         return head.stdout.strip(), uncommitted
 
-    def _append_dispatch_section(self, lines: List[str], ledger: Any) -> None:
+    def _append_dispatch_section(
+        self, lines: List[str], ledger: Any, dispatch_paging: bool = False
+    ) -> None:
         """Append this coordinator's outstanding assignments for rebirth recovery."""
         lines.append("")
         try:
@@ -886,6 +894,11 @@ class AgentVault:
             lines.append(
                 f"  +{len(recent) - self._REBIRTH_MAX_DISPATCHES} older unresolved dispatches"
             )
+            if dispatch_paging:
+                lines.append(
+                    "  page them with <hub_dispatch_list page=\"2\"/> and read one "
+                    "with <hub_dispatch_read dispatch_id=\"ID\"/>"
+                )
         lines.extend(
             [
                 "  verification checklist (worker reports are not proof):",

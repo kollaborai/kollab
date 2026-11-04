@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- PR throughput KPI report (`.github/scripts/pr_throughput_kpi.py`, opt-in via `kpi.enabled`, default off): closed PRs per hour against a target of 3 on 1h, 8h and 24h rolling windows, with supporting open-PR, review, first-push CI and per-author/lane metrics. Missing data is reported as missing, never zero (#729).
+- Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
+- Optional merge bot for maintainers: `.github/workflows/auto-merge.yml` can merge a PR once CI, an independent review of its exact head, approval and resolved conversations all hold. It ships off; `docs/operations/pr-gates-auto-merge.md` has the steps to turn it on (#736).
+- Coordinators can page through all of their unresolved hub dispatches with `<hub_dispatch_list page="N" per_page="N"/>` (newest first, 10 per page, at most 50) and read any one of their dispatches in full with `<hub_dispatch_read dispatch_id="ID"/>`. Both are read-only, limited to dispatches the coordinator assigned, and off by default: enable with `plugins.hub.dispatch_list_enabled`. When enabled, the rebirth recovery summary names them in its overflow line; its bounded size is unchanged (#656).
+- Contributor docs now state the productization rule: every enhancement ships as an opt-in, default-off, repo-agnostic product surface (skill, extension, agent, or plugin), with the policy, checklist, and a mapping of every issue in the #711-#730 batch to its surface in `docs/productization.md` (#731).
+- A definition-of-done check (`pr-gates`) runs configurable hygiene checks on every PR -- docs-path rules, unresolved threads, base currency, Conventional Commit title, linked issue, and regression-test coverage of review finding ids -- and reports every failed item in exactly one check run (default `dod/ready-for-review`), never comments. Every commits, files, and comments page is read and review-thread pagination is followed, so nothing beyond the first page is silently skipped; pagination is bounded and repeat-guarded (identical pages, null or repeated cursors, and runaway loops fail closed with a loud error -- hang never, silently truncate never); base currency is judged by the PR head's merge-base against the target branch tip, so a branch missing commits from main fails. This repository runs it enabled (`pr_gates.dod.enabled = true` in `.github/pr-gates.toml`), with signed-commit validation left out until agent commits are signed (#755); the feature defaults to off elsewhere, and it is usable as a local CLI before pushing (#724).
+
 ### Fixed
+- Closed-PR review and first-push check-run collection in the throughput KPI paginates all pages and fails closed on repeated pages, malformed responses, or pagination-cap exhaustion rather than reporting partial metrics (#747).
+- A hub message reports `sent` only when the recipient's hub acks that message: ACP `hub_msg` results now carry `delivery` (`confirmed`, `accepted`, `queued` or `unconfirmed`), and a queued or unacked message no longer reads as sent (#609).
+- `kollab --hub capture` shows the hub messages an agent sent and received again; they were dropped whenever a heartbeat's state snapshot was in the capture window (#609).
+- A failed send names its cause: an exception with no message reports its type instead of a blank `Tool execution error:`, and a refused message always gives a reason (#609).
+- Connect's join code shows why it could not be made when the network's discovery origin is not on port 443 (`Enrollment needs port 443, but this network's origin uses port <port>.`), instead of a reason-less "could not create a code". Enrollment still requires port 443 (#693).
+
+## [0.19.1] - 2026-11-03
+
+### Changed
+- Release publishing runs from a reviewed controller on `main`, resolves immutable tagged source, limits the existing repository PyPI token to upload steps, and verifies GitHub release assets.
+
+### Fixed
+- Installed voice workers use their managed runtime dependencies without importing packages from Kollab's main interpreter, fixing startup failures caused by cross-version dependency imports.
+
+## [0.19.0] - 2026-11-03
+
+### Fixed
+- Web UI source archives exclude local TypeScript build metadata, keeping generated compiler state out of published packages.
+- PhoneLink chat reuses unchanged polling snapshots so typing and scrolling stay responsive. Completed voice turns remain visible until saved history replaces them.
 - A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
 - Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
 - Detached daemon SIGTERM cancels its top-level async task so application cleanup
@@ -29,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the window keep addressing it (#671).
 
 ### Added
+- PhoneLink carries microphone input and spoken replies through the phone while the computer's LiveKit signaling and media stay on loopback (#440).
+- The Web UI Agents sidebar shows a small type glyph after local-session and offline names (coder `▸`, research `◈`, default `●`); rows without type metadata and all remote rows stay unmarked (#655).
 - Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
 - Team launches now support member selection or exclusions across the CLI,
   TUI and Web UI. The launch sheet sets the workspace, profile, lead and
@@ -362,6 +391,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attach, `kollab service` and goal turns use `pid_alive`, so the hub keeps
   live agents. On every platform an exited agent that was never reaped now
   counts as stopped (#268).
+
+### Known limitations
+- PhoneLink voice passed recorded-input Android emulator testing. Final iPhone playback and transcript-persistence testing remains pending (#440).
 
 ## [0.18.5] - 2026-10-26
 

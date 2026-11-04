@@ -431,6 +431,83 @@ async def test_a_user_message_taken_by_the_daemon_warms_the_mirror(
 
 
 @pytest.mark.asyncio
+async def test_turn_complete_announces_rows_found_after_an_inflight_stale_refresh(
+    registry, conversations
+):
+    """A terminal's final refresh must notify even if a prior background read was stale."""
+    _, workspace_root = conversations
+    state = GrowingState()
+    state.messages = [_wire("user", "before", "t0")]
+    release_old_snapshot = asyncio.Event()
+    old_snapshot_started = asyncio.Event()
+    initial = list(state.messages)
+    calls = 0
+
+    async def get_conversation(since=None, anchor=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            old_snapshot_started.set()
+            await release_old_snapshot.wait()
+            messages = initial
+        else:
+            messages = list(state.messages)
+        return SimpleNamespace(
+            messages=messages,
+            session_id="conv-1",
+            started_at="t0",
+            message_count=len(messages),
+            metadata={},
+            anchor="",
+            since=None,
+        )
+
+    state.get_conversation = get_conversation
+    events: asyncio.Queue = asyncio.Queue()
+    announced: list = []
+    daemon = _daemon(state)
+    daemon.subscribe = lambda: events
+    daemon.fan_out = announced.append
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = daemon
+    registry[session.session_id] = session
+    await session.refresh_history()
+    session._event_task = asyncio.create_task(session._track_events())
+    try:
+        events.put_nowait({"type": "user_message"})
+        await asyncio.wait_for(old_snapshot_started.wait(), timeout=2)
+        state.messages.extend(
+            [
+                _wire("user", "spoken transcript", "t1"),
+                _wire("assistant", "spoken reply", "t2"),
+            ]
+        )
+        events.put_nowait({"type": "turn_complete"})
+        await asyncio.sleep(0)  # let the tracker wait behind the in-flight refresh
+        release_old_snapshot.set()
+
+        for _ in range(200):
+            if session.total_turns == 1 and session.history[-1]["content"] == "spoken reply":
+                break
+            await asyncio.sleep(0.01)
+
+        assert [message["content"] for message in session.history] == [
+            "before",
+            "spoken transcript",
+            "spoken reply",
+        ]
+        assert [event for event in announced if event["type"] == "history_updated"] == [
+            {"type": "history_updated"}
+        ]
+    finally:
+        release_old_snapshot.set()
+        session._event_task.cancel()
+        await asyncio.gather(session._event_task, return_exceptions=True)
+        if session._history_refresh_task is not None:
+            await asyncio.gather(session._history_refresh_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_a_voice_cut_that_lands_late_reloads_the_open_windows(registry, conversations):
     """A talk-over's cut queued on a turn still unwinding lands after its RPC
     answered: the daemon says voice_reply_cut, and open windows reload."""

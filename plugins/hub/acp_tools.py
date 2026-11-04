@@ -261,7 +261,8 @@ class ACPHubTools:
                         "text": "The asking session stopped.", "earlier": list(wait.earlier)}
             if not result.success:
                 return {"status": "ended", "from": target, "thread": thread,
-                        "text": result.error or result.output, "earlier": []}
+                        "text": result.error or result.output
+                        or "hub_msg failed and gave no reason", "earlier": []}
             if is_ask and busy_peer:
                 return {"status": "busy", "from": target, "thread": thread,
                         "text": "The agent is waiting on another ask; your request is queued.", "earlier": []}
@@ -290,7 +291,18 @@ class ACPHubTools:
                 if not is_ask:
                     self._retire_question(question)
             if not is_ask:
-                return {"status": "sent", "thread": thread}
+                # `sent` means a recipient confirmed the message (or a network
+                # peer accepted it); a queued or unconfirmed one must not read
+                # as sent.
+                delivery = dict((result.metadata or {}).get("delivery") or {})
+                state = str(delivery.get("state") or "unconfirmed")
+                status = {
+                    "confirmed": "sent", "accepted": "sent", "queued": "queued",
+                }.get(state, "unconfirmed")
+                out = {"status": status, "delivery": state, "thread": thread}
+                if status != "sent":
+                    out["text"] = result.output or "not confirmed by the recipient"
+                return out
             if question is not None:
                 timeout = min(timeout, max(0, question.expires_at - time.monotonic()))
             from .relay_state import RelayError
