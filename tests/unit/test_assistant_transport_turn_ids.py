@@ -15,7 +15,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from kollabor_engine.routes import messages
 
 
@@ -354,10 +353,12 @@ class _Session:
 
 async def _run_turn(
     monkeypatch, history, state_messages, replies=None,
-    message="PROOF666 one", tool_round=None,
+    message="PROOF666 one", tool_round=None, refresh=None,
 ):
     controllers, runners = _fake_assistant_stream(monkeypatch)
     session = _Session(history, replies=replies, tool_round=tool_round)
+    if refresh is not None:
+        session.refresh_history = refresh
     monkeypatch.setattr(messages, "get_session_registry", lambda: {"s1": session})
     body = messages.AssistantRequest(
         commands=[{
@@ -546,3 +547,40 @@ async def test_failed_refresh_then_stale_retry_never_claims_sync(monkeypatch):
         "history-0", "history-1", "user-s1-2", "assistant-s1-3",
     ]
     assert final["synced"] is None
+
+
+@pytest.mark.asyncio
+async def test_publish_precedes_refresh_history_round_trips(monkeypatch):
+    """The page receives the turn's rows before any history refresh awaits.
+
+    #675 P2: the turn-end publish used to sit behind up to two
+    ``refresh_history`` round trips, so rows appeared only after the daemon
+    answered. The publish now goes out first; the refreshed snapshot only
+    decides the sync claim afterwards (alignment mutates the published list
+    in place, so the claim and the shown ids stay consistent).
+    """
+    order = []
+    real_set = messages._assistant_set_messages
+
+    def _recording_set(controller, msgs):
+        order.append("publish")
+        real_set(controller, msgs)
+
+    monkeypatch.setattr(messages, "_assistant_set_messages", _recording_set)
+
+    async def _refresh(*, stale_raises=False):
+        order.append("refresh")
+        return _history()
+
+    state = await _run_turn(
+        monkeypatch, _history(), _state_messages(), refresh=_refresh
+    )
+
+    last_publish = len(order) - 1 - order[::-1].index("publish")
+    first_refresh = order.index("refresh")
+    assert last_publish < first_refresh, f"publish order wrong: {order}"
+    # End state is unchanged: ids renamed against the snapshot, claim set.
+    assert [row["id"] for row in state["messages"]] == [
+        "history-0", "history-1", "history-2", "history-3",
+    ]
+    assert state["synced"] == {"history": 4, "messages": 4}

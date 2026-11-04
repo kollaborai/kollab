@@ -1591,12 +1591,18 @@ async def assistant_transport(
                             if event.get("history_recorded"):
                                 controller.state["goalHistoryReloadRequired"] = True
                         else:
+                            # Publish first: the page renders this turn's rows
+                            # without waiting on history round trips (#675).
+                            # The snapshot fetched below only decides the sync
+                            # claim; alignment mutates the published list in
+                            # place, so the claimed ids are the shown ids.
+                            _assistant_set_messages(controller, state_messages)
                             refreshed = None
                             for _attempt in (0, 1):
                                 try:
                                     refreshed = await session.refresh_history(
-                                    stale_raises=True
-                                )
+                                        stale_raises=True
+                                    )
                                 except Exception as exc:
                                     logger.debug(
                                         "history refresh for %s failed: %s",
@@ -1610,7 +1616,6 @@ async def assistant_transport(
                                 aligned = _assistant_align_streamed_ids(
                                     state_messages, refreshed
                                 )
-                            _assistant_set_messages(controller, state_messages)
                             if aligned:
                                 # The streamed ids were reconciled against
                                 # exactly this snapshot, so the page may
