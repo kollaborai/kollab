@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
+
 ### Fixed
 - A hub message reports `sent` only when the recipient's hub acks that message: ACP `hub_msg` results now carry `delivery` (`confirmed`, `accepted`, `queued` or `unconfirmed`), and a queued or unacked message no longer reads as sent (#609).
 - `kollab --hub capture` shows the hub messages an agent sent and received again; they were dropped whenever a heartbeat's state snapshot was in the capture window (#609).
