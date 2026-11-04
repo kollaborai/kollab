@@ -7,10 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-11-03
+
+### Changed
+- Release publishing runs from a reviewed controller on `main`, resolves immutable tagged source, limits the existing repository PyPI token to upload steps, and verifies GitHub release assets.
+
 ### Fixed
+- Installed voice workers use their managed runtime dependencies without importing packages from Kollab's main interpreter, fixing startup failures caused by cross-version dependency imports.
+
+## [0.19.0] - 2026-11-03
+
+### Fixed
+- Web UI source archives exclude local TypeScript build metadata, keeping generated compiler state out of published packages.
+- PhoneLink chat reuses unchanged polling snapshots so typing and scrolling stay responsive. Completed voice turns remain visible until saved history replaces them.
+- A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
+- Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
+- Detached daemon SIGTERM cancels its top-level async task so application cleanup
+  completes without injecting `KeyboardInterrupt` into child-task cleanup (#667).
+- Coordinator task assignments survive restarts in a durable dispatch ledger,
+  suppress re-routing delivered work, and keep completion reports unverified
+  until the original assigner verifies a worktree or commit reference (#636).
+- An agent whose code changed on disk after it started no longer fails every turn with an opaque 500: the daemon flags the mismatch, the Engine names the agent and says to restart it (`<agent> could not run the turn: <error>. Its code changed on disk after it started. Restart it.`), and voice turns carry the same explanation to the speaker (#571).
 - The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
+- The hub no longer replays stale pre-reboot inbox messages as current instructions: ordinary messages written before the last restart are dropped at the boot boundary (visible in the offline inbox summary), while durable task controls are still delivered for TaskLedger classification (#639).
+- The hub's crystal summary token cache now scales with the live vault (a power of two of at least twice its entries, minimum 8) instead of a fixed floor of 8,192, so its size tracks the live memories (#567).
+- Agent-facing crystal writes reject bodies over 2,000 characters; crystal-store saves are atomic and verified, and failed writes surface errors without retaining partial mutations (#638).
+- The web UI no longer serves beyond this machine without saying so: whenever it binds an address other than 127.0.0.1, whether from KOLLAB_WEBUI_HOSTS or the new `--web-ui-hosts` flag, startup prints a warning that the page is exposed and that anyone who can open it gets the engine token. `kollab --web-ui --web-ui-hosts IP[,IP]` is the explicit per-launch opt-in and overrides the shell's KOLLAB_WEBUI_HOSTS; an explicitly empty value forces localhost-only, and the desktop app forwards its own `--web-ui-hosts` argument to kollab, showing the exposure warning in its window before opening the UI (#674).
+- The desktop exposure interstitial now recognizes IPv4-mapped IPv6 addresses
+  whose embedded IPv4 is private or link-local (#674).
+
+- The web UI labels a hub broadcast note as addressed to All instead of naming
+  the observing window's own agent as the recipient; notes delivered straight to
+  the window keep addressing it (#671).
 
 ### Added
+- PhoneLink carries microphone input and spoken replies through the phone while the computer's LiveKit signaling and media stay on loopback (#440).
+- The Web UI Agents sidebar shows a small type glyph after local-session and offline names (coder `▸`, research `◈`, default `●`); rows without type metadata and all remote rows stay unmarked (#655).
 - Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
 - Team launches now support member selection or exclusions across the CLI,
   TUI and Web UI. The launch sheet sets the workspace, profile, lead and
@@ -137,6 +169,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Network: withdrawing access stops queued remote-agent input and output before
+  network submission; bytes already sent may still arrive (#524).
 - Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
   `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
   internal agent message-tool syntax (#622).
@@ -333,6 +367,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attach, `kollab service` and goal turns use `pid_alive`, so the hub keeps
   live agents. On every platform an exited agent that was never reaped now
   counts as stopped (#268).
+
+### Known limitations
+- PhoneLink voice passed recorded-input Android emulator testing. Final iPhone playback and transcript-persistence testing remains pending (#440).
 
 ## [0.18.5] - 2026-10-26
 

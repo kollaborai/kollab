@@ -1,6 +1,6 @@
 {
   "name": "kollabor-webui-frontend",
-  "version": "0.18.5",
+  "version": "0.19.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e:learn": "node tests/learn-browser-acceptance.mjs",
+    "test:e2e:agent-sidebar-glyph": "node tests/agent-sidebar-glyph-browser-acceptance.mjs",
     "test:e2e:team-launch": "node tests/team-launch-browser-acceptance.mjs"
   },
   "dependencies": {

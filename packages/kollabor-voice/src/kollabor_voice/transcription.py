@@ -16,11 +16,11 @@ import subprocess
 import threading
 import time
 import uuid
-from pathlib import Path
 
 import numpy as np
 
 from .control import manifest
+from .module_runtime import isolated_env, module_command
 from .speech_settings import STT_ENGINES
 
 log = logging.getLogger(__name__)
@@ -53,20 +53,19 @@ class ParakeetWorker:
         }
         # Every weight file was verified above; inference needs no network.
         env.update(
-            PYTHONPATH=str(Path(__file__).resolve().parent.parent),
             HF_HUB_OFFLINE="1",
         )
+        env = isolated_env(env)
         logs = root / "logs"
         logs.mkdir(exist_ok=True)
         with (logs / "parakeet.log").open("ab") as log_file:
             self.process = subprocess.Popen(
-                [
-                    str(python),
-                    "-m",
+                module_command(
+                    python,
                     "kollabor_voice.parakeet_worker",
                     "--model",
-                    str(paths["parakeet-v3"]),
-                ],
+                    paths["parakeet-v3"],
+                ),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=log_file,
