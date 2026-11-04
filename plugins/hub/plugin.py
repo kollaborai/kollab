@@ -137,6 +137,20 @@ except ImportError as _dns_import_err:
 
 logger = logging.getLogger(__name__)
 
+
+MAX_CRYSTAL_BODY_CHARS = 2000
+
+
+def _crystal_body_limit_error(tool_name: str, body: str) -> str | None:
+    if len(body) <= MAX_CRYSTAL_BODY_CHARS:
+        return None
+    return (
+        f"{tool_name} rejected: body has {len(body)} characters; "
+        f"maximum is {MAX_CRYSTAL_BODY_CHARS}. No changes were saved. "
+        "Reduce the body or split long notes across entries."
+    )
+
+
 _OPERATOR_NOTIFY_KINDS = frozenset({"decision", "blocker", "done"})
 _DEFAULT_OPERATOR_ALIASES = frozenset({"boss", "human", "operator"})
 
@@ -764,6 +778,7 @@ class HubPlugin(BasePlugin):
                     "identity": "",
                     "roster": DEFAULT_ROSTER,
                     "auto_help": False,
+                    "dispatch_list_enabled": False,
                     "mailbox_poll_interval": 5,
                     "dreaming_enabled": True,
                     "dreaming_idle_threshold": 300,
@@ -1351,13 +1366,16 @@ class HubPlugin(BasePlugin):
         #          <hub_msg to="x" kind="answer">msg</hub_msg>
         #          <hub_msg to="x">msg  (unclosed)
         # `to` is required; the rest are optional and may come in any order.
-        # task_id is optional: when present, the receiver's TaskLedger mint
-        # is deterministic (issue #211 addendum — handoffs were invisible to
-        # the tracker because nothing could carry an id).
+        # task_id, worktree, and commit are optional assignment metadata. The
+        # worktree and commit let a reborn coordinator inspect the assigned lane.
         hub_msg_pat = tag_pattern(
             "hub_msg",
             required={"to": "some"},
-            valid={"task_id": r"[0-9A-Za-z._:@-]+"},
+            valid={
+                "task_id": r"[0-9A-Za-z._:@-]+",
+                "worktree": r".+",
+                "commit": r"[0-9A-Za-z._/@:-]+",
+            },
             end="body?",
         )
 
@@ -1372,6 +1390,8 @@ class HubPlugin(BasePlugin):
                 "kind": attrs.get("kind", "").strip().lower(),
                 "notify_kind": attrs.get("notify_kind", "").strip().lower(),
                 "task_id": attrs.get("task_id", "").strip(),
+                "worktree": attrs.get("worktree", "").strip(),
+                "commit": attrs.get("commit", "").strip(),
                 "content": m.group(2).strip(),
             }
 
@@ -1382,6 +1402,81 @@ class HubPlugin(BasePlugin):
             _extract_hub_msg,
         )
         tool_executor.register_plugin_handler("hub_msg", self._handle_hub_msg_tool)
+
+
+        # Explicit coordinator-owned verification is intentionally separate from
+        # a worker's self-reported task completion.
+        hub_dispatch_verify_pat = tag_pattern(
+            "hub_dispatch_verify",
+            required={"dispatch_id": "some"},
+            valid={"dispatch_id": r"[0-9A-Za-z._:@-]+"},
+            end="body?",
+        )
+
+        def _extract_hub_dispatch_verify(m):
+            attrs = tag_attrs(m.group(1))
+            return {
+                "dispatch_id": attrs.get("dispatch_id", "").strip(),
+                "note": m.group(2).strip(),
+            }
+
+        response_parser.register_plugin_tag(
+            "hub_dispatch_verify",
+            hub_dispatch_verify_pat,
+            "hub_dispatch_verify",
+            _extract_hub_dispatch_verify,
+        )
+        tool_executor.register_plugin_handler(
+            "hub_dispatch_verify", self._handle_hub_dispatch_verify_tool
+        )
+
+        # Read-only paging over this coordinator's unresolved dispatches (#656).
+        # Opt-in: without plugins.hub.dispatch_list_enabled the tags are not
+        # registered, so the model never sees a tool that does not exist.
+        if self._dispatch_list_enabled():
+            hub_dispatch_list_pat = tag_pattern(
+                "hub_dispatch_list",
+                valid={"page": r"\d+", "per_page": r"\d+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_list(m):
+                attrs = tag_attrs(m.group(1))
+                return {
+                    "page": attrs.get("page", ""),
+                    "per_page": attrs.get("per_page", ""),
+                }
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_list",
+                hub_dispatch_list_pat,
+                "hub_dispatch_list",
+                _extract_hub_dispatch_list,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_list", self._handle_hub_dispatch_list_tool
+            )
+
+            hub_dispatch_read_pat = tag_pattern(
+                "hub_dispatch_read",
+                required={"dispatch_id": "some"},
+                valid={"dispatch_id": r"[0-9A-Za-z._:@-]+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_read(m):
+                attrs = tag_attrs(m.group(1))
+                return {"dispatch_id": attrs.get("dispatch_id", "").strip()}
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_read",
+                hub_dispatch_read_pat,
+                "hub_dispatch_read",
+                _extract_hub_dispatch_read,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_read", self._handle_hub_dispatch_read_tool
+            )
 
         # --- hub_reply ---
         # Shorthand for replying in-thread. The agent doesn't need to track
@@ -2590,6 +2685,15 @@ class HubPlugin(BasePlugin):
                 output="empty content, nothing saved",
             )
 
+        body_error = _crystal_body_limit_error("vault_write", content)
+        if body_error:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="vault_write",
+                success=False,
+                error=body_error,
+            )
+
         if not self._crystal_store:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2620,7 +2724,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="vault_write",
                 success=False,
-                output=f"vault_write error: {e}",
+                error=f"vault_write error: {e}",
             )
 
     async def _handle_global_vault_write_tool(self, tool_data: dict[str, Any]):
@@ -2636,6 +2740,15 @@ class HubPlugin(BasePlugin):
                 tool_type="global_vault_write",
                 success=True,
                 output="empty content, nothing saved",
+            )
+
+        body_error = _crystal_body_limit_error("global_vault_write", content)
+        if body_error:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="global_vault_write",
+                success=False,
+                error=body_error,
             )
 
         if not self._global_crystal_store:
@@ -2667,7 +2780,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="global_vault_write",
                 success=False,
-                output=f"global_vault_write error: {e}",
+                error=f"global_vault_write error: {e}",
             )
 
     async def _handle_crystal_search_tool(self, tool_data: dict[str, Any]):
@@ -2777,18 +2890,53 @@ class HubPlugin(BasePlugin):
             ]
             output = "\n".join(lines)
 
-            # Context limit: 3000 chars
-            if len(output) > 3000:
+            # Keep the tool response within the context budget while ensuring
+            # unbounded metadata cannot consume the space reserved for the body.
+            output_limit = 3000
+            header_limit = 600
+            if len(output) > output_limit:
                 body = entry.body
-                truncation_note = f"[truncated, {len(body)} chars total]"
-                header = (
-                    f"[{entry.id}] {entry.summary}\n"
-                    f"date: {entry.date}\n"
-                    f"keywords: {', '.join(entry.keywords)}\n"
-                    "---\n"
+                keywords = ", ".join(entry.keywords)
+
+                def _bounded_metadata(value: str, limit: int) -> Tuple[str, bool]:
+                    if len(value) <= limit:
+                        return value, False
+                    return value[: max(0, limit - 1)] + "…", True
+
+                summary_line, summary_truncated = _bounded_metadata(
+                    f"[{entry.id}] {entry.summary}  [{tier}]", 240
                 )
-                available = 3000 - len(header) - len(truncation_note) - 1
-                output = header + body[:available] + "\n" + truncation_note
+                date_line, date_truncated = _bounded_metadata(
+                    f"date: {entry.date}", 80
+                )
+                fixed_header = f"{summary_line}\n{date_line}\nkeywords: "
+                separator = "\n---\n"
+                metadata_note = "\n[metadata truncated]"
+                keyword_limit = max(
+                    0,
+                    header_limit
+                    - len(fixed_header)
+                    - len(separator)
+                    - len(metadata_note),
+                )
+                keyword_text, keywords_truncated = _bounded_metadata(
+                    keywords, keyword_limit
+                )
+                header = fixed_header + keyword_text
+                if summary_truncated or date_truncated or keywords_truncated:
+                    header += metadata_note
+                header += separator
+
+                available = output_limit - len(header)
+                if len(body) > available:
+                    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+                    body_note = (
+                        f"[body truncated, {len(body)} chars total; sha256={digest}]"
+                    )
+                    available = max(0, output_limit - len(header) - len(body_note) - 1)
+                    output = header + body[:available] + "\n" + body_note
+                else:
+                    output = header + body
 
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2911,6 +3059,15 @@ class HubPlugin(BasePlugin):
                     output="empty body",
                 )
 
+            body_error = _crystal_body_limit_error("crystal_edit", body)
+            if body_error:
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="crystal_edit",
+                    success=False,
+                    error=body_error,
+                )
+
             summary = tool_data.get("summary")
             keywords = tool_data.get("keywords")
             entry = self._crystal_store.update_entry(
@@ -2946,7 +3103,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="crystal_edit",
                 success=False,
-                output=f"crystal_edit error: {e}",
+                error=f"crystal_edit error: {e}",
             )
 
     async def _handle_crystal_delete_tool(self, tool_data: dict[str, Any]):
@@ -3320,6 +3477,180 @@ class HubPlugin(BasePlugin):
         return str(target or "").strip().casefold() in aliases
 
 
+    async def _handle_hub_dispatch_verify_tool(self, tool_data: dict):
+        """Mark an assignment verified only from its original assigner."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        dispatch_id = str(tool_data.get("dispatch_id", "") or "").strip()
+        note = str(tool_data.get("note", tool_data.get("content", "")) or "").strip()
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_dispatch_verify",
+                success=False,
+                output="",
+                error="Dispatch verification is unavailable without an active identity and TaskLedger.",
+            )
+        if not dispatch_id or not note:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_dispatch_verify",
+                success=False,
+                output="",
+                error="Provide a dispatch_id and a concise verification note.",
+            )
+
+        try:
+            verified = await asyncio.to_thread(
+                self._task_ledger.mark_dispatch_verified,
+                dispatch_id,
+                verified_by=verified_by,
+                note=note,
+            )
+        except Exception as e:
+            logger.exception("failed to verify hub dispatch %s", dispatch_id)
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_dispatch_verify",
+                success=False,
+                output="",
+                error=f"Could not save dispatch verification: {e}",
+            )
+        if not verified:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_dispatch_verify",
+                success=False,
+                output="",
+                error=(
+                    "Dispatch was not marked verified. Only its original assigner can "
+                    "verify it, and only after a worker report is recorded."
+                ),
+            )
+        return ToolExecutionResult(
+            tool_id=tool_data.get("id", "unknown"),
+            tool_type="hub_dispatch_verify",
+            success=True,
+            output=f"Dispatch {dispatch_id} marked verified by {verified_by}.",
+        )
+
+
+    def _dispatch_list_enabled(self) -> bool:
+        """Whether the opt-in dispatch list/read tags are on (default off)."""
+        try:
+            return bool(
+                self.config and self.config.get("plugins.hub.dispatch_list_enabled", False)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _dispatch_int_arg(value, default: int, maximum: int) -> int:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+        return min(max(number, 1), maximum)
+
+    async def _handle_hub_dispatch_list_tool(self, tool_data: dict):
+        """List one page of this coordinator's unresolved dispatches (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error="Dispatch listing is unavailable without an active identity and TaskLedger.",
+            )
+        page = self._dispatch_int_arg(tool_data.get("page", 1), 1, 10_000)
+        per_page = self._dispatch_int_arg(tool_data.get("per_page", 10), 10, 50)
+        try:
+            items, total = await asyncio.to_thread(
+                self._task_ledger.get_dispatches_page,
+                verified_by,
+                page=page,
+                per_page=per_page,
+            )
+        except Exception as e:
+            logger.exception("failed to list hub dispatches")
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error=f"Could not read dispatches: {e}",
+            )
+        if total == 0:
+            output = "no unresolved dispatches"
+        elif not items:
+            pages = -(-total // per_page)
+            output = (
+                f"no dispatches on page {page} ({total} unresolved; "
+                f"pages 1-{pages})"
+            )
+        else:
+            pages = -(-total // per_page)
+            lines = [
+                f"unresolved dispatches ({total} unresolved; page {page} of {pages}, "
+                "newest first):"
+            ]
+            for item in items:
+                lines.append(
+                    f"  [{item.get('status', 'unknown')}] dispatch "
+                    f"{item.get('dispatch_id', item.get('message_id', ''))} -> "
+                    f"{item.get('assignee', '')} (task {item.get('task_id', '')})"
+                )
+            output = "\n".join(lines)
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_list", success=True, output=output,
+        )
+
+    async def _handle_hub_dispatch_read_tool(self, tool_data: dict):
+        """Return one full dispatch record this coordinator assigned (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        dispatch_id = str(tool_data.get("dispatch_id", "") or "").strip()
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by or not dispatch_id:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="Provide a dispatch_id; reading needs an active identity and TaskLedger.",
+            )
+        try:
+            record = await asyncio.to_thread(self._task_ledger.get_dispatch, dispatch_id)
+        except Exception as e:
+            logger.exception("failed to read hub dispatch %s", dispatch_id)
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error=f"Could not read dispatch: {e}",
+            )
+        if not record or record.get("assigned_by") != verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="No dispatch with that ID is assigned by you.",
+            )
+        fields = (
+            "dispatch_id", "status", "task_id", "assignee", "assigned_by",
+            "directive", "thread_id", "worktree", "commit", "reported_worktree",
+            "reported_commit", "report", "delivery_error", "verified_by",
+            "verification_note", "created_at", "updated_at",
+        )
+        lines = []
+        for name in fields:
+            value = record.get(name)
+            if value not in (None, ""):
+                lines.append(f"{name}: {value}")
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_read", success=True,
+            output="\n".join(lines),
+        )
+
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
         from kollabor_agent.tool_executor import ToolExecutionResult
@@ -3349,12 +3680,22 @@ class HubPlugin(BasePlugin):
         target = str(target or "").strip()
         content = str(content or "").strip()
         attrs, embedded_content = embedded_attrs("hub_msg", target) or ({}, "")
-        # Only the attributes this recovery has always understood; anything else
-        # (kind, thread_id) stays a literal target and fails loudly.
-        if "to" in attrs and set(attrs) <= {"to", "wait", "force"}:
+        # Recover the attributes supported by the native hub_msg schema; relay
+        # control attributes still must be passed in their dedicated fields.
+        if "to" in attrs and set(attrs) <= {
+            "to",
+            "wait",
+            "force",
+            "task_id",
+            "worktree",
+            "commit",
+        }:
             target = attrs["to"].strip()
             wait_attr = str(wait_attr or attrs.get("wait", "")).lower()
             force_attr = str(force_attr or attrs.get("force", "")).lower()
+            for field in ("task_id", "worktree", "commit"):
+                if field in attrs and not tool_data.get(field):
+                    tool_data[field] = attrs[field]
             if not content and embedded_content:
                 content = embedded_content.strip()
 
@@ -3601,8 +3942,6 @@ class HubPlugin(BasePlugin):
                 ),
                 metadata={"end_turn": True} if any_wait else None,
             )
-        if not target.startswith("relay:") and not handle:
-            self._recent_hub_msgs[msg_hash] = now
 
         # Resolve thread context
         is_reply = tool_data.get("_is_reply", False)
@@ -3644,6 +3983,12 @@ class HubPlugin(BasePlugin):
         task_id = str(tool_data.get("task_id", "") or "").strip()
         if task_id:
             metadata["task_id"] = task_id
+        worktree = str(tool_data.get("worktree", "") or "").strip()
+        commit = str(tool_data.get("commit", "") or "").strip()
+        if worktree:
+            metadata["worktree"] = worktree
+        if commit:
+            metadata["commit"] = commit
         if relay_kind != "answer":
             if self._is_ack_only_content(
                 content, sender_has_active_task=sender_has_task
@@ -3665,28 +4010,6 @@ class HubPlugin(BasePlugin):
             ):
                 metadata["task_assignment"] = True
 
-        # A tagged handoff to a local agent is tracked on the ledger until
-        # the assignee acknowledges it (issue #283).
-        if (
-            metadata.get("task_assignment")
-            and task_id
-            and not handle
-            and not target.startswith("relay:")
-            and self._task_ledger
-            and self._identity
-            and target not in ("all", "*", "everyone", "team", "project")
-        ):
-            try:
-                begin_handoff(
-                    self._task_ledger,
-                    task_id,
-                    self._identity.identity,
-                    target,
-                    content,
-                )
-            except Exception as e:
-                logger.debug("failed to track handoff %s: %s", task_id, e)
-
         # Route the message
         msg = HubMessage(
             action="message",
@@ -3701,13 +4024,109 @@ class HubPlugin(BasePlugin):
             reply_to=reply_to,
             metadata=metadata,
         )
+
+        if metadata.get("task_assignment") and not metadata.get("task_id"):
+            # Use the stable outbound message ID as the task ID when callers do
+            # not provide one, so the receiver and dispatch ledger can correlate.
+            metadata["task_id"] = msg.id
+        task_id = str(metadata.get("task_id") or "").strip()
+
+        is_trackable_assignment = bool(
+            metadata.get("task_assignment")
+            and not handle
+            and not target.startswith("relay:")
+            and target not in ("all", "*", "everyone", "team", "project")
+        )
+        dispatch_id = ""
+        if is_trackable_assignment:
+            assigned_by = str(
+                getattr(self._identity, "identity", "") if self._identity else ""
+            ).strip()
+            if not self._task_ledger or not assigned_by:
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=False,
+                    output="",
+                    error=(
+                        "Task assignment was not sent: the durable dispatch ledger "
+                        "or coordinator identity is unavailable."
+                    ),
+                )
+            try:
+                dispatch_record = await asyncio.to_thread(
+                    self._task_ledger.record_dispatch,
+                    task_id=str(metadata.get("task_id") or msg.id),
+                    assigned_by=assigned_by,
+                    assignee=target,
+                    directive=content,
+                    message_id=msg.id,
+                    thread_id=msg.thread_id,
+                    worktree=worktree,
+                    commit=commit,
+                )
+            except Exception as e:
+                logger.exception("failed to persist hub dispatch to %s", target)
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=False,
+                    output="",
+                    error=(
+                        "Task assignment was not sent because its durable dispatch "
+                        f"record could not be saved: {e or type(e).__name__}"
+                    ),
+                )
+            dispatch_id = msg.id
+            dispatch_status = str(dispatch_record.get("status") or "dispatching")
+            if dispatch_status not in {"dispatching", "delivery_failed"}:
+                logger.info(
+                    "not rerouting dispatch %s already in status %s",
+                    dispatch_id,
+                    dispatch_status,
+                )
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=True,
+                    output=(
+                        f"Dispatch {dispatch_id} is already {dispatch_status}; "
+                        "not sent again."
+                    ),
+                    metadata={"end_turn": True} if any_wait else None,
+                )
+            metadata["dispatch_id"] = dispatch_id
+        # Apply the existing TaskLedger handoff hint only after the durable
+        # write-ahead record has been saved and before routing begins.
+        if (
+            metadata.get("task_assignment")
+            and task_id
+            and not handle
+            and not target.startswith("relay:")
+            and self._task_ledger
+            and self._identity
+            and target not in ("all", "*", "everyone", "team", "project")
+        ):
+            try:
+                await asyncio.to_thread(
+                    begin_handoff,
+                    self._task_ledger,
+                    task_id,
+                    self._identity.identity,
+                    target,
+                    content,
+                )
+            except Exception as e:
+                logger.debug("failed to track handoff %s: %s", task_id, e)
+
         if (
             metadata.get("task_assignment")
             and self._task_ledger
             and target not in ("all", "*", "everyone", "team", "project")
         ):
             try:
-                self._task_ledger.expect_reply(
+                await asyncio.to_thread(
+                    self._task_ledger.expect_reply,
                     task_id=str(metadata.get("task_id") or msg.id),
                     assignee=target,
                     requested_by=(
@@ -3718,7 +4137,53 @@ class HubPlugin(BasePlugin):
                 )
             except Exception as e:
                 logger.debug("failed to record expected hub reply: %s", e)
-        rejections = await self._route_message(msg)
+        try:
+            rejections = await self._route_message(msg)
+        except Exception as e:
+            if not dispatch_id:
+                raise
+            try:
+                updated = await asyncio.to_thread(
+                    self._task_ledger.update_dispatch,
+                    dispatch_id,
+                    status="delivery_failed",
+                    delivery_error=f"routing failed: {e or type(e).__name__}",
+                )
+                if not updated:
+                    logger.warning(
+                        "dispatch %s could not record route failure", dispatch_id
+                    )
+            except Exception:
+                logger.exception(
+                    "failed to persist route failure for dispatch %s", dispatch_id
+                )
+            logger.exception("failed to route task dispatch %s to %s", dispatch_id, target)
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_msg",
+                success=False,
+                output="",
+                error=(
+                    "Task assignment could not be routed: "
+                    f"{e or type(e).__name__}"
+                ),
+            )
+        if dispatch_id:
+            dispatch_status = "delivery_failed" if rejections else "in_flight"
+            dispatch_error = "; ".join(
+                f"{recipient}: {reason}" for recipient, reason in (rejections or [])
+            )
+            try:
+                updated = await asyncio.to_thread(
+                    self._task_ledger.update_dispatch,
+                    dispatch_id,
+                    status=dispatch_status,
+                    delivery_error=dispatch_error,
+                )
+                if not updated:
+                    logger.warning("dispatch %s could not transition to %s", dispatch_id, dispatch_status)
+            except Exception:
+                logger.exception("failed to update delivery state for %s", dispatch_id)
         if notify_kind and not relay_turn_active and not rejections:
             self._queue_operator_notification(content, notify_kind)
         self._display_outgoing_message(target, content)
@@ -3739,7 +4204,7 @@ class HubPlugin(BasePlugin):
         if rejections:
             parts = []
             for ident, reason in rejections:
-                parts.append(f"{ident}: {reason}")
+                parts.append(f"{ident}: {reason or 'refused with no reason given'}")
                 self._record_dispatch_failure(ident, reason)
             output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
                 # The reason already says what to do; force means nothing here.
@@ -3815,8 +4280,11 @@ class HubPlugin(BasePlugin):
         else:
             output = f"delivered to {target}"
 
+        metadata["delivery"] = self._delivery_evidence(msg, target)
         if any_wait and not warned:
             metadata["end_turn"] = True
+        if not target.startswith("relay:") and not handle:
+            self._recent_hub_msgs[msg_hash] = time.time()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_msg",
@@ -3824,6 +4292,30 @@ class HubPlugin(BasePlugin):
             output=output,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _delivery_evidence(msg: HubMessage, target: str) -> dict:
+        """How far a hub_msg got, for the sender to read.
+
+        ``confirmed``: a recipient's hub socket acked this message's id.
+        ``accepted``: a network peer accepted it (acceptance is not reading).
+        ``queued``: it sits in a mailbox; the recipient has not taken it.
+        ``unconfirmed``: nothing acked it and nothing queued it.
+        """
+        meta = msg.metadata or {}
+        acked = list(meta.get("_acked_by", []))
+        if meta.get("relay_receipt") or meta.get("network"):
+            state = "accepted"
+        elif meta.get("_queued_for") or meta.get("_socket_failed"):
+            state = "queued"
+        elif acked and (
+            target in acked or msg.scope != MessageScope.DIRECT.value
+        ):
+            state = "confirmed"
+        else:
+            state = "unconfirmed"
+        # Ids stay out: a tool result reaches attached clients and the model.
+        return {"state": state, "recipients": acked}
 
     async def _handle_hub_broadcast_tool(self, tool_data: dict):
         """Execute a hub_broadcast tool."""
@@ -5685,6 +6177,7 @@ class HubPlugin(BasePlugin):
                     crystal_store=self._crystal_store,
                     global_crystal_store=self._global_crystal_store,
                     task_ledger=self._task_ledger,
+                    dispatch_paging=self._dispatch_list_enabled(),
                 )
 
                 # Release stale lane claims from previous session
@@ -8787,6 +9280,34 @@ class HubPlugin(BasePlugin):
         # Display the message visually in the UI
         self._display_hub_message(message)
 
+        # Persist correlated task reports even when no LLM service is attached
+        # or the coordinator is already busy and will queue the message.
+        my_name = self._identity.identity if self._identity else ""
+        is_intended = bool(my_name) and (
+            message.to == my_name
+            or message.to in ("*", "all", "everyone", "team", "project")
+        )
+        dispatch_metadata = message.metadata or {}
+        dispatch_task_id = str(dispatch_metadata.get("task_id") or "").strip()
+        if self._task_ledger and is_intended:
+            try:
+                await asyncio.to_thread(
+                    self._task_ledger.record_dispatch_report,
+                    task_id=dispatch_task_id,
+                    assignee=message.from_identity or message.from_agent,
+                    thread_id=getattr(message, "thread_id", "") or "",
+                    reply_to=getattr(message, "reply_to", "") or "",
+                    message_id=message.id,
+                    report=message.content,
+                    worktree=str(dispatch_metadata.get("worktree") or ""),
+                    commit=str(dispatch_metadata.get("commit") or ""),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to reconcile durable dispatch report from %s",
+                    message.from_identity or message.from_agent,
+                )
+
         is_arrival = "just came online" in (message.content or "")
         is_departure = "is going offline" in (message.content or "")
         # Forward to bridge (skip system/cron noise)
@@ -8901,6 +9422,8 @@ class HubPlugin(BasePlugin):
                 is_human_elsewhere=is_human_elsewhere,
                 llm_service=llm_service,
             )
+            message_metadata = message.metadata or {}
+            task_id = str(message_metadata.get("task_id") or "").strip()
             dispatch_mode = self._agent_dispatch_mode(llm_service)
             if dispatch_mode == "acp" or (
                 dispatch_mode == "unavailable"
@@ -8938,9 +9461,7 @@ class HubPlugin(BasePlugin):
                         assignee=message.from_identity,
                         evidence=message.content,
                         message_id=message.id,
-                        task_id=str(
-                            (message.metadata or {}).get("task_id") or ""
-                        ).strip(),
+                        task_id=task_id,
                     )
                 except Exception as e:
                     logger.debug("failed to resolve expected hub reply: %s", e)
@@ -9210,6 +9731,26 @@ class HubPlugin(BasePlugin):
         """Get the persona color for an identity, or a stable palette fallback."""
         return persona_color(identity)
 
+    def _publish_hub_display(
+        self, from_name: str, to_name: str, content: str, observing: bool
+    ) -> None:
+        """Publish a hub message box as a semantic event for `kollab --hub capture`.
+
+        The box itself is rendered output, which the JSON capture drops whenever a
+        semantic event (a heartbeat's state_snapshot) is in the ring. This copy is
+        semantic, so the transcript keeps the message. Never raises.
+        """
+        from kollabor_tui.display_tap import publish_semantic
+
+        publish_semantic(
+            getattr(self, "_display_tap", None),
+            "hub_display",
+            sender=from_name,
+            target=to_name,
+            observing=observing,
+            text=f"{from_name} -> {to_name}\n{content}",
+        )
+
     def _render_hub_box(
         self, from_name: str, to_name: str, content: str, observing: bool = False
     ) -> None:
@@ -9221,6 +9762,7 @@ class HubPlugin(BasePlugin):
         Direct messages: bright colored ◆ marker
         Observed messages: dimmed colored ◇ marker
         """
+        self._publish_hub_display(from_name, to_name, content, observing)
         renderer = self.event_bus.get_service("renderer") if self.event_bus else None
         if not renderer or not hasattr(renderer, "message_coordinator"):
             return
@@ -11071,7 +11613,7 @@ class HubPlugin(BasePlugin):
                     **({"waiting": True} if (message.metadata or {}).get("acp_waiting") else {}),
                 )
             except RelayError as exc:
-                return [(message.to, str(exc))]
+                return [(message.to, str(exc) or type(exc).__name__)]
             refusal = _receipt_refusal(receipt)
             if refusal:
                 if receipt.get("reason") == "recipient_unavailable" or (
@@ -11228,6 +11770,13 @@ class HubPlugin(BasePlugin):
             if message.to not in queued_for:
                 message.metadata["_queued_for"] = [*queued_for, message.to]
             await AgentMessenger.send_to_file(message.to, message)
+            # A successful durable enqueue is accepted delivery; remove the
+            # waiting rejection so the dispatch ledger will not allow replay.
+            rejections = [
+                (recipient, reason)
+                for recipient, reason in rejections
+                if recipient != message.to
+            ]
             self._trace_delivery(
                 message,
                 "queued_identity_mailbox",
@@ -11502,6 +12051,12 @@ class HubPlugin(BasePlugin):
             target=agent.identity,
             detail=dial_target,
         )
+        if success:
+            # The receiver acked this message's id: it is the sender's proof
+            # of delivery (see _delivery_evidence).
+            acked = list(message.metadata.get("_acked_by", []))
+            if agent.identity not in acked:
+                message.metadata["_acked_by"] = [*acked, agent.identity]
         if not success:
             await AgentMessenger.send_to_file(agent.identity, message)
             # The sender has to hear that this was a mailbox drop, not a
@@ -12710,15 +13265,17 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: the knock screen is unavailable"
 
-    def _offer_failed(self) -> dict[str, str]:
-        """A failed offer, with the network's refusal line when that is why (#355).
+    def _offer_failed(self, refusal: str = "") -> dict[str, str]:
+        """A failed offer, with the reason it failed when we know it (#355, #693).
 
-        The line comes from this machine's state, never from exception text.
+        `refusal` is the issuer's own fixed line for a refusal made before any relay
+        request (#693). Otherwise the network's admit line is used (#355). Both come
+        from this machine's state, never from exception text.
         """
-        reason = ""
+        reason = refusal if isinstance(refusal, str) else ""
         try:
             commands = getattr(self._relay_agent, "commands", None)
-            if commands is not None:
+            if not reason and commands is not None:
                 reason = commands.client.control.admit_refusal()
         except Exception:
             reason = ""
@@ -12745,6 +13302,8 @@ class HubPlugin(BasePlugin):
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
             return {"error": "invalid connect offer request"}
+        from .enrollment_client import EnrollmentProtocolError
+
         try:
             if self._identity is None or self._rpc_server is None:
                 return {"error": "connect enrollment is unavailable"}
@@ -12753,6 +13312,10 @@ class HubPlugin(BasePlugin):
             if create is None:
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
+        except EnrollmentProtocolError as exc:
+            # The issuer refused before any relay request; say why (#693).
+            logger.warning("connect offer refused: %s", exc.refusal or exc.code)
+            return self._offer_failed(exc.refusal)
         except Exception:
             return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):

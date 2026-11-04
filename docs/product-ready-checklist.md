@@ -64,11 +64,38 @@ Keep the PR draft while any required evidence or work is outstanding.
   `Fixes #<issue-number>` when an issue tracks the work.
 - [ ] This complete checklist is present in the PR body, and every item is
   filled with evidence or a specific N/A reason; no result is guessed or left blank.
-- [ ] Work was done in the shared checkout on `main` (no worktree, no branch
-  switch) and committed by explicit paths, leaving other agents' uncommitted
-  edits untouched.
-- [ ] The PR remains a draft until Marco or the koordinator marks it ready; agents do not merge or
-  create release tags without explicit authorization.
+- [ ] Work was done in a uniquely owned worktree and branch based on the
+  current PR base (`origin/main` in the maintainer checkout), or a standalone
+  contributor branch when no other writer shares the checkout. File ownership
+  was clear; existing dirty work, branches, and worktrees were preserved; the
+  maintainer integration checkout had no source edits.
+- [ ] The PR remains a draft until its designated integrator marks it ready
+  within Marco's authorized integration plan, batch, or class order, after a
+  different AI agent
+  reviews the exact final head and records approval using whichever account
+  (`kollaborai` or `maarco`) is not the PR author. Record reviewer identity
+  and exact reviewed SHA in private maintainer audit evidence. Keep the GitHub
+  approval plain, with no AI attribution or footer. GitHub prohibits author
+  self-approval. Required CI must pass.
+  After the code-owner gate is enabled, external PRs need approval from
+  `@maarco` or `@kollaborai`; a PR authored under either account needs the
+  other account's approval. GitHub does not verify the independent AI review,
+  which stays in private exact-head audit evidence.
+  Every merge uses `kollaborai` with a merge commit; never use `--admin` or a
+  ruleset bypass. Work outside the plan needs new authorization, and release
+  tags need separate explicit maintainer instruction.
+- [ ] An independent clean-room review verdict is posted as a PR comment
+  recording the pinned head SHA, base SHA, exact commands run, and PASS or
+  FAIL; the reviewer worked in a scratch environment and ran the tests itself.
+  A head moved only by merging `main` may carry the reviewer's addendum instead,
+  as `SOFTWARE_DEVELOPMENT_LIFECYCLE.md` describes.
+- [ ] Independent review started only while the PR head was current with
+  `main` (not BEHIND or DIRTY), and the verdict names the base SHA it covered.
+- [ ] Every review finding has a failing regression test landed before its
+  fix (as its own commit, or marked strict `xfail`); the fix flipped it green
+  without editing the test, and removing that marker was the only test change.
+  A finding no test can reproduce, such as wording in a doc, says so in its
+  fix commit instead.
 
 ## Evidence notes
 

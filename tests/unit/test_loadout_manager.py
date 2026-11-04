@@ -828,3 +828,32 @@ async def test_activate_acp_rejects_native_overrides_and_remote_delegates():
     )
     assert accepted is not None
     state.panel_action.assert_awaited_once_with("llm", "activate", {"name": "haiku-max"})
+
+
+@pytest.mark.asyncio
+async def test_activate_acp_missing_rollback_state_is_logged_and_swallowed(caplog):
+    previous = _FakeProfile("previous", "acp")
+    selected = _FakeProfile("selected", "acp")
+    pm = _FakeProfileManager([previous, selected])
+    pm.active_name = "previous"
+    manager = LoadoutManager(pm, config=_MemoryConfig())
+
+    orchestrator = SimpleNamespace(
+        close=AsyncMock(),
+        start=AsyncMock(
+            side_effect=[RuntimeError("new session failed"), RuntimeError("restore failed")]
+        ),
+    )
+    bus = SimpleNamespace(
+        get_service=lambda name: orchestrator if name == "acp_orchestrator" else None
+    )
+
+    with caplog.at_level("ERROR", logger=lm.logger.name):
+        result = await manager.activate(
+            Loadout("selected-loadout", "selected", "claude-sonnet"), bus
+        )
+
+    assert result is None
+    assert pm.active_name == "previous"
+    assert "ACP loadout 'selected-loadout' failed (RuntimeError)" in caplog.text
+    assert "Could not restore previous ACP session (RuntimeError)" in caplog.text

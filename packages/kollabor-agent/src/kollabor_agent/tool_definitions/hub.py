@@ -37,7 +37,17 @@ hub_msg = ToolDefinition(
     requires_permission=False,
     xml_tag="hub_msg",
     xml_form="mixed",
-    xml_attributes=["to", "wait", "force", "thread_id", "reply_to", "kind"],
+    xml_attributes=[
+        "to",
+        "wait",
+        "force",
+        "thread_id",
+        "reply_to",
+        "kind",
+        "task_id",
+        "worktree",
+        "commit",
+    ],
     xml_body_param="message",
     parameters=[
         ToolParameter(
@@ -107,6 +117,33 @@ hub_msg = ToolDefinition(
             required=False,
             enum=["message", "question", "answer"],
         ),
+        ToolParameter(
+            name="task_id",
+            type="string",
+            description=(
+                "Optional stable ID for a direct task assignment. When omitted, a local "
+                "assignment uses its outbound message ID as the task ID."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="worktree",
+            type="string",
+            description=(
+                "Optional assigned worktree path. Include it for task assignments so the "
+                "coordinator can inspect the lane after a restart."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="commit",
+            type="string",
+            description=(
+                "Optional starting commit for the assigned lane. Include it with "
+                "worktree when known."
+            ),
+            required=False,
+        ),
     ],
     examples=[
         '<hub_msg to="lapis">standby. waiting for next task.</hub_msg>',
@@ -119,6 +156,11 @@ hub_msg = ToolDefinition(
             '<hub_msg to="relay:<approved-agent-address>" kind="answer" '
             'thread_id="<thread-id>" reply_to="<question-id>">'
             "Use the workspace root.</hub_msg>"
+        ),
+        (
+            '<hub_msg to="lapis" task_id="TASK-123" '
+            'worktree="/repo/wt/issue-123" commit="abc1234">'
+            "Implement the assigned task and report the resulting commit.</hub_msg>"
         ),
     ],
     result_format="Delivery confirmation.",
@@ -137,6 +179,10 @@ hub_msg = ToolDefinition(
         "without wait='true' the system will re-invoke you after delivery — "
         "correct when you have more work to do but causes loops when you're just chatting",
         "be concise — other agents have limited context too",
+        "for direct task assignments, include task_id, worktree, and starting commit when known",
+        "tell workers to use the exact first line 'Task complete' only for final, acceptance-complete reports",
+        "for final task reports, include task_id and at least one of the worktree "
+        "or commit attributes",
         "manual trust only: start a remote task with kind='message', the exact request text from its human "
         "contact instruction, and that instruction's exact thread_id; do not wrap or extend it",
         "manual trust only: use kind='question' only as the receiver of an active authenticated remote task, "
@@ -145,6 +191,56 @@ hub_msg = ToolDefinition(
         "address, thread_id, and event_id as reply_to; never answer a result or an expired question",
     ],
 )
+
+hub_dispatch_verify = ToolDefinition(
+    name="hub-dispatch-verify",
+    description=(
+        "Verify a worker's reported completion after independently checking the "
+        "assigned worktree, commit, and acceptance evidence. Only the original "
+        "assigner can verify a dispatch."
+    ),
+    category="hub",
+    risk_level="medium",
+    requires_permission=False,
+    xml_tag="hub_dispatch_verify",
+    xml_form="mixed",
+    xml_attributes=["dispatch_id"],
+    xml_body_param="note",
+    parameters=[
+        ToolParameter(
+            name="dispatch_id",
+            type="string",
+            description="The exact message/dispatch ID shown in coordinator recovery context.",
+            required=True,
+        ),
+        ToolParameter(
+            name="note",
+            type="string",
+            description=(
+                "Evidence-backed note describing the worktree/commit and acceptance "
+                "checks performed. A worker's report alone is not verification."
+            ),
+            required=True,
+        ),
+    ],
+    examples=[
+        '<hub_dispatch_verify dispatch_id="<dispatch-id>">'
+        "Inspected the reported commit and passed the acceptance tests."
+        "</hub_dispatch_verify>"
+    ],
+    result_format="Verification state for the durable dispatch.",
+    key_rules=[
+        "only the original assigner may verify a dispatch",
+        "a dispatch must have a worker report before verification",
+        "verify the actual worktree and acceptance evidence; do not trust the report alone",
+    ],
+    safety_features=[
+        "verification is recorded separately from worker reports",
+        "verification requires an explicit evidence note",
+    ],
+)
+
+
 
 hub_broadcast = ToolDefinition(
     name="hub-broadcast",
@@ -1113,6 +1209,7 @@ def register_all():
 
     # Messaging
     registry.register(hub_msg)
+    registry.register(hub_dispatch_verify)
     registry.register(hub_broadcast)
 
     # Agent management

@@ -144,7 +144,7 @@ export class PromptsApi {
     key: string,
     content: string,
   ): Promise<void> {
-    await this.check(
+    await this.discard(
       await this.transport.request(
         `/prompts/${encodeURIComponent(bundle)}/sections/${encodeURIComponent(key)}`,
         { method: "PUT", body: JSON.stringify({ content }) },
@@ -154,7 +154,7 @@ export class PromptsApi {
 
   /** Deletes this bundle's override; the shipped section shows through. */
   async deleteOverride(bundle: string, key: string): Promise<void> {
-    await this.check(
+    await this.discard(
       await this.transport.request(
         `/prompts/${encodeURIComponent(bundle)}/sections/${encodeURIComponent(key)}`,
         { method: "DELETE" },
@@ -175,7 +175,7 @@ export class PromptsApi {
   }
 
   async createLibrary(name: string): Promise<void> {
-    await this.check(
+    await this.discard(
       await this.transport.request("/prompts/libraries", {
         method: "POST",
         body: JSON.stringify({ name }),
@@ -192,7 +192,7 @@ export class PromptsApi {
 
   /** Defaults: an edit every role gets. A user library: adds or replaces the section. */
   async saveLibrarySection(library: string, key: string, content: string): Promise<void> {
-    await this.check(
+    await this.discard(
       await this.transport.request(this.libraryPath(library, key), {
         method: "PUT",
         body: JSON.stringify({ content }),
@@ -202,7 +202,7 @@ export class PromptsApi {
 
   /** Defaults: back to the shipped text. A user library: deletes the section. */
   async deleteLibrarySection(library: string, key: string): Promise<void> {
-    await this.check(
+    await this.discard(
       await this.transport.request(this.libraryPath(library, key), { method: "DELETE" }),
     );
   }
@@ -232,6 +232,11 @@ export class PromptsApi {
     const response = await this.transport.request(path);
     await this.check(response);
     return (await response.json()) as T;
+  }
+
+  private async discard(response: Response): Promise<void> {
+    await this.check(response);
+    await response.body?.cancel();
   }
 
   /** Turns a non-2xx response into a PromptsApiError, like EngineApi does. */

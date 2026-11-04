@@ -31,7 +31,8 @@ import { composerDraftStorageKey } from "../composer-draft";
 
 type WelcomeGem = { name: string; pool?: AgentPoolEntry; activity?: Activity | null; onOpen?: () => void };
 
-const WelcomeContext = createContext<WelcomeGem | null>(null);
+// Exported for tests: the window's own agent (its gem) shapes note addressing.
+export const WelcomeContext = createContext<WelcomeGem | null>(null);
 const PoolContext = createContext<readonly AgentPoolEntry[]>([]);
 /** Where the session's agent runs (its device, else its folder): a bare hub name is its neighbor there. */
 const WhereContext = createContext("");
@@ -117,11 +118,13 @@ const agentLabel = (id: string, pool: readonly AgentPoolEntry[]) => {
 
 // A hub message, sent or received: the sender's gem, "From → To" and the
 // words, the way the terminal draws its hub box.
-const HubNoteView: FC<{
+export const HubNoteView: FC<{
   from: string;
   to: string;
   threadId?: string;
   replyTo?: string;
+  /** The note was delivered straight to this window ("Message from ..."). */
+  isDirect?: boolean;
   isReply?: boolean;
   children: ReactNode;
   footer?: ReactNode;
@@ -130,6 +133,7 @@ const HubNoteView: FC<{
   to,
   threadId,
   replyTo,
+  isDirect,
   isReply = false,
   children,
   footer,
@@ -144,9 +148,11 @@ const HubNoteView: FC<{
   const sender = pool.find((agent) => agent.name === name);
 
   const resolvedTo = to ? resolveAgentSender(to, { agents: pool, remoteAgents }) : "";
+  // An empty recipient is a broadcast ("All", the hub's `*`); only a note
+  // delivered straight to this window addresses the window's own agent (#671).
   const recipient = resolvedTo
     ? agentLabel(resolvedTo, pool)
-    : gem?.name
+    : isDirect && gem?.name
       ? agentLabel(gem.name, pool)
       : "All";
 
@@ -261,7 +267,7 @@ const HubNoteMessage: FC = () => {
         note?.observed && "opacity-60",
       )}
     >
-      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo}>
+      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo} isDirect={note?.isDirect}>
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </HubNoteView>
     </MessagePrimitive.Root>

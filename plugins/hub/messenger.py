@@ -34,6 +34,39 @@ INBOX_TTL_SECS: int = 7 * 86400  # 7 days
 # Durable task controls bypass this cap and retain normal receive semantics.
 INBOX_MAX_REPLAY: int = 20
 
+# --- Restart boundary (issue #639) ---
+# Boot time of this process (module import). Inbox messages written by a
+# previous process instance carry timestamps below this boundary: they are
+# pre-reboot and must never be replayed as current instructions. Ordinary
+# pre-boundary messages are dropped with a log line (and reported in the
+# inbox summary when anything survives to deliver); durable task controls
+# are preserved so the normal receive path can classify them against the
+# TaskLedger (stale cron ACK, assignment classification).
+MESSENGER_BOOT_TS: float = time.time()
+# Grace window (seconds) around the restart boundary. Traffic written within
+# this window before boot is treated as current: brief offline windows
+# (agent crash/relaunch churn) produce legitimate offline messages that must
+# still be delivered (bounded + summarized). Stale pre-reboot backlogs
+# accumulate over hours or days — well beyond this window — and are
+# reconciled away. Also absorbs clock adjustments at boot.
+INBOX_RESTART_GRACE_SECS: float = 900.0
+
+
+def set_restart_boundary(ts: float) -> float:
+    """Set the restart boundary used to classify pre-reboot inbox messages.
+
+    The module records its own process start at import; an external boot
+    mark may override it. Returns the boundary in effect after the call.
+    """
+    global MESSENGER_BOOT_TS
+    MESSENGER_BOOT_TS = float(ts)
+    return MESSENGER_BOOT_TS
+
+
+def get_restart_boundary() -> float:
+    """Return the current restart boundary (process boot by default)."""
+    return MESSENGER_BOOT_TS
+
 # Idle timeout (seconds) for the off-box read loop. An authenticated remote
 # peer that handshakes then sends nothing (or stops between actions) is dropped
 # after this long. Combined with REMOTE_MAX_CONNECTIONS this bounds remote
@@ -2521,7 +2554,7 @@ class AgentMessenger:
 
         ``target_socket`` may be a unix socket path or an endpoint URI.
         Pass ``auth`` to authenticate over a remote / auth-required peer.
-        Returns True if delivered and acked.
+        Returns True only if the receiver acked this message's id.
         """
         writer = None
         try:
@@ -2539,7 +2572,12 @@ class AgentMessenger:
             if ack_line:
                 ack = json.loads(ack_line.decode().strip())
                 if isinstance(ack, dict):
-                    return ack.get("type") == "ack"
+                    # The receiver acks a message with its id once its handler
+                    # returned. An ack naming another message confirms nothing
+                    # here; an ack without an id is a control-plane frame's.
+                    return ack.get("type") == "ack" and ack.get(
+                        "id", message.id
+                    ) == message.id
             return False
 
         except Exception as e:
@@ -3168,7 +3206,11 @@ class AgentMessenger:
         _prune_inbox(msg_dir, INBOX_MAX_SIZE)
 
     @staticmethod
-    def read_mailbox(agent_id: str, max_replay: int = 0) -> List[HubMessage]:
+    def read_mailbox(
+        agent_id: str,
+        max_replay: int = 0,
+        restart_boundary: Optional[float] = None,
+    ) -> List[HubMessage]:
         """Read and consume messages from filesystem mailbox.
 
         Args:
@@ -3178,14 +3220,24 @@ class AgentMessenger:
                 receive can classify them exactly once. A synthetic
                 ``inbox_summary`` reports dropped ordinary traffic. TTL also
                 applies only to ordinary traffic; controls must be classified.
+            restart_boundary: Explicit restart boundary (epoch seconds).
+                Defaults to the process boot boundary (``MESSENGER_BOOT_TS``).
+                Ordinary messages older than the boundary (minus a small
+                clock-skew grace) are pre-reboot: they are dropped with a log
+                line and never delivered as current instructions, but durable
+                task controls are preserved for TaskLedger classification.
         """
         msg_dir = get_messages_dir() / agent_id
         if not msg_dir.exists():
             return []
 
         now = time.time()
+        boundary = (
+            MESSENGER_BOOT_TS if restart_boundary is None else float(restart_boundary)
+        )
         messages: List[HubMessage] = []
         expired_count = 0
+        stale_preboot_count = 0
 
         for f in sorted(msg_dir.glob("*.json")):
             data: Dict[str, Any] = {}
@@ -3216,11 +3268,8 @@ class AgentMessenger:
             # reach normal receive so stale cron reminders are explicitly
             # ACKed and assignments are classified instead of disappearing.
             ts = data.get("timestamp", 0) or 0
-            if (
-                not _is_durable_control(data)
-                and ts
-                and (now - float(ts)) > INBOX_TTL_SECS
-            ):
+            is_control = _is_durable_control(data)
+            if not is_control and ts and (now - float(ts)) > INBOX_TTL_SECS:
                 expired_count += 1
                 try:
                     f.unlink()
@@ -3230,7 +3279,6 @@ class AgentMessenger:
 
             try:
                 msg = HubMessage.from_dict(data)
-                messages.append(msg)
             except Exception as e:
                 logger.warning(f"Failed to parse mailbox message {f}: {e}")
                 try:
@@ -3245,16 +3293,90 @@ class AgentMessenger:
             except Exception:
                 pass
 
+            # Issue #639: reconcile pre-restart messages against the boot
+            # boundary. Ordinary chatter written by a previous process
+            # instance is dropped with a log line — never delivered as
+            # current instructions. Durable controls are preserved for
+            # TaskLedger classification on the normal receive path.
+            if (
+                not is_control
+                and ts
+                and float(ts) < boundary - INBOX_RESTART_GRACE_SECS
+            ):
+                stale_preboot_count += 1
+                continue
+
+            messages.append(msg)
+
         if expired_count:
             logger.info(
                 f"Discarded {expired_count} TTL-expired inbox message(s) for {agent_id}"
             )
 
-        total = len(messages)
+        if stale_preboot_count:
+            logger.info(
+                "Dropped %d pre-restart inbox message(s) for %s (written before "
+                "restart boundary %.0f)",
+                stale_preboot_count,
+                agent_id,
+                boundary,
+            )
+
+        # Truthful summary accounting: "total" counts everything that
+        # arrived, including pre-reboot messages reconciled away below.
+        total = len(messages) + stale_preboot_count
         controls = [
             message for message in messages if _is_durable_control(message.to_dict())
         ]
         ordinary = [message for message in messages if message not in controls]
+
+        def _unique_senders() -> List[str]:
+            return list(
+                dict.fromkeys(
+                    m.from_identity or m.from_agent
+                    for m in messages
+                    if m.from_identity or m.from_agent
+                )
+            )
+
+        def _build_summary(showing: int, dropped: int) -> HubMessage:
+            senders = _unique_senders()
+            sender_str = ", ".join(senders[:5])
+            if len(senders) > 5:
+                sender_str += f" and {len(senders) - 5} more"
+
+            content = (
+                f"[offline inbox] {total} message(s) arrived while offline"
+                f" (senders: {sender_str or 'unknown'}). "
+                f"Showing most recent {showing} ordinary message(s) and "
+                f"{len(controls)} preserved task control(s)."
+            )
+            if stale_preboot_count:
+                content += (
+                    f" {stale_preboot_count} stale pre-restart message(s) were"
+                    f" dropped (written before the last restart)."
+                )
+            if dropped:
+                content += (
+                    f" {dropped} older ordinary message(s) have been dropped"
+                    f" to prevent flooding."
+                )
+            return HubMessage(
+                action="inbox_summary",
+                from_identity="hub",
+                content=content,
+                # timestamp=0 ensures this summary sorts before all real
+                # messages when read_mailboxes does its chronological sort.
+                timestamp=0.0,
+                metadata={
+                    "total": total,
+                    "showing": showing,
+                    "controls_preserved": len(controls),
+                    "senders": senders,
+                    "dropped": dropped,
+                    "stale_preboot_dropped": stale_preboot_count,
+                },
+            )
 
         if max_replay > 0 and len(ordinary) > max_replay:
             replayed_ordinary = ordinary[-max_replay:]
@@ -3262,40 +3384,7 @@ class AgentMessenger:
             replayed_ids = {message.id for message in controls + replayed_ordinary}
             replayed = [message for message in messages if message.id in replayed_ids]
 
-            # Collect unique senders from the full set for the summary.
-            senders: List[str] = list(
-                dict.fromkeys(
-                    m.from_identity or m.from_agent
-                    for m in messages
-                    if m.from_identity or m.from_agent
-                )
-            )
-            sender_str = ", ".join(senders[:5])
-            if len(senders) > 5:
-                sender_str += f" and {len(senders) - 5} more"
-
-            summary_content = (
-                f"[offline inbox] {total} message(s) arrived while offline"
-                f" (senders: {sender_str or 'unknown'}). "
-                f"Showing most recent {max_replay} ordinary message(s) and "
-                f"{len(controls)} preserved task control(s). "
-                f"Older ordinary messages have been dropped to prevent flooding."
-            )
-            summary = HubMessage(
-                action="inbox_summary",
-                from_identity="hub",
-                content=summary_content,
-                # timestamp=0 ensures this summary sorts before all real
-                # messages when read_mailboxes does its chronological sort.
-                timestamp=0.0,
-                metadata={
-                    "total": total,
-                    "showing": len(replayed_ordinary),
-                    "controls_preserved": len(controls),
-                    "senders": senders,
-                    "dropped": dropped,
-                },
-            )
+            summary = _build_summary(len(replayed_ordinary), dropped)
             logger.info(
                 "Inbox replay bounded for %s: %d total, replaying %d ordinary "
                 "and preserving %d control(s)",
@@ -3306,10 +3395,28 @@ class AgentMessenger:
             )
             return [summary] + replayed
 
+        if stale_preboot_count and messages:
+            # Issue #639: make pre-reboot drops visible even when bounded
+            # replay did not trigger. Delivery coalesces this summary with
+            # the surviving messages into one stale-flagged block.
+            return [_build_summary(len(ordinary), 0)] + messages
+
+        if stale_preboot_count:
+            logger.info(
+                "Dropped %d pre-restart inbox message(s) for %s; nothing "
+                "current remained to deliver",
+                stale_preboot_count,
+                agent_id,
+            )
+
         return messages
 
     @staticmethod
-    def read_mailboxes(agent_keys: List[str], max_replay: int = 0) -> List[HubMessage]:
+    def read_mailboxes(
+        agent_keys: List[str],
+        max_replay: int = 0,
+        restart_boundary: Optional[float] = None,
+    ) -> List[HubMessage]:
         """Read and consume mailboxes for all durable addresses.
 
         Agents get a fresh agent_id on restart, but their hub identity
@@ -3319,11 +3426,15 @@ class AgentMessenger:
         Args:
             agent_keys: List of agent_id and identity strings to drain.
             max_replay: Forwarded to read_mailbox — caps per-inbox replay.
+            restart_boundary: Forwarded to read_mailbox — pre-reboot
+                reconciliation boundary (defaults to process boot).
         """
         messages: List[HubMessage] = []
         seen: set[str] = set()
         for key in dict.fromkeys(k for k in agent_keys if k):
-            for msg in AgentMessenger.read_mailbox(key, max_replay=max_replay):
+            for msg in AgentMessenger.read_mailbox(
+                key, max_replay=max_replay, restart_boundary=restart_boundary
+            ):
                 if msg.id in seen:
                     continue
                 seen.add(msg.id)

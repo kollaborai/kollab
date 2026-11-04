@@ -1318,8 +1318,10 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
         manifest=discovery.manifest,
     )
     commands._discover.return_value = (custom_port_discovery, "", (), False)
-    with pytest.raises(EnrollmentProtocolError, match="unavailable"):
+    with pytest.raises(EnrollmentProtocolError, match="unavailable") as refused:
         await issuer.create_offer("kollabor.ai")
+    # The refusal names its real cause (#693): the port is the only thing wrong here.
+    assert "port 8443" in refused.value.refusal and "port 443" in refused.value.refusal
     state = json.loads((tmp_path / "enrollment-delegations.json").read_text())
     assert len(state["delegations"]) == 1
 
