@@ -26,6 +26,7 @@ def test_initialize_system_prompt_finds_bundles_next_to_package(tmp_path, monkey
     workspace.mkdir()
 
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.chdir(workspace)
     monkeypatch.setattr(
         config_utils,
@@ -119,6 +120,7 @@ def test_initialize_user_directories_finds_packaged_bundles(tmp_path, monkeypatc
     workspace.mkdir()
 
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.chdir(workspace)
     monkeypatch.setattr(
         config_utils,
