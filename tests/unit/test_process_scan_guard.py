@@ -191,6 +191,9 @@ def test_process_table_detector_recurses_into_powershell_command_payloads():
     for process_provider_script in (
         "Get-CimInstance Win32_Process",
         "Get-WmiObject Win32_Process",
+        "[System.Diagnostics.Process]::GetProcesses()",
+        "Invoke-Expression 'Get-CimInstance Win32_Process'",
+        r"CimCmdlets\Get-CimInstance Win32_Process",
     ):
         encoded_cim = base64.b64encode(
             process_provider_script.encode("utf-16-le")
@@ -200,6 +203,46 @@ def test_process_table_detector_recurses_into_powershell_command_payloads():
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     assert is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", encoded])
     assert is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", "not-base64"])
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "[System.Diagnostics.Process]::GetProcesses()",
+        "[System.Diagnostics.Process]::GetProcessesByName('python')",
+        "Invoke-Expression 'Get-CimInstance Win32_Process'",
+        "iex 'Get-CimInstance Win32_Process'",
+        r"CimCmdlets\Get-CimInstance Win32_Process",
+    ],
+)
+def test_powershell_alternate_process_scans_fail_closed(script):
+    for executable in ("powershell.exe", "pwsh.exe"):
+        command = [executable, "-NoProfile", "-Command", script]
+        assert is_process_table_enumeration_command(command), command
+        command_string = f'{executable} -NoProfile -Command "{script}"'
+        assert is_process_table_enumeration_command(command_string), command_string
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        encoded_command = [executable, "-EncodedCommand", encoded]
+        assert is_process_table_enumeration_command(encoded_command), encoded_command
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (["wmic.exe", "process", "list", "brief"], True),
+        ("wmic.exe process list brief", True),
+        (r"C:\Windows\System32\wbem\wmic.exe process list brief", True),
+        (["wmic.exe", "path", "Win32_Process", "get", "ProcessId"], True),
+        (["wmic.exe", "computersystem", "get", "name"], False),
+    ],
+)
+def test_wmic_process_queries_are_blocked_but_other_classes_stay_allowed(command, expected):
+    assert is_process_table_enumeration_command(command) is expected
+
+
+def test_encoded_benign_powershell_get_date_stays_allowed():
+    encoded = base64.b64encode("Get-Date".encode("utf-16-le")).decode("ascii")
+    assert not is_process_table_enumeration_command(["pwsh.exe", "-EncodedCommand", encoded])
 
 
 
@@ -256,6 +299,10 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
         ["powershell.exe", "-NoProfile", "-Command", "Get-CimInstance Win32_Process"],
         ["powershell.exe", "-NoProfile", "-Command", "Get-CimInstance -ClassName Win32_Process"],
         ["powershell.exe", "-NoProfile", "-Command", "Get-WmiObject Win32_Process"],
+        ["powershell.exe", "-NoProfile", "-Command", "[System.Diagnostics.Process]::GetProcesses()"],
+        ["wmic.exe", "process", "list", "brief"],
+        ["powershell.exe", "-NoProfile", "-Command", "Invoke-Expression 'Get-CimInstance Win32_Process'"],
+        ["powershell.exe", "-NoProfile", "-Command", r"CimCmdlets\Get-CimInstance Win32_Process"],
     ):
         with pytest.raises(RuntimeError, match="blocked for unmarked test"):
             fake_subprocess.Popen(command)
@@ -263,6 +310,9 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
     for process_provider_script in (
         "Get-CimInstance Win32_Process",
         "Get-WmiObject Win32_Process",
+        "[System.Diagnostics.Process]::GetProcesses()",
+        "Invoke-Expression 'Get-CimInstance Win32_Process'",
+        r"CimCmdlets\Get-CimInstance Win32_Process",
     ):
         encoded_cim = base64.b64encode(
             process_provider_script.encode("utf-16-le")
@@ -271,6 +321,10 @@ def test_installed_guard_blocks_windows_tasklist_paths_before_launch(monkeypatch
             fake_subprocess.Popen(["pwsh.exe", "-EncodedCommand", encoded_cim])
 
     assert calls == []
+    encoded_get_date = base64.b64encode("Get-Date".encode("utf-16-le")).decode("ascii")
+    encoded_get_date_command = ["pwsh.exe", "-EncodedCommand", encoded_get_date]
+    assert fake_subprocess.Popen(encoded_get_date_command) == "launched"
+    assert calls == [((encoded_get_date_command,), {})]
 
 
 @pytest.mark.parametrize(

@@ -216,6 +216,29 @@ def _decode_powershell_encoded_command(encoded: str) -> str | None:
     return command.lstrip("\ufeff")
 
 
+_POWERSHELL_DYNAMIC_EVALUATION = re.compile(r"\b(?:Invoke-Expression|iex)\b", re.IGNORECASE)
+_POWERSHELL_DOTNET_PROCESS_SCAN = re.compile(
+    r"\[\s*(?:System\.)?Diagnostics\.Process\s*\]\s*::\s*GetProcesses(?:ByName)?\s*\(",
+    re.IGNORECASE,
+)
+_POWERSHELL_MODULE_QUALIFIED_PROCESS_PROVIDER = re.compile(
+    r"\b[\w.-]+\\(?:Get-Process|gps|Get-CimInstance|gcim|Get-WmiObject|gwmi)\b",
+    re.IGNORECASE,
+)
+
+
+def _powershell_payload_requires_fail_closed(command: str) -> bool:
+    """Block opaque dynamic execution and process APIs PowerShell tokenization misses."""
+    return any(
+        pattern.search(command)
+        for pattern in (
+            _POWERSHELL_DYNAMIC_EVALUATION,
+            _POWERSHELL_DOTNET_PROCESS_SCAN,
+            _POWERSHELL_MODULE_QUALIFIED_PROCESS_PROVIDER,
+        )
+    )
+
+
 def _token_text(part: Any) -> str:
     if isinstance(part, os.PathLike):
         part = os.fspath(part)
@@ -339,6 +362,8 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     nested_command = " ".join(shell_args[shell_index + 1 :])
                     if nested_command.strip() == "-":
                         return True
+                    if _powershell_payload_requires_fail_closed(nested_command):
+                        return True
                     if is_process_table_enumeration_command(nested_command):
                         return True
                     break
@@ -346,7 +371,11 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     if shell_index + 1 >= len(shell_args):
                         return True
                     nested_command = _decode_powershell_encoded_command(shell_args[shell_index + 1])
-                    if nested_command is None or is_process_table_enumeration_command(nested_command):
+                    if (
+                        nested_command is None
+                        or _powershell_payload_requires_fail_closed(nested_command)
+                        or is_process_table_enumeration_command(nested_command)
+                    ):
                         return True
                     break
         if name == "cmd":
@@ -357,6 +386,15 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     if is_process_table_enumeration_command(nested_command):
                         return True
                     break
+        if name == "wmic":
+            # WMIC's process provider exposes the host process table; preserve
+            # unrelated WMI class queries.
+            wmic_targets = {
+                _shell_token_name(value).casefold().replace("-", "_")
+                for value in tokens[index + 1 :]
+            }
+            if {"process", "win32_process"} & wmic_targets:
+                return True
         # CIM/WMI accept arbitrary class and WQL query forms. Block these
         # cmdlets wholesale instead of guessing whether a query lists processes.
         if name in {
