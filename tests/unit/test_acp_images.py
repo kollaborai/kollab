@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -116,6 +116,29 @@ async def test_untyped_capability_error_during_admission_still_maps_to_notice():
     }, "state_rpc")
     assert result == {"status": "rejected", "reason": "This harness can't take images."}
     assert steer.await_count == 1
+    assert runner._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_untyped_capability_error_from_admit_maps_to_notice():
+    """The admit path maps a raw capability-loss ACPError to the notice too.
+
+    Steer can decline (turn over), and acp.admit is the next boundary; a
+    raw ACPError carrying the capability-loss text from admit must land the
+    image notice rather than degrading to the generic unavailable result.
+    """
+    runner = runner_with_capability(False)
+    admit = MagicMock(side_effect=ACPError("This harness can't take images."))
+    acp = SimpleNamespace(
+        supports_image_input=True, steer=AsyncMock(return_value=False), admit=admit
+    )
+    service = object.__new__(LLMService)
+    result = await service._admit_acp(acp, {
+        "message": [{"type": "text", "text": "Look"},
+                    {"type": "image", "image": "data:image/png;base64,YWJj"}],
+    }, "state_rpc")
+    assert result == {"status": "rejected", "reason": "This harness can't take images."}
+    assert admit.called
     assert runner._queue.empty()
 
 
