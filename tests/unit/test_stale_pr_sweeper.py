@@ -394,3 +394,44 @@ def test_workflow_notify_step_is_fail_soft():
     assert "::warning::NTFY_TOPIC" in text
     assert 'echo "::warning::ntfy notify failed' in text
     assert "continue-on-error: true" in text
+
+
+def test_missing_label_classified_as_warning(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 1
+            stderr = "gh: Could not add label 'status/stale': label not found"
+            stdout = ""
+
+        return R()
+
+    monkeypatch.setattr(sweeper.subprocess, "run", fake_run)
+    result = sweeper.add_stale_label(28, "kollaborai/kollab", dry_run=False)
+    assert result == sweeper.LABEL_MISSING
+
+
+def test_main_missing_label_warns_in_digest_and_exits_zero(monkeypatch, tmp_path):
+    """Missing label = loud digest warning, never a workflow failure."""
+    prs = [
+        _pr(29, last_commit=NOW - timedelta(days=6), body="Fixes #9"),
+        _pr(30, last_commit=NOW - timedelta(days=7), body="Fixes #9"),
+    ]
+    monkeypatch.setattr(sweeper, "fetch_open_prs", lambda repo: prs)
+    monkeypatch.setattr(sweeper, "fetch_compare", lambda repo, sha: {"behind_by": 0})
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 1
+            stderr = "gh: label 'status/stale' not found"
+            stdout = ""
+
+        return R()
+
+    monkeypatch.setattr(sweeper.subprocess, "run", fake_run)
+    digest_path = tmp_path / "digest.md"
+    code = sweeper.main(["--repo", "kollaborai/kollab", "--digest", str(digest_path)])
+    assert code == 0
+    text = digest_path.read_text(encoding="utf-8")
+    assert "**WARNING:**" in text
+    assert "does not exist on this repository" in text
+    assert "never fails the run" in text

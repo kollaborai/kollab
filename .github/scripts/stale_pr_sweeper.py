@@ -213,6 +213,7 @@ def build_digest(
     days: int,
     dry_run: bool,
     exempted: int = 0,
+    warnings: list[str] | None = None,
 ) -> str:
     """Single markdown digest; drafts first, then most-inactive first."""
     ordered = sorted(
@@ -263,6 +264,8 @@ def build_digest(
     ]
     if exempted:
         lines.append(f"{exempted} PR(s) skipped as exempt ({EXEMPT_LABEL}).")
+    for warning in warnings or []:
+        lines += ["", f"**WARNING:** {warning}"]
     lines.append("")
     return "\n".join(lines)
 
@@ -355,8 +358,16 @@ def fetch_compare(repo: str, head_sha: str) -> dict:
     return json.loads(payload)
 
 
+LABEL_MISSING = "LABEL-MISSING"
+
+
 def add_stale_label(pr_number: int, repo: str, dry_run: bool) -> str:
-    """Add-only. There is deliberately no remove/close/comment code path."""
+    """Add-only. There is deliberately no remove/close/comment code path.
+
+    A missing label is classified LABEL-MISSING so the caller can report it
+    as a loud digest warning; flagging itself still succeeded, so it never
+    fails the run. Anything else surfaces as FAILED with stderr attached.
+    """
     if dry_run:
         return "DRYRUN"
     result = subprocess.run(
@@ -370,6 +381,12 @@ def add_stale_label(pr_number: int, repo: str, dry_run: bool) -> str:
     message = (result.stderr or "").lower()
     if "already" in message:
         return "ALREADY-LABELED"
+    if "label" in message and (
+        "not found" in message
+        or "not_found" in message
+        or "could not resolve" in message
+    ):
+        return LABEL_MISSING
     return f"FAILED: {(result.stderr or '').strip()[:160]}"
 
 
@@ -416,7 +433,27 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"warn: compare for #{pr['number']}: {error}", file=sys.stderr)
 
     rows = collect_rows(prs, compares, now, args.days)
-    digest = build_digest(rows, now, args.days, args.dry_run, exempted=exempted)
+
+    # Label before building the digest so label-state warnings land in the
+    # digest itself (step summary + artifact), not only on stderr.
+    if args.dry_run:
+        results = {r["number"]: "DRYRUN" for r in rows}
+    else:
+        results = {}
+        for r in rows:
+            results[r["number"]] = add_stale_label(r["number"], repo, args.dry_run)
+    label_missing = any(v == LABEL_MISSING for v in results.values())
+    warnings: list[str] = []
+    if label_missing:
+        warnings.append(
+            f"the {STALE_LABEL} label does not exist on this repository, so no "
+            "PR could be labeled. A maintainer must create it; until then the "
+            "sweep still lists stale PRs here and never fails the run."
+        )
+
+    digest = build_digest(
+        rows, now, args.days, args.dry_run, exempted=exempted, warnings=warnings
+    )
     print(digest)
 
     if args.digest:
@@ -425,17 +462,13 @@ def main(argv: list[str] | None = None) -> int:
         with Path(args.summary).open("a", encoding="utf-8") as handle:
             handle.write("\n" + digest)
 
-    if args.dry_run:
-        results = {r["number"]: "DRYRUN" for r in rows}
-    else:
-        results = {}
-        for r in rows:
-            results[r["number"]] = add_stale_label(r["number"], repo, args.dry_run)
     labeled = sum(
         1 for v in results.values() if v in ("LABELED", "ALREADY-LABELED", "DRYRUN")
     )
+    missing = sum(1 for v in results.values() if v == LABEL_MISSING)
     print(
         f"\nflag summary: {len(rows)} stale, {labeled} labeled-ok, "
+        f"{missing} label-missing (warned), "
         f"{sum(1 for v in results.values() if str(v).startswith('FAILED'))} failed"
     )
     return 0 if not any(str(v).startswith("FAILED") for v in results.values()) else 1
