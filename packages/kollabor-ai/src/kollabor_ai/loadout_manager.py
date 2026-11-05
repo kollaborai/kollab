@@ -89,6 +89,31 @@ def acp_loadout_model(loadout: Loadout, profile: Any) -> str:
     return loadout.model
 
 
+
+def loadout_sendable_effort(profile_manager: Any, loadout: Loadout) -> str:
+    """A loadout's effort as its provider profile would send it.
+
+    ``none``/``minimal`` stored on a loadout whose profile is now Anthropic are
+    dropped (logged), so the model and other fields still apply.
+    """
+    if not loadout.effort:
+        return ""
+    from .profile_manager import sendable_effort
+
+    profile = profile_manager.get_profile(loadout.provider_profile)
+    get_provider = getattr(profile, "get_provider", None)
+    provider = get_provider() if callable(get_provider) else getattr(profile, "provider", "")
+    kept = sendable_effort(provider, loadout.effort)
+    if not kept:
+        logger.warning(
+            "Loadout '%s': effort '%s' is not sent by provider '%s'; ignoring it",
+            loadout.name,
+            loadout.effort,
+            provider,
+        )
+    return kept
+
+
 class LoadoutManager:
     """Resolves, persists, and activates loadouts on top of a ProfileManager."""
 
@@ -529,6 +554,10 @@ class LoadoutManager:
         except Exception:
             logger.debug("hub model-switch announcement failed", exc_info=True)
 
+    def _sendable_effort(self, loadout: Loadout) -> str:
+        """The loadout's effort, or "" when its provider never sends that level."""
+        return loadout_sendable_effort(self.profile_manager, loadout)
+
     async def activate(
         self, loadout_or_name: Any, event_bus: Optional[Any] = None
     ) -> Optional[Loadout]:
@@ -723,8 +752,9 @@ class LoadoutManager:
         }
         if loadout.temperature is not None:
             update_kwargs["temperature"] = loadout.temperature
-        if loadout.effort:
-            update_kwargs["effort"] = loadout.effort
+        loadout_effort = self._sendable_effort(loadout)
+        if loadout_effort:
+            update_kwargs["effort"] = loadout_effort
         if loadout.max_tokens is not None:
             update_kwargs["max_tokens"] = loadout.max_tokens
 

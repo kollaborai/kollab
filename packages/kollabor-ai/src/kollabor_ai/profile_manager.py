@@ -168,6 +168,19 @@ def effort_unsupported_reason(provider: Optional[str], effort: Optional[str]) ->
     return ""
 
 
+def sendable_effort(provider: Optional[str], effort: Optional[str]) -> str:
+    """``effort`` when ``provider`` sends it, else empty.
+
+    A stored loadout level is applied through this, so one that the provider
+    never receives (``minimal`` on a loadout whose profile moved to Anthropic)
+    reads back as unset, as it does on a profile, and the rest of the preset
+    still applies.
+    """
+    if not effort or effort_unsupported_reason(provider, effort):
+        return ""
+    return effort
+
+
 def _keyring_get(key_name: str) -> Optional[str]:
     """Retrieve a value from OS keyring (sync, graceful fallback).
 

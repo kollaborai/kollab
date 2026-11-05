@@ -16,7 +16,11 @@ Anthropic documents `low`–`max`, so `none` and `minimal` are left out of its
 request and its pickers (`/model effort`, `/llm` loadouts, Settings), and an
 Anthropic profile refuses them when written: the profile route, a copy,
 `kollab --effort` and `/model effort` answer with the levels it takes, and a
-value that arrives by hand-edited config or `*_EFFORT` reads back as unset. The
+value that arrives by hand-edited config or `*_EFFORT` reads back as unset. A
+loadout that holds one of them when its profile is Anthropic does the same: the
+level is ignored (logged) and the loadout's model and other fields still apply.
+`kollab --llm <profile> --effort <level>` is refused before the daemon switches
+profile. The
 OpenAI-shaped providers take them. `/model effort none` sets `none` where the
 provider lists it (it used to clear the level); `default`, `clear` and `off`
 clear it. The ChatGPT codex backend also advertises

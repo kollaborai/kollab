@@ -1505,6 +1505,14 @@ class LocalStateService(StateService):
             if hasattr(target_profile, "get_provider")
             else getattr(target_profile, "provider", "")
         )
+        if effort:
+            # --effort that the provider never sends fails the launch, not a log
+            # line, and before anything switches: the daemon keeps its profile.
+            from kollabor_ai.profile_manager import effort_unsupported_reason
+
+            reason = effort_unsupported_reason(target_provider, effort)
+            if reason:
+                raise ValueError(reason)
         current_profile = self._profile_manager.get_active_profile()
         current_provider = (
             current_profile.get_provider()
@@ -1527,8 +1535,11 @@ class LocalStateService(StateService):
             }
             if loadout.temperature is not None:
                 layer["temperature"] = loadout.temperature
-            if loadout.effort:
-                layer["effort"] = loadout.effort
+            from kollabor_ai.loadout_manager import loadout_sendable_effort
+
+            layer_effort = loadout_sendable_effort(self._profile_manager, loadout)
+            if layer_effort:
+                layer["effort"] = layer_effort
             if loadout.max_tokens is not None:
                 layer["max_tokens"] = loadout.max_tokens
             try:
@@ -1697,12 +1708,6 @@ class LocalStateService(StateService):
                 overrides["model"] = model
             if effort:
                 overrides["effort"] = effort
-                # --effort that the provider never sends fails the launch, not a log line
-                from kollabor_ai.profile_manager import effort_unsupported_reason
-
-                reason = effort_unsupported_reason(target_provider, effort)
-                if reason:
-                    raise ValueError(reason)
             try:
                 if not self._profile_manager.update_profile(name, **overrides):
                     logger.warning(
