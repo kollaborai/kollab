@@ -107,7 +107,7 @@ async def voice_provider(
     config = None
     has_effort = False
     previous = None
-    held = (getattr(api_service, "_profile", None), getattr(api_service, "_provider", None))
+    held = _holding(api_service)
     # ponytail: the turn swaps the one shared api_service (profile, provider,
     # effort), as the voice profile switch always has, so any other call on this
     # service while the turn runs rides the voice model too. Give the turn its own
@@ -135,21 +135,37 @@ async def voice_provider(
             # an effort (the model takes one) and sends none otherwise.
             low = settings.get("voice_reasoning") == "low" or previous
             config.effort = "low" if low else None
-        held = (getattr(api_service, "_profile", None), getattr(api_service, "_provider", None))
+        held = _holding(api_service)
         yield
     finally:
         if has_effort:
             config.effort = previous
         # A /model or profile change that finished while the turn ran replaced the
         # provider the turn installed: it is the user's latest choice, not ours to undo.
-        ours = (getattr(api_service, "_profile", None), getattr(api_service, "_provider", None))
-        if not all(now is was for now, was in zip(ours, held)):
-            logger.info("active provider changed during the voice turn; not restoring chat's")
+        if not _still_holding(api_service, held):
+            logger.info(
+                "active provider changed during the voice turn; not restoring chat's"
+            )
         else:
             if swapped_model:
                 api_service._provider = previous_provider
             if switched and not await api_service.reinitialize_provider(active):
                 logger.error("could not restore the active profile after a voice turn")
+
+
+def _holding(api_service: Any) -> tuple[Any, Any, Any]:
+    """The service's profile, provider and how many times it was reinitialized."""
+    return (
+        getattr(api_service, "_profile", None),
+        getattr(api_service, "_provider", None),
+        getattr(api_service, "_provider_generation", None),
+    )
+
+
+def _still_holding(api_service: Any, held: tuple[Any, Any, Any]) -> bool:
+    """True when nothing reinitialized or replaced what `held` recorded."""
+    profile, provider, generation = _holding(api_service)
+    return profile is held[0] and provider is held[1] and generation == held[2]
 
 
 def _quick_loadout(api_service: Any, profile_manager: Any) -> Any:
