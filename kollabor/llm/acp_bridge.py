@@ -42,6 +42,10 @@ class ACPError(RuntimeError):
         self.code = code
 
 
+class ACPSteeringUnconfirmed(ACPError):
+    """A steer was sent but its receipt never arrived, so it may have landed."""
+
+
 def _on_windows() -> bool:
     return sys.platform == "win32"
 
@@ -1192,8 +1196,11 @@ class ACPRunner:
             return False
         if images and not self.supports_image_input:
             raise ACPError("This harness can't take images.")
+        connection = self._connection
+        if connection is None:
+            return False
         try:
-            await asyncio.wait_for(self._connection.ext_method("session/steering", {
+            await asyncio.wait_for(connection.ext_method("session/steering", {
                 "sessionId": self.session_id,
                 "prompt": [
                     {"type": "text", "text": text},
@@ -1202,8 +1209,14 @@ class ACPRunner:
                 ],
             }), timeout=10)
             return True
-        except Exception:
+        except acp.RequestError:
             return False
+        except Exception as exc:
+            # A timeout or dropped connection after the send is not a refusal:
+            # the harness may already hold this text, so it must not be queued.
+            raise ACPSteeringUnconfirmed(
+                f"{self.profile.name}: steering receipt not confirmed ({type(exc).__name__})"
+            ) from exc
 
     def cancel_queued(self, request_id: str, admission: ACPAdmission | None = None) -> bool:
         """Cancel one queued admission: that exact admission if given, else the first with this id."""
