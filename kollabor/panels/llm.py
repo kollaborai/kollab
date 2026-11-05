@@ -34,6 +34,14 @@ def provider_display(provider: str) -> str:
     return PROVIDER_LABELS.get(provider.lower(), provider.replace("_", " ").title())
 
 
+def _effort_provider(profile: Any) -> Any:
+    """The profile's provider with ``auto`` resolved to what requests use."""
+    for getter in ("get_effort_provider", "get_provider"):
+        if hasattr(profile, getter):
+            return getattr(profile, getter)()
+    return getattr(profile, "provider", "")
+
+
 def resolve_provider_type(profile_manager: Any, provider_profile: str) -> str:
     """Best-effort provider type (e.g. ``anthropic``) for a profile name."""
     if not profile_manager or not provider_profile:
@@ -44,7 +52,9 @@ def resolve_provider_type(profile_manager: Any, provider_profile: str) -> str:
         return provider_profile
     if profile is not None and hasattr(profile, "get_provider"):
         try:
-            return profile.get_provider() or provider_profile
+            # ``auto`` resolved, so the pickers see Anthropic where requests do
+            resolve = getattr(profile, "get_effort_provider", profile.get_provider)
+            return resolve() or provider_profile
         except Exception:
             return provider_profile
     return provider_profile
@@ -343,7 +353,7 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
     profile = pm.get_profile(base.provider_profile)
     existing = {entry.name for entry in manager.list_loadouts()}
     codex = is_chatgpt_codex_profile(pm, base.provider_profile)
-    provider = profile.get_provider() if hasattr(profile, "get_provider") else getattr(profile, "provider", "")
+    provider = _effort_provider(profile)
     is_acp = str(provider or "").lower() == "acp"
     command = tuple(getattr(profile, "command", ()) or ())
     model_value = "" if is_acp and base.implicit and command and base.model == command[0] else base.model
@@ -564,7 +574,7 @@ class LlmPanel:
         name = base.name if mode == "edit" else str(changes.get("name") or "").strip()
         codex = is_chatgpt_codex_profile(ctx._profile_manager, base.provider_profile)
         profile = ctx._profile_manager.get_profile(base.provider_profile)
-        provider = profile.get_provider() if hasattr(profile, "get_provider") else getattr(profile, "provider", "")
+        provider = _effort_provider(profile)
         is_acp = str(provider or "").lower() == "acp"
         model = str(changes.get("model", base.model) or "").strip() if is_acp else base.model
         values, errors = _loadout_values(

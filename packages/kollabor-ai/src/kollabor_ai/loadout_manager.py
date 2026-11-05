@@ -101,7 +101,9 @@ def loadout_sendable_effort(profile_manager: Any, loadout: Loadout) -> str:
     from .profile_manager import sendable_effort
 
     profile = profile_manager.get_profile(loadout.provider_profile)
-    get_provider = getattr(profile, "get_provider", None)
+    get_provider = getattr(profile, "get_effort_provider", None) or getattr(
+        profile, "get_provider", None
+    )
     provider = get_provider() if callable(get_provider) else getattr(profile, "provider", "")
     kept = sendable_effort(provider, loadout.effort)
     if not kept:

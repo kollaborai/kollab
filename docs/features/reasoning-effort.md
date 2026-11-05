@@ -12,6 +12,9 @@ working untouched.
 
 `none` → `minimal` → `low` → `medium` → `high` → `xhigh` → `max` → `ultra` (cheapest first).
 
+A profile with `provider: auto` (the shipped `default`) counts as Anthropic when
+its key starts with `sk-ant-` or its endpoint is Anthropic's, for every rule below.
+
 Anthropic documents `low`–`max`, so `none` and `minimal` are left out of its
 request and its pickers (`/model effort`, `/llm` loadouts, Settings), and an
 Anthropic profile refuses them when written: the profile route, a copy,

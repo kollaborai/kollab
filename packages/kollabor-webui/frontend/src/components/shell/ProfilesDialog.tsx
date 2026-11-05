@@ -79,6 +79,16 @@ type ProfileUpdateBody = Partial<Omit<ProfileWriteBody, "name" | "copy_from">> &
   new_name?: string;
 };
 
+/** True when requests go to Anthropic: named, or "auto" with an Anthropic key
+ * (the server resolves "auto" the same way and refuses the levels it never sends). */
+function sendsAnthropic(draft: { provider?: string; api_key?: string }): boolean {
+  const provider = (draft.provider || "").toLowerCase();
+  return (
+    provider === "anthropic" ||
+    (provider === "auto" && (draft.api_key || "").startsWith("sk-ant-"))
+  );
+}
+
 const EMPTY_DRAFT: ProfileWriteBody = {
   name: "",
   provider: "anthropic",
@@ -519,7 +529,7 @@ export function ProfilesDialog({
                   <SelectItem value="">Model Default</SelectItem>
                   {EFFORT_LEVELS.filter(
                     (level) =>
-                      (draft.provider || "").toLowerCase() !== "anthropic" ||
+                      !sendsAnthropic(draft) ||
                       (level !== "none" && level !== "minimal"),
                   ).map((level) => (
                     <SelectItem key={level} value={level}>

@@ -146,6 +146,33 @@ ANTHROPIC_UNSUPPORTED_EFFORT = frozenset({"none", "minimal"})
 _warned_unsent_effort: set = set()
 
 
+def resolve_effort_provider(
+    provider: Optional[str], api_key: str = "", base_url: str = ""
+) -> str:
+    """The provider a request is built for: ``auto`` resolved like the request does.
+
+    A profile with ``provider: "auto"`` (the shipped ``default``) becomes Anthropic
+    from its key or endpoint, so the effort rules must see that, not the word
+    ``auto``. An ``auto`` that detects nothing stays ``auto``.
+    """
+    name = (provider or "").strip().lower()
+    if name != "auto":
+        return name
+    try:
+        from kollabor_ai.providers.registry import detect_provider_from_profile
+
+        detected = detect_provider_from_profile(
+            {
+                "provider": "auto",
+                "api_key": api_key or "",
+                "api_base": base_url or "",
+            }
+        )
+    except Exception:
+        return name
+    return str(getattr(detected, "value", detected)).lower()
+
+
 def effort_unsupported_reason(provider: Optional[str], effort: Optional[str]) -> str:
     """Why ``provider`` never receives ``effort``; empty when it can.
 
@@ -761,7 +788,7 @@ class LLMProfile:
                 f"Profile '{self.name}': effort '{value}' is not one of {'/'.join(EFFORT_LEVELS)} — ignoring"
             )
             return ""
-        if effort_unsupported_reason(self.get_provider(), value):
+        if effort_unsupported_reason(self.get_effort_provider(), value):
             # stored by hand or by an env var: report it as unset, since the
             # request would not carry it either
             if self.name not in _warned_unsent_effort:
@@ -840,6 +867,13 @@ class LLMProfile:
         if global_val:
             return global_val.lower()
         return self.provider or "openai"
+
+    def get_effort_provider(self) -> str:
+        """``get_provider()`` with ``auto`` resolved to the provider requests use."""
+        provider = self.get_provider()
+        if provider != "auto":
+            return provider
+        return resolve_effort_provider(provider, self.get_api_key(), self.get_endpoint())
 
     def get_provider_type(self) -> str:
         """
@@ -2362,7 +2396,9 @@ class ProfileManager:
                     "(or empty for model default)"
                 )
             profile.effort = normalized_effort
-            reason = effort_unsupported_reason(profile.provider, normalized_effort)
+            reason = effort_unsupported_reason(
+                profile.get_effort_provider(), normalized_effort
+            )
             if reason:
                 raise ValueError(f"Profile {source_name!r}: {reason}")
 
@@ -2534,8 +2570,14 @@ class ProfileManager:
         # A level the resulting provider never sends is refused before anything
         # changes, so a launch flag or API write cannot store it.
         if effort:
+            target = provider if provider is not None else profile.provider
             reason = effort_unsupported_reason(
-                provider if provider is not None else profile.provider, effort
+                resolve_effort_provider(
+                    target,
+                    api_key if api_key is not None else profile.get_api_key(),
+                    base_url if base_url is not None else profile.get_endpoint(),
+                ),
+                effort,
             )
             if reason:
                 raise ValueError(reason)

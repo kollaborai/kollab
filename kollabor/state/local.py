@@ -1510,7 +1510,12 @@ class LocalStateService(StateService):
             # line, and before anything switches: the daemon keeps its profile.
             from kollabor_ai.profile_manager import effort_unsupported_reason
 
-            reason = effort_unsupported_reason(target_provider, effort)
+            effort_provider = (
+                target_profile.get_effort_provider()
+                if hasattr(target_profile, "get_effort_provider")
+                else target_provider
+            )
+            reason = effort_unsupported_reason(effort_provider, effort)
             if reason:
                 raise ValueError(reason)
         current_profile = self._profile_manager.get_active_profile()
