@@ -1123,3 +1123,74 @@ async def test_continuation_parents_on_chain_tail_not_a_drifted_pointer():
     # The mention keeps the cursor (strictly later admission wins).
     assert service.current_parent_uuid == "mention-reply"
 
+
+@pytest.mark.asyncio
+async def test_delayed_continuation_cannot_clobber_newer_batch_tail_or_cursor():
+    """A stale tool-loop continuation commits only under its own serial (#768).
+
+    Bismuth's overlap probe on the #768 head: ``_continue_conversation``
+    wrote its continuation uuid into ``_batch_tail_uuid`` and published on
+    the re-read ``_continue_serial`` AFTER its await. A newer batch that
+    admitted while the old continuation was suspended had its tail
+    overwritten and its serial hijacked by the stale chain.
+    """
+    release_cont = asyncio.Event()
+    cont_started = asyncio.Event()
+    service = object.__new__(LLMService)
+    service._pending_agent_hud = []
+    service.current_parent_uuid = "parent-before"
+    service._turn_serial = 1
+    service._cursor_winner_serial = -1
+    service._continue_serial = 1
+    service._batch_tail_uuid = "batch1-tail"
+    service._batch_tail_serial = 1
+
+    class GatedQueueProcessor:
+        async def continue_conversation(self, *, current_parent_uuid):
+            cont_started.set()
+            await release_cont.wait()
+            return "stale-cont-1"
+
+        async def process_message_batch(
+            self, *, messages, current_parent_uuid, request_ids
+        ):
+            return "assistant-2"
+
+    service._queue_processor = GatedQueueProcessor()
+
+    cont_task = asyncio.create_task(service._continue_conversation())
+    try:
+        await asyncio.wait_for(cont_started.wait(), timeout=1)
+
+        # A newer batch admits and completes while the old continuation is
+        # suspended: serial 2 owns the tail and the cursor.
+        second = TaggedInput(
+            content="second",
+            request_ids=("second",),
+            parent_uuid="user-2",
+            admission_serial=2,
+        )
+        await asyncio.wait_for(
+            service._process_message_batch([second]), timeout=1
+        )
+        assert service._batch_tail_uuid == "assistant-2"
+        assert service._batch_tail_serial == 2
+        assert service._cursor_winner_serial == 2
+
+        # The stale continuation resumes now: it must not overwrite the
+        # newer tail, and its publish on the captured serial 1 must lose.
+        release_cont.set()
+        await asyncio.wait_for(cont_task, timeout=1)
+
+        assert service._batch_tail_uuid == "assistant-2", (
+            "stale continuation overwrote the newer batch tail"
+        )
+        assert service._batch_tail_serial == 2
+        assert service.current_parent_uuid == "assistant-2", (
+            "stale continuation published on the newer serial and won the cursor"
+        )
+        assert service._cursor_winner_serial == 2
+    finally:
+        release_cont.set()
+        if not cont_task.done():
+            await cont_task

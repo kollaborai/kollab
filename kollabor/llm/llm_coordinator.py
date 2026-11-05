@@ -1898,15 +1898,31 @@ class LLMService:
         # later-admitted mention that completed mid-batch keeps the cursor
         # while the chain stays contiguous. None = chain start: parent on
         # the pointer.
+        # Capture the owning serial BEFORE the await (continue-ticket
+        # discipline, #676 r7): a newer batch admitted while this
+        # continuation is suspended owns the tail and the cursor, and the
+        # stale continuation must commit under its own captured serial, not
+        # the re-read ticket it would inherit on resume (bismuth #768
+        # verdict: the unguarded commits let the stale chain hijack both).
+        admission_serial = self._continue_serial
         chain_parent = self._batch_tail_uuid or self.current_parent_uuid
         cont_uuid = await self._queue_processor.continue_conversation(
             current_parent_uuid=chain_parent,
         )
-        self._batch_tail_uuid = cont_uuid
+        # Tail seeding mirrors the batch guard above: only a serial that
+        # still owns (or extends) the chain tail may advance it.
+        if admission_serial is not None and (
+            self._batch_tail_serial is None
+            or admission_serial >= self._batch_tail_serial
+        ):
+            self._batch_tail_uuid = cont_uuid
+            self._batch_tail_serial = admission_serial
         # Same-turn handoff (batch -> tool-loop continuation): publishes on
-        # the batch's serial so later-admitted mention completions still win
-        # over this chain, while the chain itself stays contiguous (#676 r7).
-        self.publish_cursor(cont_uuid, self._continue_serial)
+        # the captured serial so later-admitted mention completions still
+        # win over this chain, while the chain itself stays contiguous
+        # (#676 r7). A stale continuation's captured serial loses to the
+        # newer batch in publish_cursor's monotonic check.
+        self.publish_cursor(cont_uuid, admission_serial)
 
     def queue_agent_hud(
         self,
