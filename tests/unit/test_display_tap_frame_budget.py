@@ -101,3 +101,52 @@ async def test_many_large_strings_are_cut_until_the_line_fits():
     blocks = frame["update"]["content"]
     assert [b["type"] for b in blocks] == ["text"] * 16
     assert all("characters)" in b["text"] for b in blocks)
+
+
+def _many_short_strings_event(tap: DisplayTap, output: str) -> dict:
+    """A completed ACP tool call whose raw output is a long list of short strings.
+
+    The list is what keeps the event over the budget, so cutting ``output``
+    cannot make it fit (a rawOutput of ``{"lines": [...]}`` in the review of #810).
+    """
+    live = tap.subscribe("attach")
+    lines = ["abcdefgh"] * 1_800_000  # about 21 MB once encoded
+    publish_semantic(
+        tap,
+        "tool_result",
+        tool_id="t3",
+        output=output,
+        metadata={"acp": {"rawOutput": {"lines": lines}}},
+    )
+    return live.get_nowait()
+
+
+def test_an_event_that_cutting_text_cannot_fit_keeps_its_text():
+    tap = DisplayTap()
+    output = "o" * (2 * 1024 * 1024)
+
+    published = _many_short_strings_event(tap, output)
+
+    # Still over the limit either way, so the engine drops it as on main; the
+    # text must not be thrown away for a cut that cannot rescue the frame.
+    assert published["output"] == output
+
+
+def test_an_event_that_cannot_fit_is_not_encoded_again_and_again(monkeypatch):
+    import kollabor_tui.display_tap as display_tap
+
+    calls = 0
+    real_dumps = json.dumps
+
+    def counting_dumps(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(display_tap.json, "dumps", counting_dumps)
+
+    _many_short_strings_event(DisplayTap(), "o" * (2 * 1024 * 1024))
+
+    # One encode to measure and one for the single cut: not a halving loop
+    # of a dozen full copies on the publishing thread.
+    assert calls <= 3
