@@ -653,17 +653,18 @@ def _assistant_align_streamed_ids(
     """Rename this turn's streamed row ids to the snapshot's history ids.
 
     Only a strict one-to-one match between the trailing stored rows and the
-    provisional rows justifies a rename; anything else (a refresh that missed
-    the turn, content that does not match, an unexpected role) keeps the
-    provisional ids, which the next full reload still reconciles.
+    provisional rows justifies a rename, and the complete role/content
+    alignment must be unique across refreshed history. Anything else (a
+    refresh that missed the turn, ambiguous duplicate content, a content
+    mismatch, or an unexpected role) keeps the provisional ids for the next
+    full reload.
 
     Role order alone is not evidence: a stale [user, assistant] pair looks
     identical to this turn's rows by role. Every paired row must also match
-    on content -- user rows by exact text, assistant rows by the stored text
-    being the tail of the streamed text. A stored assistant row with no text
-    of its own (a tool-calls row) may sit between pairs only when its call
-    ids all appear in the streamed row's call cards, proving it was rendered
-    inside this turn's row.
+    on content: user rows by exact text; assistant rows by exact text, or by a
+    strict suffix when the streamed row carries tool-call cards. A stored
+    calls row may sit between pairs only when its call ids all appear in the
+    streamed row's call cards, proving it was rendered inside this turn.
 
     Returns whether the rename happened. ``True`` means every provisional
     row now carries this snapshot's history id, so the caller may claim
@@ -822,6 +823,78 @@ def _assistant_align_streamed_ids(
         # does not cover this turn. Keep the provisional ids.
         return False
     stored.reverse()
+
+    # A successful nearest-tail match is not enough if the same complete
+    # role/content sequence appears more than once in the stored history.
+    # Count possible full alignments, including earlier duplicate rows that
+    # the greedy pass skipped, and fail closed unless the mapping is unique.
+    selected = dict(zip(provisional, stored))
+    alignment_counts: Dict[tuple[int, int], int] = {}
+
+    def _count_prefix_alignments(before: int, cursor: int) -> int:
+        if cursor < 0:
+            return 1
+        key = (before, cursor)
+        if key in alignment_counts:
+            return alignment_counts[key]
+
+        for history_index in range(before, -1, -1):
+            stored_row = history[history_index]
+            role = stored_row.get("role")
+            if role in ("system", "tool"):
+                continue
+            if role not in ("user", "assistant") or history_index in shown:
+                alignment_counts[key] = 0
+                return 0
+
+            message_index = provisional[cursor]
+            streamed_row = messages[message_index]
+            rendered_inside = _rendered_inside(stored_row, mega_row)
+            if (
+                role == streamed_row.get("role")
+                and _pairs_by_content(stored_row, streamed_row)
+            ):
+                if rendered_inside and selected.get(message_index) != history_index:
+                    continue
+                matched = _count_prefix_alignments(history_index - 1, cursor - 1)
+                if matched >= 2:
+                    alignment_counts[key] = 2
+                    return 2
+                skipped = _count_prefix_alignments(history_index - 1, cursor)
+                alignment_counts[key] = min(2, matched + skipped)
+                return alignment_counts[key]
+            if rendered_inside:
+                continue
+            alignment_counts[key] = 0
+            return 0
+
+        alignment_counts[key] = 0
+        return 0
+
+    final_message_index = provisional[-1]
+    final_streamed_row = messages[final_message_index]
+    complete_alignments = 0
+    for history_index, stored_row in enumerate(history):
+        if history_index in shown:
+            continue
+        if (
+            stored_row.get("role") != final_streamed_row.get("role")
+            or not _pairs_by_content(stored_row, final_streamed_row)
+        ):
+            continue
+        if (
+            _rendered_inside(stored_row, mega_row)
+            and selected.get(final_message_index) != history_index
+        ):
+            continue
+        complete_alignments += _count_prefix_alignments(
+            history_index - 1, len(provisional) - 2
+        )
+        if complete_alignments > 1:
+            return False
+    if complete_alignments != 1:
+        return False
+
     for message_index, history_index in zip(provisional, stored):
         messages[message_index]["id"] = f"history-{history_index}"
 
