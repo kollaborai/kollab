@@ -479,6 +479,12 @@ class ConfigLoader:
                 "version": _package_version,
                 "description": "AI Edition",
             },
+            "adversarial_review": {
+                "enabled": False,
+                "round_caps": {"low": 1, "medium": 2, "high": 3, "critical": 3},
+                "cooldown": 0,
+                "reviewer_pool": [],
+            },
             "kollabor": {
                 "updates": {
                     "check_enabled": True,
