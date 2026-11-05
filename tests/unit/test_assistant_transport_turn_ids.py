@@ -9,6 +9,7 @@ completion, which makes the merge a no-op.
 """
 
 import asyncio
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -576,11 +577,90 @@ async def test_publish_precedes_refresh_history_round_trips(monkeypatch):
         monkeypatch, _history(), _state_messages(), refresh=_refresh
     )
 
-    last_publish = len(order) - 1 - order[::-1].index("publish")
+    # The FIRST publish still precedes the refresh round trips (#675), and
+    # the aligned rows are re-published after alignment so the wire carries
+    # the canonical ids (#767 — the encode-time snapshot of the early chunk
+    # alone would leave the provisional ids on the client).
     first_refresh = order.index("refresh")
-    assert last_publish < first_refresh, f"publish order wrong: {order}"
+    assert order[0] == "publish" and first_refresh > 0, f"order wrong: {order}"
+    assert "publish" in order[first_refresh + 1:], (
+        f"aligned rows never re-published after refresh: {order}"
+    )
     # End state is unchanged: ids renamed against the snapshot, claim set.
     assert [row["id"] for row in state["messages"]] == [
         "history-0", "history-1", "history-2", "history-3",
     ]
     assert state["synced"] == {"history": 4, "messages": 4}
+
+
+@pytest.mark.asyncio
+async def test_wire_republishes_aligned_rows_after_refresh(monkeypatch):
+    """The aligned ids must actually reach the client over the wire (#767).
+
+    Bismuth's encoder probe on the #767 head: the early publish chunk is
+    JSON-serialized at encode time and carries the provisional ids, and the
+    later ``synced`` chunk carries no messages update — so the in-place
+    alignment never re-published, and the client kept ``user-s1-2`` until a
+    full reload. This test drives the real ``assistant_stream`` encoder (no
+    fake harness) and asserts on the EMITTED CHUNKS: the last messages
+    chunk on the wire must carry the canonical ids.
+    """
+    session = _Session(_history())
+
+    async def _refresh(*, stale_raises=False):
+        # Suspend long enough for the consumer to encode the early publish
+        # chunk before alignment runs (production: a real daemon round trip;
+        # add_operations flushes via call_soon, so sleep(0) is too short and
+        # would let alignment mutate before the encode — never red).
+        await asyncio.sleep(0.05)
+        return _history()
+
+    session.refresh_history = _refresh
+    monkeypatch.setattr(messages, "get_session_registry", lambda: {"s1": session})
+    body = messages.AssistantRequest(
+        commands=[{
+            "type": "add-message",
+            "message": {
+                "id": "client-1",
+                "role": "user",
+                "parts": [{"type": "text", "text": "PROOF666 one"}],
+            },
+        }],
+        state={"messages": _state_messages()},
+    )
+
+    response = await messages.assistant_transport("s1", body)
+    sent: list = []
+
+    async def _send(message):
+        sent.append(message)
+
+    await response.stream_response(_send)
+
+    wire_text = "".join(
+        (part.get("body") or b"").decode()
+        if isinstance(part.get("body"), bytes)
+        else (part.get("body") or "")
+        for part in sent
+    )
+    messages_sets: list = []
+    for line in wire_text.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        chunk = json.loads(line[len("data: "):])
+        if chunk.get("type") != "update-state":
+            continue
+        for op in chunk.get("operations", []):
+            if op.get("type") == "set" and op.get("path") == ["messages"]:
+                messages_sets.append(op["value"])
+
+    assert messages_sets, "no messages update ever reached the wire"
+    # The early publish may (by design) carry provisional ids, but the LAST
+    # messages chunk on the wire must be the aligned snapshot.
+    last_ids = [row["id"] for row in messages_sets[-1]]
+    assert last_ids == [
+        "history-0", "history-1", "history-2", "history-3",
+    ], (
+        "wire never re-published the aligned rows; last messages chunk "
+        f"carried ids {last_ids}"
+    )

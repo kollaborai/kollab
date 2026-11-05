@@ -1620,6 +1620,15 @@ async def assistant_transport(
                                 # The streamed ids were reconciled against
                                 # exactly this snapshot, so the page may
                                 # append canonical rows past it by id.
+                                # The early publish chunk was JSON-encoded
+                                # at yield time with the provisional ids,
+                                # and the synced chunk below carries no
+                                # messages update — re-publish the aligned
+                                # rows so the canonical ids reach the
+                                # client (#767).
+                                _assistant_set_messages(
+                                    controller, state_messages
+                                )
                                 controller.state["synced"] = {
                                     "history": len(refreshed),
                                     "messages": len(state_messages),
