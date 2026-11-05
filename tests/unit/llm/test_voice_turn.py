@@ -366,3 +366,42 @@ async def test_voice_cleanup_keeps_a_switch_to_the_profile_the_turn_runs_on(tmp_
 
     assert api._profile is fast
     assert api._provider.provider_name == "fast-voice"
+
+
+@pytest.mark.asyncio
+async def test_voice_cleanup_restores_chat_after_an_oauth_rebuild_mid_turn(tmp_path, monkeypatch):
+    """A 401 refresh rebuilds the provider on its own; the user chose nothing, so chat returns."""
+    from kollabor_ai import api_communication_service as service_module
+
+    chat, fast = stored_profile("chat"), stored_profile("fast-voice")
+    fast.auth_type = "oauth"
+    fast.api_key = "old"
+    api = real_api_service(tmp_path, chat, monkeypatch)
+    built = []
+
+    async def new_provider(provider_config):  # a new token builds a new provider
+        provider = SimpleNamespace(
+            provider_name=provider_config["name"], model="rebuilt", config=Config("high")
+        )
+        built.append(provider)
+        return provider
+
+    monkeypatch.setattr(
+        service_module.ProviderRegistry, "get_provider", staticmethod(new_provider)
+    )
+
+    async def refresh() -> None:
+        fast.api_key = f"token-{len(built)}-{fast.api_key}"  # every refresh rotates the key
+
+    monkeypatch.setattr(api, "_refresh_oauth_token", refresh)
+    profiles = SimpleNamespace(get_profile=lambda name: {"fast-voice": fast}.get(name))
+
+    async with voice_provider(api, profiles, {"voice_provider_profile_id": "fast-voice"}):
+        assert api._profile is fast
+        built.clear()
+        rejected = fast.api_key
+        assert await api._refresh_oauth_after_401(rejected)  # the 401 path, not a user choice
+        assert api._provider is built[-1]
+
+    assert api._profile is chat
+    assert api._provider.provider_name == "chat"
