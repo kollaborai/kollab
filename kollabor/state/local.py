@@ -3618,12 +3618,21 @@ class LocalStateService(StateService):
         ``parent_uuid`` is the lineage captured by the caller at spawn time;
         reading the shared ``current_parent_uuid`` pointer inside this task
         would grab whatever ordinary turn happened to complete meanwhile.
+        The captured conversation session fences detached completions after a
+        restart from writing into or publishing on behalf of a new session.
         ``turn_serial`` is the admission ticket claimed at the same atomic
         point (#676 r7): completion writes publish through the coordinator's
         admission-serial protocol, so the later-admitted mention owns the
         cursor regardless of completion order.
         """
         from kollabor_tui.display_tap import publish_semantic
+
+        conversation_logger = getattr(self._llm_service, "conversation_logger", None)
+        conversation_session_id = getattr(conversation_logger, "session_id", None)
+
+        def conversation_session_is_current() -> bool:
+            current_logger = getattr(self._llm_service, "conversation_logger", None)
+            return getattr(current_logger, "session_id", None) == conversation_session_id
 
         broadcast = target.lower() if target.lower() in _HUB_BROADCASTS else None
         is_broadcast = broadcast is not None
@@ -3634,12 +3643,17 @@ class LocalStateService(StateService):
         }
         add_message = getattr(self._llm_service, "_add_conversation_message", None)
         publish_cursor = getattr(self._llm_service, "publish_cursor", None)
-        if callable(add_message):
-            add_message("user", text, metadata=metadata)
         turn_parent = parent_uuid
+        memory_user_uuid = None
+        if callable(add_message):
+            memory_user_uuid = add_message(
+                "user", text, parent_uuid=turn_parent, metadata=metadata
+            )
         user_uuid = await self._log_jsonl_turn_message(
             "user", text, parent_uuid=turn_parent
         )
+        if not conversation_session_is_current():
+            return
 
         try:
             # A broadcast takes the terminal's @ path (HubPlugin.send_user_message),
@@ -3649,14 +3663,23 @@ class LocalStateService(StateService):
                 if broadcast
                 else await self.hub_send_msg(target, content)
             )
+            if not conversation_session_is_current():
+                return  # the detached send finished after its session was replaced
             output = str(result or "hub message completed")
             success = not output.lower().startswith(("hub:", "hub ", "rejected:"))
             response_metadata = {**metadata, "hub_success": success}
             if callable(add_message):
-                add_message("assistant", output, metadata=response_metadata)
+                add_message(
+                    "assistant",
+                    output,
+                    parent_uuid=memory_user_uuid,
+                    metadata=response_metadata,
+                )
             assistant_uuid = await self._log_jsonl_turn_message(
                 "assistant", output, parent_uuid=user_uuid
             )
+            if not conversation_session_is_current():
+                return
             if assistant_uuid and callable(publish_cursor):
                 # Ordinary LLM turns take their parent from this pointer
                 # (pipeline parity), so the chain must continue after the
@@ -3682,17 +3705,22 @@ class LocalStateService(StateService):
                 stop_reason="end_turn",
             )
         except Exception as exc:
+            if not conversation_session_is_current():
+                return  # do not publish an error from a replaced conversation
             logger.exception("hub mention execution failed for web transport")
             message = str(exc)
             if callable(add_message):
                 add_message(
                     "assistant",
                     message,
+                    parent_uuid=memory_user_uuid,
                     metadata={**metadata, "hub_success": False},
                 )
             assistant_uuid = await self._log_jsonl_turn_message(
                 "assistant", message, parent_uuid=user_uuid
             )
+            if not conversation_session_is_current():
+                return
             if assistant_uuid and callable(publish_cursor):
                 # Same admission-serial publish as the success path (#676
                 # r7): a later-admitted turn keeps the cursor, and the

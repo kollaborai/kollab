@@ -16,6 +16,10 @@ on:
       - scripts/windows_halt_smoke.py
       - scripts/build_binary.py
       - tests/unit/test_windows_project_state_recovery.py
+      - tests/unit/test_agent_seed_symlinks.py
+      - tests/unit/test_skill_seed_symlinks.py
+      - tests/unit/test_bundled_seed_resolution.py
+      - tests/unit/test_skill_seed_retire.py
       - tests/unit/test_network_control.py
       - tests/unit/test_windows_halt_smoke_diagnostics.py
       - tests/unit/test_windows_relay_halt_smoke.py
@@ -71,6 +75,9 @@ jobs:
 
       - name: Windows project state recovery
         run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_windows_project_state_recovery.py tests/unit/test_encode_project_path_windows.py
+
+      - name: Agent seed preservation
+        run: uv run python -m pytest -q -rs -p no:cacheprovider --noconftest tests/unit/test_agent_seed_symlinks.py tests/unit/test_skill_seed_symlinks.py tests/unit/test_bundled_seed_resolution.py tests/unit/test_skill_seed_retire.py
 
       - name: Halt exchange race
         run: >-

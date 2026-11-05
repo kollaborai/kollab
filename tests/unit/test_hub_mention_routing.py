@@ -4,6 +4,8 @@ import asyncio
 import json
 from unittest.mock import AsyncMock
 
+import pytest
+
 from kollabor.state.local import LocalStateService, parse_hub_mention
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 
@@ -61,7 +63,7 @@ def test_send_message_routes_mentions_without_invoking_llm() -> None:
                 self.process_called = True
                 raise AssertionError("Hub mentions must not invoke the LLM")
 
-            def _add_conversation_message(self, role, content, *, metadata):
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
                 self.messages.append((role, content, metadata))
 
         llm = FakeLlm()
@@ -95,7 +97,7 @@ def test_web_broadcasts_take_the_terminal_path() -> None:
                 self.task = asyncio.create_task(coro, name=name)
                 return self.task
 
-            def _add_conversation_message(self, role, content, *, metadata):
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
                 pass
 
         llm = Llm()
@@ -144,7 +146,7 @@ def test_hub_mentions_log_the_typed_turn_through_the_logger() -> None:
                 self.task = asyncio.create_task(coro, name=name)
                 return self.task
 
-            def _add_conversation_message(self, role, content, *, metadata):
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
                 pass
 
         llm = FakeLlm()
@@ -195,7 +197,7 @@ def test_broadcasts_log_the_typed_turn_through_the_logger() -> None:
                 self.task = asyncio.create_task(coro, name=name)
                 return self.task
 
-            def _add_conversation_message(self, role, content, *, metadata):
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
                 pass
 
         llm = FakeLlm()
@@ -240,7 +242,7 @@ def test_failed_hub_mention_still_logs_the_typed_turn() -> None:
                 self.task = asyncio.create_task(coro, name=name)
                 return self.task
 
-            def _add_conversation_message(self, role, content, *, metadata):
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
                 pass
 
         llm = FakeLlm()
@@ -289,7 +291,7 @@ def test_overlapping_mentions_do_not_reparent_each_other() -> None:
                 self.tasks.append(task)
                 return task
 
-            def _add_conversation_message(self, role, content, *, metadata):
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
                 pass
 
         llm = FakeLlm()
@@ -350,7 +352,7 @@ def test_ordinary_turn_continues_after_a_hub_mention() -> None:
                 self.task = asyncio.create_task(coro, name=name)
                 return self.task
 
-            def _add_conversation_message(self, role, content, *, metadata):
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
                 pass
 
         llm = FakeLlm()
@@ -406,7 +408,7 @@ def test_mixed_turn_overlap_does_not_misparent_or_clobber_the_cursor() -> None:
                 # inside the task body would grab the wrong lineage.
                 self.coros.append(coro)
 
-            def _add_conversation_message(self, role, content, *, metadata):
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
                 pass
 
         llm = FakeLlm()
@@ -477,7 +479,7 @@ def test_mixed_turn_overlap_failure_keeps_the_newer_cursor() -> None:
             def create_background_task(self, coro, *, name: str):
                 self.coros.append(coro)
 
-            def _add_conversation_message(self, role, content, *, metadata):
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
                 pass
 
         llm = FakeLlm()
@@ -545,7 +547,7 @@ def _garnet_llm():
         def create_background_task(self, coro, *, name: str):
             self.coros.append(coro)
 
-        def _add_conversation_message(self, role, content, *, metadata):
+        def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
             pass
 
     return FakeLlm()
@@ -741,8 +743,9 @@ def test_execute_hub_message_persists_one_jsonl_pair_on_success_and_failure(
                     self.conversation_logger = logger
                     self.messages = []
 
-                def _add_conversation_message(self, role, content, *, metadata):
-                    self.messages.append((role, content, metadata))
+                def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
+                    self.messages.append((role, content, metadata, parent_uuid))
+                    return f"memory-{role}-uuid"
 
             llm = FakeLlm()
             service = LocalStateService(llm, object())
@@ -775,11 +778,148 @@ def test_execute_hub_message_persists_one_jsonl_pair_on_success_and_failure(
             assert user_record["parentUuid"] == parent_uuid
             assert assistant_record["message"]["role"] == "assistant"
             assert assistant_record["parentUuid"] == user_record["uuid"]
+
+            assert [(message[0], message[3]) for message in llm.messages] == [
+                ("user", parent_uuid),
+                ("assistant", "memory-user-uuid"),
+            ]
             assert any(
                 item.get("text") == expected_assistant_text
                 for item in assistant_record["message"]["content"]
             )
             assert llm.current_parent_uuid == assistant_record["uuid"]
             service.hub_send_msg.assert_awaited_once_with("lapis", "inspect the queue")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_hub_mention_completion_after_session_reset_does_not_write_to_new_session(
+    fails: bool,
+) -> None:
+    async def scenario() -> None:
+        class RotatingLogger:
+            def __init__(self) -> None:
+                self.session_id = "old-session"
+                self.records = {"old-session": [], "new-session": []}
+
+            def reset_session(self, session_id: str) -> None:
+                self.session_id = session_id
+                self.records.setdefault(session_id, [])
+
+            async def log_user_message(self, content: str, *, parent_uuid=None):
+                self.records[self.session_id].append(("user", content, parent_uuid))
+                return "old-user-jsonl-uuid"
+
+            async def log_assistant_message(self, content: str, *, parent_uuid=None):
+                self.records[self.session_id].append(("assistant", content, parent_uuid))
+                return "assistant-jsonl-uuid"
+
+        logger = RotatingLogger()
+
+        class FakeLlm:
+            def __init__(self) -> None:
+                self.conversation_logger = logger
+                self.session_id = "old-session"
+                self.current_parent_uuid = "conversation-root"
+                self.messages = {"old-session": [], "new-session": []}
+                self.cursor_publications = []
+
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
+                self.messages[self.session_id].append((role, content, parent_uuid, metadata))
+                return f"{self.session_id}-{role}-memory-uuid"
+
+            def publish_cursor(self, message_uuid, turn_serial):
+                self.cursor_publications.append((message_uuid, turn_serial))
+                self.current_parent_uuid = message_uuid
+                return True
+
+        llm = FakeLlm()
+        service = LocalStateService(llm, object())
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def delayed_send(target: str, content: str) -> str:
+            send_started.set()
+            await release_send.wait()
+            if fails:
+                raise RuntimeError("late failure from old session")
+            return "late reply from old session"
+
+        service.hub_send_msg = delayed_send
+        task = asyncio.create_task(
+            service._execute_hub_message(
+                "@lapis inspect",
+                "lapis",
+                "inspect",
+                parent_uuid="conversation-root",
+                turn_serial=2,
+            )
+        )
+        await send_started.wait()
+
+        logger.reset_session("new-session")
+        llm.session_id = "new-session"
+        llm.current_parent_uuid = None
+        release_send.set()
+        await task
+
+        assert logger.records["old-session"] == [("user", "@lapis inspect", "conversation-root")]
+        assert logger.records["new-session"] == []
+        assert llm.messages["new-session"] == []
+        assert llm.cursor_publications == []
+        assert llm.current_parent_uuid is None
+
+    asyncio.run(scenario())
+
+
+def test_hub_mention_in_memory_assistant_thread_is_parented_to_user(tmp_path) -> None:
+    from kollabor_ai.conversation_manager import ConversationManager
+
+    class Config:
+        _conversations_dir = tmp_path
+
+        def get(self, key, default=None):
+            if key == "kollabor.llm.save_conversations":
+                return False
+            return default
+
+    async def scenario() -> None:
+        manager = ConversationManager(Config())
+
+        class FakeLlm:
+            conversation_manager = manager
+            conversation_logger = None
+            conversation_history = []
+
+            def _add_conversation_message(self, role, content, *, metadata, parent_uuid=None):
+                return manager.add_message(
+                    role,
+                    content,
+                    parent_uuid=parent_uuid,
+                    metadata=metadata,
+                )
+
+        llm = FakeLlm()
+        service = LocalStateService(llm, object())
+        service.hub_send_msg = AsyncMock(return_value="sent to lapis")
+        await service._execute_hub_message(
+            "@lapis inspect",
+            "lapis",
+            "inspect",
+            parent_uuid="conversation-root",
+            turn_serial=1,
+        )
+
+        user, assistant = manager.messages
+        assert user["role"] == "user"
+        assert user["parent_uuid"] == "conversation-root"
+        assert assistant["role"] == "assistant"
+        assert assistant["parent_uuid"] == user["uuid"]
+        thread = manager.get_message_thread(assistant["uuid"])
+        assert [message["uuid"] for message in thread] == [
+            user["uuid"],
+            assistant["uuid"],
+        ]
 
     asyncio.run(scenario())
