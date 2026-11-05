@@ -38,6 +38,41 @@ Agents are resolved from:
 When the same agent name exists at multiple tiers, the higher-priority definition
 wins. The bundled copy remains the install-safe fallback.
 
+On app startup Kollab copies missing bundled agent files into the global agents
+directory. Existing files are preserved, so a global copy does not automatically
+receive later bundle changes. Linked agent or section directories, junctions,
+reparse points and file links are preserved instead of being seeded through. If
+the global config directory or its agents directory is linked, startup skips seeding there;
+existing global agents in that directory still resolve normally. An agent with
+no local or global `system_prompt.md` resolves from the bundle.
+
+New seed files are staged in their target directory and published without
+overwriting a file created at the same time. If hard links are unavailable,
+Windows uses a no-overwrite rename and POSIX uses its native exclusive rename
+when the filesystem supports it. If neither safe operation is available,
+startup logs an error and leaves the target absent; use the bundled agent when
+no higher-priority copy shadows it, or use a filesystem that supports one of
+the safe operations. On POSIX, directory descriptors prevent link traversal,
+but another process can relocate an already-open directory during startup; a
+seed file may then be published in the moved directory instead of at its
+original path. If a global `system_prompt.md` already exists, it still shadows
+the bundle unless a project-local agent wins; the log identifies that override
+for review because missing fragments may leave it incomplete. If a process
+exits abruptly during staging, a
+hidden `.<filename>.seed-...` file can remain beside the target. Once no seeding
+process is using it and the target has been checked, that exact temporary file
+can be removed. Kollab does not use it as an agent file or remove it silently.
+
+Old global skill copies that match the historical seed hashes can be moved into
+`skills/.seed-backup`. Kollab checks a moved copy again and restores it if it
+changed and a safe no-replace rename is available. If the original path is
+occupied or restoration cannot be done safely, the backup and any other copy
+are preserved and the log identifies the conflict for review. If a safe move
+is unavailable initially, the global skill stays in place.
+A writer that keeps a file descriptor open can still change a moved file after
+the last check; avoid editing a skill while startup is retiring it and inspect
+the backup if this occurs.
+
 The local tier is the folder the agent runs in. A chat the engine starts for the web
 UI or a team launch uses that chat's own folder, not the engine's
 (`AgentManager(project_path=...)`). The hub protocol docs (`system/hub-*.md`) and the
@@ -99,6 +134,17 @@ This means: run the `coder` bundle, use `lapis` as the hub identity, and use
 the `openai-oauth` provider profile. `lapis` is not an agent bundle, and
 `research` is not automatically a live hub identity just because a `research`
 bundle exists.
+
+## Sidebar Type Marks
+
+The Web UI Agents sidebar places a small, muted glyph after each local-session or
+offline agent name to identify its bundle (for example, coder `▸`, research `◈`, or
+default `●`). Hovering the mark shows the full bundle name, which is also exposed to
+screen readers. An unknown custom bundle gets a generic mark labeled with its actual
+type; when type metadata is missing, no mark is shown. Network/remote rows are also
+unmarked because their data does not include a bundle type; matching a remote name to
+a local roster entry could show the wrong type. The mark does not change identity,
+workspace grouping, or row actions.
 
 ## Hub Rosters and Teams
 

@@ -206,23 +206,50 @@ class MembershipContext:
         self.transport = transport
         self.inbound = inbound  # bridge-bound async (peer, method, payload)
         self.enrollment_issuer = enrollment_issuer
-        self.resume_task: object | None = None
+        self.resume_task: asyncio.Task[None] | None = None
+        self._started = False
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     async def start(self):
-        self.commands.client.set_request_handler(self.inbound)
-        self.resume_task = asyncio.create_task(
-            self.commands.resume(), name=f"kollab-relay-resume-{self.membership.slug}"
-        )
-        if self.enrollment_issuer is not None:
-            self.enrollment_issuer.start_recovery()
+        if self._closed or self._started:
+            return
+        self._started = True
+        try:
+            self.commands.client.set_request_handler(self.inbound)
+            self.resume_task = asyncio.create_task(
+                self.commands.resume(),
+                name=f"kollab-relay-resume-{self.membership.slug}",
+            )
+            if self.enrollment_issuer is not None:
+                self.enrollment_issuer.start_recovery()
+        except BaseException:
+            # Startup may have installed the handler or created resume work
+            # before a later component failed; close that partial state too.
+            await self.close()
+            raise
 
     async def close(self):
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(
+                self._close_resources(),
+                name=f"kollab-membership-close-{self.membership.slug}",
+            )
+        # A caller canceled during shutdown must not cancel the owned cleanup.
+        await asyncio.shield(self._close_task)
+
+    async def _close_resources(self):
         task, self.resume_task = self.resume_task, None
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        self.commands.client.set_request_handler(None)
-        if self.enrollment_issuer is not None:
-            await self.enrollment_issuer.close()
-            self.enrollment_issuer = None
-        await self.commands.close()
+        try:
+            self.commands.client.set_request_handler(None)
+        finally:
+            issuer, self.enrollment_issuer = self.enrollment_issuer, None
+            try:
+                if issuer is not None:
+                    await issuer.close()
+            finally:
+                await self.commands.close()

@@ -203,6 +203,42 @@ def test_stt_choice_never_reloads_or_rekeys_speech(root):
     assert speech_key(load_preferences(root)) == before
 
 
+def test_parakeet_child_uses_isolated_package_module_command(root, monkeypatch):
+    from kollabor_voice import assets, bootstrap
+
+    monkeypatch.setenv("PYTHONPATH", "/voice-engine/site-packages")
+    monkeypatch.setattr(bootstrap, "ensure_runtime", lambda *_args, **_kwargs: Path(sys.executable))
+    monkeypatch.setattr(
+        assets,
+        "ensure_models",
+        lambda *_args, **_kwargs: {"parakeet-v3": root / "parakeet-model"},
+    )
+    real_popen = subprocess.Popen
+    observed = {}
+
+    def capture(command, **kwargs):
+        observed.update(command=command, env=kwargs["env"])
+        return real_popen(
+            [
+                sys.executable,
+                "-c",
+                "import json,time; print(json.dumps({'ready': True}), flush=True); time.sleep(60)",
+            ],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(transcription.subprocess, "Popen", capture)
+    worker = ParakeetWorker(root, lambda **_state: None)
+    try:
+        assert observed["command"][1:3] == ["-I", "-c"]
+        assert observed["command"][5] == "kollabor_voice.parakeet_worker"
+        assert observed["command"][6:8] == ["--model", str(root / "parakeet-model")]
+        assert observed["env"]["PYTHONPATH"] == ""
+        assert observed["env"]["HF_HUB_OFFLINE"] == "1"
+    finally:
+        worker.close()
+
+
 def test_manifest_pins_the_parakeet_runtime_and_weights():
     spec = manifest()["stt"]["parakeet"]
     assert all("==" in pin for pin in spec["runtime"])
