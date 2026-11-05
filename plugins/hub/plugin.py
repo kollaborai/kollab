@@ -5687,8 +5687,11 @@ class HubPlugin(BasePlugin):
             self._identity.is_coordinator = is_coordinator
 
             # Discover existing agents to get taken identities (solo ones
-            # too: their sockets are named by identity)
-            existing = self._presence.discover_agents(include_solo=True)
+            # too: their sockets are named by identity, and busy ones whose
+            # socket is silent for now still hold theirs, #673)
+            existing = self._presence.discover_agents(
+                include_solo=True, include_busy=True
+            )
             taken = [a.identity for a in existing]
 
             # Resolve active agent for identity and vault config
@@ -5760,6 +5763,11 @@ class HubPlugin(BasePlugin):
                 if holder:
                     still_alive = await AgentMessenger.ping_agent(
                         holder.socket_path, timeout=2.0
+                    ) or (
+                        # A busy holder answers no ping but is not dead (#673)
+                        holder.is_alive()
+                        and time.time() - (holder.last_heartbeat or 0)
+                        < PresenceManager.LIVE_PID_GRACE_SECONDS
                     )
                     if not still_alive:
                         logger.info(
