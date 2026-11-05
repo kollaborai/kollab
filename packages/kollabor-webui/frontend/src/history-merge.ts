@@ -318,9 +318,14 @@ export function dropTransientTurnDuplicates<T extends Message>(
       transientText(message.content) === transientText(anchor.content),
   );
   if (!anchorRow) return null;
-  const covered = (message: Message) => kept.some((candidate) =>
-    transientRole(candidate) === transientRole(message) &&
-    transientText(candidate.content) === transientText(message.content));
-  if (!block.every(covered)) return null;
+  // The stored copies of this turn are the newest kept rows, in order. Matching
+  // by position keeps an identical earlier turn from covering a reply that was
+  // never stored.
+  if (kept.length < block.length) return null;
+  const stored = kept.slice(kept.length - block.length);
+  const aligned = block.every((message, index) =>
+    transientRole(stored[index]) === transientRole(message) &&
+    transientText(stored[index].content) === transientText(message.content));
+  if (!aligned) return null;
   return shown.slice(0, blockStart);
 }
