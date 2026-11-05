@@ -364,6 +364,7 @@ def test_cli_status_and_capture_find_presence_after_home_changes(
             lines=50,
             capture_format="json",
             max_chars=10_000,
+            cursor=None,
         )
     finally:
         project_scope.resolve_project_root.cache_clear()
