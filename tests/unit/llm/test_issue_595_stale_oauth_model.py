@@ -243,3 +243,164 @@ async def test_untouched_profile_commits_the_lookup_result(
     assert manager.get_profile(PROFILE).model == LOOKUP_RESULT
     assert reinit_calls == [LOOKUP_RESULT]
     assert manager.get_active_profile().name == PROFILE
+
+
+# --- Profile-scoped OAuth tokens -------------------------------------------
+#
+# A profile not named ``openai-oauth`` keeps its tokens under its own name.
+# ``switch_profile`` asks the default store, finds nothing and skips its guarded
+# lookup; the lookup then runs inside ``APICommunicationService`` during provider
+# re-initialization. These tests run that path for real: only the token store,
+# the codex lookup and the provider registry are faked.
+
+SCOPED = "work-oauth"
+
+
+class _ScopedTokenStorage:
+    """Tokens exist only for a profile-scoped request, as for a provisioned profile."""
+
+    async def load_tokens(self, provider, auto_refresh=True, *, profile_name=None):
+        if profile_name is None:
+            return None
+        return SimpleNamespace(access_token="scoped-token", account_id="acct-2")
+
+
+def _scoped_profile(model="codex"):
+    return LLMProfile(
+        name=SCOPED,
+        provider="openai_responses",
+        model=model,
+        auth_type="oauth",
+        api_key="stale-token",
+        base_url="https://chatgpt.example/backend-api/codex",
+    )
+
+
+@pytest.fixture
+def scoped_manager(manager):
+    assert manager.add_profile(_scoped_profile())
+    return manager
+
+
+@pytest.fixture
+def scoped_lookup():
+    pending = _PendingLookup()
+    with (
+        patch("kollabor_ai.oauth.OAuthTokenStorage", _ScopedTokenStorage),
+        patch("kollabor_ai.oauth.openai_oauth.query_codex_models", pending),
+        patch(
+            "kollabor_ai.api_communication_service.create_config_from_profile",
+            return_value={},
+        ),
+        patch(
+            "kollabor_ai.api_communication_service.ProviderRegistry.get_provider",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    provider_name="openai_responses", model=LOOKUP_RESULT
+                )
+            ),
+        ),
+        patch(
+            "kollabor.llm.llm_coordinator.create_config_from_profile",
+            return_value={},
+        ),
+    ):
+        yield pending
+
+
+@pytest.fixture
+def scoped_coord(scoped_manager):
+    from kollabor_ai.api_communication_service import APICommunicationService
+
+    config = MagicMock()
+    config.get = lambda key, default=None: default
+    coord = MagicMock()
+    coord._provider_lock = asyncio.Lock()
+    coord.profile_manager = scoped_manager
+    coord.event_bus = None
+    # The real service: reinitialize_provider, _refresh_oauth_token and
+    # _resolve_oauth_model are not stubbed.
+    coord.api_service = APICommunicationService(
+        config, None, scoped_manager.get_profile(BASE)
+    )
+    coord._provider_registry.get_provider = AsyncMock(
+        return_value=SimpleNamespace(provider_name="openai_responses", model=LOOKUP_RESULT)
+    )
+    return coord
+
+
+async def _start_scoped_switch(coord, lookup):
+    task = asyncio.create_task(
+        LLMService.switch_profile(coord, SCOPED, persist=False)
+    )
+    await asyncio.wait_for(lookup.started.wait(), timeout=5)
+    return task
+
+
+@pytest.mark.asyncio
+async def test_scoped_token_model_edit_during_lookup_is_not_overwritten(
+    scoped_manager, scoped_coord, scoped_lookup
+):
+    task = await _start_scoped_switch(scoped_coord, scoped_lookup)
+    assert scoped_manager.update_profile(SCOPED, model=NEWER)
+    scoped_lookup.release.set()
+
+    ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is False
+    assert scoped_manager.get_profile(SCOPED).model == NEWER
+    assert scoped_manager.get_active_profile().name == BASE
+    # The refused switch leaves the previous profile's provider in place.
+    assert scoped_coord.api_service._profile.name == BASE
+
+
+@pytest.mark.asyncio
+async def test_scoped_token_profile_replaced_during_lookup_refuses_the_switch(
+    scoped_manager, scoped_coord, scoped_lookup
+):
+    task = await _start_scoped_switch(scoped_coord, scoped_lookup)
+    assert scoped_manager.remove_profile(SCOPED)
+    replacement = _scoped_profile(model=NEWER)
+    assert scoped_manager.add_profile(replacement)
+    scoped_lookup.release.set()
+
+    ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is False
+    assert scoped_manager.get_profile(SCOPED) is replacement
+    assert replacement.model == NEWER
+    assert scoped_manager.get_active_profile().name == BASE
+    assert scoped_coord.api_service._profile.name == BASE
+
+
+@pytest.mark.asyncio
+async def test_scoped_token_untouched_profile_commits_the_lookup_result(
+    scoped_manager, scoped_coord, scoped_lookup
+):
+    task = await _start_scoped_switch(scoped_coord, scoped_lookup)
+    scoped_lookup.release.set()
+
+    ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is True
+    assert scoped_manager.get_profile(SCOPED).model == LOOKUP_RESULT
+    assert scoped_manager.get_active_profile().name == SCOPED
+    assert scoped_coord.api_service._profile.name == SCOPED
+
+
+@pytest.mark.asyncio
+async def test_refresh_outside_a_switch_does_not_overwrite_a_model_edit(
+    scoped_manager, scoped_coord, scoped_lookup
+):
+    """Startup and the 401 refresh run the same lookup with no switch around it."""
+    profile = scoped_manager.get_profile(SCOPED)
+    service = scoped_coord.api_service
+    service._profile = profile
+
+    refresh = asyncio.create_task(service._refresh_oauth_token())
+    await asyncio.wait_for(scoped_lookup.started.wait(), timeout=5)
+    assert scoped_manager.update_profile(SCOPED, model=NEWER)
+    scoped_lookup.release.set()
+    await asyncio.wait_for(refresh, timeout=5)
+
+    assert profile.model == NEWER
