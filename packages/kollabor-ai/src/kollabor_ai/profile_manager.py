@@ -179,9 +179,10 @@ def _vault_call(
                     password = f.read().strip()
             if not password:
                 if vault_file.exists() or not writing:
-                    raise RuntimeError(
-                        "no vault password: set KOLLAB_KEY_ENCRYPTION_PASSWORD"
+                    logger.warning(
+                        "Password vault is locked: set KOLLAB_KEY_ENCRYPTION_PASSWORD"
                     )
+                    return None
                 password = _secrets.token_urlsafe(32)
                 with locked_file(key_file, "w", private=True) as f:
                     f.write(password)
@@ -198,7 +199,8 @@ def _vault_call(
             storage._save_keystore(keystore)
             return value
     except Exception as e:
-        logger.warning(f"Password vault unavailable for '{key_name}': {e}")
+        # The type only: an exception's text can carry the key being stored.
+        logger.warning(f"Password vault unavailable ({type(e).__name__})")
         return None
 
 
