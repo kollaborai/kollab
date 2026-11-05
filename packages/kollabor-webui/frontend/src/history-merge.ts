@@ -205,9 +205,56 @@ const historyOrder = (message: Message, tie: number): HistoryOrder => {
 const compareHistoryOrder = (left: HistoryOrder, right: HistoryOrder): number =>
   left.section - right.section || left.index - right.index || left.tie - right.tie;
 
+/**
+ * A paged tool result carries a reference signed with its row position, and
+ * compaction renumbers the retained rows. The output it showed is what stays.
+ */
+const stableResult = (result: unknown): unknown => {
+  if (!result || typeof result !== "object" ||
+    (result as { kind?: unknown }).kind !== "history-output-preview") return result;
+  const stable = { ...(result as Record<string, unknown>) };
+  delete stable.reference;
+  return stable;
+};
+
+const toolCalls = (message: Message): Array<{ id: unknown; result: unknown }> =>
+  Array.isArray(message.content)
+    ? message.content
+      .filter((part) => !!part && typeof part === "object" &&
+        (part as { type?: unknown }).type === "tool-call")
+      .map((part) => ({
+        id: (part as { toolCallId?: unknown }).toolCallId,
+        result: stableResult((part as { result?: unknown }).result),
+      }))
+    : [];
+
 /** Role and content: what a retained row keeps across compaction (its id is renumbered). */
-const rowFingerprint = (message: Message): string =>
-  `${String((message as { role?: unknown }).role ?? "")}\n${JSON.stringify(message.content ?? null)}`;
+const rowFingerprint = (message: Message): string => {
+  const content = Array.isArray(message.content)
+    ? message.content.map((part) => part && typeof part === "object" && "result" in part
+      ? { ...part, result: stableResult((part as { result?: unknown }).result) }
+      : part)
+    : message.content ?? null;
+  return `${String((message as { role?: unknown }).role ?? "")}\n${JSON.stringify(content)}`;
+};
+
+/** The request a row belongs to, stamped on its live and stored assistant rows. */
+const requestIdOf = (message: Message): string | undefined => {
+  const value = message.metadata?.custom?.requestId;
+  return typeof value === "string" && value !== "" ? value : undefined;
+};
+
+/**
+ * Same turn, on top of same words: equal request ids when both rows carry one,
+ * else equal tool calls (call ids and results). A repeated prompt whose turn
+ * made another call is a different turn.
+ */
+const sameTurn = (live: Message, stored: Message): boolean => {
+  const liveRequest = requestIdOf(live);
+  const storedRequest = requestIdOf(stored);
+  if (liveRequest && storedRequest) return liveRequest === storedRequest;
+  return JSON.stringify(toolCalls(live)) === JSON.stringify(toolCalls(stored));
+};
 
 /**
  * Rebase a compacted snapshot in place: preserve all history the user has
@@ -302,9 +349,10 @@ const transientRole = (message: Message): string =>
  * read the mirror before the rows landed -- the next reload replays the turn
  * as a tail next to those rows, and assistant-ui draws it twice until a
  * manual reload (#666). Drop the trailing transient block once every row in
- * it exists in the kept history with the same role and text, and the tail's
- * first row matches the block's same-role row; null keeps the rows as they
- * are, so a replay that proves nothing never hides content.
+ * it exists in the kept history as the same turn (same role and text, and the
+ * same request id or tool calls, see sameTurn), and the tail's first row
+ * matches the block's same-role row; null keeps the rows as they are, so a
+ * replay that proves nothing never hides content.
  */
 export function dropTransientTurnDuplicates<T extends Message>(
   shown: ReadonlyArray<T>,
@@ -334,7 +382,8 @@ export function dropTransientTurnDuplicates<T extends Message>(
   const stored = kept.slice(kept.length - block.length);
   const aligned = block.every((message, index) =>
     transientRole(stored[index]) === transientRole(message) &&
-    transientText(stored[index].content) === transientText(message.content));
+    transientText(stored[index].content) === transientText(message.content) &&
+    sameTurn(message, stored[index]));
   if (!aligned) return null;
   return shown.slice(0, blockStart);
 }
