@@ -61,7 +61,7 @@ def _cut_text(text: str, limit: int) -> str:
 # writes stays under that limit, with room for the fields publish adds after the check.
 _FRAME_BUDGET_BYTES = 15 * 1024 * 1024
 # The longest text one string keeps when cut. Cuts halve it until the event fits,
-# and stop at the floor.
+# and stop at the floor. An event that does not fit even at the floor is not cut.
 _FRAME_TEXT_LIMIT = 1024 * 1024
 _FRAME_TEXT_FLOOR = 1024
 
@@ -88,13 +88,19 @@ def _within_frame_budget(event: Dict[str, Any]) -> Dict[str, Any]:
             return event
     except (TypeError, ValueError):
         return event  # not serializable: published as before
+    # Cut everything to the floor once. If even that does not fit, the event's
+    # bulk is not text (a long list of short strings): cutting would lose its
+    # text without rescuing the frame, so it goes out whole, as before.
+    floor_cut = _cut_strings(event, _FRAME_TEXT_FLOOR)
+    if len(json.dumps(floor_cut, default=str)) > _FRAME_BUDGET_BYTES:
+        return event
     limit = _FRAME_TEXT_LIMIT
-    while True:
+    while limit > _FRAME_TEXT_FLOOR:
         cut = _cut_strings(event, limit)
-        fits = len(json.dumps(cut, default=str)) <= _FRAME_BUDGET_BYTES
-        if fits or limit <= _FRAME_TEXT_FLOOR:
+        if len(json.dumps(cut, default=str)) <= _FRAME_BUDGET_BYTES:
             return cut
         limit //= 2
+    return floor_cut
 
 
 def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
