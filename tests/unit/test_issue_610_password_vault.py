@@ -203,3 +203,20 @@ def test_missing_password_never_replaces_the_vault_key(home, monkeypatch):
     assert not (home / ".kollab" / "vault" / "vault.key").exists()
     monkeypatch.setenv("KOLLAB_KEY_ENCRYPTION_PASSWORD", "operator-chosen-password")
     assert _resolve(PROFILE) == KEY
+
+
+def test_a_vault_failure_never_logs_the_secret(home, caplog):
+    """An error raised while storing a key must not put the key in the log."""
+    from unittest.mock import patch
+
+    from kollabor_ai.profile_manager import _keyring_set
+
+    def boom(self, keystore):
+        raise RuntimeError(f"cannot write {keystore}")
+
+    with patch(
+        "kollabor_ai.providers.security.EncryptedFileKeyStorage._save_keystore", boom
+    ), caplog.at_level("DEBUG"):
+        assert _keyring_set(PROFILE, KEY) is False
+    assert "vault" in caplog.text.lower()
+    assert KEY not in caplog.text
