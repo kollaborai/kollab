@@ -137,8 +137,10 @@ KEYRING_SENTINEL_PREFIX = "secret:keyring:"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
 
-def _vault_call(key_name: str, value: Optional[str] = None) -> Optional[str]:
-    """Read (value None) or store a secret in the encrypted vault file.
+def _vault_call(
+    key_name: str, value: Optional[str] = None, *, delete: bool = False
+) -> Optional[str]:
+    """Read (value None), store, or delete a secret in the encrypted vault file.
 
     The vault is where a key goes when the OS keyring cannot take it
     (KOLLAB_NO_KEYRING, no Secret Service, a container): AES-256-GCM in
@@ -147,6 +149,8 @@ def _vault_call(key_name: str, value: Optional[str] = None) -> Optional[str]:
     so pipe mode and --detached never prompt. Returns the value read, or the
     value stored; None when the vault is unavailable or cannot be decrypted --
     an unreadable vault is never rewritten, so a wrong password loses nothing.
+    A read or delete never creates the vault, and a vault that exists is never
+    given a new vault.key: without its password it stays closed (#610).
     """
     import secrets as _secrets
 
@@ -162,18 +166,32 @@ def _vault_call(key_name: str, value: Optional[str] = None) -> Optional[str]:
         return None
     try:
         vault_dir = get_config_directory() / "vault"
+        vault_file = vault_dir / "secrets.enc"
+        writing = value is not None and not delete
+        if not writing and not vault_file.exists():
+            return None
         ensure_private_dir(vault_dir)
         with locked_file(vault_dir / "vault.lock", private=True):
             password = os.environ.get("KOLLAB_KEY_ENCRYPTION_PASSWORD", "")
-            if not password:
-                with locked_file(vault_dir / "vault.key", "a+", private=True) as f:
-                    f.seek(0)
+            key_file = vault_dir / "vault.key"
+            if not password and key_file.exists():
+                with locked_file(key_file, "r", private=True) as f:
                     password = f.read().strip()
-                    if not password:
-                        password = _secrets.token_urlsafe(32)
-                        f.write(password)
-            storage = EncryptedFileKeyStorage(vault_dir / "secrets.enc", password)
+            if not password:
+                if vault_file.exists() or not writing:
+                    raise RuntimeError(
+                        "no vault password: set KOLLAB_KEY_ENCRYPTION_PASSWORD"
+                    )
+                password = _secrets.token_urlsafe(32)
+                with locked_file(key_file, "w", private=True) as f:
+                    f.write(password)
+            storage = EncryptedFileKeyStorage(vault_file, password)
             keystore = storage._load_keystore()
+            if delete:
+                found = keystore.pop(key_name, None)
+                if found is not None:
+                    storage._save_keystore(keystore)
+                return found
             if value is None:
                 return keystore.get(key_name)
             keystore[key_name] = value
@@ -191,8 +209,13 @@ def _keyring_get(key_name: str) -> Optional[str]:
     so keys are interchangeable between the async and sync paths.
     The keyring is skipped entirely when disabled (KOLLAB_NO_KEYRING, tests) --
     on macOS a lookup of a missing entry pops a Keychain dialog. A
-    ``secret:keyring:`` reference resolves from either store (#610).
+    ``secret:keyring:`` reference resolves from either store (#610). A key
+    lives in one store at a time (see _keyring_set), and the vault is read
+    first because a process without the keyring cannot clear a keyring copy.
     """
+    in_vault = _vault_call(key_name)
+    if in_vault:
+        return in_vault
     try:
         import keyring
 
@@ -204,7 +227,7 @@ def _keyring_get(key_name: str) -> Optional[str]:
                 return str(found)
     except Exception:
         pass
-    return _vault_call(key_name)
+    return None
 
 
 # (profile name, plaintext key) pairs get_api_key() already tried to migrate.
@@ -217,7 +240,8 @@ def _keyring_set(key_name: str, value: str) -> bool:
     Returns True on success, False if neither store took it. A False return
     keeps the caller on its plaintext path. With the keyring disabled
     (KOLLAB_NO_KEYRING, tests) the keyring is never touched, so no prompt;
-    the key goes to the vault file instead (#610).
+    the key goes to the vault file instead (#610). A keyring write removes the
+    vault's copy, so a reference never resolves to a stale key.
     """
     try:
         import keyring
@@ -226,6 +250,7 @@ def _keyring_set(key_name: str, value: str) -> bool:
 
         if keyring_enabled():
             keyring.set_password(APIKeyManager.SERVICE_NAME, key_name, value)
+            _vault_call(key_name, delete=True)
             return True
     except Exception:
         pass
