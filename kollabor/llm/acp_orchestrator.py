@@ -115,7 +115,10 @@ class ACPOrchestrator:
         self._observed_turns: dict[tuple[str, int], _ObservedTurn] = {}
         self._display_turn: tuple[str, int] | None = None
         # Voice data of a mic turn, by request id, until its reply is spoken.
-        self.voice_turns: dict[str, dict[str, Any]] = {}
+        # Keyed by (request_id, turn_id): admissions may reuse a caller
+        # request ID (#597), and a bare request_id key would let the second
+        # admission overwrite the first one's mic-turn metadata.
+        self.voice_turns: dict[tuple[str, int], dict[str, Any]] = {}
         # Voice epochs whose rules already went to the harness.
         self.voice_rules_epochs: set[Any] = set()
         from pathlib import Path
@@ -1236,7 +1239,7 @@ class ACPOrchestrator:
                         thinking_duration=0, response=display_response_text(observed.text)
                     )
         if kind == "turn_finished" and observed is not None:
-            voice = self.voice_turns.pop(key[0], None)
+            voice = self.voice_turns.pop(key, None)
             if voice is not None:
                 self._speak_reply(voice, observed.text)
             elif kind == "agent_thought_chunk" and key == self._display_turn:
