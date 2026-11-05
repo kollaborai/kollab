@@ -156,9 +156,11 @@ def _save_disk_cache(entries: Dict[str, Dict[str, Any]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         # Drop the raw "endpoint" an earlier build wrote beside the models.
         clean = {
-            key: {k: v for k, v in entry.items() if k != "endpoint"}
-            if isinstance(entry, dict)
-            else entry
+            key: (
+                {k: v for k, v in entry.items() if k != "endpoint"}
+                if isinstance(entry, dict)
+                else entry
+            )
             for key, entry in entries.items()
         }
         payload = {"version": CACHE_VERSION, "entries": clean}
