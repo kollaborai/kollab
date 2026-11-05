@@ -428,3 +428,106 @@ test("a partially replayed turn keeps transient rows without a replayed counterp
   const tail = [{ id: "history-2", role: "user", content: "q2" }];
   assert.equal(dropTransientTurnDuplicates(shown, tail), null);
 });
+
+// Issue #637 review (5ca3a3dc): a paged tool result's reference is signed with
+// its row position, and compaction renumbers the retained rows.
+const pagedOutput = (reference) => ({
+  kind: "history-output-preview",
+  sessionId: "s1",
+  reference,
+  preview: "line 1\n...",
+});
+const compactionMarker = {
+  id: "history-0",
+  role: "assistant",
+  content: "Context compacted (round 1): 4 -> 3 messages.",
+  metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+};
+const callCount = (messages, callId) =>
+  messages.filter((message) =>
+    JSON.stringify(message.content ?? null).includes(`"toolCallId":"${callId}"`)).length;
+
+test("a paged tool result shows once when compaction renumbers its reference", () => {
+  const shown = [
+    { id: "history-0", role: "user", content: "list the logs" },
+    { id: "history-10", role: "assistant", content: [{ type: "tool-call", toolCallId: "t1", result: pagedOutput("ref-position-10") }] },
+  ];
+  const loaded = [
+    compactionMarker,
+    { id: "history-1", role: "user", content: "list the logs" },
+    { id: "history-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "t1", result: pagedOutput("ref-position-1") }] },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.equal(callCount(rebased.messages, "t1"), 1);
+});
+
+test("a live tool turn is kept when a stored turn with the same words used another call", () => {
+  // no retained row overlaps, so the replayed tail is every loaded row; the same words are not the same turn
+  const shown = [
+    { id: "history-0", role: "user", content: "older question" },
+    { id: "history-1", role: "assistant", content: "older answer" },
+    { id: "user-ws1-7", role: "user", content: "lookup same" },
+    { id: "assistant-ws1-8", role: "assistant", content: [{ type: "tool-call", toolCallId: "t2", result: "new output" }, { type: "text", text: "Done" }] },
+  ];
+  const loaded = [
+    compactionMarker,
+    { id: "history-1", role: "user", content: "lookup same" },
+    { id: "history-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "t1", result: "old output" }, { type: "text", text: "Done" }] },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.ok(rebased.messages.some((message) => message.id === "assistant-ws1-8"));
+});
+
+test("a live tool turn is kept when a stored turn reuses its call id with another result", () => {
+  const shown = [
+    { id: "history-0", role: "user", content: "older question" },
+    { id: "history-1", role: "assistant", content: "older answer" },
+    { id: "user-ws1-7", role: "user", content: "lookup same" },
+    { id: "assistant-ws1-8", role: "assistant", content: [{ type: "tool-call", toolCallId: "t1", result: "new output" }, { type: "text", text: "Done" }] },
+  ];
+  const loaded = [
+    compactionMarker,
+    { id: "history-1", role: "user", content: "lookup same" },
+    { id: "history-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "t1", result: "old output" }, { type: "text", text: "Done" }] },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.ok(rebased.messages.some((message) => message.id === "assistant-ws1-8"));
+});
+
+test("a live tool turn is replaced by its stored copy when both carry the same request", () => {
+  // the stored copy's output is a paged reference, so the results differ in shape, not turn
+  const request = { custom: { requestId: "req-2" } };
+  const shown = [
+    { id: "history-0", role: "user", content: "older question" },
+    { id: "history-1", role: "assistant", content: "older answer" },
+    { id: "user-ws1-7", role: "user", content: "lookup same", metadata: request },
+    { id: "assistant-ws1-8", role: "assistant", content: [{ type: "tool-call", toolCallId: "t2", result: "live output" }, { type: "text", text: "Done" }], metadata: request },
+  ];
+  const loaded = [
+    compactionMarker,
+    { id: "history-1", role: "user", content: "lookup same", metadata: request },
+    { id: "history-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "t2", result: pagedOutput("ref-position-2") }, { type: "text", text: "Done" }], metadata: request },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.equal(rebased.messages.some((message) => message.id === "assistant-ws1-8"), false);
+  assert.equal(callCount(rebased.messages, "t2"), 1);
+});
+
+test("each loaded row takes at most one shown row, matched from the newest", () => {
+  // the window shows one "go" prompt; the snapshot keeps two identical prompts
+  const shown = [{ id: "history-7", role: "user", content: "go" }];
+  const loaded = [
+    compactionMarker,
+    { id: "history-1", role: "user", content: "go" },
+    { id: "history-2", role: "assistant", content: "ok" },
+    { id: "history-3", role: "user", content: "go" },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.deepEqual(rebased.messages.map((message) => message.id), ["history-0", "history-1", "history-2", "history-3"]);
+  assert.equal(rebased.messages.filter((message) => message.content === "go").length, 2);
+});
