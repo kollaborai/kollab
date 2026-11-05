@@ -130,3 +130,76 @@ def test_unreadable_vault_is_never_overwritten(home, monkeypatch):
     monkeypatch.delenv("KOLLAB_KEY_ENCRYPTION_PASSWORD")
     stored = _stored(home, PROFILE)
     assert LLMProfile.from_dict(PROFILE, {**FIELDS, "api_key": stored}).get_api_key() == KEY
+
+
+class _FakeKeyring:
+    """A dict-backed stand-in for the keyring module."""
+
+    def __init__(self):
+        self.store = {}
+
+    def get_password(self, service, name):
+        return self.store.get((service, name))
+
+    def set_password(self, service, name, value):
+        self.store[(service, name)] = value
+
+
+def _keyring(fake, on: bool):
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    stack = ExitStack()
+    stack.enter_context(patch.dict(sys.modules, {"keyring": fake}))
+    stack.enter_context(
+        patch("kollabor_ai.providers.security.keyring_enabled", return_value=on)
+    )
+    return stack
+
+
+def _resolve(name: str) -> str:
+    ref = f"{KEYRING_SENTINEL_PREFIX}{name}"
+    return LLMProfile.from_dict(name, {**FIELDS, "api_key": ref}).get_api_key()
+
+
+def test_a_reference_has_one_source_of_truth(home):
+    """A key written to one store must never be shadowed by a stale copy in the other."""
+    fake = _FakeKeyring()
+    old, new, newer = ("sk-ant-" + w * 20 for w in ("OLD", "NEW", "NWR"))
+
+    with _keyring(fake, on=True):
+        _save(PROFILE, old)
+        assert _resolve(PROFILE) == old
+    _KEYRING_MIGRATION_TRIED.clear()
+    with _keyring(fake, on=False):  # e.g. a service started with KOLLAB_NO_KEYRING
+        _save(PROFILE, new)
+        assert _resolve(PROFILE) == new
+    with _keyring(fake, on=True):
+        assert _resolve(PROFILE) == new  # not the keyring's stale OLD
+
+    _KEYRING_MIGRATION_TRIED.clear()
+    with _keyring(fake, on=True):
+        _save(PROFILE, newer)
+        assert _resolve(PROFILE) == newer
+    with _keyring(fake, on=False):
+        # The vault's copy is gone, so a no-keyring process gets nothing, never NEW.
+        assert _resolve(PROFILE) == ""
+
+
+def test_a_lookup_creates_no_vault(home):
+    with _keyring(_FakeKeyring(), on=True):
+        assert _resolve("missing") == ""
+    assert not (home / ".kollab" / "vault").exists()
+
+
+def test_missing_password_never_replaces_the_vault_key(home, monkeypatch):
+    """A vault made with KOLLAB_KEY_ENCRYPTION_PASSWORD stays readable with it."""
+    monkeypatch.setenv("KOLLAB_KEY_ENCRYPTION_PASSWORD", "operator-chosen-password")
+    _save(PROFILE, KEY)
+    monkeypatch.delenv("KOLLAB_KEY_ENCRYPTION_PASSWORD")
+    _KEYRING_MIGRATION_TRIED.clear()
+    _save("second", "sk-or-issue610-" + "v5" * 16)  # cannot open the vault
+
+    assert not (home / ".kollab" / "vault" / "vault.key").exists()
+    monkeypatch.setenv("KOLLAB_KEY_ENCRYPTION_PASSWORD", "operator-chosen-password")
+    assert _resolve(PROFILE) == KEY
