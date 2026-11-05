@@ -1756,6 +1756,13 @@ class ContextCompactionPlugin(BasePlugin):
             if self._start_compaction():
                 return "compacting now, applied before the next request"
             return "compaction could not start"
+        if self._acp_owns_chat():
+            # The ask wakes the model natively, and an ACP chat refuses that
+            # wake (#579). Refuse up front so history and state stay untouched.
+            return (
+                "compaction cannot ask the model here: an ACP agent owns this "
+                "chat, so the question would not reach it. Nothing was changed"
+            )
         if self._awaiting_model:
             return "already asked the model, waiting for its <compact>"
         await self._request_model_curation(wake=True, reason="requested by user")
@@ -1763,6 +1770,18 @@ class ContextCompactionPlugin(BasePlugin):
             "asked the model what to keep; it compacts when ready "
             "(or when its turn ends)"
         )
+
+    def _acp_owns_chat(self) -> bool:
+        """Whether an ACP agent owns this chat (the test the message handler
+        and process_user_input apply). False when the service cannot say."""
+        svc = self._llm_service
+        try:
+            selected = svc._profile_selects_acp()
+            if isinstance(selected, tuple) and selected and selected[0] is True:
+                return True
+            return getattr(svc._acp_service(), "active", False) is True
+        except Exception:
+            return False
 
     def _keep_recent_count(
         self, history: Optional[List[ConversationMessage]] = None
