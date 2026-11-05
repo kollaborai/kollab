@@ -80,14 +80,19 @@ class SessionManager:
                 role="system", content=initial_message, metadata={"system_initialization": True}
             ))
 
-            # Log initial context message
-            parent_uuid = await self.conversation_logger.log_user_message(
-                initial_message,
-                user_context={
-                    "type": "system_initialization",
-                    "project_context_loaded": True,
-                },
-            )
+            # Log initial context message. The conversation is initialized
+            # either way; a failed history write only leaves this row out.
+            try:
+                parent_uuid = await self.conversation_logger.log_user_message(
+                    initial_message,
+                    user_context={
+                        "type": "system_initialization",
+                        "project_context_loaded": True,
+                    },
+                )
+            except Exception as exc:
+                logger.warning(f"Initial context not written to history: {exc}")
+                return None
 
             logger.info("Conversation initialized with project context")
             return parent_uuid  # type: ignore[no-any-return]
