@@ -1761,7 +1761,8 @@ class ContextCompactionPlugin(BasePlugin):
             # wake (#579). Refuse up front so history and state stay untouched.
             return (
                 "compaction cannot ask the model here: an ACP agent owns this "
-                "chat, so the question would not reach it. Nothing was changed"
+                "chat, so the question would not reach it. Nothing was changed; "
+                "/compact now still compacts without asking"
             )
         if self._awaiting_model:
             return "already asked the model, waiting for its <compact>"
