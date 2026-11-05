@@ -1,0 +1,245 @@
+"""#595: a slow OAuth model lookup must not overwrite a profile edited while it ran.
+
+``LLMService.switch_profile`` resolves a generic ``codex`` model with a network
+lookup. The lookup runs while the profile can still be edited (``/model``,
+``/llm``, profile replacement), so its result must be committed only if the
+profile is still the same stored object and has not been edited since the
+lookup began.
+
+The switch runs against a real ``ProfileManager``; only the OAuth token, the
+codex lookup and provider initialization are faked.
+"""
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from kollabor.llm.llm_coordinator import LLMService
+from kollabor_ai import profile_manager as profile_manager_module
+from kollabor_ai.profile_manager import LLMProfile, ProfileManager
+
+PROFILE = "codex-oauth"
+BASE = "anthropic-base"
+LOOKUP_RESULT = "gpt-5.6-luna"
+NEWER = "gpt-5.4"
+
+
+class _FakeTokenStorage:
+    async def load_tokens(self, provider, auto_refresh=True):
+        return SimpleNamespace(access_token="fresh-token", account_id="acct-1")
+
+
+class _PendingLookup:
+    """Stands in for query_codex_models and holds it open until released."""
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, access_token, account_id=None):
+        self.started.set()
+        await self.release.wait()
+        return [LOOKUP_RESULT]
+
+
+@pytest.fixture
+def manager(monkeypatch):
+    # Keep the developer's config files and any local .kollab/ out of the manager.
+    monkeypatch.setattr(
+        profile_manager_module, "get_global_config_path_candidates", lambda: []
+    )
+    monkeypatch.setattr(
+        profile_manager_module, "get_local_config_path_candidates", lambda: []
+    )
+    pm = ProfileManager()
+    assert pm.add_profile(
+        LLMProfile(name=BASE, provider="anthropic", model="claude-sonnet-4", api_key="k")
+    )
+    assert pm.add_profile(
+        LLMProfile(
+            name=PROFILE,
+            provider="openai_responses",
+            model="codex",
+            auth_type="oauth",
+            api_key="stale-token",
+            base_url="https://chatgpt.example/backend-api/codex",
+        )
+    )
+    assert pm.set_active_profile(BASE, persist=False)
+    return pm
+
+
+@pytest.fixture
+def lookup():
+    pending = _PendingLookup()
+    with (
+        patch("kollabor_ai.oauth.OAuthTokenStorage", _FakeTokenStorage),
+        patch("kollabor_ai.oauth.openai_oauth.query_codex_models", pending),
+        patch(
+            "kollabor.llm.llm_coordinator.create_config_from_profile",
+            return_value={},
+        ),
+    ):
+        yield pending
+
+
+@pytest.fixture
+def reinit_calls():
+    """Model name the provider was re-initialized with, one entry per call."""
+    return []
+
+
+@pytest.fixture
+def coord(manager, reinit_calls):
+    coord = MagicMock()
+    coord._provider_lock = asyncio.Lock()
+    coord.profile_manager = manager
+    coord.event_bus = None
+
+    async def reinitialize_provider(profile):
+        reinit_calls.append(profile.model)
+        return True
+
+    coord.api_service.reinitialize_provider = AsyncMock(
+        side_effect=reinitialize_provider
+    )
+    coord._provider_registry.get_provider = AsyncMock(
+        return_value=SimpleNamespace(provider_name="openai_responses", model=LOOKUP_RESULT)
+    )
+    return coord
+
+
+async def _start_switch(coord, lookup):
+    """Start a switch and return once its codex lookup is pending."""
+    task = asyncio.create_task(
+        LLMService.switch_profile(coord, PROFILE, persist=False)
+    )
+    await asyncio.wait_for(lookup.started.wait(), timeout=5)
+    return task
+
+
+@pytest.mark.asyncio
+async def test_model_edit_during_lookup_is_not_overwritten(
+    manager, coord, lookup, reinit_calls
+):
+    task = await _start_switch(coord, lookup)
+    assert manager.update_profile(PROFILE, model=NEWER)
+    lookup.release.set()
+
+    ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is False
+    assert manager.get_profile(PROFILE).model == NEWER
+    assert reinit_calls == []
+    assert manager.get_active_profile().name == BASE
+
+
+@pytest.mark.asyncio
+async def test_effort_edit_during_lookup_refuses_the_stale_switch(
+    manager, coord, lookup, reinit_calls
+):
+    task = await _start_switch(coord, lookup)
+    assert manager.update_profile(PROFILE, effort="high")
+    lookup.release.set()
+
+    ok = await asyncio.wait_for(task, timeout=5)
+
+    profile = manager.get_profile(PROFILE)
+    assert ok is False
+    assert profile.model == "codex"
+    assert profile.effort == "high"
+    assert reinit_calls == []
+    assert manager.get_active_profile().name == BASE
+
+
+@pytest.mark.asyncio
+async def test_profile_replaced_during_lookup_refuses_the_stale_switch(
+    manager, coord, lookup, reinit_calls
+):
+    task = await _start_switch(coord, lookup)
+    assert manager.remove_profile(PROFILE)
+    replacement = LLMProfile(
+        name=PROFILE,
+        provider="openai_responses",
+        model=NEWER,
+        auth_type="oauth",
+        api_key="new-token",
+        base_url="https://chatgpt.example/backend-api/codex",
+    )
+    assert manager.add_profile(replacement)
+    lookup.release.set()
+
+    ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is False
+    assert manager.get_profile(PROFILE) is replacement
+    assert replacement.model == NEWER
+    assert reinit_calls == []
+    assert manager.get_active_profile().name == BASE
+
+
+@pytest.mark.asyncio
+async def test_edit_undone_during_lookup_still_refuses_the_stale_switch(
+    manager, coord, lookup, reinit_calls
+):
+    """Same-value ABA: the model returns to ``codex``, but it was edited."""
+    task = await _start_switch(coord, lookup)
+    assert manager.update_profile(PROFILE, model=NEWER)
+    assert manager.update_profile(PROFILE, model="codex")
+    lookup.release.set()
+
+    ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is False
+    assert manager.get_profile(PROFILE).model == "codex"
+    assert reinit_calls == []
+    assert manager.get_active_profile().name == BASE
+
+
+@pytest.mark.asyncio
+async def test_cancelled_lookup_commits_nothing_and_releases_the_lock(
+    manager, coord, lookup, reinit_calls
+):
+    task = await _start_switch(coord, lookup)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert manager.get_profile(PROFILE).model == "codex"
+    assert reinit_calls == []
+    assert not coord._provider_lock.locked()
+    assert manager.get_active_profile().name == BASE
+
+
+@pytest.mark.asyncio
+async def test_edit_to_another_profile_does_not_block_the_switch(
+    manager, coord, lookup, reinit_calls
+):
+    task = await _start_switch(coord, lookup)
+    assert manager.update_profile(BASE, model="claude-opus-4")
+    lookup.release.set()
+
+    ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is True
+    assert manager.get_profile(PROFILE).model == LOOKUP_RESULT
+    assert reinit_calls == [LOOKUP_RESULT]
+    assert manager.get_active_profile().name == PROFILE
+
+
+@pytest.mark.asyncio
+async def test_untouched_profile_commits_the_lookup_result(
+    manager, coord, lookup, reinit_calls
+):
+    task = await _start_switch(coord, lookup)
+    lookup.release.set()
+
+    ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is True
+    assert manager.get_profile(PROFILE).model == LOOKUP_RESULT
+    assert reinit_calls == [LOOKUP_RESULT]
+    assert manager.get_active_profile().name == PROFILE
