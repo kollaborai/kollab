@@ -118,6 +118,27 @@ class TestSessionManager(unittest.TestCase):
         self.assertEqual(len(conversation_history), 0)  # clear() was called
         add_message_fn.assert_called_once()
 
+    def test_initialize_conversation_failed_history_write_is_not_an_init_failure(self):
+        """#580: the conversation exists; only its history row is missing."""
+        self.conversation_logger.log_user_message = AsyncMock(
+            side_effect=OSError("disk full")
+        )
+        conversation_history = []
+        add_message_fn = MagicMock()
+
+        with self.assertLogs("kollabor.llm.session_manager", level="WARNING") as logs:
+            result = self.loop.run_until_complete(
+                self.manager.initialize_conversation(
+                    conversation_history, add_message_fn
+                )
+            )
+
+        self.assertIsNone(result)
+        add_message_fn.assert_called_once()
+        output = "\n".join(logs.output)
+        self.assertNotIn("Failed to initialize conversation", output)
+        self.assertIn("not written to history", output)
+
     def test_initialize_conversation_error_handling(self):
         """Test initialization handles errors gracefully."""
         self.prompt_builder.build = MagicMock(side_effect=Exception("build error"))
