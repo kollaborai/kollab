@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Dreaming no longer stalls the agent's event loop while it saves insights or loads the vault: the saves run in a worker thread, the vault loads at startup, and shutdown waits for a save still in progress (#562)
+- A turn typed in the terminal can no longer draw twice in the Web UI after the fact: at turn end the daemon aligns the streamed rows it published with the refreshed history ids and only records a sync point when every streamed row is proven in that snapshot by content (tool rows by call id); otherwise it clears the sync point so the page reloads the whole history instead of appending rows past a stale count (#666).
 - Hub shutdown now joins in-flight secondary membership starts, isolates per-peer close failures, and finishes remaining cleanup before propagating cancellation (#356).
 - The Profiles dialog keeps profile model details readable on narrow screens:
   provider, model and effort wrap onto the row instead of truncating to an
