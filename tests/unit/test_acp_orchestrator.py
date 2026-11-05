@@ -953,3 +953,35 @@ async def test_an_observation_whose_retry_fails_in_a_flush_is_kept_until_it_pers
         assert [note for note in accepted if note not in persisted] == []
     finally:
         await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_a_later_batch_threads_under_a_row_of_its_own_message(tmp_path, monkeypatch):
+    # #581: OLD_NOTE's row failed and its batch ran without one. After storage
+    # recovers, NEW_NOTE's flush retries OLD_NOTE's row too. The reply to
+    # NEW_NOTE's batch must thread under NEW_NOTE's row, not under the retried
+    # row of a message an earlier turn already answered.
+    orchestrator, llm = await _started_orchestrator(
+        tmp_path, monkeypatch, _CancellableRunner
+    )
+    try:
+        storage_down = _storage_outage(orchestrator, monkeypatch)
+        orchestrator.observe_notification(_observation("OLD_NOTE"))
+        storage_down[0] = False
+        orchestrator.observe_notification(_observation("NEW_NOTE"))
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        rows = {
+            (message.get("metadata") or {}).get("request_id"): message["content"]
+            for message in llm.conversation_manager.messages
+            if message["role"] == "user"
+        }
+        batch = next(
+            update for update in reversed(orchestrator.runner._updates)
+            if "NEW_NOTE" in update["text"]
+        )
+        assert "NEW_NOTE" in rows.get(batch["request_id"], "")
+        # OLD_NOTE still reaches history once, from the retry.
+        assert sum("OLD_NOTE" in content for content in rows.values()) == 1
+    finally:
+        await orchestrator.close()
