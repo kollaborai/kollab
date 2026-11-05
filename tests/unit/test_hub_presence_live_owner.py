@@ -137,6 +137,27 @@ def test_discover_reclaims_a_reused_pid(hub_dirs, owner_socket):
     assert not record.exists() and not owner_socket.exists()
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="simulates Linux boot time")
+@pytest.mark.parametrize("sweep", ["discover", "startup"])
+def test_a_clock_step_does_not_make_a_live_owner_look_reused(
+    hub_dirs, owner_socket, monkeypatch, sweep
+):
+    # The wall clock steps 60 s forward after the owner started. Linux builds a
+    # process's create time on boot time, which moves with the clock, so the owner
+    # would look as if it started a minute after its record was stamped.
+    import psutil._pslinux as pslinux
+
+    real_boot = pslinux.boot_time()
+    monkeypatch.setattr(pslinux, "boot_time", lambda: real_boot + 60)
+    presence, _ = hub_dirs
+    record = _owner_file(presence, owner_socket, pid=os.getpid(), age=660)
+    if sweep == "discover":
+        assert _peer().discover_agents(include_solo=True) == []
+    else:
+        assert _peer().startup_scan() == 0
+    assert record.exists() and owner_socket.exists()
+
+
 def test_startup_scan_reclaims_a_reused_pid(hub_dirs, owner_socket):
     presence, _ = hub_dirs
     record = _owner_file(
