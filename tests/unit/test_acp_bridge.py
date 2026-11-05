@@ -462,6 +462,45 @@ async def test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit(t
                 child.wait(timeout=2)
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.asyncio
+async def test_orphan_is_not_recovered_where_os_getsid_is_missing(tmp_path, monkeypatch):
+    """#608 Windows trade-off: os.getsid does not exist there, so the session
+    scan is skipped and a descendant that lost its parent between two 100 ms
+    tree samples survives teardown, which reports clean. A Job Object would
+    close it (#819); this test should then flip to asserting recovery.
+    """
+    child_file = tmp_path / "child.json"
+    runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
+        "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": "prompt",
+    }))
+    child = None
+    try:
+        await runner.start()
+        await runner.prompt("create an orphan")
+        for _ in range(200):
+            if child_file.exists() and child_file.read_text():
+                break
+            await asyncio.sleep(0.005)
+        identity = json.loads(child_file.read_text())
+        child = psutil.Process(identity["pid"])
+        assert child.create_time() == identity["birth"]
+        assert os.getsid(child.pid) == runner._adapter_pid
+        monkeypatch.delattr(os, "getsid")
+        await runner.close()
+        monkeypatch.undo()
+        assert child.is_running() and child.status() != psutil.STATUS_ZOMBIE
+        assert not runner._owned_processes and runner._adapter_pid is None
+    finally:
+        monkeypatch.undo()
+        with contextlib.suppress(Exception):
+            await runner.close()
+        if child is not None:
+            with contextlib.suppress(psutil.Error):
+                child.kill()
+                child.wait(timeout=2)
+
+
 def _session_lookup_runner(tmp_path, monkeypatch, candidate):
     runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
     runner._adapter_pid = 4242
