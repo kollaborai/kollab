@@ -8,6 +8,7 @@ Thread-safe: publish() is called from the main render thread,
 subscribers are managed from asyncio tasks.
 """
 
+import json
 import logging
 import queue
 import threading
@@ -46,6 +47,56 @@ def resolve_tap(source: Any) -> Optional["DisplayTap"]:
 _ERROR_TEXT_LIMIT = 8192
 
 
+def _cut_text(text: str, limit: int) -> str:
+    """``text`` with its middle cut past ``limit`` characters; both ends stay."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]} … ({len(text):,} characters) … {text[-half:]}"
+
+
+# The engine reads each daemon line up to kollabor_rpc.transport.LARGE_BUFFER_LIMIT
+# (16 MiB) and drops a longer one, which left its chat incomplete or waiting (#544).
+# An event over this budget has its long text cut, so the line the attach stream
+# writes stays under that limit, with room for the fields publish adds after the check.
+_FRAME_BUDGET_BYTES = 15 * 1024 * 1024
+# The longest text one string keeps when cut. Cuts halve it until the event fits,
+# and stop at the floor.
+_FRAME_TEXT_LIMIT = 1024 * 1024
+_FRAME_TEXT_FLOOR = 1024
+
+
+def _cut_strings(node: Any, limit: int) -> Any:
+    """A copy of ``node`` with every string past ``limit`` characters cut."""
+    if isinstance(node, str):
+        return _cut_text(node, limit)
+    if isinstance(node, dict):
+        return {key: _cut_strings(value, limit) for key, value in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_cut_strings(value, limit) for value in node]
+    return node
+
+
+def _within_frame_budget(event: Dict[str, Any]) -> Dict[str, Any]:
+    """The event to publish: itself, or a copy with its text cut to fit the budget.
+
+    The type, ids and seq are kept, and each cut says how much it removed, so a
+    chat shows the start and end of a long output instead of losing the update.
+    """
+    try:
+        if len(json.dumps(event, default=str)) <= _FRAME_BUDGET_BYTES:
+            return event
+    except (TypeError, ValueError):
+        return event  # not serializable: published as before
+    limit = _FRAME_TEXT_LIMIT
+    while True:
+        cut = _cut_strings(event, limit)
+        fits = len(json.dumps(cut, default=str)) <= _FRAME_BUDGET_BYTES
+        if fits or limit <= _FRAME_TEXT_FLOOR:
+            return cut
+        limit //= 2
+
+
 def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
     """Publish a machine-readable turn event alongside the rendered output.
 
@@ -63,9 +114,8 @@ def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
     if event_type in ("turn_complete", "error"):
         for key in ("error", "message"):
             text = fields.get(key)
-            if isinstance(text, str) and len(text) > _ERROR_TEXT_LIMIT:
-                half = _ERROR_TEXT_LIMIT // 2
-                fields[key] = f"{text[:half]} … ({len(text):,} characters) … {text[-half:]}"
+            if isinstance(text, str):
+                fields[key] = _cut_text(text, _ERROR_TEXT_LIMIT)
     try:
         tap.publish({"type": event_type, **fields})
     except Exception:
@@ -116,6 +166,7 @@ class DisplayTap:
             if key != "_client_completion" and event.get(key) is None:
                 event[key] = value
         event.setdefault("ts", time.time())
+        event = _within_frame_budget(event)
         with self._lock:
             if (event.get("type") == "turn_complete" and completion is not None
                     and event.get("request_id") == completion["request_id"]
