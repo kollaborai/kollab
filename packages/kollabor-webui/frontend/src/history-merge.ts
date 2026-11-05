@@ -217,6 +217,7 @@ const rowFingerprint = (message: Message): string =>
 export function mergeCompactionHistorySnapshot<T extends Message>(
   shown: ReadonlyArray<T>,
   loaded: ReadonlyArray<T>,
+  isLive: (message: T) => boolean = () => false,
 ): { messages: T[]; history: T[]; key: string } | null {
   const shownMarkers = new Set(
     shown.filter(isCompactionMarker).map(compactionMarkerKey),
@@ -237,18 +238,18 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
   // The engine keeps its newest rows verbatim across a compaction, so they come
   // back in `history`. Archiving their displayed copies too would show them
   // twice. Each loaded row takes at most one shown row, matched from the newest.
-  const remaining = new Map<string, number>();
-  for (const message of history) {
+  const positions = new Map<string, number[]>();
+  history.forEach((message, index) => {
     const fingerprint = rowFingerprint(message);
-    remaining.set(fingerprint, (remaining.get(fingerprint) ?? 0) + 1);
-  }
+    positions.set(fingerprint, [...(positions.get(fingerprint) ?? []), index]);
+  });
   const carried = new Set<T>();
+  let lastCarried = -1;
   for (const message of [...transcript].reverse()) {
-    const fingerprint = rowFingerprint(message);
-    const copies = remaining.get(fingerprint) ?? 0;
-    if (copies > 0) {
-      remaining.set(fingerprint, copies - 1);
+    const position = positions.get(rowFingerprint(message))?.pop();
+    if (position !== undefined) {
       carried.add(message);
+      lastCarried = Math.max(lastCarried, position);
     }
   }
   const archived = transcript
@@ -265,7 +266,15 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
         },
       },
     }) as T);
-  return { messages: [...archived, ...history, ...nonHistory], history, key };
+  // The rows the snapshot brings after the last shown row it carried are the turn
+  // a reload replays; its transient copies go as a sync drops them (#666). Live
+  // rows sit at the end, outside that check.
+  const replayed = history.filter((message, index) =>
+    index > lastCarried && !isCompactionMarker(message));
+  const live = nonHistory.filter((message) => isLive(message));
+  const settled = [...archived, ...history, ...nonHistory.filter((message) => !isLive(message))];
+  const deduped = dropTransientTurnDuplicates(settled, replayed) ?? settled;
+  return { messages: [...deduped, ...live], history, key };
 }
 
 const TRANSIENT_ROW_ID = /^(?:user|assistant)-.+-(\d+)$/;

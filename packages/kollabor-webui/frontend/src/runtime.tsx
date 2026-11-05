@@ -1001,7 +1001,7 @@ export function EngineRuntimeProvider({
           (current.conversationUid && snapshot.conversationUid &&
             current.conversationUid !== snapshot.conversationUid)) return;
 
-        const rebased = mergeCompactionHistorySnapshot(current.messages, snapshot.messages);
+        const rebased = mergeCompactionHistorySnapshot(current.messages, snapshot.messages, isLiveMessage);
         if (!rebased) {
           // Another sync already imported this marker; it is now our baseline.
           reloaded.current = snapshot.messages;
