@@ -202,3 +202,97 @@ def test_ordinary_and_spoken_user_messages_are_never_hidden(published):
         assert published == ["user_message"] * 3
     finally:
         revoke_voice_admission_context(spoken)
+
+
+class ModelProfile:
+    """A profile the real /model setter can edit, as ProfileManager hands it out."""
+
+    def __init__(self, name: str, model: str) -> None:
+        self.name = name
+        self.model = model
+
+    def get_model(self) -> str:
+        return self.model
+
+    def get_provider(self) -> str:
+        return "fake"
+
+
+class ModelProfiles:
+    """Just enough ProfileManager for the setter: edit a model, get the active profile back."""
+
+    def __init__(self, active: ModelProfile) -> None:
+        self.active = active
+
+    def get_active_profile(self) -> ModelProfile:
+        return self.active
+
+    def update_profile(self, name: str, model: str, **_) -> bool:
+        # A fresh profile object per edit, like a config reload
+        self.active = ModelProfile(name, model)
+        return True
+
+
+class ModelApi(FakeApi):
+    """FakeApi whose provider remembers the model its profile chose."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._profile = ModelProfile("chat", "original")
+        self._provider = SimpleNamespace(config=Config("high"), model="original")
+
+    async def reinitialize_provider(self, profile) -> bool:
+        self.reinitialized.append(f"{profile.name}:{profile.get_model()}")
+        self._profile = profile
+        self._provider = SimpleNamespace(config=Config("high"), model=profile.get_model())
+        return True
+
+
+def model_setter(api, profiles):
+    from kollabor.commands.system_commands.handlers.model import ModelCommandHandler
+
+    async def no_tools() -> None:
+        return None
+
+    llm = SimpleNamespace(api_service=api, _load_native_tools=no_tools)
+    return ModelCommandHandler(None, None, profile_manager=profiles, llm_service=llm)
+
+
+@pytest.mark.asyncio
+async def test_voice_cleanup_does_not_restore_over_a_model_choice_made_mid_turn():
+    """#584: /model alpha finishes while a voice turn is paused before cleanup."""
+    api = ModelApi()
+    profiles = ModelProfiles(api._profile)
+    setter = model_setter(api, profiles)
+    in_turn, resume = asyncio.Event(), asyncio.Event()
+
+    async def voice_turn() -> None:
+        voice = {"voice_provider_profile_id": "fast-voice"}
+        pm = SimpleNamespace(get_profile=lambda name: ModelProfile(name, "voice-model"))
+        async with voice_provider(api, pm, voice):
+            in_turn.set()
+            await resume.wait()  # paused before cleanup
+
+    turn = asyncio.create_task(voice_turn())
+    await in_turn.wait()
+    result = await setter._set_active_profile_model("alpha")
+    assert result.success
+    assert (api._profile.get_model(), api._provider.model) == ("alpha", "alpha")
+
+    resume.set()
+    await turn
+
+    # the selected model and the request provider still agree
+    assert api._profile.get_model() == "alpha"
+    assert api._provider.model == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_voice_cleanup_still_restores_chat_when_nothing_changed_mid_turn():
+    api = ModelApi()
+    original = api._profile
+    pm = SimpleNamespace(get_profile=lambda name: ModelProfile(name, "voice-model"))
+    async with voice_provider(api, pm, {"voice_provider_profile_id": "fast-voice"}):
+        assert api._provider.model == "voice-model"
+    assert api._profile is original
+    assert api._provider.model == "original"
