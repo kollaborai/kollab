@@ -201,3 +201,48 @@ async def test_advertise_publishes_quietly_when_socket_answers(caplog):
             await hub._advertise_presence_when_socket_answers("/live/endpoint")
     hub._presence.publish.assert_called_once()
     assert not [r for r in caplog.records if "never answered a handshake" in r.message]
+
+@pytest.mark.asyncio
+async def test_degraded_advertise_completes_within_fork_parent_budget(caplog):
+    """zircon REQUEST_CHANGES @1ce1fc92: the fork parent (kollabor/daemon.py:115)
+    SIGKILLs the child and raises 'daemon hung' after 15s, but the advertise
+    gate sat BETWEEN bind and signal_daemon_ready with a 30s deadline -- a
+    socket that never answers got the child killed before the degraded
+    publish or the ready signal could happen (nt-shaped: the probe there is
+    a full HMAC handshake, so "accepting but never answering" burns the
+    whole deadline). The fake wait sleeps exactly the timeout it is GIVEN,
+    so this asserts the helper actually plumbs a parent-nested deadline
+    down (elapsed ~= deadline < 15s), not that a mock returned fast."""
+    hub = HubPlugin(event_bus=MagicMock())
+    hub._presence = MagicMock()
+
+    async def sleep_the_deadline_then_never_answer(path, timeout=30.0, interval=0.25):
+        await asyncio.sleep(timeout)
+        return False
+
+    started = time.monotonic()
+    with patch.object(
+        hub_plugin,
+        "wait_until_socket_answers",
+        new=sleep_the_deadline_then_never_answer,
+    ):
+        with caplog.at_level(logging.ERROR, logger="plugins.hub.plugin"):
+            await hub._advertise_presence_when_socket_answers("/no/such/endpoint")
+    elapsed = time.monotonic() - started
+    hub._presence.publish.assert_called_once()
+    assert any("never answered a handshake" in r.message for r in caplog.records)
+    assert elapsed < 15.0, (
+        f"advertise gate took {elapsed:.1f}s; the fork parent kills the "
+        "daemon at 15s (kollabor/daemon.py:115) -- deadline must nest inside it"
+    )
+
+
+def test_gate_deadline_nests_inside_parent_and_outer_budgets():
+    """Deadline nesting guard: gate < fork parent 15s (kollabor/daemon.py:115)
+    < app-level wait_until_ready 30s (application.py:1611). Equal-or-greater
+    inner deadlines race the outer waits instead of finishing inside them."""
+    from plugins.hub import plugin as hub_plugin_module
+
+    gate = hub_plugin_module.HubPlugin.SOCKET_ANSWER_DEADLINE_SECONDS
+    assert gate < 15.0, "gate deadline must be strictly inside the fork parent's 15s"
+    assert gate < 30.0, "gate deadline must leave the outer wait_until_ready margin"

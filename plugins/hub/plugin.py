@@ -5667,7 +5667,19 @@ class HubPlugin(BasePlugin):
                 f"(identity={identity}): {e}"
             )
 
-    async def _advertise_presence_when_socket_answers(self, socket_path: str) -> None:
+    # Deadline nesting (zircon REQUEST_CHANGES @1ce1fc92): this gate runs
+    # between bind and signal_daemon_ready, and the fork parent SIGKILLs a
+    # child that has not signaled within 15s (kollabor/daemon.py:115),
+    # while the app-level wait_until_ready allows 30s
+    # (kollabor/application.py:1611). The gate must finish strictly inside
+    # the parent budget: 10 < 15 < 30, so the degraded publish and the
+    # ready signal always land while the child is still alive, and the
+    # outer wait keeps margin over both.
+    SOCKET_ANSWER_DEADLINE_SECONDS = 10.0
+
+    async def _advertise_presence_when_socket_answers(
+        self, socket_path: str, timeout: float = SOCKET_ANSWER_DEADLINE_SECONDS
+    ) -> None:
         """Publish presence once the endpoint answers a handshake (#692).
 
         Bind-return is not serving: a busy startup loop can delay the first
@@ -5675,12 +5687,13 @@ class HubPlugin(BasePlugin):
         that refuses breaks every client that trusts it. When the endpoint
         never answers within the deadline the publish still goes out --
         degraded, discoverable-but-refusing -- with an error logged so the
-        condition stays visible.
+        condition stays visible. The deadline nests inside the fork parent's
+        15s ready budget (see SOCKET_ANSWER_DEADLINE_SECONDS).
         """
-        if not await wait_until_socket_answers(socket_path):
+        if not await wait_until_socket_answers(socket_path, timeout=timeout):
             logger.error(
                 f"socket {socket_path} never answered a handshake within "
-                "30s — publishing presence anyway; clients may see refusals"
+                f"{timeout:.0f}s — publishing presence anyway; clients may see refusals"
             )
         self._presence.publish()
 
