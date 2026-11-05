@@ -60,6 +60,54 @@ def _coerce_sse_object(data: Any, provider_name: str) -> Dict[str, Any]:
     return data
 
 
+def _validate_tool_calls(
+    tool_calls: Any, provider_name: str, *, require_complete: bool
+) -> None:
+    """Validate a tool_calls array's shape (#754).
+
+    Both parsers iterate ``tool_calls`` directly, so a scalar leaks an
+    untyped TypeError; non-object elements crash the per-item accessors
+    (``tool_call["function"]`` subscript on the non-stream side,
+    ``tool_delta.get(...)`` on the SSE side); a non-object ``function``
+    crashes both. ``require_complete`` (non-stream ``message`` variant)
+    additionally demands the keys that parser subscripts without
+    defaults (``id``, ``function.name``, ``function.arguments``).
+    Streaming ``delta`` tool calls legally omit them on continuation
+    chunks (which carry only ``function.arguments``), so the SSE variant
+    enforces list + object + function-object shape only.
+    """
+    if not isinstance(tool_calls, list):
+        raise APIFormatMismatchError(
+            "Custom API 'tool_calls' is not a list", provider_name,
+        )
+    for item in tool_calls:
+        if not isinstance(item, dict):
+            raise APIFormatMismatchError(
+                "Custom API tool_calls element is not an object",
+                provider_name,
+            )
+        function = item.get("function")
+        if function is not None and not isinstance(function, dict):
+            raise APIFormatMismatchError(
+                "Custom API tool call 'function' is not an object",
+                provider_name,
+            )
+        if require_complete:
+            if "id" not in item:
+                raise APIFormatMismatchError(
+                    "Custom API tool call is missing 'id'", provider_name,
+                )
+            if (
+                not isinstance(function, dict)
+                or "name" not in function
+                or "arguments" not in function
+            ):
+                raise APIFormatMismatchError(
+                    "Custom API tool call 'function' needs name and arguments",
+                    provider_name,
+                )
+
+
 def _validate_openai_shapes(data: Dict[str, Any], provider_name: str) -> None:
     """Validate the nested shapes the parser indexes into (#720, #754).
 
@@ -96,6 +144,17 @@ def _validate_openai_shapes(data: Dict[str, Any], provider_name: str) -> None:
                 raise APIFormatMismatchError(
                     f"Custom API choice {field} is not an object",
                     provider_name,
+                )
+            if "tool_calls" in nested:
+                # both parsers iterate tool_calls directly; a scalar or a
+                # non-object element/function crashes untyped (#754). The
+                # message variant is a complete tool call (id/function.name/
+                # function.arguments all subscripted); delta variants legally
+                # omit those on streaming continuation chunks.
+                _validate_tool_calls(
+                    nested["tool_calls"],
+                    provider_name,
+                    require_complete=(field == "message"),
                 )
     usage = data.get("usage")
     if usage is not None and not isinstance(usage, dict):
