@@ -1407,12 +1407,29 @@ async def test_a_continuation_turn_that_raises_ends_the_hub_continue_chain_faile
             await qp.continue_conversation("root")
 
     tasks: list = []
+    admission = {"turn": 0, "winner": 0}
+
+    def claim_turn_serial():
+        admission["turn"] += 1
+        return admission["turn"]
+
+    def publish_cursor(uuid, serial):
+        if serial is None or serial < admission["winner"]:
+            return False
+        admission["winner"] = serial
+        coord.current_parent_uuid = uuid
+        return True
+
     coord = SimpleNamespace(
         renderer=SimpleNamespace(),
         is_processing=False,
+        current_parent_uuid=None,
+        _continue_serial=0,
         _queue_processor=qp,
         _continue_conversation=continue_conversation,
         _process_queue=AsyncMock(),
+        claim_turn_serial=claim_turn_serial,
+        publish_cursor=publish_cursor,
         create_background_task=lambda fn, name=None: tasks.append(asyncio.ensure_future(fn())),
         _profile_selects_acp=lambda: (False, False),  # native profile, no ACP runner
         _active_acp=lambda: None,
