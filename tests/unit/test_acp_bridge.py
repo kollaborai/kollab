@@ -329,7 +329,10 @@ from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
 def orphan():
     if os.fork():
         return
-    # Detach by double fork; the orphan keeps the adapter's session.
+    # Detach by double fork. The orphan keeps the adapter's session unless
+    # ACP_OWNED_CHILD_SETSID asks for the usual daemonizing setsid().
+    if os.environ.get('ACP_OWNED_CHILD_SETSID') == '1':
+        os.setsid()
     if os.fork():
         os._exit(0)
     for fd in (0, 1, 2):
@@ -420,6 +423,43 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_other_session_p
                 outsider_owner.terminate()
         if outsider is not None:
             await asyncio.wait_for(outsider.wait(), timeout=2)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
+@pytest.mark.asyncio
+async def test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit(tmp_path):
+    """#608 trade-off: without reading environments no portable signal links a
+    descendant that called setsid() and lost its parent between two 100 ms tree
+    samples to the adapter. Teardown cannot find it and reports clean. If a
+    portable signal is ever added, this test should flip to asserting recovery.
+    """
+    child_file = tmp_path / "child.json"
+    runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
+        "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": "prompt",
+        "ACP_OWNED_CHILD_SETSID": "1",
+    }))
+    child = None
+    try:
+        await runner.start()
+        await runner.prompt("create a setsid orphan")
+        for _ in range(200):
+            if child_file.exists() and child_file.read_text():
+                break
+            await asyncio.sleep(0.005)
+        identity = json.loads(child_file.read_text())
+        child = psutil.Process(identity["pid"])
+        assert child.create_time() == identity["birth"]
+        assert os.getsid(child.pid) != runner._adapter_pid
+        await runner.close()
+        assert child.is_running() and child.status() != psutil.STATUS_ZOMBIE
+        assert not runner._owned_processes and runner._adapter_pid is None
+    finally:
+        with contextlib.suppress(Exception):
+            await runner.close()
+        if child is not None:
+            with contextlib.suppress(psutil.Error):
+                child.kill()
+                child.wait(timeout=2)
 
 
 def _session_lookup_runner(tmp_path, monkeypatch, candidate):
