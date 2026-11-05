@@ -32,6 +32,27 @@ same ID and input: they return the original pending request or creation
 receipt. Reusing the ID for different input or another conversation is refused.
 The saved binding survives restart; after a pending request is discarded, a
 replay cannot recreate it, so use a new submission to send those images again.
+
+**Replay window.** A client request ID's saved binding is kept as follows:
+
+- *Pending*: kept for as long as the request is pending, however long that is,
+  including across restarts. It leaves only when the request is discarded or
+  creates a goal.
+- *Committed or discarded*: kept for 7 days from that moment
+  (`ATTACHMENT_SUBMISSION_REPLAY_S`). A replay inside the window gets the
+  original receipt (the goal it created, or "discarded"); it never creates a
+  second goal or brings a discarded request back. The window starts when the
+  request settles, not when it was first submitted.
+- *After the window*: the binding is deleted (at the next submission, and when
+  the daemon opens its store), so storage holds only pending and recently
+  settled IDs. The same ID is then an ordinary new submission: a client that
+  replays a week-old, already discarded ID stages a new pending request and
+  sees no error. A goal created earlier is not touched or duplicated by this;
+  only the ID's receipt is gone. Use a fresh ID for each new submission.
+- Another conversation, or different input, with a saved ID is still refused
+  inside the window and never sees its receipt; after the window the ID is free.
+- The binding holds only the hashed ID, the hashed input, the request id and
+  the settle time. Command text, image data and artifact paths are never in it.
 A replay's receipt is returned only to that response, without taking over or
 cancelling the original goal's private reply. A new goal checks a pre-admission
 cancellation before saving its images.
@@ -139,7 +160,8 @@ permissions apply. Prose claiming "done" is never completion.
 Tables: `goals`, `goal_events` (append-only), `goal_attempts`,
 `goal_evidence`, `goal_attachment_requests`, `goal_attachment_submissions`.
 Submission keys and input fingerprints are hashed; no image bytes or artifact
-paths enter the submission table. Pending request references are
+paths enter the submission table, and settled rows expire after the replay
+window above. Pending request references are
 consumed and a creation receipt is recorded in the same transaction that
 creates their goal. A partial unique index enforces one unfinished goal per
 conversation at the storage layer.
