@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Closing an ACP session no longer reads the environment of other processes to find the ones it started, so their API keys and other variables never enter Kollab's memory. It now finds leftover child processes by the adapter's session id and checks that the adapter's pid was not reused; a child that leaves that session with setsid() before Kollab sees it is no longer found (#608).
+- Web hub mentions (@agent and @broadcast) now persist to the session JSONL like addressed LLM turns, so wake and broadcast turns survive resume and reload instead of vanishing on reload (#672).
+- An ordinary turn queued while a detached completion (hub mention or voice reply) runs now parents from the user row logged at its admission, so a concurrent completion can no longer re-parent the queued reply under the detached turn (#676).
+- Queue batches without an admission serial, including corrective nudges, cannot advance the conversation cursor or overwrite a tracked turn (#676).
 - A turn typed in the terminal can no longer draw twice in the Web UI after the fact: at turn end the daemon aligns the streamed rows it published with the refreshed history ids and only records a sync point when every streamed row is proven in that snapshot by content (tool rows by call id); otherwise it clears the sync point so the page reloads the whole history instead of appending rows past a stale count (#666).
 - Hub shutdown now joins in-flight secondary membership starts, isolates per-peer close failures, and finishes remaining cleanup before propagating cancellation (#356).
 - The Profiles dialog keeps profile model details readable on narrow screens:
