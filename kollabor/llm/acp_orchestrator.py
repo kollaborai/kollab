@@ -105,10 +105,20 @@ class ACPOrchestrator:
         self._parents: dict[str, str] = {}
         self._history_tasks: set[asyncio.Task] = set()
         self._user_history_tasks: dict[str, asyncio.Task] = {}
+        # An admission owns its history parent and user-row write under its own
+        # (generation, turn_id), so a caller-supplied request id reused by a
+        # later admission cannot overwrite them (#597). `_parents` and
+        # `_user_history_tasks` stay keyed by row id for observation and
+        # steering rows, which are uuid-unique.
+        self._turn_parents: dict[tuple[int, int], str | None] = {}
+        self._turn_user_tasks: dict[tuple[int, int], asyncio.Task] = {}
         self._observed_turns: dict[tuple[str, int], _ObservedTurn] = {}
         self._display_turn: tuple[str, int] | None = None
         # Voice data of a mic turn, by request id, until its reply is spoken.
-        self.voice_turns: dict[str, dict[str, Any]] = {}
+        # Keyed by (request_id, turn_id): admissions may reuse a caller
+        # request ID (#597), and a bare request_id key would let the second
+        # admission overwrite the first one's mic-turn metadata.
+        self.voice_turns: dict[tuple[str, int], dict[str, Any]] = {}
         # Voice epochs whose rules already went to the harness.
         self.voice_rules_epochs: set[Any] = set()
         from pathlib import Path
@@ -623,18 +633,31 @@ class ACPOrchestrator:
         task = asyncio.create_task(self._complete(admission), name=f"acp-turn-{request_id}")
         self._completion_tasks.add(task)
         task.add_done_callback(self._completion_tasks.discard)
+        turn_key = (admission.generation, admission.turn_id)
         if record:
             try:
                 self._record_user(
                     request_id, text, source, thread_id, track_completion=True
                 )
             except Exception as exc:
-                # Admission is already owned. Remove it before the worker can run,
-                # and let that owner's terminal event report the persistence error.
+                # Admission is already owned. Remove this admission (by identity,
+                # not request id) before the worker can run, and let its terminal
+                # event report the persistence error.
+                self._parents.pop(request_id, None)
+                self._user_history_tasks.pop(request_id, None)
                 if not admission.future.done():
                     admission.future.set_exception(exc)
-                self._runner.cancel_queued(request_id)
+                self._runner.cancel_queued(request_id, admission)
+                return admission
+        self._take_turn_history(turn_key, request_id)
         return admission
+
+    def _take_turn_history(self, turn_key: tuple[int, int], request_id: str) -> None:
+        """Move this row's parent and user-row write under the admission's own key."""
+        self._turn_parents[turn_key] = self._parents.pop(request_id, None)
+        task = self._user_history_tasks.pop(request_id, None)
+        if task is not None:
+            self._turn_user_tasks[turn_key] = task
 
     def observe_notification(self, message: Any) -> None:
         thread = f" [thread:{message.thread_id}]" if message.thread_id else ""
@@ -925,6 +948,7 @@ class ACPOrchestrator:
         return {"usage": dict(usage), "input_total": input_total, "output_total": output_total}
 
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
+        turn_key = (admission.generation, admission.turn_id)
         result: ACPResult | None = None
         settled_usage: dict[str, Any] | None = None
         try:
@@ -932,11 +956,11 @@ class ACPOrchestrator:
             # Once the adapter returned, its usage was incurred even if any
             # later binding or history operation fails or is cancelled.
             settled_usage = self._settle_turn_usage(result)
-            user_history = self._user_history_tasks.get(admission.request_id)
+            user_history = self._turn_user_tasks.get(turn_key)
             if user_history is not None:
                 await user_history
             self._save_binding()
-            await self._record_result(result)
+            await self._record_result(result, turn_key)
         except BaseException as exc:
             # Admission is immediately acknowledged, so every admitted request
             # must still receive one correlated terminal event on close/failure.
@@ -1007,10 +1031,10 @@ class ACPOrchestrator:
                     admission.turn_id, admission.request_id, admission.source, admission.thread_id,
                 )
                 try:
-                    user_history = self._user_history_tasks.get(admission.request_id)
+                    user_history = self._turn_user_tasks.get(turn_key)
                     if user_history is not None:
                         await user_history
-                    await self._record_result(partial)
+                    await self._record_result(partial, turn_key)
                 except BaseException as history_exc:
                     logger.warning("ACP interrupted transcript write failed (%s)", type(history_exc).__name__)
             if stop_reason == "error":
@@ -1054,8 +1078,8 @@ class ACPOrchestrator:
                     "request_id": admission.request_id,
                     "stop_reason": stop_reason, "end_frame": end_frame}
         finally:
-            self._parents.pop(admission.request_id, None)
-            self._user_history_tasks.pop(admission.request_id, None)
+            self._turn_parents.pop(turn_key, None)
+            self._turn_user_tasks.pop(turn_key, None)
             self._observed_turns.pop((admission.request_id, admission.turn_id), None)
         event_usage = (settled_usage or {}).get("usage")
         if (event_usage is None and self._display_usage_payload is not None
@@ -1091,8 +1115,9 @@ class ACPOrchestrator:
                 "request_id": result.request_id, "stop_reason": result.stop_reason,
                 "end_frame": end_frame}
 
-    async def _record_result(self, result: ACPResult) -> None:
+    async def _record_result(self, result: ACPResult, turn_key: tuple[int, int]) -> None:
         llm = self.event_bus.get_service("llm_service")
+        parent = self._turn_parents.get(turn_key)
         manager = getattr(llm, "conversation_manager", None)
         text = "".join(str(update.get("text") or "") for update in result.updates if update.get("kind") == "text")
         thoughts = [str((update.get("payload", {}).get("content") or {}).get("text") or "")
@@ -1119,7 +1144,7 @@ class ACPOrchestrator:
         metadata["tool_calls"] = list(tools.values())
         if manager is not None:
             manager.add_message("assistant", text or result.text,
-                                parent_uuid=self._parents.get(result.request_id), metadata=metadata)
+                                parent_uuid=parent, metadata=metadata)
             manager.save_conversation()
         history = getattr(llm, "conversation_history", None)
         if isinstance(history, list) and history is not getattr(manager, "messages", None):
@@ -1128,9 +1153,8 @@ class ACPOrchestrator:
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
             await logger_service.log_assistant_message(text or result.text,
-                parent_uuid=self._parents.get(result.request_id, ""), model=self._profile_name,
+                parent_uuid=parent or "", model=self._profile_name,
                 thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata)
-        self._parents.pop(result.request_id, None)
 
     async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:
         request_id = f"request-{uuid.uuid4().hex}"
@@ -1215,7 +1239,7 @@ class ACPOrchestrator:
                         thinking_duration=0, response=display_response_text(observed.text)
                     )
         if kind == "turn_finished" and observed is not None:
-            voice = self.voice_turns.pop(key[0], None)
+            voice = self.voice_turns.pop(key, None)
             if voice is not None:
                 self._speak_reply(voice, observed.text)
             elif kind == "agent_thought_chunk" and key == self._display_turn:
