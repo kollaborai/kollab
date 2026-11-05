@@ -229,6 +229,20 @@ def _vault_op(
         return None, closed
 
 
+def _project_secret_name(profile_name: str, config_path: Path) -> str:
+    """Secret-store name for a key saved into one project's config.
+
+    Profiles merge by name, but a project's profile can hold a different key
+    than the global one or another project's. A shared name would let one
+    project's save replace the key the others run on, so each project config
+    gets an entry of its own (#610).
+    """
+    import hashlib
+
+    digest = hashlib.sha256(str(config_path.resolve()).encode("utf-8")).hexdigest()
+    return f"{profile_name}@{digest[:12]}"
+
+
 def _keyring_get(key_name: str) -> Optional[str]:
     """Retrieve a value from OS keyring, then the vault (sync, graceful fallback).
 
@@ -249,8 +263,7 @@ def _keyring_get(key_name: str) -> Optional[str]:
         return in_vault
     if vault_closed:
         logger.warning(
-            f"Profile '{key_name}': the vault cannot be opened; not using "
-            "a keyring copy that may be older"
+            "The vault cannot be opened; not using a keyring copy that may be older"
         )
         return None
     try:
@@ -291,8 +304,8 @@ def _keyring_set(key_name: str, value: str) -> bool:
             keyring.set_password(APIKeyManager.SERVICE_NAME, key_name, value)
             if _vault_call(key_name, delete=True) is None:
                 logger.warning(
-                    f"Profile '{key_name}': the vault holds a copy this process "
-                    "cannot open; not writing a reference"
+                    "The vault holds a copy this process cannot open; "
+                    "not writing a reference"
                 )
                 return False
             return True
@@ -2172,7 +2185,7 @@ class ProfileManager:
                 None,
             )
 
-            def _build_profile_dict() -> dict:
+            def _build_profile_dict(secret_name: str) -> dict:
                 profile_dict = {
                     "provider": profile.provider,
                     "model": profile.model,
@@ -2209,8 +2222,8 @@ class ProfileManager:
                     profile_dict["api_key"] = raw_stored
                 elif resolved_key:
                     key_val = resolved_key
-                    if _keyring_set(profile.name, key_val):
-                        sentinel = f"{KEYRING_SENTINEL_PREFIX}{profile.name}"
+                    if _keyring_set(secret_name, key_val):
+                        sentinel = f"{KEYRING_SENTINEL_PREFIX}{secret_name}"
                         profile_dict["api_key"] = sentinel
                         logger.info(
                             f"Profile '{profile.name}': stored API key in OS keyring or vault, "
@@ -2263,7 +2276,9 @@ class ProfileManager:
                         profile_dict["install_guidance"] = profile.install_guidance
                 return profile_dict
 
-            def _write_profile_config(config_path: Path, location: str) -> bool:
+            def _write_profile_config(
+                config_path: Path, location: str, secret_name: str
+            ) -> bool:
                 config_path.parent.mkdir(parents=True, exist_ok=True)
 
                 if config_path.exists():
@@ -2280,7 +2295,7 @@ class ProfileManager:
 
                 config_data["kollabor"]["llm"]["profiles"][
                     profile.name
-                ] = _build_profile_dict()
+                ] = _build_profile_dict(secret_name)
 
                 write_text_atomic(
                     config_path,
@@ -2293,7 +2308,7 @@ class ProfileManager:
                 return True
 
             global_path = get_global_config_path()
-            _write_profile_config(global_path, "global")
+            _write_profile_config(global_path, "global", profile.name)
 
             # Also update local config if it already has LLM profiles
             local_path = next(
@@ -2307,7 +2322,11 @@ class ProfileManager:
                         local_data.get("kollabor", {}).get("llm", {}).get("profiles")
                     )
                     if local_profiles:
-                        _write_profile_config(local_path, "local")
+                        _write_profile_config(
+                            local_path,
+                            "local",
+                            _project_secret_name(profile.name, local_path),
+                        )
                 except Exception as e:
                     logger.debug(f"Skipping local config update: {e}")
 
