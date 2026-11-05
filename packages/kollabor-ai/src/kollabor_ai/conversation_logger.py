@@ -310,8 +310,16 @@ class KollaborConversationLogger:
         """Get current working directory."""
         return str(Path.cwd())
 
-    async def _append_to_jsonl(self, message: Dict[str, Any]):
-        """Append message to JSONL file."""
+    async def _append_to_jsonl(
+        self, message: Dict[str, Any], session_id: Optional[str] = None
+    ):
+        """Append message to JSONL file (another session's, when one is named)."""
+        own = session_id is None or session_id == self.session_id
+        path = (
+            self.session_file
+            if own
+            else self.conversations_dir / f"{session_id}.jsonl"
+        )
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
             parent = message.get("parentUuid")
             while parent in self._reparent:  # a cut dropped it after the caller read it
@@ -320,13 +328,14 @@ class KollaborConversationLogger:
                 message["parentUuid"] = parent
             try:
                 fd = os.open(
-                    self.session_file,
+                    path,
                     os.O_WRONLY | os.O_CREAT | os.O_APPEND,
                     0o600,
                 )
                 with os.fdopen(fd, "a") as f:
                     f.write(json.dumps(message) + "\n")
-                self.message_count += 1
+                if own:
+                    self.message_count += 1
             except Exception as e:
                 logger.error(f"Failed to write to JSONL: {e}")
 
@@ -610,6 +619,7 @@ class KollaborConversationLogger:
         provider_reasoning: Optional[Dict[str, Any]] = None,
         display_metadata: Optional[Dict[str, Any]] = None,
         voice_turn_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         """Log assistant response with usage statistics.
 
@@ -626,6 +636,9 @@ class KollaborConversationLogger:
                 excluded from native provider tool-call reconstruction
             voice_turn_id: The voice turn a reply belongs to, so a talk-over
                 can cut it here too (rewrite_voice_turn)
+            session_id: The session this reply belongs to when it is not the
+                logger's current one (a turn that finished after another
+                conversation was resumed); its own log gets the record
         """
         message_uuid = str(uuid4())
 
@@ -655,7 +668,7 @@ class KollaborConversationLogger:
             "isSidechain": False,
             "userType": "external",
             "cwd": self._get_working_directory(),
-            "sessionId": self.session_id,
+            "sessionId": session_id or self.session_id,
             "version": (
                 self.app_version
                 if self.app_version != "unknown"
@@ -696,7 +709,7 @@ class KollaborConversationLogger:
         if voice_turn_id:
             message["voice_turn_id"] = voice_turn_id
 
-        await self._append_to_jsonl(message)
+        await self._append_to_jsonl(message, session_id)
 
         # Analyze assistant response for learning
         self._analyze_assistant_response(content)
