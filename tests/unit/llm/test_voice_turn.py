@@ -296,3 +296,73 @@ async def test_voice_cleanup_still_restores_chat_when_nothing_changed_mid_turn()
         assert api._provider.model == "voice-model"
     assert api._profile is original
     assert api._provider.model == "original"
+
+
+def real_api_service(tmp_path, chat, monkeypatch):
+    """The real APICommunicationService; only the provider registry is faked, and it
+    caches one provider per profile, as ProviderRegistry.get_provider does per config."""
+    from unittest.mock import MagicMock
+
+    from kollabor_ai import api_communication_service as service_module
+
+    config = MagicMock()
+    config.get = lambda key, default=None: default
+    cache: dict[str, SimpleNamespace] = {}
+
+    async def get_provider(provider_config):
+        name = provider_config["name"]
+        if name not in cache:
+            cache[name] = SimpleNamespace(
+                provider_name=name, model=name, config=Config("high")
+            )
+        return cache[name]
+
+    monkeypatch.setattr(service_module, "create_config_from_profile", lambda data: data)
+    monkeypatch.setattr(
+        service_module.ProviderRegistry, "get_provider", staticmethod(get_provider)
+    )
+    api = service_module.APICommunicationService(config, tmp_path, chat)
+    api._profile = chat
+    api._provider = cache.setdefault(
+        chat.name, SimpleNamespace(provider_name=chat.name, model=chat.name, config=Config("high"))
+    )
+    return api
+
+
+def stored_profile(name: str):
+    from unittest.mock import MagicMock
+
+    profile = MagicMock()
+    profile.name = name
+    profile.provider = "openai"
+    profile.auth_type = "api_key"
+    profile.get_provider.return_value = "openai"
+    profile.to_dict.return_value = {"name": name}
+    return profile
+
+
+@pytest.mark.asyncio
+async def test_voice_cleanup_keeps_a_switch_to_the_profile_the_turn_runs_on(tmp_path, monkeypatch):
+    """#584: /llm fast-voice mid-turn hands the service the very objects the turn installed."""
+    chat, fast = stored_profile("chat"), stored_profile("fast-voice")
+    api = real_api_service(tmp_path, chat, monkeypatch)
+    profiles = SimpleNamespace(get_profile=lambda name: {"fast-voice": fast}.get(name))
+    in_turn, resume = asyncio.Event(), asyncio.Event()
+
+    async def voice_turn() -> None:
+        async with voice_provider(api, profiles, {"voice_provider_profile_id": "fast-voice"}):
+            in_turn.set()
+            await resume.wait()
+
+    turn = asyncio.create_task(voice_turn())
+    await in_turn.wait()
+    assert api._profile is fast
+    before = api._provider
+    assert await api.reinitialize_provider(fast)  # the user's switch, as switch_profile does
+    assert api._provider is before  # same profile, same cached provider: nothing to tell it apart
+
+    resume.set()
+    await turn
+
+    assert api._profile is fast
+    assert api._provider.provider_name == "fast-voice"
