@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from kollabor_ai.session_naming import generate_session_name
+from kollabor_config.file_lock import locked_file
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ class KollaborConversationLogger:
         # appends wait for it and thread past the records it dropped.
         self._write_lock = asyncio.Lock()
         self._reparent: Dict[str, Any] = {}  # a dropped record's uuid: its parent's
+        self._reparent_seen: Optional[tuple[int, int]] = None  # sidecar (mtime, size) last read
 
         # Memory directory (used by _load/_save_conversation_memory)
         self.memory_dir = self.conversations_dir / "memory"
@@ -310,11 +312,46 @@ class KollaborConversationLogger:
         """Get current working directory."""
         return str(Path.cwd())
 
+    def _reparent_path(self) -> Path:
+        """Where cuts of this session file are shared with its other writers."""
+        return Path(str(self.session_file) + ".reparent.json")
+
+    def _read_reparent(self) -> None:
+        """Fold the cuts other loggers (or processes) made into `_reparent`."""
+        path = self._reparent_path()
+        try:
+            info = path.stat()
+            signature = (info.st_mtime_ns, info.st_size)
+            if signature == self._reparent_seen:
+                return
+            with locked_file(path, "r", private=True) as f:
+                shared = json.load(f)
+        except (OSError, ValueError):
+            return  # none yet, or unreadable: the next append looks again
+        if isinstance(shared, dict):
+            self._reparent.update(shared)
+            self._reparent_seen = signature
+
+    def _share_reparent(self, dropped: Dict[str, Any]) -> Dict[str, Any]:
+        """Add a cut's dropped records to the shared file; returns what it held."""
+        with locked_file(self._reparent_path(), "a+", private=True) as f:
+            f.seek(0)
+            try:
+                before = json.loads(f.read() or "{}")
+            except ValueError:
+                before = {}
+            f.truncate(0)
+            f.write(json.dumps({**before, **dropped}))
+        return before
+
     async def _append_to_jsonl(self, message: Dict[str, Any]):
         """Append message to JSONL file."""
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
+            self._read_reparent()  # cuts by other loggers of this session file
             parent = message.get("parentUuid")
-            while parent in self._reparent:  # a cut dropped it after the caller read it
+            seen = set()
+            while parent in self._reparent and parent not in seen:  # a cut dropped it
+                seen.add(parent)
                 parent = self._reparent[parent]
             if "parentUuid" in message:
                 message["parentUuid"] = parent
@@ -727,6 +764,7 @@ class KollaborConversationLogger:
             if cut is None:
                 return None
             dropped, temp, end = cut
+            before = self._share_reparent(dropped)  # before the swap: no dangling window
             try:  # on the loop, so nothing lands between the copy and the swap
                 with open(path, "rb") as log, open(temp, "ab") as new:
                     log.seek(end)
@@ -734,6 +772,8 @@ class KollaborConversationLogger:
                 os.replace(temp, path)
             except BaseException:
                 Path(temp).unlink(missing_ok=True)
+                with locked_file(self._reparent_path(), "w", private=True) as f:
+                    f.write(json.dumps(before))  # the cut did not land
                 raise
             self._reparent.update(dropped)
             return dropped

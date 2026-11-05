@@ -95,3 +95,21 @@ async def test_another_process_threads_past_a_reply_this_one_cut(tmp_path):
     child = out.stdout.strip().splitlines()[-1]
     by_uuid = {r["uuid"]: r for r in _records(first.session_file) if r.get("uuid")}
     assert by_uuid[child]["parentUuid"] == root
+
+
+async def test_a_swap_that_fails_leaves_no_cut_in_the_shared_mapping(tmp_path, monkeypatch):
+    first, second = _same_session(tmp_path)
+    root = await first.log_user_message("hi", parent_uuid=None)
+    voice = await first.log_assistant_message("sunny", root, voice_turn_id="turn-1")
+
+    def refuse(*args, **kwargs):
+        raise OSError("swap failed")
+
+    monkeypatch.setattr("kollabor_ai.conversation_logger.os.replace", refuse)
+    with pytest.raises(OSError):
+        await first.rewrite_voice_turn("turn-1", 1, {0: None})
+    monkeypatch.undo()
+
+    child = await second.log_user_message("thanks", parent_uuid=voice)
+    by_uuid = {r["uuid"]: r for r in _records(first.session_file) if r.get("uuid")}
+    assert by_uuid[child]["parentUuid"] == voice  # the reply is still in the log
