@@ -15,7 +15,12 @@ causes found and fixed here:
 3. Untagged heuristic matches now mint OPEN cards (claimable,
    supervisor-visible) instead of force-assigning 'active' work.
 
-Positive cases below use today's REAL handoff texts verbatim; negative
+Fixture freshness (2026-11-02): the backlog items quoted in the
+original handoff texts (#204/#205/#206) are all fixed on main now, so
+those fixture bodies were refreshed onto live backlog items (#642,
+#647, #670) while preserving the incident phrasings the classifier
+must catch; the hold fixture no longer asserts any backlog item's
+status. Positive cases still use real assignment phrasings; negative
 cases reproduce the historical false-positive shapes.
 """
 
@@ -62,18 +67,19 @@ REAL_HANDOFFS = {
         "/tmp/prompt-page-contract.md appears (aquamarine is writing it), "
         "independently verify it against the source."
     ),
-    "lapis_backlog_206": (
+    "lapis_backlog_pair": (
         "Next assignment: pick up two backlog ledger items (they're in "
         "hub_queue — work them in this order). (1) Item 6d10d3be / issue "
-        "#206: remove the test-only native_json generate_openai_tools and "
-        "point test_tool_registry_parity at the real generator."
+        "#642: sweep the suite-order flakes (real-socket/clock tests pass "
+        "in isolation, fail in the full run). (2) issue #647: sweep "
+        "orphaned session directories under ~/.kollab/projects."
     ),
-    "zircon_hookadapter": (
-        "Next assignment: ledger item 641cd3d4 / issue #205 — HookAdapter "
-        "in packages/kollabor-events (hook_adapter.py, exported "
-        "__init__.py:19, zero consumers). Branch off origin/main @ "
-        "8dbdf9fb (e.g. fix/remove-dead-hook-adapter, fresh scratch clone "
-        "if yours is dirty)."
+    "zircon_issue_assignment": (
+        "Next assignment: ledger item 641cd3d4 / issue #670 — kollab "
+        "--hub status and --hub capture showed no agents in a "
+        "project-scoped folder (symptom observed once, not reproduced). "
+        "Branch off origin/main (e.g. fix/hub-status-project-scope, "
+        "fresh scratch clone if yours is dirty)."
     ),
     "explicit_take_ownership": "take ownership of the release verification lane",
 }
@@ -106,8 +112,8 @@ NON_HANDOFFS = {
     ),
     "hold_nothing_queued": (
         "Next assignment: nothing queued — hold. If peridot or bismuth "
-        "report, backlog #204 (mentiko_adapter) is still pending an "
-        "operator decision, so don't start it without my word."
+        "report, anything they surface is still pending an operator "
+        "decision, so don't start it without my word."
     ),
     "hold_position": (
         "New task was assigned to you earlier — hold position until "

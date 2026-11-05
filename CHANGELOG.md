@@ -7,16 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- PR throughput KPI report (`.github/scripts/pr_throughput_kpi.py`, opt-in via `kpi.enabled`, default off): closed PRs per hour against a target of 3 on 1h, 8h and 24h rolling windows, with supporting open-PR, review, first-push CI and per-author/lane metrics. Missing data is reported as missing, never zero (#729).
+- Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
+- Optional merge bot for maintainers: `.github/workflows/auto-merge.yml` can merge a PR once CI, an independent review of its exact head, approval and resolved conversations all hold. It ships off; `docs/operations/pr-gates-auto-merge.md` has the steps to turn it on (#736).
+- Coordinators can page through all of their unresolved hub dispatches with `<hub_dispatch_list page="N" per_page="N"/>` (newest first, 10 per page, at most 50) and read any one of their dispatches in full with `<hub_dispatch_read dispatch_id="ID"/>`. Both are read-only, limited to dispatches the coordinator assigned, and off by default: enable with `plugins.hub.dispatch_list_enabled`. When enabled, the rebirth recovery summary names them in its overflow line; its bounded size is unchanged (#656).
+- Contributor docs now state the productization rule: every enhancement ships as an opt-in, default-off, repo-agnostic product surface (skill, extension, agent, or plugin), with the policy, checklist, and a mapping of every issue in the #711-#730 batch to its surface in `docs/productization.md` (#731).
+- A definition-of-done check (`pr-gates`) runs configurable hygiene checks on every PR -- docs-path rules, unresolved threads, base currency, Conventional Commit title, linked issue, and regression-test coverage of review finding ids -- and reports every failed item in exactly one check run (default `dod/ready-for-review`), never comments. Every commits, files, and comments page is read and review-thread pagination is followed, so nothing beyond the first page is silently skipped; pagination is bounded and repeat-guarded (identical pages, null or repeated cursors, and runaway loops fail closed with a loud error -- hang never, silently truncate never); base currency is judged by the PR head's merge-base against the target branch tip, so a branch missing commits from main fails. This repository runs it enabled (`pr_gates.dod.enabled = true` in `.github/pr-gates.toml`), with signed-commit validation left out until agent commits are signed (#755); the feature defaults to off elsewhere, and it is usable as a local CLI before pushing (#724).
+
 ### Fixed
+- A turn typed in the terminal can no longer draw twice in the Web UI after the fact: at turn end the daemon aligns the streamed rows it published with the refreshed history ids and only records a sync point when every streamed row is proven in that snapshot by content (tool rows by call id); otherwise it clears the sync point so the page reloads the whole history instead of appending rows past a stale count (#666).
+- Hub shutdown now joins in-flight secondary membership starts, isolates per-peer close failures, and finishes remaining cleanup before propagating cancellation (#356).
+- The Profiles dialog keeps profile model details readable on narrow screens:
+  provider, model and effort wrap onto the row instead of truncating to an
+  ellipsis, and the Test/Edit/Copy/Delete actions wrap below the text at phone
+  widths, so no detail needs hover to read (#578).
+- Closed-PR review and first-push check-run collection in the throughput KPI paginates all pages and fails closed on repeated pages, malformed responses, or pagination-cap exhaustion rather than reporting partial metrics (#747).
+- Input handler hook cleanup now detaches its hooks from the event bus: `HookRegistrar.unregister_all_hooks()` passed a `Hook` object to an API that takes the owning plugin and hook name, so cleanup silently left every input hook registered and firing (#735).
+- Agent startup now preserves existing global agent/skill files, refuses to seed through linked/reparse-point directories, and publishes missing seed files without overwriting concurrent creations; safely retired seed copies are restored if changed (#698).
+- `kollab --hub capture` accepts `--cursor N` to resume a window from a truncation marker's `next_cursor` and `--follow` to drain subsequent pages (bounded, stop-and-say-so on a stuck cursor), so scripted polling can read past `... (truncated, next_cursor=...)` (#752).
+- A hub message reports `sent` only when the recipient's hub acks that message: ACP `hub_msg` results now carry `delivery` (`confirmed`, `accepted`, `queued` or `unconfirmed`), and a queued or unacked message no longer reads as sent (#609).
+- `kollab --hub capture` shows the hub messages an agent sent and received again; they were dropped whenever a heartbeat's state snapshot was in the capture window (#609).
+- A failed send names its cause: an exception with no message reports its type instead of a blank `Tool execution error:`, and a refused message always gives a reason (#609).
+- Connect's join code shows why it could not be made when the network's discovery origin is not on port 443 (`Enrollment needs port 443, but this network's origin uses port <port>.`), instead of a reason-less "could not create a code". Enrollment still requires port 443 (#693).
+- ACP admissions that reuse a caller request ID keep their own history parent and completion ownership, so a reply is no longer recorded under the later input's row (#597). A rejected admission cancels only itself, not an earlier queued admission with the same ID.
+- ACP admissions that reuse a caller request ID also keep their own mic-turn voice metadata: the voice-reply dictionary was keyed by bare request ID, so a later admission overwrote the earlier one's voice and the reply was spoken with the wrong voice or not at all (#597).
+- Mentiko attaches to an existing live hub session without spawning a second daemon or duplicating its system-prompt history (#708).
+
+## [0.19.1] - 2026-11-03
+
+### Changed
+- Release publishing runs from a reviewed controller on `main`, resolves immutable tagged source, limits the existing repository PyPI token to upload steps, and verifies GitHub release assets.
+
+### Fixed
+- Installed voice workers use their managed runtime dependencies without importing packages from Kollab's main interpreter, fixing startup failures caused by cross-version dependency imports.
+
+## [0.19.0] - 2026-11-03
+
+### Fixed
+- Web UI source archives exclude local TypeScript build metadata, keeping generated compiler state out of published packages.
+- PhoneLink chat reuses unchanged polling snapshots so typing and scrolling stay responsive. Completed voice turns remain visible until saved history replaces them.
+- A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
+- Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
+- Detached daemon SIGTERM cancels its top-level async task so application cleanup
+  completes without injecting `KeyboardInterrupt` into child-task cleanup (#667).
 - Coordinator task assignments survive restarts in a durable dispatch ledger,
   suppress re-routing delivered work, and keep completion reports unverified
   until the original assigner verifies a worktree or commit reference (#636).
 - An agent whose code changed on disk after it started no longer fails every turn with an opaque 500: the daemon flags the mismatch, the Engine names the agent and says to restart it (`<agent> could not run the turn: <error>. Its code changed on disk after it started. Restart it.`), and voice turns carry the same explanation to the speaker (#571).
 - The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
 - The hub no longer replays stale pre-reboot inbox messages as current instructions: ordinary messages written before the last restart are dropped at the boot boundary (visible in the offline inbox summary), while durable task controls are still delivered for TaskLedger classification (#639).
+- The hub's crystal summary token cache now scales with the live vault (a power of two of at least twice its entries, minimum 8) instead of a fixed floor of 8,192, so its size tracks the live memories (#567).
 - Agent-facing crystal writes reject bodies over 2,000 characters; crystal-store saves are atomic and verified, and failed writes surface errors without retaining partial mutations (#638).
+- The web UI no longer serves beyond this machine without saying so: whenever it binds an address other than 127.0.0.1, whether from KOLLAB_WEBUI_HOSTS or the new `--web-ui-hosts` flag, startup prints a warning that the page is exposed and that anyone who can open it gets the engine token. `kollab --web-ui --web-ui-hosts IP[,IP]` is the explicit per-launch opt-in and overrides the shell's KOLLAB_WEBUI_HOSTS; an explicitly empty value forces localhost-only, and the desktop app forwards its own `--web-ui-hosts` argument to kollab, showing the exposure warning in its window before opening the UI (#674).
+- The desktop exposure interstitial now recognizes IPv4-mapped IPv6 addresses
+  whose embedded IPv4 is private or link-local (#674).
+
+- The web UI labels a hub broadcast note as addressed to All instead of naming
+  the observing window's own agent as the recipient; notes delivered straight to
+  the window keep addressing it (#671).
 
 ### Added
+- PhoneLink carries microphone input and spoken replies through the phone while the computer's LiveKit signaling and media stay on loopback (#440).
+- The Web UI Agents sidebar shows a small type glyph after local-session and offline names (coder `▸`, research `◈`, default `●`); rows without type metadata and all remote rows stay unmarked (#655).
 - Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
 - Team launches now support member selection or exclusions across the CLI,
   TUI and Web UI. The launch sheet sets the workspace, profile, lead and
@@ -143,6 +196,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Network: withdrawing access stops queued remote-agent input and output before
+  network submission; bytes already sent may still arrive (#524).
 - Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
   `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
   internal agent message-tool syntax (#622).
@@ -339,6 +394,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attach, `kollab service` and goal turns use `pid_alive`, so the hub keeps
   live agents. On every platform an exited agent that was never reaped now
   counts as stopped (#268).
+
+### Known limitations
+- PhoneLink voice passed recorded-input Android emulator testing. Final iPhone playback and transcript-persistence testing remains pending (#440).
 
 ## [0.18.5] - 2026-10-26
 

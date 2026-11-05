@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import file_lock
 from .control import atomic_json, manifest, prepare_root, service_root
+from .module_runtime import isolated_env, module_command
 
 
 def ensure_runtime(
@@ -28,16 +29,13 @@ def ensure_runtime(
     runtime = root / "runtimes" / signature
     python = runtime / "bin/python"
     marker = runtime / "ready.json"
-    probe = [
-        str(python),
-        "-c",
-        imports,
-    ]
+    probe = [str(python), "-I", "-c", imports]
+    child_env = isolated_env(os.environ)
     ready = False
     if marker.exists() and python.exists():
         try:
             if json.loads(marker.read_text()).get("requirements") == pins:
-                subprocess.run(probe, check=True, timeout=60)
+                subprocess.run(probe, check=True, timeout=60, env=child_env)
                 ready = True
         except (ValueError, OSError, subprocess.SubprocessError):
             pass  # A marker is not proof of a working environment.
@@ -58,25 +56,22 @@ def ensure_runtime(
             cmd = (
                 [uv, "venv", "--python", interpreter, str(runtime)]
                 if uv
-                else [sys.executable, "-m", "venv", str(runtime)]
+                else [sys.executable, "-I", "-m", "venv", str(runtime)]
             )
-            subprocess.run(cmd, check=True, timeout=180)
+            subprocess.run(cmd, check=True, timeout=180, env=child_env)
         cmd = (
             [uv, "pip", "install", "--python", str(python), *pins]
             if uv
-            else [str(python), "-m", "pip", "install", *pins]
+            else [str(python), "-I", "-m", "pip", "install", *pins]
         )
         if repair_existing:
             cmd.append("--reinstall" if uv else "--force-reinstall")
-        subprocess.run(cmd, check=True, timeout=900)
+        subprocess.run(cmd, check=True, timeout=900, env=child_env)
         subprocess.run(
-            [
-                str(python),
-                "-c",
-                imports,
-            ],
+            [str(python), "-I", "-c", imports],
             check=True,
             timeout=90,
+            env=child_env,
         )
         atomic_json(marker, {"requirements": pins})
     return python
@@ -99,7 +94,7 @@ def prepared_runtime_python(root=None):
 
 
 def main() -> None:
-    # client.launch refuses off POSIX too: the service serves on AF_UNIX, and on Windows os.execv
+    # client.launch refuses off POSIX too: the service serves on AF_UNIX, and on Windows os.execve
     # starts a new process, which would drop the setup lock taken below (#268).
     if os.name != "posix":
         raise SystemExit("The local voice service currently requires macOS or Linux")
@@ -135,17 +130,17 @@ def main() -> None:
         progress("starting", "Starting shared voice service")
         # The lock survives exec. No second setup or daemon can race this one.
         os.set_inheritable(lock.fileno(), True)
-        os.execv(
+        os.execve(
             str(python),
-            [
-                str(python),
-                "-m",
+            module_command(
+                python,
                 "kollabor_voice.service",
                 "--root",
-                str(root),
+                root,
                 "--lock-fd",
-                str(lock.fileno()),
-            ],
+                lock.fileno(),
+            ),
+            isolated_env(os.environ),
         )
     except Exception as exc:
         progress("error", f"Voice setup failed: {exc}")

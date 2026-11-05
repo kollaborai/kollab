@@ -328,3 +328,116 @@ async def test_idle_session_pruning_discards_idle_request_lock(pair):
     assert key not in origin_secure._outbound
     assert key not in origin_secure._request_locks
     assert key not in origin_secure._request_lock_users
+
+
+@pytest.mark.asyncio
+async def test_trust_discard_keeps_replacement_generation_counter_intact(pair):
+    """A superseded guard must not decrement the replacement generation.
+
+    Interleaving (third-waiter trust-event probe): hold lock A, fire a
+    trust discard (drops the counter and the lock outright), start a
+    fresh lock B, exit the old A holder, queue a waiter on B, then queue
+    one more. The old holder's exit must leave B's counter alone; B keeps
+    its identity and serializes every post-discard caller. Decrementing
+    by key here used to erase B's slots, letting B pop while waiters
+    queued and the next caller open a divergent lock ("secure session was
+    superseded" churn for callers that never left the binding).
+    """
+    wire, origin, dest, origin_secure = pair
+    key = ("peer", "origin", "sess")
+    entered: list[str] = []
+    entry_locks: dict[str, object] = {}
+    releases: dict[str, asyncio.Event] = {}
+
+    def release(name: str) -> asyncio.Event:
+        return releases.setdefault(name, asyncio.Event())
+
+    async def guarded(name: str):
+        async with origin_secure._request_guard(key) as request_lock:
+            entry_locks[name] = request_lock
+            entered.append(name)
+            await release(name).wait()
+
+    # A: holds the pre-discard generation.
+    task_a = asyncio.create_task(guarded("A"))
+    while entered != ["A"]:
+        await asyncio.sleep(0)
+    lock_a = origin_secure._request_locks[key]
+    assert origin_secure._request_lock_users[key] == 1
+
+    # W: queues on A (two users on the old generation).
+    task_w = asyncio.create_task(guarded("W"))
+    while origin_secure._request_lock_users.get(key, 0) != 2:
+        await asyncio.sleep(0)
+    assert entered == ["A"]
+    assert origin_secure._request_locks[key] is lock_a
+
+    # Trust event: revoke drops counter and lock outright.
+    origin_secure._discard_peer(key[0], trust_event=True)
+    assert key not in origin_secure._request_locks
+    assert key not in origin_secure._request_lock_users
+
+    # B generation starts while the old holder is still parked on A.
+    task_b = asyncio.create_task(guarded("B"))
+    while entered != ["A", "B"]:
+        await asyncio.sleep(0)
+    lock_b = origin_secure._request_locks[key]
+    assert lock_b is not lock_a
+    assert origin_secure._request_lock_users[key] == 1
+
+    # Old holder exits AFTER the replacement generation exists.
+    release("A").set()
+    task_a_cancel = asyncio.gather(task_a, return_exceptions=True)
+    while origin_secure._request_lock_users.get(key, 0) != 1:
+        await asyncio.sleep(0)
+    assert entered == ["A", "B"]
+    assert origin_secure._request_locks[key] is lock_b
+    assert origin_secure._request_lock_users[key] == 1
+
+    # W finally acquires the orphaned A and unwinds (skipped decrement).
+    release("W").set()
+    task_w_cancel = asyncio.gather(task_w, return_exceptions=True)
+    while "W" not in entered:
+        await asyncio.sleep(0)
+    await task_w_cancel
+    assert origin_secure._request_locks[key] is lock_b
+    assert origin_secure._request_lock_users[key] == 1
+
+    # Third waiter queues on B.
+    task_c = asyncio.create_task(guarded("C"))
+    while origin_secure._request_lock_users.get(key, 0) != 2:
+        await asyncio.sleep(0)
+    assert entered == ["A", "B", "W"]
+    assert origin_secure._request_locks[key] is lock_b
+
+    # A fourth caller joins B; the map must still hand out B.
+    task_d = asyncio.create_task(guarded("D"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert origin_secure._request_locks.get(key) is lock_b
+    assert origin_secure._request_lock_users[key] == 3
+    assert "D" not in entered  # waits behind C on the same lock
+
+    # Wind down in order; everyone shared the replacement generation.
+    release("B").set()
+    while "C" not in entered:
+        await asyncio.sleep(0)
+    release("C").set()
+    while "D" not in entered:
+        await asyncio.sleep(0)
+    release("D").set()
+    await asyncio.gather(
+        task_a_cancel,
+        asyncio.gather(task_b, return_exceptions=True),
+        asyncio.gather(task_c, return_exceptions=True),
+        asyncio.gather(task_d, return_exceptions=True),
+    )
+    # Callers queued before the discard keep the old lock (their real-flow
+    # session check kills them); everyone queued after it shared lock_b.
+    assert entry_locks["A"] is lock_a
+    assert entry_locks["W"] is lock_a
+    assert entry_locks["B"] is lock_b
+    assert entry_locks["C"] is lock_b
+    assert entry_locks["D"] is lock_b
+    assert key not in origin_secure._request_locks
+    assert key not in origin_secure._request_lock_users

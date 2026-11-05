@@ -209,6 +209,10 @@ addresses in `KOLLAB_WEBUI_HOSTS` (comma-separated; it also works with
 KOLLAB_WEBUI_HOSTS=10.8.0.1 kollab --web-ui
 ```
 
+The same list can be passed per launch as `kollab --web-ui --web-ui-hosts
+10.8.0.1`, which overrides the environment value for that launch. Serving on
+any address besides `127.0.0.1` prints an exposure warning at startup (#674).
+
 For an editable checkout without installed console scripts:
 
 ```bash

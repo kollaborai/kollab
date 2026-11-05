@@ -248,6 +248,7 @@ class RelayAgentBridge:
         self.memberships = Memberships(self.workspace)
         self._membership_runtimes: dict[str, RelayCommands] = {}
         self._membership_contexts: dict[str, MembershipContext] = {}
+        self._membership_start_tasks: set[asyncio.Task[None]] = set()
         self.directory = directory or LocalAgentDirectory()
         self.commands: RelayCommands | None = None
         self.store: ConversationStore | None = None
@@ -278,6 +279,7 @@ class RelayAgentBridge:
         self._next_event_wake = 0.0
         self._outbox_lock = asyncio.Lock()
         self._enrollment_issuer = None
+        self._close_task: asyncio.Task[None] | None = None
         self.secure_transport: SecureConversationTransport | None = None
         self.config_sync: ConfigSyncService | None = None
         self.membership_sync: MembershipSync | None = None
@@ -502,6 +504,32 @@ class RelayAgentBridge:
         """Open and agents trust send an ordinary message with no human grant."""
         return level in ("open", "agents")
 
+    def _invalidate_denied_attach_leases(self, state=None) -> None:
+        attach = getattr(self, "network_attach", None)
+        if attach is None:
+            return
+        if state is None:
+            try:
+                state = self._state().state
+            except Exception:
+                attach.invalidate_device_permissions(lambda _peer, _name: False)
+                return
+
+        def allowed(peer: str, name: str) -> bool:
+            if peer in state.links or peer not in self.commands.client.state.approvals:
+                return False
+            trust = "manual" if state.trust == "manual" else state.peer_trust.get(peer, state.trust)
+            if trust == "open":
+                return True
+            if trust != "agents":
+                return False
+            return any(
+                row["peer"] == peer and row["agent"] == name
+                for row in self.store.grants(state.room)
+            )
+
+        attach.invalidate_device_permissions(allowed)
+
     def set_trust_level(self, level: str) -> str:
         self._require_human_network_context(
             "remote model turns cannot change network trust"
@@ -512,6 +540,7 @@ class RelayAgentBridge:
             raise RelayError(str(exc)) from exc
         store = self._state()
         store.state.trust = level
+        self._invalidate_denied_attach_leases(store.state)
         store.save()
         logger.info("network trust set to %s (pid %d)", level, os.getpid())
         return store.state.trust
@@ -536,6 +565,7 @@ class RelayAgentBridge:
         store = self._state()
         validate_public_key(peer_key)
         store.state.peer_trust[peer_key] = level
+        self._invalidate_denied_attach_leases(store.state)
         store.save()
         return level
 
@@ -543,6 +573,7 @@ class RelayAgentBridge:
         self._require_human_network_context("remote model turns cannot change peer trust")
         store = self._state()
         if store.state.peer_trust.pop(peer_key, None) is not None:
+            self._invalidate_denied_attach_leases(store.state)
             store.save()
 
     def set_peer_link(self, peer_key: str) -> None:
@@ -554,6 +585,7 @@ class RelayAgentBridge:
             if len(store.state.links) >= MAX_APPROVALS:
                 raise RelayError("local peer approval capacity reached", "capacity")
             store.state.links.append(peer_key)
+            self._invalidate_denied_attach_leases(store.state)
             store.save()
 
     def _known_device_names(self, *, except_key: str = "") -> set[str]:
@@ -829,7 +861,7 @@ class RelayAgentBridge:
         validation (approvals, links, grants) always reads THAT membership's
         state. Config-sync and peer mesh stay primary-only (design v2 §4).
         """
-        if self.owner.owner() is None:
+        if self._closed or self.owner.owner() is None:
             return
         try:
             primary = self.memberships.primary().slug
@@ -873,17 +905,91 @@ class RelayAgentBridge:
                 )
                 continue
             self._membership_contexts[membership.slug] = context
-            asyncio.create_task(
+            task = asyncio.create_task(
                 context.start(), name=f"kollab-membership-start-{membership.slug}"
             )
+            self._membership_start_tasks.add(task)
+            task.add_done_callback(
+                lambda completed, slug=membership.slug, context=context: (
+                    self._secondary_membership_start_done(slug, context, completed)
+                )
+            )
 
-    def _stop_secondary_memberships(self) -> None:
-        contexts, self._membership_contexts = self._membership_contexts, {}
-        for context in contexts.values():
+    def _secondary_membership_start_done(
+        self, slug: str, context: MembershipContext, task: asyncio.Task[None]
+    ) -> None:
+        self._membership_start_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception as exc:
+            # Avoid logging exception text that could contain membership state.
+            logger.warning(
+                "secondary network membership %s failed to start (%s)",
+                slug,
+                type(exc).__name__,
+            )
+            if self._membership_contexts.get(slug) is context:
+                self._membership_contexts.pop(slug, None)
+
+    async def _finish_shutdown_operation(
+        self, awaitable
+    ) -> tuple[bool, BaseException | None]:
+        """Wait for a shutdown operation despite cancellation of its owner."""
+        task = asyncio.ensure_future(awaitable)
+        cancellation_requested = False
+        while not task.done():
             try:
-                asyncio.get_running_loop().create_task(context.close())
-            except RuntimeError:
-                pass
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                cancellation_requested |= bool(
+                    current_task and current_task.cancelling()
+                )
+            except Exception:
+                break
+        try:
+            task.result()
+        except asyncio.CancelledError as exc:
+            return cancellation_requested, exc
+        except Exception as exc:
+            return cancellation_requested, exc
+        return cancellation_requested, None
+
+    async def _close_shutdown_resource(self, name: str, awaitable) -> bool:
+        """Close one resource without letting failure skip remaining teardown."""
+        cancellation_requested, error = await self._finish_shutdown_operation(
+            awaitable
+        )
+        if error is not None:
+            logger.warning("%s failed to close (%s)", name, type(error).__name__)
+        return cancellation_requested
+
+    async def _stop_secondary_memberships(self) -> bool:
+        """Cancel and join starts, then close every secondary context."""
+        cancellation_requested = False
+        contexts, self._membership_contexts = self._membership_contexts, {}
+        startup_tasks = tuple(self._membership_start_tasks)
+        for task in startup_tasks:
+            if not task.done():
+                task.cancel()
+        if startup_tasks:
+            interrupted, error = await self._finish_shutdown_operation(
+                asyncio.gather(*startup_tasks, return_exceptions=True)
+            )
+            cancellation_requested |= interrupted
+            if error is not None:
+                logger.warning(
+                    "secondary membership startup tasks failed to stop (%s)",
+                    type(error).__name__,
+                )
+        self._membership_start_tasks.clear()
+        for slug, context in contexts.items():
+            cancellation_requested |= await self._close_shutdown_resource(
+                f"secondary network membership {slug}", context.close()
+            )
+        return cancellation_requested
 
     async def _receive_membership(self, slug, peer, method, payload, *, _secure=False):
         """Slug-addressed inbound entry: route into the shared _receive body
@@ -963,6 +1069,8 @@ class RelayAgentBridge:
             self.make_membership_sync().start()
             self.network_attach = NetworkAttach(
                 request=self.secure_transport.request,
+                guarded_request=self.secure_transport.request,
+                capture_peer_guard=self.secure_transport.capture_peer_guard,
                 target=self.attach_target,
                 peer_name=self._peer_name,
                 notice=self._config_notice,
@@ -1058,15 +1166,54 @@ class RelayAgentBridge:
 
     async def close(self):
         self._closed = True
+        # Cancel queued starts before yielding to the owned cleanup task, so a
+        # start already in the event loop's ready queue cannot install its
+        # handler after shutdown has been requested.
+        for task in tuple(getattr(self, "_membership_start_tasks", ())):
+            if not task.done():
+                task.cancel()
+        close_task = getattr(self, "_close_task", None)
+        if close_task is None:
+            close_task = asyncio.create_task(
+                self._close_resources(), name="kollab-relay-agent-close"
+            )
+            self._close_task = close_task
+        # Keep the full teardown alive if the caller is canceled. In
+        # particular, secondary contexts have already been detached from the
+        # bridge map before their startup tasks are joined.
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is None or not current_task.cancelling():
+                raise
+            # Caller cancellation is deferred until the owned teardown finishes.
+            while not close_task.done():
+                try:
+                    await asyncio.shield(close_task)
+                except asyncio.CancelledError:
+                    if close_task.done():
+                        break
+            raise
+
+    async def _close_resources(self):
+        self._closed = True
+        cancellation_requested = False
         if self.active and not self.active.finished:
-            await self._stop_active("interrupted", "receiving agent stopped")
+            interrupted, error = await self._finish_shutdown_operation(
+                self._stop_active("interrupted", "receiving agent stopped")
+            )
+            cancellation_requested |= interrupted
+            if error is not None:
+                logger.warning(
+                    "active relay session failed to stop (%s)",
+                    type(error).__name__,
+                )
         # Secondaries close before the primary's task teardown: their
         # inbound adapters must be detached while their clients can still
-        # respond to in-flight requests.
-        contexts = list(self._membership_contexts.values())
-        self._membership_contexts.clear()
-        for context in contexts:
-            await context.close()
+        # respond to in-flight requests. Join startup first so it cannot
+        # reinstall a handler or create resume work after cleanup.
+        cancellation_requested |= await self._stop_secondary_memberships()
         tasks = (
             self._loop_task,
             self._resume_task,
@@ -1076,36 +1223,76 @@ class RelayAgentBridge:
         for task in tasks:
             if task:
                 task.cancel()
-        await asyncio.gather(*(t for t in tasks if t), return_exceptions=True)
-        if self._enrollment_issuer is not None:
-            await self._enrollment_issuer.close()
+        background_tasks = tuple(task for task in tasks if task)
+        if background_tasks:
+            interrupted, error = await self._finish_shutdown_operation(
+                asyncio.gather(*background_tasks, return_exceptions=True)
+            )
+            cancellation_requested |= interrupted
+            if error is not None:
+                logger.warning(
+                    "relay agent background tasks failed to stop (%s)",
+                    type(error).__name__,
+                )
+        issuer = self._enrollment_issuer
+        if issuer is not None:
+            cancellation_requested |= await self._close_shutdown_resource(
+                "enrollment issuer", issuer.close()
+            )
             self._enrollment_issuer = None
         socket_server = getattr(self.plugin, "_socket_server", None)
         if socket_server is not None:
-            socket_server.set_peer_forward_handler(None)
-            socket_server.set_peer_secure_handler(None)
-            socket_server.set_peer_identity_resolver(None)
-        if self.peer_mesh is not None:
-            await self.peer_mesh.close()
-            self.peer_mesh = None
-        if self.config_sync is not None:
-            await self.config_sync.close()
-            self.config_sync = None
-        if self.membership_sync is not None:
-            await self.membership_sync.close()
-            self.membership_sync = None
-        if self.halt_sync is not None:
-            await self.halt_sync.close()
-            self.halt_sync = None
-        if self.network_attach is not None:
-            await self.network_attach.close()
-            self.network_attach = None
-        if self.secure_transport is not None:
-            self.secure_transport.close()
+            handlers = (
+                ("peer forward handler", socket_server.set_peer_forward_handler),
+                ("peer secure handler", socket_server.set_peer_secure_handler),
+                ("peer identity resolver", socket_server.set_peer_identity_resolver),
+            )
+            for name, detach in handlers:
+                try:
+                    detach(None)
+                except Exception as exc:
+                    logger.warning(
+                        "failed to detach %s (%s)", name, type(exc).__name__
+                    )
+        for attr, name in (
+            ("peer_mesh", "peer mesh"),
+            ("config_sync", "configuration sync"),
+            ("membership_sync", "membership sync"),
+            ("halt_sync", "halt sync"),
+            ("network_attach", "network attach"),
+        ):
+            resource = getattr(self, attr)
+            if resource is not None:
+                cancellation_requested |= await self._close_shutdown_resource(
+                    name, resource.close()
+                )
+                setattr(self, attr, None)
+        secure_transport = self.secure_transport
+        if secure_transport is not None:
+            try:
+                secure_transport.close()
+            except Exception as exc:
+                logger.warning(
+                    "secure transport failed to close (%s)", type(exc).__name__
+                )
             self.secure_transport = None
         if self.commands:
-            await self.commands.close()
-        self.owner.release()
+            cancellation_requested |= await self._close_shutdown_resource(
+                "relay agent commands", self.commands.close()
+            )
+        try:
+            self.owner.release()
+        except Exception as exc:
+            logger.warning("relay agent owner failed to release (%s)", type(exc).__name__)
+        current_task = asyncio.current_task()
+        cancellation_requested |= bool(
+            current_task and current_task.cancelling()
+        )
+        if cancellation_requested:
+            logger.warning("relay agent shutdown was cancelled; cleanup completed")
+            raise asyncio.CancelledError(
+                "relay agent shutdown cancelled after cleanup"
+            )
 
     async def _run(self):
         next_election = 0.0
@@ -2869,6 +3056,9 @@ class RelayAgentBridge:
         control = self._network_control()
         if not control.halt_book().active():
             return
+        attach = getattr(self, "network_attach", None)
+        if attach is not None:
+            attach.invalidate_for_halt()
         try:
             if network in (hr.read_halt().get("scopes") or {}):
                 return  # the listener already holds it
@@ -3061,9 +3251,12 @@ class RelayAgentBridge:
         if head == "deny":
             if len(parts) not in (1, 2):
                 return "usage: /connect deny <device> [agent]"
-            self.store.revoke(
-                client.state.room, parts[0], parts[1] if len(parts) == 2 else None
-            )
+            try:
+                self.store.revoke(
+                    client.state.room, parts[0], parts[1] if len(parts) == 2 else None
+                )
+            finally:
+                self._invalidate_denied_attach_leases()
             return "conversation grant revoked; affected work cancelled"
         if head == "grants":
             sender = str(

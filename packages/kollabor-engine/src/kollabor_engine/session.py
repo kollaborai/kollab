@@ -51,6 +51,16 @@ INLINE_PROFILE = "app-inline"
 # RPC can be queued behind a long-running tool, so this is deliberately shorter
 # than the normal RPC timeout and falls back to the cached snapshot.
 HISTORY_REFRESH_TIMEOUT_SECONDS = 0.75
+
+
+class HistoryRefreshUnavailable(Exception):
+    """refresh_history could not prove a fresh mirror; the cache it would
+    return is stale.
+
+    The synced watermark consumer asks for this explicitly: a watermark set
+    from a stale mirror misses the turn a window just ran, so the next
+    history reload replays that turn next to its already-shown rows (#666).
+    """
 ACP_STARTUP_TIMEOUT_SECONDS = 45.0
 
 
@@ -211,6 +221,8 @@ class EngineSession:
         self._history_conversation_uid: str | None = None
         self._history_authoritative = False
         self._history_lock = asyncio.Lock()
+        # Serializes same-session MCP attach snapshot/apply/rollback transactions.
+        self._mcp_lock = asyncio.Lock()
         # The mirror holds a disk seed the daemon has not replaced yet. A seed
         # is no prefix of the daemon's history (hub messages are logged apart),
         # so a page showing it replaces its thread whole when the daemon answers.
@@ -593,16 +605,21 @@ class EngineSession:
 
     # === conversation ===
 
-    async def _apply_mcp_servers(self) -> None:
-        """Enable the session's requested MCP servers on the live daemon.
+    async def _apply_mcp_servers(
+        self, server_names: Optional[List[str]] = None
+    ) -> None:
+        """Enable the selected MCP servers on the live daemon.
 
-        Mirrors the /sessions/{id}/mcp/{name}/connect route: enable each
-        server in the daemon's settings, then one hot-reload reconnects the
-        whole set. Unknown server names are surfaced in a warning instead of
-        failing session creation -- a bad name should degrade the tool set,
-        not take the session down.
+        By default, session creation enables the full requested list. An
+        adopted-session attach passes only newly requested names so an
+        unrelated attach cannot re-enable a server that was explicitly
+        disconnected. One hot-reload reconnects the whole enabled set. Unknown
+        names are warned about instead of failing session creation.
         """
-        for server_name in self.mcp_server_names:
+        requested_servers = (
+            self.mcp_server_names if server_names is None else server_names
+        )
+        for server_name in requested_servers:
             try:
                 await self.state.enable_mcp_server(server_name)
             except ValueError as e:
@@ -614,7 +631,9 @@ class EngineSession:
                 )
         await self.state.reload_mcp_servers()
 
-    async def refresh_history(self, notify: bool = False) -> List[Dict[str, Any]]:
+    async def refresh_history(
+        self, notify: bool = False, stale_raises: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Pull the daemon's conversation into the local mirror.
 
         Asks for only the messages past the ones already held, with the digest
@@ -653,13 +672,22 @@ class EngineSession:
                         else getattr(snapshot, "metadata", {})
                     )
                     current_uid = metadata.get("conversation_uid") if isinstance(metadata, dict) else None
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
+                if stale_raises:
+                    raise HistoryRefreshUnavailable(
+                        "timed out after "
+                        f"{HISTORY_REFRESH_TIMEOUT_SECONDS}s waiting for the daemon"
+                    ) from exc
                 logger.debug(
                     "session %s history refresh timed out; using cached history",
                     self.session_id,
                 )
                 return self.history
             except Exception as e:
+                if stale_raises:
+                    raise HistoryRefreshUnavailable(
+                        f"daemon answered with an error: {e}"
+                    ) from e
                 logger.debug(
                     "session %s history refresh failed: %s", self.session_id, e
                 )
@@ -695,6 +723,10 @@ class EngineSession:
             if since is not None and since > len(held):
                 # A tail past what is held cannot be joined; the next refresh
                 # sends no anchor and gets all of it.
+                if stale_raises:
+                    raise HistoryRefreshUnavailable(
+                        "the daemon sent a tail the mirror cannot join"
+                    )
                 self._history_anchor = ""
                 return self.history
             self._raw_history = (held[:since] if since else []) + received
@@ -1100,7 +1132,11 @@ class EngineSession:
                     usage_turn = (str(event.get("request_id") or ""), int(event.get("turn_id") or 0))
                     if self._acp_usage_display_turn in (None, usage_turn):
                         self.acp_turn_usage = dict(event.get("turn_usage") or {})
-                    await self.refresh_history()
+                    # This awaited completion refresh may be queued behind an
+                    # older, non-notifying user_message refresh. Announce the
+                    # digest it finds so pages that fetched the warm mirror
+                    # once at turn_complete can replace their transient reply.
+                    await self.refresh_history(notify=True)
                     self.last_turn_error = (
                         {"message": turn_error, "history_length": len(self.history)}
                         if turn_error

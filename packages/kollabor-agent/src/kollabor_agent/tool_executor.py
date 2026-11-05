@@ -879,7 +879,7 @@ class ToolExecutor:
                     tool_id=tool_id,
                     tool_type=tool_type,
                     success=False,
-                    error=f"Tool execution error: {str(e)}",
+                    error=f"Tool execution error: {str(e) or type(e).__name__}",
                 )
 
             # Update execution time
@@ -904,7 +904,7 @@ class ToolExecutor:
                 tool_id=tool_id,
                 tool_type=tool_type,
                 success=False,
-                error=f"Execution error: {str(e)}",
+                error=f"Execution error: {str(e) or type(e).__name__}",
                 execution_time=execution_time,
             )
 

@@ -778,6 +778,7 @@ class HubPlugin(BasePlugin):
                     "identity": "",
                     "roster": DEFAULT_ROSTER,
                     "auto_help": False,
+                    "dispatch_list_enabled": False,
                     "mailbox_poll_interval": 5,
                     "dreaming_enabled": True,
                     "dreaming_idle_threshold": 300,
@@ -1430,6 +1431,54 @@ class HubPlugin(BasePlugin):
         tool_executor.register_plugin_handler(
             "hub_dispatch_verify", self._handle_hub_dispatch_verify_tool
         )
+
+        # Read-only paging over this coordinator's unresolved dispatches (#656).
+        # Opt-in: without plugins.hub.dispatch_list_enabled the tags are not
+        # registered, so the model never sees a tool that does not exist.
+        if self._dispatch_list_enabled():
+            hub_dispatch_list_pat = tag_pattern(
+                "hub_dispatch_list",
+                valid={"page": r"\d+", "per_page": r"\d+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_list(m):
+                attrs = tag_attrs(m.group(1))
+                return {
+                    "page": attrs.get("page", ""),
+                    "per_page": attrs.get("per_page", ""),
+                }
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_list",
+                hub_dispatch_list_pat,
+                "hub_dispatch_list",
+                _extract_hub_dispatch_list,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_list", self._handle_hub_dispatch_list_tool
+            )
+
+            hub_dispatch_read_pat = tag_pattern(
+                "hub_dispatch_read",
+                required={"dispatch_id": "some"},
+                valid={"dispatch_id": r"[0-9A-Za-z._:@-]+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_read(m):
+                attrs = tag_attrs(m.group(1))
+                return {"dispatch_id": attrs.get("dispatch_id", "").strip()}
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_read",
+                hub_dispatch_read_pat,
+                "hub_dispatch_read",
+                _extract_hub_dispatch_read,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_read", self._handle_hub_dispatch_read_tool
+            )
 
         # --- hub_reply ---
         # Shorthand for replying in-thread. The agent doesn't need to track
@@ -3524,6 +3573,119 @@ class HubPlugin(BasePlugin):
         )
 
 
+    def _dispatch_list_enabled(self) -> bool:
+        """Whether the opt-in dispatch list/read tags are on (default off)."""
+        try:
+            return bool(
+                self.config and self.config.get("plugins.hub.dispatch_list_enabled", False)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _dispatch_int_arg(value, default: int, maximum: int) -> int:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+        return min(max(number, 1), maximum)
+
+    async def _handle_hub_dispatch_list_tool(self, tool_data: dict):
+        """List one page of this coordinator's unresolved dispatches (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error="Dispatch listing is unavailable without an active identity and TaskLedger.",
+            )
+        page = self._dispatch_int_arg(tool_data.get("page", 1), 1, 10_000)
+        per_page = self._dispatch_int_arg(tool_data.get("per_page", 10), 10, 50)
+        try:
+            items, total = await asyncio.to_thread(
+                self._task_ledger.get_dispatches_page,
+                verified_by,
+                page=page,
+                per_page=per_page,
+            )
+        except Exception as e:
+            logger.exception("failed to list hub dispatches")
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error=f"Could not read dispatches: {e}",
+            )
+        if total == 0:
+            output = "no unresolved dispatches"
+        elif not items:
+            pages = -(-total // per_page)
+            output = (
+                f"no dispatches on page {page} ({total} unresolved; "
+                f"pages 1-{pages})"
+            )
+        else:
+            pages = -(-total // per_page)
+            lines = [
+                f"unresolved dispatches ({total} unresolved; page {page} of {pages}, "
+                "newest first):"
+            ]
+            for item in items:
+                lines.append(
+                    f"  [{item.get('status', 'unknown')}] dispatch "
+                    f"{item.get('dispatch_id', item.get('message_id', ''))} -> "
+                    f"{item.get('assignee', '')} (task {item.get('task_id', '')})"
+                )
+            output = "\n".join(lines)
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_list", success=True, output=output,
+        )
+
+    async def _handle_hub_dispatch_read_tool(self, tool_data: dict):
+        """Return one full dispatch record this coordinator assigned (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        dispatch_id = str(tool_data.get("dispatch_id", "") or "").strip()
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by or not dispatch_id:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="Provide a dispatch_id; reading needs an active identity and TaskLedger.",
+            )
+        try:
+            record = await asyncio.to_thread(self._task_ledger.get_dispatch, dispatch_id)
+        except Exception as e:
+            logger.exception("failed to read hub dispatch %s", dispatch_id)
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error=f"Could not read dispatch: {e}",
+            )
+        if not record or record.get("assigned_by") != verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="No dispatch with that ID is assigned by you.",
+            )
+        fields = (
+            "dispatch_id", "status", "task_id", "assignee", "assigned_by",
+            "directive", "thread_id", "worktree", "commit", "reported_worktree",
+            "reported_commit", "report", "delivery_error", "verified_by",
+            "verification_note", "created_at", "updated_at",
+        )
+        lines = []
+        for name in fields:
+            value = record.get(name)
+            if value not in (None, ""):
+                lines.append(f"{name}: {value}")
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_read", success=True,
+            output="\n".join(lines),
+        )
+
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
         from kollabor_agent.tool_executor import ToolExecutionResult
@@ -3947,7 +4109,7 @@ class HubPlugin(BasePlugin):
                     output="",
                     error=(
                         "Task assignment was not sent because its durable dispatch "
-                        f"record could not be saved: {e}"
+                        f"record could not be saved: {e or type(e).__name__}"
                     ),
                 )
             dispatch_id = msg.id
@@ -4020,7 +4182,7 @@ class HubPlugin(BasePlugin):
                     self._task_ledger.update_dispatch,
                     dispatch_id,
                     status="delivery_failed",
-                    delivery_error=f"routing failed: {e}",
+                    delivery_error=f"routing failed: {e or type(e).__name__}",
                 )
                 if not updated:
                     logger.warning(
@@ -4036,7 +4198,10 @@ class HubPlugin(BasePlugin):
                 tool_type="hub_msg",
                 success=False,
                 output="",
-                error=f"Task assignment could not be routed: {e}",
+                error=(
+                    "Task assignment could not be routed: "
+                    f"{e or type(e).__name__}"
+                ),
             )
         if dispatch_id:
             dispatch_status = "delivery_failed" if rejections else "in_flight"
@@ -4074,7 +4239,7 @@ class HubPlugin(BasePlugin):
         if rejections:
             parts = []
             for ident, reason in rejections:
-                parts.append(f"{ident}: {reason}")
+                parts.append(f"{ident}: {reason or 'refused with no reason given'}")
                 self._record_dispatch_failure(ident, reason)
             output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
                 # The reason already says what to do; force means nothing here.
@@ -4150,6 +4315,7 @@ class HubPlugin(BasePlugin):
         else:
             output = f"delivered to {target}"
 
+        metadata["delivery"] = self._delivery_evidence(msg, target)
         if any_wait and not warned:
             metadata["end_turn"] = True
         if not target.startswith("relay:") and not handle:
@@ -4161,6 +4327,30 @@ class HubPlugin(BasePlugin):
             output=output,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _delivery_evidence(msg: HubMessage, target: str) -> dict:
+        """How far a hub_msg got, for the sender to read.
+
+        ``confirmed``: a recipient's hub socket acked this message's id.
+        ``accepted``: a network peer accepted it (acceptance is not reading).
+        ``queued``: it sits in a mailbox; the recipient has not taken it.
+        ``unconfirmed``: nothing acked it and nothing queued it.
+        """
+        meta = msg.metadata or {}
+        acked = list(meta.get("_acked_by", []))
+        if meta.get("relay_receipt") or meta.get("network"):
+            state = "accepted"
+        elif meta.get("_queued_for") or meta.get("_socket_failed"):
+            state = "queued"
+        elif acked and (
+            target in acked or msg.scope != MessageScope.DIRECT.value
+        ):
+            state = "confirmed"
+        else:
+            state = "unconfirmed"
+        # Ids stay out: a tool result reaches attached clients and the model.
+        return {"state": state, "recipients": acked}
 
     async def _handle_hub_broadcast_tool(self, tool_data: dict):
         """Execute a hub_broadcast tool."""
@@ -6022,6 +6212,7 @@ class HubPlugin(BasePlugin):
                     crystal_store=self._crystal_store,
                     global_crystal_store=self._global_crystal_store,
                     task_ledger=self._task_ledger,
+                    dispatch_paging=self._dispatch_list_enabled(),
                 )
 
                 # Release stale lane claims from previous session
@@ -9575,6 +9766,26 @@ class HubPlugin(BasePlugin):
         """Get the persona color for an identity, or a stable palette fallback."""
         return persona_color(identity)
 
+    def _publish_hub_display(
+        self, from_name: str, to_name: str, content: str, observing: bool
+    ) -> None:
+        """Publish a hub message box as a semantic event for `kollab --hub capture`.
+
+        The box itself is rendered output, which the JSON capture drops whenever a
+        semantic event (a heartbeat's state_snapshot) is in the ring. This copy is
+        semantic, so the transcript keeps the message. Never raises.
+        """
+        from kollabor_tui.display_tap import publish_semantic
+
+        publish_semantic(
+            getattr(self, "_display_tap", None),
+            "hub_display",
+            sender=from_name,
+            target=to_name,
+            observing=observing,
+            text=f"{from_name} -> {to_name}\n{content}",
+        )
+
     def _render_hub_box(
         self, from_name: str, to_name: str, content: str, observing: bool = False
     ) -> None:
@@ -9586,6 +9797,7 @@ class HubPlugin(BasePlugin):
         Direct messages: bright colored ◆ marker
         Observed messages: dimmed colored ◇ marker
         """
+        self._publish_hub_display(from_name, to_name, content, observing)
         renderer = self.event_bus.get_service("renderer") if self.event_bus else None
         if not renderer or not hasattr(renderer, "message_coordinator"):
             return
@@ -11436,7 +11648,7 @@ class HubPlugin(BasePlugin):
                     **({"waiting": True} if (message.metadata or {}).get("acp_waiting") else {}),
                 )
             except RelayError as exc:
-                return [(message.to, str(exc))]
+                return [(message.to, str(exc) or type(exc).__name__)]
             refusal = _receipt_refusal(receipt)
             if refusal:
                 if receipt.get("reason") == "recipient_unavailable" or (
@@ -11874,6 +12086,12 @@ class HubPlugin(BasePlugin):
             target=agent.identity,
             detail=dial_target,
         )
+        if success:
+            # The receiver acked this message's id: it is the sender's proof
+            # of delivery (see _delivery_evidence).
+            acked = list(message.metadata.get("_acked_by", []))
+            if agent.identity not in acked:
+                message.metadata["_acked_by"] = [*acked, agent.identity]
         if not success:
             await AgentMessenger.send_to_file(agent.identity, message)
             # The sender has to hear that this was a mailbox drop, not a
@@ -13082,15 +13300,17 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: the knock screen is unavailable"
 
-    def _offer_failed(self) -> dict[str, str]:
-        """A failed offer, with the network's refusal line when that is why (#355).
+    def _offer_failed(self, refusal: str = "") -> dict[str, str]:
+        """A failed offer, with the reason it failed when we know it (#355, #693).
 
-        The line comes from this machine's state, never from exception text.
+        `refusal` is the issuer's own fixed line for a refusal made before any relay
+        request (#693). Otherwise the network's admit line is used (#355). Both come
+        from this machine's state, never from exception text.
         """
-        reason = ""
+        reason = refusal if isinstance(refusal, str) else ""
         try:
             commands = getattr(self._relay_agent, "commands", None)
-            if commands is not None:
+            if not reason and commands is not None:
                 reason = commands.client.control.admit_refusal()
         except Exception:
             reason = ""
@@ -13117,6 +13337,8 @@ class HubPlugin(BasePlugin):
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
             return {"error": "invalid connect offer request"}
+        from .enrollment_client import EnrollmentProtocolError
+
         try:
             if self._identity is None or self._rpc_server is None:
                 return {"error": "connect enrollment is unavailable"}
@@ -13125,6 +13347,10 @@ class HubPlugin(BasePlugin):
             if create is None:
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
+        except EnrollmentProtocolError as exc:
+            # The issuer refused before any relay request; say why (#693).
+            logger.warning("connect offer refused: %s", exc.refusal or exc.code)
+            return self._offer_failed(exc.refusal)
         except Exception:
             return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
