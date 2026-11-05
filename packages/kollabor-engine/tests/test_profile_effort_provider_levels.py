@@ -107,3 +107,58 @@ async def test_copy_refuses_unsent_level_for_anthropic(client, manager):
     )
     assert response.status_code == 422
     assert manager.get_profile("an-copy") is None
+
+
+# Review round 3: provider "auto" that resolves to Anthropic (key sk-ant-...)
+# follows the same rule as a profile that names Anthropic.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", NEW_LEVELS)
+async def test_create_refuses_unsent_level_for_auto_resolving_to_anthropic(
+    client, manager, level
+):
+    response = await client.post(
+        "/profiles",
+        json={
+            "name": "new-auto",
+            "provider": "auto",
+            "model": "claude-x",
+            "api_key": "sk-ant-test-key",
+            "effort": level,
+        },
+    )
+    assert response.status_code == 422
+    assert manager.get_profile("new-auto") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", NEW_LEVELS)
+async def test_update_refuses_unsent_level_for_auto_resolving_to_anthropic(
+    client, manager, level
+):
+    manager._profiles["auto-an"] = LLMProfile(
+        name="auto-an", provider="auto", model="claude-x", api_key="sk-ant-test-key"
+    )
+    response = await client.put("/profiles/auto-an", json={"effort": level})
+    assert response.status_code == 422
+    assert manager.get_profile("auto-an").effort == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", NEW_LEVELS)
+async def test_create_still_accepts_level_for_auto_resolving_to_openai(
+    client, manager, level
+):
+    response = await client.post(
+        "/profiles",
+        json={
+            "name": "new-auto-oa",
+            "provider": "auto",
+            "model": "gpt-5.6",
+            "api_key": "sk-test-key",
+            "effort": level,
+        },
+    )
+    assert response.status_code in (200, 201)
+    assert manager.get_profile("new-auto-oa").effort == level
