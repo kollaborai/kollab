@@ -33,7 +33,9 @@ DEFAULT_TIMEOUT = 8.0
 
 # Disk cache. Same shape as kollabor_agent.agent_manager's agent metadata
 # cache: versioned JSON, discarded whole on version mismatch or TTL expiry.
-# Bump CACHE_VERSION when the cached entry shape changes.
+# Bump CACHE_VERSION when the cached entry shape changes. Entries also carry
+# the provider and endpoint they were fetched from (#558); that is additive, so
+# an older entry without them still loads and is taken as a match.
 CACHE_VERSION = 2
 CACHE_TTL_SECONDS = 3600  # 1h -- provider catalogs move slowly
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -76,6 +78,42 @@ def _profile_key(profile: Any) -> str:
         return str(get_provider() or "").lower()
     except Exception:
         return provider.lower()
+
+
+def _profile_source(profile: Any) -> Dict[str, str]:
+    """Which provider and endpoint a profile's catalog comes from.
+
+    The cache is keyed by profile name, and an edit can change a profile's
+    provider or endpoint in place. An entry fetched from the old source is
+    not this profile's catalog (#558).
+    """
+    if isinstance(profile, dict):
+        provider = str(profile.get("provider") or "")
+        endpoint = str(profile.get("base_url") or profile.get("endpoint") or "")
+    else:
+        provider = ""
+        endpoint = ""
+        try:
+            provider = str(profile.get_provider() or "")
+        except Exception:  # noqa: BLE001 -- identity is best-effort
+            provider = str(getattr(profile, "provider", "") or "")
+        try:
+            endpoint = str(profile.get_endpoint() or "")
+        except Exception:  # noqa: BLE001
+            endpoint = str(getattr(profile, "base_url", "") or "")
+    return {"provider": provider.lower(), "endpoint": endpoint.rstrip("/")}
+
+
+def _same_source(entry: Dict[str, Any], profile: Any) -> bool:
+    """Whether a cache entry was fetched from this profile's provider/endpoint.
+
+    An entry with no recorded source (hand-written) is taken as a match.
+    """
+    source = _profile_source(profile)
+    for field in ("provider", "endpoint"):
+        if field in entry and str(entry[field] or "") != source[field]:
+            return False
+    return True
 
 
 def _load_disk_cache() -> Dict[str, Dict[str, Any]]:
@@ -130,9 +168,9 @@ def cached_provider_models(
         return []
 
     entry = _MEMORY_CACHE.get(key)
-    if not _fresh(entry, max_age):
+    if not (_fresh(entry, max_age) and _same_source(entry, profile)):  # type: ignore[arg-type]
         entry = _load_disk_cache().get(key)
-        if _fresh(entry, max_age):
+        if _fresh(entry, max_age) and _same_source(entry, profile):  # type: ignore[arg-type]
             _MEMORY_CACHE[key] = entry  # type: ignore[assignment]
         else:
             return []
@@ -144,7 +182,11 @@ def _store(profile: Any, models: List[Dict[str, Any]]) -> None:
     key = _profile_key(profile)
     if not key:
         return
-    entry = {"timestamp": time.time(), "models": models}
+    entry = {
+        "timestamp": time.time(),
+        "models": models,
+        **_profile_source(profile),
+    }
     _MEMORY_CACHE[key] = entry
     entries = _load_disk_cache()
     entries[key] = entry

@@ -193,6 +193,11 @@ supplement to the registry (#558):
   the provider has no listing API
 - a catalog is authoritative only when complete: the Anthropic fetcher reads
   every `/v1/models` page and returns empty, never partial, if it cannot
+- a catalog belongs to the provider and endpoint it was fetched from: each
+  cache entry records them, and an entry that does not match the profile's
+  current provider and endpoint is ignored. The cache key is the profile name,
+  and an edit keeps the name, so the old provider's catalog would otherwise
+  stay the new provider's list. An entry with no recorded source is a match
 - existing dedup rule unchanged: explicit shadows implicit, first provider
   profile wins on name collision
 
