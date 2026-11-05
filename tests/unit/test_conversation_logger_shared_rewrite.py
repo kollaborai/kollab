@@ -188,3 +188,62 @@ async def test_a_row_another_logger_appends_while_the_cut_is_built_is_threaded_p
     by_uuid = {r["uuid"]: r for r in _records(first.session_file) if r.get("uuid")}
     assert voice not in by_uuid
     assert by_uuid[appended[0]]["parentUuid"] == root  # not the removed reply
+
+async def test_short_sidecar_write_rollback_preserves_prior_rewrite_mapping(
+    tmp_path, monkeypatch
+):
+    import os
+    from contextlib import contextmanager
+
+    from kollabor_config.file_lock import locked_file as real_locked_file
+
+    first, second = _same_session(tmp_path)
+    root = await first.log_user_message("hi", parent_uuid=None)
+    previous = await first.log_assistant_message(
+        "earlier", root, voice_turn_id="earlier"
+    )
+    assert await first.rewrite_voice_turn("earlier", 1, {0: None}) == {previous: root}
+    target = await first.log_assistant_message("later", root, voice_turn_id="later")
+    sidecar = first._reparent_path()
+    assert json.loads(sidecar.read_text()) == {previous: root}
+
+    short_write_done = False
+
+    @contextmanager
+    def short_write_once(path, mode="a+", *, private=False):
+        with real_locked_file(path, mode, private=private) as handle:
+
+            class ShortWrite:
+                def __getattr__(self, name):
+                    return getattr(handle, name)
+
+                def write(self, text):
+                    nonlocal short_write_done
+                    if not short_write_done:
+                        short_write_done = True
+                        text = text[: max(1, len(text) // 2)]
+                    return handle.write(text)
+
+            yield ShortWrite()
+
+    real_replace = os.replace
+
+    def fail_session_swap(source, destination):
+        if Path(destination) == first.session_file:
+            raise OSError("session swap failed")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("kollabor_ai.conversation_logger.locked_file", short_write_once)
+    monkeypatch.setattr("kollabor_ai.conversation_logger.os.replace", fail_session_swap)
+
+    with pytest.raises(OSError):
+        await first.rewrite_voice_turn("later", 1, {0: None})
+
+    assert short_write_done
+    monkeypatch.undo()
+
+    assert json.loads(sidecar.read_text()) == {previous: root}
+    child = await second.log_user_message("thanks", parent_uuid=previous)
+    by_uuid = {r["uuid"]: r for r in _records(first.session_file) if r.get("uuid")}
+    assert by_uuid[child]["parentUuid"] == root
+    assert target in by_uuid  # the refused swap left the transcript unchanged
