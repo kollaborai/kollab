@@ -220,3 +220,51 @@ def test_a_vault_failure_never_logs_the_secret(home, caplog):
         assert _keyring_set(PROFILE, KEY) is False
     assert "vault" in caplog.text.lower()
     assert KEY not in caplog.text
+
+
+def test_a_project_plaintext_key_never_replaces_the_global_vault_entry(home):
+    """Review round 2, finding 1: profiles are keyed by name only."""
+    global_key, local_key = "sk-ant-global-" + "g" * 24, "sk-ant-local-" + "l" * 24
+    _save(PROFILE, global_key)
+    # A project's .kollab/config.json overrides the profile with a plaintext key.
+    local = LLMProfile.from_dict(PROFILE, {**FIELDS, "api_key": local_key})
+    assert local.get_api_key() == local_key
+    # Another project, with only the global profile, still gets the global key.
+    assert _resolve(PROFILE) == global_key
+
+
+def test_a_keyring_write_that_cannot_clear_the_vault_copy_is_not_a_reference(
+    home, monkeypatch
+):
+    """Review round 2, finding 2: processes that do not share the vault password."""
+    fake = _FakeKeyring()
+    old, new = "sk-ant-" + "OLD" * 20, "sk-ant-" + "NEW" * 20
+    monkeypatch.setenv("KOLLAB_KEY_ENCRYPTION_PASSWORD", "service-password")
+    with _keyring(fake, on=False):  # A: a service, no keyring
+        _save(PROFILE, old)
+    monkeypatch.delenv("KOLLAB_KEY_ENCRYPTION_PASSWORD")
+    _KEYRING_MIGRATION_TRIED.clear()
+    with _keyring(fake, on=True):  # B: a shell with the keyring, no password
+        _save(PROFILE, new)
+
+    stored = _stored(home, PROFILE)
+    monkeypatch.setenv("KOLLAB_KEY_ENCRYPTION_PASSWORD", "service-password")
+    for on in (False, True):  # A again, then a process with both
+        with _keyring(fake, on=on):
+            resolved = LLMProfile.from_dict(
+                PROFILE, {**FIELDS, "api_key": stored}
+            ).get_api_key()
+        assert resolved == new, on
+
+
+def test_a_password_that_does_not_open_the_vault_falls_back_to_the_key_file(
+    home, monkeypatch
+):
+    _save(PROFILE, KEY)  # vault made with the default key file
+    monkeypatch.setenv("KOLLAB_KEY_ENCRYPTION_PASSWORD", "set-later")
+    _KEYRING_MIGRATION_TRIED.clear()
+    assert _resolve(PROFILE) == KEY
+    other = "sk-or-issue610-" + "f4" * 16
+    _save("second", other)
+    assert _stored(home, "second") == f"{KEYRING_SENTINEL_PREFIX}second"
+    assert _resolve("second") == other
