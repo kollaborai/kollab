@@ -19,6 +19,7 @@ Regression contract (deterministic fakes, no live ACP):
 
 import asyncio
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -174,7 +175,7 @@ def acp_lane(monkeypatch, tmp_path):
     assert manager.set_active_profile("openai-oauth")
     orchestrator = FakeOrchestrator()
     service = LocalStateService(
-        Mock(), manager, event_bus=FakeBus(orchestrator)
+        Mock(provider_transition=nullcontext), manager, event_bus=FakeBus(orchestrator)
     )
     return manager, service, orchestrator, harness
 
