@@ -284,9 +284,10 @@ class HubBridge:
         Returns parsed response dict, or None on any failure.
         """
         # The cache can predate the agent or its socket: an agent's first record has none (#555).
+        # A cached record whose pid has exited may name a socket its successor now owns (#566).
         agent_data = self.get_agent(agent_id)
         sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
-        if sock_path is None or not sock_path.exists():
+        if sock_path is None or not sock_path.exists() or not _pid_alive(agent_data.get("pid")):
             agent_data = self._fresh_agent(agent_id)
             sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if agent_data is None:

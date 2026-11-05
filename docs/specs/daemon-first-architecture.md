@@ -163,7 +163,8 @@ second terminal forks its own daemon and gets the next agent.
     survives crashes and reboots (systemd: at boot; launchd: at login)
   cleaned up: presence file removed, socket unlinked on shutdown
   crash recovery: presence file PID check + stale socket detection
-    (already implemented in presence.py and messenger.py)
+    (already implemented in presence.py and messenger.py; the engine's
+    HubBridge.query_socket applies the same pid check to cached records, #566)
 
 ### what the daemon renders to DisplayTap
 
