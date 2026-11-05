@@ -329,7 +329,7 @@ from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
 def orphan():
     if os.fork():
         return
-    os.setsid()
+    # Detach by double fork; the orphan keeps the adapter's session.
     if os.fork():
         os._exit(0)
     for fd in (0, 1, 2):
@@ -367,7 +367,7 @@ if os.environ['ACP_OWNED_CHILD_MODE'] == 'close':
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["prompt", "close"])
-async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_process(tmp_path, mode):
+async def test_close_recovers_fast_detached_orphan_and_preserves_other_session_process(tmp_path, mode):
     child_file = tmp_path / "child.json"
     runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
         "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": mode,
@@ -389,7 +389,6 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_pro
         await runner.start()
         outsider = await asyncio.create_subprocess_exec(
             sys.executable, "-c", "import time; time.sleep(60)", cwd=str(tmp_path),
-            env={**os.environ, "KOLLAB_ACP_PROCESS_NONCE": "different-owned-run"},
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
         )
@@ -407,7 +406,7 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_pro
         child = child_identity()
         assert child is None or not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
         assert outsider.returncode is None and outsider_owner.is_running()
-        assert not runner._owned_processes and runner._process_nonce is None
+        assert not runner._owned_processes and runner._adapter_pid is None
     finally:
         with contextlib.suppress(Exception):
             await runner.close()
@@ -423,39 +422,74 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_pro
             await asyncio.wait_for(outsider.wait(), timeout=2)
 
 
-@pytest.mark.parametrize("older", [False, True])
-def test_nonce_lookup_rejects_old_birth_or_identity_reused_during_environment_read(tmp_path, monkeypatch, older):
+def _session_lookup_runner(tmp_path, monkeypatch, candidate):
     runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
-    runner._process_nonce = "owned-nonce"
+    runner._adapter_pid = 4242
     runner._process_started_at = 10
     runner._process_username = "owned-test-user"
+
+    def no_process(pid):
+        raise psutil.NoSuchProcess(pid)
+
+    # The adapter (session leader) has exited and its pid names nothing.
+    monkeypatch.setattr(bridge_mod.psutil, "Process", no_process)
+    monkeypatch.setattr(bridge_mod.psutil, "process_iter", lambda attrs: iter([candidate]))
+    return runner
+
+
+@pytest.mark.parametrize("older", [False, True])
+def test_session_lookup_rejects_old_birth_or_identity_reused_during_session_read(tmp_path, monkeypatch, older):
     candidate = Mock()
     candidate.pid = 9999
     candidate.info = {"pid": 9999, "create_time": 9 if older else 11, "username": "owned-test-user"}
     candidate.is_running.side_effect = [True, False]
-    candidate.environ.return_value = {"KOLLAB_ACP_PROCESS_NONCE": "owned-nonce"}
-    monkeypatch.setattr(bridge_mod.psutil, "process_iter", lambda attrs: iter([candidate]))
+    sessions = []
+    monkeypatch.setattr(bridge_mod.os, "getsid", lambda pid: sessions.append(pid) or 4242)
+    runner = _session_lookup_runner(tmp_path, monkeypatch, candidate)
     runner._recover_tagged_processes()
     assert not runner._owned_processes
     candidate.create_time.assert_not_called()
-    if older:
-        candidate.environ.assert_not_called()
+    candidate.environ.assert_not_called()
+    assert sessions == ([] if older else [9999])
 
 
-def test_nonce_lookup_skips_a_process_whose_environment_psutil_cannot_read(tmp_path, monkeypatch):
-    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
-    runner._process_nonce = "owned-nonce"
-    runner._process_started_at = 10
-    runner._process_username = "owned-test-user"
+def test_session_lookup_adopts_same_session_orphan_and_skips_unreadable_session(tmp_path, monkeypatch):
     candidate = Mock()
     candidate.pid = 9999
     candidate.info = {"pid": 9999, "create_time": 11, "username": "owned-test-user"}
     candidate.is_running.return_value = True
-    # psutil on macOS raises SystemError (not psutil.Error) while a process exits
-    candidate.environ.side_effect = SystemError("returned a result with an exception set")
-    monkeypatch.setattr(bridge_mod.psutil, "process_iter", lambda attrs: iter([candidate]))
+    monkeypatch.setattr(bridge_mod.os, "getsid", Mock(side_effect=PermissionError(1, "denied")))
+    runner = _session_lookup_runner(tmp_path, monkeypatch, candidate)
     runner._recover_tagged_processes()
     assert not runner._owned_processes
+    monkeypatch.setattr(bridge_mod.os, "getsid", lambda pid: 4242)
+    runner._recover_tagged_processes()
+    assert runner._owned_processes == {9999: candidate}
+    candidate.environ.assert_not_called()
+
+
+@pytest.mark.skipif(not hasattr(os, "getsid"), reason="requires POSIX sessions")
+@pytest.mark.asyncio
+async def test_session_lookup_ignores_session_whose_leader_pid_was_reused(tmp_path):
+    """A reused adapter pid that leads another session must not be adopted."""
+    stranger = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(60)", cwd=str(tmp_path),
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        assert os.getsid(stranger.pid) == stranger.pid
+        runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+        # The recorded adapter had this pid; the number now names the stranger.
+        runner._adapter_pid = stranger.pid
+        runner._process_started_at = 0
+        runner._process_username = psutil.Process().username()
+        runner._recover_tagged_processes()
+        assert stranger.pid not in runner._owned_processes
+        assert stranger.returncode is None
+    finally:
+        stranger.kill()
+        await asyncio.wait_for(stranger.wait(), timeout=2)
 
 
 @pytest.mark.asyncio
@@ -518,7 +552,7 @@ async def test_startup_failure_recovers_orphan_after_root_exited_before_ownershi
             child = psutil.Process(identity["pid"])
             if child.create_time() == identity["birth"]:
                 assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
-        assert runner._process_nonce is None and not runner._owned_processes
+        assert runner._adapter_pid is None and not runner._owned_processes
     finally:
         with contextlib.suppress(Exception):
             await runner.close()
