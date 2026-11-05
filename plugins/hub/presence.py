@@ -733,13 +733,16 @@ async def wait_until_socket_answers(
     handshake seconds past bind-return (windows-smoke ConnectionRefused against
     an already-bound path, #692). Presence must advertise only sockets that
     answer, so the hub plugin gates its presence publish on this probe.
-    POSIX: a unix connect proves the listener; Windows: local_ipc.connect_blocking
-    performs the full HMAC handshake. Returns False when the deadline passes
-    without an answer.
+    POSIX: a unix connect proves the listener; Windows: local_ipc.connect
+    performs the full HMAC handshake. The probe is awaited, never run inline
+    on this loop: the answering server lives on this same loop, and a probe
+    that blocks the loop starves it of the turns needed to answer, so the
+    handshake can only ever time out (#692 rework). Returns False when the
+    deadline passes without an answer.
     """
     deadline = time.monotonic() + timeout
     while True:
-        if PresenceManager._socket_responds(socket_path):
+        if await PresenceManager._socket_responds_async(socket_path):
             return True
         if time.monotonic() >= deadline:
             return False

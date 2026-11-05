@@ -5667,6 +5667,23 @@ class HubPlugin(BasePlugin):
                 f"(identity={identity}): {e}"
             )
 
+    async def _advertise_presence_when_socket_answers(self, socket_path: str) -> None:
+        """Publish presence once the endpoint answers a handshake (#692).
+
+        Bind-return is not serving: a busy startup loop can delay the first
+        handshake seconds past bind-return, and a record advertising a socket
+        that refuses breaks every client that trusts it. When the endpoint
+        never answers within the deadline the publish still goes out --
+        degraded, discoverable-but-refusing -- with an error logged so the
+        condition stays visible.
+        """
+        if not await wait_until_socket_answers(socket_path):
+            logger.error(
+                f"socket {socket_path} never answered a handshake within "
+                "30s — publishing presence anyway; clients may see refusals"
+            )
+        self._presence.publish()
+
     async def _start_hub(self) -> None:
         """Start hub services (called after all plugins init)."""
         if self._started or self._starting or not self._identity:
@@ -6021,12 +6038,7 @@ class HubPlugin(BasePlugin):
             # Bind-return is not serving: under a busy startup loop the first
             # handshake can land seconds after the listener exists (#692), so
             # the advertise waits for the endpoint to actually answer one.
-            if not await wait_until_socket_answers(socket_path):
-                logger.error(
-                    f"socket {socket_path} never answered a handshake within "
-                    "30s — publishing presence anyway; clients may see refusals"
-                )
-            self._presence.publish()
+            await self._advertise_presence_when_socket_answers(socket_path)
 
             # Signal daemon-ready if running in fork-daemon mode
             try:

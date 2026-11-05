@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running during the upgrade keep heartbeating under their original
   HOME-scoped path and remain undiscoverable from a different HOME until
   restarted; Windows presence remains HOME-scoped.
+- Hub presence is advertised only after the local IPC endpoint answers a handshake: the gating probe awaits the handshake off the event loop (the answering server runs on that same loop, which a blocking probe starves of the turns needed to answer), and when the endpoint never answers within 30s the record still publishes, degraded, with an error logged (#692).
 
 ## [0.19.1] - 2026-11-03
 
