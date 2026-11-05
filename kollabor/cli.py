@@ -539,7 +539,7 @@ Telegram bridge setup (run inside interactive mode):
         default=None,
         metavar="CMD",
         help=(
-            "Hub CLI: status, agents, stop <name|all>, capture <name> [lines] [--raw], "
+            "Hub CLI: status, agents, stop <name|all>, capture <name> [lines] [--cursor N] [--follow] [--raw], "
             "msg <name> <text>, broadcast <text>, where <name>, user [name], on/off, "
             "org <name> [mission] [--dir FOLDER] [--only a,b | --without a,b]. "
             "Pass '--hub help' for the full list. "
@@ -1479,7 +1479,7 @@ def _print_hub_help() -> None:
     print("  halt [--reason <text>] [--revoke <device>]   halt the network (a person's terminal only)")
     print("  resume [--confirm <8-hex> | --local]         propose, confirm or lift here only")
     print(
-        "  capture <name> [lines] [--raw]  readable transcript; --raw keeps terminal output"
+        "  capture <name> [lines] [--raw]  readable transcript; --cursor N resumes a marker; --follow drains pages"
     )
     print("  msg <name> <text>          send a direct message to one agent")
     print("  broadcast <text>           send a message to all online agents")
@@ -1685,7 +1685,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
         status                  show online agents
         agents / list           same as status
         stop <identity|all>     send shutdown signal (alias: kill)
-        capture <name> [n]      readable transcript; add --raw for terminal output
+        capture <name> [n]      readable transcript; --cursor N resumes; --follow drains; --raw terminal
         msg <name> <text>       send hub message to agent
         broadcast <text>        send message to all agents
         user [name]             show or set hub user name
@@ -1953,18 +1953,54 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "capture":
         raw = "--raw" in rest
-        capture_args = [arg for arg in rest if arg != "--raw"]
+        follow = "--follow" in rest
+        capture_args = [arg for arg in rest if arg not in ("--raw", "--follow")]
         if not capture_args:
-            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
+            print(
+                "usage: kollab --hub capture <identity|agent@device> [lines] "
+                "[--cursor N] [--follow] [--raw]"
+            )
             sys.exit(1)
         target = capture_args[0]
-        if len(capture_args) > 2:
-            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
+        positionals = capture_args[1:]
+        cursor: Any = None
+        if "--cursor" in positionals:
+            flag_index = positionals.index("--cursor")
+            value_index = flag_index + 1
+            if value_index >= len(positionals):
+                print(
+                    "usage: kollab --hub capture <identity|agent@device> [lines] "
+                    "[--cursor N] [--follow] [--raw]"
+                )
+                sys.exit(2)
+            cursor_value = positionals[value_index]
+            positionals = [
+                arg
+                for index, arg in enumerate(positionals)
+                if index not in (flag_index, value_index)
+            ]
+            try:
+                int(cursor_value)
+            except ValueError:
+                print(
+                    "usage: kollab --hub capture <identity|agent@device> [lines] "
+                    "[--cursor N] [--follow] [--raw]"
+                )
+                sys.exit(2)
+            cursor = cursor_value
+        if len(positionals) > 1:
+            print(
+                "usage: kollab --hub capture <identity|agent@device> [lines] "
+                "[--cursor N] [--follow] [--raw]"
+            )
             sys.exit(2)
         try:
-            num_lines = int(capture_args[1]) if len(capture_args) > 1 else 50
+            num_lines = int(positionals[0]) if positionals else 50
         except ValueError:
-            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
+            print(
+                "usage: kollab --hub capture <identity|agent@device> [lines] "
+                "[--cursor N] [--follow] [--raw]"
+            )
             sys.exit(2)
         from plugins.hub.device_names import parse_handle
 
@@ -2022,20 +2058,68 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 lines=num_lines,
                 capture_format="json",
                 max_chars=10_000,
+                cursor=cursor,
             )
             if capture_error:
                 print(
                     f"capture failed for '{target}': {capture_error}", file=sys.stderr
                 )
                 sys.exit(1)
-            print(
-                render_transcript(
-                    capture,
-                    identity=target,
-                    max_lines=num_lines,
-                    max_chars=10_000,
-                )
+            printed = render_transcript(
+                capture,
+                identity=target,
+                max_lines=num_lines,
+                max_chars=10_000,
             )
+            print(printed)
+            if follow:
+                # The truncated marker's next_cursor is the only continuation
+                # handle a script has; follow pages until the window is done
+                # or a peer stops advancing the cursor (bounded, one page per
+                # round trip; a stuck cursor keeps its marker instead of
+                # spinning -- sweep-class guard, mirrors the bounded/repeat-
+                # guard philosophy of scripts/pr_gates_dod.py).
+                follow_budget = 50
+                while follow_budget > 0:
+                    marker_cursor = (capture or {}).get("next_cursor")
+                    if not capture or not capture.get("truncated") or not marker_cursor:
+                        break
+                    capture, capture_error = await AgentMessenger.request_capture(
+                        socket_path,
+                        lines=num_lines,
+                        capture_format="json",
+                        max_chars=10_000,
+                        cursor=marker_cursor,
+                    )
+                    if capture_error:
+                        print(
+                            f"capture failed for '{target}': {capture_error}",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                    follow_budget -= 1
+                    if capture.get("truncated") and capture.get("next_cursor") == marker_cursor:
+                        # Stuck peer: same marker again. Stop instead of
+                        # looping on an unadvancing cursor; the just-printed
+                        # page already carries the marker.
+                        print(
+                            "... (capture stopped: peer did not advance "
+                            "next_cursor; use --cursor N to retry)"
+                        )
+                        break
+                    page = render_transcript(
+                        capture,
+                        identity=target,
+                        max_lines=num_lines,
+                        max_chars=10_000,
+                    )
+                    if page.strip():
+                        print(page)
+                else:
+                    print(
+                        "... (capture stopped: too many pages, use --cursor N "
+                        "to continue)"
+                    )
 
     elif subcmd == "msg":
         if len(rest) < 2:
