@@ -8844,7 +8844,8 @@ class HubPlugin(BasePlugin):
         sender = message.from_identity or message.from_agent or ""
         acp = self.event_bus.get_service("acp_orchestrator")
         if acp is not None and acp.active and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}):
-            acp.observe_notification(message)
+            if not acp.observe_notification(message):
+                return {"status": "refused", "request_id": message.id}
             return {"status": "queued", "request_id": message.id}
         turns[message.id] = _NetworkTurn(
             handle=sender,
@@ -8936,8 +8937,16 @@ class HubPlugin(BasePlugin):
                 )
         return result
 
-    async def _on_message_received(self, message: HubMessage) -> None:
-        """Handle an incoming message from another agent."""
+    def _unmark_refused_message(self, msg_key: tuple, content_hash: str) -> None:
+        """Forget a message the ACP queue refused, so its retransmission is admitted (#581)."""
+        self._seen_messages.pop(msg_key, None)
+        self._seen_content_hashes.pop(content_hash, None)
+
+    async def _on_message_received(self, message: HubMessage) -> bool | None:
+        """Handle an incoming message from another agent.
+
+        Returns False when the message was refused and must not be acknowledged.
+        """
         if self._solo:
             # Peers cannot discover a solo agent; this covers direct sends by
             # name (`kollab --hub send`) so nothing reaches its conversation.
@@ -9443,7 +9452,9 @@ class HubPlugin(BasePlugin):
                         )
                 elif message.reply_to or message.to in {"*", "all", "everyone", "team", "project"}:
                     if dispatch_mode == "acp":
-                        acp.observe_notification(message)
+                        if not acp.observe_notification(message):
+                            self._unmark_refused_message(msg_key, _content_hash)
+                            return False
                 elif wake_decision.should_trigger:
                     await self._submit_authenticated_agent_message(message, llm_service)
                 else:
@@ -9701,9 +9712,12 @@ class HubPlugin(BasePlugin):
                         if dispatch_mode in {"acp", "unavailable"} and hasattr(
                             llm_service, "submit_human_input"
                         ):
-                            await self._submit_authenticated_agent_message(
+                            admitted = await self._submit_authenticated_agent_message(
                                 message, llm_service
                             )
+                            if admitted.get("status") == "refused":
+                                self._unmark_refused_message(msg_key, _content_hash)
+                                return False
                             return
                     await self.event_bus.emit_with_hooks(
                         EventType.TRIGGER_LLM_CONTINUE,

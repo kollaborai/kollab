@@ -811,29 +811,35 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
         await orchestrator.close()
 
 
-def test_a_full_retry_queue_warns_before_dropping(monkeypatch, caplog):
+def test_a_full_retry_queue_refuses_the_new_message_instead_of_evicting(monkeypatch, caplog):
     orchestrator = mod.ACPOrchestrator(Bus())
 
     def failing_record(*args, **kwargs):
         raise OSError("disk full")
 
     monkeypatch.setattr(orchestrator, "_record_user", failing_record)
+    results = []
     with caplog.at_level("WARNING", logger=mod.logger.name):
         for index in range(21):
-            orchestrator.observe_notification(
-                HubMessage(
-                    action="message",
-                    from_agent="peer-id-1",
-                    from_identity="peer-1",
-                    to="*",
-                    content=f"NOTE_{index}",
-                    thread_id=None,
-                    reply_to="",
+            results.append(
+                orchestrator.observe_notification(
+                    HubMessage(
+                        action="message",
+                        from_agent="peer-id-1",
+                        from_identity="peer-1",
+                        to="*",
+                        content=f"NOTE_{index}",
+                        thread_id=None,
+                        reply_to="",
+                    )
                 )
             )
     full = [r for r in caplog.records if "retry queue is full" in r.getMessage()]
     assert len(full) == 1
+    # The 21st message is refused, and the oldest accepted one stays queued.
+    assert results == [True] * 20 + [False]
     assert len(orchestrator._unwritten_observations) == 20
+    assert orchestrator._unwritten_observations[0].content.endswith("NOTE_0")
 
 
 def _observation(content):

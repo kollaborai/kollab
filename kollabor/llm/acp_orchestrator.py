@@ -659,15 +659,20 @@ class ACPOrchestrator:
         if task is not None:
             self._turn_user_tasks[turn_key] = task
 
-    def observe_notification(self, message: Any) -> None:
+    def observe_notification(self, message: Any) -> bool:
+        """Admit a peer observation. False means refused: nothing was admitted.
+
+        A message whose history row fails waits in the retry queue until a row
+        lands. The queue is bounded: when it is full, the new message is refused
+        instead of evicting an accepted one, and the hub must not acknowledge it
+        (#581).
+        """
         thread = f" [thread:{message.thread_id}]" if message.thread_id else ""
         reply = f" [reply-to:{message.reply_to}]" if message.reply_to else ""
         entry = AgentHudEntry(
             section="hub", label=f"{message.from_identity}->{message.to}",
             content=f"[hub channel: {message.from_identity} -> {message.to}{thread}{reply}]\n{message.content}",
         )
-        self._observations.append(entry)
-        self._observation_count += 1
         # Written as it arrives, like a native agent's hub message, so a watching
         # page reloads it now rather than when the running turn ends. The flush
         # hands the batch to the model without writing it again.
@@ -681,35 +686,36 @@ class ACPOrchestrator:
                 track_completion=True,
             )
         except Exception as error:
-            logger.warning(
-                "ACP observation history write failed (%s)", type(error).__name__
-            )
             pending = self._unwritten_observations
             if len(pending) == pending.maxlen:
                 logger.warning(
-                    "ACP observation retry queue is full; the oldest message "
-                    "waiting for a history row is dropped"
+                    "ACP observation retry queue is full; the message was refused "
+                    "and not acknowledged"
                 )
+                return False
+            logger.warning(
+                "ACP observation history write failed (%s)", type(error).__name__
+            )
             pending.append(entry)
         else:
             self._observation_rows.append(row_id)
+        self._observations.append(entry)
+        self._observation_count += 1
         if not self.is_processing:
             self._flush_observations()
+        return True
 
     def _flush_observations(self) -> None:
-        if not self._observations or self._closed or self._runner is None:
+        if self._closed or self._runner is None:
             return
-        discarded = self._observation_count - len(self._observations)
-        entries = list(self._observations)
-        if discarded:
-            entries.insert(0, AgentHudEntry("status", "observations", f"{discarded} older observations omitted."))
-        text = format_agent_hud(entries)
-        # A message whose arrival row failed gets one more try here. After a
-        # second failure it reaches history only through the batch row, which
-        # is written when no message has a row of its own.
-        unwritten = list(self._unwritten_observations)
+        if not self._observations and not self._unwritten_observations:
+            return
+        # A message whose history row is still missing keeps its place in the
+        # retry queue until a row lands. A failed retry is kept, never dropped
+        # (#581).
+        pending = list(self._unwritten_observations)
         self._unwritten_observations.clear()
-        for entry in unwritten:
+        for entry in pending:
             row_id = f"observations-{uuid.uuid4().hex}"
             try:
                 self._record_user(
@@ -724,16 +730,28 @@ class ACPOrchestrator:
                     "ACP observation history write failed again (%s)",
                     type(error).__name__,
                 )
+                self._unwritten_observations.append(entry)
             else:
                 self._observation_rows.append(row_id)
         rows, self._observation_rows = self._observation_rows, []
+        if not self._observations:
+            # Only retries ran. Their messages already reached the model in an
+            # earlier batch, so their own rows are the record.
+            for row in rows:
+                self._parents.pop(row, None)
+                self._user_history_tasks.pop(row, None)
+            return
+        discarded = self._observation_count - len(self._observations)
+        entries = list(self._observations)
+        if discarded:
+            entries.insert(0, AgentHudEntry("status", "observations", f"{discarded} older observations omitted."))
+        text = format_agent_hud(entries)
         # The turn takes the newest row's id, so its reply threads under that
-        # row; the older rows' bookkeeping goes now.
+        # row. The batch gets no row of its own: each message is persisted by
+        # its own row, so a batch row would only duplicate them (#581).
         request_id = rows[-1] if rows else f"observations-{uuid.uuid4().hex}"
         try:
-            self.admit(
-                text, request_id=request_id, source="observation", record=not rows
-            )
+            self.admit(text, request_id=request_id, source="observation", record=False)
         except Exception:
             self._observation_rows = rows + self._observation_rows
             return
