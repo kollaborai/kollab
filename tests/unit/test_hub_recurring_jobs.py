@@ -7,7 +7,6 @@ file; only the hub router is replaced, to record what would have been sent.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -222,3 +221,32 @@ async def test_failed_send_is_not_counted_and_does_not_retry_early(
     assert len(sent_to(plugin)) == 1
     await plugin._run_hub_jobs(now=600.0)
     assert len(sent_to(plugin)) == 2
+
+
+@pytest.mark.asyncio
+async def test_job_aimed_at_the_coordinator_itself_is_delivered_locally(
+    tmp_path, monkeypatch
+):
+    plugin = make_plugin(
+        tmp_path,
+        monkeypatch,
+        jobs={
+            "koordinator_refresh": {
+                "enabled": True,
+                "schedule": "1m",
+                "target": "koordinator",
+            }
+        },
+    )
+    plugin._on_message_received = AsyncMock()
+    await plugin._run_hub_jobs(now=0.0)
+    await plugin._run_hub_jobs(now=60.0)
+    plugin._on_message_received.assert_awaited_once()
+    assert (
+        "never merge" in plugin._on_message_received.await_args.args[0].content.lower()
+    )
+
+
+def test_each_job_has_a_settings_toggle():
+    paths = {w["config_path"] for w in HubPlugin.get_config_widgets()["widgets"]}
+    assert {f"plugins.hub.hub_jobs.{name}.enabled" for name in JOBS} <= paths
