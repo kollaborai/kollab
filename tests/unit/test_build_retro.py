@@ -217,5 +217,4 @@ class TestNonObjectRoot:
         bad.write_text("[1, 2]", encoding="utf-8")
         assert retro.main(["--config", str(bad)]) == 2
         err = capsys.readouterr().err
-        assert "config error" in err
-        assert "Traceback" not in err
+        assert err == "build_retro: config error: config root must be a JSON object\n"
