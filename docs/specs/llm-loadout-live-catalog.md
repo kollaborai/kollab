@@ -186,9 +186,13 @@ callers below read.
 non-blocking). Once the catalog has entries it is the provider's list, not a
 supplement to the registry (#558):
 
-- `cached_provider_models(profile)` entries, plus the profile's own model
+- `cached_provider_models(profile, max_age=inf)` entries, plus the profile's own
+  model. No TTL: launch paths (`--llm`, the startup default, `/llm <name>`)
+  never refresh, and an expired entry is still the last list served
 - registry models only while the catalog is cold or empty: no fetch yet, or
   the provider has no listing API
+- a catalog is authoritative only when complete: the Anthropic fetcher reads
+  every `/v1/models` page and returns empty, never partial, if it cannot
 - existing dedup rule unchanged: explicit shadows implicit, first provider
   profile wins on name collision
 

@@ -396,9 +396,11 @@ async def _openrouter_models() -> List[Dict[str, Any]]:
 
 
 # Anthropic models endpoint. Requires an API key; returns only models the
-# account can access. No standard pagination beyond a single page here.
+# account can access. Paged with ``limit`` / ``after_id``; every page is read.
 ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_API_VERSION = "2023-06-01"
+ANTHROPIC_PAGE_LIMIT = 1000  # the API maximum; the default is 20
+ANTHROPIC_MAX_PAGES = 20  # bound on a server that never stops saying has_more
 
 
 async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
@@ -433,11 +435,32 @@ async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
         "anthropic-version": ANTHROPIC_API_VERSION,
     }
 
+    # The endpoint pages (20 by default): read every page, since the loadout
+    # list treats this catalog as the account's whole list (#558). A listing
+    # that cannot be completed is empty, never partial, so the registry still
+    # seeds the picker instead of a truncated list hiding models.
+    pages: List[Dict[str, Any]] = []
+    after_id: Optional[str] = None
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+            for _ in range(ANTHROPIC_MAX_PAGES):
+                params: Dict[str, Any] = {"limit": ANTHROPIC_PAGE_LIMIT}
+                if after_id:
+                    params["after_id"] = after_id
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                page = response.json()
+                pages.append(page)
+                if not page.get("has_more"):
+                    break
+                next_id = str(page.get("last_id") or "")
+                if not next_id or next_id == after_id:
+                    logger.warning("Anthropic model catalog paging did not advance")
+                    return []
+                after_id = next_id
+            else:
+                logger.warning("Anthropic model catalog has too many pages")
+                return []
     except httpx.HTTPStatusError as e:
         logger.warning(
             "Anthropic model catalog fetch failed (HTTP %s) at %s",
@@ -453,7 +476,7 @@ async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
         return []
 
     result: List[Dict[str, Any]] = []
-    for model in data.get("data", []):
+    for model in (m for page in pages for m in page.get("data", [])):
         model_id = str(model.get("id") or "")
         if not model_id:
             continue

@@ -8,6 +8,15 @@ import pytest
 from kollabor_ai import model_catalog
 
 
+@pytest.fixture(autouse=True)
+def _clean_memory_cache():
+    """Tests here store catalogs under shared profile names; drop them so they
+    cannot leak into later modules that list loadouts."""
+    model_catalog._MEMORY_CACHE.clear()
+    yield
+    model_catalog._MEMORY_CACHE.clear()
+
+
 class _Profile:
     def __init__(self, provider="", auth_type=""):
         self._provider = provider
@@ -63,7 +72,7 @@ async def test_anthropic_dispatch(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def get(self, url, headers=None):
+        async def get(self, url, headers=None, params=None):
             assert url == f"{model_catalog.ANTHROPIC_DEFAULT_BASE_URL}/v1/models"
             assert headers.get("x-api-key") == "sk-ant-xyz"
             return FakeResp()

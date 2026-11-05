@@ -289,11 +289,18 @@ class LoadoutManager:
 
     @staticmethod
     def _cached_catalog(profile: Any) -> List[Dict[str, Any]]:
-        """This profile's cached live catalog. Empty when cold or unavailable."""
+        """This profile's cached live catalog. Empty when cold or unavailable.
+
+        Read with no TTL: an entry older than the cache's refresh interval is
+        still the last list the provider served. Launch paths (``kollab
+        --llm``, the startup default, ``/llm <name>``) never refresh it, and
+        treating it as cold would bring the registry back and offer a model
+        the account lacks (#558). The pickers refresh on open.
+        """
         try:
             from kollabor_ai.model_catalog import cached_provider_models
 
-            return list(cached_provider_models(profile))
+            return list(cached_provider_models(profile, max_age=float("inf")))
         except Exception as exc:  # noqa: BLE001 -- catalog must never break listing
             logger.debug("cached catalog unavailable for %s: %s", profile, exc)
             return []
