@@ -1613,9 +1613,40 @@ class LLMService:
                 # ``_provider_error``), so the next turn can still report the
                 # previous profile's error.
                 provider_config = create_config_from_profile(profile.to_dict())
+                revision = profile.revision
                 api_reinitialized = await self.api_service.reinitialize_provider(
                     profile
                 )
+                # Re-initialization can look up the OAuth model (profile-scoped
+                # tokens skip the lookup above), so an edit or replacement made
+                # meanwhile refuses this switch and restores the previous provider.
+                if (
+                    profile.revision != revision
+                    or self.profile_manager.get_profile(profile_name) is not profile
+                ):
+                    logger.warning(
+                        "Profile %r was edited while its provider was being "
+                        "initialized; switch cancelled",
+                        profile_name,
+                    )
+                    if (
+                        active_profile is not None
+                        and active_profile is not profile
+                        and str(getattr(active_profile, "provider", "") or "").lower()
+                        != "acp"
+                    ):
+                        try:
+                            await self.api_service.reinitialize_provider(
+                                active_profile
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                "Could not restore profile %r after a cancelled "
+                                "switch (%s)",
+                                active_profile.name,
+                                type(exc).__name__,
+                            )
+                    return False
                 if not api_reinitialized:
                     logger.warning(
                         "API service could not reinitialize for profile '%s'",
