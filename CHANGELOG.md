@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mentiko attaches to an existing live hub session without spawning a second daemon or duplicating its system-prompt history (#708).
 - A tool result or agent update whose long text pushes it over the engine's 16 MB frame limit is now cut to fit and still reaches the chat, instead of being dropped with its reply marked incomplete. An update that is over the limit because of many small items is still dropped (#544).
 - A request for an agent that has exited no longer reaches a new agent that took over its socket under the same name: the engine reads the agent's record fresh before it uses that socket, so the request fails instead of returning the new agent's output, including when the agent restarted in place (#566).
+- A live hub agent keeps its presence record and socket when its heartbeat is over ten minutes old and its socket briefly does not answer; peers now remove them only once the agent's process has exited or its process ID has been reused by another process (#575)
 
 ## [0.19.1] - 2026-11-03
 
