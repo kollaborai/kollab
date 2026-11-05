@@ -210,6 +210,53 @@ def test_stale_catalog_is_still_the_provider_list():
     assert manager.resolve("gpt-6-luna")[0] is None
 
 
+def test_catalog_cached_under_another_provider_is_not_this_profiles_list():
+    """A profile edited to a new provider keeps its name, and the cache is keyed
+    by name. The catalog it had under the old provider must not become its
+    list under the new one: a Claude id would be sent to Gemini (#558)."""
+    profile = _Profile(name="work", provider="anthropic", model="claude-opus-4-1")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    with patch.object(mc.time, "time", return_value=time.time() - 7200):
+        _seed(profile, ["claude-sonnet-4-5", "claude-opus-4-1"])
+    mc._MEMORY_CACHE.clear()  # a fresh process reads only the disk cache
+
+    profile._provider = "gemini"  # edited in place: same name, new provider
+    profile._model = "gemini-2.5-pro"
+
+    names = [lo.name for lo in manager.list_loadouts()]
+    assert not any(n.startswith("claude-") for n in names)
+    assert set(names) >= {m for m, _ in list_models_for_provider("gemini")}
+    assert manager.resolve("claude-opus-4-1")[0] is None
+    assert manager.resolve("gemini-2.5-flash")[0] is not None
+
+    # Gemini has no listing API, so a refresh cannot repair it either.
+    assert asyncio.run(manager.refresh_catalogs()) == {"work": 0}
+    assert manager.resolve("claude-opus-4-1")[0] is None
+
+
+def test_catalog_cached_for_another_endpoint_is_not_this_profiles_list():
+    """Same name and provider, different endpoint: the old server's catalog is
+    not the new server's list."""
+
+    class _Endpoint(_Profile):
+        endpoint = "http://localhost:1234/v1"
+
+        def get_endpoint(self):
+            return self.endpoint
+
+    profile = _Endpoint(name="local", provider="custom")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    _seed(profile, ["old-server-model"])
+    mc._MEMORY_CACHE.clear()
+    assert [lo.name for lo in manager.list_loadouts()] == ["old-server-model"]
+
+    profile.endpoint = "http://localhost:8080/v1"  # edited in place
+    assert manager.list_loadouts() == []
+
+    profile.endpoint = "http://localhost:1234/v1/"  # trailing slash: same server
+    assert [lo.name for lo in manager.list_loadouts()] == ["old-server-model"]
+
+
 def _anthropic_pages(monkeypatch, pages):
     """Serve ``pages`` from a mocked GET /v1/models, keyed by ``after_id``."""
 
