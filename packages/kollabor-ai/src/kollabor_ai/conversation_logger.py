@@ -799,7 +799,9 @@ class KollaborConversationLogger:
                 self._edit_reparent(dropped)  # others thread past it from here on
                 with open(path, "rb") as log, open(temp, "ab") as new:
                     log.seek(end)
-                    new.write(log.read())  # appended since the cut read the log
+                    # Appended since the cut read the log, possibly by a logger that had not
+                    # read the cut yet: its rows may still hang under a reply this cut drops.
+                    new.write(self._thread_past(log.read(), dropped))
                 os.replace(temp, path)
             except BaseException:
                 Path(temp).unlink(missing_ok=True)
@@ -810,6 +812,27 @@ class KollaborConversationLogger:
                 raise
             self._reparent.update(dropped)
             return dropped
+
+    @staticmethod
+    def _thread_past(tail: bytes, dropped: Dict[str, Any]) -> bytes:
+        """`tail` with each row's parent walked through `dropped`; other bytes kept as written."""
+        out = []
+        for line in tail.splitlines(keepends=True):
+            try:
+                record = json.loads(line)
+            except ValueError:  # includes a line still being written
+                out.append(line)
+                continue
+            parent = record.get("parentUuid") if isinstance(record, dict) else None
+            seen = set()
+            while parent in dropped and parent not in seen:
+                seen.add(parent)
+                parent = dropped[parent]
+            if isinstance(record, dict) and record.get("parentUuid") != parent:
+                record["parentUuid"] = parent
+                line = (json.dumps(record) + "\n").encode()
+            out.append(line)
+        return b"".join(out)
 
     def _rewrite_voice_turn(
         self, path: Path, turn_id: str, count: int, edits: Dict[int, Optional[str]]
