@@ -319,42 +319,84 @@ class KollaborConversationLogger:
         """
         return Path(self.session_file).with_suffix(".reparent")
 
+    def _reparent_lock_path(self) -> Path:
+        """Stable lock path for a sidecar that is replaced atomically."""
+        path = self._reparent_path()
+        return path.with_name(f".{path.name}.lock")
+
     def _read_reparent(self) -> None:
         """Take the cuts other loggers (or processes) share as `_reparent`.
 
         Replaces it, so a cut that was taken back (a failed swap) is forgotten too.
+        Readers and writers share a separate stable lock because the sidecar
+        itself is replaced atomically.
         """
         path = self._reparent_path()
         try:
-            info = path.stat()
-            signature = (info.st_mtime_ns, info.st_size)
-            if signature == self._reparent_seen:
-                return
-            with locked_file(path, "r", private=True) as f:
-                shared = json.load(f)
-        except (OSError, ValueError):
-            return  # none yet, or unreadable: the next append looks again
+            with locked_file(self._reparent_lock_path(), "a+", private=True):
+                try:
+                    info = path.stat()
+                    signature = (info.st_mtime_ns, info.st_size)
+                    if signature == self._reparent_seen:
+                        return
+                    with locked_file(path, "r", private=True) as f:
+                        shared = json.load(f)
+                except (OSError, ValueError):
+                    return  # none yet, or unreadable: the next append looks again
+        except OSError:
+            return
         if isinstance(shared, dict):
             self._reparent = shared
             self._reparent_seen = signature
 
     def _edit_reparent(self, add: Dict[str, Any], remove: Any = ()) -> None:
-        """Add cuts to the shared file, or take some back, under its lock.
+        """Atomically add cuts to the shared file, or take some back.
 
-        Written over the old text and cut to length, never emptied first, so a
-        failed write leaves the cuts other loggers recorded.
+        A stable sibling lock coordinates readers and writers across the atomic
+        replacement. Invalid sidecar data is left untouched rather than replaced
+        with an empty map during a rollback.
         """
         path = self._reparent_path()
-        os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
-        with locked_file(path, "r+", private=True) as f:
+        with locked_file(self._reparent_lock_path(), "a+", private=True):
             try:
-                shared = json.loads(f.read() or "{}")
-            except ValueError:
+                with locked_file(path, "r", private=True) as f:
+                    shared = json.load(f)
+            except FileNotFoundError:
                 shared = {}
+            except json.JSONDecodeError as e:
+                raise ValueError(f"invalid JSON in parent-rewrite sidecar {path}") from e
+            if not isinstance(shared, dict):
+                raise ValueError(f"parent-rewrite sidecar must contain a JSON object: {path}")
+
             shared = {k: v for k, v in {**shared, **add}.items() if k not in remove}
-            f.seek(0)
-            f.write(json.dumps(shared))
-            f.truncate()
+            serialized = json.dumps(shared)
+            descriptor, temporary = tempfile.mkstemp(
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+            )
+            try:
+                os.close(descriptor)
+                with locked_file(temporary, "w", private=True) as f:
+                    written = f.write(serialized)
+                    if written != len(serialized):
+                        raise OSError(
+                            f"short write updating parent-rewrite sidecar {path}: "
+                            f"wrote {written} of {len(serialized)} characters"
+                        )
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary, path)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError as cleanup_error:
+                    logger.warning(
+                        "failed to remove temporary parent-rewrite sidecar %s: %s",
+                        temporary,
+                        cleanup_error,
+                    )
+                raise
 
     async def _append_to_jsonl(self, message: Dict[str, Any]):
         """Append message to JSONL file."""
@@ -807,7 +849,7 @@ class KollaborConversationLogger:
                 Path(temp).unlink(missing_ok=True)
                 try:
                     self._edit_reparent({}, remove=dropped)  # the cut did not land
-                except OSError as e:
+                except (OSError, ValueError) as e:
                     logger.warning("voice cut not taken back from %s: %s", self._reparent_path(), e)
                 raise
             self._reparent.update(dropped)

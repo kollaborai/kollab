@@ -1,6 +1,7 @@
 """A voice rewrite by one logger must not leave another logger's child dangling (#586)."""
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -133,9 +134,13 @@ async def test_a_failed_swap_reaches_a_logger_that_already_read_the_cut(tmp_path
     root = await first.log_user_message("hi", parent_uuid=None)
     voice = await first.log_assistant_message("sunny", root, voice_turn_id="turn-1")
 
-    def read_then_refuse(*args, **kwargs):
-        second._read_reparent()  # the other logger appended while the cut was published
-        raise OSError("swap failed")
+    real_replace = os.replace
+
+    def read_then_refuse(source, destination):
+        if Path(destination) == first.session_file:
+            second._read_reparent()  # the other logger appended while the cut was published
+            raise OSError("swap failed")
+        return real_replace(source, destination)
 
     monkeypatch.setattr("kollabor_ai.conversation_logger.os.replace", read_then_refuse)
     with pytest.raises(OSError):
