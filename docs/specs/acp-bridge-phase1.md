@@ -805,6 +805,11 @@ Source inspection and scoped diffs are the evidence for this ledger. The
   born, detached and orphaned wholly between polling observations remains
   unverified; this is not proof of complete
   live process containment.
+- #602: the orchestrator bounds a runner close at `RUNNER_CLOSE_TIMEOUT` (30 s). A close
+  still running then is set aside: the orchestrator stops owning that runner so the
+  transition releases and a successor can start, the close finishes on its own task, and
+  the set-aside runner's late updates are dropped. A close that raises still stays
+  reachable for retry. Nothing is signalled by the orchestrator.
 - R10 source fixed: `a85df02f`, `41f28c25`, `d6f02499`, `d27c07ac`;
   explicit resolution ownership, cancellation settlement in the Web transport,
   waiting state cleared at the owned turn boundary, and

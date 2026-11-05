@@ -1,6 +1,7 @@
 """A stalled ACP runner close cannot hold the session transition forever (#602)."""
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -55,13 +56,15 @@ def _world(monkeypatch):
     pm = _FakeProfileManager([stalled, other, native], config=config)
     pm.set_active_profile("stalled-acp")
     bus = Bus()
-    bus.services["llm_service"] = SimpleNamespace(config=config, session_stats={})
+    display = MagicMock()
+    bus.services["llm_service"] = SimpleNamespace(
+        config=config, session_stats={}, message_display_service=display)
     orch = mod.ACPOrchestrator(bus)
     bus.services["acp_orchestrator"] = orch
     state = LocalStateService(bus.services["llm_service"], pm, event_bus=bus)
     return SimpleNamespace(
         created=created, start_entered=start_entered, close_entered=close_entered,
-        release_close=release_close, pm=pm, orch=orch, state=state, stalled=stalled, other=other,
+        release_close=release_close, display=display, pm=pm, orch=orch, state=state, stalled=stalled, other=other,
     )
 
 
@@ -98,6 +101,36 @@ async def test_cancelled_startup_with_never_returning_close_releases_the_transit
         assert w.orch.runner is successor and w.orch.active and not successor.closed
         result = await w.orch.submit("hello", source="rpc")
         assert result["text"] == "hello"
+    finally:
+        w.release_close.set()
+        await w.orch.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_set_aside_runner_cannot_write_into_its_successor(monkeypatch):
+    w = _world(monkeypatch)
+    startup = asyncio.create_task(w.orch.start(w.stalled))
+    await asyncio.wait_for(w.start_entered.wait(), timeout=5)
+    startup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(startup, timeout=5)
+    old = w.created[0]
+    try:
+        await asyncio.wait_for(w.orch.start(w.other), timeout=5)
+        assert w.orch.runner is not old
+        w.display.reset_mock()
+
+        # A response the old harness still emits after it was set aside.
+        old.update_callback({"kind": "turn_start", "request_id": "late", "turn_id": 9, "generation": 1})
+        old.update_callback({"kind": "text", "text": "late words", "request_id": "late", "turn_id": 9})
+        old.update_callback({"kind": "turn_finished", "request_id": "late", "turn_id": 9})
+        w.display.start_streaming_response.assert_not_called()
+        w.display.display_complete_response.assert_not_called()
+
+        # The successor's own turn still reaches the display.
+        w.orch.runner.update_callback(
+            {"kind": "turn_start", "request_id": "live", "turn_id": 1, "generation": 1})
+        w.display.start_streaming_response.assert_called_once()
     finally:
         w.release_close.set()
         await w.orch.shutdown()

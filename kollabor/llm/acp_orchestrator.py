@@ -35,6 +35,10 @@ from .agent_hud import AgentHudEntry, format_agent_hud
 
 logger = logging.getLogger(__name__)
 
+# How long a close may hold the session transition. The runner's own teardown
+# is bounded well under this; a close still running after it is set aside.
+RUNNER_CLOSE_TIMEOUT = 30.0
+
 
 @dataclass
 class _ObservedTurn:
@@ -95,6 +99,9 @@ class ACPOrchestrator:
         self._completion_tasks: set[asyncio.Task[Any]] = set()
         self._delivery_tasks: set[asyncio.Task[Any]] = set()
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
+        # Closes that outlived RUNNER_CLOSE_TIMEOUT: their runner is no longer
+        # this orchestrator's, but the close keeps running to completion.
+        self._quarantined_closes: set[asyncio.Task[Any]] = set()
         self._terminal_session_id: str | None = None
         self._selected_profile: LLMProfile | None = None
         # Explicit loadouts and Session-tab overrides belong to this daemon,
@@ -496,7 +503,11 @@ class ACPOrchestrator:
             owned_runner = ACPRunner(
                 acp_profile,
                 permission_bridge=permission_bridge,
-                update_callback=self._on_runner_update,
+                # A runner set aside by a stalled close may still answer; its
+                # late updates must not reach the runner that replaced it.
+                update_callback=lambda update: (
+                    self._on_runner_update(update) if owned_runner is self._runner else None
+                ),
                 lifecycle_callback=self._runner_lifecycle,
             )
             self._runner = owned_runner
@@ -1379,11 +1390,53 @@ class ACPOrchestrator:
         with self.transition():
             await self._close_owned()
 
+    async def _close_runner_bounded(self, runner: ACPRunner) -> bool:
+        """Close `runner`, but never hold the transition past RUNNER_CLOSE_TIMEOUT.
+
+        Returns True when the close finished. A close still running at the
+        bound is set aside: this orchestrator stops owning the runner (so a
+        successor can be installed), and the close task finishes on its own
+        without touching any orchestrator state. Nothing is signalled here;
+        the runner's close alone decides which processes it owns.
+        """
+        task = asyncio.ensure_future(runner.close())
+        try:
+            await asyncio.wait({task}, timeout=RUNNER_CLOSE_TIMEOUT)
+        except BaseException:
+            # Cancelled while closing: pass the cancellation to the close, as
+            # an inline await would, and give it the same bound to settle.
+            task.cancel()
+            await asyncio.wait({task}, timeout=RUNNER_CLOSE_TIMEOUT)
+            if not task.done():
+                self._set_aside_close(runner, task)
+            elif not task.cancelled():
+                task.exception()
+            raise
+        if not task.done():
+            self._set_aside_close(runner, task)
+            return False
+        task.result()
+        return True
+
+    def _set_aside_close(self, runner: ACPRunner, task: asyncio.Task[Any]) -> None:
+        logger.warning("ACP runner close still running after %ss; set aside", RUNNER_CLOSE_TIMEOUT)
+        self._quarantined_closes.add(task)
+
+        def settled(done: asyncio.Task[Any]) -> None:
+            self._quarantined_closes.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                logger.warning("Set-aside ACP runner close failed (%s)", type(done.exception()).__name__)
+
+        task.add_done_callback(settled)
+        if self._runner is runner:
+            self._runner = None
+
     async def _close_owned(self) -> None:
         if self._closed and self._runner is None:
             return
         self._closed = True
         close_error: BaseException | None = None
+        stalled = False
         runner = self._runner
         if self._pending_ready_runner is runner:
             self._pending_ready_runner = None
@@ -1404,8 +1457,10 @@ class ACPOrchestrator:
         if runner is not None:
             self._terminal_session_id = getattr(runner, "session_id", None)
             try:
-                await runner.close()
+                if not await self._close_runner_bounded(runner):
+                    stalled = True
             except BaseException as exc:
+                stalled = stalled or self._runner is not runner
                 # Cancellation must not skip process/binding cleanup.  Keep the
                 # original error for the caller after all owned resources settle.
                 if close_error is None:
@@ -1415,6 +1470,11 @@ class ACPOrchestrator:
             else:
                 if self._runner is runner:
                     self._runner = None
+        if stalled:
+            # Turns admitted on the set-aside runner will never get their
+            # result: end them rather than wait on a close that may not return.
+            for task in tuple(self._completion_tasks):
+                task.cancel()
         if self._cancel_tasks:
             pending = tuple(self._cancel_tasks)
             for task in pending:
