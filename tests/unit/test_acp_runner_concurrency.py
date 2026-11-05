@@ -110,3 +110,44 @@ async def test_a_request_queued_before_a_failure_runs_on_the_restarted_harness(t
     finally:
         runner._worker.cancel()
         await asyncio.gather(runner._worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_request_admitted_during_a_restart_that_fails_gets_that_error_and_does_not_hang(tmp_path):
+    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+    prompts: list[str] = []
+    restarting = asyncio.Event()
+    finish_restart = asyncio.Event()
+    runner.session_id = "old"
+    runner.generation = 1
+    runner._connection = _Connection(True, prompts)
+
+    async def terminate():
+        runner._connection = None
+
+    async def start():
+        restarting.set()
+        await finish_restart.wait()
+        raise ACPError("harness would not restart")
+
+    runner._terminate_process = terminate
+    runner._start_process = start
+    runner._worker = asyncio.create_task(runner._drain_queue())
+    try:
+        failing = runner.admit("a", request_id="a", source="hub")
+        with pytest.raises(ACPError, match="harness request failed"):
+            await asyncio.wait_for(failing.future, timeout=1)
+        await asyncio.wait_for(restarting.wait(), timeout=1)
+        late = runner.admit("c", request_id="c", source="hub")
+        finish_restart.set()
+        with pytest.raises(ACPError, match="would not restart"):
+            await asyncio.wait_for(late.future, timeout=1)
+        # The restart is over and failed: the runner is no longer taking requests.
+        assert not runner._restarting
+        with pytest.raises(ACPError, match="not started"):
+            runner.admit("d", request_id="d", source="hub")
+        assert prompts == ["old"]
+    finally:
+        finish_restart.set()
+        runner._worker.cancel()
+        await asyncio.gather(runner._worker, return_exceptions=True)

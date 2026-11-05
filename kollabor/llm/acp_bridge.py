@@ -613,6 +613,7 @@ class ACPRunner:
         self._active_turn_id = 0
         self._active_future: asyncio.Future[ACPResult] | None = None
         self._restart_before_next = False
+        self._restarting = False
         self._active_done = asyncio.Event()
         self._active_done.set()
         self._queue_release = asyncio.Event()
@@ -978,7 +979,11 @@ class ACPRunner:
         origin: dict[str, Any] | None = None,
         images: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
-        if not self.session_id or self._connection is None:
+        # While the harness restarts (after a failed or cancelled prompt) its
+        # connection is briefly gone; a request then waits in the queue like one
+        # admitted before the failure, and the worker settles it.
+        restarting = (self._restarting or self._restart_before_next) and not self._closing
+        if not restarting and (not self.session_id or self._connection is None):
             raise ACPError("ACP runner is not started")
         if not text.strip():
             raise ValueError("prompt must not be empty")
@@ -1069,6 +1074,7 @@ class ACPRunner:
         """Replace the owned ACP process, even if SDK close is stuck."""
         if self._closing:
             return
+        self._restarting = True
         try:
             # _terminate_process bounds connection.close and always tears down
             # the process group/stderr task before a fresh session is started.
@@ -1083,6 +1089,8 @@ class ACPRunner:
             # initialization/new_session fails (including cancellation).
             await self._terminate_process()
             raise
+        finally:
+            self._restarting = False
 
     async def _run_prompt(self, admission: ACPAdmission, generation: int) -> ACPResult:
         turn_id, text = admission.turn_id, admission.text
