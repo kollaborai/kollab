@@ -1970,6 +1970,65 @@ async def test_sender_rejects_malformed_authenticated_rejection_receipts(
         await left.send(address(right), consent["purpose"], grant_id=consent["id"])
 
 
+def _directory_reply(right, **extra):
+    return {
+        "agents": [
+            {
+                "machine_id": "1" * 32,
+                "workspace_id": right.commands.client.state.workspace_id,
+                "agent_id": right.identity.agent_id,
+                "name": "sapphire",
+                "is_coordinator": False,
+                "state": "ready",
+                **extra,
+            }
+        ],
+        "truncated": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_remote_directory_row_carries_the_peers_agent_type(bridges):
+    """Rows for agents on other computers name the bundle they run, so the web
+    UI can draw their type glyph without guessing from a local name (#662)."""
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    left.secure_transport.request = AsyncMock(
+        return_value=_directory_reply(right, agent_type="research")
+    )
+
+    await left._rpc_directory({"peer": right.commands.client.public_key})
+    (row,) = [r for r in await left.remote_agents() if r["address"] == address(right)]
+
+    assert row["agent_type"] == "research"
+
+
+@pytest.mark.asyncio
+async def test_remote_directory_row_without_agent_type_has_an_empty_one(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    left.secure_transport.request = AsyncMock(return_value=_directory_reply(right))
+
+    await left._rpc_directory({"peer": right.commands.client.public_key})
+    (row,) = [r for r in await left.remote_agents() if r["address"] == address(right)]
+
+    assert row["agent_type"] == ""
+
+
+@pytest.mark.parametrize("bad", [7, None, ["coder"], "co\nder", "x" * 129])
+@pytest.mark.asyncio
+async def test_remote_directory_rejects_a_malformed_agent_type(bridges, bad):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    left.secure_transport.request = AsyncMock(
+        return_value=_directory_reply(right, agent_type=bad)
+    )
+
+    await left._rpc_directory({"peer": right.commands.client.public_key})
+
+    assert [r for r in await left.remote_agents() if r["address"] == address(right)] == []
+
+
 @pytest.mark.asyncio
 async def test_raw_hub_cannot_forge_relay_identity(bridges):
     members, _ = bridges

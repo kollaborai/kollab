@@ -149,6 +149,32 @@ def test_export_carries_the_running_tool_never_its_arguments(directory, presence
     assert "rm -rf" not in json.dumps(row)
 
 
+@pytest.mark.parametrize(
+    ("agent_name", "exported"),
+    [
+        ("coder", "coder"),
+        ("research", "research"),
+        ("pr-shepherd", "pr-shepherd"),
+        # Anything that is not a short printable bundle name exports no type,
+        # so a peer never sees a guess in its place.
+        ("", None),
+        ("   ", None),
+        ("co\nder", None),
+        (7, None),
+        ("x" * 129, None),
+    ],
+)
+def test_export_carries_the_agent_bundle_as_agent_type(directory, agent_name, exported):
+    """A device's sidebar draws a type glyph for agents on other computers, so
+    the roster it publishes names the bundle each agent runs (#662)."""
+    view, publish = directory
+    _, _, workspace = publish("one", agent_name=agent_name)
+    [row] = view.publishable_agents(workspace, "b" * 32)
+    assert row.get("agent_type") == exported
+    if exported is None:
+        assert "agent_type" not in row
+
+
 def test_existing_relay_workspace_identity_used_without_key_read(directory):
     import hashlib
 
