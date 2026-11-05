@@ -745,7 +745,19 @@ def _assistant_align_streamed_ids(
         stored_text = _text(stored_row.get("content"))
         if not stored_text:
             return False
-        return _text(streamed_row.get("content")).endswith(stored_text)
+        streamed_text = _text(streamed_row.get("content"))
+        if streamed_text == stored_text:
+            return True
+        # A bare tail match is not identity: a stale stored answer can be
+        # the tail of an unrelated new answer ("42" vs "Answer: 42"), and
+        # pairing it would rename this turn onto the stale rows. Only a
+        # merged tool round legitimately renders the stored text as a
+        # strict tail, and that turn's streamed row carries its own call
+        # cards — require that evidence for any strict-suffix match.
+        return (
+            bool(_streamed_call_ids(streamed_row))
+            and streamed_text.endswith(stored_text)
+        )
 
     provisional: List[int] = []
     shown: set[int] = set()
@@ -1591,12 +1603,22 @@ async def assistant_transport(
                             if event.get("history_recorded"):
                                 controller.state["goalHistoryReloadRequired"] = True
                         else:
+                            # Publish the finished turn first: the page must
+                            # not wait on history-refresh RPCs (up to 2, ~3s
+                            # worst case) to see the completed status — that
+                            # spun the completion spinner on a slow daemon.
+                            # Provisional ids are fine for this publish; the
+                            # refresh below aligns them and republishes the
+                            # aligned rows before any synced claim (#666:
+                            # never claim synced for rows the page has not
+                            # been shown).
+                            _assistant_set_messages(controller, state_messages)
                             refreshed = None
                             for _attempt in (0, 1):
                                 try:
                                     refreshed = await session.refresh_history(
-                                    stale_raises=True
-                                )
+                                        stale_raises=True
+                                    )
                                 except Exception as exc:
                                     logger.debug(
                                         "history refresh for %s failed: %s",
@@ -1610,11 +1632,14 @@ async def assistant_transport(
                                 aligned = _assistant_align_streamed_ids(
                                     state_messages, refreshed
                                 )
-                            _assistant_set_messages(controller, state_messages)
                             if aligned:
                                 # The streamed ids were reconciled against
                                 # exactly this snapshot, so the page may
                                 # append canonical rows past it by id.
+                                # Republish the aligned rows BEFORE claiming
+                                # synced: the page must hold exactly the ids
+                                # the watermark describes when it arrives.
+                                _assistant_set_messages(controller, state_messages)
                                 controller.state["synced"] = {
                                     "history": len(refreshed),
                                     "messages": len(state_messages),
