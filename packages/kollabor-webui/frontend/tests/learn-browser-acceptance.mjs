@@ -291,10 +291,17 @@ async function main() {
     await shell.page.getByTestId("new-session-options").click();
     // Help is a hover card on the control, never an inline link.
     assert.equal(await shell.page.getByRole("link", { name: /Learn about|Learn more/ }).count(), 0);
-    await shell.page.getByRole("button", { name: "Manage Profiles", exact: true }).hover();
+    const manageProfiles = shell.page.getByRole("button", { name: "Manage Profiles", exact: true });
+    await manageProfiles.hover();
     await shell.page.getByRole("tooltip").filter({ hasText: "A profile picks the provider" }).first().waitFor({ state: "visible" });
-    await shell.page.keyboard.press("Escape"); // the card
-    await shell.page.keyboard.press("Escape"); // the options popover
+
+    // Exercise App -> AppSidebar -> ProfilesDialog, not just the isolated dialog fixture.
+    await manageProfiles.click();
+    const profilesDialog = shell.page.getByRole("dialog", { name: "Profiles", exact: true });
+    await profilesDialog.waitFor({ state: "visible" });
+    await profilesDialog.getByText("default", { exact: true }).waitFor({ state: "visible" });
+    await profilesDialog.getByText("openai_responses · gpt-6-luna", { exact: true }).waitFor({ state: "visible" });
+    await profilesDialog.getByRole("button", { name: "Close", exact: true }).click();
 
     await shell.page.getByRole("button", { name: "Agents", exact: true }).first().click();
     const agentLibrary = shell.page.getByRole("dialog", { name: "Agents", exact: true });
