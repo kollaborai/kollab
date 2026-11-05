@@ -1814,7 +1814,7 @@ class QueueProcessor:
                     del self.conversation_history[-continuation_msg_count:]
 
             # Update session stats with actual token usage (accumulated across continuations)
-            token_usage = self.api_service.get_last_token_usage()
+            token_usage = self.api_service.get_last_token_usage() or {}
             prompt_tokens = accumulated_tokens["prompt"]
             completion_tokens = accumulated_tokens["completion"]
             cache_creation_tokens = accumulated_tokens["cache_creation"]
@@ -1826,7 +1826,11 @@ class QueueProcessor:
             usage_is_estimated = (
                 bool(accumulated_tokens["estimated"]) or final_usage_estimated
             )
-            if token_usage:
+            # A cut reply's earlier calls were billed even when the last call
+            # came back without a usage trailer, so they still count (#421).
+            if token_usage or prompt_tokens or completion_tokens or (
+                cache_creation_tokens or cache_read_tokens
+            ):
                 prompt_tokens += token_usage.get("prompt_tokens", 0)
                 completion_tokens += token_usage.get("completion_tokens", 0)
                 cache_creation_tokens += token_usage.get("cache_creation_tokens", 0)
@@ -1855,8 +1859,13 @@ class QueueProcessor:
                 # Store and accumulate stats. input_tokens is the context size:
                 # the last request already carried the whole conversation, so
                 # a continuation's summed prompts would count it twice (#396)
-                self.session_stats["input_tokens"] = token_usage.get("prompt_tokens", 0)
-                self.session_stats["input_tokens_estimated"] = final_usage_estimated
+                if token_usage:
+                    self.session_stats["input_tokens"] = token_usage.get(
+                        "prompt_tokens", 0
+                    )
+                    self.session_stats["input_tokens_estimated"] = (
+                        final_usage_estimated
+                    )
                 self.session_stats["output_tokens"] = completion_tokens
                 # Cache metrics (anthropic + openai)
                 self.session_stats["cache_creation_tokens"] = cache_creation_tokens
