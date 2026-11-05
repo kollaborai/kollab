@@ -689,6 +689,10 @@ class LoadoutManager:
                         )
                 except Exception as restore_exc:
                     logger.error("Could not restore previous ACP session (%s)", type(restore_exc).__name__)
+                    notice = getattr(orchestrator, "_show_notice", None)
+                    if callable(notice):
+                        notice("the previous harness could not be restarted and none is running "
+                               f"({type(restore_exc).__name__})")
                 if not isinstance(exc, Exception):
                     raise
                 return None

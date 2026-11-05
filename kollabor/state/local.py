@@ -1573,7 +1573,8 @@ class LocalStateService(StateService):
                 prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
                 prior_loadout = getattr(orchestrator, "_loadout_override", None)
 
-                async def restore_previous() -> None:
+                async def restore_previous() -> bool:
+                    """Put the previous harness back; False when it did not come back."""
                     try:
                         await orchestrator.close()
                         if previous is not None:
@@ -1586,6 +1587,10 @@ class LocalStateService(StateService):
                             )
                     except Exception:
                         logger.error("previous ACP profile did not restart after a rejected activation")
+                        return False
+                    return True
+
+                not_restarted = "; the previous harness could not be restarted and none is running"
 
                 try:
                     await orchestrator.close()
@@ -1602,7 +1607,7 @@ class LocalStateService(StateService):
                     else:
                         await orchestrator.start(target_profile)
                 except BaseException as exc:
-                    await restore_previous()
+                    restored = await restore_previous()
                     if not isinstance(exc, Exception):
                         raise
                     logger.error(
@@ -1613,6 +1618,7 @@ class LocalStateService(StateService):
                     raise ValueError(
                         f"ACP profile {name!r} could not be activated; verify its "
                         "adapter command and profile settings."
+                        + ("" if restored else not_restarted)
                     ) from None
                 if loadout is not None:
                     # Mirror LoadoutManager.activate(): confirm the harness
@@ -1647,16 +1653,18 @@ class LocalStateService(StateService):
                             raise ValueError(
                                 "ACP harness did not apply the loadout effort"
                             )
-                    except BaseException:
+                    except BaseException as exc:
                         # A rejected loadout restores the previous harness.
-                        await restore_previous()
+                        if not await restore_previous() and isinstance(exc, Exception):
+                            raise ValueError(f"{exc}{not_restarted}") from None
                         raise
                 if effort:
                     try:
                         await self._apply_acp_effort(orchestrator, effort)
-                    except BaseException:
+                    except BaseException as exc:
                         # A rejected or cancelled effort restores the previous harness.
-                        await restore_previous()
+                        if not await restore_previous() and isinstance(exc, Exception):
+                            raise ValueError(f"{exc}{not_restarted}") from None
                         raise
                 ok = bool(self._profile_manager.set_active_profile(name))
         else:

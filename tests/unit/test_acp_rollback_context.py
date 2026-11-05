@@ -1,5 +1,4 @@
 """A rejected ACP switch must say when the rollback lost context or could not restart (#502)."""
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
