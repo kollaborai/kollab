@@ -10,6 +10,7 @@ import {
   reconcileBoundaryToolResults,
   shownMessagesChanged,
 } from "../src/history-merge.ts";
+import { historyContentToThreadContent } from "../src/history-content.ts";
 
 const user = { id: "history-0", role: "user", content: "go" };
 const step = (result?: string) => ({
@@ -570,4 +571,49 @@ test("a transient picture turn is replaced by a stored row with the same image s
   assert.ok(rebased);
   assert.equal(rebased.messages.some((message) => message.id === "user-ws1-11"), false);
   assert.equal(JSON.stringify(rebased.messages).split("data:image/png;base64,SAME").length - 1, 1);
+});
+
+// Round-4 P2 (#648 at 7ec6a17e). The engine stores a pasted picture as a managed_upload
+// part with no public URL, and the thread shows it as the placeholder [imageN]. The live
+// transient row carries the same placeholder for a different picture, so the words alone
+// matched and the new picture was dropped. The stored row goes through the real converter.
+test("a new picture turn with a placeholder is kept next to a stored turn with the same words", () => {
+  const stored = {
+    id: "history-1",
+    role: "user",
+    content: historyContentToThreadContent([
+      { type: "text", text: "describe this" },
+      { type: "image", source: { kind: "managed_upload", media_id: "media-OLD", media_type: "image/png" } },
+    ]),
+  };
+  const shown = [
+    stored,
+    { id: "history-2", role: "assistant", content: "Looks like a cat." },
+    { id: "user-ws1-11", role: "user", content: "describe this\n[image1]" },
+    { id: "assistant-ws1-12", role: "assistant", content: "Looks like a cat." },
+  ];
+  const tail = [{ id: "history-3", role: "user", content: "describe this\n[image1]" }];
+  assert.equal(dropTransientTurnDuplicates(shown, tail), null);
+});
+
+test("a placeholder picture turn is replaced by its stored copy when both rows carry the same request id", () => {
+  const requested = { metadata: { custom: { requestId: "req-1" } } };
+  const shown = [
+    {
+      id: "history-1",
+      role: "user",
+      content: historyContentToThreadContent([
+        { type: "text", text: "describe this" },
+        { type: "image", source: { kind: "managed_upload", media_id: "media-OLD", media_type: "image/png" } },
+      ]),
+      ...requested,
+    },
+    { id: "history-2", role: "assistant", content: "Looks like a cat.", ...requested },
+    { id: "user-ws1-11", role: "user", content: "describe this\n[image1]", ...requested },
+    { id: "assistant-ws1-12", role: "assistant", content: "Looks like a cat.", ...requested },
+  ];
+  const tail = [{ id: "history-3", role: "user", content: "describe this\n[image1]" }];
+  const deduped = dropTransientTurnDuplicates(shown, tail);
+  assert.ok(deduped);
+  assert.equal(deduped.some((message) => message.id === "user-ws1-11"), false);
 });
