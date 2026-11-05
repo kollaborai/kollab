@@ -69,12 +69,17 @@ def _validate_tool_calls(
     untyped TypeError; non-object elements crash the per-item accessors
     (``tool_call["function"]`` subscript on the non-stream side,
     ``tool_delta.get(...)`` on the SSE side); a non-object ``function``
-    crashes both. ``require_complete`` (non-stream ``message`` variant)
-    additionally demands the keys that parser subscripts without
-    defaults (``id``, ``function.name``, ``function.arguments``).
-    Streaming ``delta`` tool calls legally omit them on continuation
-    chunks (which carry only ``function.arguments``), so the SSE variant
-    enforces list + object + function-object shape only.
+    crashes both. An explicit ``function: null`` is not a missing key, so
+    the ``.get("function", {})`` default does not cover it.
+
+    ``require_complete`` (non-stream ``message`` variant) demands the values
+    ``ToolUseContent`` takes: ``id`` and ``function.name`` strings, and
+    ``function.arguments`` a string or object. A missing or null value is
+    typed here, not left to Pydantic. Streaming ``delta`` tool calls legally
+    omit them on continuation chunks (which carry only
+    ``function.arguments``), so the SSE variant checks only the values
+    present: null passes, and any other non-string fails, since
+    ``ToolCallDelta`` takes ``Optional[str]``.
     """
     if not isinstance(tool_calls, list):
         raise APIFormatMismatchError(
@@ -86,26 +91,38 @@ def _validate_tool_calls(
                 "Custom API tool_calls element is not an object",
                 provider_name,
             )
-        function = item.get("function")
-        if function is not None and not isinstance(function, dict):
+        if "function" in item and not isinstance(item["function"], dict):
             raise APIFormatMismatchError(
                 "Custom API tool call 'function' is not an object",
                 provider_name,
             )
+        function = item.get("function") or {}
+        tool_id = item.get("id")
+        name = function.get("name")
+        arguments = function.get("arguments")
         if require_complete:
-            if "id" not in item:
+            if not isinstance(tool_id, str):
                 raise APIFormatMismatchError(
-                    "Custom API tool call is missing 'id'", provider_name,
-                )
-            if (
-                not isinstance(function, dict)
-                or "name" not in function
-                or "arguments" not in function
-            ):
-                raise APIFormatMismatchError(
-                    "Custom API tool call 'function' needs name and arguments",
+                    "Custom API tool call 'id' is missing or not a string",
                     provider_name,
                 )
+            if not isinstance(name, str):
+                raise APIFormatMismatchError(
+                    "Custom API tool call 'function.name' is not a string",
+                    provider_name,
+                )
+            if not isinstance(arguments, (str, dict)):
+                raise APIFormatMismatchError(
+                    "Custom API tool call arguments are not a string or object",
+                    provider_name,
+                )
+        else:
+            for value in (tool_id, name, arguments):
+                if value is not None and not isinstance(value, str):
+                    raise APIFormatMismatchError(
+                        "Custom API tool call delta value is not a string",
+                        provider_name,
+                    )
 
 
 def _validate_openai_shapes(data: Dict[str, Any], provider_name: str) -> None:
@@ -385,6 +402,14 @@ class CustomProvider(LLMProvider):
                         arguments = json.loads(arguments)
                     except json.JSONDecodeError:
                         arguments = {}
+                if not isinstance(arguments, dict):
+                    # valid JSON that is not an object ("[1, 2]", "null") is no
+                    # tool input: type it here, not as a ToolUseContent
+                    # ValidationError (#754)
+                    raise APIFormatMismatchError(
+                        "Custom API tool call arguments are not a JSON object",
+                        self.provider_name,
+                    )
                 tool_uses.append(
                     ToolUseContent(
                         type="tool_use",
