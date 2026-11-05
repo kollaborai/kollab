@@ -6650,7 +6650,7 @@ class HubPlugin(BasePlugin):
                 if self._identity:
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
-                        max_replay=INBOX_MAX_REPLAY,
+                        max_replay=self._mailbox_replay_cap(INBOX_MAX_REPLAY),
                     )
                     if messages:
                         await self._deliver_inbox_batch(messages)
@@ -6658,6 +6658,24 @@ class HubPlugin(BasePlugin):
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
+
+    def _mailbox_replay_cap(self, cap: int) -> int:
+        """Return the per-poll cap on ordinary mailbox replay (0 = no cap).
+
+        An ACP agent's queue can refuse a message (#581), and a refused message
+        is only owned again once it is delivered one by one so it can be put
+        back. A capped replay deletes the overflow and coalesces the rest into
+        one block that never reaches the queue, so ACP polls without the cap.
+        The mailbox's own size prune (INBOX_MAX_SIZE) still bounds it.
+        """
+        llm = None
+        try:
+            llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+            if self._agent_dispatch_mode(llm) == "acp":
+                return 0
+        except Exception as exc:
+            logger.debug("mailbox replay cap check failed: %s", exc)
+        return cap
 
     async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
         """Deliver a batch of offline inbox messages.
@@ -6714,6 +6732,20 @@ class HubPlugin(BasePlugin):
         if not ordinary_msgs:
             return
 
+        llm = None
+        if self.event_bus is not None:
+            try:
+                llm = self.event_bus.get_service("llm_service")
+            except Exception:
+                pass
+
+        # An ACP agent's queue owns each message it admits and can refuse one
+        # (#581); a coalesced block would hide that from it. Deliver one by one.
+        if self._agent_dispatch_mode(llm) == "acp":
+            for msg in ordinary_msgs:
+                await self._deliver_inbox_message(msg)
+            return
+
         lines: List[str] = [summary.content, ""]
         for msg in ordinary_msgs:
             sender = msg.from_identity or msg.from_agent or "?"
@@ -6725,13 +6757,6 @@ class HubPlugin(BasePlugin):
             lines.append(f"[{ts}] {sender}: {content_preview}")
 
         block = "\n".join(lines)
-
-        llm = None
-        if self.event_bus is not None:
-            try:
-                llm = self.event_bus.get_service("llm_service")
-            except Exception:
-                pass
 
         if llm is not None and hasattr(llm, "inject_system_message"):
             try:
@@ -6748,7 +6773,7 @@ class HubPlugin(BasePlugin):
 
         # Fallback: individual delivery (no inject_system_message)
         for msg in ordinary_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
     async def _dreaming_loop(self) -> None:
         """Periodically dream when agent is idle -- distill stream into insights.
