@@ -486,7 +486,7 @@ def test_session_lookup_rejects_old_birth_or_identity_reused_during_session_read
     sessions = []
     monkeypatch.setattr(bridge_mod.os, "getsid", lambda pid: sessions.append(pid) or 4242)
     runner = _session_lookup_runner(tmp_path, monkeypatch, candidate)
-    runner._recover_tagged_processes()
+    runner._recover_session_processes()
     assert not runner._owned_processes
     candidate.create_time.assert_not_called()
     candidate.environ.assert_not_called()
@@ -500,10 +500,10 @@ def test_session_lookup_adopts_same_session_orphan_and_skips_unreadable_session(
     candidate.is_running.return_value = True
     monkeypatch.setattr(bridge_mod.os, "getsid", Mock(side_effect=PermissionError(1, "denied")))
     runner = _session_lookup_runner(tmp_path, monkeypatch, candidate)
-    runner._recover_tagged_processes()
+    runner._recover_session_processes()
     assert not runner._owned_processes
     monkeypatch.setattr(bridge_mod.os, "getsid", lambda pid: 4242)
-    runner._recover_tagged_processes()
+    runner._recover_session_processes()
     assert runner._owned_processes == {9999: candidate}
     candidate.environ.assert_not_called()
 
@@ -524,7 +524,7 @@ async def test_session_lookup_ignores_session_whose_leader_pid_was_reused(tmp_pa
         runner._adapter_pid = stranger.pid
         runner._process_started_at = 0
         runner._process_username = psutil.Process().username()
-        runner._recover_tagged_processes()
+        runner._recover_session_processes()
         assert stranger.pid not in runner._owned_processes
         assert stranger.returncode is None
     finally:

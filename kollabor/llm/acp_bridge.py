@@ -907,7 +907,7 @@ class ACPRunner:
             self._refresh_process_tree()
             await asyncio.sleep(0.1)
 
-    def _recover_tagged_processes(self) -> None:
+    def _recover_session_processes(self) -> None:
         """Recover same-user newborns still in the adapter's session.
 
         The adapter starts as a session leader, so descendants that lose
@@ -956,9 +956,9 @@ class ACPRunner:
 
     def _live_owned_processes(self) -> list[psutil.Process]:
         self._refresh_process_tree()
-        # Do the process-wide marker lookup at lifecycle boundaries, rather
-        # than reading unrelated environments on every 100ms tree sample.
-        self._recover_tagged_processes()
+        # Do the process-wide session lookup at lifecycle boundaries, rather
+        # than walking every same-user process on every 100ms tree sample.
+        self._recover_session_processes()
         self._refresh_process_tree()
         alive: list[psutil.Process] = []
         for owner in tuple(self._owned_processes.values()):
