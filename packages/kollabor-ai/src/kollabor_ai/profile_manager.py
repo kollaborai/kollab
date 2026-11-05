@@ -2217,10 +2217,19 @@ class ProfileManager:
                     # Auto-profile from a provider env var -- never persist the key.
                     # The provider env var stays the source of truth.
                     pass
-                elif raw_stored.startswith(KEYRING_SENTINEL_PREFIX):
-                    # Config already references keyring -- keep sentinel stable on save
+                elif raw_stored.startswith(KEYRING_SENTINEL_PREFIX) and (
+                    raw_stored == f"{KEYRING_SENTINEL_PREFIX}{secret_name}"
+                    or not resolved_key
+                ):
+                    # The reference already names this config's own entry (or
+                    # cannot be resolved, so there is nothing to re-store):
+                    # keep it stable on save
                     profile_dict["api_key"] = raw_stored
                 elif resolved_key:
+                    # A plain key, or a reference to another entry (another
+                    # project's, or the profile this one was copied from).
+                    # Sharing that entry would let a later save of the other
+                    # change this config's key, so store it under its own name.
                     key_val = resolved_key
                     if _keyring_set(secret_name, key_val):
                         sentinel = f"{KEYRING_SENTINEL_PREFIX}{secret_name}"
@@ -2228,6 +2237,14 @@ class ProfileManager:
                         logger.info(
                             f"Profile '{profile.name}': stored API key in OS keyring or vault, "
                             "writing sentinel to config"
+                        )
+                    elif raw_stored.startswith(KEYRING_SENTINEL_PREFIX):
+                        # No store takes a new entry: keep the reference rather
+                        # than write the key to a config file
+                        profile_dict["api_key"] = raw_stored
+                        logger.warning(
+                            f"Profile '{profile.name}': keyring and vault unavailable, "
+                            "keeping the existing reference"
                         )
                     else:
                         # Keyring and vault unavailable -- fall back to plaintext
@@ -2315,7 +2332,9 @@ class ProfileManager:
                 (path for path in get_local_config_path_candidates() if path.exists()),
                 get_local_config_path(),
             )
-            if local_path.exists():
+            # Run from $HOME the "local" config is the global one: it was just
+            # written, and a second write would swap its reference for a scoped one.
+            if local_path.exists() and local_path.resolve() != global_path.resolve():
                 try:
                     local_data = json.loads(local_path.read_text(encoding="utf-8"))
                     local_profiles = (
