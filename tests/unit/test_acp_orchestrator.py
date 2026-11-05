@@ -834,3 +834,116 @@ def test_a_full_retry_queue_warns_before_dropping(monkeypatch, caplog):
     full = [r for r in caplog.records if "retry queue is full" in r.getMessage()]
     assert len(full) == 1
     assert len(orchestrator._unwritten_observations) == 20
+
+
+def _observation(content):
+    return HubMessage(
+        action="message", from_agent="peer-id-1", from_identity="peer-1",
+        to="*", content=content, thread_id=None, reply_to="",
+    )
+
+
+def _observed_notes(llm):
+    return [
+        line.strip()
+        for message in llm.conversation_history
+        if message.metadata.get("source") == "observation"
+        for line in message.content.splitlines()
+    ]
+
+
+class _CancellableRunner(FakeRunner):
+    # ACPRunner.cancel_queued runs when admit() cannot write its history row.
+    def cancel_queued(self, request_id, admission=None):
+        return True
+
+
+async def _started_orchestrator(tmp_path, monkeypatch, runner_cls=FakeRunner):
+    monkeypatch.setattr(mod, "ACPRunner", runner_cls)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    return orchestrator, llm
+
+
+def _storage_outage(orchestrator, monkeypatch):
+    real_record = orchestrator._record_user
+    storage_down = [True]
+
+    def flaky_record(*args, **kwargs):
+        if storage_down[0]:
+            raise OSError("disk full")
+        return real_record(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "_record_user", flaky_record)
+    return storage_down
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_observation_is_not_evicted_by_a_history_outage(tmp_path, monkeypatch):
+    # #581: 21 peer observations arrive while history writes fail. Each one the
+    # orchestrator reports as accepted must reach history once writes recover.
+    orchestrator, llm = await _started_orchestrator(tmp_path, monkeypatch)
+    try:
+        storage_down = _storage_outage(orchestrator, monkeypatch)
+        orchestrator.runner.is_processing = True
+        accepted = []
+        for index in range(21):
+            note = f"NOTE_{index}"
+            # A refusal is reported as False; anything else counts as accepted.
+            if orchestrator.observe_notification(_observation(note)) is not False:
+                accepted.append(note)
+        storage_down[0] = False
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        persisted = _observed_notes(llm)
+        assert [note for note in accepted if note not in persisted] == []
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_an_observation_whose_retry_fails_in_a_flush_is_kept_until_it_persists(
+    tmp_path, monkeypatch
+):
+    # #581: a turn ends while history is still down, so the retry fails again.
+    # The message must stay owned by the retry queue, not be dropped when the
+    # batch turn runs, and must reach history after recovery.
+    orchestrator, llm = await _started_orchestrator(
+        tmp_path, monkeypatch, _CancellableRunner
+    )
+    try:
+        storage_down = _storage_outage(orchestrator, monkeypatch)
+        orchestrator.runner.is_processing = True
+        accepted = []
+        for note in ("NOTE_0", "NOTE_1"):
+            if orchestrator.observe_notification(_observation(note)) is not False:
+                accepted.append(note)
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+        storage_down[0] = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        persisted = _observed_notes(llm)
+        assert [note for note in accepted if note not in persisted] == []
+    finally:
+        await orchestrator.close()
