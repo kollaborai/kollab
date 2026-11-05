@@ -472,6 +472,42 @@ async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_t
             assert not runner._live_owned_processes()
 
 
+@pytest.mark.asyncio
+async def test_failed_user_row_write_keeps_the_finished_reply(tmp_path, monkeypatch):
+    """#580: a user row that never reached the file must not discard the reply."""
+    configuration = SimpleNamespace(_conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default)
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=[])
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+
+    async def failing_user_write(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(conversation_logger, "log_user_message", failing_user_write)
+    profile = LLMProfile(name="user-row-fails", provider="acp", command=(sys.executable, "-c", INTERRUPTED_AGENT), cwd=str(tmp_path))
+    runner = None
+    try:
+        await orchestrator.start(profile)
+        runner = orchestrator.runner
+        admission = orchestrator.admit("next turn", request_id="user-row-request", source="rpc")
+        completion_tasks = tuple(orchestrator._completion_tasks)
+        await asyncio.wait_for(admission.future, 5)
+        completions = await asyncio.gather(*completion_tasks)
+        assert len(completions) == 1
+        assert completions[0]["stop_reason"] == "end_turn"
+        assert completions[0]["text"] == "Replacement turn only."
+        snapshot = await LocalStateService(llm, None).get_conversation()
+        assert len([message for message in snapshot.messages if message.role == "assistant"]) == 1
+        assert not orchestrator._observed_turns
+    finally:
+        await orchestrator.close()
+        if runner is not None:
+            assert not runner._live_owned_processes()
+
+
 class Tap:
     def __init__(self):
         self.events = []
