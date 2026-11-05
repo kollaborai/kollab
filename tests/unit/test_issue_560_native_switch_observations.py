@@ -1,0 +1,198 @@
+"""Issue #560: a switch from an ACP profile to a native one answers buffered peer messages.
+
+Peer broadcasts that arrive while the ACP harness is busy are written to the
+conversation as they arrive and kept in the orchestrator until its turn ends.
+Closing the harness for a native profile used to leave them there: the native
+model had them in its history but nothing started a turn, and a later switch
+back to ACP would offer them to a harness again.
+
+All collaborators are in-process fakes: no adapter process is started.
+"""
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+import pytest_asyncio
+
+from kollabor.llm import acp_orchestrator as mod
+from kollabor.llm.llm_coordinator import LLMService
+from kollabor.state.local import LocalStateService
+from kollabor_ai.profile_manager import LLMProfile
+from kollabor_events import EventType
+from plugins.hub.models import HubMessage
+
+
+class _Runner:
+    """Minimal ACP runner: starts, records what it is asked to run, closes."""
+
+    def __init__(self, profile, **_kwargs):
+        self.profile = profile
+        self.session_id = "s1"
+        self.generation = 1
+        self.binding = None
+        self.state = "ready"
+        self.resume_mode = "fresh"
+        self.is_processing = False
+        self.admitted = []
+
+    async def start(self, binding=None):
+        pass
+
+    def admit(self, text, *, request_id, source, thread_id=None, origin=None, **_kw):
+        self.admitted.append(text)
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(
+            mod.ACPResult(
+                1, "s1", text, "end_turn", (), {"type": "turn_end"}, 1,
+                request_id, source, thread_id,
+            )
+        )
+        return mod.ACPAdmission(
+            request_id, source, thread_id, 1, 1, text, future, origin or {}
+        )
+
+    async def close(self):
+        pass
+
+
+class _Bus:
+    def __init__(self):
+        self.services = {}
+        self.emitted = []
+
+    def get_service(self, name):
+        return self.services.get(name)
+
+    def register_service(self, name, service):
+        self.services[name] = service
+
+    async def emit_with_hooks(self, event_type, data, source):
+        self.emitted.append((event_type, data))
+        return {}
+
+
+class _ProfileManager:
+    def __init__(self, profiles, active):
+        self.profiles = {p.name: p for p in profiles}
+        self.active = active
+
+    def get_profile(self, name):
+        return self.profiles.get(name)
+
+    def get_active_profile(self):
+        return self.profiles.get(self.active)
+
+    def get_profile_names(self):
+        return list(self.profiles)
+
+    def set_active_profile(self, name, persist=True):
+        if name not in self.profiles:
+            return False
+        self.active = name
+        return True
+
+
+ACP = LLMProfile(name="harness", provider="acp", command=("fake",))
+NATIVE = LLMProfile(
+    name="native", provider="openai", model="gpt-test", api_key="k",
+    base_url="http://127.0.0.1:1/v1",
+)
+
+
+def _peer_note():
+    return HubMessage(
+        action="message", from_agent="peer-id", from_identity="peer",
+        to="*", content="PEER_NOTE", thread_id=None, reply_to="",
+    )
+
+
+@pytest_asyncio.fixture
+async def harness(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path / "data"
+    )
+    monkeypatch.setattr(mod, "ACPRunner", _Runner)
+    monkeypatch.setattr(mod, "publish_semantic", lambda *a, **k: None)
+    bus = _Bus()
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(ACP)
+    yield bus, orchestrator
+    await orchestrator.close()
+
+
+def _buffer_peer_note(orchestrator):
+    """A peer broadcast arrives while the harness is mid-turn: it is buffered."""
+    orchestrator.runner.is_processing = True
+    orchestrator.observe_notification(_peer_note())
+
+
+def _continues(bus):
+    return [d for t, d in bus.emitted if t == EventType.TRIGGER_LLM_CONTINUE]
+
+
+def _llm_service(bus, manager, monkeypatch):
+    service = LLMService.__new__(LLMService)
+    service._provider_lock = asyncio.Lock()
+    service.profile_manager = manager
+    service.event_bus = bus
+    service.api_service = Mock()
+    service.api_service.reinitialize_provider = AsyncMock(return_value=True)
+    service.conversation_logger = Mock()
+    service._current_provider = SimpleNamespace(provider_name="openai", model="gpt-test")
+    service._provider_registry = Mock()
+    service._provider_registry.get_provider = AsyncMock(
+        return_value=service._current_provider
+    )
+    monkeypatch.setattr(LLMService, "_announce_hub_model_switch", AsyncMock())
+    return service
+
+
+@pytest.mark.asyncio
+async def test_coordinator_native_switch_starts_one_turn_for_buffered_messages(
+    harness, monkeypatch
+):
+    bus, orchestrator = harness
+    _buffer_peer_note(orchestrator)
+    manager = _ProfileManager([ACP, NATIVE], "harness")
+    service = _llm_service(bus, manager, monkeypatch)
+
+    assert await service.switch_profile("native", persist=False) is True
+
+    assert manager.active == "native"
+    assert len(_continues(bus)) == 1
+
+    # Switching back must not offer the messages to a harness a second time.
+    await orchestrator.start(ACP)
+    orchestrator._flush_observations()
+    assert orchestrator.runner.admitted == []
+
+
+@pytest.mark.asyncio
+async def test_state_rpc_native_switch_starts_one_turn_for_buffered_messages(harness):
+    bus, orchestrator = harness
+    _buffer_peer_note(orchestrator)
+    manager = _ProfileManager([ACP, NATIVE], "harness")
+    llm = SimpleNamespace(
+        api_service=SimpleNamespace(reinitialize_provider=AsyncMock(return_value=True))
+    )
+    state = LocalStateService(llm_service=llm, profile_manager=manager, event_bus=bus)
+
+    snapshot = await state.set_active_profile("native")
+
+    assert snapshot.name == "native"
+    assert len(_continues(bus)) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_switch_without_buffered_messages_starts_no_turn(
+    harness, monkeypatch
+):
+    bus, _orchestrator = harness
+    manager = _ProfileManager([ACP, NATIVE], "harness")
+    service = _llm_service(bus, manager, monkeypatch)
+
+    assert await service.switch_profile("native", persist=False) is True
+
+    assert _continues(bus) == []
