@@ -244,3 +244,15 @@ async def test_owner_override_is_env_only_timeboxed_and_logged(env, monkeypatch)
 async def test_config_cannot_grant_an_override(env):
     executor = env.build(**{"sandbox_gate.override": str(env.shared)})
     assert not (await executor.execute_tool(create(env.shared / "x.txt"))).success
+
+
+async def test_override_must_be_timeboxed_and_names_one_root(env, monkeypatch, tmp_path):
+    other = make_repo(tmp_path / "other")
+    executor = env.build(**{"sandbox_gate.protected_roots": [str(env.shared), str(other)]})
+    now = executor.sandbox_gate.clock()
+    monkeypatch.setenv("KOLLAB_SANDBOX_GATE_OVERRIDE", f"{env.shared}@{now + 7200}")
+    assert not (await executor.execute_tool(create(env.shared / "x.txt"))).success
+    monkeypatch.setenv("KOLLAB_SANDBOX_GATE_OVERRIDE", f"{env.shared}@{now + 600}")
+    assert (await executor.execute_tool(create(env.shared / "y.txt"))).success
+    elsewhere = env.build(workspace=other)
+    assert not (await elsewhere.execute_tool(create(other / "z.txt"))).success
