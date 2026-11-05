@@ -302,3 +302,28 @@ def test_startup_scan_keeps_a_live_owner_on_macos(hub_dirs, owner_socket, macos)
     record = _owner_file(presence, owner_socket, pid=os.getpid(), age=660, start_token=token)
     assert _peer().startup_scan() == 0
     assert record.exists() and owner_socket.exists()
+
+
+@pytest.mark.parametrize("platform", ["freebsd14", "openbsd7"])
+def test_a_bsd_whose_start_follows_the_clock_gives_no_token(monkeypatch, platform):
+    # psutil documents the FreeBSD and OpenBSD start as subject to clock updates:
+    # no token, so a peer keeps the record rather than guess.
+    monkeypatch.setattr(sys, "platform", platform)
+    assert process_start_token(os.getpid()) is None
+
+
+def test_a_macos_psutil_without_the_monotonic_flag_gives_no_token(monkeypatch, macos):
+    import psutil
+
+    class _Proc:
+        def create_time(self):  # no ``monotonic`` argument
+            return 1.0
+
+    class _Process:
+        _proc = _Proc()
+
+        def __init__(self, pid):
+            pass
+
+    monkeypatch.setattr(psutil, "Process", _Process)
+    assert process_start_token(os.getpid()) is None

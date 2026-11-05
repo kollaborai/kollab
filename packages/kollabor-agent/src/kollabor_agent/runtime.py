@@ -141,8 +141,8 @@ def process_start_token(pid: int) -> Optional[str]:
     computed now: psutil's Linux ``create_time()`` adds a freshly read
     ``boot_time()``, which moves when the realtime clock steps (NTP after boot, a
     VM resuming), so two reads of one process can differ. Linux uses the boot id
-    and the start ticks in ``/proc/<pid>/stat``; macOS and the BSDs use psutil's
-    ``create_time(monotonic=True)`` (the kernel's own record, no clock
+    and the start ticks in ``/proc/<pid>/stat``; macOS and NetBSD use psutil's private
+    ``_proc.create_time(monotonic=True)`` (the kernel's own record, no clock
     adjustment); Windows uses the creation time of the process object, which the
     system stamps once. None when it cannot be read or is not clock-independent
     here, so the caller keeps its record.
@@ -164,10 +164,18 @@ def process_start_token(pid: int) -> Optional[str]:
         process = psutil.Process(int(pid))
         if sys.platform == "win32":
             return f"win32:{process.create_time()!r}"
-        try:
-            return f"{sys.platform}:{process.create_time(monotonic=True)!r}"
-        except TypeError:  # psutil older than the monotonic flag: its time is clock-adjusted
-            return None
+        if sys.platform == "darwin" or sys.platform.startswith("netbsd"):
+            # The public create_time() takes no ``monotonic`` argument and adds a
+            # clock adjustment that two processes can disagree on. psutil's own
+            # identity check (``Process._ident``) reads the kernel's record through
+            # the private ``_proc``; do the same, and give no token if it is not there.
+            try:
+                return f"{sys.platform}:{process._proc.create_time(monotonic=True)!r}"
+            except (AttributeError, TypeError):  # a psutil without the flag
+                return None
+        # FreeBSD, OpenBSD and others: psutil documents the start as subject to
+        # system clock updates, so there is no clock-independent token.
+        return None
     except Exception:  # unreadable stat, psutil.Error, a pid that is gone
         return None
 
