@@ -145,6 +145,34 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
+_PID_REUSE_SLACK_SECONDS = 5
+"""psutil reads process start times to about a second; this absorbs that drift."""
+
+
+def _owner_gone(agent: "AgentRuntime") -> bool:
+    """True only when ``agent``'s pid is provably no longer its process.
+
+    That is a zombie (it exited and nobody reaped it), or a pid whose process
+    started well after the agent did, so the pid was reused. Neither a silent
+    socket nor a long heartbeat proves it: a busy owner looks the same (#575).
+    An unreadable start time or process keeps the record.
+    """
+    import psutil
+
+    started = agent.started_at
+    if not isinstance(started, (int, float)) or started <= 0:
+        return False
+    try:
+        proc = psutil.Process(agent.pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return True
+        return proc.create_time() > started + _PID_REUSE_SLACK_SECONDS
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError, ValueError):
+        return False
+
+
 STALL_AFTER_SECONDS = 15 * 60
 """An idle agent holding an open task is flagged stalled after this long."""
 
@@ -247,11 +275,6 @@ def _atomic_write(path: Path, data: dict) -> None:
 class PresenceManager:
     """Manages this agent's presence file and discovers other agents."""
 
-    # A live pid whose socket does not answer is busy, not dead, until its
-    # heartbeat is this old. Deleting its files sooner cut every connection to
-    # an agent that was only stuck for a couple of minutes (#545).
-    LIVE_PID_GRACE_SECONDS = 600
-
     def __init__(self, identity: "AgentRuntime"):
         self.identity = identity
         self._presence_dir = get_presence_dir()
@@ -302,7 +325,8 @@ class PresenceManager:
         """Scan presence directory for live agents.
 
         Validates PID liveness AND socket connectivity.
-        Both must pass - a recycled PID with a dead socket is stale.
+        Both must pass - a live pid with a dead socket is not a peer, and its
+        files go only once the owner is provably gone (see _owner_gone).
         """
         agents = []
         for f in self._presence_dir.glob("*.json"):
@@ -329,10 +353,10 @@ class PresenceManager:
 
                 # Stale heartbeat -- verify socket is actually responding
                 if agent.socket_path and not self._socket_responds(agent.socket_path):
-                    if heartbeat_age < self.LIVE_PID_GRACE_SECONDS:
-                        continue  # busy: not a peer right now, its files stay
+                    if not _owner_gone(agent):
+                        continue  # busy or stuck: not a peer right now, its files stay
                     logger.info(
-                        f"Cleaning stale agent: {f.stem} (pid alive but socket dead)"
+                        f"Cleaning stale agent: {f.stem} (owner gone, socket dead)"
                     )
                     f.unlink(missing_ok=True)
                     self._cleanup_agent_socket(agent)
@@ -376,12 +400,12 @@ class PresenceManager:
                 # Stale heartbeat -- async socket check (non-blocking)
                 if agent.socket_path:
                     alive = await self._socket_responds_async(agent.socket_path)
-                    if not alive and heartbeat_age < self.LIVE_PID_GRACE_SECONDS:
-                        continue  # busy: not a peer right now, its files stay
+                    if not alive and not _owner_gone(agent):
+                        continue  # busy or stuck: not a peer right now, its files stay
                     if not alive:
                         logger.info(
                             f"Cleaning stale agent: {f.stem} "
-                            f"(pid alive but socket dead)"
+                            f"(owner gone, socket dead)"
                         )
                         f.unlink(missing_ok=True)
                         self._cleanup_agent_socket(agent)
@@ -513,13 +537,13 @@ class PresenceManager:
                     removed += 1
                     continue
 
-                # Also check socket for stale heartbeats
-                heartbeat_age = time.time() - (agent.last_heartbeat or 0)
-                if heartbeat_age > self.LIVE_PID_GRACE_SECONDS and agent.socket_path:
+                # A silent socket does not make an owner gone (#575): only a
+                # provably gone owner (see _owner_gone) loses its files.
+                if agent.socket_path and _owner_gone(agent):
                     if not self._socket_responds(agent.socket_path):
                         logger.info(
                             f"Startup cleanup: stale agent {f.stem} "
-                            f"(pid alive, socket dead)"
+                            f"(owner gone, socket dead)"
                         )
                         f.unlink(missing_ok=True)
                         self._cleanup_agent_socket(agent)
