@@ -107,6 +107,8 @@ def _record(raw: Any, seq: int) -> dict[str, Any]:
         "token": "text",
         "output": "text",
         "text": "text",
+        # A hub message box, published beside its rendered output (plugin.py).
+        "hub_display": "message",
     }
     kind = kind_map.get(
         source_type,

@@ -871,7 +871,9 @@ changing those files. Do not edit, stage, commit, or push source there, and
 preserve existing dirty files and worktrees.
 
 Use scoped Conventional Commits and DRAFT PRs. Marco authorizes a concrete
-integration plan or bounded batch; its named integrator may mark covered PRs
+integration plan or bounded batch (a class order in his own words, such as
+"merge as many ready PRs as you can tonight", counts; see
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`); its named integrator may mark covered PRs
 ready and merge them after independent source review of the exact head, current
 base, required CI, and resolved conversations. Do not repeat permission for
 listed steps. A different AI agent must review every PR's exact final head and
@@ -879,7 +881,20 @@ record the GitHub approval as whichever account, `kollaborai` or `maarco`, is
 not the PR author. GitHub prohibits author self-approval. Record reviewer
 identity and exact reviewed SHA in private maintainer audit evidence; keep the
 GitHub approval plain, with no AI attribution or footer. A new head requires
-fresh review and CI. Every merge uses
+fresh review and CI. The review is clean-room and starts only on a current
+base: the reviewer has not seen the code before the review (not the author,
+not any agent in the writer's lane), works in a scratch environment, runs the
+tests, and posts a PR verdict recording the pinned head SHA, base SHA,
+commands run, and PASS or FAIL; review waits while the head is BEHIND or
+DIRTY against `main`, and a moved head or a relevant base move voids the
+verdict. A head moved only by merging `main` keeps its verdict only when an
+independent reviewer posts an addendum pinned to the new head and base,
+confirming the PR's own diff is unchanged apart from changelog lines and that
+nothing merged from `main` touches what the PR changes or relies on. Review
+findings are fixed red-first: land the failing regression test (alone, or
+marked strict `xfail`) before the fix, and the fix flips it green without
+editing the test; a finding no test can reproduce, such as wording in a doc,
+says so in its fix commit instead. Every merge uses
 `kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
 After code-owner enforcement is enabled, `.github/CODEOWNERS` covers every
 path and protects itself; one of `@maarco` or `@kollaborai` must approve. The
