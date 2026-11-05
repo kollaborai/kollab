@@ -830,6 +830,14 @@ class ModelCommandHandler(BaseCommandHandler):
             except Exception as e:  # noqa: BLE001 - fall back to the canonical set
                 self.logger.debug("codex effort levels unavailable: %s", e)
 
+        if (profile.get_provider() or "").lower() == "anthropic":
+            from kollabor_ai.providers.tuning import ANTHROPIC_UNSUPPORTED_EFFORT
+
+            return [
+                level
+                for level in EFFORT_LEVELS
+                if level not in ANTHROPIC_UNSUPPORTED_EFFORT
+            ]
         return list(EFFORT_LEVELS)
 
     async def _handle_effort(self, level: str) -> CommandResult:
@@ -913,7 +921,10 @@ class ModelCommandHandler(BaseCommandHandler):
             )
 
         requested = level.strip().lower()
-        if requested in ("default", "none", "clear", "off"):
+        # none is a level wherever the provider takes it; elsewhere it still clears
+        if requested in ("default", "clear", "off") or (
+            requested == "none" and requested not in levels
+        ):
             requested = ""
         elif requested not in levels:
             return CommandResult(

@@ -517,7 +517,11 @@ export function ProfilesDialog({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="">Model Default</SelectItem>
-                  {EFFORT_LEVELS.map((level) => (
+                  {EFFORT_LEVELS.filter(
+                    (level) =>
+                      (draft.provider || "").toLowerCase() !== "anthropic" ||
+                      (level !== "none" && level !== "minimal"),
+                  ).map((level) => (
                     <SelectItem key={level} value={level}>
                       {level}
                     </SelectItem>

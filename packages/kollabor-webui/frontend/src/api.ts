@@ -201,6 +201,8 @@ export type PermissionPrompt = {
 /** Reasoning effort levels (kollabor_ai EFFORT_LEVELS, cheapest first).
  * Empty/undefined means the model default (no effort is sent). */
 export const EFFORT_LEVELS = [
+  "none",
+  "minimal",
   "low",
   "medium",
   "high",

@@ -10,9 +10,11 @@ working untouched.
 
 ## Levels
 
-`low` → `medium` → `high` → `xhigh` → `max` → `ultra` (cheapest first).
+`none` → `minimal` → `low` → `medium` → `high` → `xhigh` → `max` → `ultra` (cheapest first).
 
-Anthropic documents `low`–`max`. The ChatGPT codex backend also advertises
+Anthropic documents `low`–`max`, so `none` and `minimal` are left out of its
+request and its picker; the OpenAI-shaped providers take them. The ChatGPT codex
+backend also advertises
 `ultra` on its top tiers and reports the accepted levels per model, which is
 why `/model effort` on an OAuth profile lists that model's real levels instead
 of the generic set. An unrecognized level is dropped with a warning rather than
@@ -24,6 +26,7 @@ sent — providers answer a bad level with a 400.
 /model effort              # show the current level + what this model accepts
 /model effort xhigh        # set it (persisted to the active profile)
 /model effort max          # maximum reasoning, when the model advertises it
+/model effort minimal      # lightest reasoning where the provider takes it (not Anthropic)
 /model effort default      # clear it -- back to the model's own default
 ```
 

@@ -131,10 +131,11 @@ def _safe_profile_load_diagnostic(profile_data: Any, error: Exception) -> str:
 # Sentinel prefix for keys stored in OS keyring
 KEYRING_SENTINEL_PREFIX = "secret:keyring:"
 
-# Reasoning effort levels, cheapest first. Anthropic documents low..max;
-# the ChatGPT codex backend also advertises "ultra" on its top tiers
-# (see query_codex_model_details). Providers 400 on anything else.
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
+# Reasoning effort levels, cheapest first. none and minimal are OpenAI-shaped:
+# Anthropic does not take them (providers/tuning.py leaves them out). Anthropic
+# documents low..max; the ChatGPT codex backend also advertises "ultra" on its
+# top tiers (see query_codex_model_details). Providers 400 on anything else.
+EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def _keyring_get(key_name: str) -> Optional[str]:

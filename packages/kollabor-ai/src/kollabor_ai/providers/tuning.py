@@ -36,6 +36,11 @@ EFFORT_SUPPORTED_PROVIDERS = frozenset(
     {"anthropic", "openai", "azure_openai", "openai_responses", "openrouter", "custom"}
 )
 
+# Levels Anthropic's output_config.effort does not take (it documents low..max).
+# They stay in EFFORT_LEVELS for the OpenAI-shaped fields; the Anthropic request
+# and the /model effort picker leave them out.
+ANTHROPIC_UNSUPPORTED_EFFORT = frozenset({"none", "minimal"})
+
 
 def sampling_params(config: Any, model: str) -> Dict[str, Any]:
     """``{"temperature": ..., "top_p": ...}``, or ``{}`` for reasoning models.
@@ -61,6 +66,9 @@ def effort_params(config: Any, style: str) -> Dict[str, Any]:
     if not effort:
         return {}
     if style == EffortStyle.ANTHROPIC:
+        if effort in ANTHROPIC_UNSUPPORTED_EFFORT:
+            logger.warning("Anthropic has no effort level %r; not sent", effort)
+            return {}
         return {"output_config": {"effort": effort}}
     if style == EffortStyle.RESPONSES:
         return {"reasoning": {"effort": effort}}
