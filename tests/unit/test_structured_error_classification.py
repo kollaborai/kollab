@@ -18,6 +18,7 @@ import pytest
 from kollabor_ai.providers.errors import (
     CONTEXT_OVERFLOW_CODES,
     APIConnectionError,
+    APIFormatMismatchError,
     APITimeoutError,
     AuthenticationError,
     ContextLengthExceededError,
@@ -915,3 +916,193 @@ async def test_null_choices_and_usage_stay_legal_downstream():
 
     with pytest.raises(EmptyResponseError):
         await provider.call([{"role": "user", "content": "hi"}])
+
+# --- #754: tool_calls shape validation (list + objects + function shape) ---
+
+@pytest.mark.asyncio
+async def test_non_stream_scalar_tool_calls_is_typed_not_attribute_error():
+    """bismuth FAIL verdict @ce681403 repro: ``message.tool_calls = 42``
+    passes every existing container check, then the parser iterates it
+    directly -> raw TypeError('int' object is not iterable), classified
+    as code=None/retryable=False instead of APIFormatMismatchError."""
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={
+            "choices": [{"message": {"content": "ok", "tool_calls": 42}}]
+        }
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        await provider.call([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_tool_call_element_not_object_is_typed():
+    """tool_calls=["oops"] crashes the parser at tool_call["function"]
+    (string subscript TypeError). The boundary must type it."""
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={
+            "choices": [
+                {"message": {"content": "ok", "tool_calls": ["oops"]}}
+            ]
+        }
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        await provider.call([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_tool_call_function_not_object_is_typed():
+    """function="oops" crashes at function["arguments"] (string index
+    TypeError). The boundary must type it."""
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={
+            "choices": [
+                {
+                    "message": {
+                        "content": "ok",
+                        "tool_calls": [{"id": "1", "function": "oops"}],
+                    }
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        await provider.call([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_tool_call_missing_function_keys_is_typed():
+    """The non-stream parser subscripts id/function.name/function.arguments
+    unconditionally; a function object missing them leaks KeyError. The
+    message variant (complete tool calls) must be fully shaped."""
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={
+            "choices": [
+                {
+                    "message": {
+                        "content": "ok",
+                        "tool_calls": [{"id": "1", "function": {"name": "f"}}],
+                    }
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        await provider.call([{"role": "user", "content": "hi"}])
+
+
+def test_coerce_rejects_scalar_delta_tool_calls():
+    """SSE: delta.tool_calls=42 crashes the streaming parser's for-loop
+    with an untyped TypeError. _coerce_sse_object must type it."""
+    from kollabor_ai.providers.custom_provider import _coerce_sse_object
+
+    with pytest.raises(APIFormatMismatchError):
+        _coerce_sse_object(
+            {"choices": [{"delta": {"tool_calls": 42}}]}, "gateway"
+        )
+
+
+def test_coerce_rejects_non_object_delta_tool_call_element():
+    """SSE: a string element crashes tool_delta.get(...) with
+    AttributeError. The boundary must type it."""
+    from kollabor_ai.providers.custom_provider import _coerce_sse_object
+
+    with pytest.raises(APIFormatMismatchError):
+        _coerce_sse_object(
+            {"choices": [{"delta": {"tool_calls": ["oops"]}}]}, "gateway"
+        )
+
+
+def test_coerce_rejects_non_object_delta_tool_call_function():
+    """SSE: function="oops" crashes tool_delta.get("function", {}).get(...)
+    (str has no .get). The boundary must type it."""
+    from kollabor_ai.providers.custom_provider import _coerce_sse_object
+
+    with pytest.raises(APIFormatMismatchError):
+        _coerce_sse_object(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [{"id": "a", "function": "oops"}]
+                        }
+                    }
+                ]
+            },
+            "gateway",
+        )
+
+
+@pytest.mark.asyncio
+async def test_valid_non_stream_tool_calls_stay_legal():
+    """Guard the guard: a well-formed message.tool_calls entry must still
+    parse into a ToolUseContent -- the new shape checks must not
+    over-reject legal gateway responses."""
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": '{"city": "sf"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+    )
+
+    response = await provider.call([{"role": "user", "content": "hi"}])
+    tool_blocks = [
+        b for b in response.content if getattr(b, "type", None) == "tool_use"
+    ]
+    assert len(tool_blocks) == 1
+    assert tool_blocks[0].name == "get_weather"
+    assert tool_blocks[0].input == {"city": "sf"}
+
+
+def test_streaming_delta_tool_call_continuation_stays_legal():
+    """Guard the guard: OpenAI streaming sends continuation chunks whose
+    tool_call deltas carry ONLY function.arguments (no id, no name). The
+    delta variant must NOT demand the non-stream key set or legal
+    streaming breaks."""
+    from kollabor_ai.providers.custom_provider import _coerce_sse_object
+
+    data = _coerce_sse_object(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {"arguments": '{"city":'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        "gateway",
+    )
+    assert (
+        data["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+        == '{"city":'
+    )
