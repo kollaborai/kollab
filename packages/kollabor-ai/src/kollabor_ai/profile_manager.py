@@ -142,6 +142,16 @@ def _vault_call(
 ) -> Optional[str]:
     """Read (value None), store, or delete a secret in the encrypted vault file.
 
+    Thin wrapper over :func:`_vault_op` that drops the "closed" flag.
+    """
+    return _vault_op(key_name, value, delete=delete)[0]
+
+
+def _vault_op(
+    key_name: str, value: Optional[str] = None, *, delete: bool = False
+) -> tuple[Optional[str], bool]:
+    """Read (value None), store, or delete a secret in the encrypted vault file.
+
     The vault is where a key goes when the OS keyring cannot take it
     (KOLLAB_NO_KEYRING, no Secret Service, a container): AES-256-GCM in
     ~/.kollab/vault/secrets.enc. Its password is the random one kept owner-only
@@ -152,6 +162,10 @@ def _vault_call(
     value stored; for a delete the removed value, or "" when the vault holds
     none. None when the vault is unavailable or cannot be decrypted --
     an unreadable vault is never rewritten, so a wrong password loses nothing.
+    Returns ``(result, closed)``; ``closed`` is True when ``secrets.enc``
+    exists but this process could not open it (no password, wrong password,
+    corrupt file), so a caller can tell that from a vault that opened and
+    simply lacks the entry (#610).
     A read or delete never creates the vault, and a vault that exists is never
     given a new vault.key: without its password it stays closed (#610).
     """
@@ -165,14 +179,15 @@ def _vault_call(
     from kollabor_config.file_lock import locked_file
     from kollabor_config.private_fs import ensure_private_dir
 
-    if not CRYPTOGRAPHY_AVAILABLE:
-        return None
+    vault_file = None
     try:
         vault_dir = get_config_directory() / "vault"
         vault_file = vault_dir / "secrets.enc"
+        if not CRYPTOGRAPHY_AVAILABLE:
+            return None, vault_file.exists()
         writing = value is not None and not delete
         if not writing and not vault_file.exists():
-            return "" if delete else None
+            return ("" if delete else None), False
         ensure_private_dir(vault_dir)
         with locked_file(vault_dir / "vault.lock", private=True):
             password = ""
@@ -187,7 +202,7 @@ def _vault_call(
                     logger.warning(
                         "Password vault is locked: set KOLLAB_KEY_ENCRYPTION_PASSWORD"
                     )
-                    return None
+                    return None, True
                 password = _secrets.token_urlsafe(32)
                 with locked_file(key_file, "w", private=True) as f:
                     f.write(password)
@@ -196,18 +211,22 @@ def _vault_call(
             if delete:
                 found = keystore.pop(key_name, None)
                 if found is None:
-                    return ""
+                    return "", False
                 storage._save_keystore(keystore)
-                return found
+                return found, False
             if value is None:
-                return keystore.get(key_name)
+                return keystore.get(key_name), False
             keystore[key_name] = value
             storage._save_keystore(keystore)
-            return value
+            return value, False
     except Exception as e:
         # The type only: an exception's text can carry the key being stored.
         logger.warning(f"Password vault unavailable ({type(e).__name__})")
-        return None
+        try:
+            closed = vault_file is not None and vault_file.exists()
+        except OSError:
+            closed = False
+        return None, closed
 
 
 def _keyring_get(key_name: str) -> Optional[str]:
@@ -220,10 +239,20 @@ def _keyring_get(key_name: str) -> Optional[str]:
     ``secret:keyring:`` reference resolves from either store (#610). A key
     lives in one store at a time (see _keyring_set), and the vault is read
     first because a process without the keyring cannot clear a keyring copy.
+    A vault that exists but this process cannot open ends the lookup with
+    None: the keyring copy may be older than a key that vault holds, and a
+    stale key used in silence is worse than the loud "sentinel found but
+    keyring lookup failed" path.
     """
-    in_vault = _vault_call(key_name)
+    in_vault, vault_closed = _vault_op(key_name)
     if in_vault:
         return in_vault
+    if vault_closed:
+        logger.warning(
+            f"Profile '{key_name}': the vault cannot be opened; not using "
+            "a keyring copy that may be older"
+        )
+        return None
     try:
         import keyring
 
