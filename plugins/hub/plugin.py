@@ -5677,6 +5677,24 @@ class HubPlugin(BasePlugin):
     # outer wait keeps margin over both.
     SOCKET_ANSWER_DEADLINE_SECONDS = 10.0
 
+    async def _signal_ready_then_advertise(self, socket_path: str) -> None:
+        """Signal the fork parent, then gate presence advertisement (#692).
+
+        The ready pipe needs only the deterministic socket path, so the
+        signal goes first: the fork parent's 15s budget is mostly consumed
+        by plugin startup before this method runs, and holding the signal
+        behind a socket-answer wait can push it past the budget on any slow
+        start. Third-party presence stays gated inside the advertise step.
+        """
+        # Signal daemon-ready if running in fork-daemon mode
+        try:
+            from kollabor.daemon import signal_daemon_ready
+
+            signal_daemon_ready(socket_path)
+        except Exception:
+            pass  # Not in daemon mode, or import failed
+        await self._advertise_presence_when_socket_answers(socket_path)
+
     async def _advertise_presence_when_socket_answers(
         self, socket_path: str, timeout: float = SOCKET_ANSWER_DEADLINE_SECONDS
     ) -> None:
@@ -6046,20 +6064,10 @@ class HubPlugin(BasePlugin):
                     self._endpoint_setup_error = bind_err
                 self._endpoint_uri = ""
 
-            # The window that forked this daemon looks the agent up in presence
-            # the moment it hears "ready"; until now the record had no socket.
-            # Bind-return is not serving: under a busy startup loop the first
-            # handshake can land seconds after the listener exists (#692), so
-            # the advertise waits for the endpoint to actually answer one.
-            await self._advertise_presence_when_socket_answers(socket_path)
-
-            # Signal daemon-ready if running in fork-daemon mode
-            try:
-                from kollabor.daemon import signal_daemon_ready
-
-                signal_daemon_ready(socket_path)
-            except Exception:
-                pass  # Not in daemon mode, or import failed
+            # The fork parent needs the ready signal early (its 15s budget is
+            # mostly consumed by plugin startup before this point); presence
+            # advertisement is gated separately inside the helper.
+            await self._signal_ready_then_advertise(socket_path)
 
             # Initialize vault for this identity (if enabled by agent config)
             _vault_enabled = True

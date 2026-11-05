@@ -237,6 +237,45 @@ async def test_degraded_advertise_completes_within_fork_parent_budget(caplog):
     )
 
 
+@pytest.mark.asyncio
+async def test_ready_signal_does_not_wait_behind_the_advertise_gate(caplog):
+    """Live-fork evidence (lf6, 2026-11-05): child startup reached socket bind
+    ~14.7s after fork on a loaded machine -- the 15s fork-parent budget was
+    nearly consumed by startup BEFORE the gate. A gate (even 10s) placed
+    BEFORE signal_daemon_ready pushes the signal past the budget on any
+    slow start with a never-answering socket: bind 14.7s + gate 10s = the
+    child is killed at 15s with no ready signal. The ready pipe needs only
+    the deterministic socket path, so the signal must fire BEFORE the gate;
+    third-party presence stays gated (#692 contract is about presence)."""
+    import kollabor.daemon as daemon_mod
+
+    hub = HubPlugin(event_bus=MagicMock())
+    hub._presence = MagicMock()
+
+    async def never_answer(path, timeout=30.0, interval=0.25):
+        await asyncio.sleep(timeout)
+        return False
+
+    signaled_at = {}
+    started = time.monotonic()
+
+    def _record_signal(path):
+        signaled_at["t"] = time.monotonic()
+
+    with patch.object(
+        hub_plugin, "wait_until_socket_answers", new=never_answer
+    ):
+        with patch.object(daemon_mod, "signal_daemon_ready", new=_record_signal):
+            await hub._signal_ready_then_advertise("/no/such/endpoint")
+    gate_returned_at = time.monotonic()
+    hub._presence.publish.assert_called_once()
+    assert signaled_at, "ready signal never fired"
+    assert signaled_at["t"] - started < 1.0, (
+        f"ready signal fired {signaled_at['t'] - started:.1f}s in -- it waited "
+        "behind the advertise gate; on a slow start the fork parent kills the "
+        "child at 15s before the signal lands"
+    )
+    assert signaled_at["t"] <= gate_returned_at
 def test_gate_deadline_nests_inside_parent_and_outer_budgets():
     """Deadline nesting guard: gate < fork parent 15s (kollabor/daemon.py:115)
     < app-level wait_until_ready 30s (application.py:1611). Equal-or-greater
