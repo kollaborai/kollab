@@ -144,10 +144,13 @@ def _vault_call(
 
     The vault is where a key goes when the OS keyring cannot take it
     (KOLLAB_NO_KEYRING, no Secret Service, a container): AES-256-GCM in
-    ~/.kollab/vault/secrets.enc. Its password is KOLLAB_KEY_ENCRYPTION_PASSWORD
-    when set, otherwise a random one kept owner-only in ~/.kollab/vault/vault.key,
-    so pipe mode and --detached never prompt. Returns the value read, or the
-    value stored; None when the vault is unavailable or cannot be decrypted --
+    ~/.kollab/vault/secrets.enc. Its password is the random one kept owner-only
+    in ~/.kollab/vault/vault.key when that file exists, otherwise
+    KOLLAB_KEY_ENCRYPTION_PASSWORD; a new vault gets a vault.key only when the
+    variable is unset. So the key file records which password a vault uses,
+    and pipe mode and --detached never prompt. Returns the value read, or the
+    value stored; for a delete the removed value, or "" when the vault holds
+    none. None when the vault is unavailable or cannot be decrypted --
     an unreadable vault is never rewritten, so a wrong password loses nothing.
     A read or delete never creates the vault, and a vault that exists is never
     given a new vault.key: without its password it stays closed (#610).
@@ -169,14 +172,16 @@ def _vault_call(
         vault_file = vault_dir / "secrets.enc"
         writing = value is not None and not delete
         if not writing and not vault_file.exists():
-            return None
+            return "" if delete else None
         ensure_private_dir(vault_dir)
         with locked_file(vault_dir / "vault.lock", private=True):
-            password = os.environ.get("KOLLAB_KEY_ENCRYPTION_PASSWORD", "")
+            password = ""
             key_file = vault_dir / "vault.key"
-            if not password and key_file.exists():
+            if key_file.exists():
                 with locked_file(key_file, "r", private=True) as f:
                     password = f.read().strip()
+            else:
+                password = os.environ.get("KOLLAB_KEY_ENCRYPTION_PASSWORD", "")
             if not password:
                 if vault_file.exists() or not writing:
                     logger.warning(
@@ -190,8 +195,9 @@ def _vault_call(
             keystore = storage._load_keystore()
             if delete:
                 found = keystore.pop(key_name, None)
-                if found is not None:
-                    storage._save_keystore(keystore)
+                if found is None:
+                    return ""
+                storage._save_keystore(keystore)
                 return found
             if value is None:
                 return keystore.get(key_name)
@@ -243,7 +249,9 @@ def _keyring_set(key_name: str, value: str) -> bool:
     keeps the caller on its plaintext path. With the keyring disabled
     (KOLLAB_NO_KEYRING, tests) the keyring is never touched, so no prompt;
     the key goes to the vault file instead (#610). A keyring write removes the
-    vault's copy, so a reference never resolves to a stale key.
+    vault's copy, so a reference never resolves to a stale key; when a vault
+    exists that this process cannot open, the write counts as failed, since
+    the stale copy could not be cleared.
     """
     try:
         import keyring
@@ -252,7 +260,12 @@ def _keyring_set(key_name: str, value: str) -> bool:
 
         if keyring_enabled():
             keyring.set_password(APIKeyManager.SERVICE_NAME, key_name, value)
-            _vault_call(key_name, delete=True)
+            if _vault_call(key_name, delete=True) is None:
+                logger.warning(
+                    f"Profile '{key_name}': the vault holds a copy this process "
+                    "cannot open; not writing a reference"
+                )
+                return False
             return True
     except Exception:
         pass
@@ -747,7 +760,15 @@ class LLMProfile:
                 return raw
             if (self.name, raw) not in _KEYRING_MIGRATION_TRIED:
                 _KEYRING_MIGRATION_TRIED.add((self.name, raw))
-                if _keyring_set(self.name, raw):
+                # Profiles are keyed by name only: a project's plaintext key must
+                # not replace the vault entry the global profile points to.
+                in_vault = _vault_call(self.name)
+                if in_vault and in_vault != raw:
+                    logger.info(
+                        f"Profile '{self.name}': another key is stored under this "
+                        "name; leaving this one in config"
+                    )
+                elif _keyring_set(self.name, raw):
                     logger.info(
                         f"Profile '{self.name}': auto-migrated API key to OS keyring"
                     )
