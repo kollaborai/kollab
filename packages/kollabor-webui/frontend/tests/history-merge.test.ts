@@ -282,6 +282,66 @@ test("a row appended during compaction follows the retained rows, which still sh
   ]);
 });
 
+test("a compaction that stores a turn drops the window's transient copies, as a sync does", () => {
+  // the window still holds the turn as transient rows; the snapshot now stores it
+  const shown = [
+    { id: "history-0", role: "user", content: "first prompt" },
+    { id: "history-1", role: "assistant", content: "first answer" },
+    { id: "user-ws1-5", role: "user", content: "Just submitted" },
+    { id: "assistant-ws1-6", role: "assistant", content: "Fresh reply" },
+  ];
+  const marker = {
+    id: "history-0",
+    role: "assistant",
+    content: "Context compacted (round 1): 4 -> 3 messages.",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+  };
+  const loaded = [
+    marker,
+    { id: "history-1", role: "user", content: "Just submitted" },
+    { id: "history-2", role: "assistant", content: "Fresh reply" },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.deepEqual(rebased.messages.map((message) => message.content), [
+    "first prompt",
+    "first answer",
+    marker.content,
+    "Just submitted",
+    "Fresh reply",
+  ]);
+});
+
+test("a compaction keeps a transient reply whose stored copy the snapshot lacks", () => {
+  // the earlier turn is displayed and carried; the new turn is not stored yet
+  const shown = [
+    { id: "history-0", role: "user", content: "2+2?" },
+    { id: "history-1", role: "assistant", content: "4" },
+    { id: "user-ws1-5", role: "user", content: "2+2?" },
+    { id: "assistant-ws1-6", role: "assistant", content: "4" },
+  ];
+  const marker = {
+    id: "history-0",
+    role: "assistant",
+    content: "Context compacted (round 1): 4 -> 3 messages.",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+  };
+  const loaded = [
+    marker,
+    { id: "history-1", role: "user", content: "2+2?" },
+    { id: "history-2", role: "assistant", content: "4" },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.deepEqual(rebased.messages.map((message) => message.content), [
+    marker.content,
+    "2+2?",
+    "4",
+    "2+2?",
+    "4",
+  ]);
+});
+
 // Issue #666: the turn a window just ran renders as transient rows
 // (user-<session>-<n>, assistant-<session>-<n>) while its stored rows are
 // still unwritten. When the sync point missed the turn -- the daemon's
