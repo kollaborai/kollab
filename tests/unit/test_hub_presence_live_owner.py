@@ -253,3 +253,52 @@ def test_a_peer_reads_the_token_another_process_stamped_for_itself():
     finally:
         child.kill()
         child.wait()
+
+
+# macOS and NetBSD: psutil's public ``Process.create_time()`` takes no ``monotonic``
+# argument, so the token must come from the kernel's own record another way. Linux
+# psutil serves the same private call, so a darwin ``sys.platform`` drives that branch.
+
+
+@pytest.fixture
+def macos(monkeypatch):
+    pytest.importorskip("psutil")
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
+def test_a_macos_process_has_a_start_token_that_names_it(macos):
+    mine = process_start_token(os.getpid())
+    assert mine and mine.startswith("darwin:")
+    assert process_start_token(os.getpid()) == mine
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert process_start_token(child.pid) not in (None, mine)
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_discover_reclaims_a_reused_pid_on_macos(hub_dirs, owner_socket, macos):
+    # The record holds the start of an earlier owner; an unrelated process has the pid.
+    presence, _ = hub_dirs
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        earlier_owner = process_start_token(os.getpid())
+        assert earlier_owner
+        record = _owner_file(
+            presence, owner_socket, pid=child.pid, age=660, start_token=earlier_owner
+        )
+        assert _peer().discover_agents(include_solo=True) == []
+        assert not record.exists() and not owner_socket.exists()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_startup_scan_keeps_a_live_owner_on_macos(hub_dirs, owner_socket, macos):
+    presence, _ = hub_dirs
+    token = process_start_token(os.getpid())
+    assert token
+    record = _owner_file(presence, owner_socket, pid=os.getpid(), age=660, start_token=token)
+    assert _peer().startup_scan() == 0
+    assert record.exists() and owner_socket.exists()
