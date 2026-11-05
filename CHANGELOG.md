@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Compaction no longer shows a retained paged tool result twice after its output reference is renumbered, and a live tool turn is kept when an earlier stored turn only shares its words: a transient turn is replaced by its stored copy only when both carry the same request id, or the same tool calls and results (#637).
 - Transient turn dedupe: a repeated prompt's new reply is no longer dropped when only its user row was stored and an identical earlier answer exists. A transient block is dropped only when its rows match the newest stored rows in order. This predates #648: the check came in with 1f481a77 on main (#666).
+- Hub shutdown now joins in-flight secondary membership starts, isolates per-peer close failures, and finishes remaining cleanup before propagating cancellation (#356).
+- The Profiles dialog keeps profile model details readable on narrow screens:
+  provider, model and effort wrap onto the row instead of truncating to an
+  ellipsis, and the Test/Edit/Copy/Delete actions wrap below the text at phone
+  widths, so no detail needs hover to read (#578).
 - Closed-PR review and first-push check-run collection in the throughput KPI paginates all pages and fails closed on repeated pages, malformed responses, or pagination-cap exhaustion rather than reporting partial metrics (#747).
 - Input handler hook cleanup now detaches its hooks from the event bus: `HookRegistrar.unregister_all_hooks()` passed a `Hook` object to an API that takes the owning plugin and hook name, so cleanup silently left every input hook registered and firing (#735).
 - Agent startup now preserves existing global agent/skill files, refuses to seed through linked/reparse-point directories, and publishes missing seed files without overwriting concurrent creations; safely retired seed copies are restored if changed (#698).

@@ -307,21 +307,25 @@ export function ProfilesDialog({
           {profiles.map((p) => (
             <div
               key={p.name}
-              className="flex items-center gap-2 rounded-md bg-muted/30 p-2"
+              className="flex min-w-0 flex-wrap items-center gap-2 rounded-md bg-muted/30 p-2"
             >
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">{p.name}</div>
-                <div className="text-muted-foreground truncate text-xs">
+              <div className="min-w-0 flex-1 basis-56">
+                <div className="text-sm font-medium break-words">{p.name}</div>
+                <div
+                  className="text-muted-foreground text-xs"
+                  data-testid="profile-meta"
+                >
                   {[p.provider, p.model, p.effort && `${p.effort} effort`]
                     .filter(Boolean)
                     .join(" · ")}
                 </div>
                 {profileTargetLabel(p) && (
-                  <div className="truncate text-xs" title={profileTargetLabel(p) ?? undefined}>
+                  <div className="text-xs break-words" title={profileTargetLabel(p) ?? undefined}>
                     {profileTargetLabel(p)}
                   </div>
                 )}
               </div>
+              <div className="flex shrink-0 gap-1">
               <Button
                 variant="ghost"
                 size="sm"
@@ -360,6 +364,7 @@ export function ProfilesDialog({
               >
                 <Trash2 className="size-4" />
               </Button>
+              </div>
             </div>
           ))}
           {profiles.length === 0 && (
