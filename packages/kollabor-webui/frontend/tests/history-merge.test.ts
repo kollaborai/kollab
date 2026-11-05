@@ -551,7 +551,10 @@ test("a new picture is kept when a stored turn repeats the words with another pi
   assert.ok(rebased.messages.some((message) => message.id === "user-ws1-11"));
 });
 
-test("a transient picture turn is replaced by its stored copy when the picture matches", () => {
+// Live-to-live only. The engine never stores an image string: a stored picture is
+// {type:"image", source:{kind:"managed_upload", media_id, media_type}}, which the web converter
+// (runtime.tsx historyContentToThreadContent) shows as the text "[imageN]". managed_upload coverage is out of scope here.
+test("a transient picture turn is replaced by a stored row with the same image string", () => {
   const shown = [
     { id: "history-0", role: "user", content: "older question" },
     { id: "history-1", role: "assistant", content: "older answer" },
