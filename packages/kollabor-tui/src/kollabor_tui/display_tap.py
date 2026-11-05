@@ -95,6 +95,31 @@ class DisplayTap:
         # The owner's own view of every event. Not a subscriber: the count of
         # those says whether a window is attached.
         self._on_event = on_event
+        # Names the live conversation (its durable uid). Every event is stamped
+        # with it, and replay and live delivery drop the other conversations'
+        # events, so a /resume or a new session never shows the old text (#525).
+        self.conversation_source: Optional[Callable[[], Optional[str]]] = None
+
+    def _live_conversation(self) -> Optional[str]:
+        source = self.conversation_source
+        if source is None:
+            return None
+        try:
+            return source() or None
+        except Exception:
+            logger.debug("DisplayTap conversation_source failed", exc_info=True)
+            return None
+
+    def in_live_conversation(self, event: Dict[str, Any]) -> bool:
+        """False for an event another conversation produced (or none is named).
+
+        Without a ``conversation_source`` nothing is scoped. With one, an event
+        with no conversation (published before identity existed) is not assumed
+        to belong to the live one.
+        """
+        if self.conversation_source is None:
+            return True
+        return event.get("conversation_uid") == self._live_conversation()
 
     def publish(self, event: Dict[str, Any]) -> None:
         """Publish a display event to all subscribers.
@@ -116,6 +141,10 @@ class DisplayTap:
             if key != "_client_completion" and event.get(key) is None:
                 event[key] = value
         event.setdefault("ts", time.time())
+        if event.get("conversation_uid") is None:
+            conversation = self._live_conversation()
+            if conversation is not None:
+                event["conversation_uid"] = conversation
         with self._lock:
             if (event.get("type") == "turn_complete" and completion is not None
                     and event.get("request_id") == completion["request_id"]
@@ -174,8 +203,8 @@ class DisplayTap:
         )
 
     def get_snapshot(self) -> List[Dict[str, Any]]:
-        """Get recent history for catch-up on connect."""
-        return list(self._history)
+        """Get the live conversation's recent history for catch-up on connect."""
+        return [event for event in list(self._history) if self.in_live_conversation(event)]
 
     @property
     def subscriber_count(self) -> int:
