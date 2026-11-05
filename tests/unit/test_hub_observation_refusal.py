@@ -6,6 +6,7 @@ refused observation would make a lost message look delivered.
 
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -240,3 +241,101 @@ async def test_a_refused_deferred_message_is_not_dropped_after_its_ack():
     await bridge._tick()
 
     assert list(bridge._local_pending) == [refused]
+
+
+# --- A long outage reaches the bounded replay (#581 review round 2) ----------
+
+
+class _StopLoop(Exception):
+    pass
+
+
+def _mailbox_plugin(refusals, injected=None):
+    """A plugin whose receiver refuses every message, in ACP dispatch mode."""
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="agent-1", identity="receiver")
+    plugin.config = None
+    llm = SimpleNamespace()
+    if injected is not None:
+
+        async def inject_system_message(block, subtype=""):
+            injected.append(subtype)
+
+        llm.inject_system_message = inject_system_message
+    plugin.event_bus = SimpleNamespace(get_service=lambda name: llm)
+    plugin._agent_dispatch_mode = lambda service: "acp"
+
+    async def receive(message):
+        refusals.append(message.id)
+        return False
+
+    plugin._on_message_received = receive
+    return plugin
+
+
+async def _run_one_mailbox_poll(plugin):
+    """Run the production poll loop for exactly one tick."""
+    ticks = []
+
+    async def fake_sleep(seconds):
+        ticks.append(seconds)
+        if len(ticks) > 1:
+            raise asyncio.CancelledError
+
+    with patch("plugins.hub.plugin.asyncio.sleep", fake_sleep):
+        await plugin._mailbox_loop()
+
+
+async def _fill_mailbox(count):
+    sent = []
+    for number in range(count):
+        message = HubMessage(
+            action="message", from_agent="peer-id-1", from_identity="peer-1",
+            to="*", content=f"NOTE_{number}", timestamp=time.time() + number / 1000,
+        )
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        sent.append(message.id)
+    return sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_inject", [True, False])
+async def test_a_long_outage_poll_offers_every_refused_message_again(
+    tmp_path, with_inject
+):
+    # More waiting files than one bounded replay (INBOX_MAX_REPLAY) carries.
+    # The poll deleted every file and coalesced or dropped the overflow, so a
+    # refused observation lost its owner while its sender had been told it was
+    # queued.
+    refusals, injected = [], []
+    plugin = _mailbox_plugin(refusals, injected if with_inject else None)
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        sent = await _fill_mailbox(messenger_module.INBOX_MAX_REPLAY + 5)
+
+        await _run_one_mailbox_poll(plugin)
+
+        assert sorted(refusals) == sorted(sent)
+        assert injected == []
+        assert messenger_module.AgentMessenger.get_inbox_count("receiver") == len(sent)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_message_in_a_summarised_replay_stays_queued(tmp_path):
+    # A replay that carries a summary (pre-restart drops) with no way to inject
+    # falls back to per-message delivery; that loop ignored the refusal.
+    refusals = []
+    plugin = _mailbox_plugin(refusals)
+    message = HubMessage(
+        action="message", from_agent="peer-id-1", from_identity="peer-1",
+        to="*", content="PEER_OBSERVATION",
+    )
+    summary = HubMessage(
+        action="inbox_summary", from_identity="hub", content="[offline inbox]",
+        timestamp=0.0, metadata={"total": 1},
+    )
+    plugin.event_bus = SimpleNamespace(get_service=lambda name: None)
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await plugin._deliver_inbox_batch([summary, message])
+
+        assert refusals == [message.id]
+        assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 1
