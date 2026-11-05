@@ -256,15 +256,31 @@ const requestIdOf = (message: Message): string | undefined => {
 };
 
 /**
+ * A picture the thread shows only as its placeholder text, [imageN]. The text
+ * names no picture, so two placeholders with the same words prove nothing.
+ */
+const PICTURE_PLACEHOLDER = /\[image\d+\]/;
+const hasPlaceholderPicture = (message: Message): boolean => {
+  const content = message.content;
+  if (typeof content === "string") return PICTURE_PLACEHOLDER.test(content);
+  return Array.isArray(content) && content.some((part) =>
+    part && typeof part === "object" && (part as { type?: unknown }).type === "text" &&
+    PICTURE_PLACEHOLDER.test(String((part as { text?: unknown }).text ?? "")));
+};
+
+/**
  * Same turn, on top of same words: equal request ids when both rows carry one,
  * else equal tool calls (call ids and results) and equal pictures. A repeated
  * prompt whose turn made another call, or came with another picture, is a
- * different turn; the composer sends pictures without a request id.
+ * different turn; the composer sends pictures without a request id. A placeholder
+ * picture has no identity to compare, so without a shared request id it is not
+ * proven the same turn: keep both rows (a duplicate) rather than drop the new one.
  */
 const sameTurn = (live: Message, stored: Message): boolean => {
   const liveRequest = requestIdOf(live);
   const storedRequest = requestIdOf(stored);
   if (liveRequest && storedRequest) return liveRequest === storedRequest;
+  if (hasPlaceholderPicture(live) || hasPlaceholderPicture(stored)) return false;
   return JSON.stringify(turnParts(live)) === JSON.stringify(turnParts(stored));
 };
 
