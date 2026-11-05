@@ -1771,23 +1771,32 @@ class TestQueueProcessor(unittest.TestCase):
             ["hub_msg", "malformed_tool", "terminal"],
         )
 
-    def _truncated_turn(self, continuation_text, continuation_stop):
-        """Run one turn whose first reply is cut at the output limit."""
+    def _truncated_turn(self, continuation_text, continuation_stop, usages=None):
+        """Run one turn whose first reply is cut at the output limit.
+
+        `usages` is the token usage each call reports, in call order.
+        """
         replies = iter([("one two se", "length"), (continuation_text, continuation_stop)])
+        usage_by_call = iter(usages or [None, None])
+        current = {"usage": None}
 
         async def call_llm(**kwargs):
             text, stop = next(replies)
             self.api_service.last_stop_reason = stop
+            current["usage"] = next(usage_by_call)
             return text
 
         self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
         self.native_tools_handler.tool_calling_enabled = False
         self.api_service.has_pending_tool_calls = MagicMock(return_value=False)
-        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.get_last_token_usage = MagicMock(
+            side_effect=lambda: current["usage"]
+        )
+        self.api_service.last_token_usage_is_estimated = False
         self.api_service.last_thinking_content = None
         self.api_service.last_stop_reason = ""
-        self.api_service.model = "test-model"
-        self.api_service.provider_type = "test"
+        self.api_service.model = "gpt-4o" if usages else "test-model"
+        self.api_service.provider_type = "openai" if usages else "test"
         self.tool_executor.take_executed_count.return_value = 0
         self.response_parser.parse_response.side_effect = lambda text: {
             "content": text,
@@ -1807,6 +1816,32 @@ class TestQueueProcessor(unittest.TestCase):
                 user_message_provided=True,
                 current_parent_uuid="parent-uuid",
             )
+        )
+
+    def test_a_cut_reply_is_priced_when_its_last_call_reports_no_usage(self):
+        """The cut call's usage is real and billed; a continuation that comes
+        back without a usage trailer must not drop it from the totals (#421)."""
+        from kollabor_ai.cost_calculator import calculate_cost
+
+        cut = {"prompt_tokens": 1000, "completion_tokens": 500}
+        self._truncated_turn("venteen", "stop", usages=[cut, None])
+        expected = calculate_cost("openai", "gpt-4o", 1000, 500, 0)
+        self.assertGreater(expected, 0)
+        self.assertEqual(self.session_stats["total_input_tokens"], 1000)
+        self.assertEqual(self.session_stats["total_output_tokens"], 500)
+        self.assertEqual(self.session_stats["total_cost_usd"], expected)
+
+    def test_a_cut_reply_is_priced_from_both_calls_when_both_report_usage(self):
+        """Unchanged path: both calls report usage and both are billed."""
+        from kollabor_ai.cost_calculator import calculate_cost
+
+        cut = {"prompt_tokens": 1000, "completion_tokens": 500}
+        last = {"prompt_tokens": 1200, "completion_tokens": 100}
+        self._truncated_turn("venteen", "stop", usages=[cut, last])
+        self.assertEqual(self.session_stats["total_input_tokens"], 2200)
+        self.assertEqual(
+            self.session_stats["total_cost_usd"],
+            calculate_cost("openai", "gpt-4o", 2200, 600, 0),
         )
 
     def test_empty_continuation_of_a_cut_reply_is_announced(self):
