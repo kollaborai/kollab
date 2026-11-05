@@ -142,3 +142,50 @@ def test_startup_scan_reclaims_a_reused_pid(hub_dirs, owner_socket):
     )
     assert _peer().startup_scan() == 1
     assert not record.exists() and not owner_socket.exists()
+
+
+@pytest.fixture
+def clock_stepped(monkeypatch):
+    """The wall clock jumps a day forward after every agent has started.
+
+    On Linux psutil reports a process's start as the kernel's boot-relative start
+    plus ``boot_time()``, and re-reads ``boot_time()`` on every call, so a step of
+    the realtime clock (NTP or chrony after boot, a VM resuming) moves every
+    reported start. The kernel's own start of a process does not move.
+    """
+    pslinux = pytest.importorskip("psutil._pslinux")
+    real = pslinux.boot_time
+    monkeypatch.setattr(pslinux, "boot_time", lambda: real() + 86400)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="steps psutil's Linux boot_time")
+@pytest.mark.parametrize("age", [120, 660])
+def test_discover_keeps_a_silent_live_owner_after_a_clock_step(
+    hub_dirs, owner_socket, clock_stepped, age
+):
+    presence, _ = hub_dirs
+    record = _owner_file(presence, owner_socket, pid=os.getpid(), age=age)
+    assert _peer().discover_agents(include_solo=True) == []
+    assert record.exists() and owner_socket.exists()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="steps psutil's Linux boot_time")
+@pytest.mark.asyncio
+async def test_discover_async_keeps_a_silent_live_owner_after_a_clock_step(
+    hub_dirs, owner_socket, clock_stepped
+):
+    presence, _ = hub_dirs
+    record = _owner_file(presence, owner_socket, pid=os.getpid(), age=660)
+    assert await _peer().discover_agents_async(include_solo=True) == []
+    assert record.exists() and owner_socket.exists()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="steps psutil's Linux boot_time")
+@pytest.mark.parametrize("age", [5, 660])
+def test_startup_scan_keeps_a_silent_live_owner_after_a_clock_step(
+    hub_dirs, owner_socket, clock_stepped, age
+):
+    presence, _ = hub_dirs
+    record = _owner_file(presence, owner_socket, pid=os.getpid(), age=age)
+    assert _peer().startup_scan() == 0
+    assert record.exists() and owner_socket.exists()
