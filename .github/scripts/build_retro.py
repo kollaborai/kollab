@@ -80,6 +80,10 @@ class RetroConfig:
 
 def parse_config(data: dict[str, Any]) -> RetroConfig:
     """Build RetroConfig from a parsed config document (reads its `retro` key)."""
+    if not isinstance(data, dict):
+        # Valid JSON with a non-object root (e.g. a list) is a config
+        # error, not a crash: the CLI's config-error path must catch it.
+        raise ConfigError("config root must be a JSON object")
     section = data.get("retro") or {}
     if not isinstance(section, dict):
         raise ConfigError("retro must be an object")
