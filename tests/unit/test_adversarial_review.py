@@ -125,7 +125,9 @@ def test_reviewer_is_never_author_or_lane_or_fixer():
     pool = ["Ruby", "peridot", "lapis"]
     assert assign_reviewer(pool, author="ruby", lane=[]) == "peridot"
     assert assign_reviewer(pool, author="ruby", lane=["PERIDOT"]) == "lapis"
-    assert assign_reviewer(pool, author="ruby", lane=["peridot"], fixers=["lapis"]) is None
+    assert (
+        assign_reviewer(pool, author="ruby", lane=["peridot"], fixers=["lapis"]) is None
+    )
 
 
 def test_unknown_severity_and_bad_config_fail_loudly():
