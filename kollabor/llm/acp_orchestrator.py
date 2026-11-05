@@ -667,6 +667,19 @@ class ACPOrchestrator:
         instead of evicting an accepted one, and the hub must not acknowledge it
         (#581).
         """
+        pending = self._unwritten_observations
+        if len(pending) == pending.maxlen and not self.is_processing:
+            # Storage may have recovered since the queue filled: drain it first.
+            self._flush_observations()
+        if len(pending) == pending.maxlen:
+            # Decided before any row is written: add_message appends its row
+            # before an autosave can raise, so a refused message that was
+            # written first would leave one more row on every offer (#581).
+            logger.warning(
+                "ACP observation retry queue is full; the message was refused "
+                "and not acknowledged"
+            )
+            return False
         thread = f" [thread:{message.thread_id}]" if message.thread_id else ""
         reply = f" [reply-to:{message.reply_to}]" if message.reply_to else ""
         entry = AgentHudEntry(
@@ -686,13 +699,6 @@ class ACPOrchestrator:
                 track_completion=True,
             )
         except Exception as error:
-            pending = self._unwritten_observations
-            if len(pending) == pending.maxlen:
-                logger.warning(
-                    "ACP observation retry queue is full; the message was refused "
-                    "and not acknowledged"
-                )
-                return False
             logger.warning(
                 "ACP observation history write failed (%s)", type(error).__name__
             )
