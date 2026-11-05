@@ -947,6 +947,21 @@ class ACPOrchestrator:
                 stats["acp_turn_usage"] = dict(usage)
         return {"usage": dict(usage), "input_total": input_total, "output_total": output_total}
 
+    async def _await_user_history(self, turn_key: tuple[int, int]) -> None:
+        """Wait for the turn's user-row write; a failed write never drops the reply.
+
+        The adapter already ran and the reply is in hand, so a user row that did
+        not reach the file is logged (``_history_task_done`` has too) and the turn
+        goes on. Cancellation still propagates.
+        """
+        user_history = self._turn_user_tasks.get(turn_key)
+        if user_history is None:
+            return
+        try:
+            await user_history
+        except Exception as exc:
+            logger.warning("ACP user history write failed; keeping the turn (%s)", type(exc).__name__)
+
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
         turn_key = (admission.generation, admission.turn_id)
         result: ACPResult | None = None
@@ -956,9 +971,7 @@ class ACPOrchestrator:
             # Once the adapter returned, its usage was incurred even if any
             # later binding or history operation fails or is cancelled.
             settled_usage = self._settle_turn_usage(result)
-            user_history = self._turn_user_tasks.get(turn_key)
-            if user_history is not None:
-                await user_history
+            await self._await_user_history(turn_key)
             self._save_binding()
             await self._record_result(result, turn_key)
         except BaseException as exc:
@@ -1031,9 +1044,7 @@ class ACPOrchestrator:
                     admission.turn_id, admission.request_id, admission.source, admission.thread_id,
                 )
                 try:
-                    user_history = self._turn_user_tasks.get(turn_key)
-                    if user_history is not None:
-                        await user_history
+                    await self._await_user_history(turn_key)
                     await self._record_result(partial, turn_key)
                 except BaseException as history_exc:
                     logger.warning("ACP interrupted transcript write failed (%s)", type(history_exc).__name__)
