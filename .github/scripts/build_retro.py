@@ -244,7 +244,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    config = load_config(Path(args.config))
+    try:
+        config = load_config(Path(args.config))
+    except (OSError, json.JSONDecodeError, ConfigError) as exc:
+        print(f"build_retro: config error: {exc}", file=sys.stderr)
+        return 2
     if not config.enabled:
         print("retro is disabled (retro.enabled is false); nothing to do")
         return 0

@@ -164,6 +164,23 @@ class TestGolden:
         )
         assert a == b
 
+    def test_main_returns_clean_error_on_malformed_config(self, tmp_path, capsys):
+        """A malformed config file is a clean CLI error (exit 2, one stderr
+        line), never a traceback — matches the pr_throughput_kpi convention."""
+        bad = tmp_path / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        assert (
+            retro.main(["--config", str(bad)]) == 2
+        )
+        err = capsys.readouterr().err
+        assert "config error" in err
+        assert "Traceback" not in err
+
+    def test_main_returns_zero_when_disabled(self, tmp_path, capsys):
+        cfg = _write_config(tmp_path, {"retro": {"enabled": False, "repo": "o/r"}})
+        assert retro.main(["--config", str(cfg)]) == 0
+        assert "disabled" in capsys.readouterr().out
+
     def test_write_outputs_creates_html_file(self, tmp_path):
         cfg = retro.parse_config(
             {"retro": {"repo": "kollaborai/kollab", "output_dir": str(tmp_path)}}
