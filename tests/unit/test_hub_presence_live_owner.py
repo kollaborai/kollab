@@ -1,8 +1,9 @@
 """A peer never unlinks a live owner's presence or socket, however old its heartbeat (#575).
 
 A peer may reclaim an owner's files only when the owner is provably gone: its pid
-exited (a zombie, or no process at all), or the pid now belongs to a process that
-started after the owner did. A silent socket and a long heartbeat prove neither.
+exited (a zombie, or no process at all), or the pid now belongs to a process whose
+kernel start differs from the one the owner stamped in its record (``start_token``).
+A silent socket, a long heartbeat and a wall-clock step prove none of it.
 The socket here is a real AF_UNIX file that refuses every connection: bound, never
 listening.
 """
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from kollabor_agent.runtime import AgentRuntime
+from kollabor_agent.runtime import AgentRuntime, own_start_token, process_start_token
 from plugins.hub.presence import PresenceManager, pid_alive
 
 pytestmark = pytest.mark.skipif(
@@ -53,13 +54,13 @@ def owner_socket(hub_dirs):
         server.close()
 
 
-def _owner_file(presence: Path, sock: Path, *, pid: int, age: float, started_at=None) -> Path:
+def _owner_file(presence: Path, sock: Path, *, pid: int, age: float, start_token=None) -> Path:
     """Write the presence record of an agent run by ``pid``, its heartbeat ``age`` seconds old."""
     owner = AgentRuntime(name="coder", identity="koordinator")
     data = owner.to_presence_dict()
     data.update(pid=pid, socket_path=str(sock), last_heartbeat=time.time() - age)
-    if started_at is not None:
-        data["started_at"] = started_at
+    if start_token is not None:
+        data["start_token"] = start_token
     record = presence / f"{owner.agent_id}.json"
     record.write_text(json.dumps(data))
     return record
@@ -94,9 +95,10 @@ def test_startup_scan_keeps_a_silent_live_owner(hub_dirs, owner_socket, age):
     assert record.exists() and owner_socket.exists()
 
 
-def test_discover_keeps_a_live_owner_with_no_start_time(hub_dirs, owner_socket):
+def test_discover_keeps_a_live_owner_with_no_start_token(hub_dirs, owner_socket):
+    # An older record, or an owner whose start could not be read: nothing proves reuse.
     presence, _ = hub_dirs
-    record = _owner_file(presence, owner_socket, pid=os.getpid(), age=660, started_at=0)
+    record = _owner_file(presence, owner_socket, pid=os.getpid(), age=660, start_token="")
     assert _peer().discover_agents(include_solo=True) == []
     assert record.exists() and owner_socket.exists()
 
@@ -126,10 +128,10 @@ def test_discover_reclaims_a_zombie_owner(hub_dirs, owner_socket):
 
 
 def test_discover_reclaims_a_reused_pid(hub_dirs, owner_socket):
-    # This live process is not the owner: the record's agent started an hour before it.
+    # This live process is not the owner: the record carries another process's start.
     presence, _ = hub_dirs
     record = _owner_file(
-        presence, owner_socket, pid=os.getpid(), age=660, started_at=time.time() - 3600
+        presence, owner_socket, pid=os.getpid(), age=660, start_token="another-process"
     )
     assert _peer().discover_agents(include_solo=True) == []
     assert not record.exists() and not owner_socket.exists()
@@ -138,7 +140,7 @@ def test_discover_reclaims_a_reused_pid(hub_dirs, owner_socket):
 def test_startup_scan_reclaims_a_reused_pid(hub_dirs, owner_socket):
     presence, _ = hub_dirs
     record = _owner_file(
-        presence, owner_socket, pid=os.getpid(), age=660, started_at=time.time() - 3600
+        presence, owner_socket, pid=os.getpid(), age=660, start_token="another-process"
     )
     assert _peer().startup_scan() == 1
     assert not record.exists() and not owner_socket.exists()
@@ -189,3 +191,44 @@ def test_startup_scan_keeps_a_silent_live_owner_after_a_clock_step(
     record = _owner_file(presence, owner_socket, pid=os.getpid(), age=age)
     assert _peer().startup_scan() == 0
     assert record.exists() and owner_socket.exists()
+
+
+def test_a_live_owner_stamps_a_start_token_a_peer_reads_back():
+    token = AgentRuntime(name="coder", identity="koordinator").to_presence_dict()["start_token"]
+    assert token and token == own_start_token() == process_start_token(os.getpid())
+    assert AgentRuntime.from_presence_dict({"pid": os.getpid(), "start_token": token}).start_token == token
+
+
+def test_another_process_start_token_differs_from_this_one():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert process_start_token(child.pid) not in (None, process_start_token(os.getpid()))
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="steps psutil's Linux boot_time")
+def test_start_token_does_not_move_with_the_wall_clock(monkeypatch):
+    before = process_start_token(os.getpid())
+    pslinux = pytest.importorskip("psutil._pslinux")
+    real = pslinux.boot_time
+    monkeypatch.setattr(pslinux, "boot_time", lambda: real() + 86400)
+    import psutil
+
+    assert psutil.Process(os.getpid()).create_time() > time.time() + 80000  # psutil moved
+    assert process_start_token(os.getpid()) == before  # the token did not
+
+
+def test_a_peer_reads_the_token_another_process_stamped_for_itself():
+    code = (
+        "import sys, time; from kollabor_agent.runtime import own_start_token;"
+        "print(own_start_token(), flush=True); time.sleep(30)"
+    )
+    child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        stamped = child.stdout.readline().strip()
+        assert stamped and stamped == process_start_token(child.pid)
+    finally:
+        child.kill()
+        child.wait()

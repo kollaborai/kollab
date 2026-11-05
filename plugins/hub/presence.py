@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from kollabor_agent.runtime import AgentRuntime
+from kollabor_agent.runtime import AgentRuntime, process_start_token
 from kollabor_config.hub_paths import hub_socket_root
 
 logger = logging.getLogger(__name__)
@@ -145,32 +145,32 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
-_PID_REUSE_SLACK_SECONDS = 5
-"""psutil reads process start times to about a second; this absorbs that drift."""
-
-
 def _owner_gone(agent: "AgentRuntime") -> bool:
     """True only when ``agent``'s pid is provably no longer its process.
 
-    That is a zombie (it exited and nobody reaped it), or a pid whose process
-    started well after the agent did, so the pid was reused. Neither a silent
-    socket nor a long heartbeat proves it: a busy owner looks the same (#575).
-    An unreadable start time or process keeps the record.
+    That is a zombie (it exited and nobody reaped it), or a pid now held by a
+    process other than the one that stamped the record: the owner wrote its own
+    kernel start (``start_token``) and the process at the pid now has a different
+    one. The comparison is for equality of values the kernel recorded, never of a
+    wall-clock time, so a clock step cannot make a live owner look replaced.
+    Neither a silent socket nor a long heartbeat proves any of it: a busy owner
+    looks the same (#575). A record with no token, or a start that cannot be
+    read, keeps the record.
     """
     import psutil
 
-    started = agent.started_at
-    if not isinstance(started, (int, float)) or started <= 0:
-        return False
     try:
-        proc = psutil.Process(agent.pid)
-        if proc.status() == psutil.STATUS_ZOMBIE:
+        if psutil.Process(agent.pid).status() == psutil.STATUS_ZOMBIE:
             return True
-        return proc.create_time() > started + _PID_REUSE_SLACK_SECONDS
     except psutil.NoSuchProcess:
         return True
     except (psutil.Error, OSError, ValueError):
         return False
+    recorded = agent.start_token
+    if not recorded:
+        return False
+    current = process_start_token(agent.pid)
+    return current is not None and current != recorded
 
 
 STALL_AFTER_SECONDS = 15 * 60
