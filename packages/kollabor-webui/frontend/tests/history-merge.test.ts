@@ -531,3 +531,40 @@ test("each loaded row takes at most one shown row, matched from the newest", () 
   assert.deepEqual(rebased.messages.map((message) => message.id), ["history-0", "history-1", "history-2", "history-3"]);
   assert.equal(rebased.messages.filter((message) => message.content === "go").length, 2);
 });
+
+// Round-3 review (41b055f6): the composer sends a picture without a request id, so
+// a stored turn with the same words and another picture was taken for the same turn.
+test("a new picture is kept when a stored turn repeats the words with another picture", () => {
+  const shown = [
+    { id: "history-0", role: "user", content: "older question" },
+    { id: "history-1", role: "assistant", content: "older answer" },
+    { id: "user-ws1-11", role: "user", content: [{ type: "text", text: "describe this" }, { type: "image", image: "data:image/png;base64,NEW" }] },
+    { id: "assistant-ws1-12", role: "assistant", content: "Looks like a cat." },
+  ];
+  const loaded = [
+    compactionMarker,
+    { id: "history-1", role: "user", content: [{ type: "text", text: "describe this" }, { type: "image", image: "data:image/png;base64,OLD" }] },
+    { id: "history-2", role: "assistant", content: "Looks like a cat." },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.ok(rebased.messages.some((message) => message.id === "user-ws1-11"));
+});
+
+test("a transient picture turn is replaced by its stored copy when the picture matches", () => {
+  const shown = [
+    { id: "history-0", role: "user", content: "older question" },
+    { id: "history-1", role: "assistant", content: "older answer" },
+    { id: "user-ws1-11", role: "user", content: [{ type: "text", text: "describe this" }, { type: "image", image: "data:image/png;base64,SAME" }] },
+    { id: "assistant-ws1-12", role: "assistant", content: "Looks like a cat." },
+  ];
+  const loaded = [
+    compactionMarker,
+    { id: "history-1", role: "user", content: [{ type: "text", text: "describe this" }, { type: "image", image: "data:image/png;base64,SAME" }] },
+    { id: "history-2", role: "assistant", content: "Looks like a cat." },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.equal(rebased.messages.some((message) => message.id === "user-ws1-11"), false);
+  assert.equal(JSON.stringify(rebased.messages).split("data:image/png;base64,SAME").length - 1, 1);
+});
