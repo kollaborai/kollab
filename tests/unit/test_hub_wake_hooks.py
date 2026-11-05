@@ -205,3 +205,63 @@ def test_malformed_config_falls_back_to_safe_defaults():
 def test_unknown_event_name_is_ignored():
     engine = _on("review_ready")
     assert engine.handle(WakeEvent(name="nope"), now=1.0) == []
+
+
+# -- delivery through the hub plugin ----------------------------------------
+
+import asyncio  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+from plugins.hub.plugin import HubPlugin  # noqa: E402
+
+
+def _plugin(values):
+    plugin = HubPlugin(event_bus=MagicMock(), config=MagicMock(get=Cfg(values).get))
+    plugin._identity = MagicMock(identity="koordinator", agent_id="koordinator-id")
+    plugin._route_message = AsyncMock(return_value=[])
+    plugin._on_message_received = AsyncMock()
+    plugin._notify_supervisor_alert = AsyncMock()
+    return plugin
+
+
+def test_plugin_ships_every_hook_disabled():
+    plugin = HubPlugin(event_bus=MagicMock())
+    hooks = plugin.get_default_config()["plugins"]["hub"]["hooks"]
+    assert set(hooks) == set(HOOK_NAMES)
+    assert not any(h["enabled"] for h in hooks.values())
+
+
+def test_plugin_sends_hook_marked_wakes_and_does_nothing_when_off():
+    off = _plugin({})
+    assert asyncio.run(off.dispatch_wake_event(_review())) == []
+    off._route_message.assert_not_called()
+
+    plugin = _plugin(
+        {
+            "plugins.hub.hooks.review_ready.enabled": True,
+            "plugins.hub.hooks.review_ready.cooldown": 0,
+        }
+    )
+    done = asyncio.run(plugin.dispatch_wake_event(_review()))
+    assert {a.target for a in done} == {"lapis", "koordinator"}
+    # The koordinator is this agent: it wakes locally; the coder is routed.
+    sent = [c.args[0] for c in plugin._route_message.await_args_list]
+    assert [m.to for m in sent] == ["lapis"]
+    assert sent[0].metadata == {"wake_hook": "review_ready"}
+    assert plugin._on_message_received.await_count == 1
+
+
+def test_plugin_alert_hook_notifies_without_a_message():
+    plugin = _plugin(
+        {
+            "plugins.hub.hooks.koordinator_heartbeat.enabled": True,
+            "plugins.hub.hooks.koordinator_heartbeat.cooldown": 0,
+        }
+    )
+    event = WakeEvent(
+        name="koordinator_heartbeat", agent="koordinator", ref="t1", age_seconds=3600
+    )
+    done = asyncio.run(plugin.dispatch_wake_event(event))
+    assert [a.kind for a in done] == ["alert"]
+    plugin._notify_supervisor_alert.assert_awaited_once()
+    plugin._route_message.assert_not_called()
