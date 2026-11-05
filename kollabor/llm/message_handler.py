@@ -466,6 +466,11 @@ class MessageHandler:
                 if qp.is_processing:
                     logger.info("Hub continue: a turn is already running, it sees the message")
                     return
+                # The hub wake is a new admitted turn. Its HUD row and all
+                # continuation writes must use a fresh ticket, not whichever
+                # queue turn last populated the shared cursor.
+                turn_serial = coord.claim_turn_serial()
+                coord._continue_serial = turn_serial
                 qp.is_processing = True
                 # Set turn_completed=False so _continue_conversation does not
                 # inject pending_agent_hud as a new user message. Setting True
@@ -503,7 +508,7 @@ class MessageHandler:
                 if isinstance(hud, str) and hud:
                     from kollabor_events.data_models import ConversationMessage
 
-                    coord.current_parent_uuid = coord._add_conversation_message(
+                    hud_uuid = coord._add_conversation_message(
                         ConversationMessage(
                             role="user",
                             content=hud,
@@ -511,6 +516,7 @@ class MessageHandler:
                         ),
                         parent_uuid=coord.current_parent_uuid,
                     )
+                    coord.publish_cursor(hud_uuid, turn_serial)
                 try:
                     await coord._continue_conversation()
                     turn_count = 0
