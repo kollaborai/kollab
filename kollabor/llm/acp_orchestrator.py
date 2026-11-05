@@ -715,6 +715,8 @@ class ACPOrchestrator:
         # (#581).
         pending = list(self._unwritten_observations)
         self._unwritten_observations.clear()
+        in_batch = {id(entry) for entry in self._observations}
+        earlier_rows: list[str] = []
         for entry in pending:
             row_id = f"observations-{uuid.uuid4().hex}"
             try:
@@ -732,7 +734,15 @@ class ACPOrchestrator:
                 )
                 self._unwritten_observations.append(entry)
             else:
-                self._observation_rows.append(row_id)
+                # A retried row of a message an earlier batch already carried is
+                # only a record; the reply to this batch must not thread under it.
+                if id(entry) in in_batch:
+                    self._observation_rows.append(row_id)
+                else:
+                    earlier_rows.append(row_id)
+        for row in earlier_rows:
+            self._parents.pop(row, None)
+            self._user_history_tasks.pop(row, None)
         rows, self._observation_rows = self._observation_rows, []
         if not self._observations:
             # Only retries ran. Their messages already reached the model in an

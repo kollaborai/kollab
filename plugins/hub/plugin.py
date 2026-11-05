@@ -753,6 +753,10 @@ class HubPlugin(BasePlugin):
 
         # Message deduplication (LRU via OrderedDict, capped at 1000)
         self._seen_messages: collections.OrderedDict = collections.OrderedDict()
+        # Messages the ACP retry queue refused (#581). Their dedup marks stay, so
+        # a retransmission skips display, vault and bridge effects it already
+        # had, and only asks the queue again.
+        self._refused_observations: collections.OrderedDict = collections.OrderedDict()
 
         # Content dedup: TTL dict keyed by MD5("from_identity:content").
         # Guards against verbatim duplicates produced by concurrent agent
@@ -6670,7 +6674,17 @@ class HubPlugin(BasePlugin):
             await self._inject_inbox_replay(messages)
         else:
             for msg in messages:
-                await self._on_message_received(msg)
+                await self._deliver_inbox_message(msg)
+
+    async def _deliver_inbox_message(self, msg: HubMessage) -> None:
+        """Deliver one mailbox message; a refusal puts its file back (#581).
+
+        The mailbox read already deleted the file, so a message the ACP retry
+        queue refused would be lost here. It goes back for the next poll, and
+        the mailbox's own age and size limits still apply to it.
+        """
+        if await self._on_message_received(msg) is False and self._identity:
+            await AgentMessenger.send_to_file(self._identity.identity, msg)
 
     async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
         """Coalesce a bounded inbox replay into a single injected block.
@@ -6695,7 +6709,7 @@ class HubPlugin(BasePlugin):
         ]
         ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
         for msg in control_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
         if not ordinary_msgs:
             return
@@ -8937,10 +8951,32 @@ class HubPlugin(BasePlugin):
                 )
         return result
 
-    def _unmark_refused_message(self, msg_key: tuple, content_hash: str) -> None:
-        """Forget a message the ACP queue refused, so its retransmission is admitted (#581)."""
-        self._seen_messages.pop(msg_key, None)
-        self._seen_content_hashes.pop(content_hash, None)
+    _REFUSED_OBSERVATIONS_MAX = 256
+
+    def _remember_refused_message(self, msg_key: tuple) -> None:
+        """Keep a refused message's dedup marks and note it for a retry (#581).
+
+        The message was already shown, logged and mirrored; a retransmission
+        (socket resend, mailbox replay, relay retry) only asks the queue again.
+        """
+        refused = self._refused_observations
+        refused[msg_key] = None
+        while len(refused) > self._REFUSED_OBSERVATIONS_MAX:
+            # Forget the oldest one's dedup mark too, so its retransmission runs
+            # the whole path again instead of being acknowledged and dropped.
+            oldest, _ = refused.popitem(last=False)
+            self._seen_messages.pop(oldest, None)
+
+    def _retry_refused_observation(self, message: HubMessage, msg_key: tuple) -> bool | None:
+        """Ask the ACP queue again for a message it refused. False: still refused."""
+        acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
+        if acp is not None and getattr(acp, "active", False):
+            if not acp.observe_notification(message):
+                return False
+        else:
+            logger.info("refused observation dropped: the ACP session is gone")
+        self._refused_observations.pop(msg_key, None)
+        return None
 
     async def _on_message_received(self, message: HubMessage) -> bool | None:
         """Handle an incoming message from another agent.
@@ -8996,6 +9032,8 @@ class HubPlugin(BasePlugin):
         msg_id = getattr(message, "id", "") or ""
         msg_key = (message.from_identity or message.from_agent, msg_id, message.action)
         if msg_id and msg_key in self._seen_messages:
+            if msg_key in getattr(self, "_refused_observations", ()):
+                return self._retry_refused_observation(message, msg_key)
             logger.debug(f"Dedup: skipping already-seen {message.action} {msg_id}")
             return
         if msg_id and message.action != "turn_end":
@@ -9453,7 +9491,7 @@ class HubPlugin(BasePlugin):
                 elif message.reply_to or message.to in {"*", "all", "everyone", "team", "project"}:
                     if dispatch_mode == "acp":
                         if not acp.observe_notification(message):
-                            self._unmark_refused_message(msg_key, _content_hash)
+                            self._remember_refused_message(msg_key)
                             return False
                 elif wake_decision.should_trigger:
                     await self._submit_authenticated_agent_message(message, llm_service)
@@ -9716,7 +9754,7 @@ class HubPlugin(BasePlugin):
                                 message, llm_service
                             )
                             if admitted.get("status") == "refused":
-                                self._unmark_refused_message(msg_key, _content_hash)
+                                self._remember_refused_message(msg_key)
                                 return False
                             return
                     await self.event_bus.emit_with_hooks(

@@ -3462,7 +3462,11 @@ class RelayAgentBridge:
         ):
             return
         if self._local_pending:
-            await self.plugin._on_message_received(self._local_pending.popleft())
+            deferred = self._local_pending.popleft()
+            if await self.plugin._on_message_received(deferred) is False:
+                # Refused by the ACP retry queue (#581): it was acknowledged
+                # when it was deferred, so it stays first in line.
+                self._local_pending.appendleft(deferred)
             return
         queued = self.store.queued(self.identity.agent_id)
         if not queued:
@@ -3576,7 +3580,10 @@ class RelayAgentBridge:
             },
         )
         try:
-            await self.plugin._on_message_received(message)
+            if await self.plugin._on_message_received(message) is False:
+                # Refused by the ACP retry queue (#581): the record stays
+                # queued and is offered again on the next tick.
+                return
             self.store.transition(record["id"], "delivered")
         except Exception:
             self.store.transition(
