@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from kollabor_ai.profile_manager import EFFORT_LEVELS, LLMProfile
+from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.terminal_state import TerminalMode
@@ -742,6 +743,41 @@ class ACPOrchestrator:
             self._user_history_tasks.pop(stale, None)
         self._observations.clear()
         self._observation_count = 0
+
+    async def hand_over_to_native(self) -> None:
+        """Give the peer messages still buffered for the harness to the native profile.
+
+        Call it once a native profile is active after this harness closed. Each
+        message is already in the conversation; this drops the buffer so no
+        harness is offered them again, and starts the one native turn that
+        answers them.
+        """
+        if not self._observation_count and not self._unwritten_observations:
+            return
+        # A message whose arrival row failed has no history row yet; the native
+        # model reads history, so it gets one more try here.
+        for entry in list(self._unwritten_observations):
+            row_id = f"observations-{uuid.uuid4().hex}"
+            try:
+                self._record_user(row_id, format_agent_hud([entry]), "observation", None)
+            except Exception as error:
+                logger.warning(
+                    "ACP observation history write failed again (%s)",
+                    type(error).__name__,
+                )
+            self._parents.pop(row_id, None)
+        for row_id in self._observation_rows:
+            self._parents.pop(row_id, None)
+            self._user_history_tasks.pop(row_id, None)
+        self._observation_rows.clear()
+        self._unwritten_observations.clear()
+        self._observations.clear()
+        self._observation_count = 0
+        await self.event_bus.emit_with_hooks(
+            EventType.TRIGGER_LLM_CONTINUE,
+            {"source": "acp_handover", "content": ""},
+            "acp_orchestrator",
+        )
 
     def _conversation_id(self) -> str:
         llm = self.event_bus.get_service("llm_service")
