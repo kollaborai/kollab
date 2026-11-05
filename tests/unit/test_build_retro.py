@@ -194,3 +194,28 @@ class TestGolden:
         text = out.read_text(encoding="utf-8")
         assert text.startswith("<!DOCTYPE html>")
         assert "Shipped" in text
+
+class TestNonObjectRoot:
+    """zircon P2 on 8eaa2804: parse_config assumes a dict root. Valid JSON
+    like [1,2] reaches data.get -> uncaught AttributeError -> traceback +
+    exit 1, instead of the clean config-error stderr/exit 2 path."""
+
+    def test_parse_config_rejects_list_root(self):
+        with pytest.raises(retro.ConfigError):
+            retro.parse_config([1, 2])
+
+    def test_parse_config_rejects_string_root(self):
+        with pytest.raises(retro.ConfigError):
+            retro.parse_config("oops")
+
+    def test_main_list_root_config_is_clean_error_not_traceback(
+        self, tmp_path, capsys
+    ):
+        """CLI regression: --config pointing at a valid-JSON list must exit
+        2 with one stderr line, never an AttributeError traceback."""
+        bad = tmp_path / "list-root.json"
+        bad.write_text("[1, 2]", encoding="utf-8")
+        assert retro.main(["--config", str(bad)]) == 2
+        err = capsys.readouterr().err
+        assert "config error" in err
+        assert "Traceback" not in err
