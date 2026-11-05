@@ -779,6 +779,12 @@ Telegram bridge setup (run inside interactive mode):
     if args.hub_capture_raw:
         if not args.hub or args.hub[0].lower() != "capture":
             parser.error("--raw is only valid with --hub capture")
+        if args.hub_capture_cursor is not None or args.hub_capture_follow:
+            # --raw keeps the byte-for-byte request/response path; it has no
+            # cursor semantics, so silently dropping the flags would lie.
+            parser.error(
+                "--raw cannot be combined with --cursor/--follow"
+            )
         args.hub.append("--raw")
 
     if args.hub_capture_cursor is not None or args.hub_capture_follow:

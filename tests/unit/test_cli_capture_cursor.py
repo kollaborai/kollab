@@ -302,3 +302,17 @@ def test_cli_capture_cursor_follow_budget_exhausted_on_truncated_reports_stop(
     assert len(calls) == 51
     out = capsys.readouterr().out
     assert "too many pages" in out
+
+
+def test_real_cli_path_rejects_raw_combined_with_cursor_or_follow():
+    """#772 review P3: --raw silently dropped --cursor/--follow because the
+    raw path keeps the byte-for-byte request/response shape. The
+    combination is now an argparse-level error naming both flags."""
+    from kollabor import cli
+
+    for extra in (["--cursor", "5"], ["--follow"]):
+        with pytest.raises(SystemExit) as rejected:
+            cli.parse_arguments(
+                plugin_classes=[], argv=["--hub", "capture", "lapis", "--raw"] + extra
+            )
+        assert rejected.value.code == 2
