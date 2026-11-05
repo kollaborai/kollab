@@ -182,11 +182,13 @@ callers below read.
 
 ### 2. Manager — `loadout_manager.py`
 
-`list_loadouts()` gains catalog-sourced implicit loadouts, read from the cache
-only (stays sync, stays non-blocking):
+`list_loadouts()` reads the catalog from the cache only (stays sync, stays
+non-blocking). Once the catalog has entries it is the provider's list, not a
+supplement to the registry (#558):
 
-- registry models, as today
-- plus `cached_provider_models(profile)` entries not already present
+- `cached_provider_models(profile)` entries, plus the profile's own model
+- registry models only while the catalog is cold or empty: no fetch yet, or
+  the provider has no listing API
 - existing dedup rule unchanged: explicit shadows implicit, first provider
   profile wins on name collision
 

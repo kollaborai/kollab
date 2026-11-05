@@ -116,17 +116,15 @@ def test_catalog_model_is_resolvable_by_name():
 # -- merge semantics --------------------------------------------------------
 
 
-def test_registry_models_still_listed_before_catalog_models():
-    """The catalog augments the registry; it does not replace it."""
+def test_live_catalog_with_entries_replaces_the_registry():
+    """Cold, openai lists its registry; once the catalog has entries it is the
+    whole list (#558). The registry is a cold-cache seed, not a supplement."""
     openai = _Profile(name="openai-oauth", provider="openai_responses")
     manager = LoadoutManager(_ProfileManager([openai]))
-    registry_names = [lo.name for lo in manager.list_loadouts()]
-    assert registry_names, "openai should have bundled registry models"
+    assert manager.list_loadouts(), "openai should have bundled registry models"
 
     _seed(openai, ["gpt-brand-new"])
-    merged = [lo.name for lo in manager.list_loadouts()]
-    assert merged[: len(registry_names)] == registry_names
-    assert merged[-1] == "gpt-brand-new"
+    assert [lo.name for lo in manager.list_loadouts()] == ["gpt-brand-new"]
 
 
 def test_catalog_duplicate_of_registry_model_is_not_listed_twice():

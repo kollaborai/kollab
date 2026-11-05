@@ -12,9 +12,10 @@ Two flavors:
     * implicit -- every model in the bundled registry
       (``model_registry.list_models_for_provider``) is automatically a
       usable loadout, named after the model, IF the user has a configured
-      provider profile for that model's provider. Nothing to create,
-      nothing saved to config -- synthesized on the fly from
-      ``provider_profiles()`` x the registry.
+      provider profile for that model's provider. A provider whose live
+      catalog is cached lists that catalog instead (#558). Nothing to
+      create, nothing saved to config -- synthesized on the fly from
+      ``provider_profiles()`` x the registry and catalog.
     * explicit -- saved under ``kollabor.llm.loadouts.<name>`` in config,
       for when a user wants overrides (a custom temperature/effort/
       max_tokens, or a name that doesn't match any model). An explicit
@@ -212,15 +213,16 @@ class LoadoutManager:
     def list_loadouts(self) -> List[Loadout]:
         """Explicit loadouts (sorted by name), then implicit ones.
 
-        Implicit loadouts are synthesized from ``provider_profiles()`` x the
-        model registry, then x the provider's cached live catalog, in that
-        order (provider-profile order, then the registry's curated per-provider
-        order, then catalog order). An implicit loadout is dropped when its
-        name collides with an explicit loadout or with an implicit already
-        emitted for an earlier provider profile -- first provider profile wins.
+        Implicit loadouts are synthesized from ``provider_profiles()``, in
+        profile order. A provider's models are its cached live catalog when
+        that has entries, plus the profile's own model (#558); otherwise its
+        bundled registry models, in the registry's curated per-provider order.
+        An implicit loadout is dropped when its name collides with an explicit
+        loadout or with an implicit already emitted for an earlier provider
+        profile -- first provider profile wins.
 
-        The catalog half is read from cache only, so this stays synchronous and
-        never blocks. A provider whose catalog has not been fetched yet simply
+        The catalog is read from cache only, so this stays synchronous and
+        never blocks. A provider whose catalog has not been fetched yet
         contributes its registry models (possibly none) -- call
         ``refresh_catalogs()`` to warm it. This is what lets proxy providers
         with no bundled registry entries (OpenRouter) appear at all.
@@ -248,25 +250,29 @@ class LoadoutManager:
                 seen.add(profile.name)
                 continue
             registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
-            # Registry "custom"/"local" entries are generic placeholders that
-            # match no real endpoint (#447): grok-4.7 & co. appeared for any
-            # custom base_url no matter what its live /models catalog said,
-            # because the registry fallback ran unconditionally and the
-            # cached catalog was only ever appended after it. Only the live
-            # catalog describes such an endpoint; cold or failed fetches
-            # leave the section empty, which renders the panel's existing
-            # "no models" note with its retry hint.
-            if provider in _LOCAL_ENDPOINT_PROVIDERS:
+            # A live catalog with entries is the provider's list (#558): a
+            # registry model it omits is not offered, since picking it fails
+            # at the provider. The registry seeds only a cold or failed fetch,
+            # or a provider with no listing API. Registry "custom"/"local"
+            # entries are generic placeholders that match no real endpoint
+            # (#447), so those endpoints list only what their live catalog
+            # serves; cold or failed fetches leave the section empty, which
+            # renders the panel's existing "no models" note with its retry hint.
+            catalog = self._cached_catalog(profile)
+            if catalog or provider in _LOCAL_ENDPOINT_PROVIDERS:
                 model_names = []
             else:
                 model_names = [
                     name for name, _info in list_models_for_provider(registry_provider)
                 ]
             model_names.extend(
-                str(entry.get("id") or "")
-                for entry in self._cached_catalog(profile)
-                if entry.get("id")
+                str(entry.get("id") or "") for entry in catalog if entry.get("id")
             )
+            if catalog:
+                get_model = getattr(profile, "get_model", None)
+                own_model = (get_model() if callable(get_model) else "") or ""
+                if own_model:
+                    model_names.append(own_model)
             for model_name in model_names:
                 if model_name in seen:
                     continue
