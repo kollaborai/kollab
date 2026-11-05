@@ -17,14 +17,16 @@ import pytest
 
 from kollabor_ai import model_catalog as mc
 from kollabor_ai.loadout_manager import LoadoutManager
+from kollabor_ai.model_registry import list_models_for_provider
 
 
 class _Profile:
     """A configured provider profile with no bundled registry models."""
 
-    def __init__(self, name="openrouter", provider="openrouter"):
+    def __init__(self, name="openrouter", provider="openrouter", model=""):
         self.name = name
         self._provider = provider
+        self._model = model
         self.auth_type = ""
 
     def get_provider(self):
@@ -37,7 +39,7 @@ class _Profile:
         return ""
 
     def get_model(self):
-        return ""
+        return self._model
 
 
 class _ProfileManager:
@@ -165,6 +167,33 @@ def test_unconfigured_provider_contributes_nothing():
     manager = LoadoutManager(_ProfileManager([profile]))
     _seed(profile, ["anthropic/claude-opus-4.5"])
     assert manager.list_loadouts() == []
+
+
+# -- #558: a live catalog with entries is the list ---------------------------
+
+
+def test_live_catalog_hides_registry_models_it_omits():
+    """An account whose catalog lists only gpt-5.6-luna must not be offered
+    gpt-6-luna: picking it fails at the provider (#558)."""
+    profile = _Profile(name="openai-api", provider="openai", model="gpt-5.6-luna")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    registry = [name for name, _info in list_models_for_provider("openai")]
+    assert "gpt-6-luna" in registry, "precondition: the registry offers gpt-6-luna"
+    _seed(profile, ["gpt-5.6-luna"])
+
+    assert [lo.name for lo in manager.list_loadouts()] == ["gpt-5.6-luna"]
+    assert manager.resolve("gpt-6-luna")[0] is None
+
+
+def test_profile_own_model_stays_listed_when_catalog_omits_it():
+    profile = _Profile(
+        name="openai-api", provider="openai", model="gpt-private-preview"
+    )
+    manager = LoadoutManager(_ProfileManager([profile]))
+    _seed(profile, ["gpt-5.6-luna"])
+
+    names = [lo.name for lo in manager.list_loadouts()]
+    assert names == ["gpt-5.6-luna", "gpt-private-preview"]
 
 
 # -- failure modes ----------------------------------------------------------
