@@ -288,3 +288,79 @@ def test_process_user_input_still_queues_the_message_when_the_history_write_fail
     )
     service._enqueue_with_overflow_strategy.assert_awaited_once()
     assert service.current_parent_uuid == "previous"
+
+
+def test_append_dropped_for_a_replaced_session_raises_and_counts_nothing(tmp_path):
+    """A row dropped because the session was replaced was not written (#580, #676).
+
+    Returning normally hands the caller a message id for a row that is on no
+    disk, the contract this issue removes.
+    """
+    from kollabor_ai.conversation_logger import KollaborConversationLogger
+
+    async def scenario():
+        logger = KollaborConversationLogger(tmp_path)
+        old_file = logger.session_file
+        lock_held = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hold_lock():
+            async with logger._write_lock:
+                lock_held.set()
+                await release.wait()
+
+        holder = asyncio.create_task(hold_lock())
+        await lock_held.wait()
+        append = asyncio.create_task(logger.log_user_message("queued"))
+        await asyncio.sleep(0)
+        logger.reset_session("replacement-session")
+        release.set()
+        await holder
+        outcome = await asyncio.gather(append, return_exceptions=True)
+        return logger, old_file, outcome[0]
+
+    logger, old_file, outcome = asyncio.run(scenario())
+
+    assert isinstance(outcome, OSError), f"expected OSError, got {outcome!r}"
+    assert logger.message_count == 0
+    assert not old_file.exists()
+    assert not logger.session_file.exists()
+
+
+def test_failed_user_row_write_does_not_cut_the_cursor_chain():
+    """A failed user-row write must not publish None as the conversation cursor.
+
+    ``publish_cursor(None, serial)`` sets ``current_parent_uuid = None`` for a
+    current serial, so the next turn would start a new chain. The queued item
+    keeps the parent captured at admission.
+    """
+    from kollabor.llm.llm_coordinator import LLMService
+
+    service = LLMService.__new__(LLMService)
+    service.supports_image_input = MagicMock(return_value=True)
+    service._active_acp = MagicMock(return_value=None)
+    service._profile_selects_acp = MagicMock(return_value=(False, None))
+    service._queue_processor = MagicMock()
+    service.tool_executor = MagicMock()
+    service.conversation_manager = MagicMock(current_session_id="session")
+    service.message_display_service = MagicMock()
+    service._prompt_builder = None
+    service.conversation_logger = MagicMock()
+    service.conversation_logger.log_user_message = AsyncMock(
+        side_effect=OSError("disk full")
+    )
+    service.current_parent_uuid = "previous"
+    service._enqueue_with_overflow_strategy = AsyncMock()
+    service.create_background_task = MagicMock()
+    service.task_config = SimpleNamespace(
+        background_tasks=SimpleNamespace(enable_monitoring=False)
+    )
+    service._turn_watchdog = None
+    service._image_store = MagicMock()
+    service.is_processing = True
+
+    asyncio.run(service.process_user_input("hello", pre_displayed=True))
+
+    assert service.current_parent_uuid == "previous"
+    queued = service._enqueue_with_overflow_strategy.await_args.args[0]
+    assert queued.parent_uuid == "previous"
