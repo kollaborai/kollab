@@ -15,7 +15,6 @@ from unittest.mock import patch
 
 import pytest
 
-from kollabor.state.local import LocalStateService
 from kollabor_ai.loadout_manager import Loadout
 from tests.unit.test_acp_effort_restore import _options, _orchestrator
 from tests.unit.test_issue_594_attach_resolve_before_close import (
