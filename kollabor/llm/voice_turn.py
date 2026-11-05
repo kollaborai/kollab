@@ -153,19 +153,23 @@ async def voice_provider(
                 logger.error("could not restore the active profile after a voice turn")
 
 
-def _holding(api_service: Any) -> tuple[Any, Any, Any]:
-    """The service's profile, provider and how many times it was reinitialized."""
+def _holding(api_service: Any) -> tuple[Any, Any]:
+    """The service's profile and how many times it was reinitialized.
+
+    The provider object is left out on purpose: the service also rebuilds it on its
+    own (the OAuth refresh after a 401), which is not a choice by the user. Every
+    /model or profile change goes through ``reinitialize_provider``, which counts.
+    """
     return (
         getattr(api_service, "_profile", None),
-        getattr(api_service, "_provider", None),
         getattr(api_service, "_provider_generation", None),
     )
 
 
-def _still_holding(api_service: Any, held: tuple[Any, Any, Any]) -> bool:
-    """True when nothing reinitialized or replaced what `held` recorded."""
-    profile, provider, generation = _holding(api_service)
-    return profile is held[0] and provider is held[1] and generation == held[2]
+def _still_holding(api_service: Any, held: tuple[Any, Any]) -> bool:
+    """True when nothing reinitialized the service or swapped its profile."""
+    profile, generation = _holding(api_service)
+    return profile is held[0] and generation == held[1]
 
 
 def _quick_loadout(api_service: Any, profile_manager: Any) -> Any:
