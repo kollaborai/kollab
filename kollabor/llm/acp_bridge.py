@@ -596,6 +596,19 @@ class _Client(acp.Client):
 class ACPRunner:
     """One SDK-owned ACP process/session with FIFO prompt queue."""
 
+    @property
+    def config_options(self) -> list[dict[str, Any]]:
+        return self._config_options
+
+    @config_options.setter
+    def config_options(self, options: list[dict[str, Any]]) -> None:
+        self._config_options = options
+        profile = getattr(self, "profile", None)
+        if options and profile is not None:  # the model picker offers what this harness reported
+            from kollabor_ai import acp_options
+
+            acp_options.remember(profile.name, options)
+
     def __init__(
         self,
         profile: ACPProfile,

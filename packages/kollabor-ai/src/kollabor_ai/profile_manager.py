@@ -137,6 +137,28 @@ KEYRING_SENTINEL_PREFIX = "secret:keyring:"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
 
+def accepted_efforts(provider: str, model: str) -> Optional[List[str]]:
+    """The levels a request on ``provider``/``model`` carries; None for any.
+
+    One rule for requests (``LLMProfile.get_effort``) and the web UI's model
+    picker, so a pick never offers a level its request drops (#553).
+    """
+    from kollabor_ai.model_registry import effort_levels
+    from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
+
+    provider = (provider or "").lower()
+    if provider not in EFFORT_SUPPORTED_PROVIDERS:
+        # Its requests carry no effort (an ACP harness keeps its own).
+        return []
+    levels = effort_levels(model)
+    if levels is None and provider == "anthropic":
+        # Claude answers a level its model does not take with a 400, and some
+        # take none (Sonnet 4.5): a model the registry does not list runs at
+        # its own default.
+        return []
+    return levels
+
+
 def _keyring_get(key_name: str) -> Optional[str]:
     """Retrieve a value from OS keyring (sync, graceful fallback).
 
@@ -716,6 +738,11 @@ class LLMProfile:
             logger.warning(
                 f"Profile '{self.name}': effort '{value}' is not one of {'/'.join(EFFORT_LEVELS)} — ignoring"
             )
+            return ""
+        levels = accepted_efforts(self.get_provider(), self.get_model())
+        if levels is not None and value not in levels:
+            # A level the model does not take (any level, if it does not reason)
+            # is a 400 or a dropped field: it runs at its own default instead.
             return ""
         return value
 

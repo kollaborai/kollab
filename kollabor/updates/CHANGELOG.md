@@ -79,6 +79,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TUI and Web UI. The launch sheet sets the workspace, profile, lead and
   mission, validates the effective reporting tree, and saves choices per team
   and workspace folder.
+- Web UI: New Session's Model field and the session panel's Model and Profile
+  field are one searchable list of every set-up profile, model and effort:
+  `codex luna max` finds Codex CLI's gpt-6-luna at max. A pick changes only
+  that session. Settings → Loadouts → Manage Profiles opens the profile
+  editor (#552).
 - Hub tests now cover short AF_UNIX hub-state socket paths, so long
   socket paths cannot silently regress the hub state client (#582).
 - Hub status flags an idle agent that still holds an open task as

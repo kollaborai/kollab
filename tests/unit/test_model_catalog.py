@@ -308,11 +308,120 @@ def test_catalog_cache_v2_preserves_structured_oauth_context_window(
         }
     ]
 
-    model_catalog._store(profile, models)
+    monkeypatch.setattr(model_catalog, "_login_of", lambda profile: "acct-a")  # signed in
+    model_catalog._store(profile, models, "acct-a")
 
     cached = json.loads(cache_path.read_text(encoding="utf-8"))
     assert cached["version"] == 2
     assert model_catalog.cached_provider_models(profile) == models
+
+
+def test_a_chatgpt_catalog_is_used_only_while_its_account_is_signed_in(
+    tmp_path, monkeypatch
+):
+    # Amazonite on #553 round 6: a profile signed in again as another account
+    # was served the first account's cached models, fresh or stale, and so was
+    # a catalog cached before each profile asked with its own login.
+    from kollabor_ai.oauth import token_storage
+
+    (tmp_path / "oauth").mkdir()
+    login = tmp_path / "oauth" / "openai.json"
+    monkeypatch.setattr(token_storage, "get_config_directory_candidates", lambda: [tmp_path])
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: tmp_path / "model_catalog.cache")
+    model_catalog._MEMORY_CACHE.clear()
+    chatgpt = {"name": "openai-oauth", "provider": "openai_responses", "auth_type": "oauth"}
+    router = {"name": "router", "provider": "openrouter"}
+
+    login.write_text(json.dumps({"account_id": "acct-a"}), encoding="utf-8")
+    model_catalog._store(chatgpt, [{"id": "a-model"}], "acct-a")
+    model_catalog._store(router, [{"id": "r-model"}], None)
+    assert model_catalog.cached_provider_models(chatgpt) == [{"id": "a-model"}]
+
+    login.write_text(json.dumps({"account_id": "acct-b"}), encoding="utf-8")
+    assert model_catalog.cached_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []  # the stale fallback
+    model_catalog._MEMORY_CACHE.clear()  # a restart: only the disk cache is left
+    assert model_catalog.cached_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(router) == [{"id": "r-model"}]  # other profiles keep theirs
+
+    # An entry from before logins were recorded names none: it is never used.
+    cache = json.loads((tmp_path / "model_catalog.cache").read_text(encoding="utf-8"))
+    cache["entries"]["openai-oauth"] = {"timestamp": 9999999999, "models": [{"id": "old"}]}
+    (tmp_path / "model_catalog.cache").write_text(json.dumps(cache), encoding="utf-8")
+    model_catalog._MEMORY_CACHE.clear()
+    assert model_catalog.cached_provider_models(chatgpt) == []
+
+
+def _signed_in(tmp_path, monkeypatch, login_data):
+    """A ChatGPT login profile, its stored login, and an empty cache."""
+    from kollabor_ai.oauth import token_storage
+
+    (tmp_path / "oauth").mkdir()
+    login = tmp_path / "oauth" / "openai.json"
+    login.write_text(json.dumps(login_data), encoding="utf-8")
+    monkeypatch.setattr(token_storage, "get_config_directory_candidates", lambda: [tmp_path])
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: tmp_path / "model_catalog.cache")
+    model_catalog._MEMORY_CACHE.clear()
+    return SimpleNamespace(name="openai-oauth", provider="openai_responses", auth_type="oauth"), login
+
+
+def _asks_as(monkeypatch, account_id, while_asking=None, refresh_token=None):
+    """The ChatGPT fetch loads tokens naming ``account_id``; ``while_asking`` runs during its request."""
+
+    async def load_tokens(provider, auto_refresh=True, profile_name=None):
+        return SimpleNamespace(access_token="tok", refresh_token=refresh_token, account_id=account_id)
+
+    async def details(access_token, account_id=None):
+        if while_asking:
+            while_asking()
+        return [{"slug": f"model-of-{account_id or 'nobody'}"}]
+
+    storage = SimpleNamespace(load_tokens=load_tokens)
+    monkeypatch.setattr("kollabor_ai.oauth.OAuthTokenStorage", lambda: storage, raising=False)
+    monkeypatch.setattr("kollabor_ai.oauth.openai_oauth.query_codex_model_details", details, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_fetched_while_another_account_signs_in_is_not_kept(tmp_path, monkeypatch):
+    # Fluorite on #553 round 7: a fetch asked as account A, B signed in before
+    # it answered, and A's models were kept and shown as B's.
+    chatgpt, login = _signed_in(tmp_path, monkeypatch, {"account_id": "acct-a"})
+    _asks_as(monkeypatch, "acct-a", lambda: login.write_text(json.dumps({"account_id": "acct-b"}), encoding="utf-8"))
+    assert await model_catalog.get_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_fetched_with_another_accounts_tokens_is_not_kept(tmp_path, monkeypatch):
+    # Petalite on #553 round 8: A was signed in before and after the fetch, but
+    # B signed in and out as it loaded its tokens, so it asked as B, and B's
+    # models were kept as A's.
+    chatgpt, _ = _signed_in(tmp_path, monkeypatch, {"account_id": "acct-a"})
+    _asks_as(monkeypatch, "acct-b")
+    assert await model_catalog.get_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []
+    _asks_as(monkeypatch, "acct-a")  # asked as the account signed in: kept
+    assert [m["id"] for m in await model_catalog.get_provider_models(chatgpt)] == ["model-of-acct-a"]
+    assert [m["id"] for m in model_catalog.cached_provider_models(chatgpt)] == ["model-of-acct-a"]
+
+
+@pytest.mark.asyncio
+async def test_a_login_with_no_account_id_keeps_its_catalog_in_memory_for_itself_only(tmp_path, monkeypatch):
+    # Fluorite on #553 round 7: such a login and no login at all named the same
+    # account, "", so its list stayed after signing out, or in as another one.
+    # Rutile on round 9: none was kept then, so the picker lost it. Ametrine on
+    # round 10: the list the loadout manager carried instead reached the next
+    # login. Such a login is now known by a digest of its token.
+    chatgpt, login = _signed_in(tmp_path, monkeypatch, {"access_token": "tok", "refresh_token": "first"})
+    _asks_as(monkeypatch, None, refresh_token="first")
+    assert [m["id"] for m in await model_catalog.get_provider_models(chatgpt)] == ["model-of-nobody"]
+    assert [m["id"] for m in model_catalog.cached_provider_models(chatgpt)] == ["model-of-nobody"]  # kept
+    cache = tmp_path / "model_catalog.cache"
+    assert "token:" not in (cache.read_text(encoding="utf-8") if cache.exists() else "")  # never on disk
+    login.write_text(json.dumps({"access_token": "tok2", "refresh_token": "second"}), encoding="utf-8")
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []  # another login
+    login.unlink()  # signed out
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []
 
 
 def test_catalog_cache_v1_is_ignored_after_structured_window_migration(

@@ -12,11 +12,20 @@ working untouched.
 
 `low` → `medium` → `high` → `xhigh` → `max` → `ultra` (cheapest first).
 
-Anthropic documents `low`–`max`. The ChatGPT codex backend also advertises
-`ultra` on its top tiers and reports the accepted levels per model, which is
-why `/model effort` on an OAuth profile lists that model's real levels instead
-of the generic set. An unrecognized level is dropped with a warning rather than
-sent — providers answer a bad level with a 400.
+Not every model takes every level, and `/model effort` lists only what the
+active model takes:
+
+- **ChatGPT login (codex backend):** the backend reports the accepted levels
+  per model, `ultra` included on its top tiers.
+- **Other models:** the levels the registry lists for them (`effort_levels` in
+  `bundles/data/models.json`). Anthropic added `xhigh` and `max` with later
+  models, and Claude Haiku 4.5 takes none.
+- **A model the registry doesn't list:** `low`, `medium` and `high`.
+- **A model that doesn't reason:** none.
+
+Neither a level the model doesn't take nor an unrecognized one is ever sent,
+since providers answer a bad level with a 400. An unrecognized level also logs
+a warning.
 
 ## Setting it
 

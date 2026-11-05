@@ -76,6 +76,73 @@ Direct activation, no UI:
 
 A miss lists suggestions instead of guessing.
 
+## Picking a model in the web UI
+
+New Session's Model field and the session panel's Model and Profile field are
+one searchable list of every set-up profile × model × effort. Type words in
+any order: `codex luna max` finds Codex CLI's gpt-6-luna
+at max, `claude code opus max` finds Claude Code's opus at max.
+
+- A pick changes only that session. A native profile takes the model and
+  effort as the session's own override (never saved); an ACP harness (Codex
+  CLI, Claude Code) owns its model and effort, so they go to its own options,
+  as the Model tab sets them. New Session starts on the profile, then applies
+  the pick.
+- Each opening asks the engine for the list again. Until it answers, the
+  picker lists each profile's saved model and says "Loading models…". If the
+  request fails, it keeps those rows, says the full model list did not load
+  and offers Retry. "No model matches." shows only for a list that loaded.
+- Each row names the effort it runs at. A native model also has a default
+  row, which runs it at its own default and clears an earlier pick. Its levels
+  are ones a request on it carries, by the request's own rule:
+  - the registry's (`effort_levels` in `bundles/data/models.json`: Claude
+    Opus 4.6 has no xhigh, Claude Haiku 4.5 takes none);
+  - for a model the registry says nothing about, its own profile's live
+    catalog's (gpt-6-luna stops at max; an empty list is none); another
+    endpoint's catalog, or another login's, says nothing about it;
+  - else none: no level is guessed. A Claude model the registry doesn't list
+    takes none (Sonnet 4.5 takes none).
+
+  A model that doesn't reason, or a provider that sends no effort, gets one
+  row with none, and a session on such a provider shows none, whatever was
+  saved. Whichever screen set a level, a level the model doesn't take is never
+  sent.
+- An ACP harness offers the models its sessions last reported
+  (`~/.kollab/acp/options.json`), each at the levels the harness reported for
+  it. A model it hasn't run yet gets the levels the harness reported for its
+  last model (Claude Code's include its own `default`), never a login's or the
+  registry's: the harness may not use either. The agent takes a pick's model
+  and level as one change, one change at a time, and a level the harness
+  refuses puts its model and level back: a pick never half-applies or mixes
+  with one made in another window. A pick names its profile, and the agent
+  refuses it once another profile is active, so a switch made in another
+  window never gets it. When a pick fails or its answer is lost, the picker
+  says what the session now runs and shows it, naming the harness when the
+  pick switched to it; so does a switch whose answer is lost. The picker shows
+  the session as the engine reads it back, so a newer pick made in another
+  window stays. A harness that has reported no model shows its
+  profile's name, never the profile's saved model. A model with no
+  levels gets one row
+  that keeps the harness's level. A harness never started offers only its
+  default; its models appear after its first session (#557).
+- Opening the list fetches any provider catalog older than an hour (up to
+  8 s), so an endpoint's models show without opening Settings → Loadouts first.
+  A ChatGPT login's list is kept only when the tokens it was fetched with are
+  the login signed in as it arrives, and only while that login stays signed
+  in: signing in as another account fetches that account's models. A login
+  that names no account is known by a digest of its token, and its list stays
+  in memory, never in the cache file. Each opening asks again, so the list
+  never shows what an earlier login fetched.
+- An environment variable outranks a pick (`KOLLAB_<PROFILE>_MODEL`,
+  `KOLLAB_<PROFILE>_EFFORT`, `KOLLAB_MODEL`, `KOLLAB_EFFORT`): the picker says
+  which model kept running instead of showing the pick as applied.
+- Saved loadouts are not in the list: using one saves it to its provider
+  profile, which every session on that profile shares. Use it from Settings →
+  Loadouts.
+- The list is `GET /profiles/choices` on the engine
+  (`LoadoutManager.list_choices`).
+- Settings → Loadouts → Manage Profiles opens the profile editor.
+
 ## Launching with a loadout
 
 ```bash

@@ -1,6 +1,7 @@
 """ACP model/effort config option integration tests."""
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -336,6 +337,61 @@ async def test_model_panel_does_not_retry_a_failed_harness_update():
 
     assert not result["ok"]
     assert acp.calls == [("effort", "low")]
+
+
+class _OfferedOnlyACP(_ACP):
+    """Takes only a value its option offers, as the runner does, and answers later."""
+
+    async def set_config_option(self, config_id, value):
+        await asyncio.sleep(0)  # another request can run meanwhile
+        option = next(option for option in self.options if option["id"] == config_id)
+        if value not in [choice["value"] for choice in option["options"]]:
+            self.calls.append((config_id, value))
+            raise ValueError(f"{value} is not offered")
+        return await super().set_config_option(config_id, value)
+
+
+def _panel_ctx(acp):
+    return SimpleNamespace(
+        _profile_manager=_Profiles(),
+        _event_bus=SimpleNamespace(get_service=lambda name: acp if name == "acp_orchestrator" else None),
+        _llm_service=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_pick_sets_the_model_and_level_as_one_change_or_puts_both_back():
+    # Ametrine on #553 round 10: the web picker sent the model and level as two
+    # actions and put them back from the browser. The agent does all of it now.
+    from kollabor.panels.model import ModelPanel
+
+    acp = _OfferedOnlyACP(_options())
+    panel, ctx = ModelPanel(), _panel_ctx(acp)
+    assert (await panel.act(ctx, "pick", {"model": "gpt-5", "level": "low", "profile": "codex"}))["ok"] is True
+    assert acp.calls == [("model", "gpt-5"), ("effort", "low")]
+
+    acp.calls.clear()
+    result = await panel.act(ctx, "pick", {"model": "harness-default", "level": "max", "profile": "codex"})
+    assert result["ok"] is False
+    assert acp.calls == [("model", "harness-default"), ("effort", "max"), ("model", "gpt-5"), ("effort", "low")]
+    assert [option["currentValue"] for option in acp.options] == ["gpt-5", "low"]
+
+
+@pytest.mark.asyncio
+async def test_a_pick_made_in_another_window_meanwhile_is_never_mixed_or_put_back():
+    # Ametrine on #553 round 10: pick A's model applied, pick B's model and level
+    # landed before A's level, and A's refused level then put A's old model back
+    # over B's pick.
+    from kollabor.panels.model import ModelPanel
+
+    acp = _OfferedOnlyACP(_options())
+    panel, ctx = ModelPanel(), _panel_ctx(acp)
+    a, b = await asyncio.gather(
+        panel.act(ctx, "pick", {"model": "gpt-5", "level": "max", "profile": "codex"}),
+        panel.act(ctx, "pick", {"model": "gpt-5", "level": "low", "profile": "codex"}),
+    )
+    assert (a["ok"], b["ok"]) == (False, True)
+    assert [option["currentValue"] for option in acp.options] == ["gpt-5", "low"]  # B's pick stands
 
 
 def test_config_options_wire_shape_survives_reload_response():
