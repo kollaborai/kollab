@@ -195,3 +195,96 @@ def test_hud_injection_still_queues_when_the_history_write_fails(monkeypatch):
 
     service.queue_agent_hud.assert_called_once()
     service.conversation_logger.log_system_message.assert_awaited_once()
+
+
+def test_message_handler_batch_continues_past_a_failed_history_write():
+    """The ADD_MESSAGE batch loop keeps going and still reports the rest of the batch."""
+    from kollabor.llm.message_handler import MessageHandler
+
+    coord = MagicMock()
+    coord.current_parent_uuid = None
+    coord.conversation_logger.log_user_message = AsyncMock(
+        side_effect=[OSError("disk full"), "second-uuid"]
+    )
+    coord.message_display_service = MagicMock()
+    coord.session_stats = {"messages": 0}
+    handler = MessageHandler(coord)
+    data = {
+        "messages": [
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        ],
+        "options": {
+            "show_loading": False,
+            "display_messages": False,
+            "add_to_history": False,
+        },
+    }
+
+    result = asyncio.run(handler.handle_add_message(data, MagicMock()))
+
+    assert result["success"] is True
+    assert result["message_count"] == 2
+    assert result["parent_uuid"] == "second-uuid"
+    assert coord.conversation_logger.log_user_message.await_count == 2
+
+
+def test_initialize_starts_up_when_the_start_record_fails():
+    """LLMService.initialize logs a failed start row and finishes startup."""
+    from kollabor.llm.llm_coordinator import LLMService
+
+    service = LLMService.__new__(LLMService)
+    service._active_profile_is_acp = MagicMock(return_value=True)
+    service.hook_system = MagicMock(register_hooks=AsyncMock())
+    service._register_registry_tool_tags = MagicMock()
+    service.create_background_task = MagicMock()
+    service._initialize_conversation = AsyncMock()
+    service._set_conversation_context = MagicMock()
+    service.conversation_logger = MagicMock()
+    service.conversation_logger.log_conversation_start = AsyncMock(
+        side_effect=OSError("disk full")
+    )
+    service.task_config = SimpleNamespace(
+        background_tasks=SimpleNamespace(enable_monitoring=False)
+    )
+    service._turn_watchdog = None
+
+    assert asyncio.run(service.initialize()) is True
+
+    service.conversation_logger.log_conversation_start.assert_awaited_once()
+
+
+def test_process_user_input_still_queues_the_message_when_the_history_write_fails():
+    """The message reaches the model and the user is told, not left with a raised OSError."""
+    from kollabor.llm.llm_coordinator import LLMService
+
+    service = LLMService.__new__(LLMService)
+    service.supports_image_input = MagicMock(return_value=True)
+    service._active_acp = MagicMock(return_value=None)
+    service._profile_selects_acp = MagicMock(return_value=(False, None))
+    service._queue_processor = MagicMock()
+    service.tool_executor = MagicMock()
+    service.conversation_manager = MagicMock(current_session_id="session")
+    service.message_display_service = MagicMock()
+    service._prompt_builder = None
+    service.conversation_logger = MagicMock()
+    service.conversation_logger.log_user_message = AsyncMock(
+        side_effect=OSError("disk full")
+    )
+    service.current_parent_uuid = "previous"
+    service._enqueue_with_overflow_strategy = AsyncMock()
+    service.create_background_task = MagicMock()
+    service.task_config = SimpleNamespace(
+        background_tasks=SimpleNamespace(enable_monitoring=False)
+    )
+    service._turn_watchdog = None
+    service._image_store = MagicMock()
+    service.is_processing = True
+
+    asyncio.run(service.process_user_input("hello", pre_displayed=True))
+
+    service.message_display_service.display_system_message.assert_called_once_with(
+        "Conversation history not saved for this message."
+    )
+    service._enqueue_with_overflow_strategy.assert_awaited_once()
+    assert service.current_parent_uuid == "previous"

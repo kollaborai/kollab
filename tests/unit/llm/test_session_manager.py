@@ -232,6 +232,25 @@ class TestSessionManager(unittest.TestCase):
                 self.manager.restart_session(conversation_history, add_message_fn)
             )
 
+    def test_restart_session_survives_a_failed_start_record(self):
+        """#580: the restart is done once state is reset; a missing start row only logs."""
+        self.conversation_logger.log_conversation_start = AsyncMock(
+            side_effect=OSError("disk full")
+        )
+        conversation_history = []
+        add_message_fn = MagicMock()
+
+        with patch("kollabor_ai.generate_session_name", return_value="new-session-id"):
+            with self.assertLogs("kollabor.llm.session_manager", level="WARNING") as logs:
+                result = self.loop.run_until_complete(
+                    self.manager.restart_session(conversation_history, add_message_fn)
+                )
+
+        self.assertEqual(result["new_session_id"], "new-session-id")
+        self.conversation_logger.reset_session.assert_called_once_with("new-session-id")
+        add_message_fn.assert_called_once()
+        self.assertTrue(any("not written to history" in line for line in logs.output))
+
     def test_set_conversation_context(self):
         """Test setting conversation context calls set_context."""
         self.conversation_logger.set_context = MagicMock()
