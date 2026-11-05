@@ -205,6 +205,10 @@ const historyOrder = (message: Message, tie: number): HistoryOrder => {
 const compareHistoryOrder = (left: HistoryOrder, right: HistoryOrder): number =>
   left.section - right.section || left.index - right.index || left.tie - right.tie;
 
+/** Role and content: what a retained row keeps across compaction (its id is renumbered). */
+const rowFingerprint = (message: Message): string =>
+  `${String((message as { role?: unknown }).role ?? "")}\n${JSON.stringify(message.content ?? null)}`;
+
 /**
  * Rebase a compacted snapshot in place: preserve all history the user has
  * already seen under non-conflicting IDs, then add the compacted rows in their
@@ -229,19 +233,38 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
   const nonHistory = shown.filter((message) =>
     historyIndex(message.id) === null && compactionArchiveOrder(message) === null,
   );
-  const archived = transcript.map((message, index) => ({
-    ...message,
-    id: `compaction-archive-${key}-${index}`,
-    metadata: {
-      ...(message.metadata ?? {}),
-      custom: {
-        ...(message.metadata?.custom ?? {}),
-        compactionArchiveOrder: index,
-        compactionArchiveKey: key,
-      },
-    },
-  }) as T);
   const history = loaded.filter((message) => historyIndex(message.id) !== null);
+  // The engine keeps its newest rows verbatim across a compaction, so they come
+  // back in `history`. Archiving their displayed copies too would show them
+  // twice. Each loaded row takes at most one shown row, matched from the newest.
+  const remaining = new Map<string, number>();
+  for (const message of history) {
+    const fingerprint = rowFingerprint(message);
+    remaining.set(fingerprint, (remaining.get(fingerprint) ?? 0) + 1);
+  }
+  const carried = new Set<T>();
+  for (const message of [...transcript].reverse()) {
+    const fingerprint = rowFingerprint(message);
+    const copies = remaining.get(fingerprint) ?? 0;
+    if (copies > 0) {
+      remaining.set(fingerprint, copies - 1);
+      carried.add(message);
+    }
+  }
+  const archived = transcript
+    .filter((message) => !carried.has(message))
+    .map((message, index) => ({
+      ...message,
+      id: `compaction-archive-${key}-${index}`,
+      metadata: {
+        ...(message.metadata ?? {}),
+        custom: {
+          ...(message.metadata?.custom ?? {}),
+          compactionArchiveOrder: index,
+          compactionArchiveKey: key,
+        },
+      },
+    }) as T);
   return { messages: [...archived, ...history, ...nonHistory], history, key };
 }
 
