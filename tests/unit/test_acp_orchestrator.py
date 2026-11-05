@@ -985,3 +985,46 @@ async def test_a_later_batch_threads_under_a_row_of_its_own_message(tmp_path, mo
         assert sum("OLD_NOTE" in content for content in rows.values()) == 1
     finally:
         await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_observation_leaves_no_history_row_however_often_it_is_offered(
+    tmp_path, monkeypatch
+):
+    # #581: with the retry queue full, a refused message is offered again on
+    # every mailbox or relay tick. ConversationManager.add_message appends the
+    # row before its autosave can raise, so writing the row before deciding on
+    # the refusal leaves one more row per offer. A refusal admits nothing.
+    orchestrator, llm = await _started_orchestrator(tmp_path, monkeypatch)
+    try:
+        manager = llm.conversation_manager
+        manager.save_conversations = True
+        storage_down = [True]
+
+        def save_conversation(*args, **kwargs):
+            if storage_down[0]:
+                raise OSError("No space left on device")
+
+        monkeypatch.setattr(manager, "save_conversation", save_conversation)
+        orchestrator.runner.is_processing = True
+        for index in range(20):
+            assert orchestrator.observe_notification(_observation(f"NOTE_{index}")) is True
+
+        def target_rows():
+            return sum(
+                "TARGET_NOTE" in message["content"]
+                for message in manager.messages
+                if message["role"] == "user"
+            )
+
+        for _ in range(13):
+            assert orchestrator.observe_notification(_observation("TARGET_NOTE")) is False
+        assert target_rows() == 0
+
+        storage_down[0] = False
+        orchestrator.runner.is_processing = False
+        assert orchestrator.observe_notification(_observation("TARGET_NOTE")) is True
+        await asyncio.gather(*orchestrator._completion_tasks)
+        assert target_rows() == 1
+    finally:
+        await orchestrator.close()
