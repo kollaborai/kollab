@@ -137,24 +137,74 @@ KEYRING_SENTINEL_PREFIX = "secret:keyring:"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
 
+def _vault_call(key_name: str, value: Optional[str] = None) -> Optional[str]:
+    """Read (value None) or store a secret in the encrypted vault file.
+
+    The vault is where a key goes when the OS keyring cannot take it
+    (KOLLAB_NO_KEYRING, no Secret Service, a container): AES-256-GCM in
+    ~/.kollab/vault/secrets.enc. Its password is KOLLAB_KEY_ENCRYPTION_PASSWORD
+    when set, otherwise a random one kept owner-only in ~/.kollab/vault/vault.key,
+    so pipe mode and --detached never prompt. Returns the value read, or the
+    value stored; None when the vault is unavailable or cannot be decrypted --
+    an unreadable vault is never rewritten, so a wrong password loses nothing.
+    """
+    import secrets as _secrets
+
+    from kollabor_ai.providers.security import (
+        CRYPTOGRAPHY_AVAILABLE,
+        EncryptedFileKeyStorage,
+    )
+    from kollabor_config.config_utils import get_config_directory
+    from kollabor_config.file_lock import locked_file
+    from kollabor_config.private_fs import ensure_private_dir
+
+    if not CRYPTOGRAPHY_AVAILABLE:
+        return None
+    try:
+        vault_dir = get_config_directory() / "vault"
+        ensure_private_dir(vault_dir)
+        with locked_file(vault_dir / "vault.lock", private=True):
+            password = os.environ.get("KOLLAB_KEY_ENCRYPTION_PASSWORD", "")
+            if not password:
+                with locked_file(vault_dir / "vault.key", "a+", private=True) as f:
+                    f.seek(0)
+                    password = f.read().strip()
+                    if not password:
+                        password = _secrets.token_urlsafe(32)
+                        f.write(password)
+            storage = EncryptedFileKeyStorage(vault_dir / "secrets.enc", password)
+            keystore = storage._load_keystore()
+            if value is None:
+                return keystore.get(key_name)
+            keystore[key_name] = value
+            storage._save_keystore(keystore)
+            return value
+    except Exception as e:
+        logger.warning(f"Password vault unavailable for '{key_name}': {e}")
+        return None
+
+
 def _keyring_get(key_name: str) -> Optional[str]:
-    """Retrieve a value from OS keyring (sync, graceful fallback).
+    """Retrieve a value from OS keyring, then the vault (sync, graceful fallback).
 
     Uses the same service name as APIKeyManager from security.py
     so keys are interchangeable between the async and sync paths.
-    Skipped entirely when the keyring is disabled (KOLLAB_NO_KEYRING, tests) --
-    on macOS a lookup of a missing entry pops a Keychain dialog.
+    The keyring is skipped entirely when disabled (KOLLAB_NO_KEYRING, tests) --
+    on macOS a lookup of a missing entry pops a Keychain dialog. A
+    ``secret:keyring:`` reference resolves from either store (#610).
     """
     try:
         import keyring
 
         from kollabor_ai.providers.security import APIKeyManager, keyring_enabled
 
-        if not keyring_enabled():
-            return None
-        return keyring.get_password(APIKeyManager.SERVICE_NAME, key_name)
+        if keyring_enabled():
+            found = keyring.get_password(APIKeyManager.SERVICE_NAME, key_name)
+            if found:
+                return str(found)
     except Exception:
-        return None
+        pass
+    return _vault_call(key_name)
 
 
 # (profile name, plaintext key) pairs get_api_key() already tried to migrate.
@@ -162,23 +212,24 @@ _KEYRING_MIGRATION_TRIED: set[tuple[str, str]] = set()
 
 
 def _keyring_set(key_name: str, value: str) -> bool:
-    """Store a value in OS keyring (sync, graceful fallback).
+    """Store a value in OS keyring, else the encrypted vault (sync, graceful fallback).
 
-    Returns True on success, False if keyring is unavailable, disabled, or
-    fails. A False return keeps the caller on its plaintext path -- see
-    get_api_key()'s auto-migration, which must not prompt during tests.
+    Returns True on success, False if neither store took it. A False return
+    keeps the caller on its plaintext path. With the keyring disabled
+    (KOLLAB_NO_KEYRING, tests) the keyring is never touched, so no prompt;
+    the key goes to the vault file instead (#610).
     """
     try:
         import keyring
 
         from kollabor_ai.providers.security import APIKeyManager, keyring_enabled
 
-        if not keyring_enabled():
-            return False
-        keyring.set_password(APIKeyManager.SERVICE_NAME, key_name, value)
-        return True
+        if keyring_enabled():
+            keyring.set_password(APIKeyManager.SERVICE_NAME, key_name, value)
+            return True
     except Exception:
-        return False
+        pass
+    return _vault_call(key_name, value) is not None
 
 
 @dataclass
@@ -630,7 +681,7 @@ class LLMProfile:
         1. Profile-specific env var (KOLLAB_{NAME}_API_KEY)
         2. For provisioned profiles, the private enrolled credential
         3. Global env var (KOLLAB_API_KEY) for ordinary profiles
-        4. Sentinel in config -> resolve from OS keyring
+        4. Sentinel in config -> resolve from OS keyring or the vault file
         5. Keyring lookup by profile name (auto-migration path)
         6. Plaintext from config (backwards compat fallback)
         """
@@ -2085,13 +2136,14 @@ class ProfileManager:
                         sentinel = f"{KEYRING_SENTINEL_PREFIX}{profile.name}"
                         profile_dict["api_key"] = sentinel
                         logger.info(
-                            f"Profile '{profile.name}': stored API key in OS keyring, writing sentinel to config"
+                            f"Profile '{profile.name}': stored API key in OS keyring or vault, "
+                            "writing sentinel to config"
                         )
                     else:
-                        # Keyring unavailable -- fall back to plaintext
+                        # Keyring and vault unavailable -- fall back to plaintext
                         profile_dict["api_key"] = key_val
                         logger.warning(
-                            f"Profile '{profile.name}': keyring unavailable, API key saved in plaintext"
+                            f"Profile '{profile.name}': keyring and vault unavailable, API key saved in plaintext"
                         )
                 if profile.top_p is not None:
                     profile_dict["top_p"] = profile.top_p
