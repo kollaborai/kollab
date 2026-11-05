@@ -336,3 +336,99 @@ def test_catalog_cache_v1_is_ignored_after_structured_window_migration(
     monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
 
     assert model_catalog._load_disk_cache() == {}
+
+
+def _anthropic_client(monkeypatch, pages):
+    """Mock GET /v1/models: ``pages`` maps ``after_id`` to a response body or
+    an exception to raise. Returns the list of ``after_id`` values requested."""
+    seen = []
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            after_id = (params or {}).get("after_id")
+            seen.append(after_id)
+            page = pages[after_id]
+            if isinstance(page, Exception):
+                raise page
+            return FakeResp(page)
+
+    monkeypatch.setattr(model_catalog.httpx, "AsyncClient", FakeClient)
+    return seen
+
+
+class _AnthropicProfile:
+    def get_provider(self):
+        return "anthropic"
+
+    def get_api_key(self):
+        return "sk-ant-xyz"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_follows_has_more_to_the_last_page(monkeypatch):
+    seen = _anthropic_client(
+        monkeypatch,
+        {
+            None: {
+                "data": [{"id": "m1"}, {"id": "m2"}],
+                "has_more": True,
+                "last_id": "m2",
+            },
+            "m2": {"data": [{"id": "m3"}], "has_more": False, "last_id": "m3"},
+        },
+    )
+
+    out = await model_catalog.list_provider_models(_AnthropicProfile())
+
+    assert [m["id"] for m in out] == ["m1", "m2", "m3"]
+    assert seen == [None, "m2"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_incomplete_listing_is_empty_not_partial(monkeypatch):
+    """A page that fails mid-listing must not leave a partial list that the
+    loadout picker would treat as the provider's whole catalog."""
+    _anthropic_client(
+        monkeypatch,
+        {
+            None: {"data": [{"id": "m1"}], "has_more": True, "last_id": "m1"},
+            "m1": RuntimeError("boom"),
+        },
+    )
+
+    assert await model_catalog.list_provider_models(_AnthropicProfile()) == []
+
+
+@pytest.mark.asyncio
+async def test_anthropic_pagination_stops_on_a_repeated_cursor(monkeypatch):
+    """A server that keeps answering has_more with the same cursor must not
+    loop forever, and its list is not trusted as complete."""
+    seen = _anthropic_client(
+        monkeypatch,
+        {
+            None: {"data": [{"id": "m1"}], "has_more": True, "last_id": "m1"},
+            "m1": {"data": [{"id": "m1"}], "has_more": True, "last_id": "m1"},
+        },
+    )
+
+    assert await model_catalog.list_provider_models(_AnthropicProfile()) == []
+    assert seen == [None, "m1"]

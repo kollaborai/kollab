@@ -194,6 +194,82 @@ def test_profile_own_model_stays_listed_when_catalog_omits_it():
     assert names == ["gpt-5.6-luna", "gpt-private-preview"]
 
 
+def test_stale_catalog_is_still_the_provider_list():
+    """A catalog cached more than the 1 h TTL ago is still the provider's list.
+
+    Launch paths (``kollab --llm``, the startup default, ``/llm <name>``) never
+    refresh it, so reading it with the TTL brought the registry back and
+    offered gpt-6-luna again (#558)."""
+    profile = _Profile(name="openai-api", provider="openai", model="gpt-5.6-luna")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    with patch.object(mc.time, "time", return_value=time.time() - 86400):
+        _seed(profile, ["gpt-5.6-luna"])
+    mc._MEMORY_CACHE.clear()  # a fresh process reads only the disk cache
+
+    assert [lo.name for lo in manager.list_loadouts()] == ["gpt-5.6-luna"]
+    assert manager.resolve("gpt-6-luna")[0] is None
+
+
+def _anthropic_pages(monkeypatch, pages):
+    """Serve ``pages`` from a mocked GET /v1/models, keyed by ``after_id``."""
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            return _Resp(pages[(params or {}).get("after_id")])
+
+    monkeypatch.setattr(mc.httpx, "AsyncClient", _Client)
+
+
+def test_truncated_anthropic_page_does_not_hide_registry_models(monkeypatch):
+    """The first /v1/models page is not the whole list (#558 review).
+
+    claude-haiku-4-5 sits on page 2; with only page 1 read, the catalog would
+    be the whole list and the model would drop out of /llm."""
+    profile = _Profile(name="anthropic-api", provider="anthropic")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    registry = [name for name, _info in list_models_for_provider("anthropic")]
+    assert "claude-haiku-4-5" in registry, "precondition: registry has the model"
+    _anthropic_pages(
+        monkeypatch,
+        {
+            None: {
+                "data": [{"id": f"claude-page1-{i}"} for i in range(20)],
+                "has_more": True,
+                "last_id": "claude-page1-19",
+            },
+            "claude-page1-19": {
+                "data": [{"id": "claude-haiku-4-5"}],
+                "has_more": False,
+                "last_id": "claude-haiku-4-5",
+            },
+        },
+    )
+
+    asyncio.run(mc.get_provider_models(profile))
+
+    assert "claude-haiku-4-5" in [lo.name for lo in manager.list_loadouts()]
+    assert manager.resolve("claude-haiku-4-5")[0] is not None
+
+
 # -- failure modes ----------------------------------------------------------
 
 
