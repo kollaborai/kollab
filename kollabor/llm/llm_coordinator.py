@@ -1710,9 +1710,12 @@ class LLMService:
 
     # --- QueueProcessor forwarding methods ---
 
-    async def _enqueue_with_overflow_strategy(self, message: MessageContent) -> None:
-        """Enqueue message with overflow strategy. Delegates to QueueProcessor."""
-        await self._queue_processor.enqueue(message)
+    async def _enqueue_with_overflow_strategy(self, message: MessageContent) -> bool:
+        """Enqueue message with overflow strategy. Delegates to QueueProcessor.
+
+        False when the message was dropped and will not run (#589).
+        """
+        return await self._queue_processor.enqueue(message)
 
     async def _process_queue(self):
         """Process queued messages. Delegates to QueueProcessor."""
@@ -2055,13 +2058,18 @@ class LLMService:
         )
 
         # Add to processing queue with overflow handling
-        await self._enqueue_with_overflow_strategy(
-            QueuedInput(normalized_message, voice or {}, trusted_origin_context)
-            if voice or trusted_origin_context
-            else TaggedInput(normalized_message, (request_id,))
-            if request_id
-            else normalized_message
-        )
+        try:
+            admitted = await self._enqueue_with_overflow_strategy(
+                QueuedInput(normalized_message, voice or {}, trusted_origin_context)
+                if voice or trusted_origin_context
+                else TaggedInput(normalized_message, (request_id,))
+                if request_id
+                else normalized_message
+            )
+        except RuntimeError:
+            # The overflow strategy refused it, and the queue already ended its
+            # stream. Raising here would make the hook pipeline retry this turn.
+            admitted = False
 
         # Start processing if not already running
         if not self.is_processing:
@@ -2069,6 +2077,10 @@ class LLMService:
                 lambda: self._process_queue(), name="process_queue"
             )
 
+        if not admitted:
+            # Dropped, or swept by a Stop: its stream already ended, so it is not
+            # reported as queued (#589).
+            return {"status": "rejected", "reason": "input_not_queued"}
         if request_id and not (voice or trusted_origin_context):
             return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
