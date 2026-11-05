@@ -580,6 +580,25 @@ Telegram bridge setup (run inside interactive mode):
         help=argparse.SUPPRESS,
     )
 
+    # --hub uses nargs='*', so capture-only flags that the hub subcommand
+    # consumes must be registered top-level (like --raw above) or argparse
+    # stops consuming at the first '-...' token and drops them as unknown.
+    parser.add_argument(
+        "--cursor",
+        dest="hub_capture_cursor",
+        default=None,
+        metavar="N",
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
+        "--follow",
+        dest="hub_capture_follow",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+
     parser.add_argument(
         "--org",
         type=str,
@@ -761,6 +780,14 @@ Telegram bridge setup (run inside interactive mode):
         if not args.hub or args.hub[0].lower() != "capture":
             parser.error("--raw is only valid with --hub capture")
         args.hub.append("--raw")
+
+    if args.hub_capture_cursor is not None or args.hub_capture_follow:
+        if not args.hub or args.hub[0].lower() != "capture":
+            parser.error("--cursor and --follow are only valid with --hub capture")
+        if args.hub_capture_cursor is not None:
+            args.hub.extend(["--cursor", str(args.hub_capture_cursor)])
+        if args.hub_capture_follow:
+            args.hub.append("--follow")
 
     hub_org_options_used = (
         args.hub_org_dir is not None
@@ -2080,6 +2107,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 # spinning -- sweep-class guard, mirrors the bounded/repeat-
                 # guard philosophy of scripts/pr_gates_dod.py).
                 follow_budget = 50
+                stuck_follow = False
                 while follow_budget > 0:
                     marker_cursor = (capture or {}).get("next_cursor")
                     if not capture or not capture.get("truncated") or not marker_cursor:
@@ -2102,6 +2130,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                         # Stuck peer: same marker again. Stop instead of
                         # looping on an unadvancing cursor; the just-printed
                         # page already carries the marker.
+                        stuck_follow = True
                         print(
                             "... (capture stopped: peer did not advance "
                             "next_cursor; use --cursor N to retry)"
@@ -2115,7 +2144,16 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     )
                     if page.strip():
                         print(page)
-                else:
+                # Budget exhausted is only a stop reason when the LAST
+                # response is still truncated with a cursor to resume from;
+                # a final untruncated page means the window drained clean
+                # exactly at the budget boundary.
+                if (
+                    follow_budget == 0
+                    and not stuck_follow
+                    and (capture or {}).get("truncated")
+                    and (capture or {}).get("next_cursor")
+                ):
                     print(
                         "... (capture stopped: too many pages, use --cursor N "
                         "to continue)"

@@ -191,3 +191,114 @@ def test_cli_capture_rejects_positional_after_cursor_value(tmp_path):
 
     assert exc.value.code == 2
     capture.assert_not_awaited()
+
+
+def test_real_cli_path_forwards_cursor_and_follow_flags():
+    """#752 review P1: --hub is nargs='*', so --cursor/--follow stop arg
+    consumption and land in parse_known_args' unknown bucket unless they
+    are registered top-level and re-appended, exactly like the --raw
+    precedent. Pin the real parse path, not _handle_cli_hub directly."""
+    from kollabor import cli
+
+    args = cli.parse_arguments(
+        plugin_classes=[],
+        argv=["--hub", "capture", "lapis", "10", "--cursor", "49620", "--follow"],
+    )
+
+    assert cli._hub_args_with_org_options(args) == [
+        "capture",
+        "lapis",
+        "10",
+        "--cursor",
+        "49620",
+        "--follow",
+    ]
+
+
+def test_real_cli_path_rejects_cursor_flag_outside_capture():
+    """--cursor/--follow are capture-only, mirroring the --raw/--org flag
+    guards: outside `--hub capture` they are a usage error, not silent
+    input for some other subcommand."""
+    from kollabor import cli
+
+    with pytest.raises(SystemExit) as wrong_command:
+        cli.parse_arguments(
+            plugin_classes=[], argv=["--hub", "status", "--cursor", "5"]
+        )
+    assert wrong_command.value.code == 2
+
+
+def test_cli_capture_cursor_follow_exactly_fifty_pages_ends_clean(tmp_path, capsys):
+    """#752 review P2 boundary: a follow that spends its whole 50-page
+    budget and lands on a final UNTRUNCATED page is a complete drain, not
+    an error — it must end silently."""
+    _write_presence(tmp_path, "lapis")
+    calls = []
+
+    async def follow(socket_path_arg, *, lines, cursor=None, **kwargs):
+        calls.append(cursor)
+        seq = len(calls)
+        if seq < 51:
+            return (
+                _capture_envelope(
+                    lines=[{"seq": seq, "kind": "text", "text": f"page {seq}"}],
+                    truncated=True,
+                    next_cursor=str(seq),
+                ),
+                None,
+            )
+        return (
+            _capture_envelope(
+                lines=[{"seq": seq, "kind": "text", "text": f"page {seq}"}],
+                truncated=False,
+                next_cursor=None,
+            ),
+            None,
+        )
+
+    with (
+        patch("plugins.hub.presence.get_presence_dir", return_value=tmp_path),
+        patch(
+            "plugins.hub.messenger.AgentMessenger.request_capture", side_effect=follow
+        ),
+    ):
+        asyncio.run(_handle_cli_hub(["capture", "lapis", "--follow"]))
+
+    assert len(calls) == 51
+    out = capsys.readouterr().out
+    assert "page 51" in out
+    assert "too many pages" not in out
+
+
+def test_cli_capture_cursor_follow_budget_exhausted_on_truncated_reports_stop(
+    tmp_path, capsys
+):
+    """Complementary pin: when the 50-page budget runs out while the last
+    response is STILL truncated with a cursor, the explicit stop reason
+    must be printed so a script knows to resume with --cursor N."""
+    _write_presence(tmp_path, "lapis")
+    calls = []
+
+    async def follow(socket_path_arg, *, lines, cursor=None, **kwargs):
+        calls.append(cursor)
+        seq = len(calls)
+        return (
+            _capture_envelope(
+                lines=[{"seq": seq, "kind": "text", "text": f"page {seq}"}],
+                truncated=True,
+                next_cursor=str(seq),
+            ),
+            None,
+        )
+
+    with (
+        patch("plugins.hub.presence.get_presence_dir", return_value=tmp_path),
+        patch(
+            "plugins.hub.messenger.AgentMessenger.request_capture", side_effect=follow
+        ),
+    ):
+        asyncio.run(_handle_cli_hub(["capture", "lapis", "--follow"]))
+
+    assert len(calls) == 51
+    out = capsys.readouterr().out
+    assert "too many pages" in out
