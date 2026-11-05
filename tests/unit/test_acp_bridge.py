@@ -458,6 +458,40 @@ def test_nonce_lookup_skips_a_process_whose_environment_psutil_cannot_read(tmp_p
     assert not runner._owned_processes
 
 
+@pytest.mark.asyncio
+async def test_start_and_close_never_read_any_process_environment(tmp_path, monkeypatch):
+    """#608: finding owned processes must not read other processes' environments."""
+    reads: list[int] = []
+    original_environ = psutil.Process.environ
+
+    def recording_environ(self):
+        reads.append(self.pid)
+        return original_environ(self)
+
+    monkeypatch.setattr(psutil.Process, "environ", recording_environ)
+    runner = ACPRunner(ACPProfile("owned", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path)))
+    outsider = None
+    try:
+        await runner.start()
+        # A same-user process born after the adapter, in its own session.
+        outsider = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "import time; time.sleep(60)", cwd=str(tmp_path),
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+        )
+        assert (await runner.prompt("one turn")).text == "hello "
+        await runner.close()
+        assert reads == []
+        assert outsider.returncode is None
+        assert not runner._live_owned_processes()
+    finally:
+        with contextlib.suppress(Exception):
+            await runner.close()
+        if outsider is not None and outsider.returncode is None:
+            outsider.kill()
+            await asyncio.wait_for(outsider.wait(), timeout=2)
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
 @pytest.mark.asyncio
 async def test_startup_failure_recovers_orphan_after_root_exited_before_ownership_read(tmp_path, monkeypatch):
