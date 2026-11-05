@@ -257,6 +257,31 @@ def test_catalog_cached_for_another_endpoint_is_not_this_profiles_list():
     assert [lo.name for lo in manager.list_loadouts()] == ["old-server-model"]
 
 
+def test_cache_file_never_holds_the_endpoint_credentials(tmp_path):
+    """An endpoint can carry a password, a query key or a path token (it may
+    come only from an env var, kept off config.json). The cache tells endpoints
+    apart without writing any of that to disk."""
+
+    class _Endpoint(_Profile):
+        endpoint = "https://user:hunter2@gw.example.test/v1/tok-9f3a?api-key=k-77e1"
+
+        def get_endpoint(self):
+            return self.endpoint
+
+    profile = _Endpoint(name="work", provider="custom")
+    _seed(profile, ["gateway-model"])
+    text = (tmp_path / "model_catalog.cache").read_text(encoding="utf-8")
+    for secret in ("hunter2", "k-77e1", "tok-9f3a", "gw.example.test"):
+        assert secret not in text
+
+    # Still this endpoint's catalog after a restart, and not another's.
+    mc._MEMORY_CACHE.clear()
+    manager = LoadoutManager(_ProfileManager([profile]))
+    assert [lo.name for lo in manager.list_loadouts()] == ["gateway-model"]
+    profile.endpoint = "https://user:hunter2@gw.example.test/v1/tok-0000?api-key=k-77e1"
+    assert manager.list_loadouts() == []
+
+
 def _anthropic_pages(monkeypatch, pages):
     """Serve ``pages`` from a mocked GET /v1/models, keyed by ``after_id``."""
 
