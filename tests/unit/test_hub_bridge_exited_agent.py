@@ -101,3 +101,38 @@ def test_a_request_for_an_exited_agent_is_not_answered_by_its_successor(
 
     assert successor_reply == "successor output"  # the stub is reachable by its own id
     assert exited_reply is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stub successor is a unix socket")
+def test_a_request_for_an_agent_restarted_in_place_is_not_answered_by_its_new_image(
+    tmp_path, monkeypatch, sock_path
+):
+    """hub_restart and /upgrade re-exec the process: same pid, new agent id, same socket path."""
+    presence = tmp_path / "presence"
+    presence.mkdir()
+    monkeypatch.setattr(hub_bridge, "CACHE_TTL_SECONDS", 3600)
+    monkeypatch.setattr(hub_bridge, "_find_presence_dirs", lambda: [presence])
+    old_file = presence / "old-agent.json"
+    old_file.write_text(json.dumps(_record("old-agent", "first", socket_path=str(sock_path))))
+    bridge = HubBridge()
+    assert bridge.get_agent("old-agent") is not None  # the cache holds the old image's record
+
+    # The old image removed its record on shutdown; the new image, with the same pid,
+    # wrote its own under a new agent id.
+    old_file.unlink()
+    (presence / "new-agent.json").write_text(
+        json.dumps(_record("new-agent", "first", socket_path=str(sock_path)))
+    )
+
+    async def ask_both():
+        server = await asyncio.start_unix_server(_serve_successor, path=str(sock_path))
+        async with server:
+            return (
+                await bridge.get_agent_output("old-agent"),
+                await bridge.get_agent_output("new-agent"),
+            )
+
+    old_reply, new_reply = asyncio.run(ask_both())
+
+    assert new_reply == "successor output"
+    assert old_reply is None
