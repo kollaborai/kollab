@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Closed-PR review and first-push check-run collection in the throughput KPI paginates all pages and fails closed on repeated pages, malformed responses, or pagination-cap exhaustion rather than reporting partial metrics (#747).
+- Input handler hook cleanup now detaches its hooks from the event bus: `HookRegistrar.unregister_all_hooks()` passed a `Hook` object to an API that takes the owning plugin and hook name, so cleanup silently left every input hook registered and firing (#735).
+- Agent startup now preserves existing global agent/skill files, refuses to seed through linked/reparse-point directories, and publishes missing seed files without overwriting concurrent creations; safely retired seed copies are restored if changed (#698).
 - A hub message reports `sent` only when the recipient's hub acks that message: ACP `hub_msg` results now carry `delivery` (`confirmed`, `accepted`, `queued` or `unconfirmed`), and a queued or unacked message no longer reads as sent (#609).
 - `kollab --hub capture` shows the hub messages an agent sent and received again; they were dropped whenever a heartbeat's state snapshot was in the capture window (#609).
 - A failed send names its cause: an exception with no message reports its type instead of a blank `Tool execution error:`, and a refused message always gives a reason (#609).
