@@ -720,3 +720,27 @@ class PresenceManager:
             }
             for a in agents
         ]
+
+
+async def wait_until_socket_answers(
+    socket_path: str,
+    timeout: float = 30.0,
+    interval: float = 0.25,
+) -> bool:
+    """Wait until the local IPC endpoint at ``socket_path`` answers a connect.
+
+    Binding a listener is not serving: a busy startup loop can delay the first
+    handshake seconds past bind-return (windows-smoke ConnectionRefused against
+    an already-bound path, #692). Presence must advertise only sockets that
+    answer, so the hub plugin gates its presence publish on this probe.
+    POSIX: a unix connect proves the listener; Windows: local_ipc.connect_blocking
+    performs the full HMAC handshake. Returns False when the deadline passes
+    without an answer.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if PresenceManager._socket_responds(socket_path):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(interval)

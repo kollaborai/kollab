@@ -74,7 +74,7 @@ from .models import (
 )
 from .notifier import HubNotifier, NtfyNotifier, load_ntfy_settings
 from .nudge_engine import NudgeEngine
-from .presence import PresenceManager, get_messages_dir, pid_alive
+from .presence import PresenceManager, get_messages_dir, pid_alive, wait_until_socket_answers
 from .rosters import (
     DEFAULT_ROSTER,
     attach_persona_skills,
@@ -6018,6 +6018,14 @@ class HubPlugin(BasePlugin):
 
             # The window that forked this daemon looks the agent up in presence
             # the moment it hears "ready"; until now the record had no socket.
+            # Bind-return is not serving: under a busy startup loop the first
+            # handshake can land seconds after the listener exists (#692), so
+            # the advertise waits for the endpoint to actually answer one.
+            if not await wait_until_socket_answers(socket_path):
+                logger.error(
+                    f"socket {socket_path} never answered a handshake within "
+                    "30s — publishing presence anyway; clients may see refusals"
+                )
             self._presence.publish()
 
             # Signal daemon-ready if running in fork-daemon mode
