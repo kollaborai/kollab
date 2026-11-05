@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `kollab --hub capture` shows the hub messages an agent sent and received again; they were dropped whenever a heartbeat's state snapshot was in the capture window (#609).
 - A failed send names its cause: an exception with no message reports its type instead of a blank `Tool execution error:`, and a refused message always gives a reason (#609).
 - Connect's join code shows why it could not be made when the network's discovery origin is not on port 443 (`Enrollment needs port 443, but this network's origin uses port <port>.`), instead of a reason-less "could not create a code". Enrollment still requires port 443 (#693).
+- ACP admissions that reuse a caller request ID keep their own history parent and completion ownership, so a reply is no longer recorded under the later input's row (#597). A rejected admission cancels only itself, not an earlier queued admission with the same ID.
+- ACP admissions that reuse a caller request ID also keep their own mic-turn voice metadata: the voice-reply dictionary was keyed by bare request ID, so a later admission overwrote the earlier one's voice and the reply was spoken with the wrong voice or not at all (#597).
 - Mentiko attaches to an existing live hub session without spawning a second daemon or duplicating its system-prompt history (#708).
 
 ## [0.19.1] - 2026-11-03
