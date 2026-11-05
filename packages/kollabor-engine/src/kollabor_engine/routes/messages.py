@@ -745,7 +745,19 @@ def _assistant_align_streamed_ids(
         stored_text = _text(stored_row.get("content"))
         if not stored_text:
             return False
-        return _text(streamed_row.get("content")).endswith(stored_text)
+        streamed_text = _text(streamed_row.get("content"))
+        if streamed_text == stored_text:
+            return True
+        # A bare tail match is not identity: a stale stored answer can be
+        # the tail of an unrelated new answer ("42" vs "Answer: 42"), and
+        # pairing it would rename this turn onto the stale rows. Only a
+        # merged tool round legitimately renders the stored text as a
+        # strict tail, and that turn's streamed row carries its own call
+        # cards — require that evidence for any strict-suffix match.
+        return (
+            bool(_streamed_call_ids(streamed_row))
+            and streamed_text.endswith(stored_text)
+        )
 
     provisional: List[int] = []
     shown: set[int] = set()
@@ -1591,11 +1603,17 @@ async def assistant_transport(
                             if event.get("history_recorded"):
                                 controller.state["goalHistoryReloadRequired"] = True
                         else:
-                            # Publish first: the page renders this turn's rows
-                            # without waiting on history round trips (#675).
-                            # The snapshot fetched below only decides the sync
-                            # claim; alignment mutates the published list in
-                            # place, so the claimed ids are the shown ids.
+                            # Publish the finished turn first: the page must
+                            # not wait on history-refresh RPCs (up to 2, ~3s
+                            # worst case) to see the completed status — that
+                            # spun the completion spinner on a slow daemon.
+                            # Provisional ids are fine for this publish; the
+                            # refresh below aligns them and republishes the
+                            # aligned rows before any synced claim (#666:
+                            # never claim synced for rows the page has not
+                            # been shown). The snapshot only decides the sync
+                            # claim; alignment mutates these published rows
+                            # in place (#675).
                             _assistant_set_messages(controller, state_messages)
                             refreshed = None
                             for _attempt in (0, 1):
@@ -1620,12 +1638,11 @@ async def assistant_transport(
                                 # The streamed ids were reconciled against
                                 # exactly this snapshot, so the page may
                                 # append canonical rows past it by id.
-                                # The early publish chunk was JSON-encoded
-                                # at yield time with the provisional ids,
-                                # and the synced chunk below carries no
-                                # messages update — re-publish the aligned
-                                # rows so the canonical ids reach the
-                                # client (#767).
+                                # The early publish is JSON-encoded with
+                                # provisional ids; the synced chunk carries
+                                # no messages update, so republish the
+                                # aligned rows for the client before the
+                                # watermark is claimed (#767/#666).
                                 _assistant_set_messages(
                                     controller, state_messages
                                 )

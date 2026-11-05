@@ -664,3 +664,97 @@ async def test_wire_republishes_aligned_rows_after_refresh(monkeypatch):
         "wire never re-published the aligned rows; last messages chunk "
         f"carried ids {last_ids}"
     )
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_publishes_before_history_refresh_resolves(monkeypatch):
+    """Bismuth probe (#675 P2): a gated refresh must not hold the turn.
+
+    The completion path awaited up to two history-refresh RPCs (~3s worst
+    case) before it published anything, so the page spun on a slow daemon
+    before it saw the completed rows. The completed turn must reach the
+    client while the refresh is still unresolved; the aligned republish
+    then reconciles ids and only afterwards claims the watermark (#666:
+    never claim synced for rows the page has not been shown)."""
+    controllers, runners = _fake_assistant_stream(monkeypatch)
+    session = _Session(_history())
+    gate = asyncio.Event()
+
+    async def gated_refresh(*args, **kwargs):
+        await gate.wait()
+        return _history()
+
+    session.refresh_history = gated_refresh
+    monkeypatch.setattr(messages, "get_session_registry", lambda: {"s1": session})
+    body = messages.AssistantRequest(
+        commands=[{
+            "type": "add-message",
+            "message": {
+                "id": "client-1",
+                "role": "user",
+                "parts": [{"type": "text", "text": "PROOF666 one"}],
+            },
+        }],
+        state={"messages": _state_messages()},
+    )
+    await messages.assistant_transport("s1", body)
+
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 1.0
+    published = None
+    while loop.time() < deadline:
+        rows = controllers[0].state.get("messages") or []
+        last = rows[-1] if rows else {}
+        # Progress publishes carry no status (the client derives "running");
+        # only the turn-complete publish stamps the completed status.
+        if last.get("status") == {"type": "complete", "reason": "stop"}:
+            published = rows
+            break
+        await asyncio.sleep(0.01)
+
+    try:
+        assert published is not None, (
+            "turn completion waited on the gated history refresh before "
+            "publishing; the page must see the completed status immediately"
+        )
+    finally:
+        gate.set()
+        await asyncio.wait_for(runners[0], 2.0)
+
+    # The aligned republish lands the canonical ids, and only then is the
+    # synced watermark claimed.
+    state = controllers[0].state
+    assert [row["id"] for row in state["messages"]] == [
+        "history-0", "history-1", "history-2", "history-3",
+    ]
+    assert state["synced"] == {"history": 4, "messages": 4}
+
+
+def test_align_refuses_stale_suffix_only_match():
+    """A bare tail match is not identity (#675 P3a).
+
+    A refresh snapshot that missed this turn can still end on a stale
+    answer whose text is the tail of the streamed answer ("42" vs
+    "Answer: 42"): pairing it would rename this turn onto the stale rows
+    and claim a synced watermark over rows the page has not been shown.
+    The aligner must refuse and keep the provisional ids; only a turn
+    whose streamed row carries its own call cards proves a merged tool
+    round, where the stored final text legitimately is a strict tail."""
+    rows = [
+        {"id": "history-0", "role": "user", "content": "welcome prompt"},
+        {"id": "history-1", "role": "assistant", "content": "welcome reply"},
+        {"id": "user-s1-2", "role": "user", "content": "ask again"},
+        {"id": "assistant-s1-3", "role": "assistant",
+         "content": [{"type": "text", "text": "Answer: 42"}]},
+    ]
+    history = [
+        {"role": "user", "content": "welcome prompt"},
+        {"role": "assistant", "content": "welcome reply"},
+        {"role": "user", "content": "ask again"},
+        {"role": "assistant", "content": "42"},
+    ]
+
+    assert messages._assistant_align_streamed_ids(rows, history) is False
+    assert [row["id"] for row in rows] == [
+        "history-0", "history-1", "user-s1-2", "assistant-s1-3",
+    ]

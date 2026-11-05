@@ -7,10 +7,13 @@ export type MainPageRoute =
 
 const PHONE_APP_PREFIX = "/relay/v1/phone";
 
+/** True when the page is served inside the PhoneLink phone app. */
+export function inPhoneApp(pathname: string): boolean {
+  return pathname === PHONE_APP_PREFIX || pathname.startsWith(`${PHONE_APP_PREFIX}/`);
+}
+
 export function pagePath(path: string, currentPath: string): string {
-  return currentPath === PHONE_APP_PREFIX || currentPath.startsWith(`${PHONE_APP_PREFIX}/`)
-    ? `${PHONE_APP_PREFIX}${path}`
-    : path;
+  return inPhoneApp(currentPath) ? `${PHONE_APP_PREFIX}${path}` : path;
 }
 
 export function readMainPageRoute(location: Pick<Location, "pathname" | "search">): MainPageRoute {

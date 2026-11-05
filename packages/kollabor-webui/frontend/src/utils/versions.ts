@@ -24,7 +24,23 @@ export function versionRows(
 
   const branch = showIdentity(build.branch);
   const sha = showIdentity(build.sha);
-  const shortSha = sha === "unknown" ? sha : sha.slice(0, 8);
+  const hasBranch = branch !== "unknown";
+  const hasSha = sha !== "unknown";
+  const shortSha = hasSha ? sha.slice(0, 8) : "unknown";
+  const buildValue = hasSha
+    ? hasBranch
+      ? `${branch} @ ${shortSha}`
+      : shortSha
+    : hasBranch
+      ? `${branch} (commit unavailable)`
+      : "Unavailable";
+  const buildTitle = hasSha
+    ? hasBranch
+      ? `${branch} @ ${sha}`
+      : sha
+    : hasBranch
+      ? `${branch} (commit unavailable)`
+      : "Build identity unavailable";
 
   return [
     { label: "Kollab", value: showVersion(config?.kollab_version) },
@@ -33,8 +49,8 @@ export function versionRows(
     { label: "Frontend Bundle", value: showVersion(bundle) },
     {
       label: "Build",
-      value: `${branch} @ ${shortSha}`,
-      title: `${branch} @ ${sha}`,
+      value: buildValue,
+      title: buildTitle,
     },
   ];
 }
