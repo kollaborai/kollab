@@ -120,3 +120,36 @@ def test_vault_made_with_env_password_is_not_re_keyed_without_it(
 
     monkeypatch.setenv("KOLLAB_KEY_ENCRYPTION_PASSWORD", "operator-chosen-pw")
     assert _keyring_get(NAME) == OLD
+
+
+def test_keyring_copy_is_not_used_when_the_vault_cannot_be_opened(
+    home, os_keyring, keyring_on, monkeypatch
+):
+    """Review round 3: a keyring process without the vault password saves OLD;
+    a no-keyring process with the password saves NEW to a new vault and cannot
+    clear the keyring copy. The first process must not resolve the stale OLD:
+    a vault it cannot open fails the lookup loudly instead."""
+    assert _keyring_set(NAME, OLD)
+
+    keyring_on["on"] = False
+    monkeypatch.setenv("KOLLAB_KEY_ENCRYPTION_PASSWORD", "operator-chosen-pw")
+    assert _keyring_set(NAME, NEW)
+    assert _keyring_get(NAME) == NEW
+
+    keyring_on["on"] = True
+    monkeypatch.delenv("KOLLAB_KEY_ENCRYPTION_PASSWORD")
+    assert _keyring_get(NAME) is None
+
+
+def test_keyring_copy_resolves_when_an_openable_vault_lacks_the_entry(
+    home, os_keyring, keyring_on
+):
+    """A vault that opens but holds no entry for the name still falls through
+    to the keyring."""
+    assert _keyring_set(NAME, OLD)
+
+    keyring_on["on"] = False
+    assert _keyring_set("other", NEW)
+
+    keyring_on["on"] = True
+    assert _keyring_get(NAME) == OLD
