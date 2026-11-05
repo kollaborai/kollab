@@ -245,6 +245,112 @@ async def test_untouched_profile_commits_the_lookup_result(
     assert manager.get_active_profile().name == PROFILE
 
 
+class _PendingStep:
+    """Gate one post-reinitialization await so a target can be edited mid-switch."""
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self):
+        self.started.set()
+        await self.release.wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suspension", ["acp_close", "provider_registry"])
+@pytest.mark.parametrize("change", ["edit", "replace"])
+async def test_profile_change_after_provider_reinit_rolls_back_runtime(
+    manager, coord, lookup, reinit_calls, suspension, change
+):
+    acp_profile = LLMProfile(name="acp-session", provider="acp", model="acp-model")
+    assert manager.add_profile(acp_profile)
+    assert manager.set_active_profile(acp_profile.name, persist=False)
+    previous_api_profile = manager.get_profile(BASE)
+    coord.api_service._profile = previous_api_profile
+    coord._current_provider = None
+
+    gate = _PendingStep()
+    started_profiles = []
+
+    async def close_acp():
+        if suspension == "acp_close":
+            await gate()
+
+    async def start_acp(profile):
+        started_profiles.append(profile)
+        return True
+
+    coord.event_bus = SimpleNamespace(
+        get_service=lambda _name: SimpleNamespace(
+            close=close_acp,
+            start=start_acp,
+        )
+    )
+
+    registry_models = []
+    runtime_provider = SimpleNamespace(
+        provider_name="openai_responses", model=LOOKUP_RESULT
+    )
+
+    async def get_provider(config):
+        registry_models.append(config["model"])
+        if suspension == "provider_registry":
+            await gate()
+        return runtime_provider
+
+    coord._provider_registry.get_provider = AsyncMock(side_effect=get_provider)
+
+    async def reinitialize(profile):
+        reinit_calls.append(profile.model)
+        coord.api_service._profile = profile
+        return True
+
+    coord.api_service.reinitialize_provider = AsyncMock(side_effect=reinitialize)
+
+    def provider_config(profile_data):
+        return {"model": profile_data["model"]}
+
+    with patch(
+        "kollabor.llm.llm_coordinator.create_config_from_profile",
+        side_effect=provider_config,
+    ):
+        task = await _start_switch(coord, lookup)
+        lookup.release.set()
+        await asyncio.wait_for(gate.started.wait(), timeout=5)
+
+        if change == "edit":
+            assert manager.update_profile(PROFILE, model=NEWER)
+            current_target = manager.get_profile(PROFILE)
+        else:
+            assert manager.remove_profile(PROFILE)
+            current_target = LLMProfile(
+                name=PROFILE,
+                provider="openai_responses",
+                model=NEWER,
+                auth_type="oauth",
+                api_key="replacement-token",
+                base_url="https://chatgpt.example/backend-api/codex",
+            )
+            assert manager.add_profile(current_target)
+
+        gate.release.set()
+        ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is False
+    assert manager.get_profile(PROFILE) is current_target
+    assert current_target.model == NEWER
+    assert manager.get_active_profile() is acp_profile
+    assert coord.api_service._profile is previous_api_profile
+    assert coord._current_provider is None
+    assert reinit_calls == [LOOKUP_RESULT, previous_api_profile.model]
+    assert started_profiles == [acp_profile]
+    assert registry_models == (
+        [] if suspension == "acp_close" else [LOOKUP_RESULT]
+    )
+
+
+
 # --- Profile-scoped OAuth tokens -------------------------------------------
 #
 # A profile not named ``openai-oauth`` keeps its tokens under its own name.
