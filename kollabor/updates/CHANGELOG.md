@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Compaction no longer shows a retained paged tool result twice after its output reference is renumbered, and a live tool turn is kept when an earlier stored turn only shares its words: a transient turn is replaced by its stored copy only when both carry the same request id, or the same tool calls, results and pictures (#637).
 - Transient turn dedupe: a repeated prompt's new reply is no longer dropped when only its user row was stored and an identical earlier answer exists. A transient block is dropped only when its rows match the newest stored rows in order. This predates #648: the check came in with 1f481a77 on main (#666).
+- A turn typed in the terminal can no longer draw twice in the Web UI after the fact: at turn end the daemon aligns the streamed rows it published with the refreshed history ids and only records a sync point when every streamed row is proven in that snapshot by content (tool rows by call id); otherwise it clears the sync point so the page reloads the whole history instead of appending rows past a stale count (#666).
 - Hub shutdown now joins in-flight secondary membership starts, isolates per-peer close failures, and finishes remaining cleanup before propagating cancellation (#356).
 - The Profiles dialog keeps profile model details readable on narrow screens:
   provider, model and effort wrap onto the row instead of truncating to an
