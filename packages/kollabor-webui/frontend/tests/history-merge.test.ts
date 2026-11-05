@@ -225,6 +225,63 @@ test("post-compaction rows append after archived transcript rather than before i
   ]);
 });
 
+test("compaction shows a retained row once, from the compacted history", () => {
+  // the engine kept the last two rows verbatim; they must not also be archived
+  const shown = [
+    { id: "history-0", role: "user", content: "What is 1+1?" },
+    { id: "history-1", role: "assistant", content: "2" },
+    { id: "history-2", role: "user", content: "What is 2+2?" },
+    { id: "history-3", role: "assistant", content: "4" },
+  ];
+  const marker = {
+    id: "history-0",
+    role: "assistant",
+    content: "Context compacted (round 1): 4 -> 3 messages.",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+  };
+  const loaded = [
+    marker,
+    { id: "history-1", role: "user", content: "What is 2+2?" },
+    { id: "history-2", role: "assistant", content: "4" },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.deepEqual(rebased.messages.map((message) => message.content), [
+    "What is 1+1?",
+    "2",
+    marker.content,
+    "What is 2+2?",
+    "4",
+  ]);
+});
+
+test("a row appended during compaction follows the retained rows, which still show once", () => {
+  const shown = [
+    { id: "history-0", role: "user", content: "What is 2+2?" },
+    { id: "history-1", role: "assistant", content: "4" },
+  ];
+  const marker = {
+    id: "history-0",
+    role: "assistant",
+    content: "Context compacted",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+  };
+  const loaded = [
+    marker,
+    { id: "history-1", role: "user", content: "What is 2+2?" },
+    { id: "history-2", role: "assistant", content: "4" },
+    { id: "history-3", role: "user", content: "and 3+3?" },
+  ];
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+  assert.ok(rebased);
+  assert.deepEqual(rebased.messages.map((message) => message.content), [
+    marker.content,
+    "What is 2+2?",
+    "4",
+    "and 3+3?",
+  ]);
+});
+
 // Issue #666: the turn a window just ran renders as transient rows
 // (user-<session>-<n>, assistant-<session>-<n>) while its stored rows are
 // still unwritten. When the sync point missed the turn -- the daemon's
@@ -278,6 +335,24 @@ test("a page without trailing transient rows has nothing to drop", () => {
 
 test("an empty tail has nothing to dedupe against", () => {
   assert.equal(dropTransientTurnDuplicates(turnShown, []), null);
+});
+
+test("a repeated prompt keeps its new reply when only its user row was stored", () => {
+  // an earlier turn already answered "2+2?" with "4"; this turn's reply was never stored
+  const shown = [
+    { id: "history-0", role: "user", content: "2+2?" },
+    { id: "history-1", role: "assistant", content: "4" },
+    { id: "user-ws1-5", role: "user", content: "2+2?" },
+    { id: "assistant-ws1-6", role: "assistant", content: "4" },
+  ];
+  const loaded = [
+    { id: "history-0", role: "user", content: "2+2?" },
+    { id: "history-1", role: "assistant", content: "4" },
+    { id: "history-2", role: "user", content: "2+2?" },
+  ];
+  const merged = mergeMissingHistoryMessages(shown, loaded);
+  assert.deepEqual(merged.added.map((m) => m.id), ["history-2"]);
+  assert.equal(dropTransientTurnDuplicates(merged.messages, merged.added), null);
 });
 
 test("a partially replayed turn keeps transient rows without a replayed counterpart", () => {
