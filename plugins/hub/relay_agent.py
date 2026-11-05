@@ -668,6 +668,8 @@ class RelayAgentBridge:
                         "workspace_id": row["workspace_id"],
                         "harness": row.get("harness") or "",
                         "acp_waiting": bool(row.get("acp_waiting")),
+                        # The agent bundle it runs ("" from a peer that does not say).
+                        "agent_type": row.get("agent_type") or "",
                         # {name, type} while it runs a tool, else None (the gem acts it out).
                         "current_tool": row.get("current_tool") or None,
                     }
@@ -2921,7 +2923,9 @@ class RelayAgentBridge:
                         # A peer on this version always sends "device" too; an
                         # older peer has none, and its agents fall back to a
                         # stable per-peer stand-in below.
-                        optional_fields = {"device", "harness", "acp_waiting", "current_tool"}
+                        optional_fields = {
+                            "device", "harness", "acp_waiting", "current_tool", "agent_type"
+                        }
                         if (
                             not isinstance(row, dict)
                             or not fields <= set(row)
@@ -2948,6 +2952,12 @@ class RelayAgentBridge:
                             raise RelayError("invalid remote harness descriptor")
                         if "acp_waiting" in row and type(row["acp_waiting"]) is not bool:
                             raise RelayError("invalid remote harness waiting state")
+                        if "agent_type" in row and (
+                            not isinstance(row["agent_type"], str)
+                            or len(row["agent_type"]) > 128
+                            or not row["agent_type"].isprintable()
+                        ):
+                            raise RelayError("invalid remote agent type")
                         tool = row.get("current_tool")
                         if "current_tool" in row and (
                             not isinstance(tool, dict)

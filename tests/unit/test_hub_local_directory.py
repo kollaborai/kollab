@@ -110,6 +110,7 @@ def test_export_filters_explicit_workspace_and_strips_private_fields(directory):
         "name": "sapphire",
         "is_coordinator": True,
         "state": "ready",
+        "agent_type": "coder",
         "device": default_device_name(workspace),
     }
     assert str(workspace) not in json.dumps(rows)

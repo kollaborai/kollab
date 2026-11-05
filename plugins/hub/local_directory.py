@@ -145,6 +145,14 @@ def _running_tool(value) -> tuple[str, str]:
     return name, kind
 
 
+def _agent_type(value) -> str:
+    """A presence record's ``agent_name`` (the bundle it runs); "" unless a short printable name."""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    return value if 0 < len(value) <= 128 and value.isprintable() else ""
+
+
 @dataclass(frozen=True)
 class LocalAgent:
     machine_id: str
@@ -162,6 +170,7 @@ class LocalAgent:
     acp_waiting: bool = False
     tool_name: str = ""
     tool_type: str = ""
+    agent_type: str = ""
 
     @property
     def global_id(self) -> str:
@@ -496,6 +505,7 @@ class LocalAgentDirectory:
                         if isinstance(data.get("tags"), dict) else False,
             tool_name=tool_name,
             tool_type=tool_type,
+            agent_type=_agent_type(data.get("agent_name")),
         )
 
     def agents(self, workspace: Path | None = None) -> list[LocalAgent]:
@@ -555,6 +565,8 @@ class LocalAgentDirectory:
                 "is_coordinator": item.is_coordinator,
                 "state": item.state,
                 **({"harness": item.harness, "acp_waiting": item.acp_waiting} if item.harness else {}),
+                # The bundle it runs: a peer's sidebar draws its type glyph (#662).
+                **({"agent_type": item.agent_type} if item.agent_type else {}),
                 # The gem on other computers acts it out (presence's current_tool).
                 **(
                     {"current_tool": {"name": item.tool_name, "type": item.tool_type}}
