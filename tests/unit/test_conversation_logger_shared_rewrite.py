@@ -164,3 +164,27 @@ async def test_the_shared_mapping_is_never_listed_as_a_session(tmp_path):
     listed = ConversationManager(config, first).get_available_sessions()
 
     assert [s["file_path"] for s in listed] == [str(first.session_file)]
+
+
+async def test_a_row_another_logger_appends_while_the_cut_is_built_is_threaded_past_it(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    first, second = _same_session(tmp_path)
+    root = await first.log_user_message("hi", parent_uuid=None)
+    voice = await first.log_assistant_message("sunny", root, voice_turn_id="turn-1")
+    appended = []
+    build = first._rewrite_voice_turn
+
+    def build_then_let_the_other_logger_append(*args, **kwargs):
+        cut = build(*args, **kwargs)  # the cut has read the log; the sidecar is not published yet
+        appended.append(asyncio.run(second.log_user_message("thanks", parent_uuid=voice)))
+        return cut
+
+    monkeypatch.setattr(first, "_rewrite_voice_turn", build_then_let_the_other_logger_append)
+    assert await first.rewrite_voice_turn("turn-1", 1, {0: None}) == {voice: root}
+
+    by_uuid = {r["uuid"]: r for r in _records(first.session_file) if r.get("uuid")}
+    assert voice not in by_uuid
+    assert by_uuid[appended[0]]["parentUuid"] == root  # not the removed reply
