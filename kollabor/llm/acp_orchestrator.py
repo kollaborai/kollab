@@ -1163,9 +1163,19 @@ class ACPOrchestrator:
                                                metadata=metadata, thinking="".join(thoughts)))
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
-            await logger_service.log_assistant_message(text or result.text,
-                parent_uuid=parent or "", model=self._profile_name,
-                thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata)
+            # The row is already in memory and the adapter finished, so a write
+            # that did not reach the file is logged and shown, as on the native
+            # path, and the turn keeps its outcome. Never retried: that could
+            # duplicate the row. Cancellation still propagates.
+            try:
+                await logger_service.log_assistant_message(text or result.text,
+                    parent_uuid=parent or "", model=self._profile_name,
+                    thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata)
+            except Exception as exc:
+                logger.error("ACP reply not written to history: %s", exc)
+                display = getattr(llm, "message_display_service", None)
+                if display is not None:
+                    display.display_system_message("Conversation history not saved for this reply.")
 
     async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:
         request_id = f"request-{uuid.uuid4().hex}"

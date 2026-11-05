@@ -117,9 +117,9 @@ async def test_result_usage_survives_persistence_failure_and_cancellation(tmp_pa
     assert llm.session_stats["total_output_tokens"] == engine.total_output_tokens == 143
     assert llm.session_stats["total_cache_read_tokens"] == 77184
     assert engine.acp_turn_usage == USAGE
-    # A user row that never reached the file is logged; the finished reply is
-    # kept (#580), unlike a failed write of the reply itself.
-    survives = failure in {"none", "user_history"}
+    # A user or reply row that never reached the file is logged; the finished
+    # reply is kept either way (#580).
+    survives = failure in {"none", "user_history", "history"}
     if survives:
         assert outcome["stop_reason"] == "end_turn"
     elif failure in {"cancel_history", "cancel_user_history"}:

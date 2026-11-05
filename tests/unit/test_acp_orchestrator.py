@@ -457,7 +457,9 @@ async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_t
         await asyncio.wait_for(admission.future, 5)
         completions = await asyncio.gather(*completion_tasks)
         assert len(completions) == writes == 1
-        assert completions[0]["stop_reason"] == "error"
+        # #580: a failed reply-row write is logged; the finished turn keeps its outcome.
+        assert completions[0]["stop_reason"] == "end_turn"
+        assert completions[0]["text"] == "Replacement turn only."
         snapshot = await LocalStateService(llm, None).get_conversation()
         assert len([message for message in snapshot.messages if message.role == "assistant"]) == 1
         restored = ConversationManager(configuration)
