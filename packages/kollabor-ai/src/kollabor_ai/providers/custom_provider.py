@@ -69,7 +69,12 @@ def _validate_openai_shapes(data: Dict[str, Any], provider_name: str) -> None:
     validating at the parse boundary keeps the failure typed
     (``APIFormatMismatchError``) instead of leaking an ``AttributeError``
     that classification cannot read. Missing keys stay legal (optional
-    fields); only present-but-wrong shapes are rejected.
+    fields); only present-but-wrong shapes are rejected -- including an
+    explicit JSON ``null`` message/delta, which is not a missing key: the
+    parser's ``.get(field, {})`` default only covers a MISSING key, so a
+    null leaks ``AttributeError`` downstream (#754). ``choices`` and
+    ``usage`` nulls stay legal: callers null-guard them with
+    ``or []``/``or {}``.
     """
     choices = data.get("choices")
     if choices is not None and not isinstance(choices, list):
@@ -82,8 +87,12 @@ def _validate_openai_shapes(data: Dict[str, Any], provider_name: str) -> None:
                 "Custom API choice is not an object", provider_name,
             )
         for field in ("message", "delta"):
-            nested = choice.get(field)
-            if nested is not None and not isinstance(nested, dict):
+            if field not in choice:
+                continue  # missing key: legal optional field
+            nested = choice[field]
+            if not isinstance(nested, dict):
+                # explicit null or wrong shape: .get(field, {}) would hand
+                # the parser None and crash downstream (#754)
                 raise APIFormatMismatchError(
                     f"Custom API choice {field} is not an object",
                     provider_name,

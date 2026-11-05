@@ -869,3 +869,49 @@ async def test_non_stream_scalar_usage_is_typed_not_attribute_error():
     with pytest.raises(APIFormatMismatchError):
         await provider.call([{"role": "user", "content": "hi"}])
 
+
+
+def test_coerce_rejects_null_delta():
+    """An explicit JSON null is not a missing key: the parser's
+    .get("delta", {}) default covers only MISSING, so a null delta leaks
+    AttributeError at choices[0].get (bismuth FAIL verdict on b8e12fdb,
+    P2). The boundary must type it."""
+    from kollabor_ai.providers.custom_provider import (
+        APIFormatMismatchError,
+        _coerce_sse_object,
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        _coerce_sse_object({"choices": [{"delta": None}]}, "gateway")
+
+
+@pytest.mark.asyncio
+async def test_non_stream_null_message_is_typed_not_attribute_error():
+    from kollabor_ai.providers.errors import APIFormatMismatchError
+
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={
+            "choices": [{"message": None, "finish_reason": "stop"}]
+        }
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        await provider.call([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_null_choices_and_usage_stay_legal_downstream():
+    """Guard the guard: callers null-guard choices and usage with
+    ``or []``/``or {}`` (custom_provider.py), so explicit nulls there are
+    de-facto legal gateway behavior and must NOT be rejected -- the
+    request proceeds to the typed empty-response error instead."""
+    from kollabor_ai.providers.errors import EmptyResponseError
+
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={"choices": None, "usage": None}
+    )
+
+    with pytest.raises(EmptyResponseError):
+        await provider.call([{"role": "user", "content": "hi"}])
