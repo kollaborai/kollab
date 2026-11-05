@@ -97,7 +97,7 @@ async def test_result_usage_survives_persistence_failure_and_cancellation(tmp_pa
         history = asyncio.get_running_loop().create_future()
         if failure == "user_history":
             history.set_exception(OSError("user history failed"))
-        orch._user_history_tasks["request"] = history
+        orch._turn_user_tasks[(1, 1)] = history
     admission.future.set_result(result())
     task = asyncio.create_task(orch._complete(admission))
     if failure == "cancel_history":

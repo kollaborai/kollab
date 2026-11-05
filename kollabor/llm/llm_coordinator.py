@@ -2462,7 +2462,11 @@ class LLMService:
                 return {"status": "rejected", "reason": "acp_queue_full"}
             return {"status": "rejected", "reason": "acp_admission_failed"}
         if voice:
-            acp.voice_turns[admission.request_id] = voice
+            # Key includes the turn id: this admission's metadata must not
+            # be overwritten by a later admission that reuses the same
+            # caller request ID (#597), and the orchestrator pops by the
+            # same (request_id, turn_id) key when the turn finishes.
+            acp.voice_turns[(admission.request_id, admission.turn_id)] = voice
         return {
             "status": "queued",
             "request_id": admission.request_id,
