@@ -155,8 +155,11 @@ class SessionManager:
                 role="system", content=initial_message, metadata={"system_initialization": True}
             ))
 
-            # 8. Log start of new conversation
-            await self.conversation_logger.log_conversation_start()
+            # 8. Log start of new conversation (a failed history write must not undo the restart)
+            try:
+                await self.conversation_logger.log_conversation_start()
+            except Exception as exc:
+                logger.warning(f"Conversation start not written to history: {exc}")
 
             logger.info(f"Session restarted: {old_session_id} -> {new_session_id}")
 

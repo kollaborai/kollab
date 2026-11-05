@@ -334,25 +334,29 @@ class MessageHandler:
                         parent_uuid=parent_uuid,
                     )
 
-                # Log message
+                # Log message. A failed write leaves the chain on the previous
+                # record; the rest of the batch still reaches history.
                 if log_messages:
                     conv_logger = coord.conversation_logger
                     log_content = content_to_text(content)
-                    if role == "user":
-                        parent_uuid = await conv_logger.log_user_message(
-                            log_content, parent_uuid=parent_uuid
-                        )
-                    elif role == "assistant":
-                        parent_uuid = await conv_logger.log_assistant_message(
-                            log_content,
-                            parent_uuid=parent_uuid,
-                            model=coord.api_service.model,
-                            thinking_content=None,
-                        )
-                    elif role == "system":
-                        await conv_logger.log_system_message(
-                            log_content, parent_uuid=parent_uuid
-                        )
+                    try:
+                        if role == "user":
+                            parent_uuid = await conv_logger.log_user_message(
+                                log_content, parent_uuid=parent_uuid
+                            )
+                        elif role == "assistant":
+                            parent_uuid = await conv_logger.log_assistant_message(
+                                log_content,
+                                parent_uuid=parent_uuid,
+                                model=coord.api_service.model,
+                                thinking_content=None,
+                            )
+                        elif role == "system":
+                            await conv_logger.log_system_message(
+                                log_content, parent_uuid=parent_uuid
+                            )
+                    except Exception as exc:
+                        logger.error("Message not written to history: %s", exc)
 
                 # Build display sequence
                 if display_messages and role in ("user", "assistant", "system"):

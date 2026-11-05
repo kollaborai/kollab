@@ -311,24 +311,38 @@ class KollaborConversationLogger:
         return str(Path.cwd())
 
     async def _append_to_jsonl(self, message: Dict[str, Any]):
-        """Append message to JSONL file."""
+        """Append message to JSONL file.
+
+        Raises when the record is not on disk, and counts nothing then. A failed
+        attempt is truncated back to where it started, so a retry cannot duplicate
+        the record and the next append never lands on a half-written line.
+        """
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
             parent = message.get("parentUuid")
             while parent in self._reparent:  # a cut dropped it after the caller read it
                 parent = self._reparent[parent]
             if "parentUuid" in message:
                 message["parentUuid"] = parent
+            data = memoryview((json.dumps(message) + "\n").encode())
+            fd = os.open(
+                self.session_file,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
             try:
-                fd = os.open(
-                    self.session_file,
-                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                    0o600,
-                )
-                with os.fdopen(fd, "a") as f:
-                    f.write(json.dumps(message) + "\n")
-                self.message_count += 1
-            except Exception as e:
-                logger.error(f"Failed to write to JSONL: {e}")
+                start = os.fstat(fd).st_size
+                try:
+                    while data:
+                        written = os.write(fd, data)
+                        if written <= 0:  # never spin on a write that makes no progress
+                            raise OSError("JSONL write made no progress")
+                        data = data[written:]
+                except BaseException:
+                    os.ftruncate(fd, start)  # roll the partial record back
+                    raise
+            finally:
+                os.close(fd)
+            self.message_count += 1
 
     def _analyze_user_context(self, content: str) -> Dict[str, Any]:
         """Analyze user context from message content."""
