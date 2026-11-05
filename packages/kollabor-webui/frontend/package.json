@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:e2e:learn": "node tests/learn-browser-acceptance.mjs",
     "test:e2e:agent-sidebar-glyph": "node tests/agent-sidebar-glyph-browser-acceptance.mjs",
-    "test:e2e:team-launch": "node tests/team-launch-browser-acceptance.mjs"
+    "test:e2e:team-launch": "node tests/team-launch-browser-acceptance.mjs",
+    "test:e2e:profile-rows": "node tests/acceptance/profile-rows.browser.mjs"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.15.27",

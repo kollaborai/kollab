@@ -96,6 +96,18 @@ jobs:
           npx vitest run
           node --test $(grep -L 'from "vitest"' tests/*.test.ts)
 
+      - name: Install Chromium for browser acceptance
+        working-directory: packages/kollabor-webui/frontend
+        run: npx playwright-core install --with-deps chromium
+
+      - name: Run web UI browser acceptance
+        working-directory: packages/kollabor-webui/frontend
+        env:
+          LEARN_CAPTURE_SCREENSHOTS: "0"
+        run: |
+          npm run test:e2e:learn
+          npm run test:e2e:profile-rows
+
       - name: Validate bundled Agent Skills layout
         run: uv run python scripts/validate_bundled_agent_skills.py
 
