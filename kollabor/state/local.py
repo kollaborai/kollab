@@ -1697,6 +1697,12 @@ class LocalStateService(StateService):
                 overrides["model"] = model
             if effort:
                 overrides["effort"] = effort
+                # --effort that the provider never sends fails the launch, not a log line
+                from kollabor_ai.profile_manager import effort_unsupported_reason
+
+                reason = effort_unsupported_reason(target_provider, effort)
+                if reason:
+                    raise ValueError(reason)
             try:
                 if not self._profile_manager.update_profile(name, **overrides):
                     logger.warning(

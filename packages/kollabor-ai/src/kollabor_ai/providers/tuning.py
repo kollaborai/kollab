@@ -18,6 +18,7 @@ import logging
 from typing import Any, Dict
 
 from ..model_registry import supports_sampling, thinking_default
+from ..profile_manager import ANTHROPIC_UNSUPPORTED_EFFORT
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +36,6 @@ class EffortStyle:
 EFFORT_SUPPORTED_PROVIDERS = frozenset(
     {"anthropic", "openai", "azure_openai", "openai_responses", "openrouter", "custom"}
 )
-
-# Levels Anthropic's output_config.effort does not take (it documents low..max).
-# They stay in EFFORT_LEVELS for the OpenAI-shaped fields; the Anthropic request
-# and the /model effort picker leave them out.
-ANTHROPIC_UNSUPPORTED_EFFORT = frozenset({"none", "minimal"})
 
 
 def sampling_params(config: Any, model: str) -> Dict[str, Any]:

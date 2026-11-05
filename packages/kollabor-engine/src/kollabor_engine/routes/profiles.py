@@ -10,7 +10,11 @@ from fastapi import APIRouter, HTTPException  # type: ignore
 from pydantic import AfterValidator, BaseModel, Field
 
 from kollabor_ai import APICommunicationService, LLMProfile, ProfileManager
-from kollabor_ai.profile_manager import EFFORT_LEVELS, redact_profile_endpoint
+from kollabor_ai.profile_manager import (
+    EFFORT_LEVELS,
+    effort_unsupported_reason,
+    redact_profile_endpoint,
+)
 from kollabor_ai.providers import (
     AuthenticationError,
     ProviderError,
@@ -287,6 +291,9 @@ async def create_profile(body: CreateProfileRequest):
             )
         if not model:
             raise HTTPException(status_code=422, detail="Model is required")
+        reason = effort_unsupported_reason(provider, body.effort)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
 
         profile = LLMProfile(
             name=name,
@@ -343,6 +350,15 @@ async def update_profile(name: str, body: UpdateProfileRequest):
             detail="A model is required for non-ACP profiles",
         )
 
+    # A level the provider never sends is refused here, not stored and reported.
+    # Switching to Anthropic checks the level the profile already holds too.
+    reason = effort_unsupported_reason(
+        target_provider,
+        body.effort if body.effort is not None else profile.effort,
+    )
+    if reason:
+        raise HTTPException(status_code=422, detail=reason)
+
     # Build kwargs for fields that were provided
     kwargs: Dict[str, Any] = {}
     if body.provider is not None:
@@ -380,7 +396,10 @@ async def update_profile(name: str, body: UpdateProfileRequest):
 
     # Update (include save_to_config)
     kwargs["save_to_config"] = True
-    ok = pm.update_profile(name, **kwargs)  # type: ignore[arg-type]
+    try:
+        ok = pm.update_profile(name, **kwargs)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if not ok:
         # Likely a rename collision

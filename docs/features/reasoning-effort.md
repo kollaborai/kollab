@@ -13,8 +13,13 @@ working untouched.
 `none` → `minimal` → `low` → `medium` → `high` → `xhigh` → `max` → `ultra` (cheapest first).
 
 Anthropic documents `low`–`max`, so `none` and `minimal` are left out of its
-request and its picker; the OpenAI-shaped providers take them. The ChatGPT codex
-backend also advertises
+request and its pickers (`/model effort`, `/llm` loadouts, Settings), and an
+Anthropic profile refuses them when written: the profile route, a copy,
+`kollab --effort` and `/model effort` answer with the levels it takes, and a
+value that arrives by hand-edited config or `*_EFFORT` reads back as unset. The
+OpenAI-shaped providers take them. `/model effort none` sets `none` where the
+provider lists it (it used to clear the level); `default`, `clear` and `off`
+clear it. The ChatGPT codex backend also advertises
 `ultra` on its top tiers and reports the accepted levels per model, which is
 why `/model effort` on an OAuth profile lists that model's real levels instead
 of the generic set. An unrecognized level is dropped with a warning rather than
