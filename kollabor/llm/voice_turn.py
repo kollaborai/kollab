@@ -107,6 +107,7 @@ async def voice_provider(
     config = None
     has_effort = False
     previous = None
+    held = (getattr(api_service, "_profile", None), getattr(api_service, "_provider", None))
     # ponytail: the turn swaps the one shared api_service (profile, provider,
     # effort), as the voice profile switch always has, so any other call on this
     # service while the turn runs rides the voice model too. Give the turn its own
@@ -134,14 +135,21 @@ async def voice_provider(
             # an effort (the model takes one) and sends none otherwise.
             low = settings.get("voice_reasoning") == "low" or previous
             config.effort = "low" if low else None
+        held = (getattr(api_service, "_profile", None), getattr(api_service, "_provider", None))
         yield
     finally:
         if has_effort:
             config.effort = previous
-        if swapped_model:
-            api_service._provider = previous_provider
-        if switched and not await api_service.reinitialize_provider(active):
-            logger.error("could not restore the active profile after a voice turn")
+        # A /model or profile change that finished while the turn ran replaced the
+        # provider the turn installed: it is the user's latest choice, not ours to undo.
+        ours = (getattr(api_service, "_profile", None), getattr(api_service, "_provider", None))
+        if not all(now is was for now, was in zip(ours, held)):
+            logger.info("active provider changed during the voice turn; not restoring chat's")
+        else:
+            if swapped_model:
+                api_service._provider = previous_provider
+            if switched and not await api_service.reinitialize_provider(active):
+                logger.error("could not restore the active profile after a voice turn")
 
 
 def _quick_loadout(api_service: Any, profile_manager: Any) -> Any:
