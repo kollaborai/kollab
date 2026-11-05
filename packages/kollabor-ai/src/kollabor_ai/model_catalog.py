@@ -18,6 +18,7 @@ empty list so the picker still opens.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -80,12 +81,25 @@ def _profile_key(profile: Any) -> str:
         return provider.lower()
 
 
+def _fingerprint(endpoint: str) -> str:
+    """SHA-256 of a normalized endpoint; "" for none.
+
+    An endpoint can carry a password, a query key or a path token, and may come
+    only from an env var that is kept off config.json. The cache file records
+    this digest, never the endpoint itself.
+    """
+    endpoint = endpoint.rstrip("/")
+    if not endpoint:
+        return ""
+    return hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
+
+
 def _profile_source(profile: Any) -> Dict[str, str]:
     """Which provider and endpoint a profile's catalog comes from.
 
     The cache is keyed by profile name, and an edit can change a profile's
     provider or endpoint in place. An entry fetched from the old source is
-    not this profile's catalog (#558).
+    not this profile's catalog (#558). The endpoint is kept as a fingerprint.
     """
     if isinstance(profile, dict):
         provider = str(profile.get("provider") or "")
@@ -101,7 +115,7 @@ def _profile_source(profile: Any) -> Dict[str, str]:
             endpoint = str(profile.get_endpoint() or "")
         except Exception:  # noqa: BLE001
             endpoint = str(getattr(profile, "base_url", "") or "")
-    return {"provider": provider.lower(), "endpoint": endpoint.rstrip("/")}
+    return {"provider": provider.lower(), "endpoint_id": _fingerprint(endpoint)}
 
 
 def _same_source(entry: Dict[str, Any], profile: Any) -> bool:
@@ -110,7 +124,7 @@ def _same_source(entry: Dict[str, Any], profile: Any) -> bool:
     An entry with no recorded source (hand-written) is taken as a match.
     """
     source = _profile_source(profile)
-    for field in ("provider", "endpoint"):
+    for field in ("provider", "endpoint_id"):
         if field in entry and str(entry[field] or "") != source[field]:
             return False
     return True
@@ -140,7 +154,14 @@ def _save_disk_cache(entries: Dict[str, Dict[str, Any]]) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": CACHE_VERSION, "entries": entries}
+        # Drop the raw "endpoint" an earlier build wrote beside the models.
+        clean = {
+            key: {k: v for k, v in entry.items() if k != "endpoint"}
+            if isinstance(entry, dict)
+            else entry
+            for key, entry in entries.items()
+        }
+        payload = {"version": CACHE_VERSION, "entries": clean}
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         logger.warning("Failed to save model catalog cache: %s", e)
