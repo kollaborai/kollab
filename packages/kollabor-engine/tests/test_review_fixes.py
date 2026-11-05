@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -309,7 +310,12 @@ async def test_session_mcp_connect_endpoint_connects(app):
         enable_mcp_server=AsyncMock(return_value=initial),
         reload_mcp_servers=AsyncMock(return_value={"snapshot": connected.to_dict()}),
     )
-    mock_session = SimpleNamespace(session_id="sess_connect", state=mock_state)
+    mock_session = SimpleNamespace(
+        session_id="sess_connect",
+        state=mock_state,
+        _mcp_lock=asyncio.Lock(),
+        mcp_server_names=[],
+    )
 
     registry = get_session_registry()
     registry["sess_connect"] = mock_session
@@ -327,6 +333,7 @@ async def test_session_mcp_connect_endpoint_connects(app):
         assert data["tools"] == ["memory_query"]
         mock_state.enable_mcp_server.assert_awaited_once_with("memory")
         mock_state.reload_mcp_servers.assert_awaited_once_with()
+        assert mock_session.mcp_server_names == ["memory"]
     finally:
         registry.pop("sess_connect", None)
 

@@ -16,7 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A definition-of-done check (`pr-gates`) runs configurable hygiene checks on every PR -- docs-path rules, unresolved threads, base currency, Conventional Commit title, linked issue, and regression-test coverage of review finding ids -- and reports every failed item in exactly one check run (default `dod/ready-for-review`), never comments. Every commits, files, and comments page is read and review-thread pagination is followed, so nothing beyond the first page is silently skipped; pagination is bounded and repeat-guarded (identical pages, null or repeated cursors, and runaway loops fail closed with a loud error -- hang never, silently truncate never); base currency is judged by the PR head's merge-base against the target branch tip, so a branch missing commits from main fails. This repository runs it enabled (`pr_gates.dod.enabled = true` in `.github/pr-gates.toml`), with signed-commit validation left out until agent commits are signed (#755); the feature defaults to off elsewhere, and it is usable as a local CLI before pushing (#724).
 
 ### Fixed
+- Hub shutdown now joins in-flight secondary membership starts, isolates per-peer close failures, and finishes remaining cleanup before propagating cancellation (#356).
+- The Profiles dialog keeps profile model details readable on narrow screens:
+  provider, model and effort wrap onto the row instead of truncating to an
+  ellipsis, and the Test/Edit/Copy/Delete actions wrap below the text at phone
+  widths, so no detail needs hover to read (#578).
 - Closed-PR review and first-push check-run collection in the throughput KPI paginates all pages and fails closed on repeated pages, malformed responses, or pagination-cap exhaustion rather than reporting partial metrics (#747).
+- Input handler hook cleanup now detaches its hooks from the event bus: `HookRegistrar.unregister_all_hooks()` passed a `Hook` object to an API that takes the owning plugin and hook name, so cleanup silently left every input hook registered and firing (#735).
+- Agent startup now preserves existing global agent/skill files, refuses to seed through linked/reparse-point directories, and publishes missing seed files without overwriting concurrent creations; safely retired seed copies are restored if changed (#698).
 - A hub message reports `sent` only when the recipient's hub acks that message: ACP `hub_msg` results now carry `delivery` (`confirmed`, `accepted`, `queued` or `unconfirmed`), and a queued or unacked message no longer reads as sent (#609).
 - `kollab --hub capture` shows the hub messages an agent sent and received again; they were dropped whenever a heartbeat's state snapshot was in the capture window (#609).
 - A failed send names its cause: an exception with no message reports its type instead of a blank `Tool execution error:`, and a refused message always gives a reason (#609).
@@ -27,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HOME-scoped path and remain undiscoverable from a different HOME until
   restarted; Windows presence remains HOME-scoped.
 - Hub presence is advertised only after the local IPC endpoint answers a handshake: the gating probe awaits the handshake off the event loop (the answering server runs on that same loop, which a blocking probe starves of the turns needed to answer), and when the endpoint never answers within 30s the record still publishes, degraded, with an error logged (#692).
+- ACP admissions that reuse a caller request ID keep their own history parent and completion ownership, so a reply is no longer recorded under the later input's row (#597). A rejected admission cancels only itself, not an earlier queued admission with the same ID.
+- ACP admissions that reuse a caller request ID also keep their own mic-turn voice metadata: the voice-reply dictionary was keyed by bare request ID, so a later admission overwrote the earlier one's voice and the reply was spoken with the wrong voice or not at all (#597).
+- Mentiko attaches to an existing live hub session without spawning a second daemon or duplicating its system-prompt history (#708).
 
 ## [0.19.1] - 2026-11-03
 

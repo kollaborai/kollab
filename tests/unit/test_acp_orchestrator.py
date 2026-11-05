@@ -227,6 +227,8 @@ async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_a
     state = LocalStateService(llm, None)
     try:
         orchestrator._record_user("owned-request", "Update the owned fixture", "rpc", None, track_completion=True)
+        # Admission takes the row's parent and history write under its own turn key.
+        orchestrator._take_turn_history((1, 1), "owned-request")
         await asyncio.gather(*orchestrator._history_tasks)
         diff = {"type": "diff", "path": "owned_fixture.txt", "oldText": "old", "newText": "new"}
         updates = (
@@ -243,7 +245,7 @@ async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_a
             {"kind": "text", "text": "Turn ended."},
         )
         result = mod.ACPResult(1, "owned-session", "Turn ended.", stop_reason, updates, {}, 1, "owned-request", "rpc")
-        await orchestrator._record_result(result)
+        await orchestrator._record_result(result, (1, 1))
         assert history is not manager.messages and all(isinstance(message, ConversationMessage) for message in history)
         live = await state.get_conversation()
         assert [message.role for message in live.messages] == ["user", "assistant"]
