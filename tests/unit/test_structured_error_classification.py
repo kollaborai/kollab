@@ -1106,3 +1106,198 @@ def test_streaming_delta_tool_call_continuation_stays_legal():
         data["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
         == '{"city":'
     )
+
+
+# --- #754 follow-up: explicit null and wrong-typed required values ---
+
+
+def _patch_sse_stream(monkeypatch, *chunks):
+    """Replay each dict as one SSE ``data:`` line (then [DONE]) through the
+    real ``_stream_impl`` aiohttp path, so the stream parser is what runs."""
+    import json
+
+    lines = [b"data: " + json.dumps(chunk).encode() + b"\n" for chunk in chunks]
+    lines.append(b"data: [DONE]\n")
+
+    class _Content:
+        def __init__(self, lines):
+            self._lines = lines
+
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            for line in self._lines:
+                yield line
+
+    class _Response:
+        status = 200
+
+        def __init__(self, lines):
+            self.content = _Content(lines)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+        def post(self, *args, **kwargs):
+            return _Response(lines)
+
+    monkeypatch.setattr(
+        "kollabor_ai.providers.custom_provider.aiohttp.ClientSession",
+        lambda *a, **kw: _Session(),
+    )
+
+
+async def _collect_stream(provider):
+    return [
+        item
+        async for item in provider._stream_impl(
+            messages=[{"role": "user", "content": "hi"}]
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_call",
+    [
+        {"id": None, "function": {"name": "f", "arguments": "{}"}},
+        {"id": 7, "function": {"name": "f", "arguments": "{}"}},
+        {"id": "1", "function": {"name": None, "arguments": "{}"}},
+        {"id": "1", "function": {"name": 7, "arguments": "{}"}},
+        {"id": "1", "function": {"name": "f", "arguments": None}},
+        {"id": "1", "function": {"name": "f", "arguments": 5}},
+        {"id": "1", "function": {"name": "f", "arguments": ["a"]}},
+        {"id": "1", "function": {"name": "f", "arguments": "[1, 2]"}},
+        {"id": "1", "function": {"name": "f", "arguments": "null"}},
+    ],
+)
+async def test_non_stream_tool_call_wrong_required_value_is_typed(tool_call):
+    """A complete message tool call with explicit null or a wrong-typed id,
+    function.name or function.arguments passes the presence-only check, then
+    ToolUseContent raises a raw Pydantic ValidationError (bismuth FAIL verdict
+    @6b5fe582, P2). Arguments that decode to a non-object ("[1, 2]", "null")
+    are the same class: the tool input must be an object."""
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={
+            "choices": [{"message": {"content": "ok", "tool_calls": [tool_call]}}]
+        }
+    )
+
+    with pytest.raises(APIFormatMismatchError):
+        await provider.call([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_tool_call_object_arguments_stay_legal():
+    """Guard the guard: the parser passes a non-string function.arguments
+    through as the tool input, so an object must still parse."""
+    provider = _make_custom_provider()
+    provider._make_request = AsyncMock(
+        return_value={
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": {"city": "sf"},
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+    )
+
+    response = await provider.call([{"role": "user", "content": "hi"}])
+    tool_blocks = [
+        b for b in response.content if getattr(b, "type", None) == "tool_use"
+    ]
+    assert tool_blocks[0].input == {"city": "sf"}
+
+
+def test_coerce_rejects_explicit_null_delta_tool_call_function():
+    """An explicit ``function: null`` is not a missing key: .get("function", {})
+    returns None, and the stream parser's ``.get("name")`` on it raises
+    AttributeError (#754). The boundary must type it."""
+    from kollabor_ai.providers.custom_provider import _coerce_sse_object
+
+    chunk = {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": None}]}}]}
+    with pytest.raises(APIFormatMismatchError):
+        _coerce_sse_object(chunk, "gateway")
+
+
+@pytest.mark.asyncio
+async def test_stream_null_delta_tool_call_function_is_typed(monkeypatch):
+    """Same shape through the real streaming parser: the validator let
+    ``function: null`` pass, then ``.get("function", {}).get("name")`` raised
+    a raw AttributeError (bismuth FAIL verdict @6b5fe582, P2)."""
+    chunk = {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": None}]}}]}
+    _patch_sse_stream(monkeypatch, chunk)
+
+    with pytest.raises(APIFormatMismatchError):
+        await _collect_stream(_make_custom_provider())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_delta",
+    [
+        {"index": 0, "id": 5},
+        {"index": 0, "function": {"name": 5}},
+        {"index": 0, "function": {"arguments": 5}},
+        {"index": 0, "function": {"arguments": {"a": 1}}},
+    ],
+)
+async def test_stream_delta_tool_call_wrong_value_type_is_typed(
+    monkeypatch, tool_delta
+):
+    """ToolCallDelta takes Optional[str] for id, name and arguments, so a
+    number or object there raises a raw Pydantic ValidationError from inside
+    the stream parser. The boundary must type it."""
+    chunk = {"choices": [{"delta": {"tool_calls": [tool_delta]}}]}
+    _patch_sse_stream(monkeypatch, chunk)
+
+    with pytest.raises(APIFormatMismatchError):
+        await _collect_stream(_make_custom_provider())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_delta",
+    [
+        {"index": 0},
+        {"index": 0, "function": {"arguments": '{"city":'}},
+    ],
+)
+async def test_stream_delta_tool_call_legal_continuation_still_streams(
+    monkeypatch, tool_delta
+):
+    """Guard the guard: a streaming continuation may omit id, name and
+    function (OpenAI sends only function.arguments after the first chunk).
+    Those legal shapes must still reach the caller as tool-call deltas."""
+    chunk = {"choices": [{"delta": {"tool_calls": [tool_delta]}}]}
+    _patch_sse_stream(monkeypatch, chunk)
+
+    results = await _collect_stream(_make_custom_provider())
+    tool_deltas = [
+        r.delta for r in results if getattr(r.delta, "type", None) == "tool_call_delta"
+    ]
+    assert len(tool_deltas) == 1
