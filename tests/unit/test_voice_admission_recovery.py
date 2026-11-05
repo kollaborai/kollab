@@ -139,3 +139,17 @@ async def test_batch_with_unknown_host_outcome_is_surfaced_until_dismissed(
     assert not again.status().get("unknown_attempts")
     final = await restart(monkeypatch, tmp_path)
     assert not final.status().get("unknown_attempts")
+
+
+@pytest.mark.asyncio
+async def test_batch_cut_off_by_voice_off_in_the_same_process_is_recovered(
+    monkeypatch, tmp_path
+):
+    plugin = started(monkeypatch, tmp_path)
+
+    async def deliver(data):
+        raise Crash
+
+    await die_during_dispatch(plugin, batch(), deliver)
+    await plugin.recover_attempts()
+    assert plugin.status()["pending"] == 1
