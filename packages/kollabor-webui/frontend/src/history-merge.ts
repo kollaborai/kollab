@@ -217,15 +217,26 @@ const stableResult = (result: unknown): unknown => {
   return stable;
 };
 
-const toolCalls = (message: Message): Array<{ id: unknown; result: unknown }> =>
+/**
+ * What tells two rows apart besides their words: tool calls (call ids and
+ * results) and pictures. A pasted picture is not text, so the same words with
+ * another picture are another turn.
+ */
+const turnParts = (message: Message): unknown[] =>
   Array.isArray(message.content)
-    ? message.content
-      .filter((part) => !!part && typeof part === "object" &&
-        (part as { type?: unknown }).type === "tool-call")
-      .map((part) => ({
-        id: (part as { toolCallId?: unknown }).toolCallId,
-        result: stableResult((part as { result?: unknown }).result),
-      }))
+    ? message.content.flatMap((part): unknown[] => {
+      if (!part || typeof part !== "object") return [];
+      const { type } = part as { type?: unknown };
+      if (type === "tool-call") {
+        return [{
+          type,
+          id: (part as { toolCallId?: unknown }).toolCallId,
+          result: stableResult((part as { result?: unknown }).result),
+        }];
+      }
+      if (type === "image") return [{ type, image: (part as { image?: unknown }).image }];
+      return [];
+    })
     : [];
 
 /** Role and content: what a retained row keeps across compaction (its id is renumbered). */
@@ -246,14 +257,15 @@ const requestIdOf = (message: Message): string | undefined => {
 
 /**
  * Same turn, on top of same words: equal request ids when both rows carry one,
- * else equal tool calls (call ids and results). A repeated prompt whose turn
- * made another call is a different turn.
+ * else equal tool calls (call ids and results) and equal pictures. A repeated
+ * prompt whose turn made another call, or came with another picture, is a
+ * different turn; the composer sends pictures without a request id.
  */
 const sameTurn = (live: Message, stored: Message): boolean => {
   const liveRequest = requestIdOf(live);
   const storedRequest = requestIdOf(stored);
   if (liveRequest && storedRequest) return liveRequest === storedRequest;
-  return JSON.stringify(toolCalls(live)) === JSON.stringify(toolCalls(stored));
+  return JSON.stringify(turnParts(live)) === JSON.stringify(turnParts(stored));
 };
 
 /**
@@ -350,7 +362,7 @@ const transientRole = (message: Message): string =>
  * as a tail next to those rows, and assistant-ui draws it twice until a
  * manual reload (#666). Drop the trailing transient block once every row in
  * it exists in the kept history as the same turn (same role and text, and the
- * same request id or tool calls, see sameTurn), and the tail's first row
+ * same request id, or tool calls and pictures, see sameTurn), and the tail's first row
  * matches the block's same-role row; null keeps the rows as they are, so a
  * replay that proves nothing never hides content.
  */
