@@ -313,11 +313,17 @@ class KollaborConversationLogger:
         return str(Path.cwd())
 
     def _reparent_path(self) -> Path:
-        """Where cuts of this session file are shared with its other writers."""
-        return Path(str(self.session_file) + ".reparent.json")
+        """Where cuts of this session file are shared with its other writers.
+
+        Named so that no session glob (`session_*.json[l]`, `<id>*.jsonl`) matches it.
+        """
+        return Path(self.session_file).with_suffix(".reparent")
 
     def _read_reparent(self) -> None:
-        """Fold the cuts other loggers (or processes) made into `_reparent`."""
+        """Take the cuts other loggers (or processes) share as `_reparent`.
+
+        Replaces it, so a cut that was taken back (a failed swap) is forgotten too.
+        """
         path = self._reparent_path()
         try:
             info = path.stat()
@@ -329,20 +335,26 @@ class KollaborConversationLogger:
         except (OSError, ValueError):
             return  # none yet, or unreadable: the next append looks again
         if isinstance(shared, dict):
-            self._reparent.update(shared)
+            self._reparent = shared
             self._reparent_seen = signature
 
-    def _share_reparent(self, dropped: Dict[str, Any]) -> Dict[str, Any]:
-        """Add a cut's dropped records to the shared file; returns what it held."""
-        with locked_file(self._reparent_path(), "a+", private=True) as f:
-            f.seek(0)
+    def _edit_reparent(self, add: Dict[str, Any], remove: Any = ()) -> None:
+        """Add cuts to the shared file, or take some back, under its lock.
+
+        Written over the old text and cut to length, never emptied first, so a
+        failed write leaves the cuts other loggers recorded.
+        """
+        path = self._reparent_path()
+        os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+        with locked_file(path, "r+", private=True) as f:
             try:
-                before = json.loads(f.read() or "{}")
+                shared = json.loads(f.read() or "{}")
             except ValueError:
-                before = {}
-            f.truncate(0)
-            f.write(json.dumps({**before, **dropped}))
-        return before
+                shared = {}
+            shared = {k: v for k, v in {**shared, **add}.items() if k not in remove}
+            f.seek(0)
+            f.write(json.dumps(shared))
+            f.truncate()
 
     async def _append_to_jsonl(self, message: Dict[str, Any]):
         """Append message to JSONL file."""
@@ -764,16 +776,18 @@ class KollaborConversationLogger:
             if cut is None:
                 return None
             dropped, temp, end = cut
-            before = self._share_reparent(dropped)  # before the swap: no dangling window
             try:  # on the loop, so nothing lands between the copy and the swap
+                self._edit_reparent(dropped)  # others thread past it from here on
                 with open(path, "rb") as log, open(temp, "ab") as new:
                     log.seek(end)
                     new.write(log.read())  # appended since the cut read the log
                 os.replace(temp, path)
             except BaseException:
                 Path(temp).unlink(missing_ok=True)
-                with locked_file(self._reparent_path(), "w", private=True) as f:
-                    f.write(json.dumps(before))  # the cut did not land
+                try:
+                    self._edit_reparent({}, remove=dropped)  # the cut did not land
+                except OSError as e:
+                    logger.warning("voice cut not taken back from %s: %s", self._reparent_path(), e)
                 raise
             self._reparent.update(dropped)
             return dropped
