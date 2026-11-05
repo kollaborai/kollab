@@ -338,7 +338,10 @@ class KollaborConversationLogger:
                     message.get("type"),
                     bound_file.name,
                 )
-                return
+                raise OSError(
+                    "conversation record not written: session replaced while "
+                    f"the append waited ({bound_file.name})"
+                )
             parent = message.get("parentUuid")
             while parent in self._reparent:  # a cut dropped it after the caller read it
                 parent = self._reparent[parent]

@@ -2156,7 +2156,10 @@ class LLMService:
         # goes to the model.
         turn_serial = self.claim_turn_serial()
         admission_parent_uuid = self.current_parent_uuid
-        user_uuid = None
+        # A failed write has no row to point at: the cursor stays where it is
+        # (publishing None would cut the chain) and the queue item keeps the
+        # parent captured at admission.
+        admitted_parent_uuid = admission_parent_uuid
         try:
             user_uuid = await self.conversation_logger.log_user_message(
                 display_text, parent_uuid=admission_parent_uuid
@@ -2166,11 +2169,13 @@ class LLMService:
             self.message_display_service.display_system_message(
                 "Conversation history not saved for this message."
             )
-        self.publish_cursor(user_uuid, turn_serial)
-        # This queue item belongs under the user row created for its admission,
-        # even if another completion won the shared cursor during the logger
-        # await. Never re-read mutable current_parent_uuid after yielding.
-        admitted_parent_uuid = user_uuid
+        else:
+            self.publish_cursor(user_uuid, turn_serial)
+            # This queue item belongs under the user row created for its
+            # admission, even if another completion won the shared cursor
+            # during the logger await. Never re-read mutable
+            # current_parent_uuid after yielding.
+            admitted_parent_uuid = user_uuid
 
         # Add to processing queue with overflow handling. Plain input rides a
         # zero-id TaggedInput so the capture travels with the item (#676); a
