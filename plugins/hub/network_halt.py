@@ -1345,9 +1345,9 @@ def _backgrounded(
                 continue
             started = info[pid][0]
             hit = False
-            if shells:
+            if shells:  # ps reads a start a second or two off the recorded clock (#710): REUSE_SLACK
                 for key in (pg, _sid(pid, tree)):
-                    if key in shells and key not in unsafe and int(started) >= int(shells[key]):
+                    if key in shells and key not in unsafe and int(started) + REUSE_SLACK >= int(shells[key]):
                         hit = True
             if not hit and pid in known and orphan(ppid):
                 owner = tag_of(pid)
