@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ACP admissions that reuse a caller request ID keep their own history parent and completion ownership, so a reply is no longer recorded under the later input's row (#597). A rejected admission cancels only itself, not an earlier queued admission with the same ID.
 - ACP admissions that reuse a caller request ID also keep their own mic-turn voice metadata: the voice-reply dictionary was keyed by bare request ID, so a later admission overwrote the earlier one's voice and the reply was spoken with the wrong voice or not at all (#597).
 - Mentiko attaches to an existing live hub session without spawning a second daemon or duplicating its system-prompt history (#708).
+- Switching to an OAuth profile whose model is still `codex` no longer overwrites a model, effort or profile edit made while the model lookup was running. The stale switch is cancelled, the edit stays, and the switch can be run again (#595).
 
 ## [0.19.1] - 2026-11-03
 

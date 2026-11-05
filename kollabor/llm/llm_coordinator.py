@@ -1566,9 +1566,24 @@ class LLMService:
                                     query_codex_models,
                                 )
 
+                                revision = profile.revision
                                 models = await query_codex_models(
                                     tokens.access_token, tokens.account_id
                                 )
+                                # The lookup awaited: an edit or replacement made
+                                # meanwhile wins, so this stale switch is refused.
+                                stale = (
+                                    profile.revision != revision
+                                    or self.profile_manager.get_profile(profile_name)
+                                    is not profile
+                                )
+                                if stale:
+                                    logger.warning(
+                                        "Profile %r was edited while its model was "
+                                        "being resolved; switch cancelled",
+                                        profile_name,
+                                    )
+                                    return False
                                 resolved = pick_best_model(models)
                                 if resolved != "codex":
                                     profile.model = resolved
