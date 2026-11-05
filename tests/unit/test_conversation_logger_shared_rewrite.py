@@ -61,7 +61,7 @@ async def test_a_chain_of_cuts_across_loggers_resolves_to_a_surviving_parent(tmp
 async def test_a_cycle_in_the_shared_mapping_never_hangs_an_append(tmp_path):
     first, second = _same_session(tmp_path)
     root = await first.log_user_message("hi", parent_uuid=None)
-    Path(str(first.session_file) + ".reparent.json").write_text(json.dumps({"a": "b", "b": "a"}))
+    first._reparent_path().write_text(json.dumps({"a": "b", "b": "a"}))
 
     child = await second.log_user_message("x", parent_uuid="a")
 
@@ -113,3 +113,54 @@ async def test_a_swap_that_fails_leaves_no_cut_in_the_shared_mapping(tmp_path, m
     child = await second.log_user_message("thanks", parent_uuid=voice)
     by_uuid = {r["uuid"]: r for r in _records(first.session_file) if r.get("uuid")}
     assert by_uuid[child]["parentUuid"] == voice  # the reply is still in the log
+
+
+async def test_a_cut_whose_sidecar_cannot_be_written_leaves_no_temp_file(tmp_path):
+    first, _ = _same_session(tmp_path)
+    root = await first.log_user_message("hi", parent_uuid=None)
+    voice = await first.log_assistant_message("sunny", root, voice_turn_id="turn-1")
+    first._reparent_path().mkdir()  # the shared mapping cannot be opened
+
+    with pytest.raises(OSError):
+        await first.rewrite_voice_turn("turn-1", 1, {0: None})
+
+    assert [p.name for p in (tmp_path / "conversations").glob("*.tmp")] == []
+    assert voice in {r.get("uuid") for r in _records(first.session_file)}  # log untouched
+
+
+async def test_a_failed_swap_reaches_a_logger_that_already_read_the_cut(tmp_path, monkeypatch):
+    first, second = _same_session(tmp_path)
+    root = await first.log_user_message("hi", parent_uuid=None)
+    voice = await first.log_assistant_message("sunny", root, voice_turn_id="turn-1")
+
+    def read_then_refuse(*args, **kwargs):
+        second._read_reparent()  # the other logger appended while the cut was published
+        raise OSError("swap failed")
+
+    monkeypatch.setattr("kollabor_ai.conversation_logger.os.replace", read_then_refuse)
+    with pytest.raises(OSError):
+        await first.rewrite_voice_turn("turn-1", 1, {0: None})
+    monkeypatch.undo()
+
+    child = await second.log_user_message("thanks", parent_uuid=voice)
+    by_uuid = {r["uuid"]: r for r in _records(first.session_file) if r.get("uuid")}
+    assert by_uuid[child]["parentUuid"] == voice  # the reply is still in the log
+
+
+async def test_the_shared_mapping_is_never_listed_as_a_session(tmp_path):
+    from types import SimpleNamespace
+
+    from kollabor_ai.conversation_manager import ConversationManager
+
+    conversations = tmp_path / "conversations"
+    first = KollaborConversationLogger(conversations)
+    first.session_id = "session_legacy1"  # an older id, which the session globs match
+    first.session_file = conversations / "session_legacy1.jsonl"
+    root = await first.log_user_message("hi", parent_uuid=None)
+    await first.log_assistant_message("sunny", root, voice_turn_id="turn-1")
+    assert await first.rewrite_voice_turn("turn-1", 1, {0: None})
+
+    config = SimpleNamespace(_conversations_dir=conversations, get=lambda key, default=None: default)
+    listed = ConversationManager(config, first).get_available_sessions()
+
+    assert [s["file_path"] for s in listed] == [str(first.session_file)]
