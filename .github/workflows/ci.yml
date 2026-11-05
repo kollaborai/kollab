@@ -16,13 +16,14 @@ permissions:
 
 jobs:
   tests:
-    name: ci/tests (${{ matrix.python-version }})
+    name: ci/tests (unit shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # 3.14 is the floor and the launch runtime.
         python-version: ["3.14"]
+        shard: [0, 1, 2, 3]
 
     steps:
       - uses: actions/checkout@v6
@@ -36,8 +37,54 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
-          # One cache per job. Jobs on the same image, Python and lockfile
-          # otherwise race to save one key ("Unable to reserve cache").
+          # Matrix legs need separate caches; otherwise they race to save one key.
+          cache-suffix: ${{ github.job }}-${{ matrix.shard }}
+
+      # Wheel/editable builds fail instead of substituting an older WebUI.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install workspace
+        run: uv sync --all-packages --extra dev
+
+      # Use the complete pytest filename pattern, partitioned over a stable,
+      # sorted file list rather than maintaining a hand-written test list.
+      # Keep the two parallel-sensitive tests serial in the support job (#470).
+      - name: Run unit test shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          selected_files=$(find tests/unit -type f -name 'test_*.py' -print |
+            LC_ALL=C sort |
+            awk -v shard="$SHARD" 'NR % 4 == shard')
+          if [ -z "$selected_files" ]; then
+            echo "Unit-test shard $SHARD discovered no test files" >&2
+            exit 1
+          fi
+          mapfile -t test_files <<< "$selected_files"
+          printf 'Shard %s selected %s files\n' "$SHARD" "${#test_files[@]}"
+          uv run python -m pytest "${test_files[@]}" -q -n auto \
+            --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle \
+            --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
+
+  supporting_tests:
+    name: ci/tests (support)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
           cache-suffix: ${{ github.job }}
 
       # Wheel/editable builds fail instead of substituting an older WebUI.
@@ -48,19 +95,8 @@ jobs:
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
-      # Run the whole unit suite, not a hand-listed subset. The old list named
-      # tests/unit/test_turn_runner_tool_loop.py, which was deleted with the
-      # turn_runner module in dca5e73 -- pytest then exited 4 ("collected 0
-      # items") and every other file in the list was skipped too, so CI
-      # reported failure without ever running a test. A directory can't rot
-      # that way. The two tests below have failed only under parallel load;
-      # keep them covered in a separate serial invocation until fixed (#470).
-      - name: Run unit tests in parallel
-        run: >-
-          uv run python -m pytest tests/unit/ -q -n auto
-          --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle
-          --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
-
+      # These two tests have failed only under parallel load; keep them serial
+      # until fixed (#470).
       - name: Run isolation-sensitive unit tests
         run: >-
           uv run python -m pytest -q
@@ -111,28 +147,27 @@ jobs:
       - name: Validate bundled Agent Skills layout
         run: uv run python scripts/validate_bundled_agent_skills.py
 
-  # The required "ci/tests" check must resolve under that EXACT name. Matrix
-  # legs report as "ci/tests (3.14)", which never matches, leaving a required
-  # rule stuck on "Expected, waiting". This aggregate job carries the exact
-  # name and mirrors the matrix verdict: the 3.14 leg must succeed. A skipped
-  # or cancelled matrix also fails the aggregate, so the check can never
-  # resolve green without the suite having run.
+  # Keep the exact required "ci/tests" check name expected by branch
+  # protection. It succeeds only when every unit shard and the support job do.
+  # !cancelled() makes the aggregate run after upstream failures or skips so
+  # the required check cannot resolve green without all tests running.
   required_tests:
     # The job ID cannot contain '/' (GitHub id charset), but the DISPLAY name
     # is free-form: this resolves as the check "ci/tests", which is the exact
     # name the required rule expects.
     name: ci/tests
-    needs: [tests]
+    needs: [tests, supporting_tests]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Fail unless the required matrix leg passed
+      - name: Fail unless every required test job passed
         env:
-          RESULT: ${{ needs.tests.result }}
+          UNIT_RESULT: ${{ needs.tests.result }}
+          SUPPORT_RESULT: ${{ needs.supporting_tests.result }}
         run: |
-          case "$RESULT" in
-            success) echo "ci/tests: required leg succeeded"; exit 0 ;;
-            *)       echo "ci/tests: required leg result was '$RESULT'"; exit 1 ;;
+          case "$UNIT_RESULT:$SUPPORT_RESULT" in
+            success:success) echo "ci/tests: all required test jobs succeeded"; exit 0 ;;
+            *) echo "ci/tests: unit shards result '$UNIT_RESULT'; support result '$SUPPORT_RESULT'"; exit 1 ;;
           esac
 
   standards-check:
