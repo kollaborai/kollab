@@ -282,6 +282,52 @@ async def test_append_from_another_process_between_tail_copy_and_swap_is_preserv
     assert by_uuid[appended]["parentUuid"] == root
 
 
+async def test_concurrent_session_snapshot_save_waits_for_voice_rewrite(
+    tmp_path, monkeypatch
+):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from kollabor_ai.conversation_manager import ConversationManager
+
+    first, _ = _same_session(tmp_path)
+    root = await first.log_user_message("hi", parent_uuid=None)
+    voice = await first.log_assistant_message(
+        "sunny", root, voice_turn_id="turn-1"
+    )
+    config = SimpleNamespace(
+        _conversations_dir=first.session_file.parent,
+        get=lambda key, default=None: default,
+    )
+    manager = ConversationManager(config, first)
+    manager.messages = [{"role": "user", "content": "snapshot-payload"}]
+    executor = ThreadPoolExecutor(max_workers=1)
+    state = {}
+    real_replace = os.replace
+
+    def save_before_swap(source, destination):
+        if Path(destination) == first.session_file:
+            state["future"] = executor.submit(
+                manager.save_session, first.session_id
+            )
+            deadline = time.monotonic() + 2
+            while not state["future"].done() and time.monotonic() < deadline:
+                time.sleep(0.01)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("kollabor_ai.conversation_logger.os.replace", save_before_swap)
+    try:
+        assert await first.rewrite_voice_turn("turn-1", 1, {0: None}) == {voice: root}
+        assert state["future"].result(timeout=5)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    saved = _records(first.session_file)
+    assert len(saved) == 1
+    assert saved[0].get("messages") == manager.messages
+
+
 async def test_short_sidecar_write_rollback_preserves_prior_rewrite_mapping(
     tmp_path, monkeypatch
 ):
