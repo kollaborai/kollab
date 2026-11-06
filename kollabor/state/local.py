@@ -1520,6 +1520,7 @@ class LocalStateService(StateService):
             event_bus.get_service("acp_orchestrator")
             if event_bus else None
         )
+        closed_harness = None
 
         previous_profile_name = getattr(current_profile, "name", None)
         previous_is_acp = str(current_provider).lower() == "acp"
@@ -1741,6 +1742,7 @@ class LocalStateService(StateService):
         else:
             if str(current_provider).lower() == "acp" and orchestrator is not None:
                 await orchestrator.close()
+                closed_harness = orchestrator
             ok = bool(self._profile_manager.set_active_profile(name))
         if not ok and hasattr(self._profile_manager, "reload"):
             # OAuth login stores tokens before it asks the daemon to activate
@@ -1858,6 +1860,18 @@ class LocalStateService(StateService):
                     )
                 except Exception as e:
                     logger.debug(f"reload_native_tools background task error: {e}")
+
+        if closed_harness is not None:
+            # Peer messages the closed harness still held are in the
+            # conversation; one native turn answers them.
+            try:
+                await closed_harness.hand_over_to_native()
+            except Exception as e:
+                logger.warning(
+                    "Could not hand buffered ACP messages to profile %r (%s)",
+                    name,
+                    type(e).__name__,
+                )
 
         snapshot = self._overlay_acp_harness_state(
             self._profile_to_snapshot(profile, is_active=True)
