@@ -3100,33 +3100,15 @@ class ContextCompactionPlugin(BasePlugin):
 
     @staticmethod
     def _split_open_state(summary_text: str) -> tuple[str, str | None]:
-        """Separate the final full-line OPEN STATE section from its summary.
-
-        ``None`` means no section was present; an empty string is an explicit
-        empty section that may clear an older state.
-        """
-        lines = summary_text.splitlines(keepends=True)
-        marker_indices = [
-            index
-            for index, line in enumerate(lines)
-            if line.rstrip() == OPEN_STATE_MARKER
-        ]
-        if not marker_indices:
+        """Separate the first OPEN STATE marker from its summary."""
+        start = summary_text.find(OPEN_STATE_MARKER)
+        if start < 0:
             return summary_text, None
 
-        marker_index = marker_indices[-1]
-        summary_prefix = "".join(lines[:marker_index]).rstrip()
-        candidate_lines = lines[marker_index + 1 :]
-        end_index = next(
-            (
-                index
-                for index, line in enumerate(candidate_lines)
-                if line.rstrip() == END_OPEN_STATE_MARKER
-            ),
-            len(candidate_lines),
-        )
-        candidate = "".join(candidate_lines[:end_index]).strip()
-        return summary_prefix, candidate
+        candidate = summary_text[start + len(OPEN_STATE_MARKER) :]
+        candidate = candidate.split(END_OPEN_STATE_MARKER, 1)[0]
+        candidate = candidate.split(OPEN_STATE_MARKER, 1)[0]
+        return summary_text[:start].rstrip(), candidate
 
     @staticmethod
     def _strip_model_operator_word_blocks(summary_text: str) -> str:
