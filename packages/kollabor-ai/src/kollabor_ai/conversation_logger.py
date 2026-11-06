@@ -313,14 +313,29 @@ class KollaborConversationLogger:
     async def _append_to_jsonl(
         self, message: Dict[str, Any], session_id: Optional[str] = None
     ):
-        """Append message to JSONL file (another session's, when one is named)."""
+        """Append to the current or explicitly named conversation JSONL."""
         own = session_id is None or session_id == self.session_id
         path = (
             self.session_file
             if own
             else self.conversations_dir / f"{session_id}.jsonl"
         )
+        # Bind current-session rows at call time. A reset while an append waits
+        # on the lock must not redirect the row; explicit old-session ACP
+        # results instead use the path selected from their session_id above.
+        bound_file = self.session_file
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
+            if own and self.session_file != bound_file:
+                # The session was replaced while this append waited. The row
+                # belongs to the captured session only — drop it rather than
+                # corrupt the replaced session's transcript.
+                logger.warning(
+                    "dropped a %s JSONL append: session replaced while the "
+                    "append waited on the write lock (%s)",
+                    message.get("type"),
+                    bound_file.name,
+                )
+                return
             parent = message.get("parentUuid")
             while parent in self._reparent:  # a cut dropped it after the caller read it
                 parent = self._reparent[parent]

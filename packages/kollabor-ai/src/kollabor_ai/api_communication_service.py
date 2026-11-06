@@ -128,6 +128,10 @@ class APICommunicationService:
 
         # Provider-based communication
         self._provider: Any = None  # Initialized in initialize()
+        # Bumped by every reinitialize_provider call, so a caller that swapped the
+        # provider for a while can tell a later switch apart even when it hands
+        # back the same profile and the registry the same cached provider.
+        self._provider_generation = 0
         self._media_resolver: Optional[Callable[[str], Optional[str]]] = None
         self._operation_observer: Optional[Callable[..., Optional[int]]] = None
         self._provider_error: Optional[str] = (
@@ -1729,6 +1733,7 @@ class APICommunicationService:
         Returns:
             True if provider initialized successfully
         """
+        self._provider_generation += 1
         # Update stored profile
         self._profile = profile
         self._provider_error = None
