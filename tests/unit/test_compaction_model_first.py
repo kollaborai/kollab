@@ -355,3 +355,61 @@ class TestNativeCurateCall(unittest.TestCase):
         self.assertEqual(data["id"], "call_1")  # the provider matches the result on this
         self.assertEqual(data["input"]["id"], "ctx-1")
         self.assertEqual(data["summary"], "short")
+
+
+class TestCompactAskOnAcpChat(unittest.IsolatedAsyncioTestCase):
+    """/compact asks the model by waking it natively; an ACP chat refuses that
+    wake, so the ask must not start (#579, PR #793 review)."""
+
+    @staticmethod
+    def _acp(llm):
+        llm._profile_selects_acp = lambda: (True, False)
+        llm._acp_service = lambda: None
+
+    async def test_slash_compact_on_acp_chat_changes_nothing(self):
+        plugin, bus, llm = _plugin(ledger=_Ledger(), tokens=10_000)
+        self._acp(llm)
+        before = list(llm.conversation_history)
+
+        first = await plugin._handle_compact_command(SimpleNamespace(args=[]))
+        second = await plugin._handle_compact_command(SimpleNamespace(args=[]))
+
+        self.assertEqual(llm.conversation_history, before)
+        self.assertFalse(plugin._awaiting_model)
+        bus.emit_with_hooks.assert_not_awaited()
+        self.assertIn("ACP", first)
+        self.assertEqual(first, second)  # never "already asked the model"
+        await _drain(plugin)
+
+    async def test_refused_wake_leaves_no_stuck_state_with_real_handler(self):
+        from kollabor.llm.message_handler import MessageHandler
+        from tests.unit.llm.test_message_handler import (
+            _acp_runner,
+            _make_coordinator,
+            _set_acp_state,
+        )
+
+        coord = _make_coordinator()
+        _set_acp_state(coord, runner=_acp_runner(), selects_acp=True)
+        handler = MessageHandler(coord)
+
+        plugin, bus, _llm = _plugin(ledger=_Ledger(), tokens=10_000)
+        coord.conversation_history = _llm.conversation_history
+        plugin._llm_service = coord
+
+        async def route(event_type, data, source):
+            if event_type == EventType.TRIGGER_LLM_CONTINUE:
+                return await handler.handle_llm_continue(data, MagicMock())
+            return {}
+
+        bus.emit_with_hooks = AsyncMock(side_effect=route)
+        before = list(coord.conversation_history)
+
+        await plugin._handle_compact_command(SimpleNamespace(args=[]))
+        again = await plugin._handle_compact_command(SimpleNamespace(args=[]))
+
+        coord.create_background_task.assert_not_called()  # no native turn
+        self.assertEqual(coord.conversation_history, before)  # no stray prompt
+        self.assertFalse(plugin._awaiting_model)
+        self.assertNotIn("already asked", again)
+        await _drain(plugin)
