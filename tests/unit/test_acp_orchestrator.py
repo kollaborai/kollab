@@ -478,10 +478,17 @@ async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_t
 @pytest.mark.asyncio
 async def test_failed_user_row_write_keeps_the_finished_reply(tmp_path, monkeypatch):
     """#580: a user row that never reached the file must not discard the reply."""
-    configuration = SimpleNamespace(_conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: default,
+    )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
-    llm = SimpleNamespace(conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=[])
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+    )
     bus = Bus()
     bus.services["llm_service"] = llm
     orchestrator = mod.ACPOrchestrator(bus)
@@ -490,7 +497,12 @@ async def test_failed_user_row_write_keeps_the_finished_reply(tmp_path, monkeypa
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(conversation_logger, "log_user_message", failing_user_write)
-    profile = LLMProfile(name="user-row-fails", provider="acp", command=(sys.executable, "-c", INTERRUPTED_AGENT), cwd=str(tmp_path))
+    profile = LLMProfile(
+        name="user-row-fails",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+    )
     runner = None
     try:
         await orchestrator.start(profile)
@@ -559,10 +571,17 @@ async def test_failed_user_row_write_is_shown_not_swallowed(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_failed_reply_row_write_keeps_the_finished_reply(tmp_path, monkeypatch):
     """#580: a real OSError on the reply row must not turn a finished turn into an error."""
-    configuration = SimpleNamespace(_conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: default,
+    )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
-    llm = SimpleNamespace(conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=[])
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+    )
     bus = Bus()
     bus.services["llm_service"] = llm
     orchestrator = mod.ACPOrchestrator(bus)
@@ -589,7 +608,12 @@ async def test_failed_reply_row_write_keeps_the_finished_reply(tmp_path, monkeyp
             monkeypatch.setattr(os, "open", real_open)
 
     monkeypatch.setattr(conversation_logger, "log_assistant_message", write_on_full_disk)
-    profile = LLMProfile(name="reply-row-fails", provider="acp", command=(sys.executable, "-c", INTERRUPTED_AGENT), cwd=str(tmp_path))
+    profile = LLMProfile(
+        name="reply-row-fails",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+    )
     runner = None
     try:
         await orchestrator.start(profile)
