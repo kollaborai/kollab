@@ -310,23 +310,33 @@ class KollaborConversationLogger:
         """Get current working directory."""
         return str(Path.cwd())
 
-    async def _append_to_jsonl(self, message: Dict[str, Any]):
-        """Append message to JSONL file.
+    async def _append_to_jsonl(
+        self, message: Dict[str, Any], session_id: Optional[str] = None
+    ):
+        """Append to the current or explicitly named conversation JSONL.
 
         Raises when the record is not on disk, and counts nothing then. A failed
         attempt is truncated back to where it started, so a retry cannot duplicate
         the record and the next append never lands on a half-written line.
         """
-        # Bind this append to the session its caller captured (the row's
-        # sessionId was stamped from self.session_id at call time).
+        own = session_id is None or session_id == self.session_id
+        path = (
+            self.session_file
+            if own
+            else self.conversations_dir / f"{session_id}.jsonl"
+        )
+        # Bind current-session rows to the session their caller captured (the
+        # row's sessionId was stamped from self.session_id at call time).
         # reset_session takes no lock and rewrite_voice_turn holds the lock
         # across a to_thread, so an append queued behind a rewrite can wake
         # up after the session was replaced: opening whatever session_file
         # points at THEN would write the old-session row into the new
         # session's file. Validate inside the lock, before opening anything.
+        # Explicit old-session ACP results instead use the path selected from
+        # their session_id above.
         bound_file = self.session_file
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
-            if self.session_file != bound_file:
+            if own and self.session_file != bound_file:
                 # The session was replaced while this append waited. The row
                 # belongs to the captured session only: do not write it into
                 # the replaced session's transcript. It was not written, so
@@ -349,7 +359,7 @@ class KollaborConversationLogger:
                 message["parentUuid"] = parent
             data = memoryview((json.dumps(message) + "\n").encode())
             fd = os.open(
-                self.session_file,
+                path,
                 os.O_WRONLY | os.O_CREAT | os.O_APPEND,
                 0o600,
             )
@@ -366,7 +376,8 @@ class KollaborConversationLogger:
                     raise
             finally:
                 os.close(fd)
-            self.message_count += 1
+            if own:
+                self.message_count += 1
 
     def _analyze_user_context(self, content: str) -> Dict[str, Any]:
         """Analyze user context from message content."""
@@ -648,6 +659,7 @@ class KollaborConversationLogger:
         provider_reasoning: Optional[Dict[str, Any]] = None,
         display_metadata: Optional[Dict[str, Any]] = None,
         voice_turn_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         """Log assistant response with usage statistics.
 
@@ -664,6 +676,9 @@ class KollaborConversationLogger:
                 excluded from native provider tool-call reconstruction
             voice_turn_id: The voice turn a reply belongs to, so a talk-over
                 can cut it here too (rewrite_voice_turn)
+            session_id: The session this reply belongs to when it is not the
+                logger's current one (a turn that finished after another
+                conversation was resumed); its own log gets the record
         """
         message_uuid = str(uuid4())
 
@@ -693,7 +708,7 @@ class KollaborConversationLogger:
             "isSidechain": False,
             "userType": "external",
             "cwd": self._get_working_directory(),
-            "sessionId": self.session_id,
+            "sessionId": session_id or self.session_id,
             "version": (
                 self.app_version
                 if self.app_version != "unknown"
@@ -734,7 +749,7 @@ class KollaborConversationLogger:
         if voice_turn_id:
             message["voice_turn_id"] = voice_turn_id
 
-        await self._append_to_jsonl(message)
+        await self._append_to_jsonl(message, session_id)
 
         # Analyze assistant response for learning
         self._analyze_assistant_response(content)
