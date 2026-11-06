@@ -350,6 +350,55 @@ async def test_profile_change_after_provider_reinit_rolls_back_runtime(
     )
 
 
+@pytest.mark.asyncio
+async def test_acp_close_failure_restores_the_previous_api_runtime(
+    manager, coord, lookup, reinit_calls
+):
+    # #595 review (P2): the API runtime moves to the target before the ACP close.
+    # A failed close must put the previous API runtime back, not only restart ACP.
+    acp_profile = LLMProfile(name="acp-session", provider="acp", model="acp-model")
+    assert manager.add_profile(acp_profile)
+    assert manager.set_active_profile(acp_profile.name, persist=False)
+    previous_api_profile = manager.get_profile(BASE)
+    coord.api_service._profile = previous_api_profile
+    coord._current_provider = None
+
+    started_profiles = []
+
+    async def close_acp():
+        raise RuntimeError("close failed")
+
+    async def start_acp(profile):
+        started_profiles.append(profile)
+        return True
+
+    coord.event_bus = SimpleNamespace(
+        get_service=lambda _name: SimpleNamespace(close=close_acp, start=start_acp)
+    )
+
+    async def reinitialize(profile):
+        reinit_calls.append(profile.model)
+        coord.api_service._profile = profile
+        return True
+
+    coord.api_service.reinitialize_provider = AsyncMock(side_effect=reinitialize)
+
+    with patch(
+        "kollabor.llm.llm_coordinator.create_config_from_profile",
+        side_effect=lambda profile_data: {"model": profile_data["model"]},
+    ):
+        task = await _start_switch(coord, lookup)
+        lookup.release.set()
+        ok = await asyncio.wait_for(task, timeout=5)
+
+    assert ok is False
+    assert manager.get_active_profile() is acp_profile
+    assert coord.api_service._profile is previous_api_profile
+    assert coord._current_provider is None
+    assert reinit_calls == [LOOKUP_RESULT, previous_api_profile.model]
+    assert started_profiles == [acp_profile]
+
+
 
 # --- Profile-scoped OAuth tokens -------------------------------------------
 #
