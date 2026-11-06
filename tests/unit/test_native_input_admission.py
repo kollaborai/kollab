@@ -117,7 +117,11 @@ async def test_native_input_with_room_is_accepted_and_queued_under_its_request_i
     result = await state.send_message("probe", request_id="queue-probe")
 
     assert result == {"accepted": True, "reason": "", "request_id": "queue-probe"}
-    assert processor.processing_queue.get_nowait() == TaggedInput("probe", ("queue-probe",))
+    queued = processor.processing_queue.get_nowait()
+    assert queued.content == "probe"
+    assert queued.request_ids == ("queue-probe",)
+    assert queued.parent_uuid == "parent-2"
+    assert queued.admission_serial == 1
     assert _ended(events, "queue-probe") == []
 
 
