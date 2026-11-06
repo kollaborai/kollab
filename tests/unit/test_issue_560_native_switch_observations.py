@@ -150,6 +150,22 @@ def _llm_service(bus, manager, monkeypatch):
     return service
 
 
+def _history_manager(bus):
+    """A conversation manager stand-in: add_message appends a row and returns its uuid."""
+    manager = SimpleNamespace(messages=[], current_session_id="session")
+
+    def add_message(role, content, metadata=None):
+        message_uuid = f"row-{len(manager.messages)}"
+        manager.messages.append(
+            {"uuid": message_uuid, "role": role, "content": content, "metadata": metadata or {}}
+        )
+        return message_uuid
+
+    manager.add_message = add_message
+    bus.register_service("llm_service", SimpleNamespace(conversation_manager=manager))
+    return manager
+
+
 @pytest.mark.asyncio
 async def test_coordinator_native_switch_starts_one_turn_for_buffered_messages(
     harness, monkeypatch
@@ -217,7 +233,62 @@ async def test_handover_does_not_start_a_turn_for_a_message_whose_row_still_fail
 
     assert _continues(bus) == []
     assert len(orchestrator._unwritten_observations) == 1
-    assert "ACP observation history write failed again" in caplog.text
+    assert "ACP observation history write failed again (OSError)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handover_writes_a_queued_message_whose_arrival_row_failed(
+    harness, monkeypatch
+):
+    """The retry queue holds (row id, entry) pairs; the handover writes each and starts the turn."""
+    bus, orchestrator = harness
+    manager = _history_manager(bus)
+    real_add_message = manager.add_message
+    failures = [OSError(28, "No space left on device")]
+
+    def fails_before_the_row_lands(*args, **kwargs):
+        if failures:
+            raise failures.pop()
+        return real_add_message(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "add_message", fails_before_the_row_lands)
+    _buffer_peer_note(orchestrator)
+    assert manager.messages == []
+    assert len(orchestrator._unwritten_observations) == 1
+
+    await orchestrator.hand_over_to_native()
+
+    assert len(_continues(bus)) == 1
+    assert sum("PEER_NOTE" in m["content"] for m in manager.messages) == 1
+    assert len(orchestrator._unwritten_observations) == 0
+
+
+@pytest.mark.asyncio
+async def test_handover_keeps_the_first_row_when_its_failed_write_had_landed(
+    harness, monkeypatch
+):
+    """A row that landed before its write raised is reused, not appended again (#581)."""
+    bus, orchestrator = harness
+    manager = _history_manager(bus)
+    real_add_message = manager.add_message
+    failures = [OSError(28, "No space left on device")]
+
+    def lands_then_raises(*args, **kwargs):
+        message_uuid = real_add_message(*args, **kwargs)
+        if failures:
+            raise failures.pop()
+        return message_uuid
+
+    monkeypatch.setattr(manager, "add_message", lands_then_raises)
+    _buffer_peer_note(orchestrator)
+    assert len(manager.messages) == 1
+    assert len(orchestrator._unwritten_observations) == 1
+
+    await orchestrator.hand_over_to_native()
+
+    assert len(_continues(bus)) == 1
+    assert sum("PEER_NOTE" in m["content"] for m in manager.messages) == 1
+    assert len(orchestrator._unwritten_observations) == 0
 
 
 class _ProfilesWithUpdate(_ProfileManager):
