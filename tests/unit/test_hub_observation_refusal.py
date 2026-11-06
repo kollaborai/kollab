@@ -182,6 +182,26 @@ async def test_a_refused_message_does_not_repeat_its_receiver_effects_on_retrans
     assert controller.calls == 3
 
 
+@pytest.mark.asyncio
+async def test_a_refused_message_is_not_acknowledged_after_the_acp_session_ends():
+    controller = _RefusingController()
+    hub = _acp_hub(controller)
+    message = HubMessage(
+        action="message", from_agent="peer-id-1", from_identity="peer-1",
+        to="*", content="PEER_OBSERVATION",
+    )
+
+    assert await hub._on_message_received(message) is False
+    # The session ends before the retransmission. Nothing can admit the message,
+    # so the sender must not be told it was delivered.
+    controller.active = False
+    assert await hub._on_message_received(message) is False
+    # A session that admits it later acknowledges it.
+    controller.active = True
+    controller.accept = True
+    assert await hub._on_message_received(message) is not False
+
+
 def _bridge(plugin):
     from plugins.hub.relay_agent import RelayAgentBridge
 
