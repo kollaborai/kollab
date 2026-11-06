@@ -1786,7 +1786,8 @@ class APICommunicationService:
             return True
         else:
             logger.warning(
-                f"Provider reinitialization failed for profile '{profile.name}': {self._provider_error}"
+                "Provider reinitialization failed. "
+                "Use /setup to check configuration."
             )
             return False
 
