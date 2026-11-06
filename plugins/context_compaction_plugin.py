@@ -2439,7 +2439,7 @@ class ContextCompactionPlugin(BasePlugin):
                 operator_records, prior_operator_omissions
             )
         )
-        open_state_candidate = ""
+        open_state_candidate: str | None = None
         for prior_message in history:
             metadata = getattr(prior_message, "metadata", None)
             content = getattr(prior_message, "content", "")
@@ -2449,15 +2449,17 @@ class ContextCompactionPlugin(BasePlugin):
                 and isinstance(content, str)
             ):
                 _, prior_open_state = self._split_open_state(content)
-                if prior_open_state.strip():
+                if prior_open_state is not None:
                     open_state_candidate = prior_open_state
         fallback_summary = self._strip_model_operator_word_blocks(fallback_summary)
         fallback_summary, emergency_open_state = self._split_open_state(
             fallback_summary
         )
-        if emergency_open_state.strip():
+        if emergency_open_state is not None:
             open_state_candidate = emergency_open_state
-        open_state = self._sanitize_open_state(open_state_candidate, history)
+        open_state = self._sanitize_open_state(
+            open_state_candidate or "", history
+        )
 
         next_round = self._compaction_round + 1
         compacted_history = self._build_compacted_history(
@@ -3097,15 +3099,34 @@ class ContextCompactionPlugin(BasePlugin):
         return "\n".join(lines)
 
     @staticmethod
-    def _split_open_state(summary_text: str) -> tuple[str, str]:
-        """Separate a model's optional OPEN STATE candidate from its summary."""
-        start = summary_text.find(OPEN_STATE_MARKER)
-        if start < 0:
-            return summary_text, ""
-        candidate = summary_text[start + len(OPEN_STATE_MARKER) :]
-        candidate = candidate.split(END_OPEN_STATE_MARKER, 1)[0]
-        candidate = candidate.split(OPEN_STATE_MARKER, 1)[0]
-        return summary_text[:start].rstrip(), candidate
+    def _split_open_state(summary_text: str) -> tuple[str, str | None]:
+        """Separate the final full-line OPEN STATE section from its summary.
+
+        ``None`` means no section was present; an empty string is an explicit
+        empty section that may clear an older state.
+        """
+        lines = summary_text.splitlines(keepends=True)
+        marker_indices = [
+            index
+            for index, line in enumerate(lines)
+            if line.rstrip() == OPEN_STATE_MARKER
+        ]
+        if not marker_indices:
+            return summary_text, None
+
+        marker_index = marker_indices[-1]
+        summary_prefix = "".join(lines[:marker_index]).rstrip()
+        candidate_lines = lines[marker_index + 1 :]
+        end_index = next(
+            (
+                index
+                for index, line in enumerate(candidate_lines)
+                if line.rstrip() == END_OPEN_STATE_MARKER
+            ),
+            len(candidate_lines),
+        )
+        candidate = "".join(candidate_lines[:end_index]).strip()
+        return summary_prefix, candidate
 
     @staticmethod
     def _strip_model_operator_word_blocks(summary_text: str) -> str:
@@ -3142,7 +3163,8 @@ class ContextCompactionPlugin(BasePlugin):
                 _, prior_open_state = ContextCompactionPlugin._split_open_state(
                     content
                 )
-                source_text_parts.append(prior_open_state)
+                if prior_open_state is not None:
+                    source_text_parts.append(prior_open_state)
             else:
                 source_text_parts.append(content)
         source_text = "\n".join(source_text_parts)
@@ -3444,7 +3466,7 @@ class ContextCompactionPlugin(BasePlugin):
             summary_text = self._strip_model_operator_word_blocks(summary_text or "")
             summary_text, open_state_candidate = self._split_open_state(summary_text)
             open_state = self._sanitize_open_state(
-                open_state_candidate, history_snapshot
+                open_state_candidate or "", history_snapshot
             )
             compacted = self._build_compacted_history(
                 system_msg,
