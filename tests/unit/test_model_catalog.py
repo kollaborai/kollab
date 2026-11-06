@@ -350,6 +350,42 @@ def test_source_less_v2_catalog_cache_is_a_cold_miss(tmp_path, monkeypatch):
     assert model_catalog.cached_provider_models(profile) == []
 
 
+@pytest.mark.parametrize("missing_field", ["provider", "endpoint_id"])
+def test_v2_catalog_cache_rejects_partial_source_metadata(
+    tmp_path, monkeypatch, missing_field
+):
+    cache_path = tmp_path / "model_catalog.cache"
+    profile = {
+        "name": "local",
+        "provider": "custom",
+        "endpoint": "http://127.0.0.1:9/api/v1/",
+    }
+    current_source = model_catalog._profile_source(profile)
+    partial_source = {
+        field: value
+        for field, value in current_source.items()
+        if field != missing_field
+    }
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": model_catalog.CACHE_VERSION,
+                "entries": {
+                    "local": {
+                        "timestamp": 9999999999,
+                        "models": [{"id": "partial-source-model"}],
+                        **partial_source,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
+
+    assert model_catalog.cached_provider_models(profile) == []
+
+
 def test_sourceful_v2_cache_matches_normalized_endpoint_after_reload(
     tmp_path, monkeypatch
 ):
