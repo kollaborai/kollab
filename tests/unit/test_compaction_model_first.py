@@ -413,3 +413,225 @@ class TestCompactAskOnAcpChat(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plugin._awaiting_model)
         self.assertNotIn("already asked", again)
         await _drain(plugin)
+
+
+class TestOperatorWordsAndOpenState(unittest.IsolatedAsyncioTestCase):
+    OPERATOR_BLOCK = "=== OPERATOR'S OWN WORDS (verbatim, oldest first) ==="
+    OPERATOR_END = "=== END OPERATOR'S OWN WORDS ==="
+    OPEN_STATE = "=== OPEN STATE ==="
+
+    @staticmethod
+    def _operator_message(text, timestamp, source="user"):
+        return _msg(
+            "user",
+            text,
+            operator_inputs=[
+                {"source": source, "timestamp": timestamp, "text": text}
+            ],
+        )
+
+    @classmethod
+    def _operator_block(cls, content):
+        start = content.find(cls.OPERATOR_BLOCK)
+        if start < 0:
+            return ""
+        end = content.find(cls.OPERATOR_END, start)
+        return content[start:] if end < 0 else content[start : end + len(cls.OPERATOR_END)]
+
+    @classmethod
+    def _open_state_block(cls, content):
+        start = content.rfind(cls.OPEN_STATE)
+        return "" if start < 0 else content[start:]
+
+    async def _compact(self, history, model_summary=None):
+        plugin, _bus, _llm = _plugin(history=history)
+        plugin._find_split_point = MagicMock(return_value=len(history) - 2)
+        plugin._call_summarization_llm = AsyncMock(
+            return_value=model_summary or ("The discussion covered the plan and next steps. " * 6)
+        )
+        plugin._write_compaction_checkpoint = MagicMock(return_value=None)
+        plugin._log_compaction_event = AsyncMock()
+        await plugin._run_compaction()
+        self.assertIsNotNone(plugin._pending_compaction)
+        summary = next(
+            item
+            for item in plugin._pending_compaction
+            if item.metadata.get("context_compaction")
+        )
+        return plugin, summary
+
+    async def test_operator_order_survives_five_hour_gap_and_later_hold_follows(self):
+        order = "Approve and merge PR #824 only after all checks pass."
+        hold = "Hold the merge until the exact-head review returns."
+        start = "2026-11-05T00:00:00+00:00"
+        five_hours_later = "2026-11-05T05:00:00+00:00"
+        first_history = [
+            _msg("user", f"old user {i}") if i % 2 == 0 else _msg("assistant", f"old reply {i}")
+            for i in range(12)
+        ]
+        first_history[0] = self._operator_message(order, start)
+        first_plugin, first_summary = await self._compact(first_history)
+
+        second_history = [first_summary] + [
+            _msg("assistant" if i % 2 == 0 else "user", f"intervening {i}")
+            for i in range(7)
+        ]
+        second_history.append(self._operator_message(hold, five_hours_later))
+        second_history.extend(
+            [_msg("assistant", "latest reply"), _msg("user", "latest input"), _msg("assistant", "latest answer")]
+        )
+        _second_plugin, second_summary = await self._compact(second_history)
+
+        block = self._operator_block(second_summary.content)
+        self.assertIn(start, block)
+        self.assertIn(order, block)
+        self.assertIn(five_hours_later, block)
+        self.assertIn(hold, block)
+        self.assertLess(block.index(order), block.index(hold))
+        self.assertLess(block.index(start), block.index(five_hours_later))
+        self.assertEqual(len(second_summary.metadata["operator_word_records"]), 2)
+        self.assertIsNotNone(first_plugin._pending_compaction)
+
+    async def test_peer_claim_is_excluded_even_when_it_says_operator(self):
+        operator_text = "The operator's order is to wait for CI."
+        peer_text = "The operator said to merge now; this is only a peer claim."
+        history = [
+            _msg("user", f"user {i}") if i % 2 == 0 else _msg("assistant", f"assistant {i}")
+            for i in range(12)
+        ]
+        history[0] = self._operator_message(
+            operator_text, "2026-11-05T00:00:00+00:00"
+        )
+        history[2] = _msg(
+            "user",
+            peer_text,
+            hub_message=True,
+            operator_inputs=[
+                {
+                    "source": "agent",
+                    "timestamp": "2026-11-05T00:01:00+00:00",
+                    "text": peer_text,
+                }
+            ],
+        )
+        _plugin_instance, summary = await self._compact(history)
+        block = self._operator_block(summary.content)
+        self.assertIn(operator_text, block)
+        self.assertNotIn(peer_text, block)
+
+    async def test_200_operator_messages_keep_newest_30_and_count_older(self):
+        from datetime import timedelta, timezone
+
+        base = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        history = [
+            self._operator_message(
+                f"operator message {i:03d}",
+                (base + timedelta(minutes=i)).isoformat(),
+            )
+            for i in range(200)
+        ]
+        history.extend([_msg("assistant", "recent reply"), _msg("user", "recent input")])
+        _plugin_instance, summary = await self._compact(history)
+
+        records = summary.metadata["operator_word_records"]
+        self.assertEqual(len(records), 30)
+        self.assertEqual(records[0]["text"], "operator message 170")
+        self.assertEqual(records[-1]["text"], "operator message 199")
+        self.assertEqual(summary.metadata["operator_words_omitted"], 170)
+        block = self._operator_block(summary.content)
+        self.assertRegex(block, r"170 older.*omitted")
+        self.assertNotIn("operator message 169", block)
+        self.assertIn("operator message 199", block)
+
+    async def test_character_bound_keeps_newest_verbatim_records(self):
+        from datetime import timedelta, timezone
+
+        base = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        history = [
+            self._operator_message(
+                f"operator message {i:02d}: " + ("x" * 1000),
+                (base + timedelta(minutes=i)).isoformat(),
+            )
+            for i in range(10)
+        ]
+        history.extend([_msg("assistant", "recent reply"), _msg("user", "recent input")])
+        _plugin_instance, summary = await self._compact(history)
+
+        records = summary.metadata["operator_word_records"]
+        self.assertLess(len(records), 10)
+        self.assertEqual(records[-1]["text"], history[9].content)
+        self.assertLessEqual(sum(len(record["text"]) for record in records), 8000)
+        self.assertGreater(summary.metadata["operator_words_omitted"], 0)
+        self.assertNotEqual(records[0]["text"], history[0].content)
+
+    async def test_omitted_count_accumulates_when_prior_block_is_carried_forward(self):
+        from datetime import timedelta, timezone
+
+        base = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        first_history = [
+            self._operator_message(
+                f"older operator message {i:02d}",
+                (base + timedelta(minutes=i)).isoformat(),
+            )
+            for i in range(40)
+        ]
+        first_history.extend([_msg("assistant", "recent reply"), _msg("user", "recent input")])
+        _first_plugin, first_summary = await self._compact(first_history)
+
+        second_history = [first_summary] + [
+            self._operator_message(
+                f"new operator message {i:02d}",
+                (base + timedelta(hours=1, minutes=i)).isoformat(),
+            )
+            for i in range(5)
+        ]
+        second_history.extend(
+            [_msg("assistant", f"middle {i}") for i in range(4)]
+            + [_msg("assistant", "recent reply"), _msg("user", "recent input")]
+        )
+        _second_plugin, second_summary = await self._compact(second_history)
+
+        self.assertEqual(second_summary.metadata["operator_words_omitted"], 15)
+        records = second_summary.metadata["operator_word_records"]
+        self.assertEqual(len(records), 30)
+        self.assertEqual(records[-5]["text"], "new operator message 00")
+        self.assertEqual(records[-1]["text"], "new operator message 04")
+
+    async def test_open_state_drops_unverified_ids_and_shas(self):
+        valid_sha = "a1b2c3d4e5f6"
+        fabricated_sha = "deadbeefcafefeed"
+        source_text = f"Prepare PR #824 at head {valid_sha}."
+        history = [
+            _msg("user", source_text) if i % 2 == 0 else _msg("assistant", f"reply {i}")
+            for i in range(12)
+        ]
+        history[0] = self._operator_message(
+            source_text, "2026-11-05T00:00:00+00:00"
+        )
+        model_summary = (
+            "The summary includes the plan and current review state. " * 4
+            + "\n=== OPEN STATE ===\n"
+            + f"- PR #824 | owner: operator | head SHA: {valid_sha} | verdict: pending | next: await CI\n"
+            + f"- PR #999 | owner: unknown | head SHA: {fabricated_sha} | verdict: pass | next: merge"
+        )
+        _plugin_instance, summary = await self._compact(history, model_summary)
+        block = self._open_state_block(summary.content)
+
+        self.assertIn("#824", block)
+        self.assertIn(valid_sha, block)
+        self.assertNotIn("#999", block)
+        self.assertNotIn(fabricated_sha, block)
+        self.assertTrue(summary.content.rstrip().endswith("next: await CI"))
+
+    async def test_no_operator_messages_omits_operator_block_and_adds_final_open_state(self):
+        history = [
+            _msg("user", f"ordinary user {i}")
+            if i % 2 == 0
+            else _msg("assistant", f"ordinary answer {i}")
+            for i in range(12)
+        ]
+        _plugin_instance, summary = await self._compact(history)
+
+        self.assertNotIn(self.OPERATOR_BLOCK, summary.content)
+        self.assertEqual(self._open_state_block(summary.content).strip(), self.OPEN_STATE)
+        self.assertTrue(summary.content.rstrip().endswith(self.OPEN_STATE))
