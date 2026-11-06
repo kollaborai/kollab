@@ -48,8 +48,8 @@ jobs:
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
-      # Use a stable hash of sorted test paths; lexical round-robin clustered
-      # the slow network suites on one shard.
+      # Hash test files across the matrix. Split the high-latency network
+      # membership module by test item so one file can't dominate a shard.
       # Keep the two parallel-sensitive tests serial in the support job (#470).
       - name: Run unit test shard
         env:
@@ -68,17 +68,53 @@ jobs:
           shard_count = int(sys.argv[2])
           for path in sys.stdin.buffer:
               path = path.rstrip(b"\n")
+              if path == b"tests/unit/test_network_members.py":
+                  continue
               digest = hashlib.sha256(b"kollab-ci-tests:" + path).digest()
               if int.from_bytes(digest[:4], "big") % shard_count == shard:
                   print(os.fsdecode(path))
           ' "$SHARD" "$SHARD_COUNT")
-          if [ -z "$selected_files" ]; then
-            echo "Unit-test shard $SHARD discovered no test files" >&2
+          test_files=()
+          if [ -n "$selected_files" ]; then
+            mapfile -t test_files <<< "$selected_files"
+          fi
+
+          network_tests=()
+          if [ -f tests/unit/test_network_members.py ]; then
+            selected_network_tests=$(
+              uv run python -m pytest tests/unit/test_network_members.py --collect-only -q |
+                python -c '
+          import hashlib
+          import os
+          import sys
+
+          shard = int(sys.argv[1])
+          shard_count = int(sys.argv[2])
+          prefix = b"tests/unit/test_network_members.py::"
+          for nodeid in sys.stdin.buffer:
+              nodeid = nodeid.rstrip(b"\n")
+              if not nodeid.startswith(prefix):
+                  continue
+              digest = hashlib.sha256(b"kollab-ci-tests:" + nodeid).digest()
+              if int.from_bytes(digest[:4], "big") % shard_count == shard:
+                  print(os.fsdecode(nodeid))
+          ' "$SHARD" "$SHARD_COUNT"
+            )
+            if [ -z "$selected_network_tests" ]; then
+              echo "Network-membership shard $SHARD discovered no test items" >&2
+              exit 1
+            fi
+            mapfile -t network_tests <<< "$selected_network_tests"
+          fi
+
+          test_targets=("${test_files[@]}" "${network_tests[@]}")
+          if [ "${#test_targets[@]}" -eq 0 ]; then
+            echo "Unit-test shard $SHARD discovered no test targets" >&2
             exit 1
           fi
-          mapfile -t test_files <<< "$selected_files"
-          printf 'Shard %s selected %s files\n' "$SHARD" "${#test_files[@]}"
-          uv run python -m pytest "${test_files[@]}" -q -n auto \
+          printf 'Shard %s selected %s files and %s network-membership test items\n' \
+            "$SHARD" "${#test_files[@]}" "${#network_tests[@]}"
+          uv run python -m pytest "${test_targets[@]}" -q -n auto \
             --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle \
             --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
 
