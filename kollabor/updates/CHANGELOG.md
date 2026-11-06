@@ -8,7 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- The `hub_queue` tool accepts optional explicit `upstream_refs` for GitHub issues and PRs; refs are never inferred from task descriptions (#640).
 - PR throughput KPI report (`.github/scripts/pr_throughput_kpi.py`, opt-in via `kpi.enabled`, default off): closed PRs per hour against a target of 3 on 1h, 8h and 24h rolling windows, with supporting open-PR, review, first-push CI and per-author/lane metrics. Missing data is reported as missing, never zero (#729).
 - Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
 - Optional merge bot for maintainers: `.github/workflows/auto-merge.yml` can merge a PR once CI, an independent review of its exact head, approval and resolved conversations all hold. It ships off; `docs/operations/pr-gates-auto-merge.md` has the steps to turn it on (#736).
@@ -17,12 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A definition-of-done check (`pr-gates`) runs configurable hygiene checks on every PR -- docs-path rules, unresolved threads, base currency, Conventional Commit title, linked issue, and regression-test coverage of review finding ids -- and reports every failed item in exactly one check run (default `dod/ready-for-review`), never comments. Every commits, files, and comments page is read and review-thread pagination is followed, so nothing beyond the first page is silently skipped; pagination is bounded and repeat-guarded (identical pages, null or repeated cursors, and runaway loops fail closed with a loud error -- hang never, silently truncate never); base currency is judged by the PR head's merge-base against the target branch tip, so a branch missing commits from main fails. This repository runs it enabled (`pr_gates.dod.enabled = true` in `.github/pr-gates.toml`), with signed-commit validation left out until agent commits are signed (#755); the feature defaults to off elsewhere, and it is usable as a local CLI before pushing (#724).
 
 ### Fixed
-- Hub stale-queue sweeps recheck closed issues and unmerged closed PRs; only
-  merged PRs count as terminal. Completed slots retire; pending slots retire
-  when their linked TaskLedger card is terminal or all explicit GitHub refs are
-  terminal. Assigned slots stay assigned, active linked cards keep their slot
-  status with an idempotent stale-upstream note, and legacy slots without refs
-  or a linked card are report-only (#640).
 - Google API keys in provider errors and logs are now redacted even when the key was not submitted by the user, and every log file (the app's `kollab.log` and the engine's log) now redacts provider keys whichever code wrote the line, including exception tracebacks (#835, #843).
 - Profile setup now reports state-service provider startup failures instead of claiming success, restores the previous profile when possible, and keeps provider secrets out of errors and logs (#832).
 - Voice-turn rewrites now coordinate with transcript appends (the logger's and compaction's summaries and checkpoints) and session snapshots across processes; rows appended after a rewrite reads its cut survive the atomic replacement (#834).
