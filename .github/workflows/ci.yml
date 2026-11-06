@@ -10,6 +10,10 @@ on:
   # A push performed with GITHUB_TOKEN cannot trigger another workflow. The
   # post-auto-merge gate uses this explicit event to run CI against main.
   workflow_dispatch:
+  # The merge queue (#857) tests each queued PR merged onto the latest main, so
+  # the required checks must also report on the queue's merge-group commits.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read

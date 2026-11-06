@@ -898,6 +898,10 @@ marked strict `xfail`) before the fix, and the fix flips it green without
 editing the test; a finding no test can reproduce, such as wording in a doc,
 says so in its fix commit instead. Every merge uses
 `kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
+Merges into `main` go through GitHub's merge queue (#857): `gh pr merge` as
+`kollaborai` (or the merge bot) adds the PR to the queue, which tests it
+merged onto the latest `main` and the PRs queued ahead of it, then makes the
+merge commit. A PR behind `main` needs no update to enter the queue.
 After code-owner enforcement is enabled, `.github/CODEOWNERS` covers every
 path and protects itself; one of `@maarco` or `@kollaborai` must approve. The
 other account approves PRs authored under either account. GitHub enforces the

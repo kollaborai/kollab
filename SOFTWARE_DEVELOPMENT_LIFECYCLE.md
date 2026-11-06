@@ -256,7 +256,11 @@ only with such a verdict on its current head. CI green alone is not
 sufficient: CI plus an independent pinned-head review is the bar.
 
 Every merge uses `kollaborai` and a merge commit. Never use `--admin` or a
-ruleset bypass. If identity, bypass status, current base, required checks, or
+ruleset bypass. Merges into `main` go through GitHub's merge queue (ruleset
+`main protection`): `gh pr merge` adds the PR to the queue, which runs the
+required checks on the PR merged onto the latest `main` and the PRs queued
+ahead of it, then makes the merge commit. A PR that is only behind `main`
+enters the queue as it is; its head, and so its review verdict, does not move. If identity, bypass status, current base, required checks, or
 thread evidence is uncertain, stop. Before an authorized merge, recheck the
 current head, base, checks, conversations, approval, and that auto-merge is not
 armed. Then use a merge commit with a head match:
