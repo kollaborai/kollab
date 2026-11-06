@@ -24,6 +24,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# On an ACP chat these native-only events are refused; ACP input goes through
+# submit_human_input (#579).
+ACP_SUBMIT_REASON = "acp_requires_submit_human_input"
+
 
 class MessageHandler:
     """Handles incoming events and messages for the LLM service.
@@ -309,6 +313,14 @@ class MessageHandler:
         add_to_history = options.get("add_to_history", True)
         display_messages = options.get("display_messages", True)
         trigger_llm = options.get("trigger_llm", False)
+        if trigger_llm and self._acp_owns_chat():
+            # Refuse before any history, log or display write: a native reply
+            # would answer behind the ACP agent's back (#579).
+            self._coordinator.message_display_service.display_error_message(
+                "ACP owns this chat, so these messages were not added and no native "
+                "reply was started. Send them from the chat to reach the ACP agent."
+            )
+            return {"success": False, "error": ACP_SUBMIT_REASON}
         parent_uuid = options.get("parent_uuid", self._coordinator.current_parent_uuid)
 
         coord = self._coordinator
@@ -445,6 +457,15 @@ class MessageHandler:
             logger.info("TRIGGER_LLM_CONTINUE: Pipe mode active, skipping")
             return {"status": "pipe_mode"}
 
+        # ACP owns the chat: a native continuation, now or from a retry, would
+        # answer behind the ACP agent's back. Refuse before scheduling anything (#579).
+        if self._acp_owns_chat():
+            coord.message_display_service.display_error_message(
+                "A message from another agent or a background task was not run natively, "
+                "because ACP owns this chat. Send it from the chat to reach the ACP agent."
+            )
+            return {"status": "rejected", "reason": ACP_SUBMIT_REASON}
+
         # Cooldown (user hit ESC to get a word in) or a half-typed message:
         # wait it out below instead of dropping the wake. A dropped wake left
         # the agent silent for good.
@@ -466,6 +487,11 @@ class MessageHandler:
                 if qp.is_processing:
                     logger.info("Hub continue: a turn is already running, it sees the message")
                     return
+                # The hub wake is a new admitted turn. Its HUD row and all
+                # continuation writes must use a fresh ticket, not whichever
+                # queue turn last populated the shared cursor.
+                turn_serial = coord.claim_turn_serial()
+                coord._continue_serial = turn_serial
                 qp.is_processing = True
                 # Set turn_completed=False so _continue_conversation does not
                 # inject pending_agent_hud as a new user message. Setting True
@@ -503,7 +529,7 @@ class MessageHandler:
                 if isinstance(hud, str) and hud:
                     from kollabor_events.data_models import ConversationMessage
 
-                    coord.current_parent_uuid = coord._add_conversation_message(
+                    hud_uuid = coord._add_conversation_message(
                         ConversationMessage(
                             role="user",
                             content=hud,
@@ -511,6 +537,7 @@ class MessageHandler:
                         ),
                         parent_uuid=coord.current_parent_uuid,
                     )
+                    coord.publish_cursor(hud_uuid, turn_serial)
                 try:
                     await coord._continue_conversation()
                     turn_count = 0
@@ -658,6 +685,14 @@ class MessageHandler:
                             "TRIGGER_LLM_CONTINUE: Retrying after processing completed"
                         )
                         if not coord.is_processing:
+                            if self._acp_owns_chat():
+                                # ACP was selected while this retry waited (#579).
+                                coord.message_display_service.display_error_message(
+                                    "ACP took over this chat while a native reply was waiting, "
+                                    "so that reply was not started. Send your message from the "
+                                    "chat to reach the ACP agent."
+                                )
+                                return
                             coord.create_background_task(
                                 lambda: _hub_continue(),
                                 name="continue_conversation_retry",
@@ -681,6 +716,12 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error in TRIGGER_LLM_CONTINUE handler: {e}")
             return {"status": "error", "error": str(e)}
+
+    def _acp_owns_chat(self) -> bool:
+        """Whether an ACP agent owns this chat: the test process_user_input applies."""
+        coord = self._coordinator
+        selected_acp, _ = coord._profile_selects_acp()
+        return bool(selected_acp or coord._active_acp() is not None)
 
     def _hub_continue_blocked(self) -> str:
         """Why a hub wake must wait right now ("" when it may run)."""
