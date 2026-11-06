@@ -24,9 +24,9 @@ import re
 import secrets
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
+from urllib.parse import urlparse
 
 from ..goal_image_scope import safe_goal_error_cause
-from urllib.parse import urlparse
 
 # Cryptography imports for Tier 2 encrypted file storage
 try:
@@ -854,7 +854,7 @@ class LoggingRedactor:
     Deep recursive redaction of sensitive data from logs.
 
     Redacts:
-    - API keys (sk-*, sk-proj-*, sk-ant-*)
+    - API keys (sk-*, sk-proj-*, sk-ant-*, and Google AIza keys)
     - Bearer tokens
     - Authorization headers
     - API key fields in JSON
@@ -872,6 +872,11 @@ class LoggingRedactor:
         (re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"), "[REDACTED-ANTHROPIC-KEY]"),
         # Bearer tokens
         (re.compile(r"Bearer\s+[a-zA-Z0-9_\-\.]{20,}"), "Bearer [REDACTED]"),
+        # Google API keys are AIza followed by 35 URL-safe characters.
+        (
+            re.compile(r"(?<![\w-])AIza[a-zA-Z0-9_-]{35}(?![\w-])"),
+            "[REDACTED-GOOGLE-API-KEY]",
+        ),
         # Authorization and provider-specific API key headers
         (
             re.compile(
