@@ -21,6 +21,7 @@ from kollabor.goals.service import (
     GoalService,
     TurnOutcome,
 )
+from kollabor.llm.llm_coordinator import LLMService
 from kollabor.state.goal_store import GoalStore
 from kollabor_ai.message_content import EphemeralImageStore
 
@@ -366,6 +367,122 @@ class DriverTests(unittest.TestCase):
         rec = self.store.get(goal_id)
         self.assertEqual(rec.turn_count, 2)  # second turn ran
         self.assertEqual(rec.status, "budget_limited")  # auto limit reached
+
+    def test_human_input_during_goal_hud_logging_keeps_the_human_cursor(self):
+        goal_id = self._create()
+        template = FakeCoordinator()
+        coord = object.__new__(LLMService)
+        coord.profile_manager = template.profile_manager
+        coord.response_parser = template.response_parser
+        coord.tool_executor = template.tool_executor
+        coord.renderer = template.renderer
+        coord._image_store = template._image_store
+        coord.supports_image_input = template.supports_image_input
+        coord.event_bus = SimpleNamespace(get_service=lambda _name: None)
+        coord._queue_processor = FakeQueueProcessor()
+        qp = coord._queue_processor
+        coord._pending_agent_hud = []
+        coord.current_parent_uuid = "parent-before-human"
+        coord._turn_serial = 0
+        coord._cursor_winner_serial = -1
+        coord._continue_serial = None
+
+        hud_log_started = asyncio.Event()
+        release_hud_log = asyncio.Event()
+        goal_serial_at_hud_log: list[int] = []
+        continued_serials: list[int | None] = []
+        enqueued_items: list[Any] = []
+
+        async def log_system_message(_content, **_kwargs):
+            goal_serial_at_hud_log.append(coord._turn_serial)
+            hud_log_started.set()
+            await release_hud_log.wait()
+            return "goal-hud-row"
+
+        async def log_user_message(_content, *, parent_uuid=None):
+            return "human-row"
+
+        async def enqueue(item):
+            enqueued_items.append(item)
+            await qp.processing_queue.put(item)
+            return True
+
+        async def continue_conversation(*, current_parent_uuid):
+            continued_serials.append(coord._continue_serial)
+            return "goal-output"
+
+        qp.enqueue = enqueue
+        qp.continue_conversation = continue_conversation
+        qp.session_stats = {}
+        coord.conversation_logger = SimpleNamespace(
+            log_system_message=log_system_message,
+            log_user_message=log_user_message,
+        )
+        coord.message_display_service = SimpleNamespace(
+            display_user_message=lambda *_args, **_kwargs: None,
+            display_error_message=lambda *_args, **_kwargs: None,
+            display_system_message=lambda *_args, **_kwargs: None,
+        )
+        # Keep the real LLMService continuation path; only the persistence
+        # boundary is stubbed so it can return a deterministic row id.
+        coord._add_conversation_message = lambda *_args, **_kwargs: "goal-hud-row"
+        # The test owns queue draining; record background kicks without racing
+        # an independent fake drain against the gated logger.
+        coord.create_background_task = lambda *_args, **_kwargs: None
+        driver = GoalTurnDriver(self.service, coord)
+
+        async def scenario():
+            goal_task = asyncio.create_task(driver.start(goal_id))
+            try:
+                await asyncio.wait_for(hud_log_started.wait(), timeout=1)
+                result = await coord.process_user_input(
+                    "please handle this first", pre_displayed=True
+                )
+                self.assertEqual(result["status"], "queued")
+                self.assertEqual(coord.current_parent_uuid, "human-row")
+                release_hud_log.set()
+                await asyncio.wait_for(goal_task, timeout=1)
+            finally:
+                release_hud_log.set()
+                if not goal_task.done():
+                    await goal_task
+
+        asyncio.run(scenario())
+
+        self.assertEqual(coord.current_parent_uuid, "human-row")
+        self.assertEqual(goal_serial_at_hud_log, [1])
+        self.assertEqual([item.admission_serial for item in enqueued_items], [2])
+        self.assertEqual(continued_serials, [])
+        self.assertEqual(len(coord._pending_agent_hud), 1)
+        self.assertEqual(qp.processing_queue.qsize(), 1)
+        self.assertEqual(self.store.get(goal_id).status, "active")
+        self.assertIn(goal_id, driver._yielded_goals)
+
+    def test_settle_while_goal_is_running_is_replayed_after_it_exits(self):
+        goal_id = self._create()
+        driver, coord = self._make_driver()
+        scheduled = []
+        coord.create_background_task = lambda coro, name=None: scheduled.append(
+            (coro, name)
+        )
+
+        async def drive(_goal_id):
+            driver._yielded_goals.add(goal_id)
+            # Models the queue's on_turn_settled callback while start() still
+            # owns the running-goal guard.
+            driver.wake_yielded()
+
+        driver._drive = drive
+        asyncio.run(driver.start(goal_id))
+        try:
+            self.assertEqual(
+                [name for _coro, name in scheduled],
+                [f"goal_driver_{goal_id[:8]}"],
+            )
+        finally:
+            for coro, _name in scheduled:
+                coro.close()
+
 
     def test_usage_flows_from_session_stats_to_tokens_used(self):
         """Bug: finish_turn got no usage, tokens_used stayed NULL, the
