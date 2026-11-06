@@ -53,8 +53,8 @@ CI. A head moved only by merging `main` keeps its verdict only when an independe
 reviewer posts an addendum pinned to the new head and base, confirming the PR's own
 diff is unchanged apart from changelog lines and that nothing merged from `main`
 touches what the PR changes or relies on. All merges use `kollaborai` only, as merge commits; never use `--admin` or a
-ruleset bypass. Merges into `main` go through GitHub's merge queue: `gh pr merge` adds the PR to the queue, which
-tests it on the latest `main` and makes the merge commit. Verify that identity cannot bypass applicable protection and
+ruleset bypass. GitHub's merge queue needs an organization-owned repo, so it is not on yet (#857); a PR behind `main`
+merges `main` into its branch before it lands. Verify that identity cannot bypass applicable protection and
 stop if identity, bypass status, or gate evidence is uncertain. An emergency
 ruleset change requires separate explicit authorization. Writers never review
 their own changes.
