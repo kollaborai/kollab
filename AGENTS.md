@@ -32,7 +32,9 @@ Before creating a lane, inspect repository status and all worktrees, verify the
 new path and branch do not exist, fetch the intended base, and record its SHA.
 Avoid concurrent writers to the same paths.
 
-Source work lands through a DRAFT PR from the owning worktree. Keep commits
+Source work lands through a DRAFT PR from the owning worktree. A PR's changelog
+entry is its own file, `changes/<issue>.<section>.md`; only release PRs edit
+`CHANGELOG.md` (see `changes/README.md`). Keep commits
 scoped to owned paths, use Conventional Commits, and require independent review
 and all configured checks on the exact PR head against current `main`. Update
 a PR branch with ordinary merges; never rebase or force-push. Marco authorizes
