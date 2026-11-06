@@ -72,6 +72,8 @@ class TaggedInput:
     # mutable ``current_parent_uuid`` pointer a detached completion (hub
     # mention, voice reply) may advance while the input sits queued.
     parent_uuid: str | None = None
+    # Authenticated operator words carried to the resulting history message.
+    operator_inputs: tuple[dict[str, str], ...] = ()
 
 
 def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
@@ -96,6 +98,8 @@ class QueuedInput:
     # Chain position frozen at admission (#676); see TaggedInput.parent_uuid.
     # Nudges leave it None and keep the pointer fallback.
     parent_uuid: str | None = None
+    # Authenticated operator words carried to the resulting history message.
+    operator_inputs: tuple[dict[str, str], ...] = ()
 
 
 _UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")
@@ -1397,6 +1401,26 @@ class QueueProcessor:
             approvals = getattr(self.tool_executor, "yes_approvals", None)
             if isinstance(approvals, YesApprovals) and (note := approvals.take_note()):
                 metadata["injected_context"] = note  # what the user's yes approved, model-only
+
+            # Operator provenance was authenticated at the coordinator's input
+            # boundary. Copy it through the batch without interpreting content.
+            operator_inputs = [
+                {
+                    "source": record["source"],
+                    "timestamp": record["timestamp"],
+                    "text": record["text"],
+                }
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for record in item.operator_inputs
+                if isinstance(record, dict)
+                and all(
+                    isinstance(record.get(field), str)
+                    for field in ("source", "timestamp", "text")
+                )
+            ]
+            if operator_inputs:
+                metadata["operator_inputs"] = operator_inputs
 
             # Add user message to conversation history
             self._add_message_fn(

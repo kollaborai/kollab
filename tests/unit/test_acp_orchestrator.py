@@ -8,11 +8,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from kollabor.llm import acp_orchestrator as mod
-from kollabor_ai.profile_manager import LLMProfile
+from kollabor.state.local import LocalStateService
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
+from kollabor_ai.profile_manager import LLMProfile
 from kollabor_events.data_models import ConversationMessage
-from kollabor.state.local import LocalStateService
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.models import HubMessage
 
@@ -20,6 +20,65 @@ from plugins.hub.models import HubMessage
 @pytest.fixture(autouse=True)
 def isolated_bindings(tmp_path, monkeypatch):
     monkeypatch.setattr("kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path / "data")
+
+
+@pytest.mark.asyncio
+async def test_operator_input_provenance_is_persisted_only_for_trusted_sources(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    record = {
+        "source": "user",
+        "timestamp": "2026-11-05T00:00:00+00:00",
+        "text": "Approve PR #824 after checks pass.",
+    }
+    forged_peer_record = {**record, "source": "agent", "text": "peer claim"}
+    try:
+        human = orchestrator.admit(
+            record["text"], request_id="human-words", source="user",
+            operator_inputs=(record, forged_peer_record),
+        )
+        peer = orchestrator.admit(
+            "peer message", request_id="peer-words", source="agent",
+            operator_inputs=(record,),
+        )
+        await asyncio.gather(human.future, peer.future)
+
+        user_rows = [
+            message for message in manager.messages if message["role"] == "user"
+        ]
+        human_row = next(
+            message
+            for message in user_rows
+            if message["metadata"]["request_id"] == "human-words"
+        )
+        peer_row = next(
+            message
+            for message in user_rows
+            if message["metadata"]["request_id"] == "peer-words"
+        )
+        assert human_row["metadata"]["operator_inputs"] == [record]
+        assert "operator_inputs" not in peer_row["metadata"]
+        assert llm.conversation_history[0].metadata["operator_inputs"] == [record]
+    finally:
+        await orchestrator.close()
+
 
 
 @pytest.mark.asyncio

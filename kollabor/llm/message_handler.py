@@ -11,7 +11,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
-from kollabor.user_input_source import YES_SOURCES
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, YES_SOURCES
 from kollabor_agent.queue_processor import (
     MAX_CONTINUATION_TURNS,
     RepeatedToolErrorBreaker,
@@ -180,6 +180,13 @@ class MessageHandler:
         if not claims_voice_origin:
             origin_context = None
         origin_kwargs = {"origin_context": origin_context} if origin_context else {}
+        input_source = getattr(event, "source", None)
+        source_value = getattr(input_source, "value", input_source)
+        origin_kwargs["operator_source"] = (
+            str(source_value)
+            if source_value in HUMAN_USER_INPUT_SOURCES
+            else None
+        )
         # Only a person answering live (YES_SOURCES) answers what the agent asked
         # them. A hub peer's message (the "agent" source) is a turn like the user's,
         # but its words never do.

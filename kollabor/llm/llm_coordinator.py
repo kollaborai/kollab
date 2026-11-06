@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, cast
 
-from kollabor.user_input_source import UserInputSource
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, UserInputSource
 from kollabor_agent import BackgroundTaskManager, NativeToolsHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.mcp_integration import MCPIntegration
@@ -39,6 +39,7 @@ from kollabor_ai import (
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.context_injection import ContextService as ContextInjectionService
 from kollabor_ai.context_service import ContextService
+from kollabor_ai.conversation_logger import utc_stamp
 from kollabor_ai.goal_image_scope import current_goal_image_scope
 from kollabor_ai.message_content import (
     EphemeralImageStore,
@@ -1798,22 +1799,37 @@ class LLMService:
         )
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
+            operator_inputs = tuple(
+                record
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for record in item.operator_inputs
+            )
             merged_origin_context = merge_voice_origin_contexts(messages)
             combined = combine_message_contents(
                 [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
             combined = self.merge_pending_agent_hud(combined)
-            messages = [
-                QueuedInput(
+            if voice_inputs:
+                merged_input = QueuedInput(
                     combined,
                     voice_inputs[-1].voice,
                     merged_origin_context,
                     parent_uuid=admission_parent,
                     admission_serial=batch_serial,
+                    operator_inputs=operator_inputs,
                 )
-                if voice_inputs
-                else combined
-            ]
+            elif operator_inputs:
+                merged_input = TaggedInput(
+                    combined,
+                    request_ids,
+                    parent_uuid=admission_parent,
+                    admission_serial=batch_serial,
+                    operator_inputs=operator_inputs,
+                )
+            else:
+                merged_input = combined
+            messages = [merged_input]
         # Parent from the admission-time capture, not the pointer: a detached
         # completion (hub mention, voice reply) may have advanced the pointer
         # while this batch sat queued (#676). Items without a capture (system
@@ -2039,6 +2055,7 @@ class LLMService:
         may_answer: bool = False,
         native_only: bool = False,
         request_id: str | None = None,
+        operator_source: str | None = None,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -2057,6 +2074,8 @@ class LLMService:
                 generation writes files); refused while ACP owns the chat.
             request_id: the client follows this turn by it (#551): its events
                 carry it in ``request_ids``, and the result echoes it.
+            operator_source: authenticated source of words spoken/written by the
+                human operator. Untrusted or absent sources are not preserved.
 
         Returns:
             Status information about processing
@@ -2088,6 +2107,20 @@ class LLMService:
                 "reason": self.image_input_rejection_reason(),
             }
 
+        input_source = getattr(operator_source, "value", operator_source)
+        operator_inputs: tuple[dict[str, str], ...] = ()
+        if (
+            isinstance(input_source, str)
+            and input_source in HUMAN_USER_INPUT_SOURCES
+        ):
+            operator_inputs = (
+                {
+                    "source": input_source,
+                    "timestamp": utc_stamp(),
+                    "text": message if isinstance(message, str) else display_text,
+                },
+            )
+
         # A LiveKit room's turn, or a /voice turn VoicePlugin.admit let in.
         claims_voice_origin = isinstance(origin_context, dict) and is_voice_origin(origin_context)
         if claims_voice_origin and not validate_voice_origin(origin_context):
@@ -2103,8 +2136,13 @@ class LLMService:
                 return _acp_unavailable_result(self._acp_service())
             return await self._admit_acp(
                 acp,
-                {"message": normalized_message, "voice": voice, "origin_context": origin_context},
-                UserInputSource.TUI.value,
+                {
+                    "message": normalized_message,
+                    "voice": voice,
+                    "origin_context": origin_context,
+                    "operator_inputs": operator_inputs,
+                },
+                input_source if operator_inputs else UserInputSource.TUI.value,
             )
 
         trusted_origin_context = (
@@ -2192,6 +2230,7 @@ class LLMService:
                     trusted_origin_context,
                     parent_uuid=admitted_parent_uuid,
                     admission_serial=turn_serial,
+                    operator_inputs=operator_inputs,
                 )
                 if voice or trusted_origin_context
                 else TaggedInput(
@@ -2199,6 +2238,7 @@ class LLMService:
                     (request_id,) if request_id else (),
                     parent_uuid=admitted_parent_uuid,
                     admission_serial=turn_serial,
+                    operator_inputs=operator_inputs,
                 )
             )
         except RuntimeError:
@@ -2482,6 +2522,11 @@ class LLMService:
                 message, request_id=request_id, source=source,
                 thread_id=data.get("thread_id"),
                 origin=origin,
+                **(
+                    {"operator_inputs": data["operator_inputs"]}
+                    if data.get("operator_inputs")
+                    else {}
+                ),
                 **({"images": images} if images else {}),
             )
         except (RuntimeError, ValueError) as exc:

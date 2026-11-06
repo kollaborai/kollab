@@ -845,6 +845,23 @@ class TestQueueProcessor(unittest.TestCase):
         self.loop.run_until_complete(self.processor.process_message_batch(["Typed input"], "parent"))
         self.assertIsNone(self.processor.active_voice)
 
+    def test_operator_input_provenance_survives_queue_batch(self):
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent")
+        record = {
+            "source": "user",
+            "timestamp": "2026-11-05T00:00:00+00:00",
+            "text": "Approve PR #824 after checks pass.",
+        }
+        queued = QueuedInput("Approve PR #824 after checks pass.", {}, operator_inputs=(record,))
+
+        self.loop.run_until_complete(
+            self.processor.process_message_batch([queued], "parent")
+        )
+
+        user_message = self.add_message_fn.call_args.args[0]
+        self.assertEqual(user_message.metadata["operator_inputs"], [record])
+
+
     def test_the_users_yes_tells_the_model_what_it_approved(self):
         """The note rides on the yes itself, model-only, once."""
         from kollabor_agent.yes_approval import YesApprovals
