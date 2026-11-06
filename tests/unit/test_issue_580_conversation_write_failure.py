@@ -223,7 +223,8 @@ def test_message_handler_batch_continues_past_a_failed_history_write():
 
     result = asyncio.run(handler.handle_add_message(data, MagicMock()))
 
-    assert result["success"] is True
+    # The batch keeps going, but a message that never reached history is not success.
+    assert result["success"] is False
     assert result["message_count"] == 2
     assert result["parent_uuid"] == "second-uuid"
     assert coord.conversation_logger.log_user_message.await_count == 2
