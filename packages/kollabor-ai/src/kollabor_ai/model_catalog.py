@@ -119,13 +119,14 @@ def _profile_source(profile: Any) -> Dict[str, str]:
 
 
 def _same_source(entry: Dict[str, Any], profile: Any) -> bool:
-    """Whether a cache entry was fetched from this profile's provider/endpoint.
+    """Whether the complete recorded source matches this profile.
 
-    An entry with no recorded source (hand-written) is taken as a match.
+    Legacy entries without both provider and endpoint metadata are cold misses:
+    their models cannot be attributed to the profile's current source.
     """
     source = _profile_source(profile)
-    for field in ("provider", "endpoint_id"):
-        if field in entry and str(entry[field] or "") != source[field]:
+    for field, expected in source.items():
+        if field not in entry or str(entry[field] or "") != expected:
             return False
     return True
 

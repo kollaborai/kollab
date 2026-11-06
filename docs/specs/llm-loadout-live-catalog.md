@@ -194,12 +194,14 @@ supplement to the registry (#558):
 - a catalog is authoritative only when complete: the Anthropic fetcher reads
   every `/v1/models` page and returns empty, never partial, if it cannot
 - a catalog belongs to the provider and endpoint it was fetched from: each
-  cache entry records the provider and a SHA-256 fingerprint of the endpoint
-  (never the endpoint itself, which can carry a password, key or path token),
-  and an entry that does not match the profile's current provider and endpoint
-  is ignored. The cache key is the profile name,
-  and an edit keeps the name, so the old provider's catalog would otherwise
-  stay the new provider's list. An entry with no recorded source is a match
+  cache entry records the provider and a SHA-256 fingerprint of the normalized
+  endpoint (never the endpoint itself, which can carry a password, key or path
+  token), and both source fields must be present and match the profile's current
+  provider and endpoint. Source-less or partial legacy v2 entries are cold
+  misses and are never served, including as stale fallback; refresh queries the
+  profile's current source before storing new results. The cache key is the
+  profile name, and an edit keeps the name, so the old provider's catalog would
+  otherwise stay the new provider's list
 - existing dedup rule unchanged: explicit shadows implicit, first provider
   profile wins on name collision
 
