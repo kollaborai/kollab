@@ -166,6 +166,27 @@ def _history_manager(bus):
     return manager
 
 
+def _script_writes(manager, monkeypatch, outcomes):
+    """Each history write takes the next outcome, then appends normally.
+
+    fails_before_append: the write raises and no row lands. lands_then_raises: the
+    row is appended, then the write raises (an autosave failure).
+    """
+    real_add_message = manager.add_message
+    pending = list(outcomes)
+
+    def add_message(*args, **kwargs):
+        outcome = pending.pop(0) if pending else "appends"
+        if outcome == "fails_before_append":
+            raise OSError(28, "No space left on device")
+        message_uuid = real_add_message(*args, **kwargs)
+        if outcome == "lands_then_raises":
+            raise OSError(28, "No space left on device")
+        return message_uuid
+
+    monkeypatch.setattr(manager, "add_message", add_message)
+
+
 @pytest.mark.asyncio
 async def test_coordinator_native_switch_starts_one_turn_for_buffered_messages(
     harness, monkeypatch
@@ -288,6 +309,43 @@ async def test_handover_keeps_the_first_row_when_its_failed_write_had_landed(
 
     assert len(_continues(bus)) == 1
     assert sum("PEER_NOTE" in m["content"] for m in manager.messages) == 1
+    assert len(orchestrator._unwritten_observations) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_batch_that_landed_before_its_write_raised_is_not_written_again(
+    harness, monkeypatch
+):
+    """The arrival and its handover retry fail before append; the fallback batch lands, then raises."""
+    bus, orchestrator = harness
+    manager = _history_manager(bus)
+    _script_writes(
+        manager, monkeypatch, ["fails_before_append", "fails_before_append", "lands_then_raises"]
+    )
+    _buffer_peer_note(orchestrator)
+
+    await orchestrator.hand_over_to_native()
+    await orchestrator.hand_over_to_native()  # a later retry must find nothing to write
+
+    assert sum("PEER_NOTE" in m["content"] for m in manager.messages) == 1
+    assert len(_continues(bus)) == 1
+    assert len(orchestrator._unwritten_observations) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_handover_retry_that_landed_before_its_write_raised_is_not_written_again(
+    harness, monkeypatch
+):
+    """The arrival fails before append; the handover's retry lands, then raises."""
+    bus, orchestrator = harness
+    manager = _history_manager(bus)
+    _script_writes(manager, monkeypatch, ["fails_before_append", "lands_then_raises"])
+    _buffer_peer_note(orchestrator)
+
+    await orchestrator.hand_over_to_native()
+
+    assert sum("PEER_NOTE" in m["content"] for m in manager.messages) == 1
+    assert len(_continues(bus)) == 1
     assert len(orchestrator._unwritten_observations) == 0
 
 
