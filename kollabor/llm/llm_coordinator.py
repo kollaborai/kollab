@@ -1808,6 +1808,18 @@ class LLMService:
 
                 self.conversation_logger.set_provider(profile.provider)
 
+                if acp_orchestrator is not None:
+                    # Peer messages the closed harness still held are in the
+                    # conversation; one native turn answers them.
+                    try:
+                        await acp_orchestrator.hand_over_to_native()
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not hand buffered ACP messages to profile %r (%s)",
+                            profile_name,
+                            type(exc).__name__,
+                        )
+
                 # Keep this explicit class call compatible with the focused
                 # unbound-method test stand-in used for switch_profile.
                 await LLMService._announce_hub_model_switch(
