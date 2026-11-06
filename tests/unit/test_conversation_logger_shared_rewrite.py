@@ -252,3 +252,23 @@ async def test_short_sidecar_write_rollback_preserves_prior_rewrite_mapping(
     by_uuid = {r["uuid"]: r for r in _records(first.session_file) if r.get("uuid")}
     assert by_uuid[child]["parentUuid"] == root
     assert target in by_uuid  # the refused swap left the transcript unchanged
+
+
+async def test_explicit_historical_append_threads_past_that_sessions_cut(tmp_path):
+    logger, _ = _same_session(tmp_path)
+    original_session_id = logger.session_id
+    original_session_file = logger.session_file
+    root, dropped = await _voice_turn_cut(logger)
+
+    logger.reset_session("resumed-b")
+    child = await logger.log_assistant_message(
+        "late reply", dropped, session_id=original_session_id
+    )
+
+    by_uuid = {
+        record["uuid"]: record
+        for record in _records(original_session_file)
+        if record.get("uuid")
+    }
+    assert dropped not in by_uuid
+    assert by_uuid[child]["parentUuid"] == root

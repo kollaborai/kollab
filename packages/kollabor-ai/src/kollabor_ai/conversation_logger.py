@@ -208,6 +208,8 @@ class KollaborConversationLogger:
         """
         self.session_id = new_session_id
         self.session_file = self.conversations_dir / f"{new_session_id}.jsonl"
+        self._reparent = {}
+        self._reparent_seen = None
         self.message_count = 0
         self.conversation_start_time = datetime.now()
         self.current_thread_uuid = None
@@ -312,42 +314,54 @@ class KollaborConversationLogger:
         """Get current working directory."""
         return str(Path.cwd())
 
-    def _reparent_path(self) -> Path:
-        """Where cuts of this session file are shared with its other writers.
+    def _reparent_path(self, session_file: Optional[Path] = None) -> Path:
+        """Where cuts of a session file are shared with its other writers.
 
         Named so that no session glob (`session_*.json[l]`, `<id>*.jsonl`) matches it.
         """
-        return Path(self.session_file).with_suffix(".reparent")
+        target = self.session_file if session_file is None else session_file
+        return Path(target).with_suffix(".reparent")
 
-    def _reparent_lock_path(self) -> Path:
+    def _reparent_lock_path(self, session_file: Optional[Path] = None) -> Path:
         """Stable lock path for a sidecar that is replaced atomically."""
-        path = self._reparent_path()
+        path = self._reparent_path(session_file)
         return path.with_name(f".{path.name}.lock")
 
-    def _read_reparent(self) -> None:
-        """Take the cuts other loggers (or processes) share as `_reparent`.
+    def _read_reparent(self, session_file: Optional[Path] = None) -> Dict[str, Any]:
+        """Read the parent cuts for the selected session file.
 
-        Replaces it, so a cut that was taken back (a failed swap) is forgotten too.
-        Readers and writers share a separate stable lock because the sidecar
-        itself is replaced atomically.
+        The current session caches its map until the sidecar changes. An explicit
+        historical-session append reads that file's sidecar without replacing the
+        current session's in-memory map.
         """
-        path = self._reparent_path()
+        target = Path(self.session_file if session_file is None else session_file)
+        path = self._reparent_path(target)
+        if target != Path(self.session_file):
+            try:
+                with locked_file(self._reparent_lock_path(target), "a+", private=True):
+                    with locked_file(path, "r", private=True) as f:
+                        shared = json.load(f)
+            except (OSError, ValueError):
+                return {}
+            return shared if isinstance(shared, dict) else {}
+
         try:
-            with locked_file(self._reparent_lock_path(), "a+", private=True):
+            with locked_file(self._reparent_lock_path(target), "a+", private=True):
                 try:
                     info = path.stat()
                     signature = (info.st_mtime_ns, info.st_size)
                     if signature == self._reparent_seen:
-                        return
+                        return self._reparent
                     with locked_file(path, "r", private=True) as f:
                         shared = json.load(f)
                 except (OSError, ValueError):
-                    return  # none yet, or unreadable: the next append looks again
+                    return self._reparent  # none yet, or unreadable: retry next append
         except OSError:
-            return
+            return self._reparent
         if isinstance(shared, dict):
             self._reparent = shared
             self._reparent_seen = signature
+        return self._reparent
 
     def _edit_reparent(self, add: Dict[str, Any], remove: Any = ()) -> None:
         """Atomically add cuts to the shared file, or take some back.
@@ -398,18 +412,22 @@ class KollaborConversationLogger:
                     )
                 raise
 
-    async def _append_to_jsonl(self, message: Dict[str, Any]):
-        """Append message to JSONL file."""
-        # Bind this append to the session its caller captured (the row's
-        # sessionId was stamped from self.session_id at call time).
-        # reset_session takes no lock and rewrite_voice_turn holds the lock
-        # across a to_thread, so an append queued behind a rewrite can wake
-        # up after the session was replaced: opening whatever session_file
-        # points at THEN would write the old-session row into the new
-        # session's file. Validate inside the lock, before opening anything.
+    async def _append_to_jsonl(
+        self, message: Dict[str, Any], session_id: Optional[str] = None
+    ):
+        """Append to the current or explicitly named conversation JSONL."""
+        own = session_id is None or session_id == self.session_id
+        path = (
+            self.session_file
+            if own
+            else self.conversations_dir / f"{session_id}.jsonl"
+        )
+        # Current-session rows are bound at call time. A reset while an append waits
+        # on the lock must not redirect that row; explicit old-session ACP results
+        # instead use the path selected from their session_id above.
         bound_file = self.session_file
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
-            if self.session_file != bound_file:
+            if own and self.session_file != bound_file:
                 # The session was replaced while this append waited. The row
                 # belongs to the captured session only — drop it rather than
                 # corrupt the replaced session's transcript.
@@ -420,23 +438,24 @@ class KollaborConversationLogger:
                     bound_file.name,
                 )
                 return
-            self._read_reparent()  # cuts by other loggers of this session file
+            reparent = self._read_reparent(path)  # cuts for the destination session
             parent = message.get("parentUuid")
             seen = set()
-            while parent in self._reparent and parent not in seen:  # a cut dropped it
+            while parent in reparent and parent not in seen:  # a cut dropped it
                 seen.add(parent)
-                parent = self._reparent[parent]
+                parent = reparent[parent]
             if "parentUuid" in message:
                 message["parentUuid"] = parent
             try:
                 fd = os.open(
-                    self.session_file,
+                    path,
                     os.O_WRONLY | os.O_CREAT | os.O_APPEND,
                     0o600,
                 )
                 with os.fdopen(fd, "a") as f:
                     f.write(json.dumps(message) + "\n")
-                self.message_count += 1
+                if own:
+                    self.message_count += 1
             except Exception as e:
                 logger.error(f"Failed to write to JSONL: {e}")
 
@@ -720,6 +739,7 @@ class KollaborConversationLogger:
         provider_reasoning: Optional[Dict[str, Any]] = None,
         display_metadata: Optional[Dict[str, Any]] = None,
         voice_turn_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         """Log assistant response with usage statistics.
 
@@ -736,6 +756,9 @@ class KollaborConversationLogger:
                 excluded from native provider tool-call reconstruction
             voice_turn_id: The voice turn a reply belongs to, so a talk-over
                 can cut it here too (rewrite_voice_turn)
+            session_id: The session this reply belongs to when it is not the
+                logger's current one (a turn that finished after another
+                conversation was resumed); its own log gets the record
         """
         message_uuid = str(uuid4())
 
@@ -765,7 +788,7 @@ class KollaborConversationLogger:
             "isSidechain": False,
             "userType": "external",
             "cwd": self._get_working_directory(),
-            "sessionId": self.session_id,
+            "sessionId": session_id or self.session_id,
             "version": (
                 self.app_version
                 if self.app_version != "unknown"
@@ -806,7 +829,7 @@ class KollaborConversationLogger:
         if voice_turn_id:
             message["voice_turn_id"] = voice_turn_id
 
-        await self._append_to_jsonl(message)
+        await self._append_to_jsonl(message, session_id)
 
         # Analyze assistant response for learning
         self._analyze_assistant_response(content)
