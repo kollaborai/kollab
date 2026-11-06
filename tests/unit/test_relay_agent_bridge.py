@@ -1353,6 +1353,81 @@ async def test_refused_answer_stays_queued_until_the_receiver_accepts_it(
 
 
 @pytest.mark.asyncio
+async def test_a_later_answer_waits_behind_a_refused_earlier_answer(
+    bridges, monkeypatch
+):
+    # ACP refused the first answer (#581), so it stays queued and first in line.
+    # A later answer must not overtake it on its own wake: _tick offers the queue
+    # in order, and the wake path has to keep that order.
+    members, _ = bridges
+    (left, left_hub, _, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+
+    async def ask(content):
+        asked = await in_turn(
+            right_model,
+            right_hub._handle_hub_msg_tool(
+                {
+                    "id": "question",
+                    "to": right.active.record["payload"]["from"],
+                    "kind": "question",
+                    "content": content,
+                }
+            ),
+        )
+        return asked.metadata["relay_receipt"]["id"]
+
+    first_question = await ask("Which existing directory should I use?")
+
+    offered = []
+    refusing = [True]
+
+    async def receive(message):
+        offered.append(message.id)
+        return False if refusing[0] else None
+
+    monkeypatch.setattr(right_hub, "_on_message_received", receive)
+
+    async def answer(question_id, content):
+        answered = await left_hub._handle_hub_msg_tool(
+            {
+                "id": "answer",
+                "to": left.store.event(question_id)["payload"]["from"],
+                "kind": "answer",
+                "thread_id": task_id,
+                "reply_to": question_id,
+                "content": content,
+            }
+        )
+        assert answered.success, answered.error
+        return answered.metadata["relay_receipt"]["id"]
+
+    first_id = await answer(first_question, "Use the workspace root.")
+    assert offered == [first_id]
+    assert right.store.event(first_id)["state"] == "queued"
+    assert right.active.waiting_answer
+
+    # The first answer is refused and stays queued. A second question on the thread
+    # then gets its own answer, which must wait behind the first answer.
+    second_question = await ask("Which file name should I use?")
+    refusing[0] = False
+    second_id = await answer(second_question, "Use the second name.")
+    assert offered == [first_id]
+    assert right.store.event(second_id)["state"] == "queued"
+    assert right.store.task(task_id)["state"] == "waiting_answer"
+
+    # Offering the queue head delivers the first answer; the second stays queued.
+    await right._rpc_event({"id": first_id})
+    assert offered == [first_id, first_id]
+    assert right.store.event(first_id)["state"] == "consumed"
+    assert right.store.task(task_id)["state"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_a_relay_task_that_stops_while_waiting_clears_its_wait(
     bridges, monkeypatch
 ):
