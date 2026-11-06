@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - A conversation history write that fails is no longer reported as saved: the logger raises instead of returning a message id, a partly written record is rolled back so later records stay intact, and the agent logs the failure and keeps going (#580)
+- A hub message sent from the Web UI now goes to the agent whose row was selected: the message carries the row's agent id, so a same-named agent in another folder no longer receives it, and a message to an agent that has gone is refused instead of redirected (#568).
+- Dreaming no longer stalls the agent's event loop while it saves insights or loads the vault: the saves run in a worker thread, the vault loads at startup, and shutdown waits for a save still in progress (#562)
+- Resuming a network halt no longer fails on Windows when another process is reading the halt file at that moment: the write waits briefly for the reader, and if it still cannot replace the file it reports the error and leaves the halt in place (#573).
 - When an ACP agent is the active backend, hub wakes and injected messages no longer start a native reply behind it; they show an error instead, `/compact` no longer asks the model on an ACP chat, and a finished `/sub` agent's summary is shown to you instead of being written into native history behind the ACP agent (#579).
 - A voice turn no longer puts the old provider back over a model or profile you chose while it was running; it restores chat's provider only if the turn still holds the active one (#584).
 - Web hub mentions (@agent and @broadcast) now persist to the session JSONL like addressed LLM turns, so wake and broadcast turns survive resume and reload instead of vanishing on reload (#672).
