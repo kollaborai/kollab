@@ -277,8 +277,8 @@ class EngineAPI {
     return this.get(`/hub/agents/${agentId}/status`);
   }
 
-  async hubSendMessage(target, content, fromIdentity = 'webui') {
-    return this.post('/hub/messages', { target, content, from_identity: fromIdentity });
+  async hubSendMessage(target, content, fromIdentity = 'webui', agentId = null) {
+    return this.post('/hub/messages', { target, content, from_identity: fromIdentity, agent_id: agentId });
   }
 }
 
@@ -1797,7 +1797,7 @@ class TerminalManager {
             ${a.current_task ? `<span class="hub-agent-task" style="color: var(--text-dim); font-size: 11px; display: block; margin-top: 2px;">${a.current_task}</span>` : ''}
           </div>
           <div class="hub-agent-actions">
-            <button class="btn btn-small" data-action="msg" data-identity="${a.identity || a.agent_id}">MSG</button>
+            <button class="btn btn-small" data-action="msg" data-identity="${a.identity || a.agent_id}" data-id="${a.agent_id}">MSG</button>
             <button class="btn btn-small" data-action="status" data-id="${a.agent_id}">STATUS</button>
           </div>
         </div>
@@ -1833,7 +1833,7 @@ class TerminalManager {
         const action = btn.dataset.action;
         if (action === 'msg') {
           const identity = btn.dataset.identity;
-          this.showHubSendModal(identity);
+          this.showHubSendModal(identity, btn.dataset.id);
         } else if (action === 'status') {
           const agentId = btn.dataset.id;
           this.showHubStatusModal(agentId);
@@ -1845,7 +1845,7 @@ class TerminalManager {
     }
   }
 
-  showHubSendModal(target) {
+  showHubSendModal(target, agentId = null) {
     const isAll = target === '*';
     const label = isAll ? 'all agents (broadcast)' : target;
     this.openModal(`Send to ${label}`, `
@@ -1874,7 +1874,7 @@ class TerminalManager {
       if (!content) return;
 
       try {
-        await this.api.hubSendMessage(to, content);
+        await this.api.hubSendMessage(to, content, 'webui', agentId);
         this.closeModal();
         this.showNotification(`Message sent to ${to}`);
       } catch (e) {

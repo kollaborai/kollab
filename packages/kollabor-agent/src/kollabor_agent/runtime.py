@@ -17,6 +17,7 @@ Field groups:
 """
 
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -133,6 +134,64 @@ def _tool_shells() -> List[List[float]]:
     return [list(e) for e in TOOL_SHELLS]
 
 
+def process_start_token(pid: int) -> Optional[str]:
+    """An id for the process ``pid`` that a later process reusing the pid cannot share.
+
+    It is the start the kernel recorded for the process, never a wall-clock time
+    computed now: psutil's Linux ``create_time()`` adds a freshly read
+    ``boot_time()``, which moves when the realtime clock steps (NTP after boot, a
+    VM resuming), so two reads of one process can differ. Linux uses the boot id
+    and the start ticks in ``/proc/<pid>/stat``; macOS and NetBSD use psutil's private
+    ``_proc.create_time(monotonic=True)`` (the kernel's own record, no clock
+    adjustment); Windows uses the creation time of the process object, which the
+    system stamps once. None when it cannot be read or is not clock-independent
+    here, so the caller keeps its record.
+    """
+    try:
+        if sys.platform.startswith("linux"):
+            with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+                stat = handle.read().decode("ascii", "replace")
+            # Field 22 is the start; the command name (field 2) may hold ")" and spaces.
+            ticks = stat.rpartition(")")[2].split()[19]
+            try:
+                with open("/proc/sys/kernel/random/boot_id", "rb") as handle:
+                    boot_id = handle.read().decode("ascii", "replace").strip()
+            except OSError:
+                boot_id = ""
+            return f"linux:{boot_id}:{int(ticks)}"
+        import psutil
+
+        process = psutil.Process(int(pid))
+        if sys.platform == "win32":
+            return f"win32:{process.create_time()!r}"
+        if sys.platform == "darwin" or sys.platform.startswith("netbsd"):
+            # The public create_time() takes no ``monotonic`` argument and adds a
+            # clock adjustment that two processes can disagree on. psutil's own
+            # identity check (``Process._ident``) reads the kernel's record through
+            # the private ``_proc``; do the same, and give no token if it is not there.
+            try:
+                return f"{sys.platform}:{process._proc.create_time(monotonic=True)!r}"
+            except (AttributeError, TypeError):  # a psutil without the flag
+                return None
+        # FreeBSD, OpenBSD and others: psutil documents the start as subject to
+        # system clock updates, so there is no clock-independent token.
+        return None
+    except Exception:  # unreadable stat, psutil.Error, a pid that is gone
+        return None
+
+
+_OWN_START_TOKENS: Dict[int, Optional[str]] = {}
+
+
+def own_start_token() -> str:
+    """This process's start token, read once per pid ("" when unavailable)."""
+    pid = os.getpid()
+    if pid not in _OWN_START_TOKENS:
+        _OWN_START_TOKENS.clear()  # a forked child has a new pid; keep one entry
+        _OWN_START_TOKENS[pid] = process_start_token(pid)
+    return _OWN_START_TOKENS[pid] or ""
+
+
 @dataclass
 class AgentRuntime:
     """The ONE object that represents everything about an AI agent.
@@ -234,6 +293,12 @@ class AgentRuntime:
     started_at: float = field(default_factory=time.time)
     """Unix timestamp when this process started.
     Used for uptime display and session tracking."""
+
+    start_token: str = ""
+    """The kernel's own start of this process (``process_start_token``), stamped
+    into the presence record. A peer compares it to the process now at ``pid`` to
+    tell a reused pid from a live owner; empty when unreadable or from an older
+    record, which a peer never reclaims on."""
 
     last_heartbeat: float = field(default_factory=time.time)
     """Unix timestamp of last heartbeat update.
@@ -649,6 +714,8 @@ class AgentRuntime:
             "agent_name": self.name,
             "profile_name": self.profile or "",
             "started_at": self.started_at,
+            "start_token": self.start_token
+            or (own_start_token() if self.pid == os.getpid() else ""),
             "last_heartbeat": self.last_heartbeat,
             "state": self.state,
             "state_changed_at": self.state_changed_at,
@@ -693,6 +760,7 @@ class AgentRuntime:
             "project",
             "socket_path",
             "started_at",
+            "start_token",
             "last_heartbeat",
             "state",
             "state_changed_at",
