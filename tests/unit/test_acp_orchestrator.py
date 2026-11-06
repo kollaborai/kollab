@@ -514,7 +514,9 @@ async def test_failed_user_row_write_keeps_the_finished_reply(tmp_path, monkeypa
 @pytest.mark.asyncio
 async def test_failed_user_row_write_is_shown_not_swallowed(tmp_path, monkeypatch):
     """#580: a user row that never reached the file is shown, as a reply row is."""
-    configuration = SimpleNamespace(_conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default
+    )
     conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
     manager = ConversationManager(configuration, conversation_logger)
     display = MagicMock()
@@ -532,7 +534,12 @@ async def test_failed_user_row_write_is_shown_not_swallowed(tmp_path, monkeypatc
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(conversation_logger, "log_user_message", failing_user_write)
-    profile = LLMProfile(name="user-row-shown", provider="acp", command=(sys.executable, "-c", INTERRUPTED_AGENT), cwd=str(tmp_path))
+    profile = LLMProfile(
+        name="user-row-shown",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+    )
     runner = None
     try:
         await orchestrator.start(profile)
