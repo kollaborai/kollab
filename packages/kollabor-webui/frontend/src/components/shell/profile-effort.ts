@@ -1,16 +1,28 @@
 /**
  * Which provider a profile's requests reach, as far as the Profiles editor's effort
  * picker needs it. Keep in step with kollabor_ai's detect_provider_from_profile:
- * the key decides first, then the endpoint.
+ * the key decides first, then the endpoint. The endpoint counts by its host; the
+ * server still matches it as text (#848).
  */
+
+/** True when the endpoint's host is `domain` or a subdomain of it. No scheme reads as https. */
+function hostIs(baseUrl: string, domain: string): boolean {
+  if (!baseUrl) return false;
+  try {
+    const host = new URL(baseUrl.includes("://") ? baseUrl : `https://${baseUrl}`).hostname.toLowerCase();
+    return host === domain || host.endsWith(`.${domain}`);
+  } catch {
+    return false;
+  }
+}
 
 /** True when an "auto" profile with this key and endpoint resolves to Anthropic. */
 export function autoResolvesToAnthropic(apiKey: string, baseUrl: string): boolean {
   if (apiKey.startsWith("sk-ant-")) return true;
-  if (baseUrl.includes("azure.com") || apiKey.startsWith("sk-")) return false;
-  if (baseUrl.includes("generativelanguage.googleapis.com")) return false;
-  if (baseUrl.includes("openrouter.ai")) return false;
-  return baseUrl.includes("anthropic.com");
+  if (hostIs(baseUrl, "azure.com") || apiKey.startsWith("sk-")) return false;
+  if (hostIs(baseUrl, "generativelanguage.googleapis.com")) return false;
+  if (hostIs(baseUrl, "openrouter.ai")) return false;
+  return hostIs(baseUrl, "anthropic.com");
 }
 
 /**
