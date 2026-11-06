@@ -682,6 +682,9 @@ class HubPlugin(BasePlugin):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
         self._dreaming_task: Optional[asyncio.Task] = None
+        # The insight write of the dream in progress, which a cancelled dream
+        # leaves running in its thread (#562); shutdown waits for it.
+        self._crystal_write: Optional[asyncio.Task] = None
         self._notify_task: Optional[asyncio.Task] = None
         self._notifier: Optional[HubNotifier] = None
 
@@ -6041,9 +6044,21 @@ class HubPlugin(BasePlugin):
                 self._vault = AgentVault(self._identity.identity)
                 self._vault.touch()
                 # Project-scoped crystal store: work done in this repo
-                self._crystal_store = CrystalStore(self._vault._vault_dir)
+                project_crystals = CrystalStore(self._vault._vault_dir)
                 # Global crystal store: cross-project personality + skills
-                self._global_crystal_store = CrystalStore(self._vault.global_vault_dir)
+                global_crystals = CrystalStore(self._vault.global_vault_dir)
+                # Parse both in a worker thread, and publish them only once loaded:
+                # a reader on the loop never parses a vault or waits on its lock (#562).
+                try:
+                    await asyncio.gather(
+                        asyncio.to_thread(project_crystals.load),
+                        asyncio.to_thread(global_crystals.load),
+                    )
+                except Exception as e:
+                    # Readers parse again on the loop and raise there, as before.
+                    logger.warning(f"crystal stores failed to load at startup: {e}")
+                self._crystal_store = project_crystals
+                self._global_crystal_store = global_crystals
             else:
                 logger.info(f"Vault disabled for agent {self._identity.identity}")
 
@@ -6896,11 +6911,16 @@ class HubPlugin(BasePlugin):
                             logger.debug("dreaming: filtered preamble paragraph")
                             continue
                         paragraphs.append(p_stripped)
-                    # On the loop, like every reader of the vault: in a worker
-                    # thread a write outlived a cancelled dream and raced the
-                    # readers (#546).
-                    for paragraph in paragraphs:
-                        self._crystal_store.add_entry(paragraph)
+                    # One worker-thread call for the batch, in order: each add saves
+                    # the whole vault, which stalled the loop (#562). A cancelled
+                    # dream leaves this write running, so shutdown waits for it.
+                    store = self._crystal_store
+                    self._crystal_write = asyncio.create_task(
+                        asyncio.to_thread(
+                            lambda: [store.add_entry(p) for p in paragraphs]
+                        )
+                    )
+                    await asyncio.shield(self._crystal_write)
                     added = len(paragraphs)
                 else:
                     # Fallback to raw append if crystal_store unavailable
@@ -6965,6 +6985,21 @@ class HubPlugin(BasePlugin):
             # Restore previous state (unless something else changed it)
             if self._identity.state == AgentLifecycle.DREAMING.value:
                 self._identity.state = prev_state
+
+    async def _settle_crystal_write(self) -> None:
+        """Wait for an insight write that a cancelled dream left running in its thread.
+
+        The thread outlives the task that awaited it. A save landing after shutdown
+        would write over a newer one (#562), so shutdown calls this after it
+        cancels the dream.
+        """
+        write = getattr(self, "_crystal_write", None)
+        if write is None or write.done():
+            return
+        try:
+            await write
+        except Exception as e:
+            logger.warning(f"dreaming: insight write failed at shutdown: {e}")
 
     async def _vault_autosave_loop(self) -> None:
         """Periodically save working memory so crash != total loss.
@@ -17210,6 +17245,7 @@ class HubPlugin(BasePlugin):
                 await self._dreaming_task
             except asyncio.CancelledError:
                 pass
+        await self._settle_crystal_write()
 
         if self._notify_task:
             self._notify_task.cancel()
