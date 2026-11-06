@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A tool result or agent update whose long text pushes it over the engine's 16 MB frame limit is now cut to fit and still reaches the chat, instead of being dropped with its reply marked incomplete. An update that is over the limit because of many small items is still dropped (#544).
 - A request for an agent that has exited no longer reaches a new agent that took over its socket under the same name: the engine reads the agent's record fresh before it uses that socket, so the request fails instead of returning the new agent's output, including when the agent restarted in place (#566).
 - A live hub agent keeps its presence record and socket when its heartbeat is over ten minutes old and its socket briefly does not answer; peers now remove them only once the agent's process has exited or its process ID has been reused by another process (#575)
+- An accepted peer observation is no longer dropped when its ACP history row cannot be written: the retry queue keeps it until the row lands, and when the queue is full the new message is refused instead of acknowledged. A refused message stays in the mailbox or relay queue until the queue takes it, and a resend does not show, log or mirror it a second time. An ACP agent now reads its mailbox without the per-poll replay cap and delivers each message on its own, so a long outage no longer drops or coalesces refused ones (#581).
 
 ## [0.19.1] - 2026-11-03
 
