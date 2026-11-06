@@ -283,12 +283,12 @@ class HubBridge:
         written by the agent, which is identity-named, not agent_id-named).
         Returns parsed response dict, or None on any failure.
         """
-        # The cache can predate the agent or its socket: an agent's first record has none (#555).
-        agent_data = self.get_agent(agent_id)
+        # The cached roster can predate the agent or its socket (an agent's first record has none, #555),
+        # and it can outlive the agent: a successor with the same identity binds the same identity-named
+        # socket path, even with the same pid when the process re-execs in place (#566). The agent id is
+        # per process image, so only a fresh read tells whether this id still holds the socket.
+        agent_data = self._fresh_agent(agent_id)
         sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
-        if sock_path is None or not sock_path.exists():
-            agent_data = self._fresh_agent(agent_id)
-            sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if agent_data is None:
             logger.debug(f"No presence data for agent {agent_id}")
             return None
