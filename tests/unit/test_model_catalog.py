@@ -324,6 +324,60 @@ def test_catalog_cache_v2_preserves_structured_oauth_context_window(
     assert model_catalog.cached_provider_models(profile) == models
 
 
+def test_source_less_v2_catalog_cache_is_a_cold_miss(tmp_path, monkeypatch):
+    cache_path = tmp_path / "model_catalog.cache"
+    profile = {
+        "name": "local",
+        "provider": "custom",
+        "endpoint": "http://127.0.0.1:9/api/v1/",
+    }
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": model_catalog.CACHE_VERSION,
+                "entries": {
+                    "local": {
+                        "timestamp": 9999999999,
+                        "models": [{"id": "legacy-only-model"}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
+
+    assert model_catalog.cached_provider_models(profile) == []
+
+
+def test_sourceful_v2_cache_matches_normalized_endpoint_after_reload(
+    tmp_path, monkeypatch
+):
+    cache_path = tmp_path / "model_catalog.cache"
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
+    model_catalog._MEMORY_CACHE.clear()
+    stored_profile = {
+        "name": "local",
+        "provider": "custom",
+        "endpoint": "http://127.0.0.1:9/api/v1/",
+    }
+    current_profile = {
+        "name": "local",
+        "provider": "custom",
+        "endpoint": "http://127.0.0.1:9/api/v1",
+    }
+    models = [{"id": "current-endpoint-model", "note": "available"}]
+
+    model_catalog._store(stored_profile, models)
+    saved = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert saved["version"] == 2
+    assert saved["entries"]["local"]["provider"] == "custom"
+    assert saved["entries"]["local"]["endpoint_id"]
+
+    model_catalog._MEMORY_CACHE.clear()
+    assert model_catalog.cached_provider_models(current_profile) == models
+
+
 def test_catalog_cache_v1_is_ignored_after_structured_window_migration(
     tmp_path, monkeypatch
 ):
