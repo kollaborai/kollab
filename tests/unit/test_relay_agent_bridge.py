@@ -459,6 +459,12 @@ async def test_relay_result_cannot_create_task_or_echo_to_external_bridge(bridge
         def is_processing(self):
             return self._queue_processor.is_processing
 
+        def _profile_selects_acp(self):
+            return False, False  # native profile
+
+        def _active_acp(self):
+            return None  # no ACP runner
+
         def create_background_task(self, factory, name=None):
             task = asyncio.create_task(factory(), name=name)
             self.scheduled.append(task)
