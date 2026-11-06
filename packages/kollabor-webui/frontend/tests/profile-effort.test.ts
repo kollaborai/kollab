@@ -49,3 +49,12 @@ test("a new auto profile with no key follows the endpoint typed in the form", ()
   );
   assert.equal(sendsAnthropic({ provider: "auto", api_key: "", base_url: "" }, ""), false);
 });
+
+test("an auto profile's endpoint counts by its host, never as text elsewhere in the URL", () => {
+  const auto = (base_url: string) => sendsAnthropic({ provider: "auto", base_url }, "");
+  assert.equal(auto("https://api.anthropic.com/v1"), true);
+  assert.equal(auto("api.anthropic.com"), true);
+  assert.equal(auto("https://anthropic.com.mirror.example/v1"), false);
+  assert.equal(auto("https://gateway.example/anthropic.com/v1"), false);
+  assert.equal(auto("https://api.anthropic.com/v1?via=azure.com"), true);
+});
