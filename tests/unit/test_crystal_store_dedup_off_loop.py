@@ -199,9 +199,8 @@ def _dreaming_plugin(add_entry):
     return plugin, insights
 
 
-def test_dreaming_writes_its_insights_on_the_loop_in_order():
-    # Howlite on #547 round 8: written in a worker thread, they raced the
-    # vault's readers on the loop, and a new store read the file half written.
+def test_dreaming_writes_its_insights_in_order_off_the_loop():
+    # #562: the batch runs in one worker thread, in order, so the loop is not held.
     writes = []
     plugin, insights = _dreaming_plugin(lambda text: writes.append((text, threading.current_thread())))
 
@@ -211,13 +210,12 @@ def test_dreaming_writes_its_insights_on_the_loop_in_order():
 
     loop_thread = asyncio.run(dream())
     assert [text for text, _ in writes] == insights
-    assert all(thread is loop_thread for _, thread in writes)
+    assert all(thread is not loop_thread for _, thread in writes)
 
 
-def test_a_dream_cancelled_during_its_writes_writes_nothing_after_it_ends():
-    # Howlite on #547 round 8: shutdown cancelled a dream whose writes ran in a
-    # worker thread, and the worker went on writing after the dream had ended,
-    # over a write saved meanwhile.
+def test_a_dream_cancelled_during_its_writes_lands_them_before_shutdown_returns():
+    # #562: a cancelled dream leaves its worker thread writing, so shutdown waits
+    # for the batch and nothing lands after that wait returns.
     import time
 
     writes = []
@@ -234,11 +232,12 @@ def test_a_dream_cancelled_during_its_writes_writes_nothing_after_it_ends():
         plugin, _ = _dreaming_plugin(add_entry)
         dream = asyncio.ensure_future(plugin._dream([]))
         await asyncio.gather(dream, return_exceptions=True)
-        ended = len(writes)
+        await plugin._settle_crystal_write()  # what shutdown does next
+        settled = len(writes)
         await asyncio.sleep(0.3)  # a write still running would land here
-        return ended
+        return settled
 
-    assert asyncio.run(main()) == len(writes)
+    assert asyncio.run(main()) == len(writes) == 3
 
 
 def test_a_chain_merges_in_list_order():
