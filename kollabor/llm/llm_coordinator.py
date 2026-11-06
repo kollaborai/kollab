@@ -219,11 +219,16 @@ class LLMService:
             and hasattr(self, "conversation_logger")
             and self.conversation_logger
         ):
-            await self.conversation_logger.log_system_message(
-                formatted_content,
-                parent_uuid=getattr(self, "current_parent_uuid", None),
-                subtype=normalized_subtype,
-            )
+            # The HUD entry is queued already: a history write failure must not
+            # stop the caller (grants, hub results) from completing.
+            try:
+                await self.conversation_logger.log_system_message(
+                    formatted_content,
+                    parent_uuid=getattr(self, "current_parent_uuid", None),
+                    subtype=normalized_subtype,
+                )
+            except Exception as exc:
+                logger.warning("HUD entry not written to history: %s", exc)
 
     async def inject_tool_grant(
         self,
@@ -1188,8 +1193,11 @@ class LLMService:
         # Set conversation context before logging start
         self._set_conversation_context()
 
-        # Log conversation start
-        await self.conversation_logger.log_conversation_start()
+        # Log conversation start; a history write failure must not stop startup
+        try:
+            await self.conversation_logger.log_conversation_start()
+        except Exception as exc:
+            logger.warning("Conversation start not written to history: %s", exc)
 
         # Start task monitoring
         if self.task_config.background_tasks.enable_monitoring:
@@ -2293,17 +2301,30 @@ class LLMService:
         # atomic point its lineage capture rides, and the cursor advance is
         # published through the admission-serial protocol so concurrent
         # detached completions resolve by admission order, not wall clock
-        # (#676 r7).
+        # (#676 r7). A failed write is logged and shown; the message still
+        # goes to the model.
         turn_serial = self.claim_turn_serial()
         admission_parent_uuid = self.current_parent_uuid
-        user_uuid = await self.conversation_logger.log_user_message(
-            display_text, parent_uuid=admission_parent_uuid
-        )
-        self.publish_cursor(user_uuid, turn_serial)
-        # This queue item belongs under the user row created for its admission,
-        # even if another completion won the shared cursor during the logger
-        # await. Never re-read mutable current_parent_uuid after yielding.
-        admitted_parent_uuid = user_uuid
+        # A failed write has no row to point at: the cursor stays where it is
+        # (publishing None would cut the chain) and the queue item keeps the
+        # parent captured at admission.
+        admitted_parent_uuid = admission_parent_uuid
+        try:
+            user_uuid = await self.conversation_logger.log_user_message(
+                display_text, parent_uuid=admission_parent_uuid
+            )
+        except Exception as exc:
+            logger.error("User message not written to history: %s", exc)
+            self.message_display_service.display_system_message(
+                "Conversation history not saved for this message."
+            )
+        else:
+            self.publish_cursor(user_uuid, turn_serial)
+            # This queue item belongs under the user row created for its
+            # admission, even if another completion won the shared cursor
+            # during the logger await. Never re-read mutable
+            # current_parent_uuid after yielding.
+            admitted_parent_uuid = user_uuid
 
         # Add to processing queue with overflow handling. Plain input rides a
         # zero-id TaggedInput so the capture travels with the item (#676); a
@@ -2943,8 +2964,11 @@ class LLMService:
 
     async def shutdown(self):
         """Shutdown the LLM service."""
-        # Log conversation end
-        await self.conversation_logger.log_conversation_end()
+        # Log conversation end; a history write failure must not skip the cleanup below
+        try:
+            await self.conversation_logger.log_conversation_end()
+        except Exception as exc:
+            logger.warning("Conversation end not written to history: %s", exc)
 
         # Cancel all background tasks
         await self.cancel_all_tasks()
