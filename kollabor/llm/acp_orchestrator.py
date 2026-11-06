@@ -803,17 +803,20 @@ class ACPOrchestrator:
             return
         # A message whose arrival row failed has no history row yet; the native
         # model reads history, so it gets one more try here.
-        still_unwritten: list[AgentHudEntry] = []
-        for entry in list(self._unwritten_observations):
-            row_id = f"observations-{uuid.uuid4().hex}"
+        still_unwritten: list[tuple[str, AgentHudEntry]] = []
+        for row_id, entry in list(self._unwritten_observations):
             try:
-                self._record_user(row_id, format_agent_hud([entry]), "observation", None)
+                # The retry keeps its first attempt's row id, so a row that landed
+                # before its write raised is not written again (#581).
+                self._record_user(
+                    row_id, format_agent_hud([entry]), "observation", None, retry=True
+                )
             except Exception as error:
                 logger.warning(
                     "ACP observation history write failed again (%s)",
                     type(error).__name__,
                 )
-                still_unwritten.append(entry)
+                still_unwritten.append((row_id, entry))
             self._parents.pop(row_id, None)
         for row_id in self._observation_rows:
             self._parents.pop(row_id, None)
@@ -823,11 +826,16 @@ class ACPOrchestrator:
         self._observations.clear()
         self._observation_count = 0
         if still_unwritten:
-            # A flush writes such messages as one batch row. No native turn may
+            # The handover writes such messages as one batch row. No native turn may
             # start while one of them is still missing from history.
             batch_id = f"observations-{uuid.uuid4().hex}"
             try:
-                self._record_user(batch_id, format_agent_hud(still_unwritten), "observation", None)
+                self._record_user(
+                    batch_id,
+                    format_agent_hud([entry for _, entry in still_unwritten]),
+                    "observation",
+                    None,
+                )
             except Exception as error:
                 logger.warning(
                     "ACP observation batch history write failed (%s)",
