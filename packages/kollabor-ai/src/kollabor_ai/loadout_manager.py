@@ -708,6 +708,7 @@ class LoadoutManager:
             await self._announce_model_switch(event_bus, loadout, None)
             return loadout
 
+        closed_harness = None
         if str(current_provider).lower() == "acp" and orchestrator is not None:
             try:
                 if getattr(orchestrator, "active", False):
@@ -718,6 +719,7 @@ class LoadoutManager:
                     type(exc).__name__,
                 )
                 return None
+            closed_harness = orchestrator
 
         previous_model: Optional[str] = None
         get_profile = getattr(self.profile_manager, "get_profile", None)
@@ -776,6 +778,18 @@ class LoadoutManager:
                 profile = self.profile_manager.get_active_profile()
                 await llm_service.api_service.reinitialize_provider(profile)
                 await llm_service._load_native_tools()
+            if closed_harness is not None:
+                # Peer messages the closed harness still held are in the
+                # conversation; one native turn answers them. The state service
+                # path hands them over itself.
+                try:
+                    await closed_harness.hand_over_to_native()
+                except Exception as exc:
+                    logger.warning(
+                        "Could not hand buffered ACP messages to profile %r (%s)",
+                        loadout.provider_profile,
+                        type(exc).__name__,
+                    )
 
         await self._announce_model_switch(event_bus, loadout, previous_model)
         return loadout

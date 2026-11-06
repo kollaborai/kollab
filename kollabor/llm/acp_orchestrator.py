@@ -19,6 +19,7 @@ from typing import Any
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_ai.profile_manager import EFFORT_LEVELS, LLMProfile
+from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.terminal_state import TerminalMode
@@ -789,6 +790,77 @@ class ACPOrchestrator:
         self._observations.clear()
         self._observation_count = 0
 
+    async def hand_over_to_native(self) -> None:
+        """Give the peer messages still buffered for the harness to the native profile.
+
+        Call it once a native profile is active after this harness closed. Each
+        message is already in the conversation; this drops the buffer so no
+        harness is offered them again, and starts the one native turn that
+        answers them. A message that still has no history row is kept, and no
+        turn starts. Each history write is awaited first; one that fails is shown
+        to the user, and the turn starts anyway, since the message is in the
+        conversation.
+        """
+        if not self._observation_count and not self._unwritten_observations:
+            return
+        # A message whose arrival row failed has no history row yet; the native
+        # model reads history, so it gets one more try here.
+        still_unwritten: list[tuple[str, AgentHudEntry]] = []
+        writes: list[asyncio.Task | None] = []
+        for row_id, entry in list(self._unwritten_observations):
+            if not self._write_history_row(row_id, format_agent_hud([entry])):
+                still_unwritten.append((row_id, entry))
+            self._parents.pop(row_id, None)
+            writes.append(self._user_history_tasks.pop(row_id, None))
+        for row_id in self._observation_rows:
+            self._parents.pop(row_id, None)
+            writes.append(self._user_history_tasks.pop(row_id, None))
+        self._observation_rows.clear()
+        self._unwritten_observations.clear()
+        self._observations.clear()
+        self._observation_count = 0
+        if still_unwritten:
+            # The handover writes such messages as one batch row. No native turn may
+            # start while one of them is still missing from history.
+            batch_id = f"observations-{uuid.uuid4().hex}"
+            batch_text = format_agent_hud([entry for _, entry in still_unwritten])
+            if not self._write_history_row(batch_id, batch_text):
+                self._unwritten_observations.extend(still_unwritten)
+                return
+            self._parents.pop(batch_id, None)
+            writes.append(self._user_history_tasks.pop(batch_id, None))
+        # The native turn reads history, so it starts once these writes have settled.
+        # A write that failed was already shown by _observation_task_done.
+        settled = [task for task in writes if task is not None]
+        if settled:
+            await asyncio.gather(*settled, return_exceptions=True)
+        await self.event_bus.emit_with_hooks(
+            EventType.TRIGGER_LLM_CONTINUE,
+            {"source": "acp_handover", "content": ""},
+            "acp_orchestrator",
+        )
+
+    def _write_history_row(self, row_id: str, text: str) -> bool:
+        """Write one observation row. True when it is in history, even if the write raised.
+
+        A write that raised after its row landed is retried once under the same id, so the
+        rest of the write (log, mirror) runs and the row is never appended twice (#581).
+        A write that raised before its row landed returns False, and the caller keeps the
+        message queued.
+        """
+        for _ in range(2):
+            try:
+                self._record_user(row_id, text, "observation", None, retry=True, track_completion=True)
+                return True
+            except Exception as error:
+                logger.warning(
+                    "ACP observation history write failed again (%s)",
+                    type(error).__name__,
+                )
+                if self._landed_row_uuid(row_id) is None:
+                    return False
+        return True
+
     def _landed_row_uuid(self, request_id: str) -> str | None:
         """The uuid of the conversation row a failed write already appended, if any."""
         llm = self.event_bus.get_service("llm_service")
@@ -832,6 +904,15 @@ class ACPOrchestrator:
             error = task.exception()
             if error is not None:
                 logger.warning("ACP user history write failed (%s)", type(error).__name__)
+
+    def _observation_task_done(self, task: asyncio.Task) -> None:
+        """A failed observation history write is shown in the chat, not only logged."""
+        self._history_task_done(task)
+        if not task.cancelled() and task.exception() is not None:
+            llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+            display = getattr(llm, "message_display_service", None)
+            if display is not None:
+                display.display_system_message("Conversation history not saved for this message.")
 
     def _record_user(
         self, request_id: str, text: str, source: str, thread_id: str | None,
@@ -879,7 +960,9 @@ class ACPOrchestrator:
             self._history_tasks.add(task)
             if track_completion:
                 self._user_history_tasks[request_id] = task
-            task.add_done_callback(self._history_task_done)
+            task.add_done_callback(
+                self._observation_task_done if source == "observation" else self._history_task_done
+            )
         history = getattr(llm, "conversation_history", None)
         if isinstance(history, list) and history is not getattr(manager, "messages", None):
             history.append(ConversationMessage(role="user", content=text, metadata=metadata))
