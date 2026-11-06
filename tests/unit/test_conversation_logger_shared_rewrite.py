@@ -194,6 +194,94 @@ async def test_a_row_another_logger_appends_while_the_cut_is_built_is_threaded_p
     assert voice not in by_uuid
     assert by_uuid[appended[0]]["parentUuid"] == root  # not the removed reply
 
+async def test_append_from_another_process_between_tail_copy_and_swap_is_preserved(
+    tmp_path, monkeypatch
+):
+    import time
+
+    first, _ = _same_session(tmp_path)
+    root = await first.log_user_message("hi", parent_uuid=None)
+    voice = await first.log_assistant_message(
+        "sunny", root, voice_turn_id="turn-1"
+    )
+    ready = tmp_path / "append-ready"
+    script = textwrap.dedent(
+        """
+        import asyncio, sys
+        from pathlib import Path
+        from kollabor_ai.conversation_logger import KollaborConversationLogger
+
+        async def main(conv, session_file, session_id, parent, ready_file):
+            log = KollaborConversationLogger(Path(conv))
+            log.session_id, log.session_file = session_id, Path(session_file)
+            Path(ready_file).write_text("ready")
+            print(await log.log_user_message("late append", parent_uuid=parent), flush=True)
+
+        asyncio.run(main(*sys.argv[1:]))
+        """
+    )
+    real_replace = os.replace
+    child_state = {}
+
+    def start_writer_after_tail_copy(source, destination):
+        if Path(destination) == first.session_file:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    script,
+                    str(first.session_file.parent),
+                    str(first.session_file),
+                    first.session_id,
+                    voice,
+                    str(ready),
+                ],
+                cwd=Path.cwd(),
+                env={**os.environ, "KOLLAB_NO_KEYRING": "1"},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            child_state["process"] = process
+            deadline = time.monotonic() + 5
+            while (
+                not ready.exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            assert ready.exists(), "second process did not reach the append boundary"
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(
+        "kollabor_ai.conversation_logger.os.replace", start_writer_after_tail_copy
+    )
+    try:
+        assert await first.rewrite_voice_turn("turn-1", 1, {0: None}) == {voice: root}
+        process = child_state["process"]
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        process = child_state.get("process")
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate()
+
+    assert process.returncode == 0, stderr
+    appended = stdout.strip().splitlines()[-1]
+    by_uuid = {
+        record["uuid"]: record
+        for record in _records(first.session_file)
+        if record.get("uuid")
+    }
+    assert voice not in by_uuid
+    assert appended in by_uuid, "an append after tail copy must not be lost at the swap"
+    assert by_uuid[appended]["parentUuid"] == root
+
+
 async def test_short_sidecar_write_rollback_preserves_prior_rewrite_mapping(
     tmp_path, monkeypatch
 ):
