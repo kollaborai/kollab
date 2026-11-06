@@ -750,12 +750,14 @@ class ACPOrchestrator:
         Call it once a native profile is active after this harness closed. Each
         message is already in the conversation; this drops the buffer so no
         harness is offered them again, and starts the one native turn that
-        answers them.
+        answers them. A message that still has no history row is kept, and no
+        turn starts.
         """
         if not self._observation_count and not self._unwritten_observations:
             return
         # A message whose arrival row failed has no history row yet; the native
         # model reads history, so it gets one more try here.
+        still_unwritten: list[AgentHudEntry] = []
         for entry in list(self._unwritten_observations):
             row_id = f"observations-{uuid.uuid4().hex}"
             try:
@@ -765,6 +767,7 @@ class ACPOrchestrator:
                     "ACP observation history write failed again (%s)",
                     type(error).__name__,
                 )
+                still_unwritten.append(entry)
             self._parents.pop(row_id, None)
         for row_id in self._observation_rows:
             self._parents.pop(row_id, None)
@@ -773,6 +776,20 @@ class ACPOrchestrator:
         self._unwritten_observations.clear()
         self._observations.clear()
         self._observation_count = 0
+        if still_unwritten:
+            # A flush writes such messages as one batch row. No native turn may
+            # start while one of them is still missing from history.
+            batch_id = f"observations-{uuid.uuid4().hex}"
+            try:
+                self._record_user(batch_id, format_agent_hud(still_unwritten), "observation", None)
+            except Exception as error:
+                logger.warning(
+                    "ACP observation batch history write failed (%s)",
+                    type(error).__name__,
+                )
+                self._unwritten_observations.extend(still_unwritten)
+                return
+            self._parents.pop(batch_id, None)
         await self.event_bus.emit_with_hooks(
             EventType.TRIGGER_LLM_CONTINUE,
             {"source": "acp_handover", "content": ""},
