@@ -375,6 +375,27 @@ async def test_setup_finish_reports_failed_llm_switch_and_preserves_previous_pro
 
 
 @pytest.mark.asyncio
+async def test_setup_finish_redacts_other_provider_key_from_switch_exception(caplog):
+    profiles = FakeProfiles(existing=("anthropic", "openai"))
+    profiles.active = "openai"
+    other_provider_key = "AIzaSyDUMMYKEYDUMMYKEY12345"
+
+    class FailingLLM:
+        async def switch_profile(self, name, persist=True):
+            raise RuntimeError(f"provider rejected key {other_provider_key}")
+
+    ctx = SimpleNamespace(_profile_manager=profiles, _llm_service=FailingLLM())
+    result = await SETUP.act(ctx, "finish", PAYLOAD)
+
+    assert result["ok"] is False
+    assert "Could not activate" in result["message"]
+    assert other_provider_key not in json.dumps(result)
+    assert other_provider_key not in caplog.text
+    assert profiles.active == "openai"
+    assert profiles.activation_calls == []
+
+
+@pytest.mark.asyncio
 async def test_setup_finish_uses_profile_manager_fallback_when_llm_service_is_absent():
     profiles = FakeProfiles(existing=("anthropic", "openai"))
     profiles.active = "openai"
