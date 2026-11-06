@@ -2484,11 +2484,33 @@ You can spawn parallel sub-agents to work on tasks concurrently. Each agent runs
             else:
                 summary = output.strip()
 
+            text = f"[done: {name} @ {duration}]\n{summary}"
+            if self.message_injector.acp_owns_chat():
+                # A native wake is refused on an ACP chat, so nothing goes into
+                # native history. Show the completion instead (#579).
+                self._show_completion(name, text)
+                return
+
             await self.message_injector.inject(
                 source=name,
-                content=f"[done: {name} @ {duration}]\n{summary}",
+                content=text,
                 trigger_llm=True,  # auto-continue conversation
             )
+
+    def _show_completion(self, name: str, text: str) -> None:
+        """Show a finished subagent's summary to the user."""
+        try:
+            self.renderer.message_coordinator.display_message_sequence(
+                [
+                    (
+                        "system",
+                        f"{text}\n(Send it from the chat to hand this to the ACP agent.)",
+                        {"display_type": "info"},
+                    )
+                ]
+            )
+        except Exception as e:
+            logger.error(f"Could not show completion of {name}: {e}")
 
     async def _export_conversation(self) -> Optional[str]:
         """Export current conversation to temp file.
