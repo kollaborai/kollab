@@ -948,11 +948,11 @@ class ACPOrchestrator:
         return {"usage": dict(usage), "input_total": input_total, "output_total": output_total}
 
     async def _await_user_history(self, turn_key: tuple[int, int]) -> None:
-        """Wait for the turn's user-row write; a failed write never drops the reply.
+        """Wait for the turn's user-row write; a failed write keeps the reply and is shown.
 
-        The adapter already ran and the reply is in hand, so a user row that did
-        not reach the file is logged (``_history_task_done`` has too) and the turn
-        goes on. Cancellation still propagates.
+        The adapter already ran and the reply is in hand, so the turn goes on with
+        it. A user row that did not reach the file is logged as an error and shown
+        in the chat, as a failed reply row is. Cancellation still propagates.
         """
         user_history = self._turn_user_tasks.get(turn_key)
         if user_history is None:
@@ -960,7 +960,14 @@ class ACPOrchestrator:
         try:
             await user_history
         except Exception as exc:
-            logger.warning("ACP user history write failed; keeping the turn (%s)", type(exc).__name__)
+            # Reported once: the failed task leaves the map, so a later caller
+            # for this turn finds nothing to report again.
+            self._turn_user_tasks.pop(turn_key, None)
+            logger.error("ACP user message not written to history: %s", type(exc).__name__)
+            llm = self.event_bus.get_service("llm_service")
+            display = getattr(llm, "message_display_service", None)
+            if display is not None:
+                display.display_system_message("Conversation history not saved for this message.")
 
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
         turn_key = (admission.generation, admission.turn_id)
