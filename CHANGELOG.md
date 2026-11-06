@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Google API keys in provider errors and logs are now redacted even when the key was not submitted by the user, and every log file (the app's `kollab.log` and the engine's log) now redacts provider keys whichever code wrote the line, including exception tracebacks (#835, #843).
 - Profile setup now reports state-service provider startup failures instead of claiming success, restores the previous profile when possible, and keeps provider secrets out of errors and logs (#832).
+- Voice-turn rewrites now coordinate with transcript appends (the logger's and compaction's summaries and checkpoints) and session snapshots across processes; rows appended after a rewrite reads its cut survive the atomic replacement (#834).
 - Switching from an ACP profile to a native one now answers the peer messages the harness was still holding: one native turn starts for them and no harness is offered them again (#560).
 - A conversation history write that fails is no longer reported as saved: the logger raises instead of returning a message id, a partly written record is rolled back so later records stay intact, and the agent logs the failure and keeps going (#580)
 - Failed profile switches now restore the previous API profile, API request provider and coordinator provider if target initialization fails or the coordinator provider-registry lookup raises, keeping subsequent requests on the prior runtime (#836).
