@@ -16,10 +16,10 @@ never loosen these rules. If the repo's own `AGENTS.md`, `CONTRIBUTING.md`,
 disagree with this file, the repo file wins and you tell the human about the conflict.
 
 Scope: this file governs the OSS roles' own GitHub writes. It does not govern an
-agent writing, reviewing or integrating a PR. Those follow
-`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`: a writer pushes its own PR branch normally,
-and the assigned reviewer and the designated integrator act as that file and
-section 1 below describe.
+agent writing, reviewing or integrating a PR. That work follows
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md` alone: a writer pushes its own PR branch
+normally, and the assigned reviewer and the designated integrator have the
+duties that file gives them.
 
 ## 1. Authority: read freely, write only an approved batch
 
