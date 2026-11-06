@@ -1431,6 +1431,8 @@ async def test_a_continuation_turn_that_raises_ends_the_hub_continue_chain_faile
         claim_turn_serial=claim_turn_serial,
         publish_cursor=publish_cursor,
         create_background_task=lambda fn, name=None: tasks.append(asyncio.ensure_future(fn())),
+        _profile_selects_acp=lambda: (False, False),  # native profile, no ACP runner
+        _active_acp=lambda: None,
     )
     await MessageHandler(coordinator=coord).handle_llm_continue({"source": "hub:lapis"}, None)
     await asyncio.gather(*tasks)
