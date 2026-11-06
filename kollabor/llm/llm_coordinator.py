@@ -1736,14 +1736,9 @@ class LLMService:
                                 active_profile.name,
                                 type(exc).__name__,
                             )
-                            try:
-                                await acp_orchestrator.start(active_profile)
-                            except Exception as restore_error:
-                                logger.error(
-                                    "Could not restore ACP profile %r after failed switch (%s)",
-                                    active_profile.name,
-                                    type(restore_error).__name__,
-                                )
+                            # The API runtime already moved to the target above: restore
+                            # it and restart ACP once, as one rollback.
+                            await restore_previous_runtime(restart_acp=True)
                             return False
 
                 # Keep the coordinator's provider reference in sync with the
