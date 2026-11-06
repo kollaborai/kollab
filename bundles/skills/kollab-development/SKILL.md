@@ -76,7 +76,8 @@ account, `kollaborai` or `maarco`, is not the PR author. Record reviewer
 identity and exact reviewed SHA in private maintainer audit evidence; keep the
 GitHub approval plain, with no AI attribution or footer. GitHub prohibits
 author self-approval. A new head needs fresh review and CI. Every merge uses
-`kollaborai` with a merge commit; never use
+`kollaborai` with a merge commit, through GitHub's merge queue (`gh pr merge`
+enqueues; the queue tests the PR on the latest `main`); never use
 `--admin` or a ruleset bypass. Verify the active identity cannot bypass
 protection and stop if identity, bypass status, or gate evidence is uncertain.
 After code-owner enforcement is enabled, every path including
