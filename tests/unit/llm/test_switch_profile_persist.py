@@ -27,6 +27,7 @@ def _coord(profile_auth: str = ""):
         model="claude-x",
         api_key="k",
         extra_headers={},
+        revision=0,
         to_dict=lambda: {"name": "p", "provider": "anthropic"},
     )
     coord.profile_manager.get_profile.return_value = profile

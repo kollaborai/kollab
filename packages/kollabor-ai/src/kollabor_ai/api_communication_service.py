@@ -583,10 +583,20 @@ class APICommunicationService:
                 query_codex_models,
             )
 
+            profile = self._profile
+            revision = profile.revision
             models = await query_codex_models(tokens.access_token, tokens.account_id)
+            # The lookup awaited: an edit or a profile swap made meanwhile wins.
+            if self._profile is not profile or profile.revision != revision:
+                logger.warning(
+                    "Profile %r was edited while its model was being resolved; "
+                    "keeping the newer settings",
+                    profile.name,
+                )
+                return
             resolved = pick_best_model(models)
             if resolved != "codex":
-                self._profile.model = resolved
+                profile.model = resolved
                 logger.info(f"Resolved OAuth model to: {resolved}")
         except Exception as e:
             logger.warning(f"Model resolution failed: {e}")
