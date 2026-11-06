@@ -2403,6 +2403,11 @@ class RelayAgentBridge:
                 and self.active.record["id"] == payload["thread_id"]
                 and self.active.waiting_answer
             ):
+                # An earlier answer for this wait is still queued (refused, #581).
+                # _tick offers the queue in order, so this one waits behind it.
+                queued = self.store.queued_answers(self.active.record["id"])
+                if queued and queued[0]["id"] != record["id"]:
+                    return {"id": record["id"], "state": "queued"}
                 return await self._resume_answer(record)
             task = self.store.task(
                 payload["thread_id"], room=state.room, peer=record["peer"]
