@@ -18,6 +18,24 @@ def _records(path: Path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
+def _child_env():
+    """Make subprocess writers import the source tree under test."""
+    repo_root = Path(__file__).resolve().parents[2]
+    source_paths = [
+        repo_root / "packages" / "kollabor-ai" / "src",
+        repo_root / "packages" / "kollabor-config" / "src",
+    ]
+    pythonpath = os.pathsep.join(str(path) for path in source_paths)
+    inherited_pythonpath = os.environ.get("PYTHONPATH")
+    if inherited_pythonpath:
+        pythonpath = f"{pythonpath}{os.pathsep}{inherited_pythonpath}"
+    return {
+        **os.environ,
+        "KOLLAB_NO_KEYRING": "1",
+        "PYTHONPATH": pythonpath,
+    }
+
+
 def _same_session(tmp_path: Path):
     first = KollaborConversationLogger(tmp_path / "conversations")
     second = KollaborConversationLogger(tmp_path / "conversations")
@@ -90,7 +108,10 @@ async def test_another_process_threads_past_a_reply_this_one_cut(tmp_path):
     out = subprocess.run(
         [sys.executable, "-c", script, str(tmp_path / "conversations"),
          str(first.session_file), first.session_id, voice],
-        capture_output=True, text=True, check=True, env={**__import__("os").environ, "KOLLAB_NO_KEYRING": "1"},
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_child_env(),
     )
 
     child = out.stdout.strip().splitlines()[-1]
@@ -237,7 +258,7 @@ async def test_append_from_another_process_between_tail_copy_and_swap_is_preserv
                     str(ready),
                 ],
                 cwd=Path.cwd(),
-                env={**os.environ, "KOLLAB_NO_KEYRING": "1"},
+                env=_child_env(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
