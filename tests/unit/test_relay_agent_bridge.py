@@ -1347,6 +1347,38 @@ async def test_refused_answer_stays_queued_until_the_receiver_accepts_it(
 
 
 @pytest.mark.asyncio
+async def test_a_relay_task_that_stops_while_waiting_clears_its_wait(
+    bridges, monkeypatch
+):
+    # A question that outlives TASK_TIMEOUT stops its task, but the stopped task
+    # kept waiting_answer. _tick returns early while a task waits, so the
+    # finished task was never cleared and the bridge took no new work.
+    members, _ = bridges
+    (left, left_hub, _, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+    await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    assert right.active.waiting_answer
+    monkeypatch.setattr("plugins.hub.relay_agent.TASK_TIMEOUT", -1)
+    await right._tick()
+    assert right.store.task(task_id)["state"] == "failed"
+    assert right.active is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["expired", "withdrawn"])
 async def test_hub_answer_rejects_expired_or_withdrawn_question_grant(bridges, mode):
     members, _ = bridges
