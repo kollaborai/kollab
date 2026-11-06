@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import secrets
 import shlex
 import shutil
 import subprocess
@@ -636,7 +635,6 @@ class ACPRunner:
         self._process_tracker: asyncio.Task[None] | None = None
         self._owned_processes: dict[int, psutil.Process] = {}
         self._adapter_pid: int | None = None
-        self._process_nonce: str | None = None
         self._process_started_at: float | None = None
         self._process_username: str | None = None
         self._teardown_lock = asyncio.Lock()
@@ -739,11 +737,6 @@ class ACPRunner:
                 "The selected Codex adapter could not be identified for this saved session. "
                 "The existing binding was kept; select the previous adapter or start a new session."
             )
-        # An inherited run marker also identifies children that fork, detach
-        # and lose their parent wholly between tree observations. It is not
-        # a credential; avoid names that vendor env policies filter as one.
-        self._process_nonce = secrets.token_hex(32)
-        env["KOLLAB_ACP_PROCESS_NONCE"] = self._process_nonce
         self._process_username = psutil.Process(os.getpid()).username()
         # A rapidly exiting root may disappear before psutil can read it.
         # Allow one second of kernel birth-time rounding in that fallback.
@@ -763,8 +756,6 @@ class ACPRunner:
             birth = owner.create_time()
             if (
                 owner.ppid() == os.getpid() and self._process.returncode is None
-                and owner.is_running()
-                and owner.environ().get("KOLLAB_ACP_PROCESS_NONCE") == self._process_nonce
                 and owner.is_running()
             ):
                 self._process_started_at = birth
@@ -916,14 +907,33 @@ class ACPRunner:
             self._refresh_process_tree()
             await asyncio.sleep(0.1)
 
-    def _recover_tagged_processes(self) -> None:
-        """Recover same-user newborns by this run's inherited marker only."""
-        if self._process_nonce is None or self._process_started_at is None:
+    def _recover_session_processes(self) -> None:
+        """Recover same-user newborns still in the adapter's session.
+
+        The adapter starts as a session leader, so descendants that lose
+        their parent keep its pid as their session id. Never read another
+        process's environment to decide ownership (#608). A descendant that
+        calls setsid() before a tree sample sees it is not recovered.
+        """
+        if self._adapter_pid is None or self._process_started_at is None or not hasattr(os, "getsid"):
             return
+        adapter = self._owned_processes.get(self._adapter_pid)
+
+        def session_is_ours() -> bool:
+            # A live process at the adapter's pid that is not the recorded
+            # adapter means the number was reused: that session is not ours.
+            try:
+                return psutil.Process(self._adapter_pid) == adapter
+            except psutil.NoSuchProcess:
+                return True
+            except psutil.Error:
+                return False
+
+        if not session_is_ours():
+            return
+        found: list[psutil.Process] = []
         for owner in psutil.process_iter(("pid", "create_time", "username")):
-            # psutil's macOS environ() raises SystemError, not psutil.Error,
-            # for a process that exits while its environment is read.
-            with contextlib.suppress(psutil.Error, SystemError):
+            with contextlib.suppress(psutil.Error, OSError):
                 birth = owner.info.get("create_time")
                 if (
                     owner.info.get("username") != self._process_username
@@ -932,21 +942,23 @@ class ACPRunner:
                     continue
                 if self._owned_processes.get(owner.pid) == owner:
                     continue
-                # Compare only the marker, without retaining/logging an
-                # environment. Recheck birth identity across that read.
+                # Recheck birth identity across the session-id read.
                 if (
                     owner.is_running()
-                    and owner.environ().get("KOLLAB_ACP_PROCESS_NONCE") == self._process_nonce
+                    and os.getsid(owner.pid) == self._adapter_pid
                     and owner.is_running()
                 ):
                     owner.create_time()
-                    self._owned_processes[owner.pid] = owner
+                    found.append(owner)
+        if session_is_ours():
+            for owner in found:
+                self._owned_processes[owner.pid] = owner
 
     def _live_owned_processes(self) -> list[psutil.Process]:
         self._refresh_process_tree()
-        # Do the process-wide marker lookup at lifecycle boundaries, rather
-        # than reading unrelated environments on every 100ms tree sample.
-        self._recover_tagged_processes()
+        # Do the process-wide session lookup at lifecycle boundaries, rather
+        # than walking every same-user process on every 100ms tree sample.
+        self._recover_session_processes()
         self._refresh_process_tree()
         alive: list[psutil.Process] = []
         for owner in tuple(self._owned_processes.values()):
@@ -1668,7 +1680,6 @@ class ACPRunner:
                 if not survivors and not unreaped_adapter:
                     self._owned_processes.clear()
                     self._adapter_pid = None
-                    self._process_nonce = None
                     self._process_started_at = None
                     self._process_username = None
                 else:
