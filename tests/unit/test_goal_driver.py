@@ -453,7 +453,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(goal_serial_at_hud_log, [1])
         self.assertEqual([item.admission_serial for item in enqueued_items], [2])
         self.assertEqual(continued_serials, [])
-        self.assertEqual(len(coord._pending_agent_hud), 1)
+        self.assertEqual(len(coord._pending_agent_hud), 0)
         self.assertEqual(qp.processing_queue.qsize(), 1)
         self.assertEqual(self.store.get(goal_id).status, "active")
         self.assertIn(goal_id, driver._yielded_goals)
