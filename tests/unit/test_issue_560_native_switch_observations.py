@@ -258,6 +258,74 @@ async def test_handover_does_not_start_a_turn_for_a_message_whose_row_still_fail
 
 
 @pytest.mark.asyncio
+async def test_handover_shows_a_retried_row_whose_history_write_fails_in_background(
+    harness, monkeypatch
+):
+    """The retry lands the row; its history write then fails in the background.
+
+    The handover waits for that write, so the failure is shown in the chat (as #803 shows a
+    failed turn row) before the native turn starts.
+    """
+    bus, orchestrator = harness
+    manager = _history_manager(bus)
+    real_add_message = manager.add_message
+    failures = [OSError(28, "No space left on device")]
+
+    def fails_before_the_row_lands(*args, **kwargs):
+        if failures:
+            raise failures.pop()
+        return real_add_message(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "add_message", fails_before_the_row_lands)
+    events, shown = [], []
+
+    async def log_user_message(_text):
+        await asyncio.sleep(0)
+        events.append("write-failed")
+        raise OSError(28, "No space left on device")
+
+    llm = bus.get_service("llm_service")
+    llm.conversation_logger = SimpleNamespace(log_user_message=log_user_message)
+    llm.message_display_service = SimpleNamespace(display_system_message=shown.append)
+    real_emit = bus.emit_with_hooks
+
+    async def emit(event_type, data, source):
+        if event_type == EventType.TRIGGER_LLM_CONTINUE:
+            events.append("continue")
+        return await real_emit(event_type, data, source)
+
+    monkeypatch.setattr(bus, "emit_with_hooks", emit)
+    _buffer_peer_note(orchestrator)
+    assert manager.messages == []
+
+    await orchestrator.hand_over_to_native()
+
+    assert len(manager.messages) == 1
+    assert shown == ["Conversation history not saved for this message."]
+    assert events == ["write-failed", "continue"]
+
+
+@pytest.mark.asyncio
+async def test_background_observation_write_failure_is_shown_to_the_user(harness):
+    """An observation row whose history write fails in the background is shown, not only logged."""
+    bus, orchestrator = harness
+    _history_manager(bus)
+    llm = bus.get_service("llm_service")
+    llm.conversation_logger = SimpleNamespace(
+        log_user_message=AsyncMock(side_effect=OSError(28, "No space left on device"))
+    )
+    shown = []
+    llm.message_display_service = SimpleNamespace(display_system_message=shown.append)
+
+    orchestrator._record_user(
+        "observations-background", "PEER_NOTE", "observation", None, track_completion=True
+    )
+    await asyncio.gather(*list(orchestrator._history_tasks), return_exceptions=True)
+
+    assert shown == ["Conversation history not saved for this message."]
+
+
+@pytest.mark.asyncio
 async def test_handover_writes_a_queued_message_whose_arrival_row_failed(
     harness, monkeypatch
 ):
