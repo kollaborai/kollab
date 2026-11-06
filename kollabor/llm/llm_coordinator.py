@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, cast
 
-from kollabor.user_input_source import UserInputSource
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, UserInputSource
 from kollabor_agent import BackgroundTaskManager, NativeToolsHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.mcp_integration import MCPIntegration
@@ -39,6 +39,7 @@ from kollabor_ai import (
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.context_injection import ContextService as ContextInjectionService
 from kollabor_ai.context_service import ContextService
+from kollabor_ai.conversation_logger import utc_stamp
 from kollabor_ai.goal_image_scope import current_goal_image_scope
 from kollabor_ai.message_content import (
     EphemeralImageStore,
@@ -218,11 +219,16 @@ class LLMService:
             and hasattr(self, "conversation_logger")
             and self.conversation_logger
         ):
-            await self.conversation_logger.log_system_message(
-                formatted_content,
-                parent_uuid=getattr(self, "current_parent_uuid", None),
-                subtype=normalized_subtype,
-            )
+            # The HUD entry is queued already: a history write failure must not
+            # stop the caller (grants, hub results) from completing.
+            try:
+                await self.conversation_logger.log_system_message(
+                    formatted_content,
+                    parent_uuid=getattr(self, "current_parent_uuid", None),
+                    subtype=normalized_subtype,
+                )
+            except Exception as exc:
+                logger.warning("HUD entry not written to history: %s", exc)
 
     async def inject_tool_grant(
         self,
@@ -1187,8 +1193,11 @@ class LLMService:
         # Set conversation context before logging start
         self._set_conversation_context()
 
-        # Log conversation start
-        await self.conversation_logger.log_conversation_start()
+        # Log conversation start; a history write failure must not stop startup
+        try:
+            await self.conversation_logger.log_conversation_start()
+        except Exception as exc:
+            logger.warning("Conversation start not written to history: %s", exc)
 
         # Start task monitoring
         if self.task_config.background_tasks.enable_monitoring:
@@ -1499,6 +1508,21 @@ class LLMService:
                     active_profile.get_model() if active_profile is not None else None
                 )
 
+
+                previous_runtime_profile = getattr(
+                    self.api_service, "_profile", None
+                )
+                if (
+                    previous_runtime_profile is None
+                    and active_profile is not None
+                    and str(getattr(active_profile, "provider", "") or "").lower()
+                    != "acp"
+                ):
+                    previous_runtime_profile = active_profile
+                previous_provider = getattr(self, "_current_provider", None)
+                acp_orchestrator = None
+                acp_closed = False
+
                 if str(getattr(profile, "provider", "") or "").lower() == "acp":
                     event_bus = getattr(self, "event_bus", None)
                     acp_orchestrator = (
@@ -1574,9 +1598,24 @@ class LLMService:
                                     query_codex_models,
                                 )
 
+                                revision = profile.revision
                                 models = await query_codex_models(
                                     tokens.access_token, tokens.account_id
                                 )
+                                # The lookup awaited: an edit or replacement made
+                                # meanwhile wins, so this stale switch is refused.
+                                stale = (
+                                    profile.revision != revision
+                                    or self.profile_manager.get_profile(profile_name)
+                                    is not profile
+                                )
+                                if stale:
+                                    logger.warning(
+                                        "Profile %r was edited while its model was "
+                                        "being resolved; switch cancelled",
+                                        profile_name,
+                                    )
+                                    return False
                                 resolved = pick_best_model(models)
                                 if resolved != "codex":
                                     profile.model = resolved
@@ -1606,14 +1645,73 @@ class LLMService:
                 # ``_provider_error``), so the next turn can still report the
                 # previous profile's error.
                 provider_config = create_config_from_profile(profile.to_dict())
+                revision = profile.revision
+
+
+                def target_profile_is_stale() -> bool:
+                    return (
+                        profile.revision != revision
+                        or self.profile_manager.get_profile(profile_name) is not profile
+                    )
+
+                async def restore_previous_runtime(
+                    *, restart_acp: bool = False
+                ) -> None:
+                    self._current_provider = previous_provider
+                    if previous_runtime_profile is not None:
+                        previous_profile_name = getattr(
+                            previous_runtime_profile, "name", profile_name
+                        )
+                        try:
+                            restored = await self.api_service.reinitialize_provider(
+                                previous_runtime_profile
+                            )
+                            if restored is False:
+                                logger.error(
+                                    "Could not restore provider profile %r after "
+                                    "switch rollback",
+                                    previous_profile_name,
+                                )
+                        except Exception as exc:
+                            logger.error(
+                                "Could not restore provider profile %r after "
+                                "switch rollback (%s)",
+                                previous_profile_name,
+                                type(exc).__name__,
+                            )
+                    if (
+                        restart_acp
+                        and acp_orchestrator is not None
+                        and active_profile is not None
+                    ):
+                        try:
+                            await acp_orchestrator.start(active_profile)
+                        except Exception as exc:
+                            logger.error(
+                                "Could not restore ACP profile %r after switch rollback (%s)",
+                                active_profile.name,
+                                type(exc).__name__,
+                            )
                 api_reinitialized = await self.api_service.reinitialize_provider(
                     profile
                 )
+                # Re-initialization can look up the OAuth model (profile-scoped
+                # tokens skip the lookup above), so an edit or replacement made
+                # meanwhile refuses this switch and restores the previous provider.
+                if target_profile_is_stale():
+                    logger.warning(
+                        "Profile %r changed while its provider was being "
+                        "initialized; switch cancelled",
+                        profile_name,
+                    )
+                    await restore_previous_runtime()
+                    return False
                 if not api_reinitialized:
                     logger.warning(
                         "API service could not reinitialize for profile '%s'",
                         profile_name,
                     )
+                    await restore_previous_runtime()
                     return False
 
                 acp_orchestrator = None
@@ -1631,28 +1729,47 @@ class LLMService:
                     if acp_orchestrator is not None:
                         try:
                             await acp_orchestrator.close()
+
+                            acp_closed = True
+                            if target_profile_is_stale():
+                                logger.warning(
+                                    "Profile %r changed while stopping ACP; "
+                                    "switch cancelled",
+                                    profile_name,
+                                )
+                                await restore_previous_runtime(restart_acp=True)
+                                return False
                         except Exception as exc:
                             logger.error(
                                 "Could not stop ACP profile %r during native switch (%s)",
                                 active_profile.name,
                                 type(exc).__name__,
                             )
-                            try:
-                                await acp_orchestrator.start(active_profile)
-                            except Exception as restore_error:
-                                logger.error(
-                                    "Could not restore ACP profile %r after failed switch (%s)",
-                                    active_profile.name,
-                                    type(restore_error).__name__,
-                                )
+                            # The API runtime already moved to the target above: restore
+                            # it and restart ACP once, as one rollback.
+                            await restore_previous_runtime(restart_acp=True)
                             return False
 
                 # Keep the coordinator's provider reference in sync with the
                 # API service. ProviderRegistry caches matching configurations,
                 # so this normally returns the same instance.
-                self._current_provider = await self._provider_registry.get_provider(
-                    provider_config
-                )
+                try:
+                    current_provider = await self._provider_registry.get_provider(
+                        provider_config
+                    )
+                except Exception:
+                    # The API service already moved; undo both provider changes.
+                    await restore_previous_runtime(restart_acp=acp_closed)
+                    raise
+                if target_profile_is_stale():
+                    logger.warning(
+                        "Profile %r changed while its provider was being resolved; "
+                        "switch cancelled",
+                        profile_name,
+                    )
+                    await restore_previous_runtime(restart_acp=acp_closed)
+                    return False
+                self._current_provider = current_provider
 
                 # Keep profile_manager's active state (and optionally the
                 # persisted config) in sync with the runtime provider. Without
@@ -1690,6 +1807,18 @@ class LLMService:
                             )
 
                 self.conversation_logger.set_provider(profile.provider)
+
+                if acp_orchestrator is not None:
+                    # Peer messages the closed harness still held are in the
+                    # conversation; one native turn answers them.
+                    try:
+                        await acp_orchestrator.hand_over_to_native()
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not hand buffered ACP messages to profile %r (%s)",
+                            profile_name,
+                            type(exc).__name__,
+                        )
 
                 # Keep this explicit class call compatible with the focused
                 # unbound-method test stand-in used for switch_profile.
@@ -1744,9 +1873,12 @@ class LLMService:
 
     # --- QueueProcessor forwarding methods ---
 
-    async def _enqueue_with_overflow_strategy(self, message: MessageContent) -> None:
-        """Enqueue message with overflow strategy. Delegates to QueueProcessor."""
-        await self._queue_processor.enqueue(message)
+    async def _enqueue_with_overflow_strategy(self, message: MessageContent) -> bool:
+        """Enqueue message with overflow strategy. Delegates to QueueProcessor.
+
+        False when the message was dropped and will not run (#589).
+        """
+        return await self._queue_processor.enqueue(message)
 
     async def _process_queue(self):
         """Process queued messages. Delegates to QueueProcessor."""
@@ -1787,22 +1919,37 @@ class LLMService:
         )
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
+            operator_inputs = tuple(
+                record
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for record in item.operator_inputs
+            )
             merged_origin_context = merge_voice_origin_contexts(messages)
             combined = combine_message_contents(
                 [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
             combined = self.merge_pending_agent_hud(combined)
-            messages = [
-                QueuedInput(
+            if voice_inputs:
+                merged_input = QueuedInput(
                     combined,
                     voice_inputs[-1].voice,
                     merged_origin_context,
                     parent_uuid=admission_parent,
                     admission_serial=batch_serial,
+                    operator_inputs=operator_inputs,
                 )
-                if voice_inputs
-                else combined
-            ]
+            elif operator_inputs:
+                merged_input = TaggedInput(
+                    combined,
+                    request_ids,
+                    parent_uuid=admission_parent,
+                    admission_serial=batch_serial,
+                    operator_inputs=operator_inputs,
+                )
+            else:
+                merged_input = combined
+            messages = [merged_input]
         # Parent from the admission-time capture, not the pointer: a detached
         # completion (hub mention, voice reply) may have advanced the pointer
         # while this batch sat queued (#676). Items without a capture (system
@@ -2028,6 +2175,7 @@ class LLMService:
         may_answer: bool = False,
         native_only: bool = False,
         request_id: str | None = None,
+        operator_source: str | None = None,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -2046,6 +2194,8 @@ class LLMService:
                 generation writes files); refused while ACP owns the chat.
             request_id: the client follows this turn by it (#551): its events
                 carry it in ``request_ids``, and the result echoes it.
+            operator_source: authenticated source of words spoken/written by the
+                human operator. Untrusted or absent sources are not preserved.
 
         Returns:
             Status information about processing
@@ -2077,6 +2227,20 @@ class LLMService:
                 "reason": self.image_input_rejection_reason(),
             }
 
+        input_source = getattr(operator_source, "value", operator_source)
+        operator_inputs: tuple[dict[str, str], ...] = ()
+        if (
+            isinstance(input_source, str)
+            and input_source in HUMAN_USER_INPUT_SOURCES
+        ):
+            operator_inputs = (
+                {
+                    "source": input_source,
+                    "timestamp": utc_stamp(),
+                    "text": message if isinstance(message, str) else display_text,
+                },
+            )
+
         # A LiveKit room's turn, or a /voice turn VoicePlugin.admit let in.
         claims_voice_origin = isinstance(origin_context, dict) and is_voice_origin(origin_context)
         if claims_voice_origin and not validate_voice_origin(origin_context):
@@ -2092,8 +2256,13 @@ class LLMService:
                 return _acp_unavailable_result(self._acp_service())
             return await self._admit_acp(
                 acp,
-                {"message": normalized_message, "voice": voice, "origin_context": origin_context},
-                UserInputSource.TUI.value,
+                {
+                    "message": normalized_message,
+                    "voice": voice,
+                    "origin_context": origin_context,
+                    "operator_inputs": operator_inputs,
+                },
+                input_source if operator_inputs else UserInputSource.TUI.value,
             )
 
         trusted_origin_context = (
@@ -2144,38 +2313,58 @@ class LLMService:
         # atomic point its lineage capture rides, and the cursor advance is
         # published through the admission-serial protocol so concurrent
         # detached completions resolve by admission order, not wall clock
-        # (#676 r7).
+        # (#676 r7). A failed write is logged and shown; the message still
+        # goes to the model.
         turn_serial = self.claim_turn_serial()
         admission_parent_uuid = self.current_parent_uuid
-        user_uuid = await self.conversation_logger.log_user_message(
-            display_text, parent_uuid=admission_parent_uuid
-        )
-        self.publish_cursor(user_uuid, turn_serial)
-        # This queue item belongs under the user row created for its admission,
-        # even if another completion won the shared cursor during the logger
-        # await. Never re-read mutable current_parent_uuid after yielding.
-        admitted_parent_uuid = user_uuid
+        # A failed write has no row to point at: the cursor stays where it is
+        # (publishing None would cut the chain) and the queue item keeps the
+        # parent captured at admission.
+        admitted_parent_uuid = admission_parent_uuid
+        try:
+            user_uuid = await self.conversation_logger.log_user_message(
+                display_text, parent_uuid=admission_parent_uuid
+            )
+        except Exception as exc:
+            logger.error("User message not written to history: %s", exc)
+            self.message_display_service.display_system_message(
+                "Conversation history not saved for this message."
+            )
+        else:
+            self.publish_cursor(user_uuid, turn_serial)
+            # This queue item belongs under the user row created for its
+            # admission, even if another completion won the shared cursor
+            # during the logger await. Never re-read mutable
+            # current_parent_uuid after yielding.
+            admitted_parent_uuid = user_uuid
 
         # Add to processing queue with overflow handling. Plain input rides a
         # zero-id TaggedInput so the capture travels with the item (#676); a
         # bare string could not carry it, and an empty request_ids tuple
         # behaves like bare content in every batch-pipeline consumer.
-        await self._enqueue_with_overflow_strategy(
-            QueuedInput(
-                normalized_message,
-                voice or {},
-                trusted_origin_context,
-                parent_uuid=admitted_parent_uuid,
-                admission_serial=turn_serial,
+        try:
+            admitted = await self._enqueue_with_overflow_strategy(
+                QueuedInput(
+                    normalized_message,
+                    voice or {},
+                    trusted_origin_context,
+                    parent_uuid=admitted_parent_uuid,
+                    admission_serial=turn_serial,
+                    operator_inputs=operator_inputs,
+                )
+                if voice or trusted_origin_context
+                else TaggedInput(
+                    normalized_message,
+                    (request_id,) if request_id else (),
+                    parent_uuid=admitted_parent_uuid,
+                    admission_serial=turn_serial,
+                    operator_inputs=operator_inputs,
+                )
             )
-            if voice or trusted_origin_context
-            else TaggedInput(
-                normalized_message,
-                (request_id,) if request_id else (),
-                parent_uuid=admitted_parent_uuid,
-                admission_serial=turn_serial,
-            )
-        )
+        except RuntimeError:
+            # The overflow strategy refused it, and the queue already ended its
+            # stream. Raising here would make the hook pipeline retry this turn.
+            admitted = False
 
         # Start processing if not already running
         if not self.is_processing:
@@ -2183,6 +2372,10 @@ class LLMService:
                 lambda: self._process_queue(), name="process_queue"
             )
 
+        if not admitted:
+            # Dropped, or swept by a Stop: its stream already ended, so it is not
+            # reported as queued (#589).
+            return {"status": "rejected", "reason": "input_not_queued"}
         if request_id and not (voice or trusted_origin_context):
             return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
@@ -2449,6 +2642,11 @@ class LLMService:
                 message, request_id=request_id, source=source,
                 thread_id=data.get("thread_id"),
                 origin=origin,
+                **(
+                    {"operator_inputs": data["operator_inputs"]}
+                    if data.get("operator_inputs")
+                    else {}
+                ),
                 **({"images": images} if images else {}),
             )
         except (RuntimeError, ValueError) as exc:
@@ -2778,8 +2976,11 @@ class LLMService:
 
     async def shutdown(self):
         """Shutdown the LLM service."""
-        # Log conversation end
-        await self.conversation_logger.log_conversation_end()
+        # Log conversation end; a history write failure must not skip the cleanup below
+        try:
+            await self.conversation_logger.log_conversation_end()
+        except Exception as exc:
+            logger.warning("Conversation end not written to history: %s", exc)
 
         # Cancel all background tasks
         await self.cancel_all_tasks()

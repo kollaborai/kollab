@@ -11,7 +11,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
-from kollabor.user_input_source import YES_SOURCES
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, YES_SOURCES
 from kollabor_agent.queue_processor import (
     MAX_CONTINUATION_TURNS,
     RepeatedToolErrorBreaker,
@@ -180,6 +180,13 @@ class MessageHandler:
         if not claims_voice_origin:
             origin_context = None
         origin_kwargs = {"origin_context": origin_context} if origin_context else {}
+        input_source = getattr(event, "source", None)
+        source_value = getattr(input_source, "value", input_source)
+        origin_kwargs["operator_source"] = (
+            str(source_value)
+            if source_value in HUMAN_USER_INPUT_SOURCES
+            else None
+        )
         # Only a person answering live (YES_SOURCES) answers what the agent asked
         # them. A hub peer's message (the "agent" source) is a turn like the user's,
         # but its words never do.
@@ -332,6 +339,8 @@ class MessageHandler:
                 mds.show_loading(loading_message)
 
             display_sequence: List[tuple] = []
+            # Messages whose history write failed. The batch still runs, but it is not a success.
+            history_failures = 0
 
             for msg in messages:
                 role = msg.get("role", "user")
@@ -346,25 +355,30 @@ class MessageHandler:
                         parent_uuid=parent_uuid,
                     )
 
-                # Log message
+                # Log message. A failed write leaves the chain on the previous
+                # record; the rest of the batch still reaches history.
                 if log_messages:
                     conv_logger = coord.conversation_logger
                     log_content = content_to_text(content)
-                    if role == "user":
-                        parent_uuid = await conv_logger.log_user_message(
-                            log_content, parent_uuid=parent_uuid
-                        )
-                    elif role == "assistant":
-                        parent_uuid = await conv_logger.log_assistant_message(
-                            log_content,
-                            parent_uuid=parent_uuid,
-                            model=coord.api_service.model,
-                            thinking_content=None,
-                        )
-                    elif role == "system":
-                        await conv_logger.log_system_message(
-                            log_content, parent_uuid=parent_uuid
-                        )
+                    try:
+                        if role == "user":
+                            parent_uuid = await conv_logger.log_user_message(
+                                log_content, parent_uuid=parent_uuid
+                            )
+                        elif role == "assistant":
+                            parent_uuid = await conv_logger.log_assistant_message(
+                                log_content,
+                                parent_uuid=parent_uuid,
+                                model=coord.api_service.model,
+                                thinking_content=None,
+                            )
+                        elif role == "system":
+                            await conv_logger.log_system_message(
+                                log_content, parent_uuid=parent_uuid
+                            )
+                    except Exception as exc:
+                        history_failures += 1
+                        logger.error("Message not written to history: %s", exc)
 
                 # Build display sequence
                 if display_messages and role in ("user", "assistant", "system"):
@@ -413,12 +427,15 @@ class MessageHandler:
             logger.info(
                 f"ADD_MESSAGE: Processed {len(messages)} messages, trigger_llm={trigger_llm}"
             )
-            return {
-                "success": True,
+            result = {
+                "success": history_failures == 0,
                 "message_count": len(messages),
                 "parent_uuid": parent_uuid,
                 "llm_triggered": trigger_llm,
             }
+            if history_failures:
+                result["error"] = f"{history_failures} message(s) not written to history"
+            return result
 
         except Exception as e:
             # Ensure loading is hidden on error
