@@ -811,6 +811,68 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
         await orchestrator.close()
 
 
+@pytest.mark.asyncio
+async def test_a_row_that_landed_before_its_write_raised_is_not_written_again(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        real_add_message = manager.add_message
+        failures = [OSError("disk full")]
+
+        def landed_then_raises(*args, **kwargs):
+            # add_message appends the row before its save can raise.
+            message_uuid = real_add_message(*args, **kwargs)
+            if failures:
+                failures.pop()
+                raise OSError("disk full")
+            return message_uuid
+
+        monkeypatch.setattr(manager, "add_message", landed_then_raises)
+        orchestrator.runner.is_processing = True
+        orchestrator.observe_notification(
+            HubMessage(
+                action="message",
+                from_agent="peer-id-1",
+                from_identity="peer-1",
+                to="*",
+                content="FIRST_NOTE",
+                thread_id=None,
+                reply_to="",
+            )
+        )
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()  # the retry must not append a second row
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        rows = [
+            m
+            for m in manager.messages
+            if m["metadata"].get("source") == "observation"
+        ]
+        assert sum("FIRST_NOTE" in m["content"] for m in rows) == 1
+    finally:
+        await orchestrator.close()
+
+
 def test_a_full_retry_queue_refuses_the_new_message_instead_of_evicting(monkeypatch, caplog):
     orchestrator = mod.ACPOrchestrator(Bus())
 
