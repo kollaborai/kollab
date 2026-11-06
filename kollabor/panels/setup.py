@@ -292,9 +292,13 @@ async def create_and_activate_profile(
                     f"Could not activate '{name}': switch timed out after 20 seconds."
                 ) from exc
             except Exception as exc:  # noqa: BLE001
-                safe_error = redact_error(str(exc), api_key) or type(exc).__name__
-                logger.warning("setup: switch_profile failed: %s", safe_error)
-                raise RuntimeError(f"Could not activate '{name}': {safe_error}") from exc
+                logger.warning(
+                    "setup: switch_profile failed (%s); active profile unchanged",
+                    type(exc).__name__,
+                )
+                raise RuntimeError(
+                    f"Could not activate '{name}': the previous profile remains active."
+                ) from exc
             if not activated:
                 logger.warning("setup: switch_profile returned false; active profile unchanged")
                 raise RuntimeError(f"Could not activate '{name}': LLM profile switch rejected it.")
