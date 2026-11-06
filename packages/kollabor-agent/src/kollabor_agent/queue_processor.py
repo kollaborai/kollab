@@ -2292,22 +2292,29 @@ class QueueProcessor:
                 # Inline XML/plugin calls may run beside native calls.
                 tool_call_entries = [*(tool_call_entries or []), *_xml_tool_call_entries(all_tools)]
 
-            # Log assistant response
+            # Log assistant response. A failed write keeps the chain on the previous
+            # record; the reply still goes into the in-memory history below.
             thinking_list = thinking_blocks if thinking_blocks else None
-            parent_uuid = await self.conversation_logger.log_assistant_message(
-                clean_response or response,
-                parent_uuid=parent_uuid,
-                model=self.api_service.model,
-                usage_stats={
-                    "input_tokens": self.session_stats.get("input_tokens", 0),
-                    "output_tokens": self.session_stats.get("output_tokens", 0),
-                    "thinking_duration": thinking_duration,
-                },
-                thinking_content=thinking_list,
-                tool_calls=tool_call_entries,
-                provider_reasoning=_last_provider_reasoning(self.api_service),
-                voice_turn_id=self._voice_turn_metadata().get("voice_turn_id"),
-            )
+            try:
+                parent_uuid = await self.conversation_logger.log_assistant_message(
+                    clean_response or response,
+                    parent_uuid=parent_uuid,
+                    model=self.api_service.model,
+                    usage_stats={
+                        "input_tokens": self.session_stats.get("input_tokens", 0),
+                        "output_tokens": self.session_stats.get("output_tokens", 0),
+                        "thinking_duration": thinking_duration,
+                    },
+                    thinking_content=thinking_list,
+                    tool_calls=tool_call_entries,
+                    provider_reasoning=_last_provider_reasoning(self.api_service),
+                    voice_turn_id=self._voice_turn_metadata().get("voice_turn_id"),
+                )
+            except Exception as exc:
+                logger.error("Assistant reply not written to history: %s", exc)
+                self.message_display_service.display_system_message(
+                    "Conversation history not saved for this reply."
+                )
 
             # Add assistant message to conversation history
             # BRANCH POINT: history format differs between native and XML paths
@@ -2356,13 +2363,16 @@ class QueueProcessor:
                 for result in native_results:
                     output_text = result.output if result.success else result.error
                     result_entry = _xml_tool_result_entry(result, output_text)
-                    await self.conversation_logger.log_system_message(
-                        f"Executed {result.tool_type} ({result.tool_id}): {output_text}",
-                        parent_uuid=parent_uuid,
-                        subtype="tool_result",
-                        tool_use_id=result.tool_id,
-                        tool_result=result_entry,
-                    )
+                    try:
+                        await self.conversation_logger.log_system_message(
+                            f"Executed {result.tool_type} ({result.tool_id}): {output_text}",
+                            parent_uuid=parent_uuid,
+                            subtype="tool_result",
+                            tool_use_id=result.tool_id,
+                            tool_result=result_entry,
+                        )
+                    except Exception as exc:
+                        logger.error("Tool result not written to history: %s", exc)
                     tool_calls_list = self.api_service.get_last_tool_calls()
                     for tc in tool_calls_list:
                         if tc.id == result.tool_id:
@@ -2407,13 +2417,16 @@ class QueueProcessor:
                         output = result.output if result.success else result.error
                         tool_context = self.tool_executor.format_result_for_conversation(result)
                         result_entry = _xml_tool_result_entry(result, tool_context)
-                        await self.conversation_logger.log_system_message(
-                            f"Executed {result.tool_type} ({result.tool_id}): {output}",
-                            parent_uuid=parent_uuid,
-                            subtype="tool_result",
-                            tool_use_id=result.tool_id,
-                            tool_result=result_entry,
-                        )
+                        try:
+                            await self.conversation_logger.log_system_message(
+                                f"Executed {result.tool_type} ({result.tool_id}): {output}",
+                                parent_uuid=parent_uuid,
+                                subtype="tool_result",
+                                tool_use_id=result.tool_id,
+                                tool_result=result_entry,
+                            )
+                        except Exception as exc:
+                            logger.error("Tool result not written to history: %s", exc)
                         batched.append(f"Tool result: {tool_context}")
                         display_results.append(result_entry)
                         self._track_file_interaction(result)
@@ -2466,13 +2479,16 @@ class QueueProcessor:
                         output = result.output if result.success else result.error
                         tool_context = self.tool_executor.format_result_for_conversation(result)
                         result_entry = _xml_tool_result_entry(result, tool_context)
-                        await self.conversation_logger.log_system_message(
-                            f"Executed {result.tool_type} ({result.tool_id}): {output}",
-                            parent_uuid=parent_uuid,
-                            subtype="tool_result",
-                            tool_use_id=result.tool_id,
-                            tool_result=result_entry,
-                        )
+                        try:
+                            await self.conversation_logger.log_system_message(
+                                f"Executed {result.tool_type} ({result.tool_id}): {output}",
+                                parent_uuid=parent_uuid,
+                                subtype="tool_result",
+                                tool_use_id=result.tool_id,
+                                tool_result=result_entry,
+                            )
+                        except Exception as exc:
+                            logger.error("Tool result not written to history: %s", exc)
                         batched_tool_results.append(f"Tool result: {tool_context}")
                         display_results.append(result_entry)
                         self._track_file_interaction(result)

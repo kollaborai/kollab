@@ -415,29 +415,45 @@ class KollaborConversationLogger:
     async def _append_to_jsonl(
         self, message: Dict[str, Any], session_id: Optional[str] = None
     ):
-        """Append to the current or explicitly named conversation JSONL."""
+        """Append to the current or explicitly named conversation JSONL.
+
+        Raises when the record is not on disk, and counts nothing then. A failed
+        attempt is truncated back to where it started, so a retry cannot duplicate
+        the record and the next append never lands on a half-written line.
+        """
         own = session_id is None or session_id == self.session_id
         path = (
             self.session_file
             if own
             else self.conversations_dir / f"{session_id}.jsonl"
         )
-        # Current-session rows are bound at call time. A reset while an append waits
-        # on the lock must not redirect that row; explicit old-session ACP results
-        # instead use the path selected from their session_id above.
+        # Bind current-session rows to the session their caller captured (the
+        # row's sessionId was stamped from self.session_id at call time).
+        # reset_session takes no lock and rewrite_voice_turn holds the lock
+        # across a to_thread, so an append queued behind a rewrite can wake
+        # up after the session was replaced: opening whatever session_file
+        # points at THEN would write the old-session row into the new
+        # session's file. Validate inside the lock, before opening anything.
+        # Explicit old-session ACP results instead use the path selected from
+        # their session_id above.
         bound_file = self.session_file
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
             if own and self.session_file != bound_file:
                 # The session was replaced while this append waited. The row
-                # belongs to the captured session only — drop it rather than
-                # corrupt the replaced session's transcript.
+                # belongs to the captured session only: do not write it into
+                # the replaced session's transcript. It was not written, so
+                # raise like every other not-written case (#580) instead of
+                # returning an id for a row that is on no disk.
                 logger.warning(
                     "dropped a %s JSONL append: session replaced while the "
                     "append waited on the write lock (%s)",
                     message.get("type"),
                     bound_file.name,
                 )
-                return
+                raise OSError(
+                    "conversation record not written: session replaced while "
+                    f"the append waited ({bound_file.name})"
+                )
             reparent = self._read_reparent(path)  # cuts for the destination session
             parent = message.get("parentUuid")
             seen = set()
@@ -446,18 +462,27 @@ class KollaborConversationLogger:
                 parent = reparent[parent]
             if "parentUuid" in message:
                 message["parentUuid"] = parent
+            data = memoryview((json.dumps(message) + "\n").encode())
+            fd = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
             try:
-                fd = os.open(
-                    path,
-                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                    0o600,
-                )
-                with os.fdopen(fd, "a") as f:
-                    f.write(json.dumps(message) + "\n")
-                if own:
-                    self.message_count += 1
-            except Exception as e:
-                logger.error(f"Failed to write to JSONL: {e}")
+                start = os.fstat(fd).st_size
+                try:
+                    while data:
+                        written = os.write(fd, data)
+                        if written <= 0:  # never spin on a write that makes no progress
+                            raise OSError("JSONL write made no progress")
+                        data = data[written:]
+                except BaseException:
+                    os.ftruncate(fd, start)  # roll the partial record back
+                    raise
+            finally:
+                os.close(fd)
+            if own:
+                self.message_count += 1
 
     def _analyze_user_context(self, content: str) -> Dict[str, Any]:
         """Analyze user context from message content."""
