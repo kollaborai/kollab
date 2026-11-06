@@ -113,6 +113,9 @@ class ACPOrchestrator:
         # steering rows, which are uuid-unique.
         self._turn_parents: dict[tuple[int, int], str | None] = {}
         self._turn_user_tasks: dict[tuple[int, int], asyncio.Task] = {}
+        # The conversation an admission was made under (#596): resume swaps the
+        # live manager's session id in place, and the reply must not follow it.
+        self._turn_conversations: dict[tuple[int, int], str] = {}
         self._observed_turns: dict[tuple[str, int], _ObservedTurn] = {}
         self._display_turn: tuple[str, int] | None = None
         # Voice data of a mic turn, by request id, until its reply is spoken.
@@ -636,6 +639,7 @@ class ACPOrchestrator:
         self._completion_tasks.add(task)
         task.add_done_callback(self._completion_tasks.discard)
         turn_key = (admission.generation, admission.turn_id)
+        self._turn_conversations[turn_key] = self._conversation_id()
         if record:
             try:
                 self._record_user(
@@ -1112,6 +1116,7 @@ class ACPOrchestrator:
         finally:
             self._turn_parents.pop(turn_key, None)
             self._turn_user_tasks.pop(turn_key, None)
+            self._turn_conversations.pop(turn_key, None)
             self._observed_turns.pop((admission.request_id, admission.turn_id), None)
         event_usage = (settled_usage or {}).get("usage")
         if (event_usage is None and self._display_usage_payload is not None
@@ -1151,6 +1156,10 @@ class ACPOrchestrator:
         llm = self.event_bus.get_service("llm_service")
         parent = self._turn_parents.get(turn_key)
         manager = getattr(llm, "conversation_manager", None)
+        # A turn that outlived its conversation (resume, restart, replacement)
+        # goes to that conversation's own log, never into the live one.
+        bound = self._turn_conversations.get(turn_key)
+        elsewhere = manager is not None and bound is not None and bound != self._conversation_id()
         text = "".join(str(update.get("text") or "") for update in result.updates if update.get("kind") == "text")
         thoughts = [str((update.get("payload", {}).get("content") or {}).get("text") or "")
                     for update in result.updates if update.get("kind") == "agent_thought_chunk"]
@@ -1174,19 +1183,22 @@ class ACPOrchestrator:
                 "is_error": payload.get("status") == "failed",
                 "metadata": {"acp": dict(payload)}}
         metadata["tool_calls"] = list(tools.values())
-        if manager is not None:
+        if manager is not None and not elsewhere:
             manager.add_message("assistant", text or result.text,
                                 parent_uuid=parent, metadata=metadata)
             manager.save_conversation()
         history = getattr(llm, "conversation_history", None)
-        if isinstance(history, list) and history is not getattr(manager, "messages", None):
+        if (isinstance(history, list) and history is not getattr(manager, "messages", None)
+                and not elsewhere):
             history.append(ConversationMessage(role="assistant", content=text or result.text,
                                                metadata=metadata, thinking="".join(thoughts)))
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
+            owner = {"session_id": bound} if elsewhere else {}
             await logger_service.log_assistant_message(text or result.text,
                 parent_uuid=parent or "", model=self._profile_name,
-                thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata)
+                thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata,
+                **owner)
 
     async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:
         request_id = f"request-{uuid.uuid4().hex}"
