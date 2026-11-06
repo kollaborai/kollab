@@ -28,6 +28,7 @@ from kollabor.state import (
     SkillListSnapshot,
     SystemPromptSnapshot,
 )
+from kollabor.state.remote import _raise_for_error
 
 
 def _make_skill(
@@ -374,6 +375,21 @@ class TestSetActiveProfileProviderReady(unittest.IsolatedAsyncioTestCase):
 
         api_service.reinitialize_provider.assert_awaited_once_with(profile)
         self.assertEqual(snapshot.name, "openrouter")
+
+
+class TestRemoteStateProfileActivationErrors(unittest.TestCase):
+    def test_reconstructs_typed_profile_activation_error(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            _raise_for_error(
+                {
+                    "error": "provider activation failed",
+                    "error_code": "profile_activation_failed",
+                    "previous_profile_restored": True,
+                }
+            )
+
+        self.assertEqual(type(caught.exception).__name__, "ProfileActivationError")
+        self.assertTrue(caught.exception.previous_profile_restored)
 
 
 # === Agents ===
