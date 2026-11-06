@@ -40,6 +40,7 @@ from .context_registry import ContextRegistry
 from .interface import (
     ACP_CONVERSATION_BUSY,
     ACP_HARNESS_UNAVAILABLE,
+    ProfileActivationError,
     StateService,
     enrollment_result,
     offer_failure,
@@ -275,6 +276,9 @@ class LocalStateService(StateService):
 
         self._llm_service = llm_service
         self._profile_manager = profile_manager
+        # Ownership token for the selected profile; this avoids taking a
+        # stale activation failure rollback over a newer selection.
+        self._profile_activation_generation = 0
         self._permission_manager = permission_manager
         self._agent_manager = agent_manager
         self._event_bus = event_bus
@@ -1530,6 +1534,81 @@ class LocalStateService(StateService):
             if event_bus else None
         )
         closed_harness = None
+
+        previous_profile_name = getattr(current_profile, "name", None)
+        previous_is_acp = str(current_provider).lower() == "acp"
+        previous_acp_active = (
+            previous_is_acp
+            and orchestrator is not None
+            and getattr(orchestrator, "active", False) is True
+        )
+        previous_runner = (
+            getattr(orchestrator, "runner", None) if previous_acp_active else None
+        )
+        previous_acp_binding = getattr(previous_runner, "binding", None)
+        previous_acp_conversation = (
+            getattr(orchestrator, "binding_conversation_id", None)
+            if previous_acp_active
+            else None
+        )
+        previous_acp_loadout = (
+            getattr(orchestrator, "_loadout_override", None)
+            if previous_acp_active
+            else None
+        )
+        activation_generation: int | None = None
+
+        async def restore_previous_profile() -> bool:
+            """Restore both the selected profile and its request runtime."""
+            if current_profile is None or not previous_profile_name:
+                return False
+            if (
+                activation_generation is None
+                or self._profile_activation_generation != activation_generation
+            ):
+                return False
+            try:
+                active_profile = self._profile_manager.get_active_profile()
+                if getattr(active_profile, "name", None) != name:
+                    return False
+                restored_active = self._profile_manager.set_active_profile(
+                    previous_profile_name
+                )
+                if restored_active is False:
+                    return False
+                # The restoration now owns the selected profile too.
+                self._profile_activation_generation += 1
+                if previous_is_acp:
+                    if previous_acp_active:
+                        if orchestrator is None:
+                            return False
+                        await orchestrator.close()
+                        orchestrator._loadout_override = previous_acp_loadout
+                        if previous_acp_binding is not None and previous_acp_conversation:
+                            orchestrator.save_binding_for(
+                                previous_acp_conversation, previous_acp_binding
+                            )
+                        await orchestrator.start(
+                            current_profile,
+                            resume_conversation=(
+                                previous_acp_conversation
+                                if previous_acp_binding is not None
+                                else None
+                            ),
+                        )
+                    return True
+
+                api_service = getattr(self._llm_service, "api_service", None)
+                reinitialize = getattr(api_service, "reinitialize_provider", None)
+                if callable(reinitialize):
+                    return await reinitialize(current_profile) is not False
+                return True
+            except Exception as restore_error:
+                logger.error(
+                    "Could not restore previous profile after provider failure (%s)",
+                    type(restore_error).__name__,
+                )
+                return False
         if loadout is not None and str(target_provider).lower() != "acp":
             # Layer the loadout preset onto the provider profile in memory
             # only: an attach/launch switch must never rewrite the user's
@@ -1705,6 +1784,12 @@ class LocalStateService(StateService):
                 + (f" (available: {', '.join(available)})" if available else "")
             )
 
+        # The manager selection above is synchronous. Record ownership before
+        # the next await so any older failed activation can detect that it is
+        # stale without serializing all concurrent profile activations.
+        self._profile_activation_generation += 1
+        activation_generation = self._profile_activation_generation
+
         # --model / --effort ride on top of the selected profile. Applied
         # before the provider reinitialize below so the next turn uses them,
         # and never written to config -- a launch flag must not rewrite the
@@ -1762,16 +1847,25 @@ class LocalStateService(StateService):
         # provider selection.
         llm = self._llm_service
         if str(target_provider).lower() != "acp" and llm is not None and hasattr(llm, "api_service"):
-            try:
-                reinitialize = getattr(llm.api_service, "reinitialize_provider", None)
-                if callable(reinitialize):
-                    await reinitialize(profile)
-            except Exception as e:
-                logger.warning(
-                    "Provider reinitialization failed for profile %r (%s)",
-                    name,
-                    type(e).__name__,
-                )
+            reinitialize = getattr(llm.api_service, "reinitialize_provider", None)
+            if callable(reinitialize):
+                try:
+                    initialized = await reinitialize(profile)
+                    if initialized is False:
+                        raise RuntimeError("provider initialization returned false")
+                except asyncio.CancelledError:
+                    await restore_previous_profile()
+                    raise
+                except Exception as activation_error:
+                    restored = await restore_previous_profile()
+                    logger.warning(
+                        "Provider reinitialization failed (%s; restored=%s)",
+                        type(activation_error).__name__,
+                        restored,
+                    )
+                    raise ProfileActivationError(
+                        previous_profile_restored=restored
+                    ) from None
             if hasattr(llm, "_load_native_tools") and hasattr(
                 llm, "create_background_task"
             ):
