@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - A reply from an ACP turn that finishes or is stopped after you resume another conversation now stays in the conversation it was sent from, instead of appearing at the end of the one you just resumed (#596).
+- A hub message sent from the Web UI now goes to the agent whose row was selected: the message carries the row's agent id, so a same-named agent in another folder no longer receives it, and a message to an agent that has gone is refused instead of redirected (#568).
+- Dreaming no longer stalls the agent's event loop while it saves insights or loads the vault: the saves run in a worker thread, the vault loads at startup, and shutdown waits for a save still in progress (#562)
 - Resuming a network halt no longer fails on Windows when another process is reading the halt file at that moment: the write waits briefly for the reader, and if it still cannot replace the file it reports the error and leaves the halt in place (#573).
 - When an ACP agent is the active backend, hub wakes and injected messages no longer start a native reply behind it; they show an error instead, `/compact` no longer asks the model on an ACP chat, and a finished `/sub` agent's summary is shown to you instead of being written into native history behind the ACP agent (#579).
 - A voice turn no longer puts the old provider back over a model or profile you chose while it was running; it restores chat's provider only if the turn still holds the active one (#584).
