@@ -230,8 +230,11 @@ async def create_and_activate_profile(
 
     Never fills a provider built-in in place: an existing name gets a suffix.
     ``state_service`` (the daemon's, or the attach client's RPC bridge) activates
-    through the daemon that owns the request provider; ``llm_service`` is the
-    fallback for wiring without one.
+    through the daemon that owns the request provider. ``llm_service`` is the
+    fallback when that bridge is unavailable or fails; if it exists but cannot
+    switch, activation fails instead of changing only the saved active profile.
+    The profile-manager-only fallback is reserved for setups without an LLM
+    service.
     """
     if not profile_manager:
         raise RuntimeError("profile manager unavailable")
@@ -262,18 +265,43 @@ async def create_and_activate_profile(
             except TypeError:
                 profile_manager.set_active_profile(name)
         except Exception as exc:  # noqa: BLE001 - fall through to the fallbacks
-            logger.warning("setup: state-service activation failed: %s", exc)
-    if not activated and llm_service is not None and hasattr(llm_service, "switch_profile"):
-        try:
-            activated = bool(
-                await asyncio.wait_for(llm_service.switch_profile(name, persist=True), timeout=20.0)
+            logger.warning(
+                "setup: state-service activation failed: %s",
+                redact_error(str(exc), api_key),
             )
-        except asyncio.TimeoutError:
-            logger.warning("setup: switch_profile timed out; activating without reinit")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("setup: switch_profile failed: %s", exc)
     if not activated:
-        profile_manager.set_active_profile(name)
+        if llm_service is None:
+            # First-run setups without an LLM service can update the manager directly.
+            profile_manager.set_active_profile(name)
+        else:
+            switch_profile = getattr(llm_service, "switch_profile", None)
+            if not callable(switch_profile):
+                raise RuntimeError(
+                    f"Could not activate '{name}': no LLM profile-switch method is available."
+                )
+            try:
+                activated = bool(
+                    await asyncio.wait_for(
+                        switch_profile(name, persist=True),
+                        timeout=20.0,
+                    )
+                )
+            except asyncio.TimeoutError as exc:
+                logger.warning("setup: switch_profile timed out; active profile unchanged")
+                raise RuntimeError(
+                    f"Could not activate '{name}': switch timed out after 20 seconds."
+                ) from exc
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "setup: switch_profile failed (%s); active profile unchanged",
+                    type(exc).__name__,
+                )
+                raise RuntimeError(
+                    f"Could not activate '{name}': the previous profile remains active."
+                ) from exc
+            if not activated:
+                logger.warning("setup: switch_profile returned false; active profile unchanged")
+                raise RuntimeError(f"Could not activate '{name}': LLM profile switch rejected it.")
     return name
 
 

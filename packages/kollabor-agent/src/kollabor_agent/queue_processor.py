@@ -72,6 +72,8 @@ class TaggedInput:
     # mutable ``current_parent_uuid`` pointer a detached completion (hub
     # mention, voice reply) may advance while the input sits queued.
     parent_uuid: str | None = None
+    # Authenticated operator words carried to the resulting history message.
+    operator_inputs: tuple[dict[str, str], ...] = ()
 
 
 def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
@@ -96,6 +98,8 @@ class QueuedInput:
     # Chain position frozen at admission (#676); see TaggedInput.parent_uuid.
     # Nudges leave it None and keep the pointer fallback.
     parent_uuid: str | None = None
+    # Authenticated operator words carried to the resulting history message.
+    operator_inputs: tuple[dict[str, str], ...] = ()
 
 
 _UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")
@@ -898,8 +902,14 @@ class QueueProcessor:
             QueuedInput(content=content, voice={}, is_system_nudge=True)
         )
 
-    async def enqueue(self, message: MessageContent) -> None:
-        """Enqueue message with overflow strategy."""
+    async def enqueue(self, message: MessageContent) -> bool:
+        """Enqueue message with overflow strategy.
+
+        Returns True only when the message entered the queue and will run. False
+        means it never will: the strategy dropped it, or a Stop swept it while it
+        waited for room. Its stream has already ended, so callers must not report
+        it as accepted (#589).
+        """
         # Watchdog heartbeat: new work arriving is activity — keeps a session
         # that just received a message from being flagged as wedged.
         self.mark_progress()
@@ -907,7 +917,7 @@ class QueueProcessor:
             # Voice admission must never acknowledge a message silently dropped
             # by an overflow strategy. Reject before modifying the queue.
             self.processing_queue.put_nowait(message)
-            return
+            return True
         self._queue_metrics["total_enqueue_attempts"] += 1
 
         if self.task_config.queue.log_queue_events:
@@ -921,7 +931,7 @@ class QueueProcessor:
             self._queue_metrics["total_enqueue_successes"] += 1
             if self.task_config.queue.log_queue_events:
                 logger.debug("Message enqueued successfully")
-            return
+            return True
         except asyncio.QueueFull:
             pass
 
@@ -930,16 +940,19 @@ class QueueProcessor:
 
         try:
             if strategy == "drop_oldest":
-                await self._drop_oldest_strategy(message)
+                admitted = await self._drop_oldest_strategy(message)
             elif strategy == "drop_newest":
-                self._drop_newest_strategy()
+                self._drop_newest_strategy()  # always raises: the new message is refused
+                admitted = False
             elif strategy == "block":
-                await self._block_strategy(message)
+                admitted = await self._block_strategy(message)
             else:
-                self._unknown_strategy(message)
+                admitted = self._unknown_strategy(message)
         except RuntimeError:
             self._end_dropped(message)  # refused: it never runs, so its stream ends now
             raise
+        if not admitted:
+            return False
         if (
             getattr(self, "_cancel_generation", 0) != generation
             and isinstance(message, TaggedInput)
@@ -948,6 +961,8 @@ class QueueProcessor:
             # A Stop swept the queue while this waited for room: no drain runs it
             # until the next message, so it ends as the swept ones did.
             self._end_queued(message)
+            return False
+        return True
 
     def _end_dropped(
         self,
@@ -974,8 +989,8 @@ class QueueProcessor:
         publish_semantic(self.renderer, "error", request_ids=ids, message=why)
         publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
 
-    async def _drop_oldest_strategy(self, message: MessageContent) -> None:
-        """Drop oldest task to make room."""
+    async def _drop_oldest_strategy(self, message: MessageContent) -> bool:
+        """Drop oldest task to make room. False when a rival took the freed slot (#589)."""
         if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
             raise RuntimeError("Queue is full; cannot discard an admitted voice request")
         if self.task_config.queue.log_queue_events:
@@ -997,9 +1012,11 @@ class QueueProcessor:
         try:
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
+            return True
         except asyncio.QueueFull:
             self.dropped_messages += 1
             self._end_dropped(message)
+            return False
 
     def _drop_newest_strategy(self) -> None:
         """Raise error when queue is full."""
@@ -1010,8 +1027,8 @@ class QueueProcessor:
             f"Queue is full (max size: {self.max_queue_size}) and overflow strategy is 'drop_newest'"
         )
 
-    async def _block_strategy(self, message: MessageContent) -> None:
-        """Block until queue has space or timeout."""
+    async def _block_strategy(self, message: MessageContent) -> bool:
+        """Block until queue has space or timeout. False when the timeout dropped it (#589)."""
         self._queue_metrics["block_count"] += 1
         if self.task_config.queue.log_queue_events:
             logger.debug(
@@ -1026,7 +1043,7 @@ class QueueProcessor:
                 try:
                     self.processing_queue.put_nowait(message)
                     self._queue_metrics["total_enqueue_successes"] += 1
-                    return
+                    return True
                 except asyncio.QueueFull:
                     pass
 
@@ -1042,11 +1059,11 @@ class QueueProcessor:
                     )
                 self.dropped_messages += 1
                 self._end_dropped(message)
-                return
+                return False
 
             await asyncio.sleep(poll_interval)
 
-    def _unknown_strategy(self, message: MessageContent) -> None:
+    def _unknown_strategy(self, message: MessageContent) -> bool:
         """Handle unknown overflow strategy."""
         if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
             raise RuntimeError("Queue is full; cannot discard an admitted voice request")
@@ -1057,9 +1074,11 @@ class QueueProcessor:
             self._end_dropped(self.processing_queue.get_nowait())
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
+            return True
         except asyncio.QueueEmpty:
             self.dropped_messages += 1
             self._end_dropped(message)
+            return False
 
     def note_chain_end(self) -> None:
         """Tell the hub a whole chain just ended (a remote request's turn ends here).
@@ -1382,6 +1401,26 @@ class QueueProcessor:
             approvals = getattr(self.tool_executor, "yes_approvals", None)
             if isinstance(approvals, YesApprovals) and (note := approvals.take_note()):
                 metadata["injected_context"] = note  # what the user's yes approved, model-only
+
+            # Operator provenance was authenticated at the coordinator's input
+            # boundary. Copy it through the batch without interpreting content.
+            operator_inputs = [
+                {
+                    "source": record["source"],
+                    "timestamp": record["timestamp"],
+                    "text": record["text"],
+                }
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for record in item.operator_inputs
+                if isinstance(record, dict)
+                and all(
+                    isinstance(record.get(field), str)
+                    for field in ("source", "timestamp", "text")
+                )
+            ]
+            if operator_inputs:
+                metadata["operator_inputs"] = operator_inputs
 
             # Add user message to conversation history
             self._add_message_fn(

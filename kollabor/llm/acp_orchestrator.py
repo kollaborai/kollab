@@ -17,6 +17,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_ai.profile_manager import EFFORT_LEVELS, LLMProfile
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
@@ -112,6 +113,9 @@ class ACPOrchestrator:
         # steering rows, which are uuid-unique.
         self._turn_parents: dict[tuple[int, int], str | None] = {}
         self._turn_user_tasks: dict[tuple[int, int], asyncio.Task] = {}
+        # The conversation an admission was made under (#596): resume swaps the
+        # live manager's session id in place, and the reply must not follow it.
+        self._turn_conversations: dict[tuple[int, int], str] = {}
         self._observed_turns: dict[tuple[str, int], _ObservedTurn] = {}
         self._display_turn: tuple[str, int] | None = None
         # Voice data of a mic turn, by request id, until its reply is spoken.
@@ -131,7 +135,7 @@ class ACPOrchestrator:
         self.restore_notices: list[str] = []
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_rows: list[str] = []
-        self._unwritten_observations: deque[AgentHudEntry] = deque(maxlen=20)
+        self._unwritten_observations: deque[tuple[str, AgentHudEntry]] = deque(maxlen=20)
         self._observation_count = 0
         # Runner turn IDs are consecutive within this orchestrator lifecycle.
         # A frontier plus completed ranges preserves replay protection without
@@ -619,6 +623,7 @@ class ACPOrchestrator:
         origin: dict[str, Any] | None = None,
         record: bool = True,
         images: tuple[dict[str, str], ...] = (),
+        operator_inputs: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
         if (self._runner is None or self._closed or getattr(self, "_starting", False)
                 or (self.transitioning and not self.transition_owned_by_current_task)):
@@ -634,10 +639,16 @@ class ACPOrchestrator:
         self._completion_tasks.add(task)
         task.add_done_callback(self._completion_tasks.discard)
         turn_key = (admission.generation, admission.turn_id)
+        self._turn_conversations[turn_key] = self._conversation_id()
         if record:
             try:
                 self._record_user(
-                    request_id, text, source, thread_id, track_completion=True
+                    request_id,
+                    text,
+                    source,
+                    thread_id,
+                    track_completion=True,
+                    operator_inputs=operator_inputs,
                 )
             except Exception as exc:
                 # Admission is already owned. Remove this admission (by identity,
@@ -659,15 +670,33 @@ class ACPOrchestrator:
         if task is not None:
             self._turn_user_tasks[turn_key] = task
 
-    def observe_notification(self, message: Any) -> None:
+    def observe_notification(self, message: Any) -> bool:
+        """Admit a peer observation. False means refused: nothing was admitted.
+
+        A message whose history row fails waits in the retry queue until a row
+        lands. The queue is bounded: when it is full, the new message is refused
+        instead of evicting an accepted one, and the hub must not acknowledge it
+        (#581).
+        """
+        pending = self._unwritten_observations
+        if len(pending) == pending.maxlen and not self.is_processing:
+            # Storage may have recovered since the queue filled: drain it first.
+            self._flush_observations()
+        if len(pending) == pending.maxlen:
+            # Decided before any row is written: add_message appends its row
+            # before an autosave can raise, so a refused message that was
+            # written first would leave one more row on every offer (#581).
+            logger.warning(
+                "ACP observation retry queue is full; the message was refused "
+                "and not acknowledged"
+            )
+            return False
         thread = f" [thread:{message.thread_id}]" if message.thread_id else ""
         reply = f" [reply-to:{message.reply_to}]" if message.reply_to else ""
         entry = AgentHudEntry(
             section="hub", label=f"{message.from_identity}->{message.to}",
             content=f"[hub channel: {message.from_identity} -> {message.to}{thread}{reply}]\n{message.content}",
         )
-        self._observations.append(entry)
-        self._observation_count += 1
         # Written as it arrives, like a native agent's hub message, so a watching
         # page reloads it now rather than when the running turn ends. The flush
         # hands the batch to the model without writing it again.
@@ -684,56 +713,73 @@ class ACPOrchestrator:
             logger.warning(
                 "ACP observation history write failed (%s)", type(error).__name__
             )
-            pending = self._unwritten_observations
-            if len(pending) == pending.maxlen:
-                logger.warning(
-                    "ACP observation retry queue is full; the oldest message "
-                    "waiting for a history row is dropped"
-                )
-            pending.append(entry)
+            pending.append((row_id, entry))
         else:
             self._observation_rows.append(row_id)
+        self._observations.append(entry)
+        self._observation_count += 1
         if not self.is_processing:
             self._flush_observations()
+        return True
 
     def _flush_observations(self) -> None:
-        if not self._observations or self._closed or self._runner is None:
+        if self._closed or self._runner is None:
             return
-        discarded = self._observation_count - len(self._observations)
-        entries = list(self._observations)
-        if discarded:
-            entries.insert(0, AgentHudEntry("status", "observations", f"{discarded} older observations omitted."))
-        text = format_agent_hud(entries)
-        # A message whose arrival row failed gets one more try here. After a
-        # second failure it reaches history only through the batch row, which
-        # is written when no message has a row of its own.
-        unwritten = list(self._unwritten_observations)
+        if not self._observations and not self._unwritten_observations:
+            return
+        # A message whose history row is still missing keeps its place in the
+        # retry queue until a row lands. A failed retry is kept, never dropped
+        # (#581).
+        pending = list(self._unwritten_observations)
         self._unwritten_observations.clear()
-        for entry in unwritten:
-            row_id = f"observations-{uuid.uuid4().hex}"
+        in_batch = {id(entry) for entry in self._observations}
+        earlier_rows: list[str] = []
+        for row_id, entry in pending:
             try:
+                # The retry keeps its first attempt's row id (#581).
                 self._record_user(
                     row_id,
                     format_agent_hud([entry]),
                     "observation",
                     None,
                     track_completion=True,
+                    retry=True,
                 )
             except Exception as error:
                 logger.warning(
                     "ACP observation history write failed again (%s)",
                     type(error).__name__,
                 )
+                self._unwritten_observations.append((row_id, entry))
             else:
-                self._observation_rows.append(row_id)
+                # A retried row of a message an earlier batch already carried is
+                # only a record; the reply to this batch must not thread under it.
+                if id(entry) in in_batch:
+                    self._observation_rows.append(row_id)
+                else:
+                    earlier_rows.append(row_id)
+        for row in earlier_rows:
+            self._parents.pop(row, None)
+            self._user_history_tasks.pop(row, None)
         rows, self._observation_rows = self._observation_rows, []
+        if not self._observations:
+            # Only retries ran. Their messages already reached the model in an
+            # earlier batch, so their own rows are the record.
+            for row in rows:
+                self._parents.pop(row, None)
+                self._user_history_tasks.pop(row, None)
+            return
+        discarded = self._observation_count - len(self._observations)
+        entries = list(self._observations)
+        if discarded:
+            entries.insert(0, AgentHudEntry("status", "observations", f"{discarded} older observations omitted."))
+        text = format_agent_hud(entries)
         # The turn takes the newest row's id, so its reply threads under that
-        # row; the older rows' bookkeeping goes now.
+        # row. The batch gets no row of its own: each message is persisted by
+        # its own row, so a batch row would only duplicate them (#581).
         request_id = rows[-1] if rows else f"observations-{uuid.uuid4().hex}"
         try:
-            self.admit(
-                text, request_id=request_id, source="observation", record=not rows
-            )
+            self.admit(text, request_id=request_id, source="observation", record=False)
         except Exception:
             self._observation_rows = rows + self._observation_rows
             return
@@ -742,6 +788,15 @@ class ACPOrchestrator:
             self._user_history_tasks.pop(stale, None)
         self._observations.clear()
         self._observation_count = 0
+
+    def _landed_row_uuid(self, request_id: str) -> str | None:
+        """The uuid of the conversation row a failed write already appended, if any."""
+        llm = self.event_bus.get_service("llm_service")
+        manager = getattr(llm, "conversation_manager", None)
+        for message in reversed(getattr(manager, "messages", None) or []):
+            if (message.get("metadata") or {}).get("request_id") == request_id:
+                return message.get("uuid")
+        return None
 
     def _conversation_id(self) -> str:
         llm = self.event_bus.get_service("llm_service")
@@ -780,13 +835,44 @@ class ACPOrchestrator:
 
     def _record_user(
         self, request_id: str, text: str, source: str, thread_id: str | None,
-        *, track_completion: bool = False,
+        *,
+        track_completion: bool = False,
+        retry: bool = False,
+        operator_inputs: tuple[dict[str, str], ...] = (),
     ) -> None:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
-        metadata = {"provider": "acp", "request_id": request_id, "source": source, "thread_id": thread_id}
+        metadata = {
+            "provider": "acp",
+            "request_id": request_id,
+            "source": source,
+            "thread_id": thread_id,
+        }
+        if source in HUMAN_USER_INPUT_SOURCES:
+            trusted_operator_inputs = [
+                {
+                    "source": record["source"],
+                    "timestamp": record["timestamp"],
+                    "text": record["text"],
+                }
+                for record in operator_inputs
+                if isinstance(record, dict)
+                and record.get("source") == source
+                and record.get("source") in HUMAN_USER_INPUT_SOURCES
+                and isinstance(record.get("timestamp"), str)
+                and bool(record.get("timestamp"))
+                and isinstance(record.get("text"), str)
+                and bool(record.get("text"))
+            ]
+            if trusted_operator_inputs:
+                metadata["operator_inputs"] = trusted_operator_inputs
         if manager is not None:
-            self._parents[request_id] = manager.add_message("user", text, metadata=metadata)
+            # A retry whose first save raised after the append reuses that row,
+            # so the conversation holds it once. The log and mirror still run (#581).
+            landed = self._landed_row_uuid(request_id) if retry else None
+            if landed is None:
+                landed = manager.add_message("user", text, metadata=metadata)
+            self._parents[request_id] = landed
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
             task = asyncio.create_task(logger_service.log_user_message(text))
@@ -1080,6 +1166,7 @@ class ACPOrchestrator:
         finally:
             self._turn_parents.pop(turn_key, None)
             self._turn_user_tasks.pop(turn_key, None)
+            self._turn_conversations.pop(turn_key, None)
             self._observed_turns.pop((admission.request_id, admission.turn_id), None)
         event_usage = (settled_usage or {}).get("usage")
         if (event_usage is None and self._display_usage_payload is not None
@@ -1119,6 +1206,10 @@ class ACPOrchestrator:
         llm = self.event_bus.get_service("llm_service")
         parent = self._turn_parents.get(turn_key)
         manager = getattr(llm, "conversation_manager", None)
+        # A turn that outlived its conversation (resume, restart, replacement)
+        # goes to that conversation's own log, never into the live one.
+        bound = self._turn_conversations.get(turn_key)
+        elsewhere = manager is not None and bound is not None and bound != self._conversation_id()
         text = "".join(str(update.get("text") or "") for update in result.updates if update.get("kind") == "text")
         thoughts = [str((update.get("payload", {}).get("content") or {}).get("text") or "")
                     for update in result.updates if update.get("kind") == "agent_thought_chunk"]
@@ -1142,19 +1233,22 @@ class ACPOrchestrator:
                 "is_error": payload.get("status") == "failed",
                 "metadata": {"acp": dict(payload)}}
         metadata["tool_calls"] = list(tools.values())
-        if manager is not None:
+        if manager is not None and not elsewhere:
             manager.add_message("assistant", text or result.text,
                                 parent_uuid=parent, metadata=metadata)
             manager.save_conversation()
         history = getattr(llm, "conversation_history", None)
-        if isinstance(history, list) and history is not getattr(manager, "messages", None):
+        if (isinstance(history, list) and history is not getattr(manager, "messages", None)
+                and not elsewhere):
             history.append(ConversationMessage(role="assistant", content=text or result.text,
                                                metadata=metadata, thinking="".join(thoughts)))
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
+            owner = {"session_id": bound} if elsewhere else {}
             await logger_service.log_assistant_message(text or result.text,
                 parent_uuid=parent or "", model=self._profile_name,
-                thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata)
+                thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata,
+                **owner)
 
     async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:
         request_id = f"request-{uuid.uuid4().hex}"

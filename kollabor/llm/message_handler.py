@@ -11,7 +11,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
-from kollabor.user_input_source import YES_SOURCES
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, YES_SOURCES
 from kollabor_agent.queue_processor import (
     MAX_CONTINUATION_TURNS,
     RepeatedToolErrorBreaker,
@@ -23,6 +23,10 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+# On an ACP chat these native-only events are refused; ACP input goes through
+# submit_human_input (#579).
+ACP_SUBMIT_REASON = "acp_requires_submit_human_input"
 
 
 class MessageHandler:
@@ -176,6 +180,13 @@ class MessageHandler:
         if not claims_voice_origin:
             origin_context = None
         origin_kwargs = {"origin_context": origin_context} if origin_context else {}
+        input_source = getattr(event, "source", None)
+        source_value = getattr(input_source, "value", input_source)
+        origin_kwargs["operator_source"] = (
+            str(source_value)
+            if source_value in HUMAN_USER_INPUT_SOURCES
+            else None
+        )
         # Only a person answering live (YES_SOURCES) answers what the agent asked
         # them. A hub peer's message (the "agent" source) is a turn like the user's,
         # but its words never do.
@@ -309,6 +320,14 @@ class MessageHandler:
         add_to_history = options.get("add_to_history", True)
         display_messages = options.get("display_messages", True)
         trigger_llm = options.get("trigger_llm", False)
+        if trigger_llm and self._acp_owns_chat():
+            # Refuse before any history, log or display write: a native reply
+            # would answer behind the ACP agent's back (#579).
+            self._coordinator.message_display_service.display_error_message(
+                "ACP owns this chat, so these messages were not added and no native "
+                "reply was started. Send them from the chat to reach the ACP agent."
+            )
+            return {"success": False, "error": ACP_SUBMIT_REASON}
         parent_uuid = options.get("parent_uuid", self._coordinator.current_parent_uuid)
 
         coord = self._coordinator
@@ -444,6 +463,15 @@ class MessageHandler:
         if hasattr(renderer, "pipe_mode") and getattr(renderer, "pipe_mode", False):
             logger.info("TRIGGER_LLM_CONTINUE: Pipe mode active, skipping")
             return {"status": "pipe_mode"}
+
+        # ACP owns the chat: a native continuation, now or from a retry, would
+        # answer behind the ACP agent's back. Refuse before scheduling anything (#579).
+        if self._acp_owns_chat():
+            coord.message_display_service.display_error_message(
+                "A message from another agent or a background task was not run natively, "
+                "because ACP owns this chat. Send it from the chat to reach the ACP agent."
+            )
+            return {"status": "rejected", "reason": ACP_SUBMIT_REASON}
 
         # Cooldown (user hit ESC to get a word in) or a half-typed message:
         # wait it out below instead of dropping the wake. A dropped wake left
@@ -668,6 +696,14 @@ class MessageHandler:
                             "TRIGGER_LLM_CONTINUE: Retrying after processing completed"
                         )
                         if not coord.is_processing:
+                            if self._acp_owns_chat():
+                                # ACP was selected while this retry waited (#579).
+                                coord.message_display_service.display_error_message(
+                                    "ACP took over this chat while a native reply was waiting, "
+                                    "so that reply was not started. Send your message from the "
+                                    "chat to reach the ACP agent."
+                                )
+                                return
                             coord.create_background_task(
                                 lambda: _hub_continue(),
                                 name="continue_conversation_retry",
@@ -691,6 +727,12 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error in TRIGGER_LLM_CONTINUE handler: {e}")
             return {"status": "error", "error": str(e)}
+
+    def _acp_owns_chat(self) -> bool:
+        """Whether an ACP agent owns this chat: the test process_user_input applies."""
+        coord = self._coordinator
+        selected_acp, _ = coord._profile_selects_acp()
+        return bool(selected_acp or coord._active_acp() is not None)
 
     def _hub_continue_blocked(self) -> str:
         """Why a hub wake must wait right now ("" when it may run)."""

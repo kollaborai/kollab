@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from kollabor_ai.session_naming import generate_session_name
+from kollabor_config.file_lock import locked_file
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ class KollaborConversationLogger:
         # appends wait for it and thread past the records it dropped.
         self._write_lock = asyncio.Lock()
         self._reparent: Dict[str, Any] = {}  # a dropped record's uuid: its parent's
+        self._reparent_seen: Optional[tuple[int, int]] = None  # sidecar (mtime, size) last read
 
         # Memory directory (used by _load/_save_conversation_memory)
         self.memory_dir = self.conversations_dir / "memory"
@@ -206,6 +208,8 @@ class KollaborConversationLogger:
         """
         self.session_id = new_session_id
         self.session_file = self.conversations_dir / f"{new_session_id}.jsonl"
+        self._reparent = {}
+        self._reparent_seen = None
         self.message_count = 0
         self.conversation_start_time = datetime.now()
         self.current_thread_uuid = None
@@ -310,18 +314,120 @@ class KollaborConversationLogger:
         """Get current working directory."""
         return str(Path.cwd())
 
-    async def _append_to_jsonl(self, message: Dict[str, Any]):
-        """Append message to JSONL file."""
-        # Bind this append to the session its caller captured (the row's
-        # sessionId was stamped from self.session_id at call time).
-        # reset_session takes no lock and rewrite_voice_turn holds the lock
-        # across a to_thread, so an append queued behind a rewrite can wake
-        # up after the session was replaced: opening whatever session_file
-        # points at THEN would write the old-session row into the new
-        # session's file. Validate inside the lock, before opening anything.
+    def _reparent_path(self, session_file: Optional[Path] = None) -> Path:
+        """Where cuts of a session file are shared with its other writers.
+
+        Named so that no session glob (`session_*.json[l]`, `<id>*.jsonl`) matches it.
+        """
+        target = self.session_file if session_file is None else session_file
+        return Path(target).with_suffix(".reparent")
+
+    def _reparent_lock_path(self, session_file: Optional[Path] = None) -> Path:
+        """Stable lock path for a sidecar that is replaced atomically."""
+        path = self._reparent_path(session_file)
+        return path.with_name(f".{path.name}.lock")
+
+    def _read_reparent(self, session_file: Optional[Path] = None) -> Dict[str, Any]:
+        """Read the parent cuts for the selected session file.
+
+        The current session caches its map until the sidecar changes. An explicit
+        historical-session append reads that file's sidecar without replacing the
+        current session's in-memory map.
+        """
+        target = Path(self.session_file if session_file is None else session_file)
+        path = self._reparent_path(target)
+        if target != Path(self.session_file):
+            try:
+                with locked_file(self._reparent_lock_path(target), "a+", private=True):
+                    with locked_file(path, "r", private=True) as f:
+                        shared = json.load(f)
+            except (OSError, ValueError):
+                return {}
+            return shared if isinstance(shared, dict) else {}
+
+        try:
+            with locked_file(self._reparent_lock_path(target), "a+", private=True):
+                try:
+                    info = path.stat()
+                    signature = (info.st_mtime_ns, info.st_size)
+                    if signature == self._reparent_seen:
+                        return self._reparent
+                    with locked_file(path, "r", private=True) as f:
+                        shared = json.load(f)
+                except (OSError, ValueError):
+                    return self._reparent  # none yet, or unreadable: retry next append
+        except OSError:
+            return self._reparent
+        if isinstance(shared, dict):
+            self._reparent = shared
+            self._reparent_seen = signature
+        return self._reparent
+
+    def _edit_reparent(self, add: Dict[str, Any], remove: Any = ()) -> None:
+        """Atomically add cuts to the shared file, or take some back.
+
+        A stable sibling lock coordinates readers and writers across the atomic
+        replacement. Invalid sidecar data is left untouched rather than replaced
+        with an empty map during a rollback.
+        """
+        path = self._reparent_path()
+        with locked_file(self._reparent_lock_path(), "a+", private=True):
+            try:
+                with locked_file(path, "r", private=True) as f:
+                    shared = json.load(f)
+            except FileNotFoundError:
+                shared = {}
+            except json.JSONDecodeError as e:
+                raise ValueError(f"invalid JSON in parent-rewrite sidecar {path}") from e
+            if not isinstance(shared, dict):
+                raise ValueError(f"parent-rewrite sidecar must contain a JSON object: {path}")
+
+            shared = {k: v for k, v in {**shared, **add}.items() if k not in remove}
+            serialized = json.dumps(shared)
+            descriptor, temporary = tempfile.mkstemp(
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+            )
+            try:
+                os.close(descriptor)
+                with locked_file(temporary, "w", private=True) as f:
+                    written = f.write(serialized)
+                    if written != len(serialized):
+                        raise OSError(
+                            f"short write updating parent-rewrite sidecar {path}: "
+                            f"wrote {written} of {len(serialized)} characters"
+                        )
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary, path)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError as cleanup_error:
+                    logger.warning(
+                        "failed to remove temporary parent-rewrite sidecar %s: %s",
+                        temporary,
+                        cleanup_error,
+                    )
+                raise
+
+    async def _append_to_jsonl(
+        self, message: Dict[str, Any], session_id: Optional[str] = None
+    ):
+        """Append to the current or explicitly named conversation JSONL."""
+        own = session_id is None or session_id == self.session_id
+        path = (
+            self.session_file
+            if own
+            else self.conversations_dir / f"{session_id}.jsonl"
+        )
+        # Current-session rows are bound at call time. A reset while an append waits
+        # on the lock must not redirect that row; explicit old-session ACP results
+        # instead use the path selected from their session_id above.
         bound_file = self.session_file
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
-            if self.session_file != bound_file:
+            if own and self.session_file != bound_file:
                 # The session was replaced while this append waited. The row
                 # belongs to the captured session only — drop it rather than
                 # corrupt the replaced session's transcript.
@@ -332,20 +438,24 @@ class KollaborConversationLogger:
                     bound_file.name,
                 )
                 return
+            reparent = self._read_reparent(path)  # cuts for the destination session
             parent = message.get("parentUuid")
-            while parent in self._reparent:  # a cut dropped it after the caller read it
-                parent = self._reparent[parent]
+            seen = set()
+            while parent in reparent and parent not in seen:  # a cut dropped it
+                seen.add(parent)
+                parent = reparent[parent]
             if "parentUuid" in message:
                 message["parentUuid"] = parent
             try:
                 fd = os.open(
-                    self.session_file,
+                    path,
                     os.O_WRONLY | os.O_CREAT | os.O_APPEND,
                     0o600,
                 )
                 with os.fdopen(fd, "a") as f:
                     f.write(json.dumps(message) + "\n")
-                self.message_count += 1
+                if own:
+                    self.message_count += 1
             except Exception as e:
                 logger.error(f"Failed to write to JSONL: {e}")
 
@@ -629,6 +739,7 @@ class KollaborConversationLogger:
         provider_reasoning: Optional[Dict[str, Any]] = None,
         display_metadata: Optional[Dict[str, Any]] = None,
         voice_turn_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         """Log assistant response with usage statistics.
 
@@ -645,6 +756,9 @@ class KollaborConversationLogger:
                 excluded from native provider tool-call reconstruction
             voice_turn_id: The voice turn a reply belongs to, so a talk-over
                 can cut it here too (rewrite_voice_turn)
+            session_id: The session this reply belongs to when it is not the
+                logger's current one (a turn that finished after another
+                conversation was resumed); its own log gets the record
         """
         message_uuid = str(uuid4())
 
@@ -674,7 +788,7 @@ class KollaborConversationLogger:
             "isSidechain": False,
             "userType": "external",
             "cwd": self._get_working_directory(),
-            "sessionId": self.session_id,
+            "sessionId": session_id or self.session_id,
             "version": (
                 self.app_version
                 if self.app_version != "unknown"
@@ -715,7 +829,7 @@ class KollaborConversationLogger:
         if voice_turn_id:
             message["voice_turn_id"] = voice_turn_id
 
-        await self._append_to_jsonl(message)
+        await self._append_to_jsonl(message, session_id)
 
         # Analyze assistant response for learning
         self._analyze_assistant_response(content)
@@ -747,15 +861,43 @@ class KollaborConversationLogger:
                 return None
             dropped, temp, end = cut
             try:  # on the loop, so nothing lands between the copy and the swap
+                self._edit_reparent(dropped)  # others thread past it from here on
                 with open(path, "rb") as log, open(temp, "ab") as new:
                     log.seek(end)
-                    new.write(log.read())  # appended since the cut read the log
+                    # Appended since the cut read the log, possibly by a logger that had not
+                    # read the cut yet: its rows may still hang under a reply this cut drops.
+                    new.write(self._thread_past(log.read(), dropped))
                 os.replace(temp, path)
             except BaseException:
                 Path(temp).unlink(missing_ok=True)
+                try:
+                    self._edit_reparent({}, remove=dropped)  # the cut did not land
+                except (OSError, ValueError) as e:
+                    logger.warning("voice cut not taken back from %s: %s", self._reparent_path(), e)
                 raise
             self._reparent.update(dropped)
             return dropped
+
+    @staticmethod
+    def _thread_past(tail: bytes, dropped: Dict[str, Any]) -> bytes:
+        """`tail` with each row's parent walked through `dropped`; other bytes kept as written."""
+        out = []
+        for line in tail.splitlines(keepends=True):
+            try:
+                record = json.loads(line)
+            except ValueError:  # includes a line still being written
+                out.append(line)
+                continue
+            parent = record.get("parentUuid") if isinstance(record, dict) else None
+            seen = set()
+            while parent in dropped and parent not in seen:
+                seen.add(parent)
+                parent = dropped[parent]
+            if isinstance(record, dict) and record.get("parentUuid") != parent:
+                record["parentUuid"] = parent
+                line = (json.dumps(record) + "\n").encode()
+            out.append(line)
+        return b"".join(out)
 
     def _rewrite_voice_turn(
         self, path: Path, turn_id: str, count: int, edits: Dict[int, Optional[str]]

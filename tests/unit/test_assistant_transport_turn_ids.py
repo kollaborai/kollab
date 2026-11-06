@@ -9,6 +9,7 @@ completion, which makes the merge a no-op.
 """
 
 import asyncio
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -94,6 +95,20 @@ class TestAlignStreamedIds:
 
         assert [row["id"] for row in rows] == [
             "history-0", "history-1", "history-4", "history-5",
+        ]
+
+    def test_refuses_ambiguous_repeated_user_content(self):
+        """Do not pick the newest matching user row by position alone."""
+        rows = _streamed(_state_messages())
+        history = _history() + [
+            {"role": "user", "content": "PROOF666 one"},
+            {"role": "user", "content": "PROOF666 one"},
+            {"role": "assistant", "content": "MOCK666 control reply."},
+        ]
+
+        assert messages._assistant_align_streamed_ids(rows, history) is False
+        assert [row["id"] for row in rows] == [
+            "history-0", "history-1", "user-s1-2", "assistant-s1-3",
         ]
 
     def test_refuses_ambiguous_duplicate_rounds(self):
@@ -353,10 +368,12 @@ class _Session:
 
 async def _run_turn(
     monkeypatch, history, state_messages, replies=None,
-    message="PROOF666 one", tool_round=None,
+    message="PROOF666 one", tool_round=None, refresh=None,
 ):
     controllers, runners = _fake_assistant_stream(monkeypatch)
     session = _Session(history, replies=replies, tool_round=tool_round)
+    if refresh is not None:
+        session.refresh_history = refresh
     monkeypatch.setattr(messages, "get_session_registry", lambda: {"s1": session})
     body = messages.AssistantRequest(
         commands=[{
@@ -545,6 +562,198 @@ async def test_failed_refresh_then_stale_retry_never_claims_sync(monkeypatch):
         "history-0", "history-1", "user-s1-2", "assistant-s1-3",
     ]
     assert final["synced"] is None
+
+
+@pytest.mark.asyncio
+async def test_publish_precedes_refresh_history_round_trips(monkeypatch):
+    """The page receives the turn's rows before any history refresh awaits.
+
+    #675 P2: the turn-end publish used to sit behind up to two
+    ``refresh_history`` round trips, so rows appeared only after the daemon
+    answered. The publish now goes out first; the refreshed snapshot only
+    decides the sync claim afterwards (alignment mutates the published list
+    in place, so the claim and the shown ids stay consistent).
+    """
+    order = []
+    real_set = messages._assistant_set_messages
+
+    def _recording_set(controller, msgs):
+        order.append("publish")
+        real_set(controller, msgs)
+
+    monkeypatch.setattr(messages, "_assistant_set_messages", _recording_set)
+
+    async def _refresh(*, stale_raises=False):
+        order.append("refresh")
+        return _history()
+
+    state = await _run_turn(
+        monkeypatch, _history(), _state_messages(), refresh=_refresh
+    )
+
+    # The FIRST publish still precedes the refresh round trips (#675), and
+    # the aligned rows are re-published after alignment so the wire carries
+    # the canonical ids (#767 — the encode-time snapshot of the early chunk
+    # alone would leave the provisional ids on the client).
+    first_refresh = order.index("refresh")
+    assert order[0] == "publish" and first_refresh > 0, f"order wrong: {order}"
+    assert "publish" in order[first_refresh + 1:], (
+        f"aligned rows never re-published after refresh: {order}"
+    )
+    # End state is unchanged: ids renamed against the snapshot, claim set.
+    assert [row["id"] for row in state["messages"]] == [
+        "history-0", "history-1", "history-2", "history-3",
+    ]
+    assert state["synced"] == {"history": 4, "messages": 4}
+
+
+@pytest.mark.asyncio
+async def test_wire_does_not_guess_between_identical_turns(monkeypatch):
+    """Ambiguous content matches must keep provisional ids and clear sync."""
+    history = _history() + [
+        {"role": "user", "content": "PROOF666 one"},
+        {"role": "assistant", "content": "MOCK666 control reply."},
+    ]
+    session = _Session(history)
+
+    async def _refresh(*, stale_raises=False):
+        # Let the real encoder serialize the provisional publish first.
+        await asyncio.sleep(0.05)
+        return history
+
+    session.refresh_history = _refresh
+    monkeypatch.setattr(messages, "get_session_registry", lambda: {"s1": session})
+    body = messages.AssistantRequest(
+        commands=[{
+            "type": "add-message",
+            "message": {
+                "id": "client-1",
+                "role": "user",
+                "parts": [{"type": "text", "text": "PROOF666 one"}],
+            },
+        }],
+        state={
+            "messages": _state_messages(),
+            "synced": {"history": 2, "messages": 2},
+        },
+    )
+
+    response = await messages.assistant_transport("s1", body)
+    sent: list = []
+
+    async def _send(message):
+        sent.append(message)
+
+    await response.stream_response(_send)
+
+    wire_text = "".join(
+        (part.get("body") or b"").decode()
+        if isinstance(part.get("body"), bytes)
+        else (part.get("body") or "")
+        for part in sent
+    )
+    messages_sets: list = []
+    synced_sets: list = []
+    for line in wire_text.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        chunk = json.loads(line[len("data: "):])
+        if chunk.get("type") != "update-state":
+            continue
+        for op in chunk.get("operations", []):
+            if op.get("type") != "set":
+                continue
+            if op.get("path") == ["messages"]:
+                messages_sets.append(op["value"])
+            elif op.get("path") == ["synced"]:
+                synced_sets.append(op["value"])
+
+    assert messages_sets, "no messages update ever reached the wire"
+    last_ids = [row["id"] for row in messages_sets[-1]]
+    assert last_ids == [
+        "history-0", "history-1", "user-s1-2", "assistant-s1-3",
+    ], f"ambiguous rows were renamed on the wire: {last_ids}"
+    assert synced_sets and synced_sets[-1] is None, (
+        "ambiguous alignment must clear the prior sync watermark; "
+        f"wire carried {synced_sets}"
+    )
+    assert not any(
+        value == {"history": len(history), "messages": 4}
+        for value in synced_sets
+    ), f"ambiguous alignment claimed the full snapshot: {synced_sets}"
+
+
+@pytest.mark.asyncio
+async def test_wire_republishes_aligned_rows_after_refresh(monkeypatch):
+    """The aligned ids must actually reach the client over the wire (#767).
+
+    Bismuth's encoder probe on the #767 head: the early publish chunk is
+    JSON-serialized at encode time and carries the provisional ids, and the
+    later ``synced`` chunk carries no messages update — so the in-place
+    alignment never re-published, and the client kept ``user-s1-2`` until a
+    full reload. This test drives the real ``assistant_stream`` encoder (no
+    fake harness) and asserts on the EMITTED CHUNKS: the last messages
+    chunk on the wire must carry the canonical ids.
+    """
+    session = _Session(_history())
+
+    async def _refresh(*, stale_raises=False):
+        # Suspend long enough for the consumer to encode the early publish
+        # chunk before alignment runs (production: a real daemon round trip;
+        # add_operations flushes via call_soon, so sleep(0) is too short and
+        # would let alignment mutate before the encode — never red).
+        await asyncio.sleep(0.05)
+        return _history()
+
+    session.refresh_history = _refresh
+    monkeypatch.setattr(messages, "get_session_registry", lambda: {"s1": session})
+    body = messages.AssistantRequest(
+        commands=[{
+            "type": "add-message",
+            "message": {
+                "id": "client-1",
+                "role": "user",
+                "parts": [{"type": "text", "text": "PROOF666 one"}],
+            },
+        }],
+        state={"messages": _state_messages()},
+    )
+
+    response = await messages.assistant_transport("s1", body)
+    sent: list = []
+
+    async def _send(message):
+        sent.append(message)
+
+    await response.stream_response(_send)
+
+    wire_text = "".join(
+        (part.get("body") or b"").decode()
+        if isinstance(part.get("body"), bytes)
+        else (part.get("body") or "")
+        for part in sent
+    )
+    messages_sets: list = []
+    for line in wire_text.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        chunk = json.loads(line[len("data: "):])
+        if chunk.get("type") != "update-state":
+            continue
+        for op in chunk.get("operations", []):
+            if op.get("type") == "set" and op.get("path") == ["messages"]:
+                messages_sets.append(op["value"])
+
+    assert messages_sets, "no messages update ever reached the wire"
+    # The early publish may (by design) carry provisional ids, but the LAST
+    # messages chunk on the wire must be the aligned snapshot.
+    last_ids = [row["id"] for row in messages_sets[-1]]
+    assert last_ids == [
+        "history-0", "history-1", "history-2", "history-3",
+    ], (
+        "wire never re-published the aligned rows; last messages chunk "
+        f"carried ids {last_ids}"
+    )
 
 
 @pytest.mark.asyncio
