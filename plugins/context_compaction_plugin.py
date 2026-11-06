@@ -10,14 +10,16 @@ import copy
 import json
 import logging
 import math
-import time
 import os
+import re
+import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_ai.conversation_logger import utc_stamp
 from kollabor_ai.fast_model import resolve_fast_model
 from kollabor_config.config_utils import resolve_global_path
@@ -71,6 +73,8 @@ MAX_PRESERVED_HUB_TASK_MESSAGES = 24
 MAX_PRESERVED_HUB_TASK_CHARS = 4000
 MAX_PRESERVED_COORDINATION_MESSAGES = 32
 MAX_PRESERVED_COORDINATION_CHARS = 16000
+# Caps the emergency recovery note and wrapper; compaction appends the operator
+# words and OPEN STATE footer afterward under their own safeguards.
 MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS = 8000
 
 
@@ -153,6 +157,11 @@ SUMMARIZATION_SYSTEM_PROMPT = (
     "agents. Look for patterns like '[hub channel:', '<hub_msg', "
     "'report back to', 'task:', 'directive:'. "
     "Do NOT paraphrase these.\n\n"
+    "OPEN STATE: End the summary with exactly one `=== OPEN STATE ===` section. "
+    "Use one line per open item and include its ID, owner, current head SHA, "
+    "last verdict, and next step. Include only items supported by the source "
+    "messages; do not invent IDs or commit SHAs. If no open items are known, "
+    "write the heading with no item lines.\n\n"
     "LANGUAGE: ALWAYS write the summary in English regardless of what "
     "languages appear in the conversation. The user and all agents "
     "communicate in English.\n\n"
@@ -198,6 +207,13 @@ SUMMARY_INJECTION_PREFIX = (
     "The following is a summary of our earlier conversation:\n\n"
 )
 SUMMARY_INJECTION_SUFFIX = "\n\nContinue from where we left off."
+
+MAX_OPERATOR_WORD_MESSAGES = 30
+MAX_OPERATOR_WORD_CHARS = 8000
+OPERATOR_WORDS_MARKER = "=== OPERATOR'S OWN WORDS (verbatim, oldest first) ==="
+OPERATOR_WORDS_END_MARKER = "=== END OPERATOR'S OWN WORDS ==="
+OPEN_STATE_MARKER = "=== OPEN STATE ==="
+END_OPEN_STATE_MARKER = "=== END OPEN STATE ==="
 
 # Coordination in flight defers compaction one turn in the normal case (a queued
 # HUD entry drains on the next request), but a hub reply that never arrives kept
@@ -1756,6 +1772,14 @@ class ContextCompactionPlugin(BasePlugin):
             if self._start_compaction():
                 return "compacting now, applied before the next request"
             return "compaction could not start"
+        if self._acp_owns_chat():
+            # The ask wakes the model natively, and an ACP chat refuses that
+            # wake (#579). Refuse up front so history and state stay untouched.
+            return (
+                "compaction cannot ask the model here: an ACP agent owns this "
+                "chat, so the question would not reach it. Nothing was changed; "
+                "/compact now still compacts without asking"
+            )
         if self._awaiting_model:
             return "already asked the model, waiting for its <compact>"
         await self._request_model_curation(wake=True, reason="requested by user")
@@ -1763,6 +1787,18 @@ class ContextCompactionPlugin(BasePlugin):
             "asked the model what to keep; it compacts when ready "
             "(or when its turn ends)"
         )
+
+    def _acp_owns_chat(self) -> bool:
+        """Whether an ACP agent owns this chat (the test the message handler
+        and process_user_input apply). False when the service cannot say."""
+        svc = self._llm_service
+        try:
+            selected = svc._profile_selects_acp()
+            if isinstance(selected, tuple) and selected and selected[0] is True:
+                return True
+            return getattr(svc._acp_service(), "active", False) is True
+        except Exception:
+            return False
 
     def _keep_recent_count(
         self, history: Optional[List[ConversationMessage]] = None
@@ -2395,6 +2431,36 @@ class ContextCompactionPlugin(BasePlugin):
                 "preserved live-task excerpts below. The full transcript remains in logs."
             )
 
+        operator_records, prior_operator_omissions = (
+            self._collect_operator_word_records(history[1:split_point])
+        )
+        operator_word_records, operator_words_omitted = (
+            self._bound_operator_word_records(
+                operator_records, prior_operator_omissions
+            )
+        )
+        open_state_candidate: str | None = None
+        for prior_message in history:
+            metadata = getattr(prior_message, "metadata", None)
+            content = getattr(prior_message, "content", "")
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("context_compaction") is True
+                and isinstance(content, str)
+            ):
+                _, prior_open_state = self._split_open_state(content)
+                if prior_open_state is not None:
+                    open_state_candidate = prior_open_state
+        fallback_summary = self._strip_model_operator_word_blocks(fallback_summary)
+        fallback_summary, emergency_open_state = self._split_open_state(
+            fallback_summary
+        )
+        if emergency_open_state is not None:
+            open_state_candidate = emergency_open_state
+        open_state = self._sanitize_open_state(
+            open_state_candidate or "", history
+        )
+
         next_round = self._compaction_round + 1
         compacted_history = self._build_compacted_history(
             system_msg=system_msg,
@@ -2404,6 +2470,9 @@ class ContextCompactionPlugin(BasePlugin):
             ledger_handled=[],
             compaction_round=next_round,
             pre_message_count=len(history),
+            operator_word_records=operator_word_records,
+            operator_words_omitted=operator_words_omitted,
+            open_state=open_state,
         )
         self._pending_compaction = compacted_history
         self._pending_session_id = self._get_current_session_id()
@@ -2454,12 +2523,13 @@ class ContextCompactionPlugin(BasePlugin):
     ) -> str:
         """Build a bounded recovery note, prioritizing the latest user request.
 
-        ``max_chars`` is the cap on the final injected message, including its
-        framing. Non-intended hub notices and standalone agent HUD updates are
-        coordination context. Only a direct-scope request addressed to this hub
-        identity, with no TaskLedger task ID, remains human intent. Raw task
-        assignments are represented by TaskLedger-selected excerpts and must
-        not reappear as active work.
+        ``max_chars`` caps this recovery note plus its injection framing. The
+        operator-word block and OPEN STATE footer are appended afterward under
+        separate preservation and source-validation bounds. Non-intended hub
+        notices and standalone agent HUD updates are coordination context. Only
+        a direct-scope request addressed to this hub identity, with no TaskLedger
+        task ID, remains human intent. Raw task assignments are represented by
+        TaskLedger-selected excerpts and must not reappear as active work.
         """
         wrapper_chars = len(SUMMARY_INJECTION_PREFIX) + len(SUMMARY_INJECTION_SUFFIX)
         body_limit = max(0, max_chars - wrapper_chars)
@@ -2941,6 +3011,182 @@ class ContextCompactionPlugin(BasePlugin):
             logger.debug("Unable to read live TaskLedger IDs for compaction", exc_info=True)
             return set()
 
+    @staticmethod
+    def _normalize_operator_record(record: Any) -> Optional[Dict[str, str]]:
+        """Return a record only when it carries trusted human provenance."""
+        if not isinstance(record, dict):
+            return None
+        source = getattr(record.get("source"), "value", record.get("source"))
+        timestamp = record.get("timestamp")
+        text = record.get("text")
+        if (
+            not isinstance(source, str)
+            or source not in HUMAN_USER_INPUT_SOURCES
+            or not isinstance(timestamp, str)
+            or not timestamp
+            or not isinstance(text, str)
+            or not text
+        ):
+            return None
+        return {"source": source, "timestamp": timestamp, "text": text}
+
+    def _collect_operator_word_records(
+        self, messages: List[ConversationMessage]
+    ) -> tuple[List[Dict[str, str]], int]:
+        """Collect trusted records from source messages and prior summaries."""
+        records: List[Dict[str, str]] = []
+        previously_omitted = 0
+
+        def add(raw_record: Any) -> None:
+            record = self._normalize_operator_record(raw_record)
+            if record is not None:
+                records.append(record)
+
+        for message in messages:
+            metadata = getattr(message, "metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+            if metadata.get("context_compaction") is True:
+                prior_records = metadata.get("operator_word_records", ())
+                if isinstance(prior_records, (list, tuple)):
+                    for record in prior_records:
+                        add(record)
+                prior_omitted = metadata.get("operator_words_omitted", 0)
+                if isinstance(prior_omitted, int) and not isinstance(prior_omitted, bool):
+                    previously_omitted += max(0, prior_omitted)
+            operator_inputs = metadata.get("operator_inputs", ())
+            if isinstance(operator_inputs, (list, tuple)):
+                for record in operator_inputs:
+                    add(record)
+
+        return records, previously_omitted
+
+    @staticmethod
+    def _bound_operator_word_records(
+        records: List[Dict[str, str]], previously_omitted: int
+    ) -> tuple[List[Dict[str, str]], int]:
+        """Keep the newest complete records under both hard preservation caps."""
+        newest_first: List[Dict[str, str]] = []
+        text_chars = 0
+        for record in reversed(records):
+            if len(newest_first) >= MAX_OPERATOR_WORD_MESSAGES:
+                break
+            record_chars = len(record["text"])
+            if text_chars + record_chars > MAX_OPERATOR_WORD_CHARS:
+                break
+            newest_first.append(record)
+            text_chars += record_chars
+        retained = list(reversed(newest_first))
+        omitted = previously_omitted + len(records) - len(retained)
+        return retained, omitted
+
+    @staticmethod
+    def _format_operator_word_block(
+        records: List[Dict[str, str]], omitted: int
+    ) -> str:
+        if not records and not omitted:
+            return ""
+        lines = [OPERATOR_WORDS_MARKER]
+        if omitted:
+            lines.append(
+                f"[{omitted} older operator messages omitted by the preservation limit.]"
+            )
+        lines.extend(
+            f"[{record['timestamp']} | {record['source']}] {record['text']}"
+            for record in records
+        )
+        lines.append(OPERATOR_WORDS_END_MARKER)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _split_open_state(summary_text: str) -> tuple[str, str | None]:
+        """Separate the final full-line OPEN STATE section from its summary.
+
+        ``None`` means no section was present; an empty string is an explicit
+        empty section that may clear an older state.
+        """
+        lines = summary_text.splitlines(keepends=True)
+        marker_indices = [
+            index
+            for index, line in enumerate(lines)
+            if line.rstrip() == OPEN_STATE_MARKER
+        ]
+        if not marker_indices:
+            return summary_text, None
+
+        marker_index = marker_indices[-1]
+        summary_prefix = "".join(lines[:marker_index]).rstrip()
+        candidate_lines = lines[marker_index + 1 :]
+        end_index = next(
+            (
+                index
+                for index, line in enumerate(candidate_lines)
+                if line.rstrip() == END_OPEN_STATE_MARKER
+            ),
+            len(candidate_lines),
+        )
+        candidate = "".join(candidate_lines[:end_index]).strip()
+        return summary_prefix, candidate
+
+    @staticmethod
+    def _strip_model_operator_word_blocks(summary_text: str) -> str:
+        """Remove model-authored copies; only source metadata may populate it."""
+        while True:
+            start = summary_text.find(OPERATOR_WORDS_MARKER)
+            if start < 0:
+                return summary_text
+            end = summary_text.find(OPERATOR_WORDS_END_MARKER, start)
+            if end < 0:
+                return summary_text[:start].rstrip()
+            summary_text = (
+                summary_text[:start]
+                + summary_text[end + len(OPERATOR_WORDS_END_MARKER) :]
+            )
+
+    @staticmethod
+    def _sanitize_open_state(
+        candidate: str, source_messages: List[ConversationMessage]
+    ) -> str:
+        """Drop an entire item line if any issue/SHA token lacks source evidence."""
+        source_text_parts = []
+        for message in source_messages:
+            if getattr(message, "role", None) == "system":
+                continue
+            content = getattr(message, "content", "")
+            if not isinstance(content, str):
+                continue
+            metadata = getattr(message, "metadata", None)
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("context_compaction") is True
+            ):
+                _, prior_open_state = ContextCompactionPlugin._split_open_state(
+                    content
+                )
+                if prior_open_state is not None:
+                    source_text_parts.append(prior_open_state)
+            else:
+                source_text_parts.append(content)
+        source_text = "\n".join(source_text_parts)
+        known_issues = set(re.findall(r"(?<![\w])#\d+\b", source_text))
+        sha_pattern = r"(?<![A-Fa-f0-9])[A-Fa-f0-9]{7,40}(?![A-Fa-f0-9])"
+        known_shas = {
+            token.lower() for token in re.findall(sha_pattern, source_text)
+        }
+        retained_lines = []
+        for line in candidate.splitlines():
+            line = line.strip()
+            if not line or line in (OPEN_STATE_MARKER, END_OPEN_STATE_MARKER):
+                continue
+            issue_tokens = re.findall(r"(?<![\w])#\d+\b", line)
+            sha_tokens = re.findall(sha_pattern, line)
+            if any(token not in known_issues for token in issue_tokens):
+                continue
+            if any(token.lower() not in known_shas for token in sha_tokens):
+                continue
+            retained_lines.append(line)
+        return "\n".join(retained_lines)
+
     def _extract_preservable_messages(
         self,
         messages: List[ConversationMessage],
@@ -3092,6 +3338,14 @@ class ContextCompactionPlugin(BasePlugin):
 
             to_summarize = history_snapshot[start_idx:split_point]
             to_keep = history_snapshot[split_point:]
+            operator_records, prior_operator_omissions = (
+                self._collect_operator_word_records(to_summarize)
+            )
+            operator_word_records, operator_words_omitted = (
+                self._bound_operator_word_records(
+                    operator_records, prior_operator_omissions
+                )
+            )
 
             if not to_summarize:
                 logger.info("No messages to summarize after boundaries")
@@ -3209,6 +3463,11 @@ class ContextCompactionPlugin(BasePlugin):
                 summary_text = (
                     notes_block + "\n\n" + summary_text if summary_text else notes_block
                 )
+            summary_text = self._strip_model_operator_word_blocks(summary_text or "")
+            summary_text, open_state_candidate = self._split_open_state(summary_text)
+            open_state = self._sanitize_open_state(
+                open_state_candidate or "", history_snapshot
+            )
             compacted = self._build_compacted_history(
                 system_msg,
                 summary_text or "",
@@ -3217,6 +3476,9 @@ class ContextCompactionPlugin(BasePlugin):
                 ledger_handled=ledger_handled,
                 compaction_round=self._compaction_round + 1,
                 pre_message_count=snapshot_len,
+                operator_word_records=operator_word_records,
+                operator_words_omitted=operator_words_omitted,
+                open_state=open_state,
             )
 
             # Write checkpoint before staging the compaction swap
@@ -3708,6 +3970,9 @@ class ContextCompactionPlugin(BasePlugin):
         ledger_handled: Optional[List[ConversationMessage]] = None,
         compaction_round: Optional[int] = None,
         pre_message_count: Optional[int] = None,
+        operator_word_records: Optional[List[Dict[str, str]]] = None,
+        operator_words_omitted: int = 0,
+        open_state: str = "",
         _dropped_preserved: int = 0,
     ) -> List[ConversationMessage]:
         """Build the new compacted history list.
@@ -3754,10 +4019,20 @@ class ContextCompactionPlugin(BasePlugin):
             compacted.append(system_msg)
 
         summary_content = (
-            SUMMARY_INJECTION_PREFIX + summary_text + SUMMARY_INJECTION_SUFFIX
+            SUMMARY_INJECTION_PREFIX + summary_text.rstrip() + SUMMARY_INJECTION_SUFFIX
         )
+        operator_block = self._format_operator_word_block(
+            operator_word_records or [], max(0, operator_words_omitted)
+        )
+        if operator_block:
+            summary_content += "\n\n" + operator_block
+        summary_content += "\n\n" + OPEN_STATE_MARKER
+        if open_state.strip():
+            summary_content += "\n" + open_state.strip()
 
         summary_metadata: Dict[str, Any] = {"context_compaction": True}
+        summary_metadata["operator_word_records"] = list(operator_word_records or [])
+        summary_metadata["operator_words_omitted"] = max(0, operator_words_omitted)
         if compaction_round is not None:
             summary_metadata["compaction_round"] = compaction_round
         if pre_message_count is not None:
@@ -3845,6 +4120,9 @@ class ContextCompactionPlugin(BasePlugin):
                 ledger_handled=ledger_handled,
                 compaction_round=compaction_round,
                 pre_message_count=pre_message_count,
+                operator_word_records=operator_word_records,
+                operator_words_omitted=operator_words_omitted,
+                open_state=open_state,
                 _dropped_preserved=_dropped_preserved + 1,
             )
 

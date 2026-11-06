@@ -128,6 +128,10 @@ class APICommunicationService:
 
         # Provider-based communication
         self._provider: Any = None  # Initialized in initialize()
+        # Bumped by every reinitialize_provider call, so a caller that swapped the
+        # provider for a while can tell a later switch apart even when it hands
+        # back the same profile and the registry the same cached provider.
+        self._provider_generation = 0
         self._media_resolver: Optional[Callable[[str], Optional[str]]] = None
         self._operation_observer: Optional[Callable[..., Optional[int]]] = None
         self._provider_error: Optional[str] = (
@@ -579,10 +583,20 @@ class APICommunicationService:
                 query_codex_models,
             )
 
+            profile = self._profile
+            revision = profile.revision
             models = await query_codex_models(tokens.access_token, tokens.account_id)
+            # The lookup awaited: an edit or a profile swap made meanwhile wins.
+            if self._profile is not profile or profile.revision != revision:
+                logger.warning(
+                    "Profile %r was edited while its model was being resolved; "
+                    "keeping the newer settings",
+                    profile.name,
+                )
+                return
             resolved = pick_best_model(models)
             if resolved != "codex":
-                self._profile.model = resolved
+                profile.model = resolved
                 logger.info(f"Resolved OAuth model to: {resolved}")
         except Exception as e:
             logger.warning(f"Model resolution failed: {e}")
@@ -1729,6 +1743,7 @@ class APICommunicationService:
         Returns:
             True if provider initialized successfully
         """
+        self._provider_generation += 1
         # Update stored profile
         self._profile = profile
         self._provider_error = None
