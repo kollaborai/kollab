@@ -3291,7 +3291,23 @@ class LocalStateService(StateService):
         if hub_mention is not None:
             target, content = hub_mention
             create_task = getattr(llm, "create_background_task", None)
-            hub_coro = self._execute_hub_message(text, target, content)
+            # The lineage is frozen at spawn: the detached task must never
+            # read the shared pointer itself, because an ordinary turn may
+            # complete between spawn and task start and the mention would
+            # silently reparent onto it.
+            hub_parent = getattr(self._llm_service, "current_parent_uuid", None)
+            # The admission ticket is claimed at the same atomic point as
+            # the lineage capture (#676 r7): cursor writes resolve by
+            # admission order, so the later-admitted mention legitimately
+            # owns the cursor even when its captured parent went stale.
+            # A real coordinator has both methods; a serial-less publish is
+            # rejected. Minimal doubles without publish_cursor keep the
+            # compatibility fallback in _execute_hub_message.
+            claim_serial = getattr(self._llm_service, "claim_turn_serial", None)
+            hub_serial = claim_serial() if callable(claim_serial) else None
+            hub_coro = self._execute_hub_message(
+                text, target, content, parent_uuid=hub_parent, turn_serial=hub_serial
+            )
             if callable(create_task):
                 create_task(hub_coro, name="rpc_hub_message")
             else:
@@ -3602,9 +3618,35 @@ class LocalStateService(StateService):
             accepted["goal_reply_id"] = reply_id
         return accepted
 
-    async def _execute_hub_message(self, text: str, target: str, content: str) -> None:
-        """Send one chat mention through Hub and publish a web turn."""
+    async def _execute_hub_message(
+        self,
+        text: str,
+        target: str,
+        content: str,
+        *,
+        parent_uuid: str | None = None,
+        turn_serial: int | None = None,
+    ) -> None:
+        """Send one chat mention through Hub and publish a web turn.
+
+        ``parent_uuid`` is the lineage captured by the caller at spawn time;
+        reading the shared ``current_parent_uuid`` pointer inside this task
+        would grab whatever ordinary turn happened to complete meanwhile.
+        The captured conversation session fences detached completions after a
+        restart from writing into or publishing on behalf of a new session.
+        ``turn_serial`` is the admission ticket claimed at the same atomic
+        point (#676 r7): completion writes publish through the coordinator's
+        admission-serial protocol, so the later-admitted mention owns the
+        cursor regardless of completion order.
+        """
         from kollabor_tui.display_tap import publish_semantic
+
+        conversation_logger = getattr(self._llm_service, "conversation_logger", None)
+        conversation_session_id = getattr(conversation_logger, "session_id", None)
+
+        def conversation_session_is_current() -> bool:
+            current_logger = getattr(self._llm_service, "conversation_logger", None)
+            return getattr(current_logger, "session_id", None) == conversation_session_id
 
         broadcast = target.lower() if target.lower() in _HUB_BROADCASTS else None
         is_broadcast = broadcast is not None
@@ -3614,8 +3656,18 @@ class LocalStateService(StateService):
             "hub_broadcast": is_broadcast,
         }
         add_message = getattr(self._llm_service, "_add_conversation_message", None)
+        publish_cursor = getattr(self._llm_service, "publish_cursor", None)
+        turn_parent = parent_uuid
+        memory_user_uuid = None
         if callable(add_message):
-            add_message("user", text, metadata=metadata)
+            memory_user_uuid = add_message(
+                "user", text, parent_uuid=turn_parent, metadata=metadata
+            )
+        user_uuid = await self._log_jsonl_turn_message(
+            "user", text, parent_uuid=turn_parent
+        )
+        if not conversation_session_is_current():
+            return
 
         try:
             # A broadcast takes the terminal's @ path (HubPlugin.send_user_message),
@@ -3625,11 +3677,38 @@ class LocalStateService(StateService):
                 if broadcast
                 else await self.hub_send_msg(target, content)
             )
+            if not conversation_session_is_current():
+                return  # the detached send finished after its session was replaced
             output = str(result or "hub message completed")
             success = not output.lower().startswith(("hub:", "hub ", "rejected:"))
             response_metadata = {**metadata, "hub_success": success}
             if callable(add_message):
-                add_message("assistant", output, metadata=response_metadata)
+                add_message(
+                    "assistant",
+                    output,
+                    parent_uuid=memory_user_uuid,
+                    metadata=response_metadata,
+                )
+            assistant_uuid = await self._log_jsonl_turn_message(
+                "assistant", output, parent_uuid=user_uuid
+            )
+            if not conversation_session_is_current():
+                return
+            if assistant_uuid and callable(publish_cursor):
+                # Ordinary LLM turns take their parent from this pointer
+                # (pipeline parity), so the chain must continue after the
+                # mention. The write publishes through the admission-serial
+                # protocol (#676 r7): the later-admitted turn owns the
+                # cursor regardless of completion order — a strictly
+                # later-admitted completion that already wrote keeps it,
+                # and this mention wins over anything admitted before it.
+                # The mention's own chain stays intact through its per-turn
+                # lineage either way.
+                publish_cursor(assistant_uuid, turn_serial)
+            elif assistant_uuid:
+                # Minimal coordinator doubles without the protocol: plain
+                # assignment, as before r7.
+                self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(
                 self._event_bus,
@@ -3640,14 +3719,30 @@ class LocalStateService(StateService):
                 stop_reason="end_turn",
             )
         except Exception as exc:
+            if not conversation_session_is_current():
+                return  # do not publish an error from a replaced conversation
             logger.exception("hub mention execution failed for web transport")
             message = str(exc)
             if callable(add_message):
                 add_message(
                     "assistant",
                     message,
+                    parent_uuid=memory_user_uuid,
                     metadata={**metadata, "hub_success": False},
                 )
+            assistant_uuid = await self._log_jsonl_turn_message(
+                "assistant", message, parent_uuid=user_uuid
+            )
+            if not conversation_session_is_current():
+                return
+            if assistant_uuid and callable(publish_cursor):
+                # Same admission-serial publish as the success path (#676
+                # r7): a later-admitted turn keeps the cursor, and the
+                # failed mention — itself a legitimate admitted turn —
+                # still wins over anything admitted before it.
+                publish_cursor(assistant_uuid, turn_serial)
+            elif assistant_uuid:
+                self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "error", message=message)
             publish_semantic(
                 self._event_bus,
@@ -3657,6 +3752,34 @@ class LocalStateService(StateService):
                 tool_calls=0,
                 stop_reason="error",
             )
+
+    async def _log_jsonl_turn_message(
+        self, role: str, content: str, *, parent_uuid: str | None = None
+    ) -> str | None:
+        """Persist one hub-mention turn record to the session JSONL.
+
+        Addressed LLM turns log through the input pipeline; hub mentions skip
+        the pipeline entirely, so log here for the same parity. The JSONL
+        feeds /resume and the engine's disk-seeded history.
+
+        Mentions run as detached tasks, so the parent chain is passed in per
+        turn instead of read from the shared ``current_parent_uuid`` pointer,
+        which concurrent mentions would reparent mid-turn. The caller
+        advances that pointer to the returned assistant uuid so ordinary
+        turns keep following the mention. Fail-open: a logger error never
+        fails the hub send.
+        """
+        logger_service = getattr(self._llm_service, "conversation_logger", None)
+        log_message = getattr(logger_service, f"log_{role}_message", None)
+        if not callable(log_message):
+            return None
+        try:
+            return await log_message(content, parent_uuid=parent_uuid)
+        except Exception:
+            logger.warning(
+                "could not log a hub mention %s record", role, exc_info=True
+            )
+            return None
 
     async def _run_web_slash_command(
         self, command: Any, executor: Any
@@ -3870,9 +3993,19 @@ class LocalStateService(StateService):
         approvals = getattr(getattr(llm, "tool_executor", None), "yes_approvals", None)
         if isinstance(approvals, YesApprovals):
             approvals.reply_cut(turn_id)  # its ask was never heard whole: no yes answers it
+        # Capture lineage and ticket at RPC admission, before an after_turn
+        # callback or logger await can observe a different conversation cursor.
+        turn_serial = getattr(llm, "_continue_serial", None)
+        admitted_parent_uuid = llm.current_parent_uuid
         queue = getattr(llm, "_queue_processor", None)
         if queue is None:
-            return await self._cut_voice_reply(llm, turn_id, text)
+            return await self._cut_voice_reply(
+                llm,
+                turn_id,
+                text,
+                admitted_parent_uuid=admitted_parent_uuid,
+                turn_serial=turn_serial,
+            )
 
         def conversation():  # the live one: /resume and a new session change it
             return getattr(getattr(llm, "conversation_logger", None), "session_id", None)
@@ -3882,7 +4015,15 @@ class LocalStateService(StateService):
         async def cut() -> None:
             if conversation() != session:
                 return  # the talked-over turn is not in this conversation
-            if (await self._cut_voice_reply(llm, turn_id, text)).get("recorded"):
+            if (
+                await self._cut_voice_reply(
+                    llm,
+                    turn_id,
+                    text,
+                    admitted_parent_uuid=admitted_parent_uuid,
+                    turn_serial=turn_serial,
+                )
+            ).get("recorded"):
                 from kollabor_tui.display_tap import publish_semantic
 
                 publish_semantic(self._event_bus, "voice_reply_cut", turn_id=turn_id)
@@ -3891,7 +4032,15 @@ class LocalStateService(StateService):
         queue.after_turn(turn_id, cut)
         return {"recorded": False, "pending": True}
 
-    async def _cut_voice_reply(self, llm: Any, turn_id: str, text: str) -> dict[str, Any]:
+    async def _cut_voice_reply(
+        self,
+        llm: Any,
+        turn_id: str,
+        text: str,
+        *,
+        admitted_parent_uuid: str | None,
+        turn_serial: int | None,
+    ) -> dict[str, Any]:
         from kollabor_events.data_models import ConversationMessage
 
         history = llm.conversation_history
@@ -3930,8 +4079,12 @@ class LocalStateService(StateService):
                     logger.warning("could not log a voice talk-over cut", exc_info=True)
                     dropped = {}
                 # The next record threads under what is left, never a dropped one.
+                # Keep the admission ticket across the await so an older cut
+                # cannot overwrite a cursor published by a newer turn.
                 while llm.current_parent_uuid in dropped:
-                    llm.current_parent_uuid = dropped[llm.current_parent_uuid]
+                    next_parent_uuid = dropped[llm.current_parent_uuid]
+                    if not llm.publish_cursor(next_parent_uuid, turn_serial):
+                        break
             return {"recorded": bool(edits), "replaced": bool(edits)}
         if not text:
             return {"recorded": False}
@@ -3941,14 +4094,15 @@ class LocalStateService(StateService):
                 content=text,
                 metadata={"interrupted": True, "source": "voice", "turn_id": turn_id},
             ),
-            parent_uuid=llm.current_parent_uuid,
+            parent_uuid=admitted_parent_uuid,
         )
         try:  # the JSONL feeds /resume and the engine's disk-seeded history
-            llm.current_parent_uuid = await llm.conversation_logger.log_assistant_message(
+            logged_uuid = await llm.conversation_logger.log_assistant_message(
                 text,
-                parent_uuid=llm.current_parent_uuid,
+                parent_uuid=admitted_parent_uuid,
                 model=getattr(getattr(llm, "api_service", None), "model", None),
             )
+            llm.publish_cursor(logged_uuid, turn_serial)
         except Exception:
             logger.warning("could not log an interrupted voice reply", exc_info=True)
         return {"recorded": True}

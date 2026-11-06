@@ -107,6 +107,14 @@ class LLMService:
     conversation logging with memory features.
     """
 
+    # Admission-serial cursor protocol state (#676 r7) as class defaults:
+    # instances built via ``object.__new__`` (isolated tests, thin doubles)
+    # still carry the protocol, and each instance rebinds its own counter on
+    # first claim (ints are immutable, so no cross-instance sharing).
+    _turn_serial = 0
+    _cursor_winner_serial = -1
+    _continue_serial: int | None = None
+
     def _is_hidden_voice_message(self, message) -> bool:
         """The user message that carries a hidden voice turn's instruction."""
         if (message.metadata or {}).get("tool_output_batch"):
@@ -1720,6 +1728,32 @@ class LLMService:
         """Set dynamic context on conversation logger before logging start."""
         self._session.set_conversation_context()
 
+    def claim_turn_serial(self) -> int:
+        """Claim this turn's admission ticket (#676 r7).
+
+        Called at the atomic admission point of every cursor-writing turn:
+        the mention spawn (same instant as its lineage capture) and the
+        ordinary pipeline's user-row log. Monotonic, so admission order is
+        total and comparable across turn kinds.
+        """
+        self._turn_serial += 1
+        return self._turn_serial
+
+    def publish_cursor(self, uuid: str | None, serial: int | None) -> bool:
+        """Advance the shared cursor for an admitted turn.
+
+        A strictly later-admitted turn that already completed wins and this
+        write is dropped. Same-serial writes (one turn advancing its own
+        chain: user row, HUD insert, batch output, tool-loop continuation)
+        all land. Untracked work, including system nudges and bare payloads,
+        has no admission ticket and must not move the shared cursor.
+        """
+        if serial is None or serial < self._cursor_winner_serial:
+            return False
+        self._cursor_winner_serial = serial
+        self.current_parent_uuid = uuid
+        return True
+
     # --- QueueProcessor forwarding methods ---
 
     async def _enqueue_with_overflow_strategy(self, message: MessageContent) -> None:
@@ -1737,6 +1771,32 @@ class LLMService:
     async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
         request_ids = batch_request_ids(messages)
+        # Keep the admission-time capture through the rebatch (#676): the
+        # most recent capture, since the pointer today lands on the last row
+        # admitted into the batch. Read BEFORE the rebatch so the non-voice
+        # branch (bare combined payload, no capture on it) keeps the value
+        # for the queue-start read below; otherwise a detached completion
+        # that advanced the pointer mid-queue would mis-parent the turn.
+        admission_parent = next(
+            (
+                m.parent_uuid
+                for m in reversed(messages)
+                if getattr(m, "parent_uuid", None)
+            ),
+            None,
+        )
+        # The batch's admission serial (#676 r7): the newest ticket carried
+        # by any item in the batch, so the batch's cursor writes resolve by
+        # the admission order of what it contains. None (system nudges,
+        # bare payloads) means the batch may run but cannot advance the cursor.
+        batch_serial = max(
+            (
+                getattr(m, "admission_serial", None)
+                for m in messages
+                if getattr(m, "admission_serial", None) is not None
+            ),
+            default=None,
+        )
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
             merged_origin_context = merge_voice_origin_contexts(messages)
@@ -1749,15 +1809,38 @@ class LLMService:
                     combined,
                     voice_inputs[-1].voice,
                     merged_origin_context,
+                    parent_uuid=admission_parent,
+                    admission_serial=batch_serial,
                 )
                 if voice_inputs
                 else combined
             ]
-        self.current_parent_uuid = await self._queue_processor.process_message_batch(
+        # Parent from the admission-time capture, not the pointer: a detached
+        # completion (hub mention, voice reply) may have advanced the pointer
+        # while this batch sat queued (#676). Items without a capture (system
+        # nudges, bare content) keep the pointer fallback.
+        batch_parent_uuid = next(
+            (
+                m.parent_uuid
+                for m in reversed(messages)
+                if getattr(m, "parent_uuid", None)
+            ),
+            admission_parent or self.current_parent_uuid,
+        )
+        # Expose this ticket while the admitted batch is running so callbacks
+        # caused by the turn can capture its serial before they yield. Do not
+        # assign it again after the await: an older batch must not restore its
+        # ticket over a later batch that started while it was suspended.
+        self._continue_serial = batch_serial
+        batch_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
-            current_parent_uuid=self.current_parent_uuid,
+            current_parent_uuid=batch_parent_uuid,
             request_ids=request_ids,
         )
+        # Completion publishes through the admission-serial protocol: a
+        # later-admitted mention that completed while this batch ran keeps
+        # the cursor; a same-turn tool-loop continuation below writes on.
+        self.publish_cursor(batch_uuid, batch_serial)
 
     async def _continue_conversation(self):
         """Continue an ongoing conversation. Delegates to QueueProcessor.
@@ -1792,12 +1875,20 @@ class LLMService:
                 ):
                     hud_message._goal_image_marker = image_scope.marker
                     image_scope.carrier = hud_message
-                self.current_parent_uuid = self._add_conversation_message(
+                hud_uuid = self._add_conversation_message(
                     hud_message, parent_uuid=self.current_parent_uuid
                 )
-        self.current_parent_uuid = await self._queue_processor.continue_conversation(
+                # The HUD insert belongs to the turn draining the queue
+                # (#676 r7): it publishes on that turn's admission serial
+                # so a later-admitted mention completion still wins over it.
+                self.publish_cursor(hud_uuid, self._continue_serial)
+        cont_uuid = await self._queue_processor.continue_conversation(
             current_parent_uuid=self.current_parent_uuid,
         )
+        # Same-turn handoff (batch -> tool-loop continuation): publishes on
+        # the batch's serial so later-admitted mention completions still win
+        # over this chain, while the chain itself stays contiguous (#676 r7).
+        self.publish_cursor(cont_uuid, self._continue_serial)
 
     def queue_agent_hud(
         self,
@@ -2061,18 +2152,41 @@ class LLMService:
         self.cancel_processing = False
         self.cancellation_message_shown = False
 
-        # Log user message
-        self.current_parent_uuid = await self.conversation_logger.log_user_message(
-            display_text, parent_uuid=self.current_parent_uuid
+        # Log user message. Admission claims this turn's serial at the same
+        # atomic point its lineage capture rides, and the cursor advance is
+        # published through the admission-serial protocol so concurrent
+        # detached completions resolve by admission order, not wall clock
+        # (#676 r7).
+        turn_serial = self.claim_turn_serial()
+        admission_parent_uuid = self.current_parent_uuid
+        user_uuid = await self.conversation_logger.log_user_message(
+            display_text, parent_uuid=admission_parent_uuid
         )
+        self.publish_cursor(user_uuid, turn_serial)
+        # This queue item belongs under the user row created for its admission,
+        # even if another completion won the shared cursor during the logger
+        # await. Never re-read mutable current_parent_uuid after yielding.
+        admitted_parent_uuid = user_uuid
 
-        # Add to processing queue with overflow handling
+        # Add to processing queue with overflow handling. Plain input rides a
+        # zero-id TaggedInput so the capture travels with the item (#676); a
+        # bare string could not carry it, and an empty request_ids tuple
+        # behaves like bare content in every batch-pipeline consumer.
         await self._enqueue_with_overflow_strategy(
-            QueuedInput(normalized_message, voice or {}, trusted_origin_context)
+            QueuedInput(
+                normalized_message,
+                voice or {},
+                trusted_origin_context,
+                parent_uuid=admitted_parent_uuid,
+                admission_serial=turn_serial,
+            )
             if voice or trusted_origin_context
-            else TaggedInput(normalized_message, (request_id,))
-            if request_id
-            else normalized_message
+            else TaggedInput(
+                normalized_message,
+                (request_id,) if request_id else (),
+                parent_uuid=admitted_parent_uuid,
+                admission_serial=turn_serial,
+            )
         )
 
         # Start processing if not already running
