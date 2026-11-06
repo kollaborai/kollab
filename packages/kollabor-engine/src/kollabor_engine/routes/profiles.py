@@ -154,6 +154,8 @@ def _safe_acp_adapter(command: Any) -> Optional[str]:
 def _redacted_profile_dict(profile: LLMProfile) -> Dict[str, Any]:
     """Return profile metadata safe for list/get/create/update API responses."""
     result = profile.to_dict()
+    # The key is dropped below, so the browser cannot resolve an auto profile itself.
+    result["effort_provider"] = profile.get_effort_provider()
     for key in (
         "api_key",
         "api_token",

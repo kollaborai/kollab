@@ -8,6 +8,7 @@ import {
   profileTargetLabel,
   shouldSubmitBaseUrlUpdate,
 } from "./profile-target";
+import { sendsAnthropic } from "./profile-effort";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -79,16 +80,6 @@ type ProfileUpdateBody = Partial<Omit<ProfileWriteBody, "name" | "copy_from">> &
   new_name?: string;
 };
 
-/** True when requests go to Anthropic: named, or "auto" with an Anthropic key
- * (the server resolves "auto" the same way and refuses the levels it never sends). */
-function sendsAnthropic(draft: { provider?: string; api_key?: string }): boolean {
-  const provider = (draft.provider || "").toLowerCase();
-  return (
-    provider === "anthropic" ||
-    (provider === "auto" && (draft.api_key || "").startsWith("sk-ant-"))
-  );
-}
-
 const EMPTY_DRAFT: ProfileWriteBody = {
   name: "",
   provider: "anthropic",
@@ -127,6 +118,8 @@ export function ProfilesDialog({
   const [invalidProfiles, setInvalidProfiles] = useState<Record<string, string>>({});
   const [copyingFrom, setCopyingFrom] = useState<string | null>(null);
   const [originalBaseUrl, setOriginalBaseUrl] = useState("");
+  // The provider the server resolved for the saved profile: an auto profile's key is redacted in GET.
+  const [savedEffortProvider, setSavedEffortProvider] = useState("");
   const [baseUrlHasHiddenData, setBaseUrlHasHiddenData] = useState(false);
   const [replaceHiddenBaseUrl, setReplaceHiddenBaseUrl] = useState(false);
   const loadWarnings = profileLoadWarningLines(invalidProfiles);
@@ -157,6 +150,7 @@ export function ProfilesDialog({
     setEditing(null);
     setCopyingFrom(null);
     setOriginalBaseUrl("");
+    setSavedEffortProvider("");
     setBaseUrlHasHiddenData(false);
     setReplaceHiddenBaseUrl(false);
     setDraft(EMPTY_DRAFT);
@@ -184,6 +178,7 @@ export function ProfilesDialog({
     setOriginalBaseUrl(p.base_url ?? "");
     setBaseUrlHasHiddenData(Boolean(p.base_url_has_hidden_data));
     setReplaceHiddenBaseUrl(false);
+    setSavedEffortProvider(p.effort_provider ?? "");
     setDraft(fromProfile(p, p.name));
     setError(null);
     setTestResult(null);
@@ -203,6 +198,7 @@ export function ProfilesDialog({
     setOriginalBaseUrl(p.base_url ?? "");
     setBaseUrlHasHiddenData(Boolean(p.base_url_has_hidden_data));
     setReplaceHiddenBaseUrl(false);
+    setSavedEffortProvider(p.effort_provider ?? "");
     setDraft(fromProfile(p, name));
     setError(null);
     setTestResult(null);
@@ -529,7 +525,7 @@ export function ProfilesDialog({
                   <SelectItem value="">Model Default</SelectItem>
                   {EFFORT_LEVELS.filter(
                     (level) =>
-                      !sendsAnthropic(draft) ||
+                      !sendsAnthropic(draft, savedEffortProvider) ||
                       (level !== "none" && level !== "minimal"),
                   ).map((level) => (
                     <SelectItem key={level} value={level}>

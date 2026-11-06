@@ -223,6 +223,8 @@ export type Profile = {
   extra_header_names?: string[];
   temperature?: number;
   effort?: string | null;
+  /** The provider requests use: an "auto" profile resolved from its key, then its endpoint. */
+  effort_provider?: string;
   streaming?: boolean;
   supports_tools?: boolean;
   supports_vision?: boolean;
