@@ -1283,6 +1283,70 @@ async def test_question_answer_resumes_same_granted_thread_once(bridges):
 
 
 @pytest.mark.asyncio
+async def test_refused_answer_stays_queued_until_the_receiver_accepts_it(
+    bridges, monkeypatch
+):
+    # ACP refuses an observation when its retry queue is full (#581). A refused
+    # answer must stay queued with the wait still open, so the next offer
+    # delivers it once. Consuming it first and then ignoring the refusal loses it.
+    members, _ = bridges
+    (left, left_hub, _, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+    asked = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    question_id = asked.metadata["relay_receipt"]["id"]
+    question_peer = left.store.event(question_id)["payload"]["from"]
+
+    offered = []
+    refusing = [True]
+
+    async def receive(message):
+        offered.append(message.id)
+        return False if refusing[0] else None
+
+    monkeypatch.setattr(right_hub, "_on_message_received", receive)
+    answered = await left_hub._handle_hub_msg_tool(
+        {
+            "id": "answer",
+            "to": question_peer,
+            "kind": "answer",
+            "thread_id": task_id,
+            "reply_to": question_id,
+            "content": "Use the workspace root.",
+        }
+    )
+    assert answered.success, answered.error
+    answer_id = answered.metadata["relay_receipt"]["id"]
+    assert offered == [answer_id]
+    assert right.store.event(answer_id)["state"] == "queued"
+    assert right.store.task(task_id)["state"] == "waiting_answer"
+    assert right.active.waiting_answer
+
+    refusing[0] = False
+    await right._rpc_event({"id": answer_id})
+    assert offered == [answer_id, answer_id]
+    assert right.store.event(answer_id)["state"] == "consumed"
+    assert right.store.task(task_id)["state"] == "running"
+
+    # Accepted once: another offer of the same answer is not delivered again.
+    await right._rpc_event({"id": answer_id})
+    assert offered == [answer_id, answer_id]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["expired", "withdrawn"])
 async def test_hub_answer_rejects_expired_or_withdrawn_question_grant(bridges, mode):
     members, _ = bridges
