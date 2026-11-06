@@ -623,6 +623,31 @@ class TestOperatorWordsAndOpenState(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(fabricated_sha, block)
         self.assertTrue(summary.content.rstrip().endswith("next: await CI"))
 
+    async def test_quoted_open_state_marker_does_not_hide_final_state(self):
+        valid_sha = "a1b2c3d4e5f6"
+        source_text = f"Prepare PR #824 at head {valid_sha}."
+        history = [_msg("user", source_text) if i % 2 == 0 else _msg("assistant", f"reply {i}") for i in range(12)]
+        history[0] = self._operator_message(source_text, "2026-11-05T00:00:00+00:00")
+        model_summary = (
+            "The format discussion quoted this marker:\n"
+            f"{self.OPEN_STATE}\n"
+            "That quote is still part of the summary.\n"
+            "The summary continues here before its actual final state.\n"
+            f"{self.OPEN_STATE}\n"
+            f"- PR #824 | owner: operator | head SHA: {valid_sha} | "
+            "verdict: pending | next: await CI"
+        )
+
+        _plugin_instance, summary = await self._compact(history, model_summary)
+        block = self._open_state_block(summary.content)
+
+        summary_before_state = summary.content.rsplit(self.OPEN_STATE, 1)[0]
+        self.assertIn("That quote is still part of the summary.", summary_before_state)
+        self.assertIn("The summary continues here", summary_before_state)
+        self.assertIn("#824", block)
+        self.assertIn(valid_sha, block)
+        self.assertTrue(summary.content.rstrip().endswith("next: await CI"))
+
     async def test_no_operator_messages_omits_operator_block_and_adds_final_open_state(self):
         history = [
             _msg("user", f"ordinary user {i}")
