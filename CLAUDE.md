@@ -861,6 +861,8 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 
 **Pre-commit:** Commits to `kollabor/`, `plugins/`, and `tests/` must reference a GitHub issue.
 
+**Changelog:** a PR adds its entry as `changes/<issue>.<section>.md` (`changes/README.md`) and never edits `CHANGELOG.md` or `kollabor/updates/CHANGELOG.md`; `ci/standards-check` refuses that outside `release/` and `changelog/` branches. The release PR folds the entries in with `python scripts/changelog.py build` (#855).
+
 For Kollab, follow the canonical isolated-writer process in
 `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`. Each active writer claims one unique
 worktree, branch, and file scope based on freshly fetched `origin/main`;
@@ -937,9 +939,11 @@ a dedicated writer worktree and DRAFT PR, with the three required CI checks
 (`ci/security-scan`, `ci/standards-check`, `ci/tests`). Keep the integration
 checkout source-read-only.
 
-1. In a worktree branch from current `origin/main`, bump every package version
-   and inter-package constraint to `X.Y.Z`, update `uv.lock`, and move
-   `[Unreleased]` entries into matching byte-identical changelogs.
+1. In a worktree branch `release/X.Y.Z` from current `origin/main`, bump every
+   package version and inter-package constraint to `X.Y.Z`, update `uv.lock`,
+   run `python scripts/changelog.py build` to fold `changes/` into
+   `[Unreleased]`, and move `[Unreleased]` entries into matching byte-identical
+   changelogs.
 2. Commit by explicit paths, push normally, and open a DRAFT release PR.
    A different AI agent reviews the exact final head and records the required
    GitHub approval as whichever account, `kollaborai` or `maarco`, is not the
