@@ -34,7 +34,7 @@ def provider_display(provider: str) -> str:
     return PROVIDER_LABELS.get(provider.lower(), provider.replace("_", " ").title())
 
 
-def _effort_provider(profile: Any) -> Any:
+def effort_provider(profile: Any) -> Any:
     """The profile's provider with ``auto`` resolved to what requests use."""
     for getter in ("get_effort_provider", "get_provider"):
         if hasattr(profile, getter):
@@ -353,7 +353,7 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
     profile = pm.get_profile(base.provider_profile)
     existing = {entry.name for entry in manager.list_loadouts()}
     codex = is_chatgpt_codex_profile(pm, base.provider_profile)
-    provider = _effort_provider(profile)
+    provider = effort_provider(profile)
     is_acp = str(provider or "").lower() == "acp"
     command = tuple(getattr(profile, "command", ()) or ())
     model_value = "" if is_acp and base.implicit and command and base.model == command[0] else base.model
@@ -574,7 +574,7 @@ class LlmPanel:
         name = base.name if mode == "edit" else str(changes.get("name") or "").strip()
         codex = is_chatgpt_codex_profile(ctx._profile_manager, base.provider_profile)
         profile = ctx._profile_manager.get_profile(base.provider_profile)
-        provider = _effort_provider(profile)
+        provider = effort_provider(profile)
         is_acp = str(provider or "").lower() == "acp"
         model = str(changes.get("model", base.model) or "").strip() if is_acp else base.model
         values, errors = _loadout_values(
