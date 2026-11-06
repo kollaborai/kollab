@@ -131,10 +131,81 @@ def _safe_profile_load_diagnostic(profile_data: Any, error: Exception) -> str:
 # Sentinel prefix for keys stored in OS keyring
 KEYRING_SENTINEL_PREFIX = "secret:keyring:"
 
-# Reasoning effort levels, cheapest first. Anthropic documents low..max;
-# the ChatGPT codex backend also advertises "ultra" on its top tiers
-# (see query_codex_model_details). Providers 400 on anything else.
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
+# Reasoning effort levels, cheapest first. none and minimal are OpenAI-shaped:
+# Anthropic does not take them (providers/tuning.py leaves them out). Anthropic
+# documents low..max; the ChatGPT codex backend also advertises "ultra" on its
+# top tiers (see query_codex_model_details). Providers 400 on anything else.
+EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+# Levels Anthropic's output_config.effort does not take (it documents low..max).
+# They stay in EFFORT_LEVELS for the OpenAI-shaped fields; an Anthropic profile
+# refuses them when written, never offers them and never reports them as set.
+ANTHROPIC_UNSUPPORTED_EFFORT = frozenset({"none", "minimal"})
+
+# Profiles already warned about a stored unsent level, so a long session logs once.
+_warned_unsent_effort: set = set()
+
+
+def resolve_effort_provider(
+    provider: Optional[str], api_key: str = "", base_url: str = ""
+) -> str:
+    """The provider a request is built for: ``auto`` resolved like the request does.
+
+    A profile with ``provider: "auto"`` (the shipped ``default``) becomes Anthropic
+    from its key or endpoint, so the effort rules must see that, not the word
+    ``auto``. An ``auto`` that detects nothing stays ``auto``.
+    """
+    name = (provider or "").strip().lower()
+    if name != "auto":
+        return name
+    try:
+        from kollabor_ai.providers.registry import detect_provider_from_profile
+
+        detected = detect_provider_from_profile(
+            {
+                "provider": "auto",
+                "api_key": api_key or "",
+                "api_base": base_url or "",
+            }
+        )
+    except Exception:
+        return name
+    return str(getattr(detected, "value", detected)).lower()
+
+
+def effort_unsupported_reason(provider: Optional[str], effort: Optional[str]) -> str:
+    """Why ``provider`` never receives ``effort``; empty when it can.
+
+    Used wherever a level is written (profile route, copy, launch flag) so the
+    typo or wrong-provider pick fails there instead of storing a level that no
+    request carries.
+    """
+    level = (effort or "").strip().lower()
+    if (
+        level in ANTHROPIC_UNSUPPORTED_EFFORT
+        and (provider or "").strip().lower() == "anthropic"
+    ):
+        return (
+            f"Anthropic has no reasoning effort {level!r}; choose one of: "
+            + ", ".join(
+                x for x in EFFORT_LEVELS if x not in ANTHROPIC_UNSUPPORTED_EFFORT
+            )
+            + " (or empty for model default)"
+        )
+    return ""
+
+
+def sendable_effort(provider: Optional[str], effort: Optional[str]) -> str:
+    """``effort`` when ``provider`` sends it, else empty.
+
+    A stored loadout level is applied through this, so one that the provider
+    never receives (``minimal`` on a loadout whose profile moved to Anthropic)
+    reads back as unset, as it does on a profile, and the rest of the preset
+    still applies.
+    """
+    if not effort or effort_unsupported_reason(provider, effort):
+        return ""
+    return effort
 
 
 def _keyring_get(key_name: str) -> Optional[str]:
@@ -453,6 +524,9 @@ class LLMProfile:
     project_id: Optional[str] = None
     location: Optional[str] = None
     store_responses: Optional[bool] = None
+    # Bumped by ProfileManager.update_profile on every edit. Not serialized: a
+    # caller that awaits (such as a model lookup) compares it to see an edit.
+    revision: int = field(default=0, compare=False, repr=False)
 
     def _get_env_key(self, field: str) -> str:
         """Generate env var key for this profile and field.
@@ -717,6 +791,15 @@ class LLMProfile:
                 f"Profile '{self.name}': effort '{value}' is not one of {'/'.join(EFFORT_LEVELS)} — ignoring"
             )
             return ""
+        if effort_unsupported_reason(self.get_effort_provider(), value):
+            # stored by hand or by an env var: report it as unset, since the
+            # request would not carry it either
+            if self.name not in _warned_unsent_effort:
+                _warned_unsent_effort.add(self.name)
+                logger.warning(
+                    f"Profile '{self.name}': Anthropic has no effort '{value}' — not sent"
+                )
+            return ""
         return value
 
     def get_streaming(self) -> bool:
@@ -787,6 +870,13 @@ class LLMProfile:
         if global_val:
             return global_val.lower()
         return self.provider or "openai"
+
+    def get_effort_provider(self) -> str:
+        """``get_provider()`` with ``auto`` resolved to the provider requests use."""
+        provider = self.get_provider()
+        if provider != "auto":
+            return provider
+        return resolve_effort_provider(provider, self.get_api_key(), self.get_endpoint())
 
     def get_provider_type(self) -> str:
         """
@@ -2309,6 +2399,11 @@ class ProfileManager:
                     "(or empty for model default)"
                 )
             profile.effort = normalized_effort
+            reason = effort_unsupported_reason(
+                profile.get_effort_provider(), normalized_effort
+            )
+            if reason:
+                raise ValueError(f"Profile {source_name!r}: {reason}")
 
         if profile.provider == "acp" and not profile.command:
             raise ValueError(
@@ -2475,6 +2570,21 @@ class ProfileManager:
             return False
         original_profile = copy.deepcopy(profile) if profile.is_provisioned else None
 
+        # A level the resulting provider never sends is refused before anything
+        # changes, so a launch flag or API write cannot store it.
+        if effort:
+            target = provider if provider is not None else profile.provider
+            reason = effort_unsupported_reason(
+                resolve_effort_provider(
+                    target,
+                    api_key if api_key is not None else profile.get_api_key(),
+                    base_url if base_url is not None else profile.get_endpoint(),
+                ),
+                effort,
+            )
+            if reason:
+                raise ValueError(reason)
+
         # Update fields if provided
         if base_url is not None:
             profile.base_url = base_url
@@ -2502,6 +2612,7 @@ class ProfileManager:
             profile.streaming = streaming
         if extra_headers is not None:
             profile.extra_headers = extra_headers
+        profile.revision += 1
 
         # Handle rename
         if new_name and new_name != original_name:

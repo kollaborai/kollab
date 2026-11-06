@@ -861,6 +861,8 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 
 **Pre-commit:** Commits to `kollabor/`, `plugins/`, and `tests/` must reference a GitHub issue.
 
+**Changelog:** a PR adds its entry as `changes/<issue>.<section>.md` (`changes/README.md`) and never edits `CHANGELOG.md` or `kollabor/updates/CHANGELOG.md`; `ci/standards-check` refuses that outside `release/` and `changelog/` branches. The release PR folds the entries in with `python scripts/changelog.py build` (#855).
+
 For Kollab, follow the canonical isolated-writer process in
 `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`. Each active writer claims one unique
 worktree, branch, and file scope based on freshly fetched `origin/main`;
@@ -896,6 +898,11 @@ marked strict `xfail`) before the fix, and the fix flips it green without
 editing the test; a finding no test can reproduce, such as wording in a doc,
 says so in its fix commit instead. Every merge uses
 `kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
+GitHub's merge queue is not on yet (#857): GitHub offers it only to repos
+owned by an organization, and this repo belongs to the personal account
+`kollaborai`. Until it moves, a PR behind `main` merges `main` into its branch
+before it lands. `ci.yml` already runs on `merge_group`, so the queue can be
+turned on as soon as the repo is in an organization.
 After code-owner enforcement is enabled, `.github/CODEOWNERS` covers every
 path and protects itself; one of `@maarco` or `@kollaborai` must approve. The
 other account approves PRs authored under either account. GitHub enforces the
@@ -933,9 +940,11 @@ a dedicated writer worktree and DRAFT PR, with the three required CI checks
 (`ci/security-scan`, `ci/standards-check`, `ci/tests`). Keep the integration
 checkout source-read-only.
 
-1. In a worktree branch from current `origin/main`, bump every package version
-   and inter-package constraint to `X.Y.Z`, update `uv.lock`, and move
-   `[Unreleased]` entries into matching byte-identical changelogs.
+1. In a worktree branch `release/X.Y.Z` from current `origin/main`, bump every
+   package version and inter-package constraint to `X.Y.Z`, update `uv.lock`,
+   run `python scripts/changelog.py build` to fold `changes/` into
+   `[Unreleased]`, and move `[Unreleased]` entries into matching byte-identical
+   changelogs.
 2. Commit by explicit paths, push normally, and open a DRAFT release PR.
    A different AI agent reviews the exact final head and records the required
    GitHub approval as whichever account, `kollaborai` or `maarco`, is not the
@@ -1090,7 +1099,7 @@ set_color_support(ColorSupport.EXTENDED)
 - `/model` (aliases: `/mod`, `/m`) - Fullscreen model picker for the active provider (list|search|set|effort). The list is seeded from `bundles/data/models.json` (retired entries filtered) and merged with the provider's live catalog when one exists. `/model effort [level]` shows or sets reasoning effort — see `docs/features/reasoning-effort.md`.
 - `/llm` (aliases: `/loadout`, `/ld`) - Fullscreen loadout picker: provider + model + param presets. Every `models.json` model for a configured provider is an implicit loadout; `/llm <name>` activates one directly, `/llm new` opens a pre-filled create form, and `kollab --llm <loadout>` resolves loadouts at launch, with `--model` / `--effort` overriding individual fields on top — see `docs/features/loadouts.md`.
 
-The `/llm` list merges `models.json` with the provider's **live** catalog (`model_catalog.py`, TTL + versioned disk cache). A provider contributing zero rows still renders a section explaining why — never silently omit it, that was the original bug.
+The `/llm` list is the provider's **live** catalog once it is cached (`model_catalog.py`, TTL + versioned disk cache), plus the profile's own model; `models.json` seeds it only while the catalog was never fetched or the provider has no listing API (#558). The list reads the cache with no TTL (an expired entry is still the last list the provider served; the pickers refresh on open), and the Anthropic fetcher reads every `/v1/models` page, returning empty rather than a partial list. Each cache entry records the provider and a fingerprint of the endpoint it came from (never the endpoint, which can hold credentials) and is ignored for a profile now on another provider or endpoint. A provider contributing zero rows still renders a section explaining why — never silently omit it, that was the original bug.
 - `/permissions` (aliases: `/perms`, `/security`) - Manage permissions (show|default|strict|trust|stats|clear)
 - `/terminal` (aliases: `/tmux`, `/term`, `/t`) - Manage tmux sessions (new|view|list|kill)
 - `/hub` (aliases: `/mesh`) - Agent hub (status|msg|broadcast|feed|console|org|vault|whoami)

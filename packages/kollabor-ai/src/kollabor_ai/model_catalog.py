@@ -18,6 +18,7 @@ empty list so the picker still opens.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -33,7 +34,9 @@ DEFAULT_TIMEOUT = 8.0
 
 # Disk cache. Same shape as kollabor_agent.agent_manager's agent metadata
 # cache: versioned JSON, discarded whole on version mismatch or TTL expiry.
-# Bump CACHE_VERSION when the cached entry shape changes.
+# Bump CACHE_VERSION when the cached entry shape changes. Entries also carry
+# the provider and endpoint they were fetched from (#558); that is additive, so
+# an older entry without them still loads and is taken as a match.
 CACHE_VERSION = 2
 CACHE_TTL_SECONDS = 3600  # 1h -- provider catalogs move slowly
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -78,6 +81,56 @@ def _profile_key(profile: Any) -> str:
         return provider.lower()
 
 
+def _fingerprint(endpoint: str) -> str:
+    """SHA-256 of a normalized endpoint; "" for none.
+
+    An endpoint can carry a password, a query key or a path token, and may come
+    only from an env var that is kept off config.json. The cache file records
+    this digest, never the endpoint itself.
+    """
+    endpoint = endpoint.rstrip("/")
+    if not endpoint:
+        return ""
+    return hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
+
+
+def _profile_source(profile: Any) -> Dict[str, str]:
+    """Which provider and endpoint a profile's catalog comes from.
+
+    The cache is keyed by profile name, and an edit can change a profile's
+    provider or endpoint in place. An entry fetched from the old source is
+    not this profile's catalog (#558). The endpoint is kept as a fingerprint.
+    """
+    if isinstance(profile, dict):
+        provider = str(profile.get("provider") or "")
+        endpoint = str(profile.get("base_url") or profile.get("endpoint") or "")
+    else:
+        provider = ""
+        endpoint = ""
+        try:
+            provider = str(profile.get_provider() or "")
+        except Exception:  # noqa: BLE001 -- identity is best-effort
+            provider = str(getattr(profile, "provider", "") or "")
+        try:
+            endpoint = str(profile.get_endpoint() or "")
+        except Exception:  # noqa: BLE001
+            endpoint = str(getattr(profile, "base_url", "") or "")
+    return {"provider": provider.lower(), "endpoint_id": _fingerprint(endpoint)}
+
+
+def _same_source(entry: Dict[str, Any], profile: Any) -> bool:
+    """Whether the complete recorded source matches this profile.
+
+    Legacy entries without both provider and endpoint metadata are cold misses:
+    their models cannot be attributed to the profile's current source.
+    """
+    source = _profile_source(profile)
+    for field, expected in source.items():
+        if field not in entry or str(entry[field] or "") != expected:
+            return False
+    return True
+
+
 def _load_disk_cache() -> Dict[str, Dict[str, Any]]:
     """Load the whole cache file. Returns {} on any problem."""
     path = _cache_file()
@@ -102,7 +155,16 @@ def _save_disk_cache(entries: Dict[str, Dict[str, Any]]) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": CACHE_VERSION, "entries": entries}
+        # Drop the raw "endpoint" an earlier build wrote beside the models.
+        clean = {
+            key: (
+                {k: v for k, v in entry.items() if k != "endpoint"}
+                if isinstance(entry, dict)
+                else entry
+            )
+            for key, entry in entries.items()
+        }
+        payload = {"version": CACHE_VERSION, "entries": clean}
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         logger.warning("Failed to save model catalog cache: %s", e)
@@ -130,9 +192,9 @@ def cached_provider_models(
         return []
 
     entry = _MEMORY_CACHE.get(key)
-    if not _fresh(entry, max_age):
+    if not (_fresh(entry, max_age) and _same_source(entry, profile)):  # type: ignore[arg-type]
         entry = _load_disk_cache().get(key)
-        if _fresh(entry, max_age):
+        if _fresh(entry, max_age) and _same_source(entry, profile):  # type: ignore[arg-type]
             _MEMORY_CACHE[key] = entry  # type: ignore[assignment]
         else:
             return []
@@ -144,7 +206,11 @@ def _store(profile: Any, models: List[Dict[str, Any]]) -> None:
     key = _profile_key(profile)
     if not key:
         return
-    entry = {"timestamp": time.time(), "models": models}
+    entry = {
+        "timestamp": time.time(),
+        "models": models,
+        **_profile_source(profile),
+    }
     _MEMORY_CACHE[key] = entry
     entries = _load_disk_cache()
     entries[key] = entry
@@ -396,9 +462,11 @@ async def _openrouter_models() -> List[Dict[str, Any]]:
 
 
 # Anthropic models endpoint. Requires an API key; returns only models the
-# account can access. No standard pagination beyond a single page here.
+# account can access. Paged with ``limit`` / ``after_id``; every page is read.
 ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_API_VERSION = "2023-06-01"
+ANTHROPIC_PAGE_LIMIT = 1000  # the API maximum; the default is 20
+ANTHROPIC_MAX_PAGES = 20  # bound on a server that never stops saying has_more
 
 
 async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
@@ -433,11 +501,32 @@ async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
         "anthropic-version": ANTHROPIC_API_VERSION,
     }
 
+    # The endpoint pages (20 by default): read every page, since the loadout
+    # list treats this catalog as the account's whole list (#558). A listing
+    # that cannot be completed is empty, never partial, so the registry still
+    # seeds the picker instead of a truncated list hiding models.
+    pages: List[Dict[str, Any]] = []
+    after_id: Optional[str] = None
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+            for _ in range(ANTHROPIC_MAX_PAGES):
+                params: Dict[str, Any] = {"limit": ANTHROPIC_PAGE_LIMIT}
+                if after_id:
+                    params["after_id"] = after_id
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                page = response.json()
+                pages.append(page)
+                if not page.get("has_more"):
+                    break
+                next_id = str(page.get("last_id") or "")
+                if not next_id or next_id == after_id:
+                    logger.warning("Anthropic model catalog paging did not advance")
+                    return []
+                after_id = next_id
+            else:
+                logger.warning("Anthropic model catalog has too many pages")
+                return []
     except httpx.HTTPStatusError as e:
         logger.warning(
             "Anthropic model catalog fetch failed (HTTP %s) at %s",
@@ -453,7 +542,7 @@ async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
         return []
 
     result: List[Dict[str, Any]] = []
-    for model in data.get("data", []):
+    for model in (m for page in pages for m in page.get("data", [])):
         model_id = str(model.get("id") or "")
         if not model_id:
             continue
