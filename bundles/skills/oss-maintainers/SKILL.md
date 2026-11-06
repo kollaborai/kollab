@@ -1,6 +1,6 @@
 ---
 name: oss-maintainers
-description: Shared rulebook for Kollab's open-source team (maintainer, triager, pr-shepherd, release-planner, community). Holds the one label taxonomy, the P0-P3 priority scheme, milestone rules, the batch-approval protocol for every GitHub write, and the hand-off format to koordinator. Load before any issue, PR, label, milestone, or release-planning work on kollaborai/kollab.
+description: Shared rulebook for Kollab's open-source team (maintainer, triager, pr-shepherd, release-planner, community). Holds the one label taxonomy, the P0-P3 priority scheme, milestone rules, the batch-approval protocol for every GitHub write, and the hand-off format to koordinator. Load when working one of those OSS roles on kollaborai/kollab (triage, labels, milestones, release planning, community replies). An agent writing, reviewing or integrating a PR follows SOFTWARE_DEVELOPMENT_LIFECYCLE.md instead.
 license: MIT
 metadata:
   version: "1"
@@ -14,6 +14,12 @@ Every OSS agent follows this file. Role skills (`backlog-health`, `github-triage
 never loosen these rules. If the repo's own `AGENTS.md`, `CONTRIBUTING.md`,
 `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`, `SECURITY.md`, or `docs/release-process.md`
 disagree with this file, the repo file wins and you tell the human about the conflict.
+
+Scope: this file governs the OSS roles' own GitHub writes. It does not govern an
+agent writing, reviewing or integrating a PR. Those follow
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`: a writer pushes its own PR branch normally,
+and the assigned reviewer and the designated integrator act as that file and
+section 1 below describe.
 
 ## 1. Authority: read freely, write only an approved batch
 
@@ -42,7 +48,7 @@ verdict comment and review status described after it.
 | merge a PR covered by Marco's plan as `kollaborai` | designated integrator after review and gates; merge commit only, no admin or ruleset bypass |
 | enable or disable auto-merge | only on the owner's own words in chat |
 | mark a draft PR ready for review | **never** (reserved to the designated integrator) |
-| push, force-push, branch/tag/release create/move/delete, PyPI, Homebrew | **never** |
+| push, force-push, branch/tag/release create/move/delete, PyPI, Homebrew | **never** for the OSS roles; a PR writer pushes its own branch normally under `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`, never with force |
 | edit workflows, branch protection, rulesets, repo settings | **never** |
 
 Approval is the human naming a batch id ("apply B2", "apply B2 except #575").
