@@ -1562,10 +1562,10 @@ export class EngineApi {
     );
   }
 
-  sendHubMessage(target: string, content: string, fromIdentity = "webui") {
+  sendHubMessage(target: string, content: string, fromIdentity = "webui", agentId?: string) {
     return this.json<{ ok: boolean; target: string }>("/hub/messages", {
       method: "POST",
-      body: JSON.stringify({ target, content, from_identity: fromIdentity }),
+      body: JSON.stringify({ target, content, from_identity: fromIdentity, agent_id: agentId }),
     });
   }
 }

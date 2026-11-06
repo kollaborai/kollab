@@ -737,6 +737,7 @@ async def test_logger_await_cannot_reparent_an_admitted_user_turn():
     async def enqueue(item):
         captured_items.append(item)
         enqueued.set()
+        return True
 
     service._queue_processor = SimpleNamespace(
         enqueue=enqueue,
@@ -876,6 +877,7 @@ async def test_concurrent_pointer_advance_between_user_row_and_queue_start_canno
         captured_items.append(item)
         enqueued.set()
         await gate.wait()  # the ordinary turn sits between log and queue start
+        return True
 
     batch_spy = AsyncMock(return_value="assistant-row")
     service._queue_processor = SimpleNamespace(
