@@ -43,14 +43,14 @@ async def test_provider_initialization_log_omits_provider_secret(
     assert error_type.__name__ in caplog.text
 
 
-def _reinitialization_profile(name):
+def _reinitialization_profile(name, api_key="test-key-not-a-real-secret"):
     return SimpleNamespace(
         name=name,
         auth_type="api_key",
         to_dict=lambda: {
             "name": name,
             "provider": "openai",
-            "api_key": "test-key-not-a-real-secret",
+            "api_key": api_key,
         },
     )
 
@@ -109,3 +109,31 @@ async def test_stale_failed_reinitialization_does_not_clear_later_provider(
     assert service._profile is later_profile
     assert service._provider is later_provider
     assert service._provider_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [ValueError, RuntimeError])
+async def test_reinitialize_provider_log_omits_provider_secret(
+    error_type, monkeypatch, caplog
+):
+    secret = "sk-wrapper-log-secret-20261106"
+    profile = _reinitialization_profile("wrapper-redaction", secret)
+    service = _bare_reinitialization_service(profile, None)
+
+    async def fail_provider_initialization(_config):
+        raise error_type(f"provider failure included credential {secret}")
+
+    class FailingProviderRegistry:
+        get_provider = staticmethod(fail_provider_initialization)
+
+    monkeypatch.setattr(api_module, "create_config_from_profile", lambda _: {})
+    monkeypatch.setattr(api_module, "ProviderRegistry", FailingProviderRegistry)
+    caplog.set_level(logging.WARNING, logger=api_module.__name__)
+
+    assert await service.reinitialize_provider(profile) is False
+
+    assert secret not in caplog.text
+    assert error_type.__name__ in caplog.text
+    assert service._provider_error == (
+        f"provider failure included credential {secret}"
+    )
