@@ -119,6 +119,11 @@ gh pr create --draft --head issue-8-version-display --title "fix(cli): correct v
 - Make small, scoped commits from the owning worktree, naming only the paths
   owned by that lane. Use Conventional Commits and include the issue reference
   when one exists. Never broadly stage another writer's files.
+- Add the PR's changelog entry as `changes/<issue>.<section>.md`
+  (`changes/README.md`). Do not edit `CHANGELOG.md` or its packaged copy: only
+  release (`release/...`) and changelog repair (`changelog/...`) branches may,
+  and `ci/standards-check` refuses it elsewhere. Every PR writes its own file,
+  so entries never conflict.
 - Push the lane branch normally and open a DRAFT PR against `main`. Agents do
   not mark their own PR ready or merge it. Note overlapping PRs and path
   ownership so the integrator can sequence them.
