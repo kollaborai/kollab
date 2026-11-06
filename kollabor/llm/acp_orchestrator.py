@@ -797,20 +797,24 @@ class ACPOrchestrator:
         message is already in the conversation; this drops the buffer so no
         harness is offered them again, and starts the one native turn that
         answers them. A message that still has no history row is kept, and no
-        turn starts.
+        turn starts. Each history write is awaited first; one that fails is shown
+        to the user, and the turn starts anyway, since the message is in the
+        conversation.
         """
         if not self._observation_count and not self._unwritten_observations:
             return
         # A message whose arrival row failed has no history row yet; the native
         # model reads history, so it gets one more try here.
         still_unwritten: list[tuple[str, AgentHudEntry]] = []
+        writes: list[asyncio.Task | None] = []
         for row_id, entry in list(self._unwritten_observations):
             if not self._write_history_row(row_id, format_agent_hud([entry])):
                 still_unwritten.append((row_id, entry))
             self._parents.pop(row_id, None)
+            writes.append(self._user_history_tasks.pop(row_id, None))
         for row_id in self._observation_rows:
             self._parents.pop(row_id, None)
-            self._user_history_tasks.pop(row_id, None)
+            writes.append(self._user_history_tasks.pop(row_id, None))
         self._observation_rows.clear()
         self._unwritten_observations.clear()
         self._observations.clear()
@@ -824,6 +828,12 @@ class ACPOrchestrator:
                 self._unwritten_observations.extend(still_unwritten)
                 return
             self._parents.pop(batch_id, None)
+            writes.append(self._user_history_tasks.pop(batch_id, None))
+        # The native turn reads history, so it starts once these writes have settled.
+        # A write that failed was already shown by _observation_task_done.
+        settled = [task for task in writes if task is not None]
+        if settled:
+            await asyncio.gather(*settled, return_exceptions=True)
         await self.event_bus.emit_with_hooks(
             EventType.TRIGGER_LLM_CONTINUE,
             {"source": "acp_handover", "content": ""},
@@ -840,7 +850,7 @@ class ACPOrchestrator:
         """
         for _ in range(2):
             try:
-                self._record_user(row_id, text, "observation", None, retry=True)
+                self._record_user(row_id, text, "observation", None, retry=True, track_completion=True)
                 return True
             except Exception as error:
                 logger.warning(
@@ -895,6 +905,15 @@ class ACPOrchestrator:
             if error is not None:
                 logger.warning("ACP user history write failed (%s)", type(error).__name__)
 
+    def _observation_task_done(self, task: asyncio.Task) -> None:
+        """A failed observation history write is shown in the chat, not only logged."""
+        self._history_task_done(task)
+        if not task.cancelled() and task.exception() is not None:
+            llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+            display = getattr(llm, "message_display_service", None)
+            if display is not None:
+                display.display_system_message("Conversation history not saved for this message.")
+
     def _record_user(
         self, request_id: str, text: str, source: str, thread_id: str | None,
         *,
@@ -941,7 +960,9 @@ class ACPOrchestrator:
             self._history_tasks.add(task)
             if track_completion:
                 self._user_history_tasks[request_id] = task
-            task.add_done_callback(self._history_task_done)
+            task.add_done_callback(
+                self._observation_task_done if source == "observation" else self._history_task_done
+            )
         history = getattr(llm, "conversation_history", None)
         if isinstance(history, list) and history is not getattr(manager, "messages", None):
             history.append(ConversationMessage(role="user", content=text, metadata=metadata))
