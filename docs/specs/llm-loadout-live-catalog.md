@@ -182,11 +182,26 @@ callers below read.
 
 ### 2. Manager — `loadout_manager.py`
 
-`list_loadouts()` gains catalog-sourced implicit loadouts, read from the cache
-only (stays sync, stays non-blocking):
+`list_loadouts()` reads the catalog from the cache only (stays sync, stays
+non-blocking). Once the catalog has entries it is the provider's list, not a
+supplement to the registry (#558):
 
-- registry models, as today
-- plus `cached_provider_models(profile)` entries not already present
+- `cached_provider_models(profile, max_age=inf)` entries, plus the profile's own
+  model. No TTL: launch paths (`--llm`, the startup default, `/llm <name>`)
+  never refresh, and an expired entry is still the last list served
+- registry models only while the catalog is cold or empty: no fetch yet, or
+  the provider has no listing API
+- a catalog is authoritative only when complete: the Anthropic fetcher reads
+  every `/v1/models` page and returns empty, never partial, if it cannot
+- a catalog belongs to the provider and endpoint it was fetched from: each
+  cache entry records the provider and a SHA-256 fingerprint of the normalized
+  endpoint (never the endpoint itself, which can carry a password, key or path
+  token), and both source fields must be present and match the profile's current
+  provider and endpoint. Source-less or partial legacy v2 entries are cold
+  misses and are never served, including as stale fallback; refresh queries the
+  profile's current source before storing new results. The cache key is the
+  profile name, and an edit keeps the name, so the old provider's catalog would
+  otherwise stay the new provider's list
 - existing dedup rule unchanged: explicit shadows implicit, first provider
   profile wins on name collision
 
