@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - When an ACP agent is the active backend, hub wakes and injected messages no longer start a native reply behind it; they show an error instead, `/compact` no longer asks the model on an ACP chat, and a finished `/sub` agent's summary is shown to you instead of being written into native history behind the ACP agent (#579).
+- A voice turn no longer puts the old provider back over a model or profile you chose while it was running; it restores chat's provider only if the turn still holds the active one (#584).
 - Web hub mentions (@agent and @broadcast) now persist to the session JSONL like addressed LLM turns, so wake and broadcast turns survive resume and reload instead of vanishing on reload (#672).
 - An ordinary turn queued while a detached completion (hub mention or voice reply) runs now parents from the user row logged at its admission, so a concurrent completion can no longer re-parent the queued reply under the detached turn (#676).
 - Queue batches without an admission serial, including corrective nudges, cannot advance the conversation cursor or overwrite a tracked turn (#676).
@@ -37,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ACP admissions that reuse a caller request ID keep their own history parent and completion ownership, so a reply is no longer recorded under the later input's row (#597). A rejected admission cancels only itself, not an earlier queued admission with the same ID.
 - ACP admissions that reuse a caller request ID also keep their own mic-turn voice metadata: the voice-reply dictionary was keyed by bare request ID, so a later admission overwrote the earlier one's voice and the reply was spoken with the wrong voice or not at all (#597).
 - Mentiko attaches to an existing live hub session without spawning a second daemon or duplicating its system-prompt history (#708).
+- A tool result or agent update whose long text pushes it over the engine's 16 MB frame limit is now cut to fit and still reaches the chat, instead of being dropped with its reply marked incomplete. An update that is over the limit because of many small items is still dropped (#544).
+- A request for an agent that has exited no longer reaches a new agent that took over its socket under the same name: the engine reads the agent's record fresh before it uses that socket, so the request fails instead of returning the new agent's output, including when the agent restarted in place (#566).
+- A live hub agent keeps its presence record and socket when its heartbeat is over ten minutes old and its socket briefly does not answer; peers now remove them only once the agent's process has exited or its process ID has been reused by another process (#575)
 
 ## [0.19.1] - 2026-11-03
 
