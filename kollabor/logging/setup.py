@@ -32,9 +32,13 @@ DEFAULT_LOG_BACKUP_COUNT = 3  # keep 3 rotated files (+ the live one)
 
 
 def _attach_redaction_filter(handler: _logging.Handler) -> None:
-    """Idempotently attach the one join-code filter to a handler."""
+    """Idempotently attach the join-code and secret filters to a handler."""
+    from kollabor_ai.providers.security import SecretRedactionFilter
+
     if not any(isinstance(item, JoinCodeRedactionFilter) for item in handler.filters):
         handler.addFilter(JoinCodeRedactionFilter())
+    if not any(isinstance(item, SecretRedactionFilter) for item in handler.filters):
+        handler.addFilter(SecretRedactionFilter())
 
 
 def _build_rotating_handler(

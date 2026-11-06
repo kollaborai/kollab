@@ -83,6 +83,7 @@ class GoalTurnDriver:
         self.coord = coordinator
         self._running_goals: set[str] = set()
         self._yielded_goals: set[str] = set()
+        self._settled_while_running: set[str] = set()
         self._tool_seq = 0
 
         # single reporting surface (9.1) through the unified tool pipeline
@@ -131,8 +132,15 @@ class GoalTurnDriver:
             logger.error("goal driver error for %s: %s", goal_id, exc)
             self._safe_error_pause(goal_id, exc)
         finally:
+            replay_settlement = goal_id in self._settled_while_running
+            self._settled_while_running.discard(goal_id)
             self._running_goals.discard(goal_id)
             self.service.clear_dispatched(goal_id)
+            if replay_settlement:
+                # A queue-settle callback can arrive while this driver owns
+                # the running guard. Replay it only after releasing that guard
+                # so a just-yielded goal cannot lose its wake.
+                self.wake_yielded()
 
     def wake_yielded(self) -> None:
         """Settle-driven wake (spec 10.3): after the interrupting turn
@@ -141,6 +149,7 @@ class GoalTurnDriver:
         checklist — user input still wins over the wake."""
         for goal_id in list(self._yielded_goals):
             if goal_id in self._running_goals:
+                self._settled_while_running.add(goal_id)
                 continue
             try:
                 record = self.service.store.get(goal_id)
@@ -331,6 +340,16 @@ class GoalTurnDriver:
                 logger.error("goal turn failed: %s", exc)
                 turn_status, error = "error", f"turn failed: {exc}"
 
+            if turn_status == "yielded":
+                # No provider request was sent. Keep the goal active and mark
+                # this unsent attempt cancelled; the queue's settle callback
+                # will re-run the boundary checklist when the human turn ends.
+                self.service.store.cancel_attempt(
+                    attempt.attempt_id, attempt.lease_epoch
+                )
+                self._yielded_goals.add(goal_id)
+                return
+
             final = self.service.store.get(goal_id)
             real_outcome = TurnOutcome(
                 turn_id=attempt.attempt_id[:12],
@@ -428,84 +447,126 @@ class GoalTurnDriver:
         note = self.service.render_goal_context(record)
         previous_hud = tuple(getattr(self.coord, "_pending_agent_hud", None) or ())
         previous_hud_ids = {id(entry) for entry in previous_hud}
-        try:
-            # §9.3: one internal goal context item per goal turn — never a
-            # synthetic user message. The agent HUD queue is kollab's
-            # existing internal-context pipeline: inject_system_message
-            # queues the entry, and _continue_conversation drains pending
-            # HUD into the turn it drives (llm_coordinator.py:1199), with
-            # agent_hud metadata marking it internal. The driver never
-            # fabricates user input itself.
-            await self.coord.inject_system_message(note, subtype="goal_context")
-        except Exception as exc:
-            logger.error("goal steering injection failed: %s", exc)
-            return "error", f"steering injection failed: {exc}"
-
-        # Profile activation can complete while the HUD logger is awaiting
-        # I/O. Do not send a native continuation after that change, or leave
-        # this goal's unsent context queued for an unrelated later turn.
-        capability_error = goal_execution_unavailable_reason(self.coord)
-        if capability_error:
-            pending = getattr(self.coord, "_pending_agent_hud", None)
-            if isinstance(pending, list):
-                for index in range(len(pending) - 1, -1, -1):
-                    entry = pending[index]
-                    if (
-                        id(entry) not in previous_hud_ids
-                        and getattr(entry, "section", None) == "system"
-                        and getattr(entry, "label", None) == "goal_context"
-                        and getattr(entry, "content", None) == note.strip()
-                    ):
-                        del pending[index]
-                        break
-            return "error", capability_error
-
         qp = self.coord._queue_processor
         self._tool_seq = 0
-        cancelled = qp.cancel_processing
         error: Optional[str] = None
+        yielded = False
+        cancelled = False
+        cursor_before = getattr(self.coord, "_cursor_winner_serial", -1)
+
+        def discard_pending_context() -> None:
+            pending = getattr(self.coord, "_pending_agent_hud", None)
+            if not isinstance(pending, list):
+                return
+            for index in range(len(pending) - 1, -1, -1):
+                entry = pending[index]
+                if (
+                    id(entry) not in previous_hud_ids
+                    and getattr(entry, "section", None) == "system"
+                    and getattr(entry, "label", None) == "goal_context"
+                    and getattr(entry, "content", None) == note.strip()
+                ):
+                    del pending[index]
+                    break
+
         try:
+            # Reserve the goal ticket and queue ownership before the first
+            # HUD logger await, so a later human admission keeps priority.
             qp.is_processing = True
-            # Open the HUD drain deterministically: _continue_conversation
-            # only drains pending HUD when turn_completed is True, and the
-            # queue inits it False (queue_processor.py:239) — a fresh
-            # conversation would otherwise send a system-only request,
-            # which every provider rejects (1214 on z.ai). The queue is
-            # idle here (the boundary check guaranteed it), so True is
-            # honest. The hub path sets False for the opposite reason:
-            # it must NOT inject HUD mid-chain.
             qp.turn_completed = True
-            await self.coord._continue_conversation()
-            chain_turns = 0
-            while not qp.turn_completed and not qp.cancel_processing:
-                if not qp.processing_queue.empty():
-                    # user input wins: yield the chain (8.3)
-                    logger.info("goal turn: user message arrived, yielding")
-                    break
-                if chain_turns >= MAX_GOAL_CHAIN_TURNS:
-                    logger.error("goal turn: spin backstop hit, stopping chain")
-                    qp.turn_completed = True
-                    break
-                capability_error = goal_execution_unavailable_reason(self.coord)
-                if capability_error:
-                    error = capability_error
-                    break
-                chain_turns += 1
-                try:
-                    await self.coord._continue_conversation()
-                except Exception as exc:
-                    logger.error("goal turn continuation error: %s", exc)
-                    error = str(exc)
-                    break
+            goal_serial = self.coord.claim_turn_serial()
+            self.coord._continue_serial = goal_serial
+            # Fresh chain: the first goal turn parents on the pointer, not the
+            # previous chain's tail.
+            self.coord._batch_tail_uuid = None
+
+            # §9.3: one internal goal context item per goal turn — never a
+            # synthetic user message. inject_system_message queues the entry
+            # and the continuation drains it as internal HUD.
+            try:
+                await self.coord.inject_system_message(note, subtype="goal_context")
+            except Exception as exc:
+                logger.error("goal steering injection failed: %s", exc)
+                discard_pending_context()
+                error = f"steering injection failed: {exc}"
+
+            if error is None and not qp.cancel_processing:
+                # A user may be admitted while the HUD logger awaits. Do not
+                # send a goal request after its ticket has lost ownership.
+                interrupted = (
+                    getattr(self.coord, "_turn_serial", goal_serial) > goal_serial
+                    or getattr(
+                        self.coord,
+                        "_cursor_winner_serial",
+                        cursor_before,
+                    )
+                    > cursor_before
+                    or not qp.processing_queue.empty()
+                )
+                if interrupted:
+                    discard_pending_context()
+                    self._yielded_goals.add(record.goal_id)
+                    yielded = True
+                else:
+                    # Profile activation can complete while the HUD logger is
+                    # awaiting I/O. Never send an unavailable profile or leave
+                    # this goal's unsent context for another turn.
+                    capability_error = goal_execution_unavailable_reason(self.coord)
+                    if capability_error:
+                        discard_pending_context()
+                        error = capability_error
+                    else:
+                        # Open the HUD drain deterministically. A fresh queue
+                        # initializes turn_completed=False and would otherwise
+                        # send a system-only request.
+                        await self.coord._continue_conversation()
+                        chain_turns = 0
+                        while not qp.turn_completed and not qp.cancel_processing:
+                            if not qp.processing_queue.empty():
+                                logger.info(
+                                    "goal turn: user message arrived, yielding"
+                                )
+                                break
+                            if chain_turns >= MAX_GOAL_CHAIN_TURNS:
+                                logger.error(
+                                    "goal turn: spin backstop hit, stopping chain"
+                                )
+                                qp.turn_completed = True
+                                break
+                            capability_error = goal_execution_unavailable_reason(
+                                self.coord
+                            )
+                            if capability_error:
+                                error = capability_error
+                                break
+                            chain_turns += 1
+                            try:
+                                # Each chain turn is a separate admitted turn;
+                                # the first has consumed its ticket.
+                                self.coord._continue_serial = (
+                                    self.coord.claim_turn_serial()
+                                )
+                                await self.coord._continue_conversation()
+                            except Exception as exc:
+                                logger.error(
+                                    "goal turn continuation error: %s", exc
+                                )
+                                error = str(exc)
+                                break
         except Exception as exc:
             logger.error("goal turn error: %s", exc)
             error = str(exc)
         finally:
             if image_scope is not None:
-                image_scope.close()
+                try:
+                    image_scope.close()
+                except Exception as scope_exc:
+                    logger.warning("goal image scope cleanup failed: %s", scope_exc)
+                    if error is None:
+                        error = str(scope_exc)
             qp.is_processing = False
             cancelled = bool(qp.cancel_processing)
-            # drain any user messages that queued while we held processing
+            # Drain any human messages queued while we held processing.
             drain = getattr(self.coord, "_process_queue", None)
             if (
                 drain is not None
@@ -521,9 +582,10 @@ class GoalTurnDriver:
                     logger.debug("goal turn queue drain failed: %s", drain_exc)
         if cancelled:
             return "cancelled", None
-        # Provider errors surface as a completed turn with a displayed
-        # error, not an exception. The qp records them (last_turn_error);
-        # §8.6: pause the goal, never burn turns against a dead endpoint.
+        if yielded:
+            return "yielded", None
+        # Provider errors surface as a completed turn with a displayed error.
+        # The queue processor records them in last_turn_error.
         turn_error = getattr(qp, "last_turn_error", None)
         if turn_error:
             return "error", turn_error

@@ -737,6 +737,7 @@ async def test_logger_await_cannot_reparent_an_admitted_user_turn():
     async def enqueue(item):
         captured_items.append(item)
         enqueued.set()
+        return True
 
     service._queue_processor = SimpleNamespace(
         enqueue=enqueue,
@@ -876,6 +877,7 @@ async def test_concurrent_pointer_advance_between_user_row_and_queue_start_canno
         captured_items.append(item)
         enqueued.set()
         await gate.wait()  # the ordinary turn sits between log and queue start
+        return True
 
     batch_spy = AsyncMock(return_value="assistant-row")
     service._queue_processor = SimpleNamespace(
@@ -1017,20 +1019,23 @@ def test_stale_untracked_nudge_cannot_overwrite_newer_hub_cursor() -> None:
         hub_wake_serial = None
         try:
             await asyncio.wait_for(nudge_started.wait(), timeout=2)
-            # A tracked hub wake completes while the older untracked nudge is
-            # still waiting on the queue's model response.
+            # A hub wake admits while the nudge batch (ticket claimed at
+            # batch start, #676) is still waiting on the model response.
             hub_wake_serial = service.claim_turn_serial()
             assert service.publish_cursor("newer-hub-wake", hub_wake_serial)
         finally:
             release_nudge.set()
             await nudge_task
 
-        assert hub_wake_serial == 1
-        assert service._continue_serial is None
+        # The nudge batch claimed ticket 1 at batch start (#676); the hub
+        # wake admitted later and holds ticket 2.
+        assert hub_wake_serial == 2
+        assert service._continue_serial == 1
         assert service._cursor_winner_serial == hub_wake_serial
         assert service.current_parent_uuid == "newer-hub-wake"
 
-        # The nudge's follow-on tool-loop write is untracked as well.
+        # The nudge's follow-on tool-loop write carries the nudge's claimed
+        # ticket (1), older than the hub wake's -- rejected.
         await service._continue_conversation()
         assert service._cursor_winner_serial == hub_wake_serial
         assert service.current_parent_uuid == "newer-hub-wake"
@@ -1038,3 +1043,156 @@ def test_stale_untracked_nudge_cannot_overwrite_newer_hub_cursor() -> None:
         assert service.current_parent_uuid == "newer-hub-wake"
 
     asyncio.run(scenario())
+
+@pytest.mark.asyncio
+async def test_untracked_nudge_batch_claims_a_ticket_and_advances_the_cursor():
+    """A batch with no admission ticket (system nudge, bare payload) claims
+    one at batch start (#676). The claim is strictly later than everything
+    already admitted -- the batch's true execution order -- so its
+    completion advances the shared cursor instead of stranding it before
+    the nudge rows."""
+    service = object.__new__(LLMService)
+    service._queue_processor = SimpleNamespace(
+        process_message_batch=AsyncMock(return_value="nudge-assistant"),
+        continue_conversation=AsyncMock(return_value="nudge-continuation"),
+        turn_completed=False,
+    )
+    service._pending_agent_hud = []
+    service.current_parent_uuid = "parent-before"
+    service._turn_serial = 0
+    service._cursor_winner_serial = -1
+    service._continue_serial = None
+
+    nudge = QueuedInput(content="finish it", voice={}, is_system_nudge=True)
+    await service._process_message_batch([nudge])
+
+    assert service._turn_serial == 1, "untracked batch must claim at start"
+    assert service._continue_serial == 1
+    assert service.current_parent_uuid == "nudge-assistant", (
+        "the nudge batch's completion must advance the shared cursor, "
+        f"got {service.current_parent_uuid!r}"
+    )
+    assert service._cursor_winner_serial == 1
+
+
+@pytest.mark.asyncio
+async def test_continuation_parents_on_chain_tail_not_a_drifted_pointer():
+    """A tool-loop continuation follows its own chain's last row, not the
+    shared pointer (#676): a later-admitted mention that completed mid-batch
+    keeps the cursor while the batch's chain stays contiguous."""
+    calls: list[tuple[str, str]] = []
+
+    class RecordingQueueProcessor:
+        turn_completed = False
+
+        async def process_message_batch(
+            self, *, messages, current_parent_uuid, request_ids
+        ) -> str:
+            calls.append(("batch", current_parent_uuid))
+            return "batch-tail"
+
+        async def continue_conversation(self, *, current_parent_uuid) -> str:
+            calls.append(("cont", current_parent_uuid))
+            return "cont-row"
+
+    service = object.__new__(LLMService)
+    service._queue_processor = RecordingQueueProcessor()
+    service._pending_agent_hud = []
+    service.current_parent_uuid = "parent-before"
+    # Ticket 1 was already handed out at the batch's admission; the mention
+    # below claims the strictly later ticket 2.
+    service._turn_serial = 1
+    service._cursor_winner_serial = -1
+    service._continue_serial = None
+
+    tracked = TaggedInput(
+        content="hello",
+        request_ids=("req-1",),
+        parent_uuid="user-row",
+        admission_serial=1,
+    )
+    await service._process_message_batch([tracked])
+    assert service.current_parent_uuid == "batch-tail"
+
+    # Mid-run drift: a later-admitted mention completes while LOOP 2 runs.
+    mention_serial = service.claim_turn_serial()
+    assert service.publish_cursor("mention-reply", mention_serial)
+
+    await service._continue_conversation()
+    assert calls[-1] == ("cont", "batch-tail"), (
+        f"continuation must parent on the chain tail, got {calls[-1]}"
+    )
+    # The mention keeps the cursor (strictly later admission wins).
+    assert service.current_parent_uuid == "mention-reply"
+
+
+@pytest.mark.asyncio
+async def test_delayed_continuation_cannot_clobber_newer_batch_tail_or_cursor():
+    """A stale tool-loop continuation commits only under its own serial (#768).
+
+    Bismuth's overlap probe on the #768 head: ``_continue_conversation``
+    wrote its continuation uuid into ``_batch_tail_uuid`` and published on
+    the re-read ``_continue_serial`` AFTER its await. A newer batch that
+    admitted while the old continuation was suspended had its tail
+    overwritten and its serial hijacked by the stale chain.
+    """
+    release_cont = asyncio.Event()
+    cont_started = asyncio.Event()
+    service = object.__new__(LLMService)
+    service._pending_agent_hud = []
+    service.current_parent_uuid = "parent-before"
+    service._turn_serial = 1
+    service._cursor_winner_serial = -1
+    service._continue_serial = 1
+    service._batch_tail_uuid = "batch1-tail"
+    service._batch_tail_serial = 1
+
+    class GatedQueueProcessor:
+        async def continue_conversation(self, *, current_parent_uuid):
+            cont_started.set()
+            await release_cont.wait()
+            return "stale-cont-1"
+
+        async def process_message_batch(
+            self, *, messages, current_parent_uuid, request_ids
+        ):
+            return "assistant-2"
+
+    service._queue_processor = GatedQueueProcessor()
+
+    cont_task = asyncio.create_task(service._continue_conversation())
+    try:
+        await asyncio.wait_for(cont_started.wait(), timeout=1)
+
+        # A newer batch admits and completes while the old continuation is
+        # suspended: serial 2 owns the tail and the cursor.
+        second = TaggedInput(
+            content="second",
+            request_ids=("second",),
+            parent_uuid="user-2",
+            admission_serial=2,
+        )
+        await asyncio.wait_for(
+            service._process_message_batch([second]), timeout=1
+        )
+        assert service._batch_tail_uuid == "assistant-2"
+        assert service._batch_tail_serial == 2
+        assert service._cursor_winner_serial == 2
+
+        # The stale continuation resumes now: it must not overwrite the
+        # newer tail, and its publish on the captured serial 1 must lose.
+        release_cont.set()
+        await asyncio.wait_for(cont_task, timeout=1)
+
+        assert service._batch_tail_uuid == "assistant-2", (
+            "stale continuation overwrote the newer batch tail"
+        )
+        assert service._batch_tail_serial == 2
+        assert service.current_parent_uuid == "assistant-2", (
+            "stale continuation published on the newer serial and won the cursor"
+        )
+        assert service._cursor_winner_serial == 2
+    finally:
+        release_cont.set()
+        if not cont_task.done():
+            await cont_task

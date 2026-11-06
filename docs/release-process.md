@@ -52,6 +52,8 @@ integration checkout with `origin/main`.
    - update all inter-package minimum-version constraints that are part of the
      same release;
    - update `uv.lock` using the supported lock command, then inspect the diff;
+   - run `python scripts/changelog.py build`, which folds every entry file in
+     `changes/` into `[Unreleased]` of both changelogs and deletes the files;
    - move intended entries from `[Unreleased]` into
      `## [X.Y.Z] - YYYY-MM-DD` in both changelogs, keeping them byte-identical;
    - add migration notes for breaking CLI, config, plugin, package, or API
