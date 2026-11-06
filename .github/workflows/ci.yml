@@ -48,17 +48,30 @@ jobs:
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
-      # Use the complete pytest filename pattern, partitioned over a stable,
-      # sorted file list rather than maintaining a hand-written test list.
+      # Use a stable hash of sorted test paths; lexical round-robin clustered
+      # the slow network suites on one shard.
       # Keep the two parallel-sensitive tests serial in the support job (#470).
       - name: Run unit test shard
         env:
           SHARD: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ strategy.job-total }}
         run: |
           set -euo pipefail
           selected_files=$(find tests/unit -type f -name 'test_*.py' -print |
             LC_ALL=C sort |
-            awk -v shard="$SHARD" 'NR % 4 == shard')
+            python -c '
+          import hashlib
+          import os
+          import sys
+
+          shard = int(sys.argv[1])
+          shard_count = int(sys.argv[2])
+          for path in sys.stdin.buffer:
+              path = path.rstrip(b"\n")
+              digest = hashlib.sha256(b"kollab-ci-tests:" + path).digest()
+              if int.from_bytes(digest[:4], "big") % shard_count == shard:
+                  print(os.fsdecode(path))
+          ' "$SHARD" "$SHARD_COUNT")
           if [ -z "$selected_files" ]; then
             echo "Unit-test shard $SHARD discovered no test files" >&2
             exit 1
