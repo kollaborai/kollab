@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -515,7 +516,9 @@ async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_t
         await asyncio.wait_for(admission.future, 5)
         completions = await asyncio.gather(*completion_tasks)
         assert len(completions) == writes == 1
-        assert completions[0]["stop_reason"] == "error"
+        # #580: a failed reply-row write is logged; the finished turn keeps its outcome.
+        assert completions[0]["stop_reason"] == "end_turn"
+        assert completions[0]["text"] == "Replacement turn only."
         snapshot = await LocalStateService(llm, None).get_conversation()
         assert len([message for message in snapshot.messages if message.role == "assistant"]) == 1
         restored = ConversationManager(configuration)
@@ -523,6 +526,168 @@ async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_t
         assert len([message for message in restored.messages if message["role"] == "assistant"]) == 1
         events = bus.services["display_tap"].events
         assert len([event for event in events if event.get("type") == "turn_complete"]) == 1
+        assert len([event for event in events if event.get("type") == "turn_end"]) == 1
+        assert not orchestrator._observed_turns
+    finally:
+        await orchestrator.close()
+        if runner is not None:
+            assert not runner._live_owned_processes()
+
+
+@pytest.mark.asyncio
+async def test_failed_user_row_write_keeps_the_finished_reply(tmp_path, monkeypatch):
+    """#580: a user row that never reached the file must not discard the reply."""
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: default,
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+
+    async def failing_user_write(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(conversation_logger, "log_user_message", failing_user_write)
+    profile = LLMProfile(
+        name="user-row-fails",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+    )
+    runner = None
+    try:
+        await orchestrator.start(profile)
+        runner = orchestrator.runner
+        admission = orchestrator.admit("next turn", request_id="user-row-request", source="rpc")
+        completion_tasks = tuple(orchestrator._completion_tasks)
+        await asyncio.wait_for(admission.future, 5)
+        completions = await asyncio.gather(*completion_tasks)
+        assert len(completions) == 1
+        assert completions[0]["stop_reason"] == "end_turn"
+        assert completions[0]["text"] == "Replacement turn only."
+        snapshot = await LocalStateService(llm, None).get_conversation()
+        assert len([message for message in snapshot.messages if message.role == "assistant"]) == 1
+        assert not orchestrator._observed_turns
+    finally:
+        await orchestrator.close()
+        if runner is not None:
+            assert not runner._live_owned_processes()
+
+
+@pytest.mark.asyncio
+async def test_failed_user_row_write_is_shown_not_swallowed(tmp_path, monkeypatch):
+    """#580: a user row that never reached the file is shown, as a reply row is."""
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    display = MagicMock()
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=display,
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+
+    async def failing_user_write(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(conversation_logger, "log_user_message", failing_user_write)
+    profile = LLMProfile(
+        name="user-row-shown",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+    )
+    runner = None
+    try:
+        await orchestrator.start(profile)
+        runner = orchestrator.runner
+        admission = orchestrator.admit("next turn", request_id="user-row-shown", source="rpc")
+        completion_tasks = tuple(orchestrator._completion_tasks)
+        await asyncio.wait_for(admission.future, 5)
+        await asyncio.gather(*completion_tasks)
+        notices = [call.args[0] for call in display.display_system_message.call_args_list]
+        assert "Conversation history not saved for this message." in notices
+    finally:
+        await orchestrator.close()
+        if runner is not None:
+            assert not runner._live_owned_processes()
+
+
+@pytest.mark.asyncio
+async def test_failed_reply_row_write_keeps_the_finished_reply(tmp_path, monkeypatch):
+    """#580: a real OSError on the reply row must not turn a finished turn into an error."""
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: default,
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    completions_seen = []
+
+    async def record_completion(*args, **kwargs):
+        completions_seen.append(kwargs)
+
+    monkeypatch.setattr(orchestrator, "_notify_hub_completion", record_completion)
+    original_write = conversation_logger.log_assistant_message
+    real_open = os.open
+    session_file = str(conversation_logger.session_file)
+
+    def full_disk_open(path, *args, **kwargs):
+        if str(path) == session_file:
+            raise OSError(28, "No space left on device")
+        return real_open(path, *args, **kwargs)
+
+    async def write_on_full_disk(*args, **kwargs):
+        monkeypatch.setattr(os, "open", full_disk_open)
+        try:
+            return await original_write(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(os, "open", real_open)
+
+    monkeypatch.setattr(conversation_logger, "log_assistant_message", write_on_full_disk)
+    profile = LLMProfile(
+        name="reply-row-fails",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+    )
+    runner = None
+    try:
+        await orchestrator.start(profile)
+        runner = orchestrator.runner
+        admission = orchestrator.admit("next turn", request_id="reply-row-request", source="rpc")
+        completion_tasks = tuple(orchestrator._completion_tasks)
+        await asyncio.wait_for(admission.future, 5)
+        completions = await asyncio.gather(*completion_tasks)
+        assert len(completions) == 1
+        assert completions[0]["stop_reason"] == "end_turn"
+        assert completions[0]["text"] == "Replacement turn only."
+        assert [kwargs.get("failed") for kwargs in completions_seen] == [False]
+        snapshot = await LocalStateService(llm, None).get_conversation()
+        assert len([message for message in snapshot.messages if message.role == "assistant"]) == 1
+        events = bus.services["display_tap"].events
         assert len([event for event in events if event.get("type") == "turn_end"]) == 1
         assert not orchestrator._observed_turns
     finally:
