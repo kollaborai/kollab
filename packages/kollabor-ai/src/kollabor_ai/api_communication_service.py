@@ -513,7 +513,10 @@ class APICommunicationService:
             self._provider = None
             self._provider_error = str(e)
             logger.warning(
-                f"Profile '{self._profile.name}' has configuration error: {e}. Use /setup to fix the configuration."
+                "Profile '%s' has configuration error (%s). "
+                "Use /setup to fix the configuration.",
+                self._profile.name,
+                type(e).__name__,
             )
 
         except Exception as e:
@@ -521,8 +524,10 @@ class APICommunicationService:
             self._provider = None
             self._provider_error = str(e)
             logger.warning(
-                f"Failed to initialize provider for profile '{self._profile.name}': {e}. "
-                f"Use /setup to check configuration."
+                "Failed to initialize provider for profile '%s' (%s). "
+                "Use /setup to check configuration.",
+                self._profile.name,
+                type(e).__name__,
             )
 
     async def _refresh_oauth_token(self) -> None:

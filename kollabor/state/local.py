@@ -276,6 +276,9 @@ class LocalStateService(StateService):
 
         self._llm_service = llm_service
         self._profile_manager = profile_manager
+        # Ownership token for the selected profile; this avoids taking a
+        # stale activation failure rollback over a newer selection.
+        self._profile_activation_generation = 0
         self._permission_manager = permission_manager
         self._agent_manager = agent_manager
         self._event_bus = event_bus
@@ -1539,17 +1542,28 @@ class LocalStateService(StateService):
             if previous_acp_active
             else None
         )
+        activation_generation: int | None = None
 
         async def restore_previous_profile() -> bool:
             """Restore both the selected profile and its request runtime."""
             if current_profile is None or not previous_profile_name:
                 return False
+            if (
+                activation_generation is None
+                or self._profile_activation_generation != activation_generation
+            ):
+                return False
             try:
+                active_profile = self._profile_manager.get_active_profile()
+                if getattr(active_profile, "name", None) != name:
+                    return False
                 restored_active = self._profile_manager.set_active_profile(
                     previous_profile_name
                 )
                 if restored_active is False:
                     return False
+                # The restoration now owns the selected profile too.
+                self._profile_activation_generation += 1
                 if previous_is_acp:
                     if previous_acp_active:
                         if orchestrator is None:
@@ -1751,6 +1765,12 @@ class LocalStateService(StateService):
                 f"profile not found: {name!r}"
                 + (f" (available: {', '.join(available)})" if available else "")
             )
+
+        # The manager selection above is synchronous. Record ownership before
+        # the next await so any older failed activation can detect that it is
+        # stale without serializing all concurrent profile activations.
+        self._profile_activation_generation += 1
+        activation_generation = self._profile_activation_generation
 
         # --model / --effort ride on top of the selected profile. Applied
         # before the provider reinitialize below so the next turn uses them,
