@@ -427,3 +427,50 @@ async def test_explicit_historical_append_threads_past_that_sessions_cut(tmp_pat
     }
     assert dropped not in by_uuid
     assert by_uuid[child]["parentUuid"] == root
+
+
+@pytest.mark.parametrize("writer", ["summary", "checkpoint"])
+async def test_compaction_record_written_during_the_swap_is_preserved(tmp_path, monkeypatch, writer):
+    """Compaction's own appends must wait for the rewrite's tail copy and swap (#834)."""
+    import threading
+    from types import SimpleNamespace
+
+    from plugins.context_compaction_plugin import ContextCompactionPlugin, _append_jsonl_durable
+
+    log, _ = _same_session(tmp_path)
+    root = await log.log_user_message("hi", parent_uuid=None)
+    voice = await log.log_assistant_message("sunny", root, voice_turn_id="turn-1")
+
+    def append() -> None:
+        if writer == "summary":
+            _append_jsonl_durable(
+                str(log.session_file),
+                {"type": "compaction_summary", "uuid": "compaction-1", "sessionId": log.session_id},
+            )
+        else:
+            plugin = SimpleNamespace(_conversation_logger=log, _compaction_round=0)
+            ContextCompactionPlugin._log_checkpoint_event(plugin, "checkpoint-1.json", 2)
+
+    real_replace = os.replace
+    threads = []
+
+    def compaction_writes_during_swap(source, destination):
+        if Path(destination) == log.session_file:
+            appended = threading.Event()
+            thread = threading.Thread(target=lambda: (append(), appended.set()))
+            thread.start()
+            threads.append(thread)
+            appended.wait(0.5)  # an unlocked append lands at once; a locked one waits for the swap
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("kollabor_ai.conversation_logger.os.replace", compaction_writes_during_swap)
+    assert await log.rewrite_voice_turn("turn-1", 1, {0: None}) == {voice: root}
+    for thread in threads:
+        thread.join(5)
+    assert threads and not any(thread.is_alive() for thread in threads)
+
+    records = _records(log.session_file)
+    if writer == "summary":
+        assert any(record.get("uuid") == "compaction-1" for record in records)
+    else:
+        assert any(record.get("checkpoint_file") == "checkpoint-1.json" for record in records)
