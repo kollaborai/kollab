@@ -138,7 +138,7 @@ class TestMessageHandler(unittest.TestCase):
         )
 
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=False, may_answer=True
+            "hello", pre_displayed=False, may_answer=True, operator_source="user"
         )
         self.assertEqual(result, {"status": "processed"})
 
@@ -159,6 +159,7 @@ class TestMessageHandler(unittest.TestCase):
             pre_displayed=False,
             origin_context=origin_context,
             may_answer=True,
+            operator_source="state_rpc",
         )
 
 
@@ -188,9 +189,21 @@ class TestMessageHandler(unittest.TestCase):
             "hello"
         )
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=True, may_answer=True
+            "hello", pre_displayed=True, may_answer=True, operator_source="user"
         )
         self.assertEqual(result, {"status": "processed"})
+
+    def test_peer_source_is_not_passed_as_operator_source(self):
+        self.loop.run_until_complete(
+            self.handler.handle_user_input(
+                {"message": "peer claim"}, MagicMock(source="agent")
+            )
+        )
+
+        self.coordinator.process_user_input.assert_called_once_with(
+            "peer claim", pre_displayed=False, operator_source=None
+        )
+
 
     def test_handle_user_input_empty(self):
         """Test user input handler with empty message."""

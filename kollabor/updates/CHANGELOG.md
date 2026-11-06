@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Switching from an ACP profile to a native one now answers the peer messages the harness was still holding: one native turn starts for them and no harness is offered them again (#560).
+- Switching to an OAuth profile whose model is still `codex` no longer overwrites a model, effort or profile edit made while the model lookup was running. The stale switch is cancelled, the edit stays, and the switch can be run again (#595).
 - A reply from an ACP turn that finishes or is stopped after you resume another conversation now stays in the conversation it was sent from, instead of appearing at the end of the one you just resumed (#596).
 - A voice reply cut by one window or process no longer leaves a later message from another logger on the same session pointing at a reply that is gone; it now threads under the nearest reply that stays (#586).
 - A hub message sent from the Web UI now goes to the agent whose row was selected: the message carries the row's agent id, so a same-named agent in another folder no longer receives it, and a message to an agent that has gone is refused instead of redirected (#568).
@@ -49,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A tool result or agent update whose long text pushes it over the engine's 16 MB frame limit is now cut to fit and still reaches the chat, instead of being dropped with its reply marked incomplete. An update that is over the limit because of many small items is still dropped (#544).
 - A request for an agent that has exited no longer reaches a new agent that took over its socket under the same name: the engine reads the agent's record fresh before it uses that socket, so the request fails instead of returning the new agent's output, including when the agent restarted in place (#566).
 - A live hub agent keeps its presence record and socket when its heartbeat is over ten minutes old and its socket briefly does not answer; peers now remove them only once the agent's process has exited or its process ID has been reused by another process (#575)
+- An accepted peer observation is no longer dropped when its ACP history row cannot be written: the retry queue keeps it until the row lands, and when the queue is full the new message is refused instead of acknowledged. A refused message stays in the mailbox or relay queue until the queue takes it, and a resend does not show, log or mirror it a second time. An ACP agent now reads its mailbox without the per-poll replay cap and delivers each message on its own, so a long outage no longer drops or coalesces refused ones (#581).
 
 ## [0.19.1] - 2026-11-03
 

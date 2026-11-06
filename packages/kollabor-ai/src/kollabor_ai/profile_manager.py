@@ -453,6 +453,9 @@ class LLMProfile:
     project_id: Optional[str] = None
     location: Optional[str] = None
     store_responses: Optional[bool] = None
+    # Bumped by ProfileManager.update_profile on every edit. Not serialized: a
+    # caller that awaits (such as a model lookup) compares it to see an edit.
+    revision: int = field(default=0, compare=False, repr=False)
 
     def _get_env_key(self, field: str) -> str:
         """Generate env var key for this profile and field.
@@ -2502,6 +2505,7 @@ class ProfileManager:
             profile.streaming = streaming
         if extra_headers is not None:
             profile.extra_headers = extra_headers
+        profile.revision += 1
 
         # Handle rename
         if new_name and new_name != original_name:
