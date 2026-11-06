@@ -1,5 +1,6 @@
 """Panels /llm, /model and /setup against a fake daemon context."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -251,6 +252,8 @@ class FakeProfiles:
     def __init__(self, existing=()):
         self._profiles = {n: object() for n in existing}
         self.created = []
+        self.activation_calls = []
+        self.active = None
         self.fail = None
 
     def get_profile(self, name):
@@ -263,6 +266,7 @@ class FakeProfiles:
         return True
 
     def set_active_profile(self, name, persist=True):
+        self.activation_calls.append((name, persist))
         self.active = name
         return True
 
@@ -337,6 +341,50 @@ async def test_setup_finish_creates_profile_and_activates_through_the_daemon():
         "anthropic-2", "anthropic", True)
     assert daemon.activated == [("anthropic-2", {"persist": True, "reload_profile": True})]
     assert KEY not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ("false", "exception", "timeout"))
+async def test_setup_finish_reports_failed_llm_switch_and_preserves_previous_profile(failure, caplog):
+    profiles = FakeProfiles(existing=("anthropic", "openai"))
+    profiles.active = "openai"
+
+    class FailingLLM:
+        def __init__(self):
+            self.calls = []
+
+        async def switch_profile(self, name, persist=True):
+            self.calls.append((name, persist))
+            if failure == "false":
+                return False
+            if failure == "exception":
+                raise RuntimeError(f"provider rejected key {KEY}")
+            raise asyncio.TimeoutError("switch timed out")
+
+    llm = FailingLLM()
+    ctx = SimpleNamespace(_profile_manager=profiles, _llm_service=llm)
+    result = await SETUP.act(ctx, "finish", PAYLOAD)
+
+    assert result["ok"] is False
+    assert "activat" in result["message"].lower()
+    assert profiles.active == "openai"
+    assert profiles.activation_calls == []
+    assert llm.calls == [("anthropic-2", True)]
+    assert KEY not in json.dumps(result)
+    assert KEY not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_setup_finish_uses_profile_manager_fallback_when_llm_service_is_absent():
+    profiles = FakeProfiles(existing=("anthropic", "openai"))
+    profiles.active = "openai"
+    ctx = SimpleNamespace(_profile_manager=profiles, _llm_service=None)
+
+    result = await SETUP.act(ctx, "finish", PAYLOAD)
+
+    assert result["ok"] is True
+    assert profiles.active == "anthropic-2"
+    assert profiles.activation_calls == [("anthropic-2", True)]
 
 
 @pytest.mark.asyncio
