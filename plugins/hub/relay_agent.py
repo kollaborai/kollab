@@ -2768,6 +2768,7 @@ class RelayAgentBridge:
         if not self.store.transition(active.record["id"], "running"):
             active.finished = True
             return {"id": record["id"], "state": "interrupted"}
+        was_model_started = active.model_started
         active.waiting_answer = False
         active.model_started = False
         message = HubMessage(
@@ -2794,7 +2795,7 @@ class RelayAgentBridge:
         self._injecting_answer_event_id = payload["id"]
         try:
             self._authorize_active(turn_id=payload["thread_id"])
-            await self.plugin._on_message_received(message)
+            admitted = await self.plugin._on_message_received(message)
         except Exception:
             await self._stop_active(
                 "failed", "conversation follow-up could not enter the model pipeline"
@@ -2804,6 +2805,19 @@ class RelayAgentBridge:
             self._injecting_message = None
             self._injecting_answer_event_id = None
             self._turn.reset(token)
+        if admitted is False:
+            # Refused (ACP's observation queue is full): nothing was admitted.
+            # Keep the answer queued and the wait open so a later tick or
+            # wakeup offers it again (#581).
+            self.store.restore_answer(record["id"])
+            if active.finished or not self.store.transition(
+                active.record["id"], "waiting_answer"
+            ):
+                active.finished = True
+            else:
+                active.waiting_answer = True
+                active.model_started = was_model_started
+            return {"id": record["id"], "state": "queued"}
         return {"id": record["id"], "state": "running"}
 
     async def _wake_pending_events(self):
@@ -3683,6 +3697,8 @@ class RelayAgentBridge:
         if not error_queued:
             self.store.transition(active.record["id"], state, detail=reason)
         active.finished = True
+        # _tick clears only a finished task that is not waiting for an answer.
+        active.waiting_answer = False
         if self.llm and self.llm.is_processing:
             generation = self.llm.cancel_current_request(
                 origin=cancellation_origin,

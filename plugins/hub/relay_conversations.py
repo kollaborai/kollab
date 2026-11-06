@@ -1632,6 +1632,13 @@ class ConversationStore:
                 ).rowcount
             )
 
+    def restore_answer(self, event_id: str) -> None:
+        with self._connect() as db:
+            db.execute(
+                "UPDATE conversation_events SET state='queued' WHERE id=? AND kind='answer' AND state='consumed'",
+                (event_id,),
+            )
+
     def admit(
         self,
         room: str,
