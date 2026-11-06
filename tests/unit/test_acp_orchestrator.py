@@ -873,6 +873,68 @@ async def test_a_row_that_landed_before_its_write_raised_is_not_written_again(
         await orchestrator.close()
 
 
+@pytest.mark.asyncio
+async def test_a_landed_row_still_reaches_the_history_mirror_at_the_retry(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        real_add_message = manager.add_message
+        failures = [OSError("disk full")]
+
+        def landed_then_raises(*args, **kwargs):
+            message_uuid = real_add_message(*args, **kwargs)
+            if failures:
+                failures.pop()
+                raise OSError("disk full")
+            return message_uuid
+
+        monkeypatch.setattr(manager, "add_message", landed_then_raises)
+        orchestrator.runner.is_processing = True
+        orchestrator.observe_notification(
+            HubMessage(
+                action="message",
+                from_agent="peer-id-1",
+                from_identity="peer-1",
+                to="*",
+                content="FIRST_NOTE",
+                thread_id=None,
+                reply_to="",
+            )
+        )
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        # The row is not appended twice, and the retry still mirrors it once.
+        mirrored = [
+            m
+            for m in llm.conversation_history
+            if m.metadata.get("source") == "observation"
+        ]
+        assert [("FIRST_NOTE" in m.content) for m in mirrored] == [True]
+    finally:
+        await orchestrator.close()
+
+
 def test_a_full_retry_queue_refuses_the_new_message_instead_of_evicting(monkeypatch, caplog):
     orchestrator = mod.ACPOrchestrator(Bus())
 
@@ -901,7 +963,7 @@ def test_a_full_retry_queue_refuses_the_new_message_instead_of_evicting(monkeypa
     # The 21st message is refused, and the oldest accepted one stays queued.
     assert results == [True] * 20 + [False]
     assert len(orchestrator._unwritten_observations) == 20
-    assert orchestrator._unwritten_observations[0].content.endswith("NOTE_0")
+    assert orchestrator._unwritten_observations[0][1].content.endswith("NOTE_0")
 
 
 def _observation(content):

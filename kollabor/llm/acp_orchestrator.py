@@ -131,7 +131,7 @@ class ACPOrchestrator:
         self.restore_notices: list[str] = []
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_rows: list[str] = []
-        self._unwritten_observations: deque[AgentHudEntry] = deque(maxlen=20)
+        self._unwritten_observations: deque[tuple[str, AgentHudEntry]] = deque(maxlen=20)
         self._observation_count = 0
         # Runner turn IDs are consecutive within this orchestrator lifecycle.
         # A frontier plus completed ranges preserves replay protection without
@@ -702,7 +702,7 @@ class ACPOrchestrator:
             logger.warning(
                 "ACP observation history write failed (%s)", type(error).__name__
             )
-            pending.append(entry)
+            pending.append((row_id, entry))
         else:
             self._observation_rows.append(row_id)
         self._observations.append(entry)
@@ -723,22 +723,23 @@ class ACPOrchestrator:
         self._unwritten_observations.clear()
         in_batch = {id(entry) for entry in self._observations}
         earlier_rows: list[str] = []
-        for entry in pending:
-            row_id = f"observations-{uuid.uuid4().hex}"
+        for row_id, entry in pending:
             try:
+                # The retry keeps its first attempt's row id (#581).
                 self._record_user(
                     row_id,
                     format_agent_hud([entry]),
                     "observation",
                     None,
                     track_completion=True,
+                    retry=True,
                 )
             except Exception as error:
                 logger.warning(
                     "ACP observation history write failed again (%s)",
                     type(error).__name__,
                 )
-                self._unwritten_observations.append(entry)
+                self._unwritten_observations.append((row_id, entry))
             else:
                 # A retried row of a message an earlier batch already carried is
                 # only a record; the reply to this batch must not thread under it.
@@ -777,6 +778,15 @@ class ACPOrchestrator:
         self._observations.clear()
         self._observation_count = 0
 
+    def _landed_row_uuid(self, request_id: str) -> str | None:
+        """The uuid of the conversation row a failed write already appended, if any."""
+        llm = self.event_bus.get_service("llm_service")
+        manager = getattr(llm, "conversation_manager", None)
+        for message in reversed(getattr(manager, "messages", None) or []):
+            if (message.get("metadata") or {}).get("request_id") == request_id:
+                return message.get("uuid")
+        return None
+
     def _conversation_id(self) -> str:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
@@ -814,13 +824,18 @@ class ACPOrchestrator:
 
     def _record_user(
         self, request_id: str, text: str, source: str, thread_id: str | None,
-        *, track_completion: bool = False,
+        *, track_completion: bool = False, retry: bool = False,
     ) -> None:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
         metadata = {"provider": "acp", "request_id": request_id, "source": source, "thread_id": thread_id}
         if manager is not None:
-            self._parents[request_id] = manager.add_message("user", text, metadata=metadata)
+            # A retry whose first save raised after the append reuses that row,
+            # so the conversation holds it once. The log and mirror still run (#581).
+            landed = self._landed_row_uuid(request_id) if retry else None
+            if landed is None:
+                landed = manager.add_message("user", text, metadata=metadata)
+            self._parents[request_id] = landed
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
             task = asyncio.create_task(logger_service.log_user_message(text))
