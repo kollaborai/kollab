@@ -805,17 +805,7 @@ class ACPOrchestrator:
         # model reads history, so it gets one more try here.
         still_unwritten: list[tuple[str, AgentHudEntry]] = []
         for row_id, entry in list(self._unwritten_observations):
-            try:
-                # The retry keeps its first attempt's row id, so a row that landed
-                # before its write raised is not written again (#581).
-                self._record_user(
-                    row_id, format_agent_hud([entry]), "observation", None, retry=True
-                )
-            except Exception as error:
-                logger.warning(
-                    "ACP observation history write failed again (%s)",
-                    type(error).__name__,
-                )
+            if not self._write_history_row(row_id, format_agent_hud([entry])):
                 still_unwritten.append((row_id, entry))
             self._parents.pop(row_id, None)
         for row_id in self._observation_rows:
@@ -829,18 +819,8 @@ class ACPOrchestrator:
             # The handover writes such messages as one batch row. No native turn may
             # start while one of them is still missing from history.
             batch_id = f"observations-{uuid.uuid4().hex}"
-            try:
-                self._record_user(
-                    batch_id,
-                    format_agent_hud([entry for _, entry in still_unwritten]),
-                    "observation",
-                    None,
-                )
-            except Exception as error:
-                logger.warning(
-                    "ACP observation batch history write failed (%s)",
-                    type(error).__name__,
-                )
+            batch_text = format_agent_hud([entry for _, entry in still_unwritten])
+            if not self._write_history_row(batch_id, batch_text):
                 self._unwritten_observations.extend(still_unwritten)
                 return
             self._parents.pop(batch_id, None)
@@ -849,6 +829,27 @@ class ACPOrchestrator:
             {"source": "acp_handover", "content": ""},
             "acp_orchestrator",
         )
+
+    def _write_history_row(self, row_id: str, text: str) -> bool:
+        """Write one observation row. True when it is in history, even if the write raised.
+
+        A write that raised after its row landed is retried once under the same id, so the
+        rest of the write (log, mirror) runs and the row is never appended twice (#581).
+        A write that raised before its row landed returns False, and the caller keeps the
+        message queued.
+        """
+        for _ in range(2):
+            try:
+                self._record_user(row_id, text, "observation", None, retry=True)
+                return True
+            except Exception as error:
+                logger.warning(
+                    "ACP observation history write failed again (%s)",
+                    type(error).__name__,
+                )
+                if self._landed_row_uuid(row_id) is None:
+                    return False
+        return True
 
     def _landed_row_uuid(self, request_id: str) -> str | None:
         """The uuid of the conversation row a failed write already appended, if any."""
