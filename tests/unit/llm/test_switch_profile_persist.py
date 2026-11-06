@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kollabor.llm.llm_coordinator import LLMService
+from kollabor_ai import api_communication_service as api_communication_service_module
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.profile_manager import LLMProfile
 
@@ -124,6 +125,120 @@ async def test_switch_profile_survives_persist_failure():
 
     # Runtime switch still succeeded even though persistence raised.
     assert ok is True
+
+
+def _real_api_switch_coord(tmp_path, monkeypatch, *, fail_target_initialization=False):
+    """Build a coordinator around a real API service for rollback regressions."""
+    previous_profile = LLMProfile(
+        name="previous",
+        provider="anthropic",
+        model="claude-old",
+        api_key="previous-test-key",
+    )
+    target_profile = LLMProfile(
+        name="target",
+        provider="openai",
+        model="gpt-new",
+        api_key="target-test-key",
+    )
+    previous_provider = SimpleNamespace(
+        provider_name="anthropic", model=previous_profile.model
+    )
+    target_provider = SimpleNamespace(provider_name="openai", model=target_profile.model)
+    api_providers = {
+        previous_profile.name: previous_provider,
+        target_profile.name: target_provider,
+    }
+    api_provider_names = []
+
+    async def get_api_provider(provider_config):
+        name = provider_config["profile"]
+        api_provider_names.append(name)
+        if fail_target_initialization and name == target_profile.name:
+            raise RuntimeError("synthetic target provider failure")
+        return api_providers[name]
+
+    class _Config:
+        def get(self, _key, default=None):
+            return default
+
+    monkeypatch.setattr(
+        api_communication_service_module,
+        "create_config_from_profile",
+        lambda profile_data: {"profile": profile_data["name"]},
+    )
+    monkeypatch.setattr(
+        api_communication_service_module,
+        "ProviderRegistry",
+        SimpleNamespace(get_provider=AsyncMock(side_effect=get_api_provider)),
+    )
+    api_service = APICommunicationService(_Config(), tmp_path, previous_profile)
+
+    coord = _coord()
+    coord.profile_manager.get_profile.return_value = target_profile
+    coord.profile_manager.get_active_profile.return_value = previous_profile
+    coord.api_service = api_service
+    coord._current_provider = previous_provider
+    coord._provider_registry.get_provider = AsyncMock(return_value=target_provider)
+    return (
+        coord,
+        api_service,
+        previous_profile,
+        previous_provider,
+        api_provider_names,
+    )
+
+
+@pytest.mark.asyncio
+async def test_switch_profile_api_reinitialize_failure_restores_api_runtime(
+    tmp_path, monkeypatch
+):
+    coord, api_service, previous_profile, previous_provider, api_provider_names = (
+        _real_api_switch_coord(
+            tmp_path, monkeypatch, fail_target_initialization=True
+        )
+    )
+    assert await api_service.initialize() is True
+    assert api_service._provider is previous_provider
+
+    with patch(
+        "kollabor.llm.llm_coordinator.create_config_from_profile", return_value={}
+    ):
+        ok = await LLMService.switch_profile(coord, "target")
+
+    assert ok is False
+    assert api_service._profile is previous_profile
+    assert api_service._provider is previous_provider
+    assert api_service.get_provider_error() is None
+    assert api_provider_names == ["previous", "target", "previous"]
+    coord.profile_manager.set_active_profile.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_switch_profile_coordinator_registry_failure_restores_api_runtime(
+    tmp_path, monkeypatch
+):
+    coord, api_service, previous_profile, previous_provider, api_provider_names = (
+        _real_api_switch_coord(tmp_path, monkeypatch)
+    )
+    assert await api_service.initialize() is True
+    assert api_service._provider is previous_provider
+    coord._provider_registry.get_provider = AsyncMock(
+        side_effect=RuntimeError("synthetic coordinator registry failure")
+    )
+
+    with patch(
+        "kollabor.llm.llm_coordinator.create_config_from_profile", return_value={}
+    ):
+        ok = await LLMService.switch_profile(coord, "target")
+
+    assert ok is False
+    assert api_service._profile is previous_profile
+    assert api_service._provider is previous_provider
+    assert api_service.get_provider_error() is None
+    assert api_provider_names == ["previous", "target", "previous"]
+    coord.profile_manager.set_active_profile.assert_not_called()
+
 
 
 @pytest.mark.asyncio

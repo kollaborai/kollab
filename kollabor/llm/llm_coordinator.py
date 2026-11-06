@@ -1668,13 +1668,13 @@ class LLMService:
                             if restored is False:
                                 logger.error(
                                     "Could not restore provider profile %r after "
-                                    "cancelled switch",
+                                    "switch rollback",
                                     previous_profile_name,
                                 )
                         except Exception as exc:
                             logger.error(
                                 "Could not restore provider profile %r after "
-                                "cancelled switch (%s)",
+                                "switch rollback (%s)",
                                 previous_profile_name,
                                 type(exc).__name__,
                             )
@@ -1687,8 +1687,7 @@ class LLMService:
                             await acp_orchestrator.start(active_profile)
                         except Exception as exc:
                             logger.error(
-                                "Could not restore ACP profile %r after cancelled "
-                                "switch (%s)",
+                                "Could not restore ACP profile %r after switch rollback (%s)",
                                 active_profile.name,
                                 type(exc).__name__,
                             )
@@ -1711,6 +1710,7 @@ class LLMService:
                         "API service could not reinitialize for profile '%s'",
                         profile_name,
                     )
+                    await restore_previous_runtime()
                     return False
 
                 acp_orchestrator = None
@@ -1752,9 +1752,14 @@ class LLMService:
                 # Keep the coordinator's provider reference in sync with the
                 # API service. ProviderRegistry caches matching configurations,
                 # so this normally returns the same instance.
-                current_provider = await self._provider_registry.get_provider(
-                    provider_config
-                )
+                try:
+                    current_provider = await self._provider_registry.get_provider(
+                        provider_config
+                    )
+                except Exception:
+                    # The API service already moved; undo both provider changes.
+                    await restore_previous_runtime(restart_acp=acp_closed)
+                    raise
                 if target_profile_is_stale():
                     logger.warning(
                         "Profile %r changed while its provider was being resolved; "
