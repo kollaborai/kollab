@@ -17,6 +17,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_ai.profile_manager import EFFORT_LEVELS, LLMProfile
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
@@ -619,6 +620,7 @@ class ACPOrchestrator:
         origin: dict[str, Any] | None = None,
         record: bool = True,
         images: tuple[dict[str, str], ...] = (),
+        operator_inputs: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
         if (self._runner is None or self._closed or getattr(self, "_starting", False)
                 or (self.transitioning and not self.transition_owned_by_current_task)):
@@ -637,7 +639,12 @@ class ACPOrchestrator:
         if record:
             try:
                 self._record_user(
-                    request_id, text, source, thread_id, track_completion=True
+                    request_id,
+                    text,
+                    source,
+                    thread_id,
+                    track_completion=True,
+                    operator_inputs=operator_inputs,
                 )
             except Exception as exc:
                 # Admission is already owned. Remove this admission (by identity,
@@ -780,11 +787,36 @@ class ACPOrchestrator:
 
     def _record_user(
         self, request_id: str, text: str, source: str, thread_id: str | None,
-        *, track_completion: bool = False,
+        *,
+        track_completion: bool = False,
+        operator_inputs: tuple[dict[str, str], ...] = (),
     ) -> None:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
-        metadata = {"provider": "acp", "request_id": request_id, "source": source, "thread_id": thread_id}
+        metadata = {
+            "provider": "acp",
+            "request_id": request_id,
+            "source": source,
+            "thread_id": thread_id,
+        }
+        if source in HUMAN_USER_INPUT_SOURCES:
+            trusted_operator_inputs = [
+                {
+                    "source": record["source"],
+                    "timestamp": record["timestamp"],
+                    "text": record["text"],
+                }
+                for record in operator_inputs
+                if isinstance(record, dict)
+                and record.get("source") == source
+                and record.get("source") in HUMAN_USER_INPUT_SOURCES
+                and isinstance(record.get("timestamp"), str)
+                and bool(record.get("timestamp"))
+                and isinstance(record.get("text"), str)
+                and bool(record.get("text"))
+            ]
+            if trusted_operator_inputs:
+                metadata["operator_inputs"] = trusted_operator_inputs
         if manager is not None:
             self._parents[request_id] = manager.add_message("user", text, metadata=metadata)
         logger_service = getattr(llm, "conversation_logger", None)
