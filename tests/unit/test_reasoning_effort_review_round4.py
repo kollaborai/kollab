@@ -90,3 +90,24 @@ class AutoModelPanelTests(unittest.TestCase):
         field = asyncio.run(_effort_control(_handler(_FakePM(profile)), profile))
         self.assertTrue(field.get("editable", True), field)
         self.assertIn("minimal", field["options"])
+
+
+class ProfileRowEffortProviderTests(unittest.TestCase):
+    def test_row_names_the_provider_auto_resolves_to_without_its_key(self):
+        from kollabor_engine.routes.profiles import _redacted_profile_dict
+
+        cases = (
+            ("auto", "sk-ant-test-key", "", "anthropic"),
+            ("auto", "sk-test-key", "", "openai"),
+            ("auto", "", "https://api.anthropic.com/v1", "anthropic"),
+            ("auto", "", "", "auto"),
+            ("anthropic", "", "", "anthropic"),
+        )
+        for provider, key, endpoint, expected in cases:
+            with self.subTest(provider=provider, key=key, endpoint=endpoint):
+                profile = LLMProfile(
+                    name="p", provider=provider, model="m", api_key=key, base_url=endpoint
+                )
+                row = _redacted_profile_dict(profile)
+                self.assertEqual(row["effort_provider"], expected)
+                self.assertNotIn("api_key", row)
