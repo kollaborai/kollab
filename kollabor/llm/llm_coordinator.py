@@ -1499,6 +1499,21 @@ class LLMService:
                     active_profile.get_model() if active_profile is not None else None
                 )
 
+
+                previous_runtime_profile = getattr(
+                    self.api_service, "_profile", None
+                )
+                if (
+                    previous_runtime_profile is None
+                    and active_profile is not None
+                    and str(getattr(active_profile, "provider", "") or "").lower()
+                    != "acp"
+                ):
+                    previous_runtime_profile = active_profile
+                previous_provider = getattr(self, "_current_provider", None)
+                acp_orchestrator = None
+                acp_closed = False
+
                 if str(getattr(profile, "provider", "") or "").lower() == "acp":
                     event_bus = getattr(self, "event_bus", None)
                     acp_orchestrator = (
@@ -1622,38 +1637,66 @@ class LLMService:
                 # previous profile's error.
                 provider_config = create_config_from_profile(profile.to_dict())
                 revision = profile.revision
+
+
+                def target_profile_is_stale() -> bool:
+                    return (
+                        profile.revision != revision
+                        or self.profile_manager.get_profile(profile_name) is not profile
+                    )
+
+                async def restore_previous_runtime(
+                    *, restart_acp: bool = False
+                ) -> None:
+                    self._current_provider = previous_provider
+                    if previous_runtime_profile is not None:
+                        previous_profile_name = getattr(
+                            previous_runtime_profile, "name", profile_name
+                        )
+                        try:
+                            restored = await self.api_service.reinitialize_provider(
+                                previous_runtime_profile
+                            )
+                            if restored is False:
+                                logger.error(
+                                    "Could not restore provider profile %r after "
+                                    "cancelled switch",
+                                    previous_profile_name,
+                                )
+                        except Exception as exc:
+                            logger.error(
+                                "Could not restore provider profile %r after "
+                                "cancelled switch (%s)",
+                                previous_profile_name,
+                                type(exc).__name__,
+                            )
+                    if (
+                        restart_acp
+                        and acp_orchestrator is not None
+                        and active_profile is not None
+                    ):
+                        try:
+                            await acp_orchestrator.start(active_profile)
+                        except Exception as exc:
+                            logger.error(
+                                "Could not restore ACP profile %r after cancelled "
+                                "switch (%s)",
+                                active_profile.name,
+                                type(exc).__name__,
+                            )
                 api_reinitialized = await self.api_service.reinitialize_provider(
                     profile
                 )
                 # Re-initialization can look up the OAuth model (profile-scoped
                 # tokens skip the lookup above), so an edit or replacement made
                 # meanwhile refuses this switch and restores the previous provider.
-                if (
-                    profile.revision != revision
-                    or self.profile_manager.get_profile(profile_name) is not profile
-                ):
+                if target_profile_is_stale():
                     logger.warning(
-                        "Profile %r was edited while its provider was being "
+                        "Profile %r changed while its provider was being "
                         "initialized; switch cancelled",
                         profile_name,
                     )
-                    if (
-                        active_profile is not None
-                        and active_profile is not profile
-                        and str(getattr(active_profile, "provider", "") or "").lower()
-                        != "acp"
-                    ):
-                        try:
-                            await self.api_service.reinitialize_provider(
-                                active_profile
-                            )
-                        except Exception as exc:
-                            logger.error(
-                                "Could not restore profile %r after a cancelled "
-                                "switch (%s)",
-                                active_profile.name,
-                                type(exc).__name__,
-                            )
+                    await restore_previous_runtime()
                     return False
                 if not api_reinitialized:
                     logger.warning(
@@ -1677,6 +1720,16 @@ class LLMService:
                     if acp_orchestrator is not None:
                         try:
                             await acp_orchestrator.close()
+
+                            acp_closed = True
+                            if target_profile_is_stale():
+                                logger.warning(
+                                    "Profile %r changed while stopping ACP; "
+                                    "switch cancelled",
+                                    profile_name,
+                                )
+                                await restore_previous_runtime(restart_acp=True)
+                                return False
                         except Exception as exc:
                             logger.error(
                                 "Could not stop ACP profile %r during native switch (%s)",
@@ -1696,9 +1749,18 @@ class LLMService:
                 # Keep the coordinator's provider reference in sync with the
                 # API service. ProviderRegistry caches matching configurations,
                 # so this normally returns the same instance.
-                self._current_provider = await self._provider_registry.get_provider(
+                current_provider = await self._provider_registry.get_provider(
                     provider_config
                 )
+                if target_profile_is_stale():
+                    logger.warning(
+                        "Profile %r changed while its provider was being resolved; "
+                        "switch cancelled",
+                        profile_name,
+                    )
+                    await restore_previous_runtime(restart_acp=acp_closed)
+                    return False
+                self._current_provider = current_provider
 
                 # Keep profile_manager's active state (and optionally the
                 # persisted config) in sync with the runtime provider. Without
