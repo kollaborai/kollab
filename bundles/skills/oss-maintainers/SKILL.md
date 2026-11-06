@@ -38,7 +38,7 @@ Everything an OSS role changes on GitHub is a **mutation**. Follow the table bel
 | add/remove labels on an issue or PR | batch approval |
 | set/clear a milestone, create/edit a milestone | batch approval |
 | create/edit/rename/delete a label | batch approval (taxonomy batches only) |
-| post a comment, review comment, or @-mention | batch approval, draft shown verbatim |
+| post a comment or @-mention (an OSS-role reply, not a PR review comment: PR review follows `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`) | batch approval, draft shown verbatim |
 | assign people, request reviewers | batch approval |
 | close, reopen, lock, transfer an issue/PR | human does it, or approves that single item by number |
 | approve or merge a PR | **never** (PR review and merging follow `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`, not this file) |
