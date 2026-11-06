@@ -19,6 +19,7 @@ import pytest_asyncio
 from kollabor.llm import acp_orchestrator as mod
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.state.local import LocalStateService
+from kollabor_ai.loadout_manager import Loadout, LoadoutManager
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_events import EventType
 from plugins.hub.models import HubMessage
@@ -196,3 +197,54 @@ async def test_native_switch_without_buffered_messages_starts_no_turn(
     assert await service.switch_profile("native", persist=False) is True
 
     assert _continues(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_handover_does_not_start_a_turn_for_a_message_whose_row_still_fails(
+    harness, monkeypatch, caplog
+):
+    """A buffered message whose history row still fails at handover stays pending; no turn starts."""
+    bus, orchestrator = harness
+
+    def failing_write(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(orchestrator, "_record_user", failing_write)
+    _buffer_peer_note(orchestrator)
+    assert len(orchestrator._unwritten_observations) == 1
+
+    await orchestrator.hand_over_to_native()
+
+    assert _continues(bus) == []
+    assert len(orchestrator._unwritten_observations) == 1
+    assert "ACP observation history write failed again" in caplog.text
+
+
+class _ProfilesWithUpdate(_ProfileManager):
+    def update_profile(self, name, **_kwargs):
+        return name in self.profiles
+
+
+@pytest.mark.asyncio
+async def test_loadout_direct_fallback_hands_buffered_messages_to_native(
+    harness, monkeypatch
+):
+    """A loadout switch to native with no state service still starts the one answering turn."""
+    bus, orchestrator = harness
+    _buffer_peer_note(orchestrator)
+    manager = _ProfilesWithUpdate([ACP, NATIVE], "harness")
+    bus.register_service("acp_orchestrator", orchestrator)
+    bus.register_service(
+        "llm_service",
+        SimpleNamespace(
+            api_service=SimpleNamespace(reinitialize_provider=AsyncMock(return_value=True)),
+            _load_native_tools=AsyncMock(),
+        ),
+    )
+    monkeypatch.setattr(LoadoutManager, "_announce_model_switch", AsyncMock())
+    loadout = Loadout(name="native", provider_profile="native", model="gpt-test")
+
+    assert await LoadoutManager(manager).activate(loadout, event_bus=bus) == loadout
+
+    assert manager.active == "native"
+    assert len(_continues(bus)) == 1
