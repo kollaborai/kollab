@@ -332,6 +332,8 @@ class MessageHandler:
                 mds.show_loading(loading_message)
 
             display_sequence: List[tuple] = []
+            # Messages whose history write failed. The batch still runs, but it is not a success.
+            history_failures = 0
 
             for msg in messages:
                 role = msg.get("role", "user")
@@ -368,6 +370,7 @@ class MessageHandler:
                                 log_content, parent_uuid=parent_uuid
                             )
                     except Exception as exc:
+                        history_failures += 1
                         logger.error("Message not written to history: %s", exc)
 
                 # Build display sequence
@@ -417,12 +420,15 @@ class MessageHandler:
             logger.info(
                 f"ADD_MESSAGE: Processed {len(messages)} messages, trigger_llm={trigger_llm}"
             )
-            return {
-                "success": True,
+            result = {
+                "success": history_failures == 0,
                 "message_count": len(messages),
                 "parent_uuid": parent_uuid,
                 "llm_triggered": trigger_llm,
             }
+            if history_failures:
+                result["error"] = f"{history_failures} message(s) not written to history"
+            return result
 
         except Exception as e:
             # Ensure loading is hidden on error
