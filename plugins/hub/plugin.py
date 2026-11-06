@@ -8995,11 +8995,13 @@ class HubPlugin(BasePlugin):
     def _retry_refused_observation(self, message: HubMessage, msg_key: tuple) -> bool | None:
         """Ask the ACP queue again for a message it refused. False: still refused."""
         acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
-        if acp is not None and getattr(acp, "active", False):
-            if not acp.observe_notification(message):
-                return False
-        else:
-            logger.info("refused observation dropped: the ACP session is gone")
+        if acp is None or not getattr(acp, "active", False):
+            # No live session can admit it. It stays refused and unacknowledged,
+            # so a later session can still take it (#581).
+            logger.debug("refused observation kept: the ACP session is not running")
+            return False
+        if not acp.observe_notification(message):
+            return False
         self._refused_observations.pop(msg_key, None)
         return None
 
