@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Profile setup now reports state-service provider startup failures instead of claiming success, restores the previous profile when possible, and keeps provider secrets out of errors and logs (#832).
+- A conversation history write that fails is no longer reported as saved: the logger raises instead of returning a message id, a partly written record is rolled back so later records stay intact, and the agent logs the failure and keeps going (#580)
+- Failed profile switches now restore the previous API profile, API request provider and coordinator provider if target initialization fails or the coordinator provider-registry lookup raises, keeping subsequent requests on the prior runtime (#836).
 - Switching to an OAuth profile whose model is still `codex` no longer overwrites a model, effort or profile edit made while the model lookup was running. The stale switch is cancelled, the edit stays, and the switch can be run again (#595).
 - A reply from an ACP turn that finishes or is stopped after you resume another conversation now stays in the conversation it was sent from, instead of appearing at the end of the one you just resumed (#596).
 - A voice reply cut by one window or process no longer leaves a later message from another logger on the same session pointing at a reply that is gone; it now threads under the nearest reply that stays (#586).

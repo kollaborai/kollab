@@ -1282,6 +1282,46 @@ class TestQueueProcessor(unittest.TestCase):
         self.message_display_service.display_complete_response.assert_not_called()
         self.message_display_service.display_tool_results.assert_called_once()
 
+    def test_failed_reply_write_keeps_the_reply_in_history_and_tells_the_user(self):
+        """Issue #580: a history write that fails must not drop the reply from the model's context."""
+        self.response_parser.parse_response.return_value = {
+            "content": "a plain answer",
+            "components": {},
+            "turn_completed": True,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.renderer.pipe_mode = False
+        self.config.get = lambda key, default=None: 0 if key.endswith("delay") else default
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.get_last_tool_calls = MagicMock(return_value=[])
+        self.api_service.has_pending_tool_calls = MagicMock(return_value=False)
+        self.api_service.last_thinking_content = ""
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            side_effect=OSError("disk full")
+        )
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("a plain answer", False, False)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        self.conversation_logger.log_assistant_message.assert_awaited_once()
+        self.message_display_service.display_system_message.assert_called_with(
+            "Conversation history not saved for this reply."
+        )
+        roles = [getattr(call.args[0], "role", None) for call in self.add_message_fn.call_args_list]
+        self.assertIn("assistant", roles)
+
     def test_xml_tool_turn_keeps_the_reply_and_adds_display_metadata(self):
         """The model keeps its own tags; the web gets display-only metadata.
 

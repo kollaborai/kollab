@@ -1033,6 +1033,28 @@ class ACPOrchestrator:
                 stats["acp_turn_usage"] = dict(usage)
         return {"usage": dict(usage), "input_total": input_total, "output_total": output_total}
 
+    async def _await_user_history(self, turn_key: tuple[int, int]) -> None:
+        """Wait for the turn's user-row write; a failed write keeps the reply and is shown.
+
+        The adapter already ran and the reply is in hand, so the turn goes on with
+        it. A user row that did not reach the file is logged as an error and shown
+        in the chat, as a failed reply row is. Cancellation still propagates.
+        """
+        user_history = self._turn_user_tasks.get(turn_key)
+        if user_history is None:
+            return
+        try:
+            await user_history
+        except Exception as exc:
+            # Reported once: the failed task leaves the map, so a later caller
+            # for this turn finds nothing to report again.
+            self._turn_user_tasks.pop(turn_key, None)
+            logger.error("ACP user message not written to history: %s", type(exc).__name__)
+            llm = self.event_bus.get_service("llm_service")
+            display = getattr(llm, "message_display_service", None)
+            if display is not None:
+                display.display_system_message("Conversation history not saved for this message.")
+
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
         turn_key = (admission.generation, admission.turn_id)
         result: ACPResult | None = None
@@ -1042,9 +1064,7 @@ class ACPOrchestrator:
             # Once the adapter returned, its usage was incurred even if any
             # later binding or history operation fails or is cancelled.
             settled_usage = self._settle_turn_usage(result)
-            user_history = self._turn_user_tasks.get(turn_key)
-            if user_history is not None:
-                await user_history
+            await self._await_user_history(turn_key)
             self._save_binding()
             await self._record_result(result, turn_key)
         except BaseException as exc:
@@ -1117,9 +1137,7 @@ class ACPOrchestrator:
                     admission.turn_id, admission.request_id, admission.source, admission.thread_id,
                 )
                 try:
-                    user_history = self._turn_user_tasks.get(turn_key)
-                    if user_history is not None:
-                        await user_history
+                    await self._await_user_history(turn_key)
                     await self._record_result(partial, turn_key)
                 except BaseException as history_exc:
                     logger.warning("ACP interrupted transcript write failed (%s)", type(history_exc).__name__)
@@ -1244,11 +1262,21 @@ class ACPOrchestrator:
                                                metadata=metadata, thinking="".join(thoughts)))
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
+            # The row is already in memory and the adapter finished, so a write
+            # that did not reach the file is logged and shown, as on the native
+            # path, and the turn keeps its outcome. Never retried: that could
+            # duplicate the row. Cancellation still propagates.
             owner = {"session_id": bound} if elsewhere else {}
-            await logger_service.log_assistant_message(text or result.text,
-                parent_uuid=parent or "", model=self._profile_name,
-                thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata,
-                **owner)
+            try:
+                await logger_service.log_assistant_message(text or result.text,
+                    parent_uuid=parent or "", model=self._profile_name,
+                    thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata,
+                    **owner)
+            except Exception as exc:
+                logger.error("ACP reply not written to history: %s", exc)
+                display = getattr(llm, "message_display_service", None)
+                if display is not None:
+                    display.display_system_message("Conversation history not saved for this reply.")
 
     async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:
         request_id = f"request-{uuid.uuid4().hex}"
