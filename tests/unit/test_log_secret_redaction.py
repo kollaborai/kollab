@@ -8,12 +8,16 @@ secrets from the message, its arguments and exception text.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
+from kollabor_engine.__main__ import _build_log_handler, _RedactingStream
 
 from kollabor.logging.setup import LoggingSetup
-from kollabor_engine.__main__ import _build_log_handler, _RedactingStream
 
 # A full-length Google API key shape: "AIza" plus 35 URL-safe characters. Not a real key.
 _KEY = "AIzaSyD" + "Q7x9_kL2-mN4pR6tV8wY0zB3cE5gH1jK"
@@ -31,7 +35,7 @@ def _emit_gemini_records(logger: logging.Logger) -> None:
     logger.warning("retry count=%d", 5)
 
 
-def _app_log_text(log_dir: Path) -> str:
+def _app_log_text(log_dir: Path, emit=None) -> str:
     """Run Gemini-provider records through LoggingSetup's real handler; return the file."""
     assert len(_KEY) == 39
     root = logging.getLogger()
@@ -40,7 +44,10 @@ def _app_log_text(log_dir: Path) -> str:
     log_file = log_dir / "kollab.log"
     try:
         LoggingSetup().setup_from_config({"logging": {"file": str(log_file), "level": "DEBUG"}})
-        _emit_gemini_records(logging.getLogger(_GEMINI_LOGGER))
+        if emit is None:
+            _emit_gemini_records(logging.getLogger(_GEMINI_LOGGER))
+        else:
+            emit()
         for handler in root.handlers[:]:
             handler.flush()
         return log_file.read_text(encoding="utf-8")
@@ -67,6 +74,43 @@ def test_app_log_file_never_holds_a_google_key(tmp_path: Path) -> None:
 def test_app_log_redaction_keeps_ordinary_formatting(tmp_path: Path) -> None:
     text = _app_log_text(tmp_path)
     assert "retry count=5" in text
+
+
+def _failing_gemini(path: str):
+    """Run the real GeminiProvider against a client whose request raises with the key in its text."""
+    from kollabor_ai.providers.gemini_provider import GeminiProvider
+    from kollabor_ai.providers.models import GeminiConfig, ProviderType
+
+    def run() -> None:
+        async def go() -> None:
+            error = RuntimeError(f"connection reset for {_URL}")
+            with patch("httpx.AsyncClient") as client_class:
+                client_class.return_value = AsyncMock(
+                    post=AsyncMock(side_effect=error), stream=Mock(side_effect=error)
+                )
+                provider = GeminiProvider(
+                    GeminiConfig(provider=ProviderType.GEMINI, api_key=_KEY, model="gemini-3.6-flash")
+                )
+                await provider.initialize()
+                messages = [{"role": "user", "content": "x"}]
+                with pytest.raises(RuntimeError):
+                    if path == "call":
+                        await provider.call(messages)
+                    else:
+                        async for _ in provider.stream(messages):
+                            pass
+
+        asyncio.run(go())
+
+    return run
+
+
+@pytest.mark.parametrize(("path", "line"), [("call", "Gemini call failed"), ("stream", "Gemini stream failed")])
+def test_gemini_provider_failure_log_never_holds_the_key(tmp_path: Path, path: str, line: str) -> None:
+    text = _app_log_text(tmp_path, _failing_gemini(path))
+    assert line in text
+    assert "connection reset for" in text
+    assert _KEY not in text
 
 
 def test_engine_log_handler_never_holds_a_google_key(tmp_path: Path) -> None:
