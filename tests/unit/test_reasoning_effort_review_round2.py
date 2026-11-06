@@ -10,7 +10,7 @@ unset and the model and other fields are still applied.
 """
 
 import asyncio
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -147,7 +147,9 @@ def test_attach_layer_keeps_the_preset_when_its_level_is_unsent(level):
             }
         }
     )
-    service = LocalStateService(Mock(), pm, event_bus=None)
+    llm = Mock()  # activation now awaits the provider re-initialization (#832)
+    llm.api_service.reinitialize_provider = AsyncMock(return_value=True)
+    service = LocalStateService(llm, pm, event_bus=None)
 
     asyncio.run(service.set_active_profile("fast"))
 
