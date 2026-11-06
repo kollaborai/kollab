@@ -858,36 +858,62 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 ## Development Guidelines
 
 ### Git Workflow
-**Pre-commit:** Commits to `kollabor/`, `plugins/`, `tests/` MUST reference GitHub issue
-- One shared checkout on `main` for every agent (see SOFTWARE_DEVELOPMENT_LIFECYCLE.md):
-  never create a git worktree (unless Marco asks for one), and never stash, reset,
-  clean, restore or switch branches in it
-- Other agents edit the same tree at once: leave their uncommitted edits alone and
-  commit only your own files, `git commit -- <paths>` (never `git add -A` or `git add .`)
-- Commit: Conventional Commits format `type(scope): summary`, referencing the issue:
-  `fixes #123`, `closes #123`, `resolves #123`, or `#123`
-- Main branch protected - no direct pushes. Push `HEAD` to a PR branch named
-  `issue-123-description`, with no local branch; check `git log origin/main..HEAD`
-  first, since every commit it lists ships
-- Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco or the
-  koordinator marks a PR ready or approves it; auto-merge then merges it once checks pass.
-- PRs merge themselves (`.github/workflows/auto-merge.yml`): a PR from a branch of this
-  repo, opened by a person with write access, merges with a merge commit once the three
-  required checks pass. Forks, bots and drafts never do: open a draft to hold one, and
-  `gh pr merge <n> --disable-auto` stops one already armed. Such a merge starts no
-  push-to-main CI run.
-- Merging needs the PR branch up to date with `main`: `gh pr update-branch <n>` (a
-  merge, never a rebase). Once it merges, `git pull --ff-only origin main`; if that
-  refuses, `main` has diverged: stop and tell Marco, never reset, rebase or force-push
 
-```bash
-gh issue create --title "Fix version display"
-git commit -m "fix(cli): version display, fixes #8" -- kollabor/cli.py
-git log --oneline origin/main..HEAD
-git push origin HEAD:refs/heads/issue-8-version-display-fix
-gh pr create --draft --head issue-8-version-display-fix --title "fix(cli): version display" --body "Fixes #8"
-git pull --ff-only origin main   # once the PR has merged
-```
+**Pre-commit:** Commits to `kollabor/`, `plugins/`, and `tests/` must reference a GitHub issue.
+
+**Changelog:** a PR adds its entry as `changes/<issue>.<section>.md` (`changes/README.md`) and never edits `CHANGELOG.md` or `kollabor/updates/CHANGELOG.md`; `ci/standards-check` refuses that outside `release/` and `changelog/` branches. The release PR folds the entries in with `python scripts/changelog.py build` (#855).
+
+For Kollab, follow the canonical isolated-writer process in
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`. Each active writer claims one unique
+worktree, branch, and file scope based on freshly fetched `origin/main`;
+read-only reviewers may share a checkout. Keep the local `main` integration
+worktree's source files read-only; inspect them or fast-forward after merged
+PRs. Fetching refs and registering a new worktree may use Git metadata without
+changing those files. Do not edit, stage, commit, or push source there, and
+preserve existing dirty files and worktrees.
+
+Use scoped Conventional Commits and DRAFT PRs. Marco authorizes a concrete
+integration plan or bounded batch (a class order in his own words, such as
+"merge as many ready PRs as you can tonight", counts; see
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`); its named integrator may mark covered PRs
+ready and merge them after independent source review of the exact head, current
+base, required CI, and resolved conversations. Do not repeat permission for
+listed steps. A different AI agent must review every PR's exact final head and
+record the GitHub approval as whichever account, `kollaborai` or `maarco`, is
+not the PR author. GitHub prohibits author self-approval. Record reviewer
+identity and exact reviewed SHA in private maintainer audit evidence; keep the
+GitHub approval plain, with no AI attribution or footer. A new head requires
+fresh review and CI. The review is clean-room and starts only on a current
+base: the reviewer has not seen the code before the review (not the author,
+not any agent in the writer's lane), works in a scratch environment, runs the
+tests, and posts a PR verdict recording the pinned head SHA, base SHA,
+commands run, and PASS or FAIL; review waits while the head is BEHIND or
+DIRTY against `main`, and a moved head or a relevant base move voids the
+verdict. A head moved only by merging `main` keeps its verdict only when an
+independent reviewer posts an addendum pinned to the new head and base,
+confirming the PR's own diff is unchanged apart from changelog lines and that
+nothing merged from `main` touches what the PR changes or relies on. Review
+findings are fixed red-first: land the failing regression test (alone, or
+marked strict `xfail`) before the fix, and the fix flips it green without
+editing the test; a finding no test can reproduce, such as wording in a doc,
+says so in its fix commit instead. Every merge uses
+`kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
+GitHub's merge queue is not on yet (#857): GitHub offers it only to repos
+owned by an organization, and this repo belongs to the personal account
+`kollaborai`. Until it moves, a PR behind `main` merges `main` into its branch
+before it lands. `ci.yml` already runs on `merge_group`, so the queue can be
+turned on as soon as the repo is in an organization.
+After code-owner enforcement is enabled, `.github/CODEOWNERS` covers every
+path and protects itself; one of `@maarco` or `@kollaborai` must approve. The
+other account approves PRs authored under either account. GitHub enforces the
+approving account, not independent AI-review identity; retain that exact-head
+evidence privately and follow the bootstrap sequence in
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`.
+Out-of-scope work needs new authorization, and release tags always need
+separate explicit instruction. Update branches with ordinary merges; never
+rebase or force-push. Report worktree, branch, base/head SHAs, remote/PR state,
+and synchronized local/remote `main` SHAs. The `main` checkout's source files
+are never edited, staged, or committed.
 
 ### Version Management
 Version managed centrally in `pyproject.toml`:
@@ -896,7 +922,8 @@ Version managed centrally in `pyproject.toml`:
 
 Files reading version: `kollabor/application.py`, `kollabor/cli.py`, `kollabor_config.loader`
 
-To update the semantic version: only modify `pyproject.toml`.
+To prepare a release version, update the root and workspace metadata, frontend
+and desktop versions together, then run `scripts/check_version_parity.py`.
 
 Build provenance is separate from the release version. Python wheel/binary
 builds embed the exact source branch and full HEAD SHA in `kollabor._build_info`;
@@ -908,42 +935,51 @@ do not need runtime Git access.
 
 ### Cutting a Release
 
-`main` is branch-protected: **no direct pushes**, every change lands via PR + 3
-required CI checks (`ci/security-scan`, `ci/standards-check`, `ci/tests`).
+`main` is branch-protected: source and version-preparation changes land through
+a dedicated writer worktree and DRAFT PR, with the three required CI checks
+(`ci/security-scan`, `ci/standards-check`, `ci/tests`). Keep the integration
+checkout source-read-only.
 
-**Correct order: prep PR BEFORE the tag** (source must already match the tag; do
-not rely on CI to repair it):
+1. In a worktree branch `release/X.Y.Z` from current `origin/main`, bump every
+   package version and inter-package constraint to `X.Y.Z`, update `uv.lock`,
+   run `python scripts/changelog.py build` to fold `changes/` into
+   `[Unreleased]`, and move `[Unreleased]` entries into matching byte-identical
+   changelogs.
+2. Commit by explicit paths, push normally, and open a DRAFT release PR.
+   A different AI agent reviews the exact final head and records the required
+   GitHub approval as whichever account, `kollaborai` or `maarco`, is not the
+   PR author. Record reviewer identity and exact reviewed SHA in private
+   maintainer audit evidence; keep the GitHub approval plain, with no AI
+   attribution or footer. GitHub prohibits author self-approval. Required CI,
+   resolved conversations, and current base must
+   pass. A Marco-authorized release plan covers its merge; the designated
+   integrator merges as `kollaborai` with a merge commit, never with `--admin`
+   or a ruleset bypass. Release tags still require Marco's separate explicit
+   instruction.
+3. The integrator runs `git pull --ff-only origin main` in the integration
+   checkout and proves local `main` equals `origin/main` at the release merge.
+   Run the pre-tag release build and validation gates from that exact commit.
+   Create and push an annotated `vX.Y.Z` tag there only when Marco explicitly
+   instructs it; never push `--tags` broadly.
+4. After publishing, run `uv sync --all-extras` and
+   `KOLLAB_VERSION=X.Y.Z bash install.sh`. Verify that the tag and published
+   artifacts still identify the recorded release merge. Synchronize local
+   `main` to current `origin/main`; if it advanced after tagging, report its
+   SHA and source version separately from the tagged release version.
 
-1. Prep commit on local `main` (`git commit -- <paths>`; never a worktree, branch
-   switch, scratch clone or uncommitted files) bumping *everything* to `X.Y.Z`:
-   - root `pyproject.toml` + all 10 `packages/*/pyproject.toml` versions
-   - inter-package `kollabor-*>=` constraints, then `uv lock`
-   - move `[Unreleased]` → `## [X.Y.Z] - DATE` in **both** `CHANGELOG.md` and
-     `kollabor/updates/CHANGELOG.md` (keep them **byte-identical**, `cmp` them;
-     the in-app update UI reads the packaged copy)
-2. `git push origin "HEAD:refs/heads/release/X.Y.Z"` and open the PR; it merges itself
-   with a merge commit once the checks pass (never squash). Then
-   `git pull --ff-only origin main`.
-3. Annotated tag on the merged commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`,
-   then `git push origin vX.Y.Z` (push the exact tag, never `--tags`).
-   Releases are tagged whenever Marco decides, and agents may create a release
-   tag ONLY when Marco explicitly instructs them to. Desktop Mac, Linux and
-   Windows builds run only from the release tag; they are never PR checks or merge
-   requirements.
-4. Once publishing is green: `uv sync --all-extras` and
-   `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in
-   `~/.local/bin`). Done = `main` matches
-   `origin/main`, `git status` lists none of the release's files, and
-   `kollab --version` reports `X.Y.Z` inside and outside the repo.
+After pushing the tag, dispatch `.github/workflows/publish.yml` from reviewed
+`main` with `-f tag=vX.Y.Z`. It resolves the immutable tagged source, builds
+and checks all binaries/desktop assets, publishes ten packages with the
+repository `PYPI_API_TOKEN` secret, then publishes the complete GitHub Release.
+The token is referenced only by the two PyPI upload action steps; the protected
+`pypi-publish` environment constrains the upload job but does not scope the
+repository secret. Upload jobs execute controller code from main, while builds
+use the tagged source SHA. Versions and changelog copies must already match
+the tag. Homebrew independently reconciles PyPI hourly; verify its formula
+update separately.
 
-The tag triggers `.github/workflows/publish.yml` → the four platform binaries
-(`binaries.yml`, built and checked before anything publishes) → PyPI + Homebrew
-tap → GitHub Release with the binaries attached. Its first step, **Verify release consistency**, fails the publish
-if the tagged commit's versions/changelog don't already agree with the tag, so
-a tag cut without a prep PR fails fast instead of publishing silently.
-
-Canonical checklist: `docs/release-process.md`. Full agent playbook (not
-invocable from Claude Code; read + follow by hand): `bundles/skills/release-manager/SKILL.md`.
+Canonical checklist: `docs/release-process.md`. Full agent playbook:
+`bundles/skills/release-manager/SKILL.md`.
 
 ### Release Binaries
 
@@ -1063,7 +1099,7 @@ set_color_support(ColorSupport.EXTENDED)
 - `/model` (aliases: `/mod`, `/m`) - Fullscreen model picker for the active provider (list|search|set|effort). The list is seeded from `bundles/data/models.json` (retired entries filtered) and merged with the provider's live catalog when one exists. `/model effort [level]` shows or sets reasoning effort — see `docs/features/reasoning-effort.md`.
 - `/llm` (aliases: `/loadout`, `/ld`) - Fullscreen loadout picker: provider + model + param presets. Every `models.json` model for a configured provider is an implicit loadout; `/llm <name>` activates one directly, `/llm new` opens a pre-filled create form, and `kollab --llm <loadout>` resolves loadouts at launch, with `--model` / `--effort` overriding individual fields on top — see `docs/features/loadouts.md`.
 
-The `/llm` list merges `models.json` with the provider's **live** catalog (`model_catalog.py`, TTL + versioned disk cache). A provider contributing zero rows still renders a section explaining why — never silently omit it, that was the original bug.
+The `/llm` list is the provider's **live** catalog once it is cached (`model_catalog.py`, TTL + versioned disk cache), plus the profile's own model; `models.json` seeds it only while the catalog was never fetched or the provider has no listing API (#558). The list reads the cache with no TTL (an expired entry is still the last list the provider served; the pickers refresh on open), and the Anthropic fetcher reads every `/v1/models` page, returning empty rather than a partial list. Each cache entry records the provider and a fingerprint of the endpoint it came from (never the endpoint, which can hold credentials) and is ignored for a profile now on another provider or endpoint. A provider contributing zero rows still renders a section explaining why — never silently omit it, that was the original bug.
 - `/permissions` (aliases: `/perms`, `/security`) - Manage permissions (show|default|strict|trust|stats|clear)
 - `/terminal` (aliases: `/tmux`, `/term`, `/t`) - Manage tmux sessions (new|view|list|kill)
 - `/hub` (aliases: `/mesh`) - Agent hub (status|msg|broadcast|feed|console|org|vault|whoami)

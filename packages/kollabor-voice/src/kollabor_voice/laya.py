@@ -7,9 +7,9 @@ import contextlib
 import json
 import os
 import uuid
-from pathlib import Path
 
 from .control import MAX_REQUEST, VoiceError, manifest
+from .module_runtime import isolated_env, module_command
 
 
 class LayaWorker:
@@ -97,17 +97,13 @@ class LayaWorker:
                 if key in {"HOME", "PATH", "TMPDIR", "LANG", "LC_ALL"}
             }
             env.update(
-                PYTHONPATH=str(Path(__file__).resolve().parent.parent),
                 HF_HUB_OFFLINE="1",
                 TRANSFORMERS_OFFLINE="1",
                 TOKENIZERS_PARALLELISM="false",
             )
+            env = isolated_env(env)
             self.process = await asyncio.create_subprocess_exec(
-                str(python),
-                "-m",
-                self.module,
-                "--model",
-                str(paths[self.name]),
+                *module_command(python, self.module, "--model", paths[self.name]),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=self.log,

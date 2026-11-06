@@ -475,6 +475,18 @@ class TaskLedger:
             ]
         return sorted(dispatches, key=lambda item: item.get("created_at", 0))
 
+    def get_dispatches_page(
+        self, assigned_by: str, *, page: int = 1, per_page: int = 10
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """Return one page of unresolved dispatches, newest first, and the total.
+
+        Page order matches rebirth recovery (newest first), so page 1 is the
+        same set the recovery summary expands.
+        """
+        newest_first = list(reversed(self.get_dispatches_for(assigned_by)))
+        start = (max(page, 1) - 1) * max(per_page, 1)
+        return newest_first[start : start + max(per_page, 1)], len(newest_first)
+
     def update_dispatch(
         self,
         dispatch_id: str,

@@ -161,9 +161,12 @@ class TestAttachFlagPlumbing(unittest.TestCase):
         start = source.index("# Apply a persisted loadout default")
         end = source.index("# Log auto-detection result", start)
         block = source[start:end]
-        for field in ("temperature", "effort", "max_tokens"):
+        for field in ("temperature", "max_tokens"):
             with self.subTest(field=field):
                 self.assertIn(f'update_kwargs["{field}"] = loadout.{field}', block)
+        # effort goes through the sendable filter (an unsent level is dropped)
+        self.assertIn("loadout_sendable_effort(", block)
+        self.assertIn('update_kwargs["effort"] = loadout_effort', block)
         self.assertIn("loadout.provider_profile, **update_kwargs", block)
 
     def test_cli_loadout_probe_suppresses_missing_profile_error(self):

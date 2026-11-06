@@ -1359,7 +1359,15 @@ class AgentSocketServer:
                         # or one-use proofs into Hub hooks, persistence, or logs.
                         msg.from_agent = authenticated_as
                         msg.metadata.clear()
-                    await self._on_message(msg)
+                    admitted = await self._on_message(msg)
+                    if admitted is False:
+                        # Refused, not admitted (#581): no ack, so the sender
+                        # never counts the message as delivered.
+                        writer.write(
+                            b'{"type":"error","msg":"message not accepted"}\n'
+                        )
+                        await writer.drain()
+                        return
                     ack = json.dumps({"type": "ack", "id": msg.id}) + "\n"
                     writer.write(ack.encode())
                     await writer.drain()
@@ -2554,7 +2562,7 @@ class AgentMessenger:
 
         ``target_socket`` may be a unix socket path or an endpoint URI.
         Pass ``auth`` to authenticate over a remote / auth-required peer.
-        Returns True if delivered and acked.
+        Returns True only if the receiver acked this message's id.
         """
         writer = None
         try:
@@ -2572,7 +2580,12 @@ class AgentMessenger:
             if ack_line:
                 ack = json.loads(ack_line.decode().strip())
                 if isinstance(ack, dict):
-                    return ack.get("type") == "ack"
+                    # The receiver acks a message with its id once its handler
+                    # returned. An ack naming another message confirms nothing
+                    # here; an ack without an id is a control-plane frame's.
+                    return ack.get("type") == "ack" and ack.get(
+                        "id", message.id
+                    ) == message.id
             return False
 
         except Exception as e:
