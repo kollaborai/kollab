@@ -242,7 +242,7 @@ class HubStateClient:
         against a corrupt presence state).
         """
         try:
-            from plugins.hub.presence import get_presence_dir
+            from plugins.hub.presence import _presence_files, get_presence_dir
 
             presence_dir = get_presence_dir()
         except Exception as e:
@@ -252,7 +252,7 @@ class HubStateClient:
         if not presence_dir.exists():
             return None
 
-        for presence_file in presence_dir.glob("*.json"):
+        for presence_file in _presence_files(presence_dir):
             try:
                 with open(presence_file) as f:
                     data = json.load(f)

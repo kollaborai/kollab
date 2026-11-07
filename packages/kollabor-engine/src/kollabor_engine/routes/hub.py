@@ -35,7 +35,8 @@ def _resolve_agent(agent_ref: str) -> tuple[Dict[str, Any] | None, str]:
 
 
 class SendMessageRequest(BaseModel):
-    target: str  # identity or agent_id
+    target: str  # identity; the agent_id below wins when both are sent
+    agent_id: str | None = None  # the selected row's presence id: names are shared across folders (#568)
     content: str
     from_identity: str = "api"
 
@@ -136,14 +137,24 @@ async def get_agent_status(agent_id: str):
 async def send_message(body: SendMessageRequest):
     """Send a message to a hub agent via unix socket.
 
-    Target should be an identity string (e.g. 'koordinator').
-    The 'to' field is set correctly so TRIGGER_LLM_CONTINUE fires.
+    Pass ``agent_id`` (the presence id of the selected agent) to reach exactly
+    that agent: a same-named agent in another folder is never a fallback.
+    ``target`` alone is an identity string (e.g. 'koordinator') and reaches the
+    first agent with that name. The 'to' field is set correctly so
+    TRIGGER_LLM_CONTINUE fires.
     """
-    success = await _bridge.send_message_to_identity(
-        body.target,
-        body.content,
-        from_identity=body.from_identity,
-    )
+    if body.agent_id:
+        success = await _bridge.send_message(
+            body.agent_id,
+            body.content,
+            from_identity=body.from_identity,
+        )
+    else:
+        success = await _bridge.send_message_to_identity(
+            body.target,
+            body.content,
+            from_identity=body.from_identity,
+        )
 
     if not success:
         raise HTTPException(

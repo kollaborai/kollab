@@ -208,11 +208,11 @@ def find_workspace_daemon(argv: list[str]) -> tuple[int, str, bool] | None:
     import json
 
     from plugins.hub.messenger import AgentMessenger
-    from plugins.hub.presence import get_presence_dir
+    from plugins.hub.presence import _presence_files, get_presence_dir
     from plugins.hub.project_scope import is_project_scoped
 
     try:
-        records = list(get_presence_dir().glob("*.json"))
+        records = list(_presence_files(get_presence_dir()))
     except OSError:
         return None
     live = []

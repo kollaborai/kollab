@@ -8,7 +8,7 @@ while another turn ran ended its stream on that turn's untagged completion.
 import asyncio
 import queue
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -57,12 +57,32 @@ async def test_native_admission_keeps_the_request_id_and_echoes_it():
     service = await _native_service()
     result = await service.submit_human_input("hi", source=UserInputSource.STATE_RPC, request_id="r1")
     assert result == {"status": "queued", "request_id": "r1"}
-    service._enqueue_with_overflow_strategy.assert_awaited_once_with(TaggedInput("hi", ("r1",)))
+    # parent_uuid and the admission serial ride every admission (#676,
+    # #676 r7): the fixture's logger returns "parent-2", and the turn
+    # claims serial 1 as the service's first admitted turn.
+    service._enqueue_with_overflow_strategy.assert_awaited_once_with(
+        TaggedInput(
+            "hi",
+            ("r1",),
+            parent_uuid="parent-2",
+            admission_serial=1,
+            operator_inputs=({"source": "state_rpc", "timestamp": ANY, "text": "hi"},),
+        )
+    )
 
-    # Input with no id (the terminal, a hub peer) queues as before and echoes none.
+    # Typed TUI input with no id echoes none but still carries provenance.
+    # The operator record and admission serial are independent of request ids.
     service._enqueue_with_overflow_strategy.reset_mock()
     assert await service.submit_human_input("typed here", source=UserInputSource.TUI) == {"status": "queued"}
-    service._enqueue_with_overflow_strategy.assert_awaited_once_with("typed here")
+    service._enqueue_with_overflow_strategy.assert_awaited_once_with(
+        TaggedInput(
+            "typed here",
+            (),
+            parent_uuid="parent-2",
+            admission_serial=2,
+            operator_inputs=({"source": "user", "timestamp": ANY, "text": "typed here"},),
+        )
+    )
 
 
 def _drain(q):

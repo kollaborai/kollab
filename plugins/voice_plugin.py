@@ -15,6 +15,7 @@ from datetime import datetime
 
 from kollabor_agent.voice_admission import issue_device_voice_context, revoke_voice_admission_context
 from kollabor_agent.voice_tool_policy import VOICE_TOOL_POLICY_ID
+from kollabor_config.proc_ctl import pid_alive
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_plugins.base import BasePlugin
 
@@ -61,6 +62,8 @@ class VoicePlugin(BasePlugin):
         self._speech_error = None
         self._retry = asyncio.Event()
         self._admissions = None
+        self._unknown_attempts = []
+        self._recovered_attempts = 0
         self._admission_lock = asyncio.Lock()
         self._remote_binding = None
         self._remote_jobs = {}
@@ -143,6 +146,11 @@ class VoicePlugin(BasePlugin):
             running=self.requested and state.get("state") == "listening",
             observer_error=self._observer_error,
             pending=len(self._pending),
+            unknown_attempts=[
+                {"admission_id": a["admission_id"], "text": a["text"][:160]}
+                for a in self._unknown_attempts
+            ],
+            recovered_attempts=self._recovered_attempts,
             context_lines=self.context_lines,
             last_speech_decision=self._last_speech_decision,
             speech_review_state=self._speech_review_state,
@@ -429,6 +437,10 @@ class VoicePlugin(BasePlugin):
                     )
                     await asyncio.sleep(0.5 * (attempt + 1))
             cursor = self._lease["cursor"]
+            try:
+                await self.recover_attempts()
+            except Exception:
+                logger.exception("Voice could not recover earlier delivery attempts")
             rpc = self._event_bus.get_service("rpc_client")
             if rpc:
                 await self._bind_remote(rpc)
@@ -600,7 +612,11 @@ class VoicePlugin(BasePlugin):
 
     async def _deliver_loop(self):
         """Send each final transcript straight to the agent turn: no intent gate."""
-        from kollabor_voice.observer import is_playback_echo, strip_playback
+        from kollabor_voice.observer import (
+            admission_id,
+            is_playback_echo,
+            strip_playback,
+        )
 
         while self.requested:
             if not self._pending:
@@ -678,6 +694,7 @@ class VoicePlugin(BasePlugin):
                     # as context, but is never sent.
                     del self._pending[: len(records)]
                     self._remember_transcripts(records)
+                    self._drop_attempt(admission_id(self.client_id, records))
                     continue
                 # More of the utterance arrived while settling: send it whole.
                 if self._state.get("speech_active") or len(self._pending) > len(
@@ -719,16 +736,123 @@ class VoicePlugin(BasePlugin):
                 "expires_at": newest + 30,
             },
         }
+        # Written before dispatch: a restart in the middle leaves this on disk
+        # for recover_attempts, since the new process has another client id.
+        self._write_attempt(identity, selected, "dispatching")
         rpc = self._event_bus.get_service("rpc_client")
         result = (
             await self._remote_job(rpc, "voice.admit", data)
             if rpc
             else await self._deliver(data)
         )
-        if result.get("status") != "queued":
+        if result.get("status") == "queued":
+            self._drop_attempt(identity)
+        else:
             raise RuntimeError(
                 f"Voice delivery {result.get('status', 'unknown')}; pending speech was not replayed"
             )
+
+    @staticmethod
+    def _attempt_dir():
+        from kollabor_voice.control import service_root
+
+        return service_root() / "attempts"
+
+    def _write_attempt(self, identity, records, state, client_id=None, pid=None):
+        """Keep a batch's identity and text private on disk while it is in flight."""
+        from kollabor_voice.control import atomic_json
+
+        path = self._attempt_dir()
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        atomic_json(
+            path / f"{identity}.json",
+            {
+                "admission_id": identity,
+                "client_id": client_id or self.client_id,
+                "pid": pid or os.getpid(),
+                "state": state,
+                "records": records,
+                "created": time.time(),
+            },
+        )
+
+    def _drop_attempt(self, identity):
+        with contextlib.suppress(OSError):
+            (self._attempt_dir() / f"{identity}.json").unlink()
+
+    async def recover_attempts(self):
+        """Settle batches a dead voice process was dispatching when it stopped.
+
+        The host's admission store is the truth: queued means the agent has the
+        batch (never sent again); no row means the host never received it (it
+        waits for delivery again); a reserved row with no outcome is unknown and
+        is shown until dismissed, never resent.
+        """
+        from kollabor_voice.control import service_root
+        from kollabor_voice.observer import AdmissionStore
+
+        self._unknown_attempts = []
+        directory = self._attempt_dir()
+        if not directory.is_dir():
+            return
+        if self._admissions is None:
+            self._admissions = AdmissionStore(service_root() / "admissions.sqlite3")
+        entries = []
+        for path in directory.glob("*.json"):
+            try:
+                entries.append(json.loads(path.read_text()))
+            except (OSError, ValueError):
+                logger.warning("Voice attempt record unreadable; removing %s", path.name)
+                with contextlib.suppress(OSError):
+                    path.unlink()
+        restored = []
+        for entry in sorted(entries, key=lambda e: e.get("created", 0)):
+            identity, records = entry["admission_id"], entry["records"]
+            mine = entry["client_id"] == self.client_id
+            if (mine and any(not t.done() for t in self._remote_jobs.values())) or (
+                not mine and entry["state"] != "unknown" and pid_alive(entry["pid"])
+            ):
+                continue  # still in flight, here or in a running chat
+            row = self._admissions.lookup(identity)
+            status = row["status"] if row else None
+            if status == "queued":
+                self._recovered_attempts += 1
+                self._remember_transcripts(records)
+                self._drop_attempt(identity)
+            elif status == "delivery_unknown":
+                if entry["state"] != "unknown":
+                    self._write_attempt(
+                        identity, records, "unknown", entry["client_id"], entry["pid"]
+                    )
+                self._unknown_attempts.append(self._unknown_view(entry))
+            else:  # the host never saw it, or declined it: not delivered
+                restored.extend(records)
+                self._drop_attempt(identity)
+        for stale in self._unknown_attempts[:-32]:
+            self._drop_attempt(stale["admission_id"])
+        self._unknown_attempts = self._unknown_attempts[-32:]
+        known = {r["event_id"] for r in self._pending}
+        self._pending[:0] = [r for r in restored if r["event_id"] not in known]
+        if self._unknown_attempts:
+            logger.warning(
+                "%d voice batch(es) have an unknown outcome after restart",
+                len(self._unknown_attempts),
+            )
+
+    @staticmethod
+    def _unknown_view(entry):
+        return {
+            "admission_id": entry["admission_id"],
+            "text": " ".join(r["text"] for r in entry["records"]),
+        }
+
+    async def dismiss_unknown_attempts(self):
+        count = len(self._unknown_attempts)
+        for attempt in self._unknown_attempts:
+            self._drop_attempt(attempt["admission_id"])
+        self._unknown_attempts = []
+        self._refresh()
+        return f"Dismissed {count} voice batch(es) with an unknown outcome"
 
     async def _deliver(self, data):
         result = await self._event_bus.emit_with_hooks(
