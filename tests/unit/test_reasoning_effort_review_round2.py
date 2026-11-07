@@ -10,6 +10,7 @@ unset and the model and other fields are still applied.
 """
 
 import asyncio
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -77,7 +78,7 @@ class _Manager(ProfileManager):
 @pytest.mark.parametrize("level", NEW_LEVELS)
 def test_launch_effort_refused_before_the_daemon_switches(level):
     pm = _Manager()
-    service = LocalStateService(Mock(), pm, event_bus=None)
+    service = LocalStateService(Mock(provider_transition=nullcontext), pm, event_bus=None)
 
     with pytest.raises(ValueError, match=level):
         asyncio.run(service.set_active_profile("an", persist=True, effort=level))
@@ -91,7 +92,7 @@ def test_launch_effort_refused_before_a_loadout_layer_is_applied(level):
     pm = _Manager(
         {"fast": {"provider_profile": "an", "model": "claude-y", "temperature": 0.2}}
     )
-    service = LocalStateService(Mock(), pm, event_bus=None)
+    service = LocalStateService(Mock(provider_transition=nullcontext), pm, event_bus=None)
 
     with pytest.raises(ValueError, match=level):
         asyncio.run(service.set_active_profile("fast", effort=level))
@@ -147,7 +148,7 @@ def test_attach_layer_keeps_the_preset_when_its_level_is_unsent(level):
             }
         }
     )
-    llm = Mock()  # activation now awaits the provider re-initialization (#832)
+    llm = Mock(provider_transition=nullcontext)  # activation now awaits the provider re-initialization (#832)
     llm.api_service.reinitialize_provider = AsyncMock(return_value=True)
     service = LocalStateService(llm, pm, event_bus=None)
 
