@@ -135,7 +135,7 @@ kollab --hub whoami       show this agent's identity, role, pid
 kollab --hub work         show pending work queue
 kollab --hub agents       list all discovered agents
 kollab --hub stop <name>  stop a specific agent
-kollab --hub stop all     stop every agent
+kollab --hub stop all     stop this folder's agents
 kollab --hub capture <name> [lines] [--raw]  read a recent transcript
 kollab --hub capture <name> [lines] --raw    preserve terminal rendering
 kollab --hub msg <name> <text>      send direct message to an agent

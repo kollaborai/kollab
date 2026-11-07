@@ -2007,71 +2007,6 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 continue
         return agents
 
-    def _get_machine_live_agents() -> List[dict]:
-        import socket as _socket
-        import time as _time
-
-        from plugins.hub.presence import all_presence_dirs
-
-        agents_by_id = {}
-        for scan_dir in all_presence_dirs(extra_dirs=[presence_dir]):
-            for f in scan_dir.glob("*.json"):
-                try:
-                    with open(f) as fh:
-                        data = json.load(fh)
-                    pid = data.get("pid", 0)
-                    # Pid must exist
-                    if os.name == "nt":
-                        # os.kill(pid, 0) sends Ctrl+C on Windows, so ask the process table (#268).
-                        from kollabor_config import proc_ctl
-
-                        if not proc_ctl.pid_alive(pid):
-                            f.unlink(missing_ok=True)
-                            continue
-                    else:
-                        try:
-                            os.kill(pid, 0)
-                        except (OSError, ProcessLookupError):
-                            f.unlink(missing_ok=True)
-                            continue
-                    # Pid alive but heartbeat stale = recycled pid, clean up
-                    heartbeat_age = _time.time() - (data.get("last_heartbeat") or 0)
-                    if heartbeat_age > 30:
-                        sock = data.get("socket_path", "")
-                        alive = False
-                        if sock:
-                            try:
-                                if os.name == "nt":  # an endpoint file, not a socket (#268)
-                                    from kollabor_config import local_ipc
-
-                                    local_ipc.connect_blocking(sock, 1.0).close()
-                                else:
-                                    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-                                    s.settimeout(1.0)
-                                    s.connect(sock)
-                                    s.close()
-                                alive = True
-                            except Exception:
-                                pass
-                        if not alive:
-                            f.unlink(missing_ok=True)
-                            continue
-                    key = str(data.get("agent_id") or data.get("socket_path") or f)
-                    previous = agents_by_id.get(key)
-                    if previous:
-                        try:
-                            previous_heartbeat = float(previous.get("last_heartbeat") or 0)
-                            current_heartbeat = float(data.get("last_heartbeat") or 0)
-                        except (TypeError, ValueError):
-                            previous_heartbeat = current_heartbeat = 0
-                        if previous_heartbeat >= current_heartbeat:
-                            continue
-                    data["_presence_path"] = str(f)
-                    agents_by_id[key] = data
-                except Exception:
-                    continue
-        return list(agents_by_id.values())
-
     def _find_agent(identity: str) -> Optional[dict]:
         for a in _get_live_agents():
             if a.get("identity") == identity:
@@ -2221,7 +2156,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
         target = rest[0]
 
         if target == "all":
-            # The mesh-wide CLI path belongs to an operator shell. Environment
+            # The CLI stop-all path belongs to an operator shell. Environment
             # markers alone are insufficient because background terminal
             # commands filter them, so also check the caller's process tree.
             # --confirm is argv and cannot grant an agent an override.
@@ -2232,7 +2167,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(2)
-            agents = _get_machine_live_agents()
+            agents = _get_live_agents()
             if not agents:
                 print("no agents online")
                 return
@@ -3419,7 +3354,10 @@ def _is_tool_shell_agent_launch(argv: list[str]) -> bool:
         if argument == "--":
             break
         option = argument.split("=", 1)[0]
-        if option == "-a" or (option.startswith("--") and "--agent".startswith(option)):
+        if option in {"-a", "-d"} or (
+            option.startswith("--")
+            and ("--agent".startswith(option) or (option.startswith("--det") and "--detached".startswith(option)))
+        ):
             return True
         if argument.startswith("-a") and not argument.startswith("--"):
             return True
