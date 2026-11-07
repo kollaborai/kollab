@@ -802,9 +802,11 @@ class ModelCommandHandler(BaseCommandHandler):
         The codex backend publishes them per model; everything else gets the
         canonical list, since no other provider exposes a capability endpoint.
         """
+        from kollabor.panels.llm import effort_provider
         from kollabor_ai.profile_manager import EFFORT_LEVELS
 
-        if (profile.get_provider() or "").lower() == "openai_responses":
+        provider = (effort_provider(profile) or "").lower()
+        if provider == "openai_responses":
             try:
                 from kollabor_ai.oauth import OAuthTokenStorage
                 from kollabor_ai.oauth.openai_oauth import query_codex_model_details
@@ -830,6 +832,14 @@ class ModelCommandHandler(BaseCommandHandler):
             except Exception as e:  # noqa: BLE001 - fall back to the canonical set
                 self.logger.debug("codex effort levels unavailable: %s", e)
 
+        if provider == "anthropic":
+            from kollabor_ai.providers.tuning import ANTHROPIC_UNSUPPORTED_EFFORT
+
+            return [
+                level
+                for level in EFFORT_LEVELS
+                if level not in ANTHROPIC_UNSUPPORTED_EFFORT
+            ]
         return list(EFFORT_LEVELS)
 
     async def _handle_effort(self, level: str) -> CommandResult:
@@ -847,9 +857,10 @@ class ModelCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
 
+        from kollabor.panels.llm import effort_provider
         from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
-        provider = (profile.get_provider() or "").lower()
+        provider = (effort_provider(profile) or "").lower()
         if provider == "acp":
             category = "thought_level"
             option = self._acp_option(self._acp_options(), category)
@@ -913,7 +924,10 @@ class ModelCommandHandler(BaseCommandHandler):
             )
 
         requested = level.strip().lower()
-        if requested in ("default", "none", "clear", "off"):
+        # none is a level wherever the provider takes it; elsewhere it still clears
+        if requested in ("default", "clear", "off") or (
+            requested == "none" and requested not in levels
+        ):
             requested = ""
         elif requested not in levels:
             return CommandResult(

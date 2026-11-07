@@ -825,7 +825,7 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
         result = asyncio.run(self.service._handle_user_input(event_data, event))
 
         mock_process.assert_called_once_with(
-            "Test user message", pre_displayed=False, may_answer=True
+            "Test user message", pre_displayed=False, operator_source="user", may_answer=True
         )
         self.assertEqual(result["status"], "processed")
 

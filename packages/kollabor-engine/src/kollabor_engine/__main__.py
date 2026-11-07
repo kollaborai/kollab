@@ -22,11 +22,13 @@ _engine_stderr: Any = None
 
 
 def _build_log_handler(log_path: Path) -> logging.Handler:
-    """The engine's file handler; join codes are redacted from every record."""
+    """The engine's file handler; join codes and secrets are redacted from every record."""
+    from kollabor_ai.providers.security import SecretRedactionFilter
     from kollabor_config.log_redaction import JoinCodeRedactionFilter
 
     handler = logging.FileHandler(log_path, encoding="utf-8")
     handler.addFilter(JoinCodeRedactionFilter())
+    handler.addFilter(SecretRedactionFilter())
     return handler
 
 
@@ -41,9 +43,10 @@ class _RedactingStream:
         self._stream = stream
 
     def write(self, text: str) -> int:
+        from kollabor_ai.providers.security import LoggingRedactor
         from kollabor_config.log_redaction import redact_join_codes
 
-        return self._stream.write(redact_join_codes(text))
+        return self._stream.write(LoggingRedactor.redact(redact_join_codes(text)))
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)

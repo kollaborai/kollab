@@ -127,6 +127,10 @@ class APICommunicationService:
 
         # Provider-based communication
         self._provider: Any = None  # Initialized in initialize()
+        # Bumped by every reinitialize_provider call, so a caller that swapped the
+        # provider for a while can tell a later switch apart even when it hands
+        # back the same profile and the registry the same cached provider.
+        self._provider_generation = 0
         self._media_resolver: Optional[Callable[[str], Optional[str]]] = None
         self._operation_observer: Optional[Callable[..., Optional[int]]] = None
         self._provider_error: Optional[str] = (
@@ -473,7 +477,9 @@ class APICommunicationService:
             )
             return False
 
-    async def _initialize_provider(self) -> None:
+    async def _initialize_provider(
+        self, expected_generation: Optional[int] = None
+    ) -> None:
         """Initialize provider from profile configuration.
 
         Handles validation errors gracefully - logs warning and allows app
@@ -481,10 +487,16 @@ class APICommunicationService:
         For OAuth profiles, auto-refreshes expired tokens before creating
         the provider.
         """
+        if expected_generation is None:
+            expected_generation = getattr(self, "_provider_generation", 0)
+
         try:
             # Auto-refresh OAuth tokens before creating provider
             if self._profile.auth_type == "oauth":
                 await self._refresh_oauth_token()
+
+            if expected_generation != getattr(self, "_provider_generation", 0):
+                return
 
             # Convert profile to provider config
             provider_config = create_config_from_profile(
@@ -493,7 +505,11 @@ class APICommunicationService:
 
             # Get or create provider instance
             provider = await ProviderRegistry.get_provider(provider_config)
+            if expected_generation != getattr(self, "_provider_generation", 0):
+                return
+
             self._provider = provider
+            self._provider_error = None
             set_resolver = getattr(provider, "set_media_resolver", None)
             if callable(set_resolver):
                 set_resolver(self._media_resolver)
@@ -505,19 +521,30 @@ class APICommunicationService:
 
         except ValueError as e:
             # Config validation failed (e.g., wrong API key format for provider)
+            if expected_generation != getattr(self, "_provider_generation", 0):
+                return
+
             self._provider = None
             self._provider_error = str(e)
             logger.warning(
-                f"Profile '{self._profile.name}' has configuration error: {e}. Use /setup to fix the configuration."
+                "Profile '%s' has configuration error (%s). "
+                "Use /setup to fix the configuration.",
+                self._profile.name,
+                type(e).__name__,
             )
 
         except Exception as e:
             # Other errors (network, etc.)
+            if expected_generation != getattr(self, "_provider_generation", 0):
+                return
+
             self._provider = None
             self._provider_error = str(e)
             logger.warning(
-                f"Failed to initialize provider for profile '{self._profile.name}': {e}. "
-                f"Use /setup to check configuration."
+                "Failed to initialize provider for profile '%s' (%s). "
+                "Use /setup to check configuration.",
+                self._profile.name,
+                type(e).__name__,
             )
 
     async def _refresh_oauth_token(self) -> None:
@@ -578,10 +605,20 @@ class APICommunicationService:
                 query_codex_models,
             )
 
+            profile = self._profile
+            revision = profile.revision
             models = await query_codex_models(tokens.access_token, tokens.account_id)
+            # The lookup awaited: an edit or a profile swap made meanwhile wins.
+            if self._profile is not profile or profile.revision != revision:
+                logger.warning(
+                    "Profile %r was edited while its model was being resolved; "
+                    "keeping the newer settings",
+                    profile.name,
+                )
+                return
             resolved = pick_best_model(models)
             if resolved != "codex":
-                self._profile.model = resolved
+                profile.model = resolved
                 logger.info(f"Resolved OAuth model to: {resolved}")
         except Exception as e:
             logger.warning(f"Model resolution failed: {e}")
@@ -1687,6 +1724,8 @@ class APICommunicationService:
         Returns:
             True if provider initialized successfully
         """
+        self._provider_generation += 1
+        expected_generation = self._provider_generation
         # Update stored profile
         self._profile = profile
         self._provider_error = None
@@ -1695,14 +1734,18 @@ class APICommunicationService:
         self.update_from_profile(profile)
 
         # Reinitialize provider
-        await self._initialize_provider()
+        await self._initialize_provider(expected_generation)
+
+        if expected_generation != getattr(self, "_provider_generation", 0):
+            return False
 
         if self._provider:
             logger.info(f"Provider reinitialized for profile '{profile.name}'")
             return True
         else:
             logger.warning(
-                f"Provider reinitialization failed for profile '{profile.name}': {self._provider_error}"
+                "Provider reinitialization failed. "
+                "Use /setup to check configuration."
             )
             return False
 
