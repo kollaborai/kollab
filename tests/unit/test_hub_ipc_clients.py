@@ -17,7 +17,9 @@ from plugins.hub.presence import get_presence_dir
 def hub_sock(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    monkeypatch.setenv("KOLLAB_ACP_HUB_TOKEN", "tok")
+    token_file = tmp_path / "binding.token"
+    token_file.write_text("tok")
+    monkeypatch.setenv("KOLLAB_ACP_HUB_TOKEN_FILE", str(token_file))
     monkeypatch.setenv("KOLLAB_ACP_GENERATION", "3")
     # macOS caps AF_UNIX paths near 104 bytes; pytest's tmp_path is longer.
     with tempfile.TemporaryDirectory(dir=tmp_path if os.name == "nt" else "/tmp") as d:

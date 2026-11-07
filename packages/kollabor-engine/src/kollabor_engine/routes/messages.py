@@ -653,17 +653,18 @@ def _assistant_align_streamed_ids(
     """Rename this turn's streamed row ids to the snapshot's history ids.
 
     Only a strict one-to-one match between the trailing stored rows and the
-    provisional rows justifies a rename; anything else (a refresh that missed
-    the turn, content that does not match, an unexpected role) keeps the
-    provisional ids, which the next full reload still reconciles.
+    provisional rows justifies a rename, and the complete role/content
+    alignment must be unique across refreshed history. Anything else (a
+    refresh that missed the turn, ambiguous duplicate content, a content
+    mismatch, or an unexpected role) keeps the provisional ids for the next
+    full reload.
 
     Role order alone is not evidence: a stale [user, assistant] pair looks
     identical to this turn's rows by role. Every paired row must also match
-    on content -- user rows by exact text, assistant rows by the stored text
-    being the tail of the streamed text. A stored assistant row with no text
-    of its own (a tool-calls row) may sit between pairs only when its call
-    ids all appear in the streamed row's call cards, proving it was rendered
-    inside this turn's row.
+    on content: user rows by exact text; assistant rows by exact text, or by a
+    strict suffix when the streamed row carries tool-call cards. A stored
+    calls row may sit between pairs only when its call ids all appear in the
+    streamed row's call cards, proving it was rendered inside this turn.
 
     Returns whether the rename happened. ``True`` means every provisional
     row now carries this snapshot's history id, so the caller may claim
@@ -822,6 +823,78 @@ def _assistant_align_streamed_ids(
         # does not cover this turn. Keep the provisional ids.
         return False
     stored.reverse()
+
+    # A successful nearest-tail match is not enough if the same complete
+    # role/content sequence appears more than once in the stored history.
+    # Count possible full alignments, including earlier duplicate rows that
+    # the greedy pass skipped, and fail closed unless the mapping is unique.
+    selected = dict(zip(provisional, stored))
+    alignment_counts: Dict[tuple[int, int], int] = {}
+
+    def _count_prefix_alignments(before: int, cursor: int) -> int:
+        if cursor < 0:
+            return 1
+        key = (before, cursor)
+        if key in alignment_counts:
+            return alignment_counts[key]
+
+        for history_index in range(before, -1, -1):
+            stored_row = history[history_index]
+            role = stored_row.get("role")
+            if role in ("system", "tool"):
+                continue
+            if role not in ("user", "assistant") or history_index in shown:
+                alignment_counts[key] = 0
+                return 0
+
+            message_index = provisional[cursor]
+            streamed_row = messages[message_index]
+            rendered_inside = _rendered_inside(stored_row, mega_row)
+            if (
+                role == streamed_row.get("role")
+                and _pairs_by_content(stored_row, streamed_row)
+            ):
+                if rendered_inside and selected.get(message_index) != history_index:
+                    continue
+                matched = _count_prefix_alignments(history_index - 1, cursor - 1)
+                if matched >= 2:
+                    alignment_counts[key] = 2
+                    return 2
+                skipped = _count_prefix_alignments(history_index - 1, cursor)
+                alignment_counts[key] = min(2, matched + skipped)
+                return alignment_counts[key]
+            if rendered_inside:
+                continue
+            alignment_counts[key] = 0
+            return 0
+
+        alignment_counts[key] = 0
+        return 0
+
+    final_message_index = provisional[-1]
+    final_streamed_row = messages[final_message_index]
+    complete_alignments = 0
+    for history_index, stored_row in enumerate(history):
+        if history_index in shown:
+            continue
+        if (
+            stored_row.get("role") != final_streamed_row.get("role")
+            or not _pairs_by_content(stored_row, final_streamed_row)
+        ):
+            continue
+        if (
+            _rendered_inside(stored_row, mega_row)
+            and selected.get(final_message_index) != history_index
+        ):
+            continue
+        complete_alignments += _count_prefix_alignments(
+            history_index - 1, len(provisional) - 2
+        )
+        if complete_alignments > 1:
+            return False
+    if complete_alignments != 1:
+        return False
+
     for message_index, history_index in zip(provisional, stored):
         messages[message_index]["id"] = f"history-{history_index}"
 
@@ -1109,14 +1182,19 @@ async def _assistant_protocol_stream(stream, completion: Dict[str, Any]):
 
     if completion.get("completed"):
         usage = completion.get("usage") or {}
-        yield _assistant_protocol_chunk(
-            "message-finish",
-            finishReason=_assistant_finish_reason(usage.get("stopReason")),
-            usage={
+        finish_fields: Dict[str, Any] = {
+            "finishReason": _assistant_finish_reason(usage.get("stopReason")),
+            "usage": {
                 "inputTokens": int(usage.get("inputTokens", 0) or 0),
                 "outputTokens": int(usage.get("outputTokens", 0) or 0),
             },
-        )
+        }
+        if completion.get("error"):
+            # Structured run-status error record: class/code/provider/
+            # retryable/cause from the daemon event, display message along
+            # for the UI (#720). Older clients ignore the extra key.
+            finish_fields["error"] = completion["error"]
+        yield _assistant_protocol_chunk("message-finish", **finish_fields)
 
 
 @router.post("/{session_id}/assistant")
@@ -1176,6 +1254,8 @@ async def assistant_transport(
         stream_held = False
         # Why the daemon says the turn failed; the turn still ends normally.
         turn_error = ""
+        # Structured fields from the error event (error_class/code/...).
+        turn_error_fields: dict = {}
 
         def publish_progress() -> None:
             """Publish the in-flight turn so its parts reach the browser.
@@ -1565,6 +1645,20 @@ async def assistant_transport(
                         return
                 elif event_type == "error":
                     turn_error = str(event.get("message") or "") or "engine error"
+                    # Structured classification rides the event untouched so
+                    # clients classify by code/class, never message text
+                    # (#549, #720).
+                    turn_error_fields = {
+                        key: event[key]
+                        for key in ("error_class", "code", "provider", "retryable", "cause")
+                        if event.get(key) is not None
+                    }
+                    # The run-status surface must carry the structured fields
+                    # even when no message state persists — controller.add_error
+                    # is display text only (#720).
+                    completion["error"] = {
+                        "message": turn_error, **turn_error_fields,
+                    }
                     if not persist_message_state:
                         # No message state to carry it: fail the run instead.
                         controller.add_error(turn_error)
@@ -1585,9 +1679,14 @@ async def assistant_transport(
                         session_id,
                         submitted_contents,
                         assistant_parts,
-                        {"type": "incomplete", "reason": "error", "error": turn_error}
-                        if turn_error
-                        else {"type": "complete", "reason": "stop"},
+                        (
+                            {
+                                "type": "incomplete", "reason": "error",
+                                "error": turn_error, **turn_error_fields,
+                            }
+                            if turn_error
+                            else {"type": "complete", "reason": "stop"}
+                        ),
                     )
                     if persist_message_state:
                         if goal_pump is not None:
@@ -1611,7 +1710,9 @@ async def assistant_transport(
                             # refresh below aligns them and republishes the
                             # aligned rows before any synced claim (#666:
                             # never claim synced for rows the page has not
-                            # been shown).
+                            # been shown). The snapshot only decides the sync
+                            # claim; alignment mutates these published rows
+                            # in place (#675).
                             _assistant_set_messages(controller, state_messages)
                             refreshed = None
                             for _attempt in (0, 1):
@@ -1636,10 +1737,14 @@ async def assistant_transport(
                                 # The streamed ids were reconciled against
                                 # exactly this snapshot, so the page may
                                 # append canonical rows past it by id.
-                                # Republish the aligned rows BEFORE claiming
-                                # synced: the page must hold exactly the ids
-                                # the watermark describes when it arrives.
-                                _assistant_set_messages(controller, state_messages)
+                                # The early publish is JSON-encoded with
+                                # provisional ids; the synced chunk carries
+                                # no messages update, so republish the
+                                # aligned rows for the client before the
+                                # watermark is claimed (#767/#666).
+                                _assistant_set_messages(
+                                    controller, state_messages
+                                )
                                 controller.state["synced"] = {
                                     "history": len(refreshed),
                                     "messages": len(state_messages),
