@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
+from pathlib import Path
 
 import pytest
 
@@ -118,6 +120,31 @@ def test_live_roundtrip_survives(tree):
     assert entry.is_dir()
     assert (root / encode_project_path(workspace)).is_dir()
     assert not plan.quarantines
+
+
+def test_sibling_prefix_workspaces_survive_boot():
+    # Avoid underscores in ancestors: they would make the old search start
+    # above the sibling prefix and accidentally find both workspaces.
+    with tempfile.TemporaryDirectory(prefix="sweep-", dir=Path("/tmp").resolve()) as tmp:
+        base = Path(tmp)
+        root = base / "projects"
+        root.mkdir()
+        workspaces = base / "workspaces"
+        (workspaces / "notes").mkdir(parents=True)
+        workspace = workspaces / "notes_app"
+        nested = workspace / "sub"
+        nested.mkdir(parents=True)
+        slugs = [encode_project_path(path) for path in (workspace, nested)]
+        entries = [_orphan(root, slug) for slug in slugs]
+
+        plan, _ = run_projects_sweep(root, mode="boot", active_window_hours=0)
+
+        assert {d.name: d.category for d in plan.decisions} == {
+            slug: "live" for slug in slugs
+        }
+        assert not plan.quarantines
+        assert all(entry.is_dir() for entry in entries)
+        assert not (root / TRASH_DIR_NAME).exists()
 
 
 def test_owner_marker_vouches_for_entry(tree):
