@@ -7,6 +7,7 @@ from kollabor.llm.agent_hud import (
     merge_agent_hud_with_user_message,
 )
 from kollabor.llm.llm_coordinator import LLMService
+from kollabor_agent.queue_processor import TaggedInput
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_events.data_models import ConversationMessage
 
@@ -58,7 +59,11 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
 
     def test_a_sender_on_another_computer_keeps_its_reply_address(self):
         hud = format_agent_hud(
-            [AgentHudEntry(section="hub", label="koordinator@devbox->zircon", content="pong")]
+            [
+                AgentHudEntry(
+                    section="hub", label="koordinator@devbox->zircon", content="pong"
+                )
+            ]
         )
         self.assertIn("[hub:koordinator@devbox->zircon]", hud)
 
@@ -119,7 +124,9 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.messages = None
 
-            async def process_message_batch(self, messages, current_parent_uuid, request_ids=None):
+            async def process_message_batch(
+                self, messages, current_parent_uuid, request_ids=None
+            ):
                 self.messages = messages
                 return "next-parent"
 
@@ -130,7 +137,16 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
         service._queue_processor = FakeQueueProcessor()
         service.current_parent_uuid = "parent-1"
 
-        await service._process_message_batch(["actual user request"])
+        await service._process_message_batch(
+            [
+                TaggedInput(
+                    "actual user request",
+                    request_ids=(),
+                    admission_serial=1,
+                    parent_uuid="parent-1",
+                )
+            ]
+        )
 
         self.assertEqual(service.current_parent_uuid, "next-parent")
         self.assertEqual(
@@ -166,31 +182,57 @@ class AgentHudTests(unittest.IsolatedAsyncioTestCase):
 
         await service._continue_conversation()
 
-        self.assertEqual(service.current_parent_uuid, "same-parent")
+        self.assertEqual(service.current_parent_uuid, "parent-1")
         self.assertEqual(len(service._pending_agent_hud), 1)
         service._add_conversation_message.assert_not_called()
 
-    async def test_hub_retry_continue_flushes_hud_once(self):
-        class FakeQueueProcessor:
-            turn_completed = True
+    async def test_hub_continue_claims_ticket_and_flushes_hud_once(self):
+        from types import SimpleNamespace
 
-            def __init__(self):
-                self.called = False
-
-            async def continue_conversation(self, current_parent_uuid):
-                self.called = True
-                return current_parent_uuid
+        from kollabor.llm.message_handler import MessageHandler
 
         service = LLMService.__new__(LLMService)
         service._pending_agent_hud = [
             AgentHudEntry("hub", "lapis->koordinator", "task complete")
         ]
-        service._queue_processor = FakeQueueProcessor()
+        service._turn_serial = 0
+        service._cursor_winner_serial = -1
+        service._continue_serial = None
         service.current_parent_uuid = "parent-1"
+        service.renderer = SimpleNamespace(pipe_mode=False)
+        service.create_background_task = MagicMock()
         service._add_conversation_message = MagicMock(return_value="hud-parent")
 
-        await service._continue_conversation()
+        class QueueProcessor:
+            cancel_processing = False
+            cancel_origin = None
+            is_processing = False
+            turn_completed = True
+            _stop_hook_active = True
+            _stop_hook_continuations = 4
+            _last_tool_error_sig = None
 
+            def __init__(self):
+                self.processing_queue = SimpleNamespace(
+                    empty=lambda: True,
+                    qsize=lambda: 0,
+                )
+
+        service._queue_processor = QueueProcessor()
+
+        async def complete_turn():
+            service._queue_processor.turn_completed = True
+
+        service._continue_conversation = complete_turn
+        handler = MessageHandler(coordinator=service)
+
+        result = await handler.handle_llm_continue({"source": "hub-test"}, MagicMock())
+        self.assertEqual(result["status"], "triggered")
+        hub_factory = service.create_background_task.call_args.args[0]
+        await hub_factory()
+
+        self.assertEqual(service._turn_serial, 1)
+        self.assertEqual(service._continue_serial, 1)
         self.assertEqual(service.current_parent_uuid, "hud-parent")
         self.assertEqual(service._pending_agent_hud, [])
         message = service._add_conversation_message.call_args.args[0]

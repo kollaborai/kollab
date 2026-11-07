@@ -90,6 +90,14 @@ def _windows_popen_kwargs() -> Dict[str, Any]:
     }
 
 
+def _session_exists_message(name: str) -> str:
+    """Explain how an agent can recover from a duplicate session name."""
+    return (
+        f"Session '{name}' already exists. "
+        "Use terminal_output to read it or terminal_send to send input to it."
+    )
+
+
 @dataclass
 class TerminalSession:
     """Represents a managed terminal session backed by subprocess.Popen."""
@@ -300,7 +308,7 @@ Aliases: /t, /term, /tmux"""
         if session_name in self.sessions and self.sessions[session_name].is_alive():
             return CommandResult(
                 success=False,
-                message=f"Session '{session_name}' already exists",
+                message=_session_exists_message(session_name),
                 display_type="error",
             )
 
@@ -586,9 +594,37 @@ Aliases: /t, /term, /tmux"""
             session.proc.stdin.write(data)
             session.proc.stdin.flush()
             return True
-        except (BrokenPipeError, OSError) as e:
+        except (BrokenPipeError, OSError, ValueError) as e:
             self.logger.error(f"Failed to send stdin to {session_name}: {e}")
             return False
+
+    def send_to_session(self, session_name: str, text: str) -> Dict[str, Any]:
+        """Send one newline-terminated line to a live background session."""
+        if not isinstance(session_name, str) or not session_name.strip():
+            return {"success": False, "message": "Session name required"}
+        if not isinstance(text, str):
+            return {"success": False, "message": "Input must be a string"}
+        session_name = session_name.strip()
+        session = self.sessions.get(session_name)
+        if session is None:
+            return {
+                "success": False,
+                "message": f"Session '{session_name}' not found",
+            }
+        if not session.is_alive():
+            return {
+                "success": False,
+                "message": f"Session '{session_name}' has already exited",
+            }
+        if not self._send_stdin(session_name, text):
+            return {
+                "success": False,
+                "message": f"Could not send input to session '{session_name}'",
+            }
+        return {
+            "success": True,
+            "message": f"Input sent to session '{session_name}'",
+        }
 
     # ------------------------------------------------------------------
     # Process management
@@ -786,7 +822,7 @@ Aliases: /t, /term, /tmux"""
             return {
                 "success": False,
                 "session_name": name,
-                "message": f"Session '{name}' already exists",
+                "message": _session_exists_message(name),
             }
 
         # A dead session may retain a timeout task. Remove both before reusing

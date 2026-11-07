@@ -8,15 +8,15 @@ import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 
-from ..goal_image_scope import safe_goal_error_cause
-
 import aiohttp
 from pydantic import field_validator
 
+from ..goal_image_scope import safe_goal_error_cause
 from ..message_content import serialize_openai_chat_content
 from .base import LLMProvider
 from .errors import (
     APIConnectionError,
+    APIFormatMismatchError,
     APITimeoutError,
     EmptyResponseError,
     map_http_status_error,
@@ -42,6 +42,142 @@ from .transformers import (
 from .tuning import EffortStyle, effort_params, sampling_params
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_sse_object(data: Any, provider_name: str) -> Dict[str, Any]:
+    """Require an SSE payload object; type the mismatch at the boundary.
+
+    Gateways occasionally emit a bare string (or array) as an SSE ``data:``
+    line. Parsing it as a chunk would raise ``AttributeError`` deep in the
+    loop, which the queue used to detect by matching that rendered text.
+    The typed error carries the classification instead (#720).
+    """
+    if not isinstance(data, dict):
+        raise APIFormatMismatchError(
+            "Custom API SSE data line is not a JSON object", provider_name,
+        )
+    _validate_openai_shapes(data, provider_name)
+    return data
+
+
+def _validate_tool_calls(
+    tool_calls: Any, provider_name: str, *, require_complete: bool
+) -> None:
+    """Validate a tool_calls array's shape (#754).
+
+    Both parsers iterate ``tool_calls`` directly, so a scalar leaks an
+    untyped TypeError; non-object elements crash the per-item accessors
+    (``tool_call["function"]`` subscript on the non-stream side,
+    ``tool_delta.get(...)`` on the SSE side); a non-object ``function``
+    crashes both. An explicit ``function: null`` is not a missing key, so
+    the ``.get("function", {})`` default does not cover it.
+
+    ``require_complete`` (non-stream ``message`` variant) demands the values
+    ``ToolUseContent`` takes: ``id`` and ``function.name`` strings, and
+    ``function.arguments`` a string or object. A missing or null value is
+    typed here, not left to Pydantic. Streaming ``delta`` tool calls legally
+    omit them on continuation chunks (which carry only
+    ``function.arguments``), so the SSE variant checks only the values
+    present: null passes, and any other non-string fails, since
+    ``ToolCallDelta`` takes ``Optional[str]``.
+    """
+    if not isinstance(tool_calls, list):
+        raise APIFormatMismatchError(
+            "Custom API 'tool_calls' is not a list", provider_name,
+        )
+    for item in tool_calls:
+        if not isinstance(item, dict):
+            raise APIFormatMismatchError(
+                "Custom API tool_calls element is not an object",
+                provider_name,
+            )
+        if "function" in item and not isinstance(item["function"], dict):
+            raise APIFormatMismatchError(
+                "Custom API tool call 'function' is not an object",
+                provider_name,
+            )
+        function = item.get("function") or {}
+        tool_id = item.get("id")
+        name = function.get("name")
+        arguments = function.get("arguments")
+        if require_complete:
+            if not isinstance(tool_id, str):
+                raise APIFormatMismatchError(
+                    "Custom API tool call 'id' is missing or not a string",
+                    provider_name,
+                )
+            if not isinstance(name, str):
+                raise APIFormatMismatchError(
+                    "Custom API tool call 'function.name' is not a string",
+                    provider_name,
+                )
+            if not isinstance(arguments, (str, dict)):
+                raise APIFormatMismatchError(
+                    "Custom API tool call arguments are not a string or object",
+                    provider_name,
+                )
+        else:
+            for value in (tool_id, name, arguments):
+                if value is not None and not isinstance(value, str):
+                    raise APIFormatMismatchError(
+                        "Custom API tool call delta value is not a string",
+                        provider_name,
+                    )
+
+
+def _validate_openai_shapes(data: Dict[str, Any], provider_name: str) -> None:
+    """Validate the nested shapes the parser indexes into (#720, #754).
+
+    Gateways occasionally emit ``choices`` as a list of strings, or
+    ``message``/``usage`` as a scalar. The parser indexes into these
+    (``choices[0].get(...)``, ``message.get(...)``, ``usage.get(...)``);
+    validating at the parse boundary keeps the failure typed
+    (``APIFormatMismatchError``) instead of leaking an ``AttributeError``
+    that classification cannot read. Missing keys stay legal (optional
+    fields); only present-but-wrong shapes are rejected -- including an
+    explicit JSON ``null`` message/delta, which is not a missing key: the
+    parser's ``.get(field, {})`` default only covers a MISSING key, so a
+    null leaks ``AttributeError`` downstream (#754). ``choices`` and
+    ``usage`` nulls stay legal: callers null-guard them with
+    ``or []``/``or {}``.
+    """
+    choices = data.get("choices")
+    if choices is not None and not isinstance(choices, list):
+        raise APIFormatMismatchError(
+            "Custom API 'choices' is not a list", provider_name,
+        )
+    for choice in choices or ():
+        if not isinstance(choice, dict):
+            raise APIFormatMismatchError(
+                "Custom API choice is not an object", provider_name,
+            )
+        for field in ("message", "delta"):
+            if field not in choice:
+                continue  # missing key: legal optional field
+            nested = choice[field]
+            if not isinstance(nested, dict):
+                # explicit null or wrong shape: .get(field, {}) would hand
+                # the parser None and crash downstream (#754)
+                raise APIFormatMismatchError(
+                    f"Custom API choice {field} is not an object",
+                    provider_name,
+                )
+            if "tool_calls" in nested:
+                # both parsers iterate tool_calls directly; a scalar or a
+                # non-object element/function crashes untyped (#754). The
+                # message variant is a complete tool call (id/function.name/
+                # function.arguments all subscripted); delta variants legally
+                # omit those on streaming continuation chunks.
+                _validate_tool_calls(
+                    nested["tool_calls"],
+                    provider_name,
+                    require_complete=(field == "message"),
+                )
+    usage = data.get("usage")
+    if usage is not None and not isinstance(usage, dict):
+        raise APIFormatMismatchError(
+            "Custom API usage is not an object", provider_name,
+        )
 
 
 class CustomConfig(ProviderConfig):
@@ -194,7 +330,17 @@ class CustomProvider(LLMProvider):
                             response.headers,
                         ) from safe_goal_error_cause(error)
 
-                    return dict(await response.json())
+                    raw = await response.json()
+                    if not isinstance(raw, dict):
+                        # A bare string (or array) body is an endpoint that
+                        # does not speak the OpenAI object protocol — typed
+                        # at this boundary so classification never reads the
+                        # rendered AttributeError text (#720).
+                        raise APIFormatMismatchError(
+                            "Custom API returned a non-object JSON body",
+                            self.provider_name,
+                        )
+                    return dict(raw)
         except asyncio.TimeoutError as e:
             raise APITimeoutError(
                 str(e),
@@ -220,6 +366,10 @@ class CustomProvider(LLMProvider):
         logger.debug(f"CustomProvider.call (model={self.model})")
 
         response_data = await self._make_request(messages, tools, stream=False)
+        # Validate the nested shapes the parser indexes into (choices
+        # elements, message, usage) before the .get chain (#754): typed at
+        # the parse boundary, not an AttributeError deep in parsing.
+        _validate_openai_shapes(response_data, self.provider_name)
 
         # Parse response (OpenAI-compatible format). "choices" can be
         # present but EMPTY on empty/aborted responses from local servers,
@@ -252,6 +402,14 @@ class CustomProvider(LLMProvider):
                         arguments = json.loads(arguments)
                     except json.JSONDecodeError:
                         arguments = {}
+                if not isinstance(arguments, dict):
+                    # valid JSON that is not an object ("[1, 2]", "null") is no
+                    # tool input: type it here, not as a ToolUseContent
+                    # ValidationError (#754)
+                    raise APIFormatMismatchError(
+                        "Custom API tool call arguments are not a JSON object",
+                        self.provider_name,
+                    )
                 tool_uses.append(
                     ToolUseContent(
                         type="tool_use",
@@ -383,6 +541,7 @@ class CustomProvider(LLMProvider):
                             data = json.loads(data_str)
                         except json.JSONDecodeError:
                             continue
+                        data = _coerce_sse_object(data, self.provider_name)
 
                         # Parse chunk. "choices" can be present but EMPTY on a
                         # trailing usage-only chunk (we request stream_options

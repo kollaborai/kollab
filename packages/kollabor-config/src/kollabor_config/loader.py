@@ -431,6 +431,17 @@ class ConfigLoader:
         system_prompt = self._load_system_prompt(skip_render=self.fast_mode)
 
         return {
+            # Promotion gate (#725): protected shared checkouts, off by default.
+            "sandbox_gate": {
+                "enabled": False,
+                "protected_roots": [],
+                "validation": [],
+                "scratch_root": "",
+                "allow_read": True,
+                "token_ttl_seconds": 900,
+                "validation_timeout_seconds": 600,
+                "audit_log": "",
+            },
             "terminal": {
                 "render_fps": 20,
                 "spinner_frames": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"],
@@ -479,6 +490,12 @@ class ConfigLoader:
                 "version": _package_version,
                 "description": "AI Edition",
             },
+            "adversarial_review": {
+                "enabled": False,
+                "round_caps": {"low": 1, "medium": 2, "high": 3, "critical": 3},
+                "cooldown": 0,
+                "reviewer_pool": [],
+            },
             "kollabor": {
                 "updates": {
                     "check_enabled": True,
@@ -487,6 +504,15 @@ class ConfigLoader:
                     "github_repo": "kollaborai/kollab",
                     "timeout_seconds": 5,
                     "include_prereleases": False,
+                },
+                "projects": {
+                    # Issue #647 orphan sweep: boot-time quarantine of
+                    # project state dirs whose workspace no longer exists.
+                    # Boot removes only empty dirs; trash purges need
+                    # kollab --cleanup-projects --execute.
+                    "sweep_boot_enabled": True,
+                    "retention_days": 14,
+                    "active_window_hours": 24,
                 },
                 "llm": {
                     # Note: api_url, api_token, model, temperature, timeout are now in profiles

@@ -1359,7 +1359,15 @@ class AgentSocketServer:
                         # or one-use proofs into Hub hooks, persistence, or logs.
                         msg.from_agent = authenticated_as
                         msg.metadata.clear()
-                    await self._on_message(msg)
+                    admitted = await self._on_message(msg)
+                    if admitted is False:
+                        # Refused, not admitted (#581): no ack, so the sender
+                        # never counts the message as delivered.
+                        writer.write(
+                            b'{"type":"error","msg":"message not accepted"}\n'
+                        )
+                        await writer.drain()
+                        return
                     ack = json.dumps({"type": "ack", "id": msg.id}) + "\n"
                     writer.write(ack.encode())
                     await writer.drain()
@@ -2000,6 +2008,10 @@ class AgentSocketServer:
                                 await writer.drain()
                         except (ConnectionError, BrokenPipeError, OSError):
                             return
+                        continue
+
+                    # Queued before a /resume or new session: not for this window.
+                    if not self._display_tap.in_live_conversation(event):
                         continue
 
                     line = json.dumps(event, default=str) + "\n"
