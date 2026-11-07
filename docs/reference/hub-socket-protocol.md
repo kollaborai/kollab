@@ -21,6 +21,13 @@ the project hash is a short hash of the project id. for kollab dev:
 
 to find the right hash at runtime, glob: `/tmp/kollabor-hub/**/<identity>.sock`
 
+On POSIX, an agent's presence record (`<agent_id>.json`) is stored beside its
+socket in the same project-hash directory. This shared location is independent
+of `$HOME`, so agents in one workspace remain discoverable when launched with
+different HOME values. Windows keeps presence in its existing per-user hub
+state directory. POSIX readers also check the current HOME's legacy presence
+paths as a migration fallback.
+
 
 ## wire format
 

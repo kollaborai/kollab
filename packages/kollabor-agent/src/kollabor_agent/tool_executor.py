@@ -16,6 +16,7 @@ from kollabor_events.models import EventType
 
 from .file_operations_executor import FileOperationsExecutor
 from .mcp_integration import MCPIntegration
+from .sandbox_gate import SandboxGate
 from .shell_executor import ShellExecutor
 from .tool_output_budget import ToolOutputArtifactStore
 from .voice_admission import is_voice_origin
@@ -598,6 +599,8 @@ class ToolExecutor:
         self.shell_executor = ShellExecutor(interactive=interactive_shell)
         self._voice_tool_guard = VoiceToolExecutionGuard()
         self.yes_approvals = YesApprovals()
+        # Promotion gate (#725): off unless sandbox_gate.enabled.
+        self.sandbox_gate = SandboxGate(config)
         # Trust All, kept in step by PermissionManager: a voice turn then runs its
         # tools as a typed one does, with no voice list and no spoken yes.
         self.trust_all = False
@@ -1149,6 +1152,17 @@ class ToolExecutor:
                 metadata={"scope_denied": True},
             )
 
+        gate_refusal = self.sandbox_gate.check(tool_data, self.workspace or Path.cwd())
+        if gate_refusal:
+            logger.warning(f"Tool {tool_id} refused by sandbox gate")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=gate_refusal,
+                metadata={"sandbox_gate": True},
+            )
+
         # Set tool executing state for spinner animation
         tool_name = self._get_display_name(tool_data)
         self.tool_executing = True  # watchdog: real work in flight
@@ -1225,6 +1239,7 @@ class ToolExecutor:
                         "terminal",
                         "terminal_status",
                         "terminal_output",
+                        "terminal_send",
                         "terminal_kill",
                     ):
                         logger.debug(
@@ -1267,6 +1282,9 @@ class ToolExecutor:
                         mark_tool_execution()
                         result = await self._execute_file_operation(tool_data)
                         logger.debug(f"_execute_file_operation completed for {tool_id}")
+                    elif tool_type in ("sandbox_promote", "sandbox-promote"):
+                        mark_tool_execution()
+                        result = await self._execute_sandbox_promote(tool_data)
                     elif tool_type in ("workspace_set", "workspace-set"):
                         logger.debug(
                             f"About to call _execute_workspace_set for {tool_id}"
@@ -1345,7 +1363,7 @@ class ToolExecutor:
                     tool_id=tool_id,
                     tool_type=tool_type,
                     success=False,
-                    error=f"Tool execution error: {str(e)}",
+                    error=f"Tool execution error: {str(e) or type(e).__name__}",
                 )
 
             # Update execution time
@@ -1370,7 +1388,7 @@ class ToolExecutor:
                 tool_id=tool_id,
                 tool_type=tool_type,
                 success=False,
-                error=f"Execution error: {str(e)}",
+                error=f"Execution error: {str(e) or type(e).__name__}",
                 execution_time=execution_time,
             )
 
@@ -1508,6 +1526,8 @@ class ToolExecutor:
             return await self._execute_terminal_status(tool_data)
         elif tool_type == "terminal_output":
             return await self._execute_terminal_output(tool_data)
+        elif tool_type == "terminal_send":
+            return await self._execute_terminal_send(tool_data)
         elif tool_type == "terminal_kill":
             return await self._execute_terminal_kill(tool_data)
 
@@ -1700,12 +1720,69 @@ class ToolExecutor:
             )
 
         if not session_name:
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                tool_type="terminal_output",
-                success=False,
-                error="Session name required",
+            try:
+                status = await self.tmux_plugin.get_session_status("*")
+            except Exception as e:
+                logger.error(f"Error listing terminal sessions: {e}")
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error="Session name required; unable to list active terminal sessions",
+                )
+
+            if not isinstance(status, dict) or not status.get("success"):
+                message = (
+                    status.get("message", "") if isinstance(status, dict) else ""
+                )
+                error = "Session name required; unable to list active terminal sessions"
+                if message:
+                    error = f"{error}: {message}"
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=error,
+                )
+
+            session_list = status.get("sessions")
+            sessions = (
+                [
+                    session
+                    for session in session_list
+                    if isinstance(session, dict)
+                    and isinstance(session.get("name"), str)
+                    and session["name"].strip()
+                    and str(session.get("status", "")).lower() == "alive"
+                ]
+                if isinstance(session_list, list)
+                else []
             )
+            if len(sessions) == 1:
+                session_name = sessions[0].get("name", "")
+            elif not sessions:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=(
+                        "Session name required; no active terminal sessions. "
+                        "Use terminal-status to list sessions."
+                    ),
+                )
+            else:
+                names = ", ".join(
+                    str(session.get("name", "?")) for session in sessions
+                )
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=(
+                        "Session name required; multiple active terminal sessions: "
+                        f"{names}. Use terminal_output with one of these names."
+                    ),
+                )
 
         try:
             result = await self.tmux_plugin.capture_session_output(
@@ -1779,6 +1856,60 @@ class ToolExecutor:
             logger.error(f"Error killing terminal session: {e}")
             return ToolExecutionResult(
                 tool_id=tool_id, tool_type="terminal_kill", success=False, error=str(e)
+            )
+
+    async def _execute_terminal_send(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Send one line of input to a named background terminal session."""
+        tool_id = tool_data.get("id", "unknown")
+        arguments = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        session_name = (
+            tool_data.get("session_name")
+            or arguments.get("session_name")
+        )
+        text = tool_data.get("text", arguments.get("text"))
+
+        if not self.tmux_plugin:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Tmux plugin not available",
+            )
+        if not isinstance(session_name, str) or not session_name.strip():
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Session name required",
+            )
+        if not isinstance(text, str):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Text must be a string",
+            )
+
+        try:
+            result = self.tmux_plugin.send_to_session(session_name.strip(), text)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=result.get("success", False),
+                output=result.get("message", ""),
+                error="" if result.get("success") else result.get("message", ""),
+            )
+        except Exception as e:
+            logger.error(f"Error sending input to terminal session: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error=str(e),
             )
 
     async def _execute_mcp_tool(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
@@ -1973,6 +2104,35 @@ class ToolExecutor:
         if not path.is_absolute() and self.workspace is not None:
             path = self.workspace / path
         return path.resolve()
+
+    async def _execute_sandbox_promote(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Validate a scratch checkout and issue a promotion token (#725)."""
+        args = tool_data.get("arguments") or {}
+        scratch = tool_data.get("scratch") or args.get("scratch") or ""
+        root = tool_data.get("root") or args.get("root") or ""
+        tool_id = tool_data.get("id", "unknown")
+        if not scratch or not root:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="sandbox_promote",
+                success=False,
+                error="sandbox-promote needs both scratch and root",
+            )
+        outcome = await asyncio.to_thread(
+            self.sandbox_gate.promote,
+            self._resolve_workspace_path(scratch),
+            self._resolve_workspace_path(root),
+        )
+        ok = outcome["success"]
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="sandbox_promote",
+            success=ok,
+            output=outcome["message"] if ok else "",
+            error="" if ok else outcome["message"],
+        )
 
     async def _execute_workspace_set(
         self, tool_data: Dict[str, Any]

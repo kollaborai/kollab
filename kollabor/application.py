@@ -15,7 +15,12 @@ from kollabor_agent import AgentManager
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_ai import KollaborConversationLogger, ProfileManager
-from kollabor_ai.loadout_manager import InvalidACPLoadoutError, acp_loadout_model, validate_acp_loadout
+from kollabor_ai.loadout_manager import (
+    InvalidACPLoadoutError,
+    acp_loadout_model,
+    loadout_sendable_effort,
+    validate_acp_loadout,
+)
 from kollabor_config import ConfigService, local_ipc
 from kollabor_events import EventBus
 from kollabor_events.dict_utils import deep_merge
@@ -197,13 +202,13 @@ class TerminalLLMChat:
             if not self._attach_socket:
                 # List available agents
                 available = []
-                from plugins.hub.presence import get_presence_dir, pid_alive
+                from plugins.hub.presence import _presence_files, get_presence_dir, pid_alive
 
                 presence_dir = get_presence_dir()
                 if presence_dir.exists():
                     import json as _j
 
-                    for f in presence_dir.glob("*.json"):
+                    for f in _presence_files(presence_dir):
                         try:
                             d = _j.loads(f.read_text())
                             pid = d.get("pid", 0)
@@ -349,8 +354,11 @@ class TerminalLLMChat:
                         }
                         if loadout.temperature is not None:
                             update_kwargs["temperature"] = loadout.temperature
-                        if loadout.effort:
-                            update_kwargs["effort"] = loadout.effort
+                        loadout_effort = loadout_sendable_effort(
+                            self.profile_manager, loadout
+                        )
+                        if loadout_effort:
+                            update_kwargs["effort"] = loadout_effort
                         if loadout.max_tokens is not None:
                             update_kwargs["max_tokens"] = loadout.max_tokens
                         applied = self.profile_manager.update_profile(
@@ -400,8 +408,13 @@ class TerminalLLMChat:
                     update_kwargs = {"model": loadout.model, "save_to_config": False}
                     if not is_acp_loadout and loadout.temperature is not None:
                         update_kwargs["temperature"] = loadout.temperature
-                    if not is_acp_loadout and loadout.effort:
-                        update_kwargs["effort"] = loadout.effort
+                    loadout_effort = (
+                        ""
+                        if is_acp_loadout
+                        else loadout_sendable_effort(self.profile_manager, loadout)
+                    )
+                    if loadout_effort:
+                        update_kwargs["effort"] = loadout_effort
                     if not is_acp_loadout and loadout.max_tokens is not None:
                         update_kwargs["max_tokens"] = loadout.max_tokens
 
@@ -1126,12 +1139,12 @@ class TerminalLLMChat:
         """
         import json as _json
 
-        from plugins.hub.presence import get_presence_dir, pid_alive
+        from plugins.hub.presence import _presence_files, get_presence_dir, pid_alive
 
         presence_dir = get_presence_dir()
         if not presence_dir.exists():
             return None
-        for f in presence_dir.glob("*.json"):
+        for f in _presence_files(presence_dir):
             try:
                 data = _json.loads(f.read_text())
                 if data.get("identity") == identity:
@@ -1547,6 +1560,39 @@ class TerminalLLMChat:
                 return
             await asyncio.sleep(1.0 if create_time is not None else 10.0)
 
+    def _boot_projects_sweep(self) -> None:
+        """Issue #647: retire orphaned project state directories at boot.
+
+        Orphans move to ``_trash`` (recoverable, 14 day retention) and truly
+        empty shells are removed; nothing with content is deleted at boot.
+        Trash purges happen only through ``kollab --cleanup-projects --execute``.
+        Any failure is logged and swallowed so startup never depends on
+        housekeeping.
+        """
+        try:
+            if not self.config.get("kollabor.projects.sweep_boot_enabled", True):
+                return
+            from kollabor_config.projects_sweep import run_projects_sweep
+
+            plan, _report = run_projects_sweep(
+                mode="boot",
+                own_project=Path.cwd(),
+                active_window_hours=float(
+                    self.config.get("kollabor.projects.active_window_hours", 24)
+                ),
+                retention_days=float(
+                    self.config.get("kollabor.projects.retention_days", 14)
+                ),
+            )
+            if plan.quarantines or plan.empty_shells:
+                logger.info(
+                    "boot projects sweep: %d quarantined, %d empty shells removed",
+                    len(plan.quarantines),
+                    len(plan.empty_shells),
+                )
+        except Exception:
+            logger.warning("boot projects sweep failed", exc_info=True)
+
     async def _deferred_startup(self, initial_message: str | None = None) -> None:
         """Run heavy initialization in background after render loop starts.
 
@@ -1556,6 +1602,8 @@ class TerminalLLMChat:
         """
         self._startup_error = ""
         try:
+            self._boot_projects_sweep()
+
             # Fire-and-forget: version check (network, 5s timeout)
             self.create_background_task(self._check_for_updates(), "version_check")
 

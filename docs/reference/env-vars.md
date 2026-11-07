@@ -84,8 +84,10 @@ Path is encoded the same way as `~/.kollab/projects/<encoded-path>/`.
 
 ### KOLLAB_HUB_PROJECT_SCOPED
 
-Silo hub state (presence, vaults, sockets) under the current project
-instead of the global `~/.kollab/hub/`. This is enabled by default.
+Silo hub metadata and vaults under the current project instead of the
+global `~/.kollab/hub/`. This is enabled by default. On POSIX, live
+presence records and sockets use a separate project-hashed runtime directory
+that is independent of `HOME`; Windows keeps presence in per-user state.
 
 ```bash
 KOLLAB_HUB_PROJECT_SCOPED=1 kollab --agent coder --as lapis

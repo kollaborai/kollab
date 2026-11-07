@@ -8,6 +8,7 @@ import {
   profileTargetLabel,
   shouldSubmitBaseUrlUpdate,
 } from "./profile-target";
+import { sendsAnthropic } from "./profile-effort";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -117,6 +118,8 @@ export function ProfilesDialog({
   const [invalidProfiles, setInvalidProfiles] = useState<Record<string, string>>({});
   const [copyingFrom, setCopyingFrom] = useState<string | null>(null);
   const [originalBaseUrl, setOriginalBaseUrl] = useState("");
+  // The provider the server resolved for the saved profile: an auto profile's key is redacted in GET.
+  const [savedEffortProvider, setSavedEffortProvider] = useState("");
   const [baseUrlHasHiddenData, setBaseUrlHasHiddenData] = useState(false);
   const [replaceHiddenBaseUrl, setReplaceHiddenBaseUrl] = useState(false);
   const loadWarnings = profileLoadWarningLines(invalidProfiles);
@@ -147,6 +150,7 @@ export function ProfilesDialog({
     setEditing(null);
     setCopyingFrom(null);
     setOriginalBaseUrl("");
+    setSavedEffortProvider("");
     setBaseUrlHasHiddenData(false);
     setReplaceHiddenBaseUrl(false);
     setDraft(EMPTY_DRAFT);
@@ -174,6 +178,7 @@ export function ProfilesDialog({
     setOriginalBaseUrl(p.base_url ?? "");
     setBaseUrlHasHiddenData(Boolean(p.base_url_has_hidden_data));
     setReplaceHiddenBaseUrl(false);
+    setSavedEffortProvider(p.effort_provider ?? "");
     setDraft(fromProfile(p, p.name));
     setError(null);
     setTestResult(null);
@@ -193,6 +198,7 @@ export function ProfilesDialog({
     setOriginalBaseUrl(p.base_url ?? "");
     setBaseUrlHasHiddenData(Boolean(p.base_url_has_hidden_data));
     setReplaceHiddenBaseUrl(false);
+    setSavedEffortProvider(p.effort_provider ?? "");
     setDraft(fromProfile(p, name));
     setError(null);
     setTestResult(null);
@@ -307,21 +313,25 @@ export function ProfilesDialog({
           {profiles.map((p) => (
             <div
               key={p.name}
-              className="flex items-center gap-2 rounded-md bg-muted/30 p-2"
+              className="flex min-w-0 flex-wrap items-center gap-2 rounded-md bg-muted/30 p-2"
             >
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">{p.name}</div>
-                <div className="text-muted-foreground truncate text-xs">
+              <div className="min-w-0 flex-1 basis-56">
+                <div className="text-sm font-medium break-words">{p.name}</div>
+                <div
+                  className="text-muted-foreground text-xs"
+                  data-testid="profile-meta"
+                >
                   {[p.provider, p.model, p.effort && `${p.effort} effort`]
                     .filter(Boolean)
                     .join(" · ")}
                 </div>
                 {profileTargetLabel(p) && (
-                  <div className="truncate text-xs" title={profileTargetLabel(p) ?? undefined}>
+                  <div className="text-xs break-words" title={profileTargetLabel(p) ?? undefined}>
                     {profileTargetLabel(p)}
                   </div>
                 )}
               </div>
+              <div className="flex shrink-0 gap-1">
               <Button
                 variant="ghost"
                 size="sm"
@@ -360,6 +370,7 @@ export function ProfilesDialog({
               >
                 <Trash2 className="size-4" />
               </Button>
+              </div>
             </div>
           ))}
           {profiles.length === 0 && (
@@ -512,7 +523,11 @@ export function ProfilesDialog({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="">Model Default</SelectItem>
-                  {EFFORT_LEVELS.map((level) => (
+                  {EFFORT_LEVELS.filter(
+                    (level) =>
+                      !sendsAnthropic(draft, savedEffortProvider) ||
+                      (level !== "none" && level !== "minimal"),
+                  ).map((level) => (
                     <SelectItem key={level} value={level}>
                       {level}
                     </SelectItem>
