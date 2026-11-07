@@ -124,7 +124,9 @@ What option A still cannot stop, stated so nobody claims more:
 - `kollab service` agents come back by themselves: systemd `Restart=always`
   and launchd `KeepAlive: true` (`kollabor/service.py:81`, `:99`).
 - `presence.live_agents_on_machine()` (`plugins/hub/presence.py:128`) finds
-  every agent that wrote presence. Presence does not record argv, start mode,
+  every live agent that wrote presence. POSIX records share the HOME-independent
+  project-hashed socket directories; current-HOME paths remain a legacy fallback.
+  Presence does not record argv, start mode,
   loadout, `--as` or `KOLLAB_LAUNCH_BRIEF` (`kollabor_agent/runtime.py:624`);
   pipe runs and `KOLLAB_NO_HUB` runs write none.
 - `kollab_argv()` (`kollabor/binary.py:46` to `:51`) returns the binary or app
@@ -243,6 +245,12 @@ counting machines:
   Settings → Network show that line as the offer's `reason` (#355). Every admission names its admitter's
   machine key, so a machine's admission chain is its admitter, that machine's
   admitter, and so on up to the founder.
+- An offer also refuses before any relay request when the discovery origin is not
+  on port 443 (`enrollment_client.ORIGIN_PORT_REFUSAL`: `Enrollment needs port 443,
+  but this network's origin uses port <port>.`). That line travels as the same
+  `reason` (`EnrollmentProtocolError.refusal` -> `_offer_failed`), so the Connect
+  screen names the cause instead of "could not create a code" (#693). Enrollment
+  still requires 443; only the explanation is new.
 - Why both (R5-1): without them a counting machine C could admit a fake F1
   (another `HOME`), have F1 admit a fake F2, and confirm F2 itself, since C is
   not F2's direct admitter. Now F1 cannot admit, and C, being in F2's chain,

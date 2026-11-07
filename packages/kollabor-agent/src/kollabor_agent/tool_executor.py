@@ -16,6 +16,7 @@ from kollabor_events.models import EventType
 
 from .file_operations_executor import FileOperationsExecutor
 from .mcp_integration import MCPIntegration
+from .sandbox_gate import SandboxGate
 from .shell_executor import ShellExecutor
 from .tool_output_budget import ToolOutputArtifactStore
 from .voice_admission import is_voice_origin
@@ -131,6 +132,8 @@ class ToolExecutor:
         self.shell_executor = ShellExecutor(interactive=interactive_shell)
         self._voice_tool_guard = VoiceToolExecutionGuard()
         self.yes_approvals = YesApprovals()
+        # Promotion gate (#725): off unless sandbox_gate.enabled.
+        self.sandbox_gate = SandboxGate(config)
         # Trust All, kept in step by PermissionManager: a voice turn then runs its
         # tools as a typed one does, with no voice list and no spoken yes.
         self.trust_all = False
@@ -682,6 +685,17 @@ class ToolExecutor:
                 metadata={"scope_denied": True},
             )
 
+        gate_refusal = self.sandbox_gate.check(tool_data, self.workspace or Path.cwd())
+        if gate_refusal:
+            logger.warning(f"Tool {tool_id} refused by sandbox gate")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=gate_refusal,
+                metadata={"sandbox_gate": True},
+            )
+
         # Set tool executing state for spinner animation
         tool_name = self._get_display_name(tool_data)
         self.tool_executing = True  # watchdog: real work in flight
@@ -800,6 +814,9 @@ class ToolExecutor:
                         mark_tool_execution()
                         result = await self._execute_file_operation(tool_data)
                         logger.debug(f"_execute_file_operation completed for {tool_id}")
+                    elif tool_type in ("sandbox_promote", "sandbox-promote"):
+                        mark_tool_execution()
+                        result = await self._execute_sandbox_promote(tool_data)
                     elif tool_type in ("workspace_set", "workspace-set"):
                         logger.debug(
                             f"About to call _execute_workspace_set for {tool_id}"
@@ -878,7 +895,7 @@ class ToolExecutor:
                     tool_id=tool_id,
                     tool_type=tool_type,
                     success=False,
-                    error=f"Tool execution error: {str(e)}",
+                    error=f"Tool execution error: {str(e) or type(e).__name__}",
                 )
 
             # Update execution time
@@ -903,7 +920,7 @@ class ToolExecutor:
                 tool_id=tool_id,
                 tool_type=tool_type,
                 success=False,
-                error=f"Execution error: {str(e)}",
+                error=f"Execution error: {str(e) or type(e).__name__}",
                 execution_time=execution_time,
             )
 
@@ -1511,6 +1528,35 @@ class ToolExecutor:
         if not path.is_absolute() and self.workspace is not None:
             path = self.workspace / path
         return path.resolve()
+
+    async def _execute_sandbox_promote(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Validate a scratch checkout and issue a promotion token (#725)."""
+        args = tool_data.get("arguments") or {}
+        scratch = tool_data.get("scratch") or args.get("scratch") or ""
+        root = tool_data.get("root") or args.get("root") or ""
+        tool_id = tool_data.get("id", "unknown")
+        if not scratch or not root:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="sandbox_promote",
+                success=False,
+                error="sandbox-promote needs both scratch and root",
+            )
+        outcome = await asyncio.to_thread(
+            self.sandbox_gate.promote,
+            self._resolve_workspace_path(scratch),
+            self._resolve_workspace_path(root),
+        )
+        ok = outcome["success"]
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="sandbox_promote",
+            success=ok,
+            output=outcome["message"] if ok else "",
+            error="" if ok else outcome["message"],
+        )
 
     async def _execute_workspace_set(
         self, tool_data: Dict[str, Any]

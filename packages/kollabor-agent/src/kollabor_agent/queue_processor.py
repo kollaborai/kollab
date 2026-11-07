@@ -25,7 +25,13 @@ from kollabor_ai.message_content import (
     content_to_text,
     prepend_text,
     redact_error_media,
-    safe_provider_error_code,
+)
+from kollabor_ai.providers.errors import (
+    StructuredErrorInfo,
+    structured_error_info,
+)
+from kollabor_ai.providers.errors import (
+    is_context_overflow as is_context_overflow_info,
 )
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
@@ -52,6 +58,27 @@ logger = logging.getLogger(__name__)
 CancellationOrigin = Literal["human", "remote_task", "external"]
 
 
+def publish_turn_error(
+    renderer: Any, message: str, info: "StructuredErrorInfo"
+) -> None:
+    """Emit the turn's error event with its structured classification.
+
+    The message is display data; the structured fields are the signal every
+    downstream consumer (engine, web UI, ACP clients) classifies by (#720).
+    """
+
+    publish_semantic(
+        renderer,
+        "error",
+        message=message,
+        error_class=info.error_class,
+        code=info.error_code,
+        provider=info.provider,
+        retryable=info.retryable,
+        cause=info.cause,
+    )
+
+
 @dataclass
 class TaggedInput:
     """Typed input a client follows by request id (#551).
@@ -63,6 +90,17 @@ class TaggedInput:
 
     content: MessageContent
     request_ids: tuple[str, ...]
+    # Admission serial frozen at admission (#676 r7): the monotonic ticket
+    # this turn claimed when it was admitted. Cursor writes resolve by
+    # admission order, so the ticket travels with the item like parent_uuid.
+    admission_serial: int | None = None
+    # Chain position frozen at admission (#676): the parent this turn's user
+    # row was logged under. The queue must parent from this, not from the
+    # mutable ``current_parent_uuid`` pointer a detached completion (hub
+    # mention, voice reply) may advance while the input sits queued.
+    parent_uuid: str | None = None
+    # Authenticated operator words carried to the resulting history message.
+    operator_inputs: tuple[dict[str, str], ...] = ()
 
 
 def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
@@ -80,6 +118,15 @@ class QueuedInput:
     # Marks a system-initiated corrective nudge (first-turn stall revival,
     # #453): never resets the nudge budget, so it cannot loop.
     is_system_nudge: bool = False
+    # Admission serial frozen at admission (#676 r7); see
+    # TaggedInput.admission_serial. Nudges leave it None; cursor writes for
+    # batches without an admission ticket are rejected by LLMService.
+    admission_serial: int | None = None
+    # Chain position frozen at admission (#676); see TaggedInput.parent_uuid.
+    # Nudges leave it None and keep the pointer fallback.
+    parent_uuid: str | None = None
+    # Authenticated operator words carried to the resulting history message.
+    operator_inputs: tuple[dict[str, str], ...] = ()
 
 
 _UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")
@@ -410,19 +457,18 @@ _TIMEOUT_EXCEPTION_NAMES = frozenset(
         "ConnectionTimeoutError",
     }
 )
-_TIMEOUT_MESSAGE_MARKERS = ("timed out", "request timeout")
-
-
 def _is_timeout_exception(exc: BaseException) -> bool:
-    """Best-effort timeout classification across provider SDKs.
+    """Timeout classification across provider SDKs, by type only.
 
-    The SDKs raise unrelated timeout hierarchies, so match on the type
-    name and on common message markers instead of importing them all.
+    The SDKs raise unrelated timeout hierarchies, so match on the class
+    name and the structured boundary classification instead of importing
+    them all. Rendered message text is display data (#549, #720): an
+    untyped exception whose text says "timed out" is not a timeout, and
+    retrying on that guess duplicates side effects.
     """
     if type(exc).__name__ in _TIMEOUT_EXCEPTION_NAMES:
         return True
-    text = str(exc).lower()
-    return any(marker in text for marker in _TIMEOUT_MESSAGE_MARKERS)
+    return structured_error_info(exc).error_class == "timeout"
 
 
 
@@ -626,6 +672,8 @@ class QueueProcessor:
         # the goal driver pauses on provider errors instead of burning
         # turns against a dead endpoint. Cleared at turn start.
         self.last_turn_error: str | None = None
+        self.last_turn_error_code: str | None = None
+        self.last_turn_error_class: str | None = None
 
         # Mutex to prevent concurrent _execute_llm_turn calls. Without this,
         # _hub_continue and process_queue can interleave turns (evidence:
@@ -882,8 +930,14 @@ class QueueProcessor:
             QueuedInput(content=content, voice={}, is_system_nudge=True)
         )
 
-    async def enqueue(self, message: MessageContent) -> None:
-        """Enqueue message with overflow strategy."""
+    async def enqueue(self, message: MessageContent) -> bool:
+        """Enqueue message with overflow strategy.
+
+        Returns True only when the message entered the queue and will run. False
+        means it never will: the strategy dropped it, or a Stop swept it while it
+        waited for room. Its stream has already ended, so callers must not report
+        it as accepted (#589).
+        """
         # Watchdog heartbeat: new work arriving is activity — keeps a session
         # that just received a message from being flagged as wedged.
         self.mark_progress()
@@ -891,7 +945,7 @@ class QueueProcessor:
             # Voice admission must never acknowledge a message silently dropped
             # by an overflow strategy. Reject before modifying the queue.
             self.processing_queue.put_nowait(message)
-            return
+            return True
         self._queue_metrics["total_enqueue_attempts"] += 1
 
         if self.task_config.queue.log_queue_events:
@@ -905,7 +959,7 @@ class QueueProcessor:
             self._queue_metrics["total_enqueue_successes"] += 1
             if self.task_config.queue.log_queue_events:
                 logger.debug("Message enqueued successfully")
-            return
+            return True
         except asyncio.QueueFull:
             pass
 
@@ -914,16 +968,19 @@ class QueueProcessor:
 
         try:
             if strategy == "drop_oldest":
-                await self._drop_oldest_strategy(message)
+                admitted = await self._drop_oldest_strategy(message)
             elif strategy == "drop_newest":
-                self._drop_newest_strategy()
+                self._drop_newest_strategy()  # always raises: the new message is refused
+                admitted = False
             elif strategy == "block":
-                await self._block_strategy(message)
+                admitted = await self._block_strategy(message)
             else:
-                self._unknown_strategy(message)
+                admitted = self._unknown_strategy(message)
         except RuntimeError:
             self._end_dropped(message)  # refused: it never runs, so its stream ends now
             raise
+        if not admitted:
+            return False
         if (
             getattr(self, "_cancel_generation", 0) != generation
             and isinstance(message, TaggedInput)
@@ -932,6 +989,8 @@ class QueueProcessor:
             # A Stop swept the queue while this waited for room: no drain runs it
             # until the next message, so it ends as the swept ones did.
             self._end_queued(message)
+            return False
+        return True
 
     def _end_dropped(
         self,
@@ -958,8 +1017,8 @@ class QueueProcessor:
         publish_semantic(self.renderer, "error", request_ids=ids, message=why)
         publish_semantic(self.renderer, "turn_complete", stop_reason="error", request_ids=ids)
 
-    async def _drop_oldest_strategy(self, message: MessageContent) -> None:
-        """Drop oldest task to make room."""
+    async def _drop_oldest_strategy(self, message: MessageContent) -> bool:
+        """Drop oldest task to make room. False when a rival took the freed slot (#589)."""
         if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
             raise RuntimeError("Queue is full; cannot discard an admitted voice request")
         if self.task_config.queue.log_queue_events:
@@ -981,9 +1040,11 @@ class QueueProcessor:
         try:
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
+            return True
         except asyncio.QueueFull:
             self.dropped_messages += 1
             self._end_dropped(message)
+            return False
 
     def _drop_newest_strategy(self) -> None:
         """Raise error when queue is full."""
@@ -994,8 +1055,8 @@ class QueueProcessor:
             f"Queue is full (max size: {self.max_queue_size}) and overflow strategy is 'drop_newest'"
         )
 
-    async def _block_strategy(self, message: MessageContent) -> None:
-        """Block until queue has space or timeout."""
+    async def _block_strategy(self, message: MessageContent) -> bool:
+        """Block until queue has space or timeout. False when the timeout dropped it (#589)."""
         self._queue_metrics["block_count"] += 1
         if self.task_config.queue.log_queue_events:
             logger.debug(
@@ -1010,7 +1071,7 @@ class QueueProcessor:
                 try:
                     self.processing_queue.put_nowait(message)
                     self._queue_metrics["total_enqueue_successes"] += 1
-                    return
+                    return True
                 except asyncio.QueueFull:
                     pass
 
@@ -1026,11 +1087,11 @@ class QueueProcessor:
                     )
                 self.dropped_messages += 1
                 self._end_dropped(message)
-                return
+                return False
 
             await asyncio.sleep(poll_interval)
 
-    def _unknown_strategy(self, message: MessageContent) -> None:
+    def _unknown_strategy(self, message: MessageContent) -> bool:
         """Handle unknown overflow strategy."""
         if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
             raise RuntimeError("Queue is full; cannot discard an admitted voice request")
@@ -1041,9 +1102,11 @@ class QueueProcessor:
             self._end_dropped(self.processing_queue.get_nowait())
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
+            return True
         except asyncio.QueueEmpty:
             self.dropped_messages += 1
             self._end_dropped(message)
+            return False
 
     def note_chain_end(self) -> None:
         """Tell the hub a whole chain just ended (a remote request's turn ends here).
@@ -1122,7 +1185,9 @@ class QueueProcessor:
                     except Exception as e:
                         logger.error(f"Queue processing error: {e}")
                         error_msg = str(e)
-                        if "'str' object has no attribute 'get'" in error_msg:
+                        # Typed classification only: the parse boundary raises
+                        # APIFormatMismatchError, never a text guess (#720).
+                        if structured_error_info(e).error_class == "api_format_mismatch":
                             error_msg = _API_FORMAT_MISMATCH_MESSAGE
                         self.last_turn_error = error_msg
                         self.message_display_service.display_error_message(error_msg)
@@ -1367,6 +1432,26 @@ class QueueProcessor:
             if isinstance(approvals, YesApprovals) and (note := approvals.take_note()):
                 metadata["injected_context"] = note  # what the user's yes approved, model-only
 
+            # Operator provenance was authenticated at the coordinator's input
+            # boundary. Copy it through the batch without interpreting content.
+            operator_inputs = [
+                {
+                    "source": record["source"],
+                    "timestamp": record["timestamp"],
+                    "text": record["text"],
+                }
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for record in item.operator_inputs
+                if isinstance(record, dict)
+                and all(
+                    isinstance(record.get(field), str)
+                    for field in ("source", "timestamp", "text")
+                )
+            ]
+            if operator_inputs:
+                metadata["operator_inputs"] = operator_inputs
+
             # Add user message to conversation history
             self._add_message_fn(
                 ConversationMessage(role="user", content=combined_message, metadata=metadata),
@@ -1487,6 +1572,8 @@ class QueueProcessor:
         async with self._turn_lock:
             await self._run_after_turn()  # a talk-over's cut of an earlier turn lands first
             self.last_turn_error = None
+            self.last_turn_error_code = None
+            self.last_turn_error_class = None
             # Stamped under the lock: a turn still running when this one was
             # queued clears its own stamp as it ends, never this one's. A chain
             # this batch cuts into still owes its requests their completion, so
@@ -1510,11 +1597,21 @@ class QueueProcessor:
                 # call) kills its chain, whichever driver then swallows it.
                 if not self.cancel_processing:
                     self.last_turn_error = str(exc) or type(exc).__name__
+                    turn_exc_info = structured_error_info(exc)
+                    self.last_turn_error_code = turn_exc_info.error_code
+                    self.last_turn_error_class = turn_exc_info.error_class
                 if self.active_request_ids:
                     # It died before its body could answer them: their streams
                     # end on this turn, not on whichever turn runs next (#551).
                     if self.last_turn_error:
-                        publish_semantic(self.renderer, "error", message=self.last_turn_error)
+                        publish_semantic(
+                            self.renderer,
+                            "error",
+                            message=self.last_turn_error,
+                            error_class=getattr(self, "last_turn_error_class", None),
+                            code=getattr(self, "last_turn_error_code", None),
+                            retryable=False,
+                        )
                     publish_semantic(
                         self.renderer, "turn_complete",
                         stop_reason="error" if self.last_turn_error else "end_turn",
@@ -1814,7 +1911,7 @@ class QueueProcessor:
                     del self.conversation_history[-continuation_msg_count:]
 
             # Update session stats with actual token usage (accumulated across continuations)
-            token_usage = self.api_service.get_last_token_usage()
+            token_usage = self.api_service.get_last_token_usage() or {}
             prompt_tokens = accumulated_tokens["prompt"]
             completion_tokens = accumulated_tokens["completion"]
             cache_creation_tokens = accumulated_tokens["cache_creation"]
@@ -1826,7 +1923,11 @@ class QueueProcessor:
             usage_is_estimated = (
                 bool(accumulated_tokens["estimated"]) or final_usage_estimated
             )
-            if token_usage:
+            # A cut reply's earlier calls were billed even when the last call
+            # came back without a usage trailer, so they still count (#421).
+            if token_usage or prompt_tokens or completion_tokens or (
+                cache_creation_tokens or cache_read_tokens
+            ):
                 prompt_tokens += token_usage.get("prompt_tokens", 0)
                 completion_tokens += token_usage.get("completion_tokens", 0)
                 cache_creation_tokens += token_usage.get("cache_creation_tokens", 0)
@@ -1855,8 +1956,13 @@ class QueueProcessor:
                 # Store and accumulate stats. input_tokens is the context size:
                 # the last request already carried the whole conversation, so
                 # a continuation's summed prompts would count it twice (#396)
-                self.session_stats["input_tokens"] = token_usage.get("prompt_tokens", 0)
-                self.session_stats["input_tokens_estimated"] = final_usage_estimated
+                if token_usage:
+                    self.session_stats["input_tokens"] = token_usage.get(
+                        "prompt_tokens", 0
+                    )
+                    self.session_stats["input_tokens_estimated"] = (
+                        final_usage_estimated
+                    )
                 self.session_stats["output_tokens"] = completion_tokens
                 # Cache metrics (anthropic + openai)
                 self.session_stats["cache_creation_tokens"] = cache_creation_tokens
@@ -2246,22 +2352,29 @@ class QueueProcessor:
                 # Inline XML/plugin calls may run beside native calls.
                 tool_call_entries = [*(tool_call_entries or []), *_xml_tool_call_entries(all_tools)]
 
-            # Log assistant response
+            # Log assistant response. A failed write keeps the chain on the previous
+            # record; the reply still goes into the in-memory history below.
             thinking_list = thinking_blocks if thinking_blocks else None
-            parent_uuid = await self.conversation_logger.log_assistant_message(
-                clean_response or response,
-                parent_uuid=parent_uuid,
-                model=self.api_service.model,
-                usage_stats={
-                    "input_tokens": self.session_stats.get("input_tokens", 0),
-                    "output_tokens": self.session_stats.get("output_tokens", 0),
-                    "thinking_duration": thinking_duration,
-                },
-                thinking_content=thinking_list,
-                tool_calls=tool_call_entries,
-                provider_reasoning=_last_provider_reasoning(self.api_service),
-                voice_turn_id=self._voice_turn_metadata().get("voice_turn_id"),
-            )
+            try:
+                parent_uuid = await self.conversation_logger.log_assistant_message(
+                    clean_response or response,
+                    parent_uuid=parent_uuid,
+                    model=self.api_service.model,
+                    usage_stats={
+                        "input_tokens": self.session_stats.get("input_tokens", 0),
+                        "output_tokens": self.session_stats.get("output_tokens", 0),
+                        "thinking_duration": thinking_duration,
+                    },
+                    thinking_content=thinking_list,
+                    tool_calls=tool_call_entries,
+                    provider_reasoning=_last_provider_reasoning(self.api_service),
+                    voice_turn_id=self._voice_turn_metadata().get("voice_turn_id"),
+                )
+            except Exception as exc:
+                logger.error("Assistant reply not written to history: %s", exc)
+                self.message_display_service.display_system_message(
+                    "Conversation history not saved for this reply."
+                )
 
             # Add assistant message to conversation history
             # BRANCH POINT: history format differs between native and XML paths
@@ -2310,13 +2423,16 @@ class QueueProcessor:
                 for result in native_results:
                     output_text = result.output if result.success else result.error
                     result_entry = _xml_tool_result_entry(result, output_text)
-                    await self.conversation_logger.log_system_message(
-                        f"Executed {result.tool_type} ({result.tool_id}): {output_text}",
-                        parent_uuid=parent_uuid,
-                        subtype="tool_result",
-                        tool_use_id=result.tool_id,
-                        tool_result=result_entry,
-                    )
+                    try:
+                        await self.conversation_logger.log_system_message(
+                            f"Executed {result.tool_type} ({result.tool_id}): {output_text}",
+                            parent_uuid=parent_uuid,
+                            subtype="tool_result",
+                            tool_use_id=result.tool_id,
+                            tool_result=result_entry,
+                        )
+                    except Exception as exc:
+                        logger.error("Tool result not written to history: %s", exc)
                     tool_calls_list = self.api_service.get_last_tool_calls()
                     for tc in tool_calls_list:
                         if tc.id == result.tool_id:
@@ -2361,13 +2477,16 @@ class QueueProcessor:
                         output = result.output if result.success else result.error
                         tool_context = self.tool_executor.format_result_for_conversation(result)
                         result_entry = _xml_tool_result_entry(result, tool_context)
-                        await self.conversation_logger.log_system_message(
-                            f"Executed {result.tool_type} ({result.tool_id}): {output}",
-                            parent_uuid=parent_uuid,
-                            subtype="tool_result",
-                            tool_use_id=result.tool_id,
-                            tool_result=result_entry,
-                        )
+                        try:
+                            await self.conversation_logger.log_system_message(
+                                f"Executed {result.tool_type} ({result.tool_id}): {output}",
+                                parent_uuid=parent_uuid,
+                                subtype="tool_result",
+                                tool_use_id=result.tool_id,
+                                tool_result=result_entry,
+                            )
+                        except Exception as exc:
+                            logger.error("Tool result not written to history: %s", exc)
                         batched.append(f"Tool result: {tool_context}")
                         display_results.append(result_entry)
                         self._track_file_interaction(result)
@@ -2420,13 +2539,16 @@ class QueueProcessor:
                         output = result.output if result.success else result.error
                         tool_context = self.tool_executor.format_result_for_conversation(result)
                         result_entry = _xml_tool_result_entry(result, tool_context)
-                        await self.conversation_logger.log_system_message(
-                            f"Executed {result.tool_type} ({result.tool_id}): {output}",
-                            parent_uuid=parent_uuid,
-                            subtype="tool_result",
-                            tool_use_id=result.tool_id,
-                            tool_result=result_entry,
-                        )
+                        try:
+                            await self.conversation_logger.log_system_message(
+                                f"Executed {result.tool_type} ({result.tool_id}): {output}",
+                                parent_uuid=parent_uuid,
+                                subtype="tool_result",
+                                tool_use_id=result.tool_id,
+                                tool_result=result_entry,
+                            )
+                        except Exception as exc:
+                            logger.error("Tool result not written to history: %s", exc)
                         batched_tool_results.append(f"Tool result: {tool_context}")
                         display_results.append(result_entry)
                         self._track_file_interaction(result)
@@ -2499,37 +2621,26 @@ class QueueProcessor:
             logger.error(f"Error processing message: {type(e).__name__}: {redact_error_media(str(e))}")
             self.renderer.update_thinking(False)
             error_msg = redact_error_media(str(e)) or f"{type(e).__name__} (no details)"
-            if "'str' object has no attribute 'get'" in error_msg:
+            # Typed classification only: the parse boundary raises
+            # APIFormatMismatchError; rendered text is display data (#720).
+            info = structured_error_info(e)
+            if info.error_class == "api_format_mismatch":
+                error_msg = _API_FORMAT_MISMATCH_MESSAGE
+            elif "'str' object has no attribute 'get'" in error_msg:
+                # Bounded base-text fallback (restored from 72f6bc1d for
+                # #754): a payload-shape AttributeError past the parse
+                # boundaries still maps to the actionable mismatch message
+                # for display. Typed errors take precedence; this covers
+                # only that one exact shape-failure signature.
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
 
             # Publish a typed failure separately from the generic UI error.
             # Compaction hooks can react to context overflow, but the failed
-            # request is never resubmitted automatically.
-            error_code = getattr(e, "error_code", None) or getattr(e, "code", None)
-            nested_error = getattr(e, "error", None)
-            if not error_code and isinstance(nested_error, dict):
-                error_code = nested_error.get("code")
-            error_code = safe_provider_error_code(error_code)
-            error_code = error_code[:120] if error_code else None
-            error_text = str(e).lower()
-            context_window_exceeded = (
-                error_code
-                in {
-                    "model_context_window_exceeded",
-                    "context_window_exceeded",
-                    "context_length_exceeded",
-                }
-                or any(
-                    phrase in error_text
-                    for phrase in (
-                        "context window",
-                        "context_window",
-                        "maximum context length",
-                        "too many tokens",
-                        "prompt is too long",
-                    )
-                )
-            )
+            # request is never resubmitted automatically. Classification reads
+            # the structured type/code snapshot only — never the rendered
+            # message, which carries provider names and hints (#549, #720).
+            error_code = info.error_code
+            context_window_exceeded = is_context_overflow_info(info)
             event_bus = getattr(self, "event_bus", None)
             if event_bus is not None:
                 try:
@@ -2537,7 +2648,10 @@ class QueueProcessor:
                         EventType.LLM_REQUEST_ERROR,
                         {
                             "error_type": type(e).__name__,
+                            "error_class": info.error_class,
                             "error_code": error_code,
+                            "provider": info.provider,
+                            "retryable": info.retryable,
                             "context_window_exceeded": context_window_exceeded,
                         },
                         "llm_service",
@@ -2548,8 +2662,12 @@ class QueueProcessor:
             self.message_display_service.display_error_message(error_msg)
             # Web clients follow the turn through semantic events, not the
             # terminal's red line; without this a failed turn ends silently.
-            publish_semantic(self.renderer, "error", message=error_msg)
+            # The structured fields ride along so no consumer has to parse the
+            # message text to classify the failure (#720).
+            publish_turn_error(self.renderer, error_msg, info)
             self.last_turn_error = error_msg
+            self.last_turn_error_code = error_code
+            self.last_turn_error_class = info.error_class
             self.turn_completed = True
 
         # A turn is only done once no tool results need to go back to the model.

@@ -862,6 +862,8 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 
 **Pre-commit:** Commits to `kollabor/`, `plugins/`, and `tests/` must reference a GitHub issue.
 
+**Changelog:** a PR adds its entry as `changes/<issue>.<section>.md` (`changes/README.md`) and never edits `CHANGELOG.md` or `kollabor/updates/CHANGELOG.md`; `ci/standards-check` refuses that outside `release/` and `changelog/` branches. The release PR folds the entries in with `python scripts/changelog.py build` (#855).
+
 For Kollab, follow the canonical isolated-writer process in
 `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`. Each active writer claims one unique
 worktree, branch, and file scope based on freshly fetched `origin/main`;
@@ -872,7 +874,9 @@ changing those files. Do not edit, stage, commit, or push source there, and
 preserve existing dirty files and worktrees.
 
 Use scoped Conventional Commits and DRAFT PRs. Marco authorizes a concrete
-integration plan or bounded batch; its named integrator may mark covered PRs
+integration plan or bounded batch (a class order in his own words, such as
+"merge as many ready PRs as you can tonight", counts; see
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`); its named integrator may mark covered PRs
 ready and merge them after independent source review of the exact head, current
 base, required CI, and resolved conversations. Do not repeat permission for
 listed steps. A different AI agent must review every PR's exact final head and
@@ -880,8 +884,26 @@ record the GitHub approval as whichever account, `kollaborai` or `maarco`, is
 not the PR author. GitHub prohibits author self-approval. Record reviewer
 identity and exact reviewed SHA in private maintainer audit evidence; keep the
 GitHub approval plain, with no AI attribution or footer. A new head requires
-fresh review and CI. Every merge uses
+fresh review and CI. The review is clean-room and starts only on a current
+base: the reviewer has not seen the code before the review (not the author,
+not any agent in the writer's lane), works in a scratch environment, runs the
+tests, and posts a PR verdict recording the pinned head SHA, base SHA,
+commands run, and PASS or FAIL; review waits while the head is BEHIND or
+DIRTY against `main`, and a moved head or a relevant base move voids the
+verdict. A head moved only by merging `main` keeps its verdict only when an
+independent reviewer posts an addendum pinned to the new head and base,
+confirming the PR's own diff is unchanged apart from changelog lines and that
+nothing merged from `main` touches what the PR changes or relies on. Review
+findings are fixed red-first: land the failing regression test (alone, or
+marked strict `xfail`) before the fix, and the fix flips it green without
+editing the test; a finding no test can reproduce, such as wording in a doc,
+says so in its fix commit instead. Every merge uses
 `kollaborai` and a merge commit; never use `--admin` or a ruleset bypass.
+GitHub's merge queue is not on yet (#857): GitHub offers it only to repos
+owned by an organization, and this repo belongs to the personal account
+`kollaborai`. Until it moves, a PR behind `main` merges `main` into its branch
+before it lands. `ci.yml` already runs on `merge_group`, so the queue can be
+turned on as soon as the repo is in an organization.
 After code-owner enforcement is enabled, `.github/CODEOWNERS` covers every
 path and protects itself; one of `@maarco` or `@kollaborai` must approve. The
 other account approves PRs authored under either account. GitHub enforces the
@@ -919,9 +941,11 @@ a dedicated writer worktree and DRAFT PR, with the three required CI checks
 (`ci/security-scan`, `ci/standards-check`, `ci/tests`). Keep the integration
 checkout source-read-only.
 
-1. In a worktree branch from current `origin/main`, bump every package version
-   and inter-package constraint to `X.Y.Z`, update `uv.lock`, and move
-   `[Unreleased]` entries into matching byte-identical changelogs.
+1. In a worktree branch `release/X.Y.Z` from current `origin/main`, bump every
+   package version and inter-package constraint to `X.Y.Z`, update `uv.lock`,
+   run `python scripts/changelog.py build` to fold `changes/` into
+   `[Unreleased]`, and move `[Unreleased]` entries into matching byte-identical
+   changelogs.
 2. Commit by explicit paths, push normally, and open a DRAFT release PR.
    A different AI agent reviews the exact final head and records the required
    GitHub approval as whichever account, `kollaborai` or `maarco`, is not the
@@ -1039,6 +1063,7 @@ Consider:
 - A Stop (ESC, the web UI's Stop, a voice talk-over) ends the turn and parks its open prompts (`PermissionManager.park_confirmations`): the tool comes back "Not run yet" and the card stays open. A card unanswered for 290 s parks the same way and the agent writes that it needs the OK. Allow on a parked card runs that call once and the agent goes on (HUD note + `TRIGGER_LLM_CONTINUE`); Deny drops it quietly; the user's typed yes runs it and closes the card. Terminals close a parked prompt without answering (`permission_parked`). ACP's Stop answers its prompts cancelled (`cancel_confirmations`)
 - A voice turn never waits on a prompt: a call that needs the user's OK (the voice guard's `confirmation_required`: a command on the voice list that is not read-only, or read-only with its tool outside `/bin` and `/usr/bin`; or a Confirm-mode prompt) returns "Not run yet" and the agent asks in its reply. The user's own next message decides (`kollabor_agent/yes_approval.py`, fed by `LLMService.process_user_input`, only for a person answering live: its `may_answer` is closed by default and `MessageHandler` opens it only for `kollabor.user_input_source.YES_SOURCES`, which are the TUI, an attached window, state RPC and the `/voice` plugin; a hub peer's "agent" source, `kollab --hub msg` (to an ACP agent it goes in as `hub_message`), the bridges and a `/agent` or `/skill` generation prompt never answer): a short yes runs each call the agent's last finished reply asked for once, a short no drops them, and anything else drops them too. Asks open when the reply's chain ends (`QueueProcessor.is_processing` falling); a yes sent before then, or said over the agent (the worker's `talk_over`, `voice_talk_over` in the context; a talk-over cut calls `YesApprovals.reply_cut`), answers nothing, and a voice ask stops counting after 5 min. The greeting asks for nothing. Asks come only from the guard's or the manager's decision (`PermissionDecision.needs_yes`), never a tool's text. A yes runs the guard's plan again, approved (`evaluate(approved=True)`): argv with no shell, the tool found on PATH but never in the project or a directory others can write, and the hard blocks still refuse it (interpreters and wrappers like `bash -c`/`env`, git config options, git sent outside the project with `-C`/`--git-dir`/`--work-tree`, git subcommands outside `_VOICE_GIT_COMMANDS`, a `<helper>::` remote on a subcommand that takes one). A yes runs only the voice list (`_voice_may_run`: read-only commands, git, `mkdir`/`touch`/`cp`/`mv`/`rm` inside the project and outside `.git` with a few options, the project's own `make` targets and `npm` run/test/start/install/ci with no extra argument, read-only `gh` and `kollab --hub`); anything else comes back `not_by_voice` before it is asked for, and the agent offers to run it from a typed message (no `npm exec`, `ex`, `sqlite3`, `curl`...). A tool other than the terminal and the hub tools (`file_create`, `file_edit`, MCP...) comes back `command_blocked` with that same list (`_VOICE_CAN`), so a model that reaches for `file_create` makes the file with the terminal's `touch` and asks
 - Session-scoped approvals
+- Sandbox gate (`kollabor_agent/sandbox_gate.py`, `sandbox_gate.*`, default off): `ToolExecutor` refuses file writes and terminal commands that touch a protected root unless `sandbox-promote` validated a clean scratch checkout and issued a one-use token (root + HEAD SHA + 15 min); owner override is env-only (`KOLLAB_SANDBOX_GATE_OVERRIDE`); audit log JSONL. Doc `docs/features/sandbox-gate.md`
 - `/permissions` command for runtime management
 - Event bus integration at SECURITY priority (900)
 
@@ -1076,7 +1101,7 @@ set_color_support(ColorSupport.EXTENDED)
 - `/model` (aliases: `/mod`, `/m`) - Fullscreen model picker for the active provider (list|search|set|effort). The list is seeded from `bundles/data/models.json` (retired entries filtered) and merged with the provider's live catalog when one exists. `/model effort [level]` shows or sets reasoning effort — see `docs/features/reasoning-effort.md`.
 - `/llm` (aliases: `/loadout`, `/ld`) - Fullscreen loadout picker: provider + model + param presets. Every `models.json` model for a configured provider is an implicit loadout; `/llm <name>` activates one directly, `/llm new` opens a pre-filled create form, and `kollab --llm <loadout>` resolves loadouts at launch, with `--model` / `--effort` overriding individual fields on top — see `docs/features/loadouts.md`.
 
-The `/llm` list merges `models.json` with the provider's **live** catalog (`model_catalog.py`, TTL + versioned disk cache). A provider contributing zero rows still renders a section explaining why — never silently omit it, that was the original bug.
+The `/llm` list is the provider's **live** catalog once it is cached (`model_catalog.py`, TTL + versioned disk cache), plus the profile's own model; `models.json` seeds it only while the catalog was never fetched or the provider has no listing API (#558). The list reads the cache with no TTL (an expired entry is still the last list the provider served; the pickers refresh on open), and the Anthropic fetcher reads every `/v1/models` page, returning empty rather than a partial list. Each cache entry records the provider and a fingerprint of the endpoint it came from (never the endpoint, which can hold credentials) and is ignored for a profile now on another provider or endpoint. A provider contributing zero rows still renders a section explaining why — never silently omit it, that was the original bug.
 - `/permissions` (aliases: `/perms`, `/security`) - Manage permissions (show|default|strict|trust|stats|clear)
 - `/terminal` (aliases: `/tmux`, `/term`, `/t`) - Manage tmux sessions (new|view|list|kill)
 - `/hub` (aliases: `/mesh`) - Agent hub (status|msg|broadcast|feed|console|org|vault|whoami)

@@ -122,7 +122,7 @@ class HubConsoleAltView(AltView):
 
     def _refresh_agents(self) -> None:
         """Load live agents from hub presence."""
-        from plugins.hub.presence import get_presence_dir, pid_alive
+        from plugins.hub.presence import _presence_files, get_presence_dir, pid_alive
 
         agents = []
         presence_dir = get_presence_dir()
@@ -130,7 +130,7 @@ class HubConsoleAltView(AltView):
             self.agents = []
             return
 
-        for f in presence_dir.glob("*.json"):
+        for f in _presence_files(presence_dir):
             try:
                 with open(f) as fh:
                     data = json.load(fh)
