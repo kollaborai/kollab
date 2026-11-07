@@ -40,7 +40,7 @@ terminal_tool = ToolDefinition(
             type="string",
             description=(
                 "Session name when background is true. Used by "
-                "terminal-status, terminal-output, terminal-kill."
+                "terminal-status, terminal-output, terminal-send, terminal-kill."
             ),
             required=False,
         ),
@@ -77,7 +77,7 @@ terminal_tool = ToolDefinition(
     notes=(
         "Background sessions run as persistent subprocesses and "
         "persist across turns. Use terminal-status, terminal-output, "
-        "terminal-kill to manage them. Foreground terminal has a "
+        "terminal-send, terminal-kill to manage them. Foreground terminal has a "
         "default timeout of 60 seconds."
     ),
     safety_features=[
@@ -149,6 +149,35 @@ terminal_output = ToolDefinition(
     result_format="Recent output from the session.",
 )
 
+terminal_send = ToolDefinition(
+    name="terminal-send",
+    description="Send one line of input to an existing background terminal session.",
+    category="terminal",
+    risk_level="high",
+    requires_permission=True,
+    xml_tag="terminal-send",
+    xml_form="nested",
+    parameters=[
+        ToolParameter(
+            name="session_name",
+            type="string",
+            description="Name of the existing background terminal session",
+            required=True,
+        ),
+        ToolParameter(
+            name="text",
+            type="string",
+            description="Line to write to the session's standard input",
+            required=True,
+        ),
+    ],
+    examples=[
+        "<terminal-send><session_name>dev</session_name><text>y</text></terminal-send>",
+    ],
+    result_format="Confirmation that the input was sent to the session.",
+    notes="A newline is appended to the input. Sending input requires permission.",
+)
+
 terminal_kill = ToolDefinition(
     name="terminal-kill",
     description="Kill a background terminal session or all sessions.",
@@ -180,6 +209,7 @@ def register_all():
     registry.register(terminal_tool)
     registry.register(terminal_status)
     registry.register(terminal_output)
+    registry.register(terminal_send)
     registry.register(terminal_kill)
 
 
