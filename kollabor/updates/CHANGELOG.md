@@ -7,9 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
-
 ### Added
 - Scheduled hub cron jobs are readable outside the terminal: each
   agent's unix socket answers a read-only, local-operator-only
@@ -17,6 +14,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live agents, and the web UI Settings gains a read-only
   Cron Jobs tab listing every live agent's schedules, next fires,
   and per-agent errors (issue #612).
+- PR throughput KPI report (`.github/scripts/pr_throughput_kpi.py`, opt-in via `kpi.enabled`, default off): closed PRs per hour against a target of 3 on 1h, 8h and 24h rolling windows, with supporting open-PR, review, first-push CI and per-author/lane metrics. Missing data is reported as missing, never zero (#729).
+- Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
+- Optional merge bot for maintainers: `.github/workflows/auto-merge.yml` can merge a PR once CI, an independent review of its exact head, approval and resolved conversations all hold. It ships off; `docs/operations/pr-gates-auto-merge.md` has the steps to turn it on (#736).
+- Coordinators can page through all of their unresolved hub dispatches with `<hub_dispatch_list page="N" per_page="N"/>` (newest first, 10 per page, at most 50) and read any one of their dispatches in full with `<hub_dispatch_read dispatch_id="ID"/>`. Both are read-only, limited to dispatches the coordinator assigned, and off by default: enable with `plugins.hub.dispatch_list_enabled`. When enabled, the rebirth recovery summary names them in its overflow line; its bounded size is unchanged (#656).
+- Contributor docs now state the productization rule: every enhancement ships as an opt-in, default-off, repo-agnostic product surface (skill, extension, agent, or plugin), with the policy, checklist, and a mapping of every issue in the #711-#730 batch to its surface in `docs/productization.md` (#731).
+- A definition-of-done check (`pr-gates`) runs configurable hygiene checks on every PR -- docs-path rules, unresolved threads, base currency, Conventional Commit title, linked issue, and regression-test coverage of review finding ids -- and reports every failed item in exactly one check run (default `dod/ready-for-review`), never comments. Every commits, files, and comments page is read and review-thread pagination is followed, so nothing beyond the first page is silently skipped; pagination is bounded and repeat-guarded (identical pages, null or repeated cursors, and runaway loops fail closed with a loud error -- hang never, silently truncate never); base currency is judged by the PR head's merge-base against the target branch tip, so a branch missing commits from main fails. This repository runs it enabled (`pr_gates.dod.enabled = true` in `.github/pr-gates.toml`), with signed-commit validation left out until agent commits are signed (#755); the feature defaults to off elsewhere, and it is usable as a local CLI before pushing (#724).
+
+### Fixed
+- Google API keys in provider errors and logs are now redacted even when the key was not submitted by the user, and every log file (the app's `kollab.log` and the engine's log) now redacts provider keys whichever code wrote the line, including exception tracebacks (#835, #843).
+- Profile setup now reports state-service provider startup failures instead of claiming success, restores the previous profile when possible, and keeps provider secrets out of errors and logs (#832).
+- Voice-turn rewrites now coordinate with transcript appends (the logger's and compaction's summaries and checkpoints) and session snapshots across processes; rows appended after a rewrite reads its cut survive the atomic replacement (#834).
+- Switching from an ACP profile to a native one now answers the peer messages the harness was still holding: one native turn starts for them and no harness is offered them again (#560).
+- A conversation history write that fails is no longer reported as saved: the logger raises instead of returning a message id, a partly written record is rolled back so later records stay intact, and the agent logs the failure and keeps going (#580)
+- Failed profile switches now restore the previous API profile, API request provider and coordinator provider if target initialization fails or the coordinator provider-registry lookup raises, keeping subsequent requests on the prior runtime (#836).
+- Switching to an OAuth profile whose model is still `codex` no longer overwrites a model, effort or profile edit made while the model lookup was running. The stale switch is cancelled, the edit stays, and the switch can be run again (#595).
+- A reply from an ACP turn that finishes or is stopped after you resume another conversation now stays in the conversation it was sent from, instead of appearing at the end of the one you just resumed (#596).
+- A voice reply cut by one window or process no longer leaves a later message from another logger on the same session pointing at a reply that is gone; it now threads under the nearest reply that stays (#586).
+- A hub message sent from the Web UI now goes to the agent whose row was selected: the message carries the row's agent id, so a same-named agent in another folder no longer receives it, and a message to an agent that has gone is refused instead of redirected (#568).
+- Dreaming no longer stalls the agent's event loop while it saves insights or loads the vault: the saves run in a worker thread, the vault loads at startup, and shutdown waits for a save still in progress (#562)
+- Resuming a network halt no longer fails on Windows when another process is reading the halt file at that moment: the write waits briefly for the reader, and if it still cannot replace the file it reports the error and leaves the halt in place (#573).
+- When an ACP agent is the active backend, hub wakes and injected messages no longer start a native reply behind it; they show an error instead, `/compact` no longer asks the model on an ACP chat, and a finished `/sub` agent's summary is shown to you instead of being written into native history behind the ACP agent (#579).
+- A voice turn no longer puts the old provider back over a model or profile you chose while it was running; it restores chat's provider only if the turn still holds the active one (#584).
+- A provider's model list in `/llm`, Settings → Loadouts and the voice panel's loadout list now shows the provider's live catalog once that catalog is cached, instead of adding every bundled registry model to it. A cached catalog counts however old it is, so `kollab --llm <name>` and `/llm <name>` no longer bring the registry back an hour after the picker was last opened. A model the account's catalog omits, such as gpt-6-luna for an account that lists only gpt-5.6-luna, is no longer offered, and the profile's own model stays listed. The Anthropic catalog now reads every page of `/v1/models`, so a model past the first page stays listed; a listing that cannot be read to the end is treated as not fetched. A cached catalog belongs to the provider and endpoint it was fetched from, so editing a profile to another provider or endpoint no longer keeps the old catalog as its list. Settings → Model is unchanged (#558).
+- Web hub mentions (@agent and @broadcast) now persist to the session JSONL like addressed LLM turns, so wake and broadcast turns survive resume and reload instead of vanishing on reload (#672).
+- An ordinary turn queued while a detached completion (hub mention or voice reply) runs now parents from the user row logged at its admission, so a concurrent completion can no longer re-parent the queued reply under the detached turn (#676).
+- Queue batches without an admission serial, including corrective nudges, cannot advance the conversation cursor or overwrite a tracked turn (#676).
+- Goal turns reserve their admission ticket before awaiting HUD logging and yield cleanly to admitted human input; settle wakes received while a goal is running are replayed (#768).
+- A turn typed in the terminal can no longer draw twice in the Web UI after the fact: at turn end the daemon aligns the streamed rows it published with the refreshed history ids and only records a sync point when every streamed row is proven in that snapshot by content (tool rows by call id); otherwise it clears the sync point so the page reloads the whole history instead of appending rows past a stale count (#666).
+- Reasoning effort `none` and `minimal` can now be picked and sent: `/model effort`, the model picker and the profile editor refused them, and a saved value was dropped before the request went out. Anthropic does not take them, so they are not offered for Anthropic profiles and an Anthropic profile refuses them when written. `/model effort none` now sets `none` where the provider lists it instead of clearing the level (use `default` to clear), and `*_EFFORT=none` is now sent. A saved loadout level the provider never sends is ignored while the rest of the loadout applies, and `--effort` on an Anthropic profile is refused before the daemon switches profile (#559).
+- `auto` profiles follow the provider their key, then their endpoint, resolves to: `/model effort`, the web model panel and the Profiles editor accept every level for an `auto` profile that resolves to OpenAI, and offer no `none` or `minimal` for one that resolves to Anthropic. The Profiles editor reads a saved profile's resolved provider from the server, since its key is never sent back (#559).
+- Hub shutdown now joins in-flight secondary membership starts, isolates per-peer close failures, and finishes remaining cleanup before propagating cancellation (#356).
+- The Profiles dialog keeps profile model details readable on narrow screens:
+  provider, model and effort wrap onto the row instead of truncating to an
+  ellipsis, and the Test/Edit/Copy/Delete actions wrap below the text at phone
+  widths, so no detail needs hover to read (#578).
+- Closed-PR review and first-push check-run collection in the throughput KPI paginates all pages and fails closed on repeated pages, malformed responses, or pagination-cap exhaustion rather than reporting partial metrics (#747).
+- Input handler hook cleanup now detaches its hooks from the event bus: `HookRegistrar.unregister_all_hooks()` passed a `Hook` object to an API that takes the owning plugin and hook name, so cleanup silently left every input hook registered and firing (#735).
+- Agent startup now preserves existing global agent/skill files, refuses to seed through linked/reparse-point directories, and publishes missing seed files without overwriting concurrent creations; safely retired seed copies are restored if changed (#698).
+- `kollab --hub capture` accepts `--cursor N` to resume a window from a truncation marker's `next_cursor` and `--follow` to drain subsequent pages (bounded, stop-and-say-so on a stuck cursor), so scripted polling can read past `... (truncated, next_cursor=...)` (#752).
+- A hub message reports `sent` only when the recipient's hub acks that message: ACP `hub_msg` results now carry `delivery` (`confirmed`, `accepted`, `queued` or `unconfirmed`), and a queued or unacked message no longer reads as sent (#609).
+- `kollab --hub capture` shows the hub messages an agent sent and received again; they were dropped whenever a heartbeat's state snapshot was in the capture window (#609).
+- A failed send names its cause: an exception with no message reports its type instead of a blank `Tool execution error:`, and a refused message always gives a reason (#609).
+- Connect's join code shows why it could not be made when the network's discovery origin is not on port 443 (`Enrollment needs port 443, but this network's origin uses port <port>.`), instead of a reason-less "could not create a code". Enrollment still requires port 443 (#693).
+- ACP admissions that reuse a caller request ID keep their own history parent and completion ownership, so a reply is no longer recorded under the later input's row (#597). A rejected admission cancels only itself, not an earlier queued admission with the same ID.
+- ACP admissions that reuse a caller request ID also keep their own mic-turn voice metadata: the voice-reply dictionary was keyed by bare request ID, so a later admission overwrote the earlier one's voice and the reply was spoken with the wrong voice or not at all (#597).
+- Mentiko attaches to an existing live hub session without spawning a second daemon or duplicating its system-prompt history (#708).
+- Input the agent's queue refuses is reported as rejected instead of queued: a full queue after its block timeout, a drop-oldest race for the freed slot, and a Stop that sweeps it while it waits. A drop_newest refusal also no longer ends its stream four times through hook retries (#589).
+- A tool result or agent update whose long text pushes it over the engine's 16 MB frame limit is now cut to fit and still reaches the chat, instead of being dropped with its reply marked incomplete. An update that is over the limit because of many small items is still dropped (#544).
+- A request for an agent that has exited no longer reaches a new agent that took over its socket under the same name: the engine reads the agent's record fresh before it uses that socket, so the request fails instead of returning the new agent's output, including when the agent restarted in place (#566).
+- A live hub agent keeps its presence record and socket when its heartbeat is over ten minutes old and its socket briefly does not answer; peers now remove them only once the agent's process has exited or its process ID has been reused by another process (#575)
+- An accepted peer observation is no longer dropped when its ACP history row cannot be written: the retry queue keeps it until the row lands, and when the queue is full the new message is refused instead of acknowledged. A refused message stays in the mailbox or relay queue until the queue takes it, and a resend does not show, log or mirror it a second time. An ACP agent now reads its mailbox without the per-poll replay cap and delivers each message on its own, so a long outage no longer drops or coalesces refused ones (#581).
+
+## [0.19.1] - 2026-11-03
+
+### Changed
+- Release publishing runs from a reviewed controller on `main`, resolves immutable tagged source, limits the existing repository PyPI token to upload steps, and verifies GitHub release assets.
+
+### Fixed
+- Installed voice workers use their managed runtime dependencies without importing packages from Kollab's main interpreter, fixing startup failures caused by cross-version dependency imports.
+
+## [0.19.0] - 2026-11-03
+
+### Fixed
+- Web UI source archives exclude local TypeScript build metadata, keeping generated compiler state out of published packages.
+- PhoneLink chat reuses unchanged polling snapshots so typing and scrolling stay responsive. Completed voice turns remain visible until saved history replaces them.
+- A just-sent turn no longer stays rendered twice in the Web UI until a manual reload: when the daemon's cached history mirror is stale, history refresh now raises instead of silently returning stale rows, the assistant turn completes without publishing a synced watermark, and the client drops transient turn rows that duplicate freshly replayed history (#666).
+- Stop hooks now accept 'block' as a synonym for 'deny' (docs/features/config-hooks.md:200).
+- Detached daemon SIGTERM cancels its top-level async task so application cleanup
+  completes without injecting `KeyboardInterrupt` into child-task cleanup (#667).
+- Coordinator task assignments survive restarts in a durable dispatch ledger,
+  suppress re-routing delivered work, and keep completion reports unverified
+  until the original assigner verifies a worktree or commit reference (#636).
+- An agent whose code changed on disk after it started no longer fails every turn with an opaque 500: the daemon flags the mismatch, the Engine names the agent and says to restart it (`<agent> could not run the turn: <error>. Its code changed on disk after it started. Restart it.`), and voice turns carry the same explanation to the speaker (#571).
+- The hub no longer permanently exhausts a conversation transport's peer request slots when the relay rejects a request for capacity: rejected slots are released, so other peers can keep talking after a capacity reject (#627).
+- The hub no longer replays stale pre-reboot inbox messages as current instructions: ordinary messages written before the last restart are dropped at the boot boundary (visible in the offline inbox summary), while durable task controls are still delivered for TaskLedger classification (#639).
+- The hub's crystal summary token cache now scales with the live vault (a power of two of at least twice its entries, minimum 8) instead of a fixed floor of 8,192, so its size tracks the live memories (#567).
+- Agent-facing crystal writes reject bodies over 2,000 characters; crystal-store saves are atomic and verified, and failed writes surface errors without retaining partial mutations (#638).
+- The web UI no longer serves beyond this machine without saying so: whenever it binds an address other than 127.0.0.1, whether from KOLLAB_WEBUI_HOSTS or the new `--web-ui-hosts` flag, startup prints a warning that the page is exposed and that anyone who can open it gets the engine token. `kollab --web-ui --web-ui-hosts IP[,IP]` is the explicit per-launch opt-in and overrides the shell's KOLLAB_WEBUI_HOSTS; an explicitly empty value forces localhost-only, and the desktop app forwards its own `--web-ui-hosts` argument to kollab, showing the exposure warning in its window before opening the UI (#674).
+- The desktop exposure interstitial now recognizes IPv4-mapped IPv6 addresses
+  whose embedded IPv4 is private or link-local (#674).
+
+- The web UI labels a hub broadcast note as addressed to All instead of naming
+  the observing window's own agent as the recipient; notes delivered straight to
+  the window keep addressing it (#671).
+
+### Added
+- PhoneLink carries microphone input and spoken replies through the phone while the computer's LiveKit signaling and media stay on loopback (#440).
+- The Web UI Agents sidebar shows a small type glyph after local-session and offline names (coder `▸`, research `◈`, default `●`); rows without type metadata and all remote rows stay unmarked (#655).
 - Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
 - Team launches now support member selection or exclusions across the CLI,
   TUI and Web UI. The launch sheet sets the workspace, profile, lead and
@@ -143,6 +228,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
+- Network: withdrawing access stops queued remote-agent input and output before
+  network submission; bytes already sent may still arrive (#524).
 - Learn: Hub messaging now teaches operators `/hub agents`, `/hub status`,
   `/hub msg <agent> <message>` and `/hub broadcast <message>` instead of
   internal agent message-tool syntax (#622).
@@ -339,6 +426,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attach, `kollab service` and goal turns use `pid_alive`, so the hub keeps
   live agents. On every platform an exited agent that was never reaped now
   counts as stopped (#268).
+
+### Known limitations
+- PhoneLink voice passed recorded-input Android emulator testing. Final iPhone playback and transcript-persistence testing remains pending (#440).
 
 ## [0.18.5] - 2026-10-26
 

@@ -84,8 +84,10 @@ Path is encoded the same way as `~/.kollab/projects/<encoded-path>/`.
 
 ### KOLLAB_HUB_PROJECT_SCOPED
 
-Silo hub state (presence, vaults, sockets) under the current project
-instead of the global `~/.kollab/hub/`. This is enabled by default.
+Silo hub metadata and vaults under the current project instead of the
+global `~/.kollab/hub/`. This is enabled by default. On POSIX, live
+presence records and sockets use a separate project-hashed runtime directory
+that is independent of `HOME`; Windows keeps presence in per-user state.
 
 ```bash
 KOLLAB_HUB_PROJECT_SCOPED=1 kollab --agent coder --as lapis
@@ -363,9 +365,18 @@ interface; it does not trust arbitrary RFC1918 clients. Uvicorn forwarded-header
 rewriting is disabled, forwarded client chains are rejected, and Host/Origin are
 checked. This is direct private binding only; reverse proxies and public port
 forwarding to the WebUI are not supported. Every allowed page can receive the
-engine token, so bind only to networks you trust.
+engine token, so bind only to networks you trust. Whenever a bound address is
+not loopback, startup prints a warning that the UI is exposed beyond this
+machine (#674); the desktop app shows the same warning in its window before
+opening the UI.
 
 Default: unset (127.0.0.1 only)
+
+`kollab --web-ui --web-ui-hosts 192.168.1.20` is the per-launch equivalent and
+overrides the shell's `KOLLAB_WEBUI_HOSTS` value for that launch. An explicitly
+empty value (`--web-ui-hosts ""`) also overrides the environment, forcing
+`127.0.0.1` only for that launch. The desktop app accepts the same
+`--web-ui-hosts IP[,IP]` argument and forwards it to kollab.
 
 ### KOLLAB_ENGINE_URL
 

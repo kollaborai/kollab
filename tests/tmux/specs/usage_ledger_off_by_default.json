@@ -1,0 +1,45 @@
+{
+  "name": "usage-ledger-off-by-default",
+  "description": "The usage ledger plugin (#723) loads, registers /usage, and reports that it is off by default. No provider is called and nothing is written: the throwaway HOME from the harness holds no plugins.usage_ledger.enabled setting. Recording and rollups are covered by tests/unit/test_usage_ledger.py and tests/unit/plugins/test_usage_ledger_plugin.py.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 4,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "label": "usage is off by default"
+    },
+    {
+      "action": "slash_command",
+      "command": "usage"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Usage ledger is off",
+      "timeout": 15,
+      "description": "/usage reports the ledger is off"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Usage ledger is off",
+      "description": "off-by-default message shown"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "plugins\\.usage_ledger\\.enabled",
+      "description": "message names the config key to enable it"
+    }
+  ]
+}

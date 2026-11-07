@@ -3,8 +3,10 @@
 import asyncio
 import time
 import unittest
+from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
 
 
@@ -63,11 +65,36 @@ def _make_coordinator(**overrides):
     coord.session_stats = {"messages": 0}
     coord.api_service.model = "test-model"
 
+    # ACP ownership is read through the real LLMService helpers (#579).
+    for name in ("_acp_service", "_active_acp", "_profile_selects_acp"):
+        setattr(coord, name, MethodType(getattr(LLMService, name), coord))
+    _set_acp_state(coord)  # native by default
+
     # Apply overrides
     for key, value in overrides.items():
         setattr(coord, key, value)
 
     return coord
+
+
+def _acp_runner(*, busy=False):
+    """A live ACP orchestrator service, as LLMService._active_acp reads it."""
+    return SimpleNamespace(active=True, is_processing=busy)
+
+
+def _set_acp_state(coord, *, runner=None, selects_acp=False):
+    """Set the ACP state the real LLMService helpers read (#579).
+
+    runner: the acp_orchestrator service, or None when no ACP runner is up.
+    selects_acp: whether the active profile is an ACP profile.
+    """
+    base_get_service = coord.event_bus.get_service
+    coord.event_bus.get_service = MagicMock(
+        side_effect=lambda name: runner if name == "acp_orchestrator" else base_get_service(name)
+    )
+    coord.profile_manager.get_active_profile = MagicMock(
+        return_value=SimpleNamespace(get_provider=lambda: "acp" if selects_acp else "openai")
+    )
 
 
 class TestMessageHandler(unittest.TestCase):
@@ -111,7 +138,7 @@ class TestMessageHandler(unittest.TestCase):
         )
 
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=False, may_answer=True
+            "hello", pre_displayed=False, may_answer=True, operator_source="user"
         )
         self.assertEqual(result, {"status": "processed"})
 
@@ -132,6 +159,7 @@ class TestMessageHandler(unittest.TestCase):
             pre_displayed=False,
             origin_context=origin_context,
             may_answer=True,
+            operator_source="state_rpc",
         )
 
 
@@ -161,9 +189,21 @@ class TestMessageHandler(unittest.TestCase):
             "hello"
         )
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=True, may_answer=True
+            "hello", pre_displayed=True, may_answer=True, operator_source="user"
         )
         self.assertEqual(result, {"status": "processed"})
+
+    def test_peer_source_is_not_passed_as_operator_source(self):
+        self.loop.run_until_complete(
+            self.handler.handle_user_input(
+                {"message": "peer claim"}, MagicMock(source="agent")
+            )
+        )
+
+        self.coordinator.process_user_input.assert_called_once_with(
+            "peer claim", pre_displayed=False, operator_source=None
+        )
+
 
     def test_handle_user_input_empty(self):
         """Test user input handler with empty message."""
@@ -557,8 +597,11 @@ class TestMessageHandler(unittest.TestCase):
         turns = {"n": 0}
 
         async def fake_continue():
-            qp._last_tool_error_sig = sigs[turns["n"]]
+            signature = sigs[turns["n"]]
             turns["n"] += 1
+            if isinstance(signature, Exception):
+                raise signature
+            qp._last_tool_error_sig = signature
             if turns["n"] >= len(sigs):
                 qp.turn_completed = True
 
@@ -582,6 +625,63 @@ class TestMessageHandler(unittest.TestCase):
         self.assertEqual(turns, 3)
         self.assertTrue(qp.turn_completed)
         self.coordinator.message_display_service.display_error_message.assert_called_once()
+
+    def test_hub_continue_reports_identical_tool_errors_to_detached_parent(self):
+        class Hub:
+            report_detached_chain_break = AsyncMock()
+
+        startup_ready = asyncio.Event()
+        startup_ready.set()
+        hub = Hub()
+        self.coordinator.event_bus.get_service.side_effect = (
+            lambda name: hub if name == "hub_plugin" else startup_ready
+        )
+
+        turns, _ = self._run_hub_chain(["terminal:boom"] * 10)
+
+        self.assertEqual(turns, 3)
+        hub.report_detached_chain_break.assert_awaited_once_with(
+            reason="3 identical tool errors"
+        )
+
+    def test_hub_continue_reports_continuation_exception_to_detached_parent(self):
+        class Hub:
+            report_detached_chain_break = AsyncMock()
+
+        startup_ready = asyncio.Event()
+        startup_ready.set()
+        hub = Hub()
+        self.coordinator.event_bus.get_service.side_effect = (
+            lambda name: hub if name == "hub_plugin" else startup_ready
+        )
+
+        turns, qp = self._run_hub_chain([RuntimeError("failed")])
+
+        self.assertEqual(turns, 1)
+        self.assertTrue(qp.turn_completed)
+        hub.report_detached_chain_break.assert_awaited_once_with(
+            reason="conversation continuation failed"
+        )
+
+    def test_hub_continue_reports_continuation_cap_to_detached_parent(self):
+        class Hub:
+            report_detached_chain_break = AsyncMock()
+
+        startup_ready = asyncio.Event()
+        startup_ready.set()
+        hub = Hub()
+        self.coordinator.event_bus.get_service.side_effect = (
+            lambda name: hub if name == "hub_plugin" else startup_ready
+        )
+
+        with patch("kollabor.llm.message_handler.MAX_CONTINUATION_TURNS", 1):
+            turns, qp = self._run_hub_chain([None] * 5)
+
+        self.assertEqual(turns, 2)
+        self.assertTrue(qp.turn_completed)
+        hub.report_detached_chain_break.assert_awaited_once_with(
+            reason="maximum continuation turns reached"
+        )
 
     def test_hub_continue_error_breaker_resets_on_success_or_change(self):
         """A success or a different error starts the identical-error count over."""
@@ -750,12 +850,10 @@ class TestMessageHandler(unittest.TestCase):
         self.loop.run_until_complete(run())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
+    # --- #579: an ACP chat never starts a native turn from these two events ---
 
     def test_add_message_trigger_llm_rejects_acp_before_mutating_or_enqueuing(self):
-        self.coordinator._uses_acp_input = MagicMock(return_value=True)
+        _set_acp_state(self.coordinator, runner=_acp_runner())
         data = {
             "messages": [{"role": "user", "content": "do not queue natively"}],
             "options": {"trigger_llm": True},
@@ -774,9 +872,47 @@ if __name__ == "__main__":
         self.coordinator._enqueue_with_overflow_strategy.assert_not_awaited()
         self.coordinator.create_background_task.assert_not_called()
         self.coordinator.message_display_service.show_loading.assert_not_called()
+        self.coordinator.message_display_service.display_error_message.assert_called_once()
+
+    def test_add_message_trigger_llm_rejects_acp_while_its_turn_is_busy(self):
+        _set_acp_state(self.coordinator, runner=_acp_runner(busy=True))
+        self.coordinator.is_processing = True  # the coordinator counts ACP work as busy
+        data = {
+            "messages": [{"role": "user", "content": "arrives during an ACP turn"}],
+            "options": {"trigger_llm": True},
+        }
+
+        result = self.loop.run_until_complete(
+            self.handler.handle_add_message(data, MagicMock())
+        )
+
+        self.assertEqual(
+            result,
+            {"success": False, "error": "acp_requires_submit_human_input"},
+        )
+        self.coordinator._enqueue_with_overflow_strategy.assert_not_awaited()
+        self.coordinator.create_background_task.assert_not_called()
+
+    def test_add_message_trigger_llm_rejects_acp_profile_before_its_runner_is_up(self):
+        _set_acp_state(self.coordinator, selects_acp=True)  # switched; runner still starting
+        data = {
+            "messages": [{"role": "user", "content": "arrives during the switch"}],
+            "options": {"trigger_llm": True},
+        }
+
+        result = self.loop.run_until_complete(
+            self.handler.handle_add_message(data, MagicMock())
+        )
+
+        self.assertEqual(
+            result,
+            {"success": False, "error": "acp_requires_submit_human_input"},
+        )
+        self.coordinator._enqueue_with_overflow_strategy.assert_not_awaited()
+        self.coordinator.create_background_task.assert_not_called()
 
     def test_llm_continue_rejects_acp_without_launching_native_continuation(self):
-        self.coordinator._uses_acp_input = MagicMock(return_value=True)
+        _set_acp_state(self.coordinator, runner=_acp_runner())
 
         result = self.loop.run_until_complete(
             self.handler.handle_llm_continue({"source": "agent-orchestrator"}, MagicMock())
@@ -789,3 +925,85 @@ if __name__ == "__main__":
         self.coordinator.create_background_task.assert_not_called()
         self.coordinator._continue_conversation.assert_not_awaited()
         self.coordinator.message_display_service.display_error_message.assert_called_once()
+
+    def test_llm_continue_rejects_acp_while_its_turn_is_busy_instead_of_queuing_retry(self):
+        _set_acp_state(self.coordinator, runner=_acp_runner(busy=True))
+        self.coordinator.is_processing = True
+
+        result = self.loop.run_until_complete(
+            self.handler.handle_llm_continue({"source": "peer"}, MagicMock())
+        )
+
+        self.assertEqual(
+            result,
+            {"status": "rejected", "reason": "acp_requires_submit_human_input"},
+        )
+        self.assertFalse(self.handler._retry_pending)
+        self.coordinator.create_background_task.assert_not_called()
+
+    def test_llm_continue_rejects_acp_profile_before_its_runner_is_up(self):
+        _set_acp_state(self.coordinator, selects_acp=True)
+
+        result = self.loop.run_until_complete(
+            self.handler.handle_llm_continue({"source": "peer"}, MagicMock())
+        )
+
+        self.assertEqual(
+            result,
+            {"status": "rejected", "reason": "acp_requires_submit_human_input"},
+        )
+        self.coordinator.create_background_task.assert_not_called()
+        self.coordinator._continue_conversation.assert_not_awaited()
+
+    def test_retry_armed_before_switch_to_acp_does_not_run_native_continuation(self):
+        self.coordinator.is_processing = True  # a native turn runs, so the wake waits
+
+        async def run():
+            result = await self.handler.handle_llm_continue({"source": "peer"}, MagicMock())
+            self.assertEqual(result["status"], "queued_for_retry")
+            retry_factory = self.coordinator.create_background_task.call_args[0][0]
+            self.coordinator.create_background_task.reset_mock()
+
+            async def fake_sleep(_secs):
+                # The native turn ends while the operator switches to an ACP profile.
+                _set_acp_state(self.coordinator, runner=_acp_runner(), selects_acp=True)
+                self.coordinator.is_processing = False
+
+            with patch("kollabor.llm.message_handler.asyncio.sleep", fake_sleep):
+                await retry_factory()
+
+            self.coordinator.create_background_task.assert_not_called()
+            self.coordinator.message_display_service.display_error_message.assert_called_once()
+            self.assertFalse(self.handler._retry_pending)
+
+        self.loop.run_until_complete(run())
+
+    def test_wakes_run_natively_again_after_switching_back_from_acp(self):
+        _set_acp_state(self.coordinator, runner=_acp_runner(), selects_acp=True)
+        rejected = self.loop.run_until_complete(
+            self.handler.handle_llm_continue({"source": "peer"}, MagicMock())
+        )
+        self.assertEqual(rejected["status"], "rejected")
+
+        _set_acp_state(self.coordinator)  # back on a native profile, runner closed
+        result = self.loop.run_until_complete(
+            self.handler.handle_llm_continue({"source": "peer"}, MagicMock())
+        )
+        self.assertEqual(result, {"status": "triggered", "source": "peer"})
+        self.coordinator.create_background_task.assert_called_once()
+        self.coordinator.create_background_task.call_args[0][0]().close()  # unawaited _hub_continue
+
+        self.coordinator.create_background_task.reset_mock()
+        data = {
+            "messages": [{"role": "user", "content": "native again"}],
+            "options": {"trigger_llm": True},
+        }
+        result = self.loop.run_until_complete(
+            self.handler.handle_add_message(data, MagicMock())
+        )
+        self.assertTrue(result["success"])
+        self.coordinator._enqueue_with_overflow_strategy.assert_awaited_once_with("native again")
+
+
+if __name__ == "__main__":
+    unittest.main()

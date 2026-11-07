@@ -9,6 +9,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 from sse_starlette.sse import EventSourceResponse
 
+from kollabor.state.remote import ReloadNeededError
+
 from ..voice_control import VoiceControl, WorkerEvent, encode_cursor
 from ..voice_runtime_host import RuntimeHostError
 from ..voice_session_router import MAX_FINAL_TRANSCRIPT_BYTES
@@ -55,6 +57,10 @@ def error_response(exc: RuntimeHostError) -> JSONResponse:
 async def _guard(fn):
     try:
         return await fn()
+    except ReloadNeededError as exc:
+        # The agent's code changed on disk after it started (#571): say so
+        # instead of letting this fall through as an opaque 500.
+        return error_response(RuntimeHostError("reload_needed", 409, str(exc)))
     except RuntimeHostError as exc:
         return error_response(exc)
 
@@ -180,23 +186,30 @@ async def stop_voice_session(
 async def voice_session_events(
     request: Request, voice_session_id: str, cursor: str | None = Query(default=None)
 ):
+    control = _control(request)
     try:
-        stream = await _control(request).subscribe(
+        stream = await control.subscribe(
             voice_session_id, cursor or request.headers.get("last-event-id")
         )
     except RuntimeHostError as exc:
         return error_response(exc)
 
     async def generator():
-        async for envelope in stream:
-            yield {
-                "id": encode_cursor(
-                    envelope["voice_session_id"],
-                    envelope["generation"],
-                    envelope["sequence"],
-                ),
-                "data": json.dumps(envelope, ensure_ascii=False),
-            }
+        # Opened inside the generator, so it pairs with the finally even when the
+        # response is never streamed (a client that left before the first byte).
+        await control.listener_opened(voice_session_id)
+        try:
+            async for envelope in stream:
+                yield {
+                    "id": encode_cursor(
+                        envelope["voice_session_id"],
+                        envelope["generation"],
+                        envelope["sequence"],
+                    ),
+                    "data": json.dumps(envelope, ensure_ascii=False),
+                }
+        finally:
+            await control.listener_closed(voice_session_id)
 
     return EventSourceResponse(generator())
 
@@ -222,6 +235,10 @@ async def worker_turn(request: Request, voice_session_id: str, body: VoiceTurnRe
             kind=body.kind,
             talk_over=body.talk_over,
         )
+    except ReloadNeededError as exc:
+        # The agent's code changed on disk after it started (#571): say so
+        # instead of letting this fall through as an opaque 500.
+        return error_response(RuntimeHostError("reload_needed", 409, str(exc)))
     except RuntimeHostError as exc:
         return error_response(exc)
 

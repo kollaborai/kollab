@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import shutil
 import socket
@@ -92,6 +93,25 @@ def build_uvicorn_config(app):
 
 
 
+def exposure_warnings(active_hosts: list[str], port: int) -> list[str]:
+    """One warning per bound host a machine other than this one could reach.
+
+    Loopback binds are the private default and stay silent. Anything else,
+    however it got there (KOLLAB_WEBUI_HOSTS or --web-ui-hosts), is an
+    explicit exposure and gets printed as one (#674).
+    """
+    warnings = []
+    for host in active_hosts:
+        if ipaddress.ip_address(host).is_loopback:
+            continue
+        shown = f"[{host}]" if ":" in host else host
+        warnings.append(
+            f"  warning: the web ui is exposed beyond this machine at http://{shown}:{port}"
+            " - anyone who can open it gets the engine token"
+        )
+    return warnings
+
+
 def main() -> None:
     """Launch the Kollab UI web server."""
 
@@ -117,6 +137,8 @@ def main() -> None:
     for sock in sockets:
         host = sock.getsockname()[0]
         print(f"  ui:     http://{f'[{host}]' if ':' in host else host}:{port}")
+    for line in exposure_warnings(active_hosts, port):
+        print(line)
     print()
 
     # Open browser after short delay.  Keep this daemonized so shutdown is not

@@ -35,6 +35,10 @@ from kollabor_config.file_lock import lock, unlock
 
 logger = logging.getLogger(__name__)
 
+TERMINAL_TASK_STATUSES = frozenset(
+    {"done", "failed", "closed", "cancelled", "obsolete"}
+)
+
 
 @dataclass
 class TaskCard:
@@ -237,7 +241,7 @@ class TaskCard:
 class TaskLedger:
     """Manages TaskCards on disk. Survives any crash or compaction."""
 
-    TERMINAL_STATUSES = frozenset({"done", "failed", "closed", "cancelled", "obsolete"})
+    TERMINAL_STATUSES = TERMINAL_TASK_STATUSES
     EXPLICIT_TERMINAL_STATUSES = frozenset({"cancelled", "obsolete"})
 
     def __init__(self, tasks_dir: Optional[str] = None):
@@ -256,10 +260,15 @@ class TaskLedger:
         return self._tasks_dir / "_pending_replies.json"
 
     def _task_files(self):
-        """Yield task card files without the pending-reply envelope."""
-        pending_name = self._pending_replies_path().name
+        """Yield task cards, excluding control and dispatch envelopes."""
+        control_names = {
+            self._pending_replies_path().name,
+            self._dispatches_path().name,
+        }
         return (
-            path for path in self._tasks_dir.glob("*.json") if path.name != pending_name
+            path
+            for path in self._tasks_dir.glob("*.json")
+            if path.name not in control_names
         )
 
     @contextmanager
@@ -334,6 +343,278 @@ class TaskLedger:
     def _save_pending_replies(self, replies: List[Dict[str, Any]]) -> None:
         with self._file_lock(self._pending_replies_path()):
             self._write_pending_replies_unlocked(replies)
+
+    # Dispatch records are durable coordinator state, deliberately separate from
+    # the expiring expected-reply control envelope.
+    DISPATCH_ACTIVE_STATUSES = frozenset(
+        {"dispatching", "in_flight", "delivery_failed", "reported_unverified"}
+    )
+    DISPATCH_TRANSITIONS = {
+        "dispatching": frozenset({"in_flight", "delivery_failed"}),
+        "in_flight": frozenset({"in_flight", "delivery_failed"}),
+        "delivery_failed": frozenset({"in_flight", "delivery_failed"}),
+    }
+
+    def _dispatches_path(self) -> Path:
+        return self._tasks_dir / "_dispatches.json"
+
+    def _read_dispatches_unlocked(self) -> List[Dict[str, Any]]:
+        path = self._dispatches_path()
+        if not path.exists():
+            return []
+        try:
+            data = self._load_json_object(path)
+            dispatches = data.get("dispatches", [])
+            if not isinstance(dispatches, list):
+                raise ValueError("dispatch envelope must contain a list")
+            return dispatches
+        except Exception as e:
+            logger.warning("Failed to load durable hub dispatches: %s", e)
+            raise RuntimeError("durable hub dispatch ledger is unreadable") from e
+
+    def _write_dispatches_unlocked(
+        self, dispatches: List[Dict[str, Any]]
+    ) -> None:
+        self._write_json_atomic(
+            self._dispatches_path(), {"dispatches": dispatches}
+        )
+
+    def record_dispatch(
+        self,
+        *,
+        task_id: str,
+        assigned_by: str,
+        assignee: str,
+        directive: str,
+        message_id: str,
+        thread_id: str = "",
+        worktree: str = "",
+        commit: str = "",
+    ) -> Dict[str, Any]:
+        """Persist one immutable assignment; exact message_id replays are safe."""
+        required = {
+            "task_id": task_id,
+            "assigned_by": assigned_by,
+            "assignee": assignee,
+            "directive": directive,
+            "message_id": message_id,
+        }
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in required.values()
+        ):
+            raise ValueError(
+                "dispatch task, assigner, assignee, directive, and message_id "
+                "are required"
+            )
+
+        message_id = message_id.strip()
+        now = time.time()
+        record = {
+            "dispatch_id": message_id,
+            "task_id": task_id.strip(),
+            "assigned_by": assigned_by.strip(),
+            "assignee": assignee.strip(),
+            "directive": directive,
+            "message_id": message_id,
+            "thread_id": thread_id.strip() if isinstance(thread_id, str) else "",
+            "worktree": worktree.strip() if isinstance(worktree, str) else "",
+            "commit": commit.strip() if isinstance(commit, str) else "",
+            "status": "dispatching",
+            "created_at": now,
+            "updated_at": now,
+        }
+        path = self._dispatches_path()
+        with self._file_lock(path):
+            dispatches = self._read_dispatches_unlocked()
+            immutable_fields = (
+                "dispatch_id",
+                "task_id",
+                "assigned_by",
+                "assignee",
+                "directive",
+                "message_id",
+                "thread_id",
+                "worktree",
+                "commit",
+            )
+            for existing in dispatches:
+                if existing.get("message_id") != record["message_id"]:
+                    continue
+                if any(
+                    existing.get(field) != record.get(field)
+                    for field in immutable_fields
+                ):
+                    raise ValueError(
+                        "dispatch message_id already exists with a different "
+                        "immutable payload"
+                    )
+                return dict(existing)
+            dispatches.append(record)
+            self._write_dispatches_unlocked(dispatches)
+        return dict(record)
+
+    def get_dispatch(self, dispatch_id: str) -> Optional[Dict[str, Any]]:
+        """Return one durable dispatch by its message/dispatch ID."""
+        if not dispatch_id:
+            return None
+        with self._file_lock(self._dispatches_path()):
+            for item in self._read_dispatches_unlocked():
+                if item.get("dispatch_id", item.get("message_id")) == dispatch_id:
+                    return dict(item)
+        return None
+
+    def get_dispatches_for(self, assigned_by: str) -> List[Dict[str, Any]]:
+        """Return unresolved dispatches created by this coordinator identity."""
+        with self._file_lock(self._dispatches_path()):
+            dispatches = [
+                dict(item)
+                for item in self._read_dispatches_unlocked()
+                if item.get("assigned_by") == assigned_by
+                and item.get("status") in self.DISPATCH_ACTIVE_STATUSES
+            ]
+        return sorted(dispatches, key=lambda item: item.get("created_at", 0))
+
+    def get_dispatches_page(
+        self, assigned_by: str, *, page: int = 1, per_page: int = 10
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """Return one page of unresolved dispatches, newest first, and the total.
+
+        Page order matches rebirth recovery (newest first), so page 1 is the
+        same set the recovery summary expands.
+        """
+        newest_first = list(reversed(self.get_dispatches_for(assigned_by)))
+        start = (max(page, 1) - 1) * max(per_page, 1)
+        return newest_first[start : start + max(per_page, 1)], len(newest_first)
+
+    def update_dispatch(
+        self,
+        dispatch_id: str,
+        *,
+        status: str,
+        delivery_error: str = "",
+    ) -> bool:
+        """Record a delivery result without allowing reports to be bypassed."""
+        if status not in {"in_flight", "delivery_failed"}:
+            raise ValueError(f"unsupported dispatch delivery status: {status}")
+        path = self._dispatches_path()
+        with self._file_lock(path):
+            dispatches = self._read_dispatches_unlocked()
+            for item in dispatches:
+                if item.get("dispatch_id", item.get("message_id")) != dispatch_id:
+                    continue
+                current = item.get("status", "dispatching")
+                if status != current and status not in self.DISPATCH_TRANSITIONS.get(
+                    current, frozenset()
+                ):
+                    return False
+                item["status"] = status
+                item["updated_at"] = time.time()
+                if status == "delivery_failed" and delivery_error:
+                    item["delivery_error"] = delivery_error[:1000]
+                elif status == "in_flight":
+                    item.pop("delivery_error", None)
+                self._write_dispatches_unlocked(dispatches)
+                return True
+        return False
+
+    def record_dispatch_report(
+        self,
+        *,
+        task_id: str = "",
+        assignee: str,
+        thread_id: str = "",
+        message_id: str,
+        report: str,
+        worktree: str = "",
+        commit: str = "",
+        reply_to: str = "",
+    ) -> bool:
+        """Correlate completion reports with a worktree or commit evidence ref."""
+        if not isinstance(report, str) or not report.strip():
+            return False
+        worktree = worktree.strip() if isinstance(worktree, str) else ""
+        commit = commit.strip() if isinstance(commit, str) else ""
+        if not worktree and not commit:
+            return False
+        first_line = report.strip().splitlines()[0].strip().casefold()
+        if first_line != "task complete":
+            return False
+        if not any((task_id, thread_id, reply_to)):
+            return False
+
+        path = self._dispatches_path()
+        with self._file_lock(path):
+            dispatches = self._read_dispatches_unlocked()
+            matches = []
+            for item in dispatches:
+                if item.get("assignee") != assignee:
+                    continue
+                if task_id and item.get("task_id") != task_id:
+                    continue
+                if thread_id and item.get("thread_id") != thread_id:
+                    continue
+                if reply_to and item.get("message_id") != reply_to:
+                    continue
+                if item.get("status") == "reported_unverified":
+                    if item.get("report_message_id") == message_id:
+                        return True
+                    continue
+                if item.get("status") not in {
+                    "dispatching",
+                    "in_flight",
+                    "delivery_failed",
+                }:
+                    continue
+                matches.append(item)
+
+            if not matches:
+                return False
+            # For legacy replies with task_id only, settle the oldest matching
+            # assignment first, just as expected-reply resolution does.
+            item = min(matches, key=lambda entry: entry.get("created_at", 0))
+            item.update(
+                {
+                    "status": "reported_unverified",
+                    "report_message_id": message_id,
+                    "report": report[:4000],
+                    "reported_worktree": worktree[:2000],
+                    "reported_commit": commit[:256],
+                    "reported_at": time.time(),
+                    "updated_at": time.time(),
+                }
+            )
+            self._write_dispatches_unlocked(dispatches)
+            return True
+
+    def mark_dispatch_verified(
+        self, dispatch_id: str, *, verified_by: str, note: str
+    ) -> bool:
+        """Close a report only after its original assigner records evidence."""
+        if not dispatch_id or not verified_by.strip() or not note.strip():
+            return False
+        path = self._dispatches_path()
+        with self._file_lock(path):
+            dispatches = self._read_dispatches_unlocked()
+            for item in dispatches:
+                if item.get("dispatch_id", item.get("message_id")) != dispatch_id:
+                    continue
+                if item.get("assigned_by") != verified_by:
+                    return False
+                if item.get("status") != "reported_unverified":
+                    return False
+                item.update(
+                    {
+                        "status": "verified",
+                        "verified_by": verified_by,
+                        "verification_note": note.strip()[:2000],
+                        "verified_at": time.time(),
+                        "updated_at": time.time(),
+                    }
+                )
+                self._write_dispatches_unlocked(dispatches)
+                return True
+        return False
 
     def _save(self, card: TaskCard) -> None:
         card.updated_at = time.time()
@@ -591,12 +872,15 @@ class TaskLedger:
     # hub restarts (plain JSON cards like every other card) and are the
     # pool the idle supervisor pulls from when the coordinator goes idle.
 
-    def _mutate_locked(self, task_id: str, mutator) -> Optional[TaskCard]:
+    def _mutate_locked(
+        self, task_id: str, mutator, *, return_unchanged: bool = False
+    ) -> Optional[TaskCard]:
         """Apply ``mutator`` to a card under its advisory file lock.
 
         The lock covers load AND save, so read-modify-write sequences like
         claim are atomic across processes. The mutator returns True to
         persist the mutation, or None/False to leave the card untouched.
+        When requested, the current card is returned for an unchanged result.
         """
         path = self._task_path(task_id)
         if not path.exists():
@@ -610,6 +894,8 @@ class TaskLedger:
             if mutator(card) is True:
                 card.updated_at = time.time()
                 self._write_json_atomic(path, card.to_dict())
+                return card
+            if return_unchanged:
                 return card
         return None
 
@@ -861,13 +1147,15 @@ class TaskLedger:
         reason: str,
         actor: str = "",
         message_id: str = "",
+        preserve_active: bool = False,
     ) -> Optional[TaskCard]:
         """Move a task to an audited, non-cron terminal state.
 
         Terminalization is idempotent: a stale or duplicate directive cannot
         reopen a finished task or append duplicate audit checkpoints. The
         reason is mandatory so the task does not disappear without an
-        explanation.
+        explanation. When ``preserve_active`` is true, the active-state guard
+        and terminalization are serialized with concurrent claims.
         """
         status = (status or "").strip().lower()
         reason = (reason or "").strip()
@@ -876,29 +1164,49 @@ class TaskLedger:
         if not reason:
             raise ValueError("terminalization reason is required")
 
-        card = self._load(task_id)
-        if not card:
-            return None
-        if card.status in self.TERMINAL_STATUSES:
-            return card
+        def _apply_terminalization(card: TaskCard) -> None:
+            card.status = status
+            card.cron_active = False
+            card.snoozed_until = 0
+            card.terminal_reason = reason
+            card.terminal_actor = actor or None
+            card.terminal_message_id = message_id or None
+            card.terminalized_at = time.time()
+            card.add_checkpoint(
+                f"task {status}: {reason}",
+                {
+                    "status": status,
+                    "reason": reason,
+                    "actor": actor,
+                    "message_id": message_id,
+                },
+            )
 
-        card.status = status
-        card.cron_active = False
-        card.snoozed_until = 0
-        card.terminal_reason = reason
-        card.terminal_actor = actor or None
-        card.terminal_message_id = message_id or None
-        card.terminalized_at = time.time()
-        card.add_checkpoint(
-            f"task {status}: {reason}",
-            {
-                "status": status,
-                "reason": reason,
-                "actor": actor,
-                "message_id": message_id,
-            },
-        )
-        self._save(card)
+        if preserve_active:
+            terminalized = False
+
+            def _terminalize_unless_active(card: TaskCard) -> bool:
+                nonlocal terminalized
+                if card.status in self.TERMINAL_STATUSES or card.status == "active":
+                    return False
+                _apply_terminalization(card)
+                terminalized = True
+                return True
+
+            card = self._mutate_locked(
+                task_id, _terminalize_unless_active, return_unchanged=True
+            )
+            if card is None or not terminalized:
+                return card
+        else:
+            card = self._load(task_id)
+            if not card:
+                return None
+            if card.status in self.TERMINAL_STATUSES:
+                return card
+            _apply_terminalization(card)
+            self._save(card)
+
         self._resolve_replies_for_task(
             card.id,
             terminal_status=status,

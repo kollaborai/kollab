@@ -36,6 +36,10 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                         ("off", "Stop voice in this chat"),
                         ("status", "Show service, microphone and transcript status"),
                         ("retry", "Retry now; voice also retries on its own"),
+                        (
+                            "dismiss",
+                            "Clear speech batches whose delivery outcome is unknown",
+                        ),
                         ("config", "Configure voice in the terminal or web UI"),
                         ("context", "Set previous transcript lines to use; default 10"),
                         (
@@ -86,16 +90,18 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 return CommandResult(
                     success=False, message=str(exc), display_type="error"
                 )
-        if action not in {"", "on", "off", "retry"}:
+        if action not in {"", "on", "off", "retry", "dismiss"}:
             return CommandResult(
                 success=False,
                 message=(
-                    "Usage: /voice [on|off|status|retry|config"
+                    "Usage: /voice [on|off|status|retry|dismiss|config"
                     "|context [1–50]|enroll [forget]]"
                 ),
                 display_type="error",
             )
-        if action == "retry":
+        if action == "dismiss":
+            message = await plugin.dismiss_unknown_attempts()
+        elif action == "retry":
             message = await plugin.retry_voice()
         elif action == "off" or (not action and plugin.requested):
             message = await plugin.stop_voice()
@@ -176,6 +182,11 @@ class VoiceModeCommandHandler(BaseCommandHandler):
         if speech:
             lines.append(
                 f"Speech check: {speech.get('decision')} · {speech.get('provider')} · {speech.get('reason', '')}"
+            )
+        for attempt in state.get("unknown_attempts") or []:
+            lines.append(
+                f"Unknown outcome after restart (not resent; /voice dismiss clears): "
+                f"{attempt['text']}"
             )
         for value in (
             state.get("detail"),

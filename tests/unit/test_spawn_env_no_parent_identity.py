@@ -50,7 +50,7 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         self.orch.project_name = "test-proj"
         self.orch.session_init_delay = 0.0
 
-    def _spawn(self, extra_env):
+    def _spawn(self, extra_env, **spawn_kwargs):
         """Run _create_session with a fake Popen and return the child env."""
         captured = {}
 
@@ -67,6 +67,8 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         base_env = dict(os.environ)
         base_env["KOLLAB_PARENT_PID"] = "999"
         base_env["KOLLAB_PARENT_CREATE_TIME"] = "12345.6"
+        base_env["KOLLAB_PARENT_IDENTITY"] = "grandparent"
+        base_env["KOLLAB_PARENT_AGENT_ID"] = "grandparent-1"
         # Control the root socket explicitly: the outer kollab process may
         # already export it, and spawn propagates it verbatim.
         base_env["KOLLAB_ROOT_SOCKET"] = "test-proj"
@@ -89,7 +91,9 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
                     return_value=["kollab"],
                 ),
             ):
-                _run(self.orch._create_session("tester", "tester-id", ""))
+                _run(
+                    self.orch._create_session("tester", "tester-id", "", **spawn_kwargs)
+                )
 
         return captured
 
@@ -105,6 +109,8 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         env = captured["env"]
         self.assertNotIn("KOLLAB_PARENT_PID", env)
         self.assertNotIn("KOLLAB_PARENT_CREATE_TIME", env)
+        self.assertNotIn("KOLLAB_PARENT_IDENTITY", env)
+        self.assertNotIn("KOLLAB_PARENT_AGENT_ID", env)
 
     def test_spawn_strips_inherited_parent_create_time(self):
         """A stale KOLLAB_PARENT_CREATE_TIME must not leak into children either."""
@@ -124,6 +130,14 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         """The daemon shape itself is unchanged: still --detached."""
         captured = self._spawn({})
         self.assertIn("--detached", captured["cmd"])
+
+    def test_spawn_passes_detached_parent_identity(self):
+        captured = self._spawn(
+            {}, parent_identity="koordinator", parent_agent_id="koordinator-1"
+        )
+        env = captured["env"]
+        self.assertEqual(env.get("KOLLAB_PARENT_IDENTITY"), "koordinator")
+        self.assertEqual(env.get("KOLLAB_PARENT_AGENT_ID"), "koordinator-1")
 
 
 if __name__ == "__main__":
