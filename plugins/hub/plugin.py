@@ -5936,14 +5936,13 @@ class HubPlugin(BasePlugin):
                     None,
                 )
                 if holder:
+                    from .presence import _owner_gone
+
+                    # A busy holder answers no ping but is not dead (#673): only an
+                    # owner that is provably gone frees the identity (#575).
                     still_alive = await AgentMessenger.ping_agent(
                         holder.socket_path, timeout=2.0
-                    ) or (
-                        # A busy holder answers no ping but is not dead (#673)
-                        holder.is_alive()
-                        and time.time() - (holder.last_heartbeat or 0)
-                        < PresenceManager.LIVE_PID_GRACE_SECONDS
-                    )
+                    ) or not _owner_gone(holder)
                     if not still_alive:
                         logger.info(
                             f"Force-claiming '{preferred}': holder "
