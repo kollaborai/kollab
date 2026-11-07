@@ -1,0 +1,785 @@
+"""Startup must treat user-owned agent links as existing entries."""
+
+import errno
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from kollabor_config import config_utils
+
+
+def _link(path: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        path.symlink_to(target, target_is_directory=directory)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+
+def test_seed_preserves_section_and_dangling_file_links(tmp_path):
+    source = tmp_path / "bundled"
+    target = tmp_path / "agents" / "operator"
+    outside = tmp_path / "outside"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "header.md").write_text("bundle header")
+    (source / "system_prompt.md").write_text("bundle prompt")
+    (source / "agent.json").write_text("{}")
+    target.mkdir(parents=True)
+    outside.mkdir()
+    _link(target / "sections", outside, directory=True)
+    _link(target / "system_prompt.md", outside / "missing.md")
+
+    copied, preserved = config_utils._copy_missing_tree_contents(source, target)
+
+    assert (copied, preserved) == (1, 2)
+    assert (target / "sections").is_symlink()
+    assert (target / "system_prompt.md").is_symlink()
+    assert list(outside.iterdir()) == []
+    assert (target / "agent.json").read_text() == "{}"
+
+
+def test_seed_preserves_a_dangling_directory_link(tmp_path):
+    source = tmp_path / "bundled"
+    target = tmp_path / "global"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "header.md").write_text("bundle")
+    target.mkdir()
+    outside = tmp_path / "missing-directory"
+    _link(target / "sections", outside, directory=True)
+
+    assert config_utils._copy_missing_tree_contents(source, target) == (0, 1)
+    assert (target / "sections").is_symlink()
+    assert not outside.exists()
+
+
+@pytest.mark.parametrize("linked_component", ["agents", "agent"])
+def test_seed_preserves_directory_links(tmp_path, monkeypatch, linked_component):
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    agents = tmp_path / "global" / "agents"
+    agents.parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if linked_component == "agents":
+        link = agents
+    else:
+        agents.mkdir()
+        link = agents / "operator"
+    _link(link, outside, directory=True)
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled)
+
+    config_utils._copy_seed_agents_to_global(agents, tmp_path / "old")
+
+    assert link.is_symlink()
+    assert list(outside.iterdir()) == []
+
+
+def test_seed_preserves_a_linked_global_config_parent(tmp_path, monkeypatch):
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    outside = tmp_path / "outside"
+    (outside / "agents").mkdir(parents=True)
+    linked_config = tmp_path / ".kollab"
+    _link(linked_config, outside, directory=True)
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled)
+
+    config_utils._copy_seed_agents_to_global(linked_config / "agents", tmp_path / "old")
+
+    assert linked_config.is_symlink()
+    assert list((outside / "agents").iterdir()) == []
+
+
+def test_seed_preserves_a_reparse_global_config_parent(tmp_path, monkeypatch):
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    config = tmp_path / ".kollab"
+    (config / "agents").mkdir(parents=True)
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path, *args, **kwargs):
+        if path == config:
+            return SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x400)
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled)
+    config_utils._copy_seed_agents_to_global(config / "agents", tmp_path / "old")
+
+    assert list((config / "agents").iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX home anchor")
+def test_system_link_above_home_does_not_block_safe_seeding(tmp_path, monkeypatch):
+    home = tmp_path / "real-home"
+    home.mkdir()
+    alias = tmp_path / "home-alias"
+    _link(alias, home, directory=True)
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    monkeypatch.setenv("HOME", str(alias))
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled)
+
+    config_utils._copy_seed_agents_to_global(alias / ".kollab" / "agents", alias / "old")
+
+    assert (home / ".kollab" / "agents" / "operator" / "system_prompt.md").read_text() == "bundle"
+
+
+def test_parent_swap_before_staging_never_writes_to_link_target(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    sections = target / "sections"
+    moved_sections = target / "sections-original"
+    outside = tmp_path / "outside"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "header.md").write_text("bundled")
+    sections.mkdir(parents=True)
+    outside.mkdir()
+    (outside / "user-marker.txt").write_text("user")
+    real_open = config_utils.os.open
+    raced = False
+
+    def swap_before_staging(path, flags, *args, **kwargs):
+        nonlocal raced
+        if not raced and ".header.md.seed-" in str(path):
+            raced = True
+            try:
+                sections.rename(moved_sections)
+            except OSError:
+                if sys.platform != "win32":
+                    raise
+                return real_open(path, flags, *args, **kwargs)
+            _link(sections, outside, directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "open", swap_before_staging)
+    try:
+        config_utils._copy_missing_tree_contents(source, target)
+    except OSError:
+        pass
+
+    assert raced
+    assert (outside / "user-marker.txt").read_text() == "user"
+    assert sorted(p.name for p in outside.iterdir()) == ["user-marker.txt"]
+
+
+def test_parent_swap_before_creating_directory_never_writes_outside(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    moved_target = tmp_path / "target-original"
+    outside = tmp_path / "outside"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "header.md").write_text("bundled")
+    target.mkdir()
+    outside.mkdir()
+    (outside / "user-marker.txt").write_text("user")
+    real_mkdir = config_utils.os.mkdir
+    raced = False
+
+    def swap_before_mkdir(path, *args, **kwargs):
+        nonlocal raced
+        if not raced and Path(path).name == "sections":
+            raced = True
+            try:
+                target.rename(moved_target)
+            except OSError:
+                if sys.platform != "win32":
+                    raise
+                return real_mkdir(path, *args, **kwargs)
+            _link(target, outside, directory=True)
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "mkdir", swap_before_mkdir)
+    try:
+        config_utils._copy_missing_tree_contents(source, target)
+    except OSError:
+        pass
+
+    assert raced
+    assert (outside / "user-marker.txt").read_text() == "user"
+    assert sorted(p.name for p in outside.iterdir()) == ["user-marker.txt"]
+
+
+def test_seed_still_copies_missing_and_preserves_existing_files(tmp_path):
+    source = tmp_path / "bundled"
+    target = tmp_path / "global"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "old.md").write_text("bundle old")
+    (source / "sections" / "new.md").write_text("bundle new")
+    (target / "sections").mkdir(parents=True)
+    (target / "sections" / "old.md").write_text("user edit")
+
+    assert config_utils._copy_missing_tree_contents(source, target) == (1, 1)
+    assert (target / "sections" / "old.md").read_text() == "user edit"
+    assert (target / "sections" / "new.md").read_text() == "bundle new"
+
+
+def test_seed_does_not_clobber_a_concurrently_created_file(tmp_path, monkeypatch):
+    source = tmp_path / "bundled"
+    target = tmp_path / "global"
+    source.mkdir()
+    target.mkdir()
+    (source / "system_prompt.md").write_text("bundle")
+    destination = target / "system_prompt.md"
+    original_link = config_utils.os.link
+    raced = False
+
+    def create_before_link(source_path, target_path, *args, **kwargs):
+        nonlocal raced
+        if Path(target_path).name == destination.name and not raced:
+            raced = True
+            destination.write_text("concurrent user content")
+        return original_link(source_path, target_path, *args, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "link", create_before_link)
+    assert config_utils._copy_missing_tree_contents(source, target) == (0, 1)
+    assert raced
+    assert destination.read_text() == "concurrent user content"
+
+
+def test_seed_does_not_follow_a_concurrently_created_dangling_link(tmp_path, monkeypatch):
+    source = tmp_path / "source.md"
+    destination = tmp_path / "prompt.md"
+    outside = tmp_path / "outside.md"
+    source.write_text("bundle")
+    original_link = config_utils.os.link
+
+    def create_before_link(source_path, target_path, *args, **kwargs):
+        _link(destination, outside)
+        return original_link(source_path, target_path, *args, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "link", create_before_link)
+    assert not config_utils._copy_file_if_missing(source, destination)
+    assert destination.is_symlink()
+    assert not outside.exists()
+
+
+@pytest.mark.parametrize("error", [PermissionError, NotImplementedError, AttributeError])
+def test_seed_with_symlink_creation_denied_uses_regular_files(tmp_path, monkeypatch, error):
+    source = tmp_path / "bundled"
+    target = tmp_path / "global"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "header.md").write_text("bundle")
+
+    def deny_symlink(*args, **kwargs):
+        raise error("symlink creation unavailable")
+
+    monkeypatch.setattr(config_utils.os, "symlink", deny_symlink)
+    config_utils._copy_missing_tree_contents(source, target)
+    assert (target / "sections" / "header.md").read_text() == "bundle"
+    assert not (target / "sections").is_symlink()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(errno.ENOTSUP, "unsupported"),
+        PermissionError("denied"),
+        NotImplementedError("unavailable"),
+        AttributeError("unavailable"),
+    ],
+)
+def test_no_safe_primitive_leaves_bundle_usable(tmp_path, monkeypatch, caplog, error):
+    from kollabor_agent import agent_manager
+
+    home = tmp_path / "home"
+    home.mkdir()
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled if name == "agents" else None)
+    monkeypatch.setattr(agent_manager, "get_bundled_agents_dir", lambda: bundled)
+
+    def deny_link(*args, **kwargs):
+        raise error
+
+    def deny_exclusive_rename(*args, **kwargs):
+        raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils, "_rename_seed_noreplace", deny_exclusive_rename)
+    config_utils.initialize_system_prompt()
+    manager = agent_manager.AgentManager(project_path=project)
+
+    assert manager.find_agent_dir("operator") == (bundled / "operator", "bundled")
+    global_agent = home / ".kollab" / "agents" / "operator"
+    assert not (global_agent / "system_prompt.md").exists()
+    assert not list(global_agent.glob(".*.seed-*"))
+    assert "both hard-link and POSIX no-replace rename failed" in caplog.text
+    assert "Existing files were preserved" in caplog.text
+
+
+def test_seed_failure_does_not_skip_independent_skill_retirement(tmp_path, monkeypatch):
+    import hashlib
+
+    config = tmp_path / ".kollab"
+    bundled = tmp_path / "bundled"
+    (bundled / "operator").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundle")
+    skill = config / "skills" / "tool" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(b"known skill")
+    digest = hashlib.sha256(b"known skill").hexdigest()
+    monkeypatch.setattr(config_utils, "get_config_directory", lambda: config)
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(
+        config_utils,
+        "_get_bundled_dir",
+        lambda name: bundled if name == "agents" else None,
+    )
+    monkeypatch.setattr(
+        config_utils, "_load_skill_seed_hashes", lambda: {"tool": {"SKILL.md": {digest}}}
+    )
+
+    def deny_link(*args, **kwargs):
+        raise OSError(errno.ENOTSUP, "hard links unsupported")
+
+    native_rename = config_utils._rename_seed_noreplace
+
+    def deny_agent_rename(source_name, target_name, **kwargs):
+        if target_name == "system_prompt.md":
+            raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+        return native_rename(source_name, target_name, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils, "_rename_seed_noreplace", deny_agent_rename)
+    config_utils.initialize_system_prompt()
+
+    assert not skill.exists()
+    assert (config / "skills" / ".seed-backup" / "tool" / "SKILL.md").read_bytes() == b"known skill"
+
+
+def test_no_safe_primitive_reports_an_existing_global_shadow(tmp_path, monkeypatch, caplog):
+    from kollabor_agent import agent_manager
+
+    home = tmp_path / "home"
+    global_agent = home / ".kollab" / "agents" / "operator"
+    global_agent.mkdir(parents=True)
+    (global_agent / "system_prompt.md").write_text("user-owned prompt")
+    bundled = tmp_path / "bundled"
+    (bundled / "operator" / "sections").mkdir(parents=True)
+    (bundled / "operator" / "system_prompt.md").write_text("bundled prompt")
+    (bundled / "operator" / "sections" / "header.md").write_text("header")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(
+        config_utils,
+        "_get_bundled_dir",
+        lambda name: bundled if name == "agents" else None,
+    )
+    monkeypatch.setattr(agent_manager, "get_bundled_agents_dir", lambda: bundled)
+
+    def deny_link(*args, **kwargs):
+        raise PermissionError("hard links denied")
+
+    def deny_exclusive_rename(*args, **kwargs):
+        raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils, "_rename_seed_noreplace", deny_exclusive_rename)
+    config_utils.initialize_system_prompt()
+    manager = agent_manager.AgentManager(project_path=project)
+
+    assert manager.find_agent_dir("operator") == (global_agent, "global")
+    assert (global_agent / "system_prompt.md").read_text() == "user-owned prompt"
+    assert not (global_agent / "sections" / "header.md").exists()
+    assert "still shadows the bundle" in caplog.text
+    assert "may leave it incomplete" in caplog.text
+    assert "Review" in caplog.text
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" and not sys.platform.startswith("linux"),
+    reason="native POSIX exclusive rename available on Linux and macOS",
+)
+def test_posix_exclusive_rename_publishes_when_hard_links_are_unavailable(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    sentinel = tmp_path / "user.md"
+    source.write_bytes(b"complete bundled content")
+    sentinel.write_bytes(b"user content")
+
+    def deny_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links unavailable")
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+
+    assert config_utils._copy_file_if_missing(source, target)
+    assert target.read_bytes() == b"complete bundled content"
+    assert sentinel.read_bytes() == b"user content"
+    assert not list(tmp_path.glob(".*.seed-*"))
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" and not sys.platform.startswith("linux"),
+    reason="native POSIX exclusive rename available on Linux and macOS",
+)
+def test_posix_exclusive_rename_preserves_concurrent_destination(tmp_path, monkeypatch):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    sentinel = tmp_path / "user.md"
+    source.write_bytes(b"bundle")
+    sentinel.write_bytes(b"unrelated user content")
+    native_rename = config_utils._rename_seed_noreplace
+
+    def deny_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links unavailable")
+
+    def create_destination_before_rename(source_name, target_name, **kwargs):
+        target.write_bytes(b"concurrent user content")
+        return native_rename(source_name, target_name, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(
+        config_utils, "_rename_seed_noreplace", create_destination_before_rename
+    )
+
+    assert not config_utils._copy_file_if_missing(source, target)
+    assert target.read_bytes() == b"concurrent user content"
+    assert sentinel.read_bytes() == b"unrelated user content"
+    assert not list(tmp_path.glob(".*.seed-*"))
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" and not sys.platform.startswith("linux"),
+    reason="native POSIX exclusive rename available on Linux and macOS",
+)
+def test_posix_no_safe_publication_preserves_user_files(tmp_path, monkeypatch):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    sentinel = tmp_path / "user.md"
+    source.write_bytes(b"bundle")
+    sentinel.write_bytes(b"user content")
+
+    def deny_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links unavailable")
+
+    def deny_exclusive_rename(*args, **kwargs):
+        raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils, "_rename_seed_noreplace", deny_exclusive_rename)
+
+    with pytest.raises(
+        OSError, match="both hard-link and POSIX no-replace rename failed"
+    ):
+        config_utils._copy_file_if_missing(source, target)
+
+    assert not target.exists()
+    assert sentinel.read_bytes() == b"user content"
+    assert not list(tmp_path.glob(".*.seed-*"))
+
+
+@pytest.mark.parametrize("race", [False, True])
+def test_windows_rename_fallback_preserves_concurrent_file(tmp_path, monkeypatch, race):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    source.write_text("bundle")
+    real_rename = config_utils.os.rename
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", True)
+
+    def deny_link(*args, **kwargs):
+        raise PermissionError("hard links denied")
+
+    def windows_rename(src, dst, **kwargs):
+        if race:
+            target.write_text("user")
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(str(dst))
+        return real_rename(src, dst, **kwargs)
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils.os, "rename", windows_rename)
+    assert config_utils._copy_file_if_missing(source, target) is not race
+    assert target.read_text() == ("user" if race else "bundle")
+    assert not list(tmp_path.glob(".*.seed-*"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows rename only")
+def test_native_windows_rename_does_not_replace_concurrent_file(tmp_path, monkeypatch):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    source.write_text("bundle")
+    real_rename = config_utils.os.rename
+
+    def deny_link(*args, **kwargs):
+        raise PermissionError("hard links denied")
+
+    def create_before_rename(src, dst):
+        target.write_text("concurrent user content")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(config_utils.os, "link", deny_link)
+    monkeypatch.setattr(config_utils.os, "rename", create_before_rename)
+    assert not config_utils._copy_file_if_missing(source, target)
+    assert target.read_text() == "concurrent user content"
+
+
+def test_windows_denied_link_and_rename_leaves_existing_user_files(tmp_path, monkeypatch):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    source.write_text("bundle")
+    other = tmp_path / "user.md"
+    other.write_text("private user content")
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", True)
+
+    def deny(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(config_utils.os, "link", deny)
+    monkeypatch.setattr(config_utils.os, "rename", deny)
+    with pytest.raises(OSError, match="both hard-link and no-overwrite rename failed"):
+        config_utils._copy_file_if_missing(source, target)
+    assert not target.exists()
+    assert other.read_text() == "private user content"
+    assert not list(tmp_path.glob(".*.seed-*"))
+
+
+def test_interrupted_copy_never_installs_a_partial_target(tmp_path, monkeypatch):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    source.write_text("complete bundle")
+
+    def interrupted_copy(src, dst):
+        dst.write(b"partial")
+        raise OSError("simulated interrupted copy")
+
+    monkeypatch.setattr(config_utils.shutil, "copyfileobj", interrupted_copy)
+    with pytest.raises(OSError, match="interrupted copy"):
+        config_utils._copy_file_if_missing(source, target)
+    assert not target.exists()
+    assert not list(tmp_path.glob(".*.seed-*"))
+
+
+def test_process_exit_during_copy_leaves_no_partial_target(tmp_path):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    source.write_text("complete bundle")
+    package_root = Path(config_utils.__file__).resolve().parents[1]
+    script = """
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+from kollabor_config import config_utils
+def interrupted(src, dst):
+    dst.write(b'partial')
+    dst.flush()
+    os._exit(23)
+config_utils.shutil.copyfileobj = interrupted
+config_utils._copy_file_if_missing(Path(sys.argv[2]), Path(sys.argv[3]))
+"""
+    process = subprocess.run(
+        [sys.executable, "-c", script, str(package_root), str(source), str(target)],
+        capture_output=True,
+        check=False,
+    )
+    assert process.returncode == 23
+    assert not target.exists()
+    staged = list(tmp_path.glob(".*.seed-*"))
+    assert len(staged) == 1 and staged[0].read_bytes() == b"partial"
+    assert config_utils._copy_file_if_missing(source, target)
+    assert target.read_text() == "complete bundle"
+    assert staged[0].read_bytes() == b"partial"  # never silently cleaned up
+
+
+def test_interruption_before_publish_never_installs_a_target(tmp_path, monkeypatch):
+    source = tmp_path / "source.md"
+    target = tmp_path / "target.md"
+    source.write_text("complete bundle")
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(config_utils.os, "link", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        config_utils._copy_file_if_missing(source, target)
+    assert not target.exists()
+    assert not list(tmp_path.glob(".*.seed-*"))
+
+
+def test_reparse_directory_is_not_traversed(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "header.md").write_text("bundle")
+    (target / "sections").mkdir(parents=True)
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path, *args, **kwargs):
+        if path == target / "sections":
+            return SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x400)
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    assert config_utils._copy_missing_tree_contents(source, target) == (0, 1)
+    assert list((target / "sections").iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows junctions only")
+def test_existing_windows_junction_is_not_traversed(tmp_path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    outside = tmp_path / "outside"
+    (source / "sections").mkdir(parents=True)
+    (source / "sections" / "header.md").write_text("bundle")
+    target.mkdir()
+    outside.mkdir()
+    junction = target / "sections"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        pytest.skip(f"junction creation unavailable: {result.stderr}")
+    assert junction.is_junction()
+    assert config_utils._copy_missing_tree_contents(source, target) == (0, 1)
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows directory handles only")
+def test_windows_seed_directory_blocks_concurrent_parent_rename(tmp_path):
+    directory = tmp_path / "sections"
+    moved = tmp_path / "sections-original"
+    directory.mkdir()
+
+    with config_utils._seed_directory(directory, create=False):
+        with pytest.raises(OSError):
+            directory.rename(moved)
+
+    assert directory.is_dir()
+    assert not moved.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows directory handles only")
+def test_windows_seed_directory_blocks_cross_process_parent_rename(tmp_path):
+    directory = tmp_path / "sections"
+    moved = tmp_path / "sections-original"
+    directory.mkdir()
+    script = "from pathlib import Path; import sys; Path(sys.argv[1]).rename(sys.argv[2])"
+
+    with config_utils._seed_directory(directory, create=False):
+        process = subprocess.run(
+            [sys.executable, "-c", script, str(directory), str(moved)],
+            capture_output=True,
+            check=False,
+        )
+        assert process.returncode != 0
+
+    assert directory.is_dir()
+    assert not moved.exists()
+
+
+def test_seed_skips_linked_global_root_but_agent_resolution_still_works(tmp_path, monkeypatch):
+    from kollabor_agent import agent_manager
+
+    home = tmp_path / "home"
+    config = home / ".kollab"
+    config.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    (outside / "coder").mkdir(parents=True)
+    (outside / "coder" / "system_prompt.md").write_text("user's coder")
+    _link(config / "agents", outside, directory=True)
+    bundled = tmp_path / "bundled"
+    for name in ("coder", "operator"):
+        (bundled / name).mkdir(parents=True)
+        (bundled / name / "system_prompt.md").write_text("bundled " + name)
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: bundled if name == "agents" else None)
+    monkeypatch.setattr(agent_manager, "get_bundled_agents_dir", lambda: bundled)
+
+    config_utils.initialize_system_prompt()
+    manager = agent_manager.AgentManager(project_path=project)
+
+    assert manager.find_agent_dir("operator") == (bundled / "operator", "bundled")
+    assert manager.find_agent_dir("coder") == (config / "agents" / "coder", "global")
+    assert sorted(p.name for p in outside.iterdir()) == ["coder"]
+    assert (outside / "coder" / "system_prompt.md").read_text() == "user's coder"
+
+    local = project / ".kollab" / "agents" / "operator"
+    local.mkdir(parents=True)
+    (local / "system_prompt.md").write_text("project override")
+    assert agent_manager.AgentManager(project_path=project).find_agent_dir("operator") == (
+        local,
+        "local",
+    )
+
+
+def test_prompt_migration_preserves_a_dangling_link(tmp_path, monkeypatch):
+    agents = tmp_path / "agents"
+    default = agents / "default"
+    default.mkdir(parents=True)
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "default.md").write_text("old prompt")
+    outside = tmp_path / "outside.md"
+    _link(default / "system_prompt.md", outside)
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: None)
+
+    config_utils._copy_seed_agents_to_global(agents, old)
+
+    assert (default / "system_prompt.md").is_symlink()
+    assert not outside.exists()
+    assert not (default / "agent.json").exists()
+
+
+@pytest.mark.parametrize("linked_component", ["agents", "default"])
+def test_prompt_migration_preserves_directory_links(tmp_path, monkeypatch, linked_component):
+    agents = tmp_path / "agents"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if linked_component == "agents":
+        link = agents
+    else:
+        agents.mkdir()
+        link = agents / "default"
+    _link(link, outside, directory=True)
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "default.md").write_text("old prompt")
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: None)
+
+    config_utils._copy_seed_agents_to_global(agents, old)
+
+    assert link.is_symlink()
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+def test_create_defaults_preserves_dangling_prompt_link(tmp_path, monkeypatch, bundled):
+    target = tmp_path / "agents" / "default"
+    target.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    _link(target / "system_prompt.md", outside)
+    seed = tmp_path / "bundled"
+    (seed / "default").mkdir(parents=True)
+    (seed / "default" / "system_prompt.md").write_text("bundle")
+    monkeypatch.setattr(config_utils, "_get_bundled_dir", lambda name: seed if bundled else None)
+
+    config_utils._create_agent_from_defaults(target)
+
+    assert (target / "system_prompt.md").is_symlink()
+    assert not outside.exists()

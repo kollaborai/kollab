@@ -1,0 +1,28 @@
+{
+  "name": "finance-ops",
+  "description": "Finance and operations back office: controller lead, bookkeeper (AP/AR), FP&A analyst, procurement and vendor manager, and tax and audit coordinator. Reconciles, forecasts and drafts; moves no money and files nothing without approval.",
+  "roster": "finance-crew",
+  "lead": "catherine",
+  "members": [
+    {
+      "persona": "catherine",
+      "reports_to": null
+    },
+    {
+      "persona": "ben",
+      "reports_to": "catherine"
+    },
+    {
+      "persona": "simone",
+      "reports_to": "catherine"
+    },
+    {
+      "persona": "raj",
+      "reports_to": "catherine"
+    },
+    {
+      "persona": "olga",
+      "reports_to": "catherine"
+    }
+  ]
+}

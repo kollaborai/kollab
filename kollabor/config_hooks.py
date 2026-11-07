@@ -433,8 +433,14 @@ class ConfigHookLoader:
             if sys_msg:
                 logger.warning(f"Config hook message: {sys_msg}")
 
-            # Handle continue=false or decision=deny
-            if response.get("continue") is False or response.get("decision") == "deny":
+            # Handle continue=false or decision=deny. "block" is the
+            # decision value Claude Code Stop hooks emit; treat it as a
+            # synonym of "deny" so ported hooks are not silently ignored
+            # (issue #664).
+            if response.get("continue") is False or response.get("decision") in (
+                "deny",
+                "block",
+            ):
                 event.cancelled = True
                 reason = response.get("reason", "Denied by config hook")
                 logger.info(f"Config hook denied event: {reason}")

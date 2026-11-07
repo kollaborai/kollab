@@ -25,6 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -907,6 +908,8 @@ def in_scope(folder: str, scopes: Iterable[str | list[str]]) -> bool:
 # ------------------------------------------------------------ halt.json
 
 
+REPLACE_ATTEMPTS = 5  # tries at replacing halt.json under a reader, REPLACE_WAIT apart
+REPLACE_WAIT = 0.05
 HALT_FILE_LIMIT = 64 << 20  # a read this big is never cut short; a write over it is refused
 
 
@@ -969,7 +972,16 @@ class HaltFile:
                 fh.write(body)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.replace(tmp, self.path)
+            # Windows refuses the replace while a reader still has halt.json open (os.open shares no delete
+            # access), so wait out a short read. A replace that never succeeds raises with the old file intact.
+            for attempt in range(REPLACE_ATTEMPTS):
+                try:
+                    os.replace(tmp, self.path)
+                    break
+                except PermissionError:
+                    if attempt == REPLACE_ATTEMPTS - 1:
+                        raise
+                    time.sleep(REPLACE_WAIT)
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
@@ -1345,9 +1357,9 @@ def _backgrounded(
                 continue
             started = info[pid][0]
             hit = False
-            if shells:
+            if shells:  # ps reads a start a second or two off the recorded clock (#710): REUSE_SLACK
                 for key in (pg, _sid(pid, tree)):
-                    if key in shells and key not in unsafe and int(started) >= int(shells[key]):
+                    if key in shells and key not in unsafe and int(started) + REUSE_SLACK >= int(shells[key]):
                         hit = True
             if not hit and pid in known and orphan(ppid):
                 owner = tag_of(pid)

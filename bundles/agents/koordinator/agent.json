@@ -3,7 +3,8 @@
   "identity": "koordinator",
   "tools": ["*"],
   "skills": [
-    "explore-agent-system"
+    "explore-agent-system",
+    "repository-coordinator"
   ],
   "vault_enabled": true
 }

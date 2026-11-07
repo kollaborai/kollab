@@ -539,17 +539,61 @@ Telegram bridge setup (run inside interactive mode):
         default=None,
         metavar="CMD",
         help=(
-            "Hub CLI: status, agents, stop <name|all>, capture <name> [lines] [--raw], "
+            "Hub CLI: status, agents, stop <name|all>, capture <name> [lines] [--cursor N] [--follow] [--raw], "
             "msg <name> <text>, broadcast <text>, where <name>, user [name], on/off, "
-            "org <name> [mission]. Pass '--hub help' for the full list. "
+            "org <name> [mission] [--dir FOLDER] [--only a,b | --without a,b]. "
+            "Pass '--hub help' for the full list. "
             "Telegram bridge and notifications are configured interactively "
             "via /hub bridge setup and /hub notify."
         ),
     )
 
     parser.add_argument(
+        "--dir",
+        dest="hub_org_dir",
+        metavar="FOLDER",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--without",
+        dest="hub_org_without",
+        action="append",
+        default=None,
+        metavar="PERSONA,...",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--only",
+        dest="hub_org_only",
+        action="append",
+        default=None,
+        metavar="PERSONA,...",
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
         "--raw",
         dest="hub_capture_raw",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+
+    # --hub uses nargs='*', so capture-only flags that the hub subcommand
+    # consumes must be registered top-level (like --raw above) or argparse
+    # stops consuming at the first '-...' token and drops them as unknown.
+    parser.add_argument(
+        "--cursor",
+        dest="hub_capture_cursor",
+        default=None,
+        metavar="N",
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
+        "--follow",
+        dest="hub_capture_follow",
         action="store_true",
         default=False,
         help=argparse.SUPPRESS,
@@ -568,6 +612,16 @@ Telegram bridge setup (run inside interactive mode):
         action="store_true",
         default=False,
         help="Open kollab in your browser (http://127.0.0.1:8080)",
+    )
+    parser.add_argument(
+        "--web-ui-hosts",
+        dest="web_ui_hosts",
+        default=None,
+        metavar="IP[,IP...]",
+        help="With --web-ui: extra interface addresses to serve on, comma "
+        "separated (LAN/VPN opt-in; localhost is always bound, and each "
+        "extra address prints an exposure warning). Pass an empty value to "
+        "force localhost-only even when KOLLAB_WEBUI_HOSTS is set",
     )
     parser.add_argument(
         "--mcp-hub",
@@ -725,7 +779,33 @@ Telegram bridge setup (run inside interactive mode):
     if args.hub_capture_raw:
         if not args.hub or args.hub[0].lower() != "capture":
             parser.error("--raw is only valid with --hub capture")
+        if args.hub_capture_cursor is not None or args.hub_capture_follow:
+            # --raw keeps the byte-for-byte request/response path; it has no
+            # cursor semantics, so silently dropping the flags would lie.
+            parser.error(
+                "--raw cannot be combined with --cursor/--follow"
+            )
         args.hub.append("--raw")
+
+    if args.hub_capture_cursor is not None or args.hub_capture_follow:
+        if not args.hub or args.hub[0].lower() != "capture":
+            parser.error("--cursor and --follow are only valid with --hub capture")
+        if args.hub_capture_cursor is not None:
+            args.hub.extend(["--cursor", str(args.hub_capture_cursor)])
+        if args.hub_capture_follow:
+            args.hub.append("--follow")
+
+    hub_org_options_used = (
+        args.hub_org_dir is not None
+        or args.hub_org_without is not None
+        or args.hub_org_only is not None
+    )
+    if hub_org_options_used and (not args.hub or args.hub[0].lower() != "org"):
+        parser.error("--dir, --only, and --without are only valid with --hub org")
+    if args.hub_org_without is not None and args.hub_org_only is not None:
+        parser.error("--only and --without are mutually exclusive")
+    if args.hub_org_dir is not None and not args.hub_org_dir.strip():
+        parser.error("--dir requires a non-empty folder path")
 
     # --profile was replaced by --llm. Unknown "--x" flags are otherwise
     # treated as CLI commands, so the old flag would resolve to a nonexistent
@@ -1000,6 +1080,20 @@ async def _run_acp_cli(args: Any) -> None:
         await runner.close()
 
 
+def _hub_args_with_org_options(args: argparse.Namespace) -> list[str]:
+    """Append top-level org selectors to the hub subcommand arguments."""
+    hub_args = list(args.hub or [])
+    if args.hub_org_dir is not None:
+        hub_args.extend(["--dir", args.hub_org_dir])
+    for flag, values in (
+        ("--without", args.hub_org_without),
+        ("--only", args.hub_org_only),
+    ):
+        for value in values or []:
+            hub_args.extend([flag, value])
+    return hub_args
+
+
 async def async_main() -> None:
     """Main async entry point for the application with proper error handling."""
     import time
@@ -1086,7 +1180,7 @@ async def async_main() -> None:
 
     # Handle --web-ui: spawn engine + browser UI and block until Ctrl+C.
     if args.web_ui:
-        await _handle_cli_web_ui(restart=args.restart)
+        await _handle_cli_web_ui(restart=args.restart, hosts=args.web_ui_hosts)
         return
     if args.restart:
         print("Error: --restart works with --web-ui", file=sys.stderr)
@@ -1110,7 +1204,7 @@ async def async_main() -> None:
                 args._cli_args.hub = True
             # continue to full TUI below
         else:
-            await _handle_cli_hub(args.hub)
+            await _handle_cli_hub(_hub_args_with_org_options(args))
             return
 
     # Handle --attach: boot full TUI app in proxy mode
@@ -1418,7 +1512,7 @@ def _print_hub_help() -> None:
     print("  halt [--reason <text>] [--revoke <device>]   halt the network (a person's terminal only)")
     print("  resume [--confirm <8-hex> | --local]         propose, confirm or lift here only")
     print(
-        "  capture <name> [lines] [--raw]  readable transcript; --raw keeps terminal output"
+        "  capture <name> [lines] [--raw]  readable transcript; --cursor N resumes a marker; --follow drains pages"
     )
     print("  msg <name> <text>          send a direct message to one agent")
     print("  broadcast <text>           send a message to all online agents")
@@ -1426,7 +1520,9 @@ def _print_hub_help() -> None:
     print("  user [name]                show or set the hub user display name")
     print("  on                         enable hub plugin (next session)")
     print("  off                        disable hub plugin (next session)")
-    print("  org <name> [mission]       launch a team")
+    print(
+        "  org <team> [mission] [--dir FOLDER] [--only a,b | --without a,b]"
+    )
     print("  help                       show this help")
     print()
     print("examples:")
@@ -1438,6 +1534,7 @@ def _print_hub_help() -> None:
     print("  kollab --hub capture koordinator 200")
     print("  kollab --hub capture koordinator 200 --raw")
     print("  kollab --hub org engineering 'ship the billing flow'")
+    print("  kollab --hub org engineering --dir ./project --without designer")
     print()
     print("interactive equivalents (run these inside a kollab session):")
     print("  /hub status        /hub msg <name> <text>    /hub broadcast <text>")
@@ -1621,7 +1718,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
         status                  show online agents
         agents / list           same as status
         stop <identity|all>     send shutdown signal (alias: kill)
-        capture <name> [n]      readable transcript; add --raw for terminal output
+        capture <name> [n]      readable transcript; --cursor N resumes; --follow drains; --raw terminal
         msg <name> <text>       send hub message to agent
         broadcast <text>        send message to all agents
         user [name]             show or set hub user name
@@ -1889,18 +1986,54 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "capture":
         raw = "--raw" in rest
-        capture_args = [arg for arg in rest if arg != "--raw"]
+        follow = "--follow" in rest
+        capture_args = [arg for arg in rest if arg not in ("--raw", "--follow")]
         if not capture_args:
-            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
+            print(
+                "usage: kollab --hub capture <identity|agent@device> [lines] "
+                "[--cursor N] [--follow] [--raw]"
+            )
             sys.exit(1)
         target = capture_args[0]
-        if len(capture_args) > 2:
-            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
+        positionals = capture_args[1:]
+        cursor: Any = None
+        if "--cursor" in positionals:
+            flag_index = positionals.index("--cursor")
+            value_index = flag_index + 1
+            if value_index >= len(positionals):
+                print(
+                    "usage: kollab --hub capture <identity|agent@device> [lines] "
+                    "[--cursor N] [--follow] [--raw]"
+                )
+                sys.exit(2)
+            cursor_value = positionals[value_index]
+            positionals = [
+                arg
+                for index, arg in enumerate(positionals)
+                if index not in (flag_index, value_index)
+            ]
+            try:
+                int(cursor_value)
+            except ValueError:
+                print(
+                    "usage: kollab --hub capture <identity|agent@device> [lines] "
+                    "[--cursor N] [--follow] [--raw]"
+                )
+                sys.exit(2)
+            cursor = cursor_value
+        if len(positionals) > 1:
+            print(
+                "usage: kollab --hub capture <identity|agent@device> [lines] "
+                "[--cursor N] [--follow] [--raw]"
+            )
             sys.exit(2)
         try:
-            num_lines = int(capture_args[1]) if len(capture_args) > 1 else 50
+            num_lines = int(positionals[0]) if positionals else 50
         except ValueError:
-            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
+            print(
+                "usage: kollab --hub capture <identity|agent@device> [lines] "
+                "[--cursor N] [--follow] [--raw]"
+            )
             sys.exit(2)
         from plugins.hub.device_names import parse_handle
 
@@ -1958,20 +2091,79 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 lines=num_lines,
                 capture_format="json",
                 max_chars=10_000,
+                cursor=cursor,
             )
             if capture_error:
                 print(
                     f"capture failed for '{target}': {capture_error}", file=sys.stderr
                 )
                 sys.exit(1)
-            print(
-                render_transcript(
-                    capture,
-                    identity=target,
-                    max_lines=num_lines,
-                    max_chars=10_000,
-                )
+            printed = render_transcript(
+                capture,
+                identity=target,
+                max_lines=num_lines,
+                max_chars=10_000,
             )
+            print(printed)
+            if follow:
+                # The truncated marker's next_cursor is the only continuation
+                # handle a script has; follow pages until the window is done
+                # or a peer stops advancing the cursor (bounded, one page per
+                # round trip; a stuck cursor keeps its marker instead of
+                # spinning -- sweep-class guard, mirrors the bounded/repeat-
+                # guard philosophy of scripts/pr_gates_dod.py).
+                follow_budget = 50
+                stuck_follow = False
+                while follow_budget > 0:
+                    marker_cursor = (capture or {}).get("next_cursor")
+                    if not capture or not capture.get("truncated") or not marker_cursor:
+                        break
+                    capture, capture_error = await AgentMessenger.request_capture(
+                        socket_path,
+                        lines=num_lines,
+                        capture_format="json",
+                        max_chars=10_000,
+                        cursor=marker_cursor,
+                    )
+                    if capture_error:
+                        print(
+                            f"capture failed for '{target}': {capture_error}",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                    follow_budget -= 1
+                    if capture.get("truncated") and capture.get("next_cursor") == marker_cursor:
+                        # Stuck peer: same marker again. Stop instead of
+                        # looping on an unadvancing cursor; the just-printed
+                        # page already carries the marker.
+                        stuck_follow = True
+                        print(
+                            "... (capture stopped: peer did not advance "
+                            "next_cursor; use --cursor N to retry)"
+                        )
+                        break
+                    page = render_transcript(
+                        capture,
+                        identity=target,
+                        max_lines=num_lines,
+                        max_chars=10_000,
+                    )
+                    if page.strip():
+                        print(page)
+                # Budget exhausted is only a stop reason when the LAST
+                # response is still truncated with a cursor to resume from;
+                # a final untruncated page means the window drained clean
+                # exactly at the budget boundary.
+                if (
+                    follow_budget == 0
+                    and not stuck_follow
+                    and (capture or {}).get("truncated")
+                    and (capture or {}).get("next_cursor")
+                ):
+                    print(
+                        "... (capture stopped: too many pages, use --cursor N "
+                        "to continue)"
+                    )
 
     elif subcmd == "msg":
         if len(rest) < 2:
@@ -2127,19 +2319,63 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "org":
         if not rest:
-            print("usage: kollab --hub org <name> [mission]")
+            print("usage: kollab --hub org <name> [mission] [--dir FOLDER] "
+                  "[--only a,b | --without a,b]", file=sys.stderr)
             sys.exit(1)
-        org_name = rest[0]
-        mission = " ".join(rest[1:]) if len(rest) > 1 else ""
+
+        org_parser = argparse.ArgumentParser(
+            prog="kollab --hub org", add_help=False
+        )
+        org_parser.add_argument("name")
+        org_parser.add_argument("mission", nargs="*")
+        org_parser.add_argument("--dir", dest="folder")
+        org_parser.add_argument("--without", action="append", default=None)
+        org_parser.add_argument("--only", action="append", default=None)
+        parsed = org_parser.parse_intermixed_args(rest)
+        if parsed.without is not None and parsed.only is not None:
+            org_parser.error("--only and --without are mutually exclusive")
+
+        def parse_member_names(values, flag):
+            if values is None:
+                return None
+            names = [name.strip() for value in values for name in value.split(",")]
+            if not names or any(not name for name in names):
+                org_parser.error(f"{flag} requires one or more comma-separated names")
+            return names
+
+        org_name = parsed.name
+        mission = " ".join(parsed.mission)
+        members = parse_member_names(parsed.only, "--only")
+        exclude = parse_member_names(parsed.without, "--without")
+        folder = parsed.folder
 
         from plugins.hub.org_launcher import OrgLauncher, load_organization
+        from plugins.hub.rosters import LibraryError
 
-        team = load_organization(org_name)
+        try:
+            team = load_organization(org_name, folder=folder)
+        except LibraryError as exc:
+            print(f"could not load team '{org_name}': {exc}", file=sys.stderr)
+            sys.exit(2)
         if not team:
             print(f"team '{org_name}' not found")
             sys.exit(1)
 
-        launch = OrgLauncher().launch_org(org_name, mission=mission)
+        launcher = OrgLauncher(folder or "")
+        try:
+            if members is not None or exclude is not None:
+                launch = launcher.launch_org(
+                    org_name,
+                    mission=mission,
+                    members=members,
+                    exclude=exclude,
+                )
+            else:
+                launch = launcher.launch_org(org_name, mission=mission)
+        except LibraryError as exc:
+            print(f"invalid selection for team '{org_name}': {exc}", file=sys.stderr)
+            sys.exit(2)
+
         names = f": {', '.join(launch.started)}" if launch.started else ""
         print(f"launched {len(launch.started)} agent(s){names}")
         for line in launch.notes(team, mission):
@@ -2479,7 +2715,7 @@ def _adopt_login_path() -> None:
         os.environ["PATH"] = os.pathsep.join(dict.fromkeys(login.split(os.pathsep) + current))
 
 
-async def _handle_cli_web_ui(restart: bool = False) -> None:
+async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None) -> None:
     """Handle --web-ui: spawn the engine + browser UI, block until Ctrl+C.
 
     Both pieces already exist as installable console entry points
@@ -2604,6 +2840,12 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     env = dict(os.environ)
     env["KOLLAB_ENGINE_URL"] = engine_url
     env["KOLLAB_WEBUI_PORT"] = str(webui_port)
+    if hosts is not None:
+        # Explicit opt-in per invocation: the flag, not whatever the shell
+        # exports, decides whether the UI is served beyond this machine. An
+        # explicitly EMPTY value means "localhost only": it must override the
+        # shell's KOLLAB_WEBUI_HOSTS, so absence and empty stay distinct.
+        env["KOLLAB_WEBUI_HOSTS"] = hosts
     webui_proc = subprocess.Popen(
         [*py, "-c", "from kollabor_webui import main; main()"], env=env, **group_flags
     )
@@ -2837,20 +3079,51 @@ def _run_async_main_with_sigterm_cleanup(detached_runtime: bool) -> None:
     """Run the app and route detached SIGTERM through normal cleanup."""
     previous_sigterm = None
     signal_module = None
+    sigterm_received = False
     if detached_runtime:
         import signal as signal_module
 
-        def _on_detached_sigterm(signum, frame):
-            # Route SIGTERM through async_main's existing KeyboardInterrupt
-            # cleanup so ACP runner process groups and Hub sockets are closed.
-            raise KeyboardInterrupt()
+        event_loop: asyncio.AbstractEventLoop | None = None
+        main_task: asyncio.Task[Any] | None = None
+
+        async def _run_detached_async_main() -> None:
+            nonlocal event_loop, main_task
+            event_loop = asyncio.get_running_loop()
+            main_task = asyncio.current_task()
+            if sigterm_received and main_task is not None:
+                event_loop.call_soon(main_task.cancel)
+            await async_main()
+
+        def _on_detached_sigterm(signum, frame) -> None:
+            nonlocal sigterm_received
+            if sigterm_received:
+                return
+            sigterm_received = True
+            if event_loop is None or main_task is None:
+                return
+            if event_loop.is_closed() or main_task.done():
+                return
+            # Defer cancellation to the top-level task. Raising KeyboardInterrupt
+            # here can inject it into an unrelated child task's cleanup.
+            event_loop.call_soon(main_task.cancel)
 
         previous_sigterm = signal_module.signal(
             signal_module.SIGTERM, _on_detached_sigterm
         )
 
     try:
-        asyncio.run(async_main())
+        if detached_runtime:
+            try:
+                asyncio.run(_run_detached_async_main())
+            except asyncio.CancelledError:
+                if not sigterm_received:
+                    raise
+            if sigterm_received:
+                logging.getLogger(__name__).info(
+                    "Detached application shutdown requested by SIGTERM"
+                )
+        else:
+            asyncio.run(async_main())
     except KeyboardInterrupt:
         pass
     finally:

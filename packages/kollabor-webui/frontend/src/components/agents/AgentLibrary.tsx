@@ -1,18 +1,26 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { ChevronDown, Loader2, Rocket } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { ChevronDown, Rocket } from "lucide-react";
 import {
   errorText,
   type EngineApi,
   type LibraryProblem,
   type Persona,
+  type Profile,
   type Roster,
   type RostersResponse,
   type Team,
-  type TeamLaunchResult,
   type TeamMember,
 } from "@/api";
 import { Avatar } from "@/components/agents/Avatar";
-import { launchLines, teamRows } from "@/components/agents/team-model";
+import { teamRows } from "@/components/agents/team-model";
+
+import { TeamLaunchSheet } from "@/components/agents/TeamLaunchSheet";
+import {
+  readTeamSelectionPreferences,
+  teamSelectionKey,
+  writeTeamSelectionPreferences,
+  type TeamSelectionPreference,
+} from "@/components/agents/team-preferences";
 import { bundleName, titleCase } from "@/components/panels/panel-model";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { Button } from "@/components/ui/button";
@@ -146,19 +154,7 @@ function RosterSection({ roster, folderRoster, folder }: { roster: Roster; folde
   );
 }
 
-function TeamSection({
-  team,
-  folder,
-  launching,
-  result,
-  onLaunch,
-}: {
-  team: Team;
-  folder: string;
-  launching: boolean;
-  result: { lines: ReturnType<typeof launchLines>; error: string } | null;
-  onLaunch: () => void;
-}) {
+function TeamSection({ team, folder, onConfigure }: { team: Team; folder: string; onConfigure: () => void }) {
   return (
     <section aria-label={titleCase(team.name)}>
       <div className="flex items-start justify-between gap-3 px-2">
@@ -171,26 +167,11 @@ function TeamSection({
           </h3>
           {team.description ? <p className="text-muted-foreground mt-0.5 text-xs">{team.description}</p> : null}
         </div>
-        <Button type="button" size="sm" variant="outline" disabled={launching} onClick={onLaunch} className="shrink-0">
-          {launching ? <Loader2 className="size-4 animate-spin" /> : <Rocket className="size-4" />}
-          Launch Team
+        <Button type="button" size="sm" variant="outline" onClick={onConfigure} className="shrink-0">
+          <Rocket className="size-4" />
+          Configure &amp; Launch
         </Button>
       </div>
-      {result ? (
-        <div role="status" className="mx-2 mt-2 flex flex-col gap-0.5 text-xs">
-          {result.error ? <p className="text-destructive break-words">{result.error}</p> : null}
-          {result.lines.length ? (
-            result.lines.map((line) => (
-              <p key={line.label} className={cn("break-words", line.failed && "text-destructive")}>
-                <span className="font-medium">{line.label}</span>
-                <span className="text-muted-foreground"> · {line.text}</span>
-              </p>
-            ))
-          ) : result.error ? null : (
-            <p className="text-muted-foreground">Nothing to start.</p>
-          )}
-        </div>
-      ) : null}
       <ul className="mt-1.5 flex flex-col">
         {teamRows(team).map((row) => (
           <PersonaRow
@@ -241,11 +222,15 @@ function LibraryBody({
   api,
   workspace,
   profile,
+  profiles,
+  initialTab,
   onLaunched,
 }: {
   api: EngineApi;
   workspace: string;
   profile: string;
+  profiles: Profile[];
+  initialTab: "rosters" | "teams";
   onLaunched: () => void;
 }) {
   const [folder, setFolder] = useState(workspace);
@@ -253,9 +238,13 @@ function LibraryBody({
   const [teams, setTeams] = useState<Team[] | null>(null);
   const [problems, setProblems] = useState<LibraryProblem[]>([]);
   const [error, setError] = useState("");
-  const [tab, setTab] = useState<"rosters" | "teams">("rosters");
-  const [launching, setLaunching] = useState("");
-  const [results, setResults] = useState<Record<string, { lines: ReturnType<typeof launchLines>; error: string }>>({});
+  const [tab, setTab] = useState<"rosters" | "teams">(initialTab);
+  const [activeTeam, setActiveTeam] = useState<Team | null>(null);
+  const [launchFolder, setLaunchFolder] = useState(workspace);
+  const [preferences, setPreferences] = useState(readTeamSelectionPreferences);
+  const [persistenceWarning, setPersistenceWarning] = useState("");
+  const [teamLookupLoading, setTeamLookupLoading] = useState(false);
+  const [teamLookupError, setTeamLookupError] = useState("");
 
   useEffect(() => {
     let stale = false;
@@ -279,26 +268,90 @@ function LibraryBody({
     };
   }, [api, folder]);
 
-  const launch = useCallback(
-    async (team: Team) => {
-      setLaunching(team.name);
-      const nameOf = (persona: string) => team.members.find((member) => member.persona.name === persona)?.persona.display_name || persona;
-      try {
-        // An empty folder is the engine's own; the launch wants its path.
-        const target = folder || (await api.listWorkspaces()).home.path;
-        const done: TeamLaunchResult = await api.launchTeam(team.name, target, profile);
-        setResults((current) => ({ ...current, [team.name]: { lines: launchLines(done, nameOf), error: "" } }));
-        onLaunched();
-      } catch (reason) {
-        setResults((current) => ({ ...current, [team.name]: { lines: [], error: errorText(reason) } }));
-      } finally {
-        setLaunching("");
-      }
-    },
-    [api, folder, profile, onLaunched],
-  );
+  useEffect(() => {
+    setTab(initialTab);
+    setActiveTeam(null);
+    setLaunchFolder(workspace);
+    setTeamLookupLoading(false);
+    setTeamLookupError("");
+  }, [initialTab, workspace]);
 
-  return (
+  useEffect(() => {
+    if (!activeTeam || launchFolder === folder) {
+      setTeamLookupLoading(false);
+      setTeamLookupError("");
+      return;
+    }
+    let stale = false;
+    setTeamLookupLoading(true);
+    setTeamLookupError("");
+    api.listTeams(launchFolder).then(
+      ({ teams: targetTeams }) => {
+        if (stale) return;
+        const targetTeam = targetTeams.find((candidate) => candidate.name === activeTeam.name);
+        if (!targetTeam) {
+          setTeamLookupError(`Team '${activeTeam.name}' is not available in the selected folder.`);
+        } else {
+          setActiveTeam(targetTeam);
+        }
+        setTeamLookupLoading(false);
+      },
+      (reason) => {
+        if (stale) return;
+        setTeamLookupError(errorText(reason));
+        setTeamLookupLoading(false);
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, [api, activeTeam?.name, folder, launchFolder]);
+
+  useEffect(() => {
+    const saved = writeTeamSelectionPreferences(preferences);
+    setPersistenceWarning(saved ? "" : "Browser storage is unavailable; these choices will last only this visit.");
+  }, [preferences]);
+
+  const preferenceKey = activeTeam ? teamSelectionKey(launchFolder, activeTeam.name) : "";
+  const currentPreference: TeamSelectionPreference | null = activeTeam
+    ? preferences[preferenceKey] ?? {
+        members: activeTeam.members.map((member) => member.persona.name),
+        lead: activeTeam.lead,
+      }
+    : null;
+
+  const updatePreference = (preference: TeamSelectionPreference) => {
+    if (!preferenceKey) return;
+    setPreferences((current) => ({ ...current, [preferenceKey]: preference }));
+  };
+
+  const resetPreference = () => {
+    if (!preferenceKey) return;
+    setPreferences((current) => {
+      const next = { ...current };
+      delete next[preferenceKey];
+      return next;
+    });
+  };
+
+  return activeTeam && currentPreference ? (
+    <TeamLaunchSheet
+      api={api}
+      team={activeTeam}
+      folder={launchFolder}
+      onFolderChange={setLaunchFolder}
+      profile={profile}
+      profiles={profiles}
+      preference={currentPreference}
+      onPreferenceChange={updatePreference}
+      onResetSelection={resetPreference}
+      persistenceWarning={persistenceWarning}
+      teamLookupLoading={teamLookupLoading}
+      teamLookupError={teamLookupError}
+      onBack={() => setActiveTeam(null)}
+      onLaunched={onLaunched}
+    />
+  ) : (
     <>
       <DialogHeader className="px-5 pt-4 pb-3 text-left">
         <DialogTitle>Agents</DialogTitle>
@@ -343,9 +396,10 @@ function LibraryBody({
               key={team.name}
               team={team}
               folder={folder}
-              launching={launching === team.name}
-              result={results[team.name] ?? null}
-              onLaunch={() => void launch(team)}
+              onConfigure={() => {
+                setLaunchFolder(folder);
+                setActiveTeam(team);
+              }}
             />
           ))
         ) : (
@@ -363,6 +417,8 @@ export function AgentLibrary({
   onOpenChange,
   workspace,
   profile,
+  profiles,
+  initialTab = "rosters",
   onLaunched,
 }: {
   api: EngineApi;
@@ -372,6 +428,8 @@ export function AgentLibrary({
   workspace: string;
   /** The Model New Session has chosen; every member of a team starts on it, as a New Session chat would. */
   profile: string;
+  profiles: Profile[];
+  initialTab?: "rosters" | "teams";
   /** A team was started: the sidebar should list its agents now. */
   onLaunched: () => void;
 }) {
@@ -379,7 +437,14 @@ export function AgentLibrary({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[92vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(48rem,calc(100%-2rem))]">
         {/* Mounted per open, so each visit reads the files as they are now. */}
-        <LibraryBody api={api} workspace={workspace} profile={profile} onLaunched={onLaunched} />
+        <LibraryBody
+          api={api}
+          workspace={workspace}
+          profile={profile}
+          profiles={profiles}
+          initialTab={initialTab}
+          onLaunched={onLaunched}
+        />
       </DialogContent>
     </Dialog>
   );

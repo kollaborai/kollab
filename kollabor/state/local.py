@@ -40,6 +40,7 @@ from .context_registry import ContextRegistry
 from .interface import (
     ACP_CONVERSATION_BUSY,
     ACP_HARNESS_UNAVAILABLE,
+    ProfileActivationError,
     StateService,
     enrollment_result,
     offer_failure,
@@ -275,6 +276,9 @@ class LocalStateService(StateService):
 
         self._llm_service = llm_service
         self._profile_manager = profile_manager
+        # Ownership token for the selected profile; this avoids taking a
+        # stale activation failure rollback over a newer selection.
+        self._profile_activation_generation = 0
         self._permission_manager = permission_manager
         self._agent_manager = agent_manager
         self._event_bus = event_bus
@@ -1505,6 +1509,19 @@ class LocalStateService(StateService):
             if hasattr(target_profile, "get_provider")
             else getattr(target_profile, "provider", "")
         )
+        if effort:
+            # --effort that the provider never sends fails the launch, not a log
+            # line, and before anything switches: the daemon keeps its profile.
+            from kollabor_ai.profile_manager import effort_unsupported_reason
+
+            effort_provider = (
+                target_profile.get_effort_provider()
+                if hasattr(target_profile, "get_effort_provider")
+                else target_provider
+            )
+            reason = effort_unsupported_reason(effort_provider, effort)
+            if reason:
+                raise ValueError(reason)
         current_profile = self._profile_manager.get_active_profile()
         current_provider = (
             current_profile.get_provider()
@@ -1516,6 +1533,82 @@ class LocalStateService(StateService):
             event_bus.get_service("acp_orchestrator")
             if event_bus else None
         )
+        closed_harness = None
+
+        previous_profile_name = getattr(current_profile, "name", None)
+        previous_is_acp = str(current_provider).lower() == "acp"
+        previous_acp_active = (
+            previous_is_acp
+            and orchestrator is not None
+            and getattr(orchestrator, "active", False) is True
+        )
+        previous_runner = (
+            getattr(orchestrator, "runner", None) if previous_acp_active else None
+        )
+        previous_acp_binding = getattr(previous_runner, "binding", None)
+        previous_acp_conversation = (
+            getattr(orchestrator, "binding_conversation_id", None)
+            if previous_acp_active
+            else None
+        )
+        previous_acp_loadout = (
+            getattr(orchestrator, "_loadout_override", None)
+            if previous_acp_active
+            else None
+        )
+        activation_generation: int | None = None
+
+        async def restore_previous_profile() -> bool:
+            """Restore both the selected profile and its request runtime."""
+            if current_profile is None or not previous_profile_name:
+                return False
+            if (
+                activation_generation is None
+                or self._profile_activation_generation != activation_generation
+            ):
+                return False
+            try:
+                active_profile = self._profile_manager.get_active_profile()
+                if getattr(active_profile, "name", None) != name:
+                    return False
+                restored_active = self._profile_manager.set_active_profile(
+                    previous_profile_name
+                )
+                if restored_active is False:
+                    return False
+                # The restoration now owns the selected profile too.
+                self._profile_activation_generation += 1
+                if previous_is_acp:
+                    if previous_acp_active:
+                        if orchestrator is None:
+                            return False
+                        await orchestrator.close()
+                        orchestrator._loadout_override = previous_acp_loadout
+                        if previous_acp_binding is not None and previous_acp_conversation:
+                            orchestrator.save_binding_for(
+                                previous_acp_conversation, previous_acp_binding
+                            )
+                        await orchestrator.start(
+                            current_profile,
+                            resume_conversation=(
+                                previous_acp_conversation
+                                if previous_acp_binding is not None
+                                else None
+                            ),
+                        )
+                    return True
+
+                api_service = getattr(self._llm_service, "api_service", None)
+                reinitialize = getattr(api_service, "reinitialize_provider", None)
+                if callable(reinitialize):
+                    return await reinitialize(current_profile) is not False
+                return True
+            except Exception as restore_error:
+                logger.error(
+                    "Could not restore previous profile after provider failure (%s)",
+                    type(restore_error).__name__,
+                )
+                return False
         if loadout is not None and str(target_provider).lower() != "acp":
             # Layer the loadout preset onto the provider profile in memory
             # only: an attach/launch switch must never rewrite the user's
@@ -1527,8 +1620,11 @@ class LocalStateService(StateService):
             }
             if loadout.temperature is not None:
                 layer["temperature"] = loadout.temperature
-            if loadout.effort:
-                layer["effort"] = loadout.effort
+            from kollabor_ai.loadout_manager import loadout_sendable_effort
+
+            layer_effort = loadout_sendable_effort(self._profile_manager, loadout)
+            if layer_effort:
+                layer["effort"] = layer_effort
             if loadout.max_tokens is not None:
                 layer["max_tokens"] = loadout.max_tokens
             try:
@@ -1573,7 +1669,8 @@ class LocalStateService(StateService):
                 prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
                 prior_loadout = getattr(orchestrator, "_loadout_override", None)
 
-                async def restore_previous() -> None:
+                async def restore_previous() -> bool:
+                    """Put the previous harness back; False when it did not come back."""
                     try:
                         await orchestrator.close()
                         if previous is not None:
@@ -1586,6 +1683,10 @@ class LocalStateService(StateService):
                             )
                     except Exception:
                         logger.error("previous ACP profile did not restart after a rejected activation")
+                        return False
+                    return True
+
+                not_restarted = "; the previous harness could not be restarted and none is running"
 
                 try:
                     await orchestrator.close()
@@ -1602,7 +1703,7 @@ class LocalStateService(StateService):
                     else:
                         await orchestrator.start(target_profile)
                 except BaseException as exc:
-                    await restore_previous()
+                    restored = await restore_previous()
                     if not isinstance(exc, Exception):
                         raise
                     logger.error(
@@ -1613,6 +1714,7 @@ class LocalStateService(StateService):
                     raise ValueError(
                         f"ACP profile {name!r} could not be activated; verify its "
                         "adapter command and profile settings."
+                        + ("" if restored else not_restarted)
                     ) from None
                 if loadout is not None:
                     # Mirror LoadoutManager.activate(): confirm the harness
@@ -1647,21 +1749,24 @@ class LocalStateService(StateService):
                             raise ValueError(
                                 "ACP harness did not apply the loadout effort"
                             )
-                    except BaseException:
+                    except BaseException as exc:
                         # A rejected loadout restores the previous harness.
-                        await restore_previous()
+                        if not await restore_previous() and isinstance(exc, Exception):
+                            raise ValueError(f"{exc}{not_restarted}") from None
                         raise
                 if effort:
                     try:
                         await self._apply_acp_effort(orchestrator, effort)
-                    except BaseException:
+                    except BaseException as exc:
                         # A rejected or cancelled effort restores the previous harness.
-                        await restore_previous()
+                        if not await restore_previous() and isinstance(exc, Exception):
+                            raise ValueError(f"{exc}{not_restarted}") from None
                         raise
                 ok = bool(self._profile_manager.set_active_profile(name))
         else:
             if str(current_provider).lower() == "acp" and orchestrator is not None:
                 await orchestrator.close()
+                closed_harness = orchestrator
             ok = bool(self._profile_manager.set_active_profile(name))
         if not ok and hasattr(self._profile_manager, "reload"):
             # OAuth login stores tokens before it asks the daemon to activate
@@ -1686,6 +1791,12 @@ class LocalStateService(StateService):
                 f"profile not found: {name!r}"
                 + (f" (available: {', '.join(available)})" if available else "")
             )
+
+        # The manager selection above is synchronous. Record ownership before
+        # the next await so any older failed activation can detect that it is
+        # stale without serializing all concurrent profile activations.
+        self._profile_activation_generation += 1
+        activation_generation = self._profile_activation_generation
 
         # --model / --effort ride on top of the selected profile. Applied
         # before the provider reinitialize below so the next turn uses them,
@@ -1744,16 +1855,25 @@ class LocalStateService(StateService):
         # provider selection.
         llm = self._llm_service
         if str(target_provider).lower() != "acp" and llm is not None and hasattr(llm, "api_service"):
-            try:
-                reinitialize = getattr(llm.api_service, "reinitialize_provider", None)
-                if callable(reinitialize):
-                    await reinitialize(profile)
-            except Exception as e:
-                logger.warning(
-                    "Provider reinitialization failed for profile %r (%s)",
-                    name,
-                    type(e).__name__,
-                )
+            reinitialize = getattr(llm.api_service, "reinitialize_provider", None)
+            if callable(reinitialize):
+                try:
+                    initialized = await reinitialize(profile)
+                    if initialized is False:
+                        raise RuntimeError("provider initialization returned false")
+                except asyncio.CancelledError:
+                    await restore_previous_profile()
+                    raise
+                except Exception as activation_error:
+                    restored = await restore_previous_profile()
+                    logger.warning(
+                        "Provider reinitialization failed (%s; restored=%s)",
+                        type(activation_error).__name__,
+                        restored,
+                    )
+                    raise ProfileActivationError(
+                        previous_profile_restored=restored
+                    ) from None
             if hasattr(llm, "_load_native_tools") and hasattr(
                 llm, "create_background_task"
             ):
@@ -1764,6 +1884,18 @@ class LocalStateService(StateService):
                     )
                 except Exception as e:
                     logger.debug(f"reload_native_tools background task error: {e}")
+
+        if closed_harness is not None:
+            # Peer messages the closed harness still held are in the
+            # conversation; one native turn answers them.
+            try:
+                await closed_harness.hand_over_to_native()
+            except Exception as e:
+                logger.warning(
+                    "Could not hand buffered ACP messages to profile %r (%s)",
+                    name,
+                    type(e).__name__,
+                )
 
         snapshot = self._overlay_acp_harness_state(
             self._profile_to_snapshot(profile, is_active=True)
@@ -3277,7 +3409,23 @@ class LocalStateService(StateService):
         if hub_mention is not None:
             target, content = hub_mention
             create_task = getattr(llm, "create_background_task", None)
-            hub_coro = self._execute_hub_message(text, target, content)
+            # The lineage is frozen at spawn: the detached task must never
+            # read the shared pointer itself, because an ordinary turn may
+            # complete between spawn and task start and the mention would
+            # silently reparent onto it.
+            hub_parent = getattr(self._llm_service, "current_parent_uuid", None)
+            # The admission ticket is claimed at the same atomic point as
+            # the lineage capture (#676 r7): cursor writes resolve by
+            # admission order, so the later-admitted mention legitimately
+            # owns the cursor even when its captured parent went stale.
+            # A real coordinator has both methods; a serial-less publish is
+            # rejected. Minimal doubles without publish_cursor keep the
+            # compatibility fallback in _execute_hub_message.
+            claim_serial = getattr(self._llm_service, "claim_turn_serial", None)
+            hub_serial = claim_serial() if callable(claim_serial) else None
+            hub_coro = self._execute_hub_message(
+                text, target, content, parent_uuid=hub_parent, turn_serial=hub_serial
+            )
             if callable(create_task):
                 create_task(hub_coro, name="rpc_hub_message")
             else:
@@ -3589,9 +3737,35 @@ class LocalStateService(StateService):
             accepted["goal_reply_id"] = reply_id
         return accepted
 
-    async def _execute_hub_message(self, text: str, target: str, content: str) -> None:
-        """Send one chat mention through Hub and publish a web turn."""
+    async def _execute_hub_message(
+        self,
+        text: str,
+        target: str,
+        content: str,
+        *,
+        parent_uuid: str | None = None,
+        turn_serial: int | None = None,
+    ) -> None:
+        """Send one chat mention through Hub and publish a web turn.
+
+        ``parent_uuid`` is the lineage captured by the caller at spawn time;
+        reading the shared ``current_parent_uuid`` pointer inside this task
+        would grab whatever ordinary turn happened to complete meanwhile.
+        The captured conversation session fences detached completions after a
+        restart from writing into or publishing on behalf of a new session.
+        ``turn_serial`` is the admission ticket claimed at the same atomic
+        point (#676 r7): completion writes publish through the coordinator's
+        admission-serial protocol, so the later-admitted mention owns the
+        cursor regardless of completion order.
+        """
         from kollabor_tui.display_tap import publish_semantic
+
+        conversation_logger = getattr(self._llm_service, "conversation_logger", None)
+        conversation_session_id = getattr(conversation_logger, "session_id", None)
+
+        def conversation_session_is_current() -> bool:
+            current_logger = getattr(self._llm_service, "conversation_logger", None)
+            return getattr(current_logger, "session_id", None) == conversation_session_id
 
         broadcast = target.lower() if target.lower() in _HUB_BROADCASTS else None
         is_broadcast = broadcast is not None
@@ -3601,8 +3775,18 @@ class LocalStateService(StateService):
             "hub_broadcast": is_broadcast,
         }
         add_message = getattr(self._llm_service, "_add_conversation_message", None)
+        publish_cursor = getattr(self._llm_service, "publish_cursor", None)
+        turn_parent = parent_uuid
+        memory_user_uuid = None
         if callable(add_message):
-            add_message("user", text, metadata=metadata)
+            memory_user_uuid = add_message(
+                "user", text, parent_uuid=turn_parent, metadata=metadata
+            )
+        user_uuid = await self._log_jsonl_turn_message(
+            "user", text, parent_uuid=turn_parent
+        )
+        if not conversation_session_is_current():
+            return
 
         try:
             # A broadcast takes the terminal's @ path (HubPlugin.send_user_message),
@@ -3612,11 +3796,38 @@ class LocalStateService(StateService):
                 if broadcast
                 else await self.hub_send_msg(target, content)
             )
+            if not conversation_session_is_current():
+                return  # the detached send finished after its session was replaced
             output = str(result or "hub message completed")
             success = not output.lower().startswith(("hub:", "hub ", "rejected:"))
             response_metadata = {**metadata, "hub_success": success}
             if callable(add_message):
-                add_message("assistant", output, metadata=response_metadata)
+                add_message(
+                    "assistant",
+                    output,
+                    parent_uuid=memory_user_uuid,
+                    metadata=response_metadata,
+                )
+            assistant_uuid = await self._log_jsonl_turn_message(
+                "assistant", output, parent_uuid=user_uuid
+            )
+            if not conversation_session_is_current():
+                return
+            if assistant_uuid and callable(publish_cursor):
+                # Ordinary LLM turns take their parent from this pointer
+                # (pipeline parity), so the chain must continue after the
+                # mention. The write publishes through the admission-serial
+                # protocol (#676 r7): the later-admitted turn owns the
+                # cursor regardless of completion order — a strictly
+                # later-admitted completion that already wrote keeps it,
+                # and this mention wins over anything admitted before it.
+                # The mention's own chain stays intact through its per-turn
+                # lineage either way.
+                publish_cursor(assistant_uuid, turn_serial)
+            elif assistant_uuid:
+                # Minimal coordinator doubles without the protocol: plain
+                # assignment, as before r7.
+                self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "token", text=output)
             publish_semantic(
                 self._event_bus,
@@ -3627,14 +3838,30 @@ class LocalStateService(StateService):
                 stop_reason="end_turn",
             )
         except Exception as exc:
+            if not conversation_session_is_current():
+                return  # do not publish an error from a replaced conversation
             logger.exception("hub mention execution failed for web transport")
             message = str(exc)
             if callable(add_message):
                 add_message(
                     "assistant",
                     message,
+                    parent_uuid=memory_user_uuid,
                     metadata={**metadata, "hub_success": False},
                 )
+            assistant_uuid = await self._log_jsonl_turn_message(
+                "assistant", message, parent_uuid=user_uuid
+            )
+            if not conversation_session_is_current():
+                return
+            if assistant_uuid and callable(publish_cursor):
+                # Same admission-serial publish as the success path (#676
+                # r7): a later-admitted turn keeps the cursor, and the
+                # failed mention — itself a legitimate admitted turn —
+                # still wins over anything admitted before it.
+                publish_cursor(assistant_uuid, turn_serial)
+            elif assistant_uuid:
+                self._llm_service.current_parent_uuid = assistant_uuid
             publish_semantic(self._event_bus, "error", message=message)
             publish_semantic(
                 self._event_bus,
@@ -3644,6 +3871,34 @@ class LocalStateService(StateService):
                 tool_calls=0,
                 stop_reason="error",
             )
+
+    async def _log_jsonl_turn_message(
+        self, role: str, content: str, *, parent_uuid: str | None = None
+    ) -> str | None:
+        """Persist one hub-mention turn record to the session JSONL.
+
+        Addressed LLM turns log through the input pipeline; hub mentions skip
+        the pipeline entirely, so log here for the same parity. The JSONL
+        feeds /resume and the engine's disk-seeded history.
+
+        Mentions run as detached tasks, so the parent chain is passed in per
+        turn instead of read from the shared ``current_parent_uuid`` pointer,
+        which concurrent mentions would reparent mid-turn. The caller
+        advances that pointer to the returned assistant uuid so ordinary
+        turns keep following the mention. Fail-open: a logger error never
+        fails the hub send.
+        """
+        logger_service = getattr(self._llm_service, "conversation_logger", None)
+        log_message = getattr(logger_service, f"log_{role}_message", None)
+        if not callable(log_message):
+            return None
+        try:
+            return await log_message(content, parent_uuid=parent_uuid)
+        except Exception:
+            logger.warning(
+                "could not log a hub mention %s record", role, exc_info=True
+            )
+            return None
 
     async def _run_web_slash_command(
         self, command: Any, executor: Any
@@ -3857,9 +4112,19 @@ class LocalStateService(StateService):
         approvals = getattr(getattr(llm, "tool_executor", None), "yes_approvals", None)
         if isinstance(approvals, YesApprovals):
             approvals.reply_cut(turn_id)  # its ask was never heard whole: no yes answers it
+        # Capture lineage and ticket at RPC admission, before an after_turn
+        # callback or logger await can observe a different conversation cursor.
+        turn_serial = getattr(llm, "_continue_serial", None)
+        admitted_parent_uuid = llm.current_parent_uuid
         queue = getattr(llm, "_queue_processor", None)
         if queue is None:
-            return await self._cut_voice_reply(llm, turn_id, text)
+            return await self._cut_voice_reply(
+                llm,
+                turn_id,
+                text,
+                admitted_parent_uuid=admitted_parent_uuid,
+                turn_serial=turn_serial,
+            )
 
         def conversation():  # the live one: /resume and a new session change it
             return getattr(getattr(llm, "conversation_logger", None), "session_id", None)
@@ -3869,7 +4134,15 @@ class LocalStateService(StateService):
         async def cut() -> None:
             if conversation() != session:
                 return  # the talked-over turn is not in this conversation
-            if (await self._cut_voice_reply(llm, turn_id, text)).get("recorded"):
+            if (
+                await self._cut_voice_reply(
+                    llm,
+                    turn_id,
+                    text,
+                    admitted_parent_uuid=admitted_parent_uuid,
+                    turn_serial=turn_serial,
+                )
+            ).get("recorded"):
                 from kollabor_tui.display_tap import publish_semantic
 
                 publish_semantic(self._event_bus, "voice_reply_cut", turn_id=turn_id)
@@ -3878,7 +4151,15 @@ class LocalStateService(StateService):
         queue.after_turn(turn_id, cut)
         return {"recorded": False, "pending": True}
 
-    async def _cut_voice_reply(self, llm: Any, turn_id: str, text: str) -> dict[str, Any]:
+    async def _cut_voice_reply(
+        self,
+        llm: Any,
+        turn_id: str,
+        text: str,
+        *,
+        admitted_parent_uuid: str | None,
+        turn_serial: int | None,
+    ) -> dict[str, Any]:
         from kollabor_events.data_models import ConversationMessage
 
         history = llm.conversation_history
@@ -3917,8 +4198,12 @@ class LocalStateService(StateService):
                     logger.warning("could not log a voice talk-over cut", exc_info=True)
                     dropped = {}
                 # The next record threads under what is left, never a dropped one.
+                # Keep the admission ticket across the await so an older cut
+                # cannot overwrite a cursor published by a newer turn.
                 while llm.current_parent_uuid in dropped:
-                    llm.current_parent_uuid = dropped[llm.current_parent_uuid]
+                    next_parent_uuid = dropped[llm.current_parent_uuid]
+                    if not llm.publish_cursor(next_parent_uuid, turn_serial):
+                        break
             return {"recorded": bool(edits), "replaced": bool(edits)}
         if not text:
             return {"recorded": False}
@@ -3928,14 +4213,15 @@ class LocalStateService(StateService):
                 content=text,
                 metadata={"interrupted": True, "source": "voice", "turn_id": turn_id},
             ),
-            parent_uuid=llm.current_parent_uuid,
+            parent_uuid=admitted_parent_uuid,
         )
         try:  # the JSONL feeds /resume and the engine's disk-seeded history
-            llm.current_parent_uuid = await llm.conversation_logger.log_assistant_message(
+            logged_uuid = await llm.conversation_logger.log_assistant_message(
                 text,
-                parent_uuid=llm.current_parent_uuid,
+                parent_uuid=admitted_parent_uuid,
                 model=getattr(getattr(llm, "api_service", None), "model", None),
             )
+            llm.publish_cursor(logged_uuid, turn_serial)
         except Exception:
             logger.warning("could not log an interrupted voice reply", exc_info=True)
         return {"recorded": True}

@@ -201,6 +201,8 @@ export type PermissionPrompt = {
 /** Reasoning effort levels (kollabor_ai EFFORT_LEVELS, cheapest first).
  * Empty/undefined means the model default (no effort is sent). */
 export const EFFORT_LEVELS = [
+  "none",
+  "minimal",
   "low",
   "medium",
   "high",
@@ -221,6 +223,8 @@ export type Profile = {
   extra_header_names?: string[];
   temperature?: number;
   effort?: string | null;
+  /** The provider requests use: an "auto" profile resolved from its key, then its endpoint. */
+  effort_provider?: string;
   streaming?: boolean;
   supports_tools?: boolean;
   supports_vision?: boolean;
@@ -358,6 +362,8 @@ export type TeamLaunchResult = {
   started: string[];
   skipped: { persona: string; reason: string }[];
   failed: { persona: string; error: string }[];
+  excluded?: string[];
+  notes?: string[];
   sessions: Session[];
 };
 
@@ -1434,11 +1440,23 @@ export class EngineApi {
     return this.json<TeamsResponse>(`/teams${query}`);
   }
 
-  /** Start every member of a team that is not already running in the folder, lead first. */
-  launchTeam(name: string, workspace: string, profile?: string) {
+  /** Start the selected team members in launch order; omitted selection fields preserve full-team behavior. */
+  launchTeam(
+    name: string,
+    workspace: string,
+    profile?: string,
+    selection?: { members?: string[]; exclude?: string[]; lead?: string; mission?: string },
+  ) {
     return this.json<TeamLaunchResult>(`/teams/${encodeURIComponent(name)}/launch`, {
       method: "POST",
-      body: JSON.stringify({ workspace, ...(profile ? { profile } : {}) }),
+      body: JSON.stringify({
+        workspace,
+        ...(profile ? { profile } : {}),
+        ...(selection?.members !== undefined ? { members: selection.members } : {}),
+        ...(selection?.exclude !== undefined ? { exclude: selection.exclude } : {}),
+        ...(selection?.lead ? { lead: selection.lead } : {}),
+        ...(selection?.mission !== undefined ? { mission: selection.mission } : {}),
+      }),
     });
   }
 
@@ -1548,10 +1566,10 @@ export class EngineApi {
     );
   }
 
-  sendHubMessage(target: string, content: string, fromIdentity = "webui") {
+  sendHubMessage(target: string, content: string, fromIdentity = "webui", agentId?: string) {
     return this.json<{ ok: boolean; target: string }>("/hub/messages", {
       method: "POST",
-      body: JSON.stringify({ target, content, from_identity: fromIdentity }),
+      body: JSON.stringify({ target, content, from_identity: fromIdentity, agent_id: agentId }),
     });
   }
 }

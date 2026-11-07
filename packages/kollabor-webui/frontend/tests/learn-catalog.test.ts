@@ -138,4 +138,8 @@ test("agents lesson explains Web UI persistence and explicit stop actions", () =
   assert.match(guidance, /conversation/);
   assert.match(guidance, /Delete/);
   assert.match(guidance, /\/quit/);
+  assert.match(guidance, /Configure & Launch/);
+  assert.match(guidance, /workspace and profile/);
+  assert.match(guidance, /effective reporting tree/);
+  assert.match(guidance, /saved per team and workspace folder/);
 });

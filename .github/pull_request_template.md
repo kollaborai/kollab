@@ -71,8 +71,9 @@ in `docs/product-ready-checklist.md`.
   configuration behavior; otherwise give a specific N/A reason.
 - [ ] A Learn entry is added or updated for a user-facing change; otherwise
   give a specific N/A reason.
-- [ ] A plain-language entry is added under the `Unreleased` section of
-  `CHANGELOG.md`.
+- [ ] A plain-language changelog entry is added as
+  `changes/<issue>.<section>.md` (see `changes/README.md`). `CHANGELOG.md`
+  itself changes only in release PRs.
 - [ ] New or changed settings, flags, and commands are documented with examples;
   otherwise give a specific N/A reason.
 - [ ] External setup such as router, VPN, or key configuration is documented
@@ -86,11 +87,55 @@ in `docs/product-ready-checklist.md`.
 - [ ] This complete checklist is present in the PR body, and every item is
   filled with evidence or a specific N/A reason; no result is guessed or left
   blank.
-- [ ] Work was done in the shared checkout on `main` (no worktree, no branch
-  switch) and committed by explicit paths, leaving other agents' uncommitted
-  edits untouched.
-- [ ] The PR remains a draft until Marco or the koordinator marks it ready; agents do not merge or
-  create release tags without explicit authorization.
+- [ ] Work was done in a uniquely owned worktree and branch based on the
+  current PR base (`origin/main` in the maintainer checkout), or a standalone
+  contributor branch when no other writer shares the checkout. File ownership
+  was clear; existing dirty work, branches, and worktrees were preserved; the
+  maintainer integration checkout had no source edits.
+- [ ] The PR remains a draft until its designated integrator marks it ready
+  within the maintainer-authorized integration plan, batch, or class order, after a different AI
+  agent reviews the exact final head, records approval as whichever account
+  (`kollaborai` or `maarco`) is not the PR author, and required CI passes.
+  Record reviewer identity and exact reviewed SHA in private maintainer audit
+  evidence. Keep the GitHub approval plain, with no AI attribution or footer.
+  GitHub prohibits author self-approval.
+  Once the code-owner gate is enabled, an external PR needs approval from
+  `@maarco` or `@kollaborai`; a PR authored by either account needs approval
+  from the other. GitHub enforces the owner-account approval, while separate
+  AI reviewer identity and exact-head evidence stay in the private audit.
+  Every merge uses `kollaborai` with a merge commit; never use `--admin` or a
+  ruleset bypass. Work outside the plan needs new authorization, and release
+  tags need separate explicit maintainer instruction.
+- [ ] An independent clean-room review verdict is posted as a PR comment
+  recording the pinned head SHA, base SHA, exact commands run, and PASS or
+  FAIL; the reviewer worked in a scratch environment and ran the tests itself.
+  A head moved only by merging `main` may carry the reviewer's addendum instead,
+  as `SOFTWARE_DEVELOPMENT_LIFECYCLE.md` describes.
+- [ ] Independent review started only while the PR head was current with
+  `main` (not BEHIND or DIRTY), and the verdict names the base SHA it covered.
+- [ ] Every review finding has a failing regression test landed before its
+  fix (as its own commit, or marked strict `xfail`); the fix flipped it green
+  without editing the test, and removing that marker was the only test change.
+  A finding no test can reproduce, such as wording in a doc, says so in its
+  fix commit instead.
+
+## Productization checklist
+
+Applies when this PR adds an enhancement that ships as a product surface
+(skill, extension, agent, or plugin). Check an item only when evidence supports
+it. For a non-applicable item, replace `[ ]` with `[x] N/A - <specific reason>`.
+Do not leave items blank, use a blanket N/A, or claim unverified work. The
+canonical policy, checklist, and #711-#730 surface mapping are in
+`docs/productization.md`.
+
+- [ ] Names its product surface: skill, extension, agent, or plugin.
+- [ ] Has an opt-in config toggle that defaults to off (name the key in the surface's docs).
+- [ ] Reads repo, owner, check names, identities, schedules, and paths from config or provider discovery; no literal `kollaborai/kollab` or personal host, device, or user names.
+- [ ] Documents the toggles and the enable steps.
+- [ ] Flags anything inherently Kollab-internal.
+- [ ] Hub job registration, ruleset, or required-status changes have recorded owner sign-off (these are not covered by a plain PR).
+- [ ] A failing regression test was written and seen to fail before the fix (#721).
+
 
 ## Risk and rollout notes
 

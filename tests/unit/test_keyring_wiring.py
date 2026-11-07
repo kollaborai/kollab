@@ -164,14 +164,25 @@ class TestKeyringHelpers(unittest.TestCase):
             self.assertTrue(result)
             mock_sp.assert_called_once_with("kollab", "claude", "sk-ant-key-123")
 
-    def test_keyring_set_failure(self):
-        """Return False when keyring storage fails."""
+    def test_keyring_set_failure_falls_back_to_vault(self):
+        """A failing keyring stores the key in the encrypted vault file (#610)."""
+        fake_keyring = SimpleNamespace(
+            set_password=MagicMock(side_effect=Exception("access denied")),
+            get_password=MagicMock(side_effect=Exception("access denied")),
+        )
+        with patch.dict(sys.modules, {"keyring": fake_keyring}), _keyring_on():
+            self.assertTrue(_keyring_set("claude", "sk-ant-key-123"))
+            self.assertEqual(_keyring_get("claude"), "sk-ant-key-123")
+
+    def test_keyring_set_failure_without_vault(self):
+        """Return False when neither the keyring nor the vault takes the key."""
         fake_keyring = SimpleNamespace(
             set_password=MagicMock(side_effect=Exception("access denied"))
         )
-        with patch.dict(sys.modules, {"keyring": fake_keyring}):
-            result = _keyring_set("claude", "sk-ant-key-123")
-            self.assertFalse(result)
+        with patch.dict(sys.modules, {"keyring": fake_keyring}), patch(
+            "kollabor_ai.profile_manager._vault_call", return_value=None
+        ):
+            self.assertFalse(_keyring_set("claude", "sk-ant-key-123"))
 
 
 class TestGetApiKeyResolution(unittest.TestCase):
