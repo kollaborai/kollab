@@ -25,7 +25,13 @@ from kollabor_ai.message_content import (
     content_to_text,
     prepend_text,
     redact_error_media,
-    safe_provider_error_code,
+)
+from kollabor_ai.providers.errors import (
+    StructuredErrorInfo,
+    structured_error_info,
+)
+from kollabor_ai.providers.errors import (
+    is_context_overflow as is_context_overflow_info,
 )
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
@@ -50,6 +56,27 @@ from .yes_approval import YesApprovals
 logger = logging.getLogger(__name__)
 
 CancellationOrigin = Literal["human", "remote_task", "external"]
+
+
+def publish_turn_error(
+    renderer: Any, message: str, info: "StructuredErrorInfo"
+) -> None:
+    """Emit the turn's error event with its structured classification.
+
+    The message is display data; the structured fields are the signal every
+    downstream consumer (engine, web UI, ACP clients) classifies by (#720).
+    """
+
+    publish_semantic(
+        renderer,
+        "error",
+        message=message,
+        error_class=info.error_class,
+        code=info.error_code,
+        provider=info.provider,
+        retryable=info.retryable,
+        cause=info.cause,
+    )
 
 
 @dataclass
@@ -430,19 +457,18 @@ _TIMEOUT_EXCEPTION_NAMES = frozenset(
         "ConnectionTimeoutError",
     }
 )
-_TIMEOUT_MESSAGE_MARKERS = ("timed out", "request timeout")
-
-
 def _is_timeout_exception(exc: BaseException) -> bool:
-    """Best-effort timeout classification across provider SDKs.
+    """Timeout classification across provider SDKs, by type only.
 
-    The SDKs raise unrelated timeout hierarchies, so match on the type
-    name and on common message markers instead of importing them all.
+    The SDKs raise unrelated timeout hierarchies, so match on the class
+    name and the structured boundary classification instead of importing
+    them all. Rendered message text is display data (#549, #720): an
+    untyped exception whose text says "timed out" is not a timeout, and
+    retrying on that guess duplicates side effects.
     """
     if type(exc).__name__ in _TIMEOUT_EXCEPTION_NAMES:
         return True
-    text = str(exc).lower()
-    return any(marker in text for marker in _TIMEOUT_MESSAGE_MARKERS)
+    return structured_error_info(exc).error_class == "timeout"
 
 
 
@@ -646,6 +672,8 @@ class QueueProcessor:
         # the goal driver pauses on provider errors instead of burning
         # turns against a dead endpoint. Cleared at turn start.
         self.last_turn_error: str | None = None
+        self.last_turn_error_code: str | None = None
+        self.last_turn_error_class: str | None = None
 
         # Mutex to prevent concurrent _execute_llm_turn calls. Without this,
         # _hub_continue and process_queue can interleave turns (evidence:
@@ -1157,7 +1185,9 @@ class QueueProcessor:
                     except Exception as e:
                         logger.error(f"Queue processing error: {e}")
                         error_msg = str(e)
-                        if "'str' object has no attribute 'get'" in error_msg:
+                        # Typed classification only: the parse boundary raises
+                        # APIFormatMismatchError, never a text guess (#720).
+                        if structured_error_info(e).error_class == "api_format_mismatch":
                             error_msg = _API_FORMAT_MISMATCH_MESSAGE
                         self.last_turn_error = error_msg
                         self.message_display_service.display_error_message(error_msg)
@@ -1542,6 +1572,8 @@ class QueueProcessor:
         async with self._turn_lock:
             await self._run_after_turn()  # a talk-over's cut of an earlier turn lands first
             self.last_turn_error = None
+            self.last_turn_error_code = None
+            self.last_turn_error_class = None
             # Stamped under the lock: a turn still running when this one was
             # queued clears its own stamp as it ends, never this one's. A chain
             # this batch cuts into still owes its requests their completion, so
@@ -1565,11 +1597,21 @@ class QueueProcessor:
                 # call) kills its chain, whichever driver then swallows it.
                 if not self.cancel_processing:
                     self.last_turn_error = str(exc) or type(exc).__name__
+                    turn_exc_info = structured_error_info(exc)
+                    self.last_turn_error_code = turn_exc_info.error_code
+                    self.last_turn_error_class = turn_exc_info.error_class
                 if self.active_request_ids:
                     # It died before its body could answer them: their streams
                     # end on this turn, not on whichever turn runs next (#551).
                     if self.last_turn_error:
-                        publish_semantic(self.renderer, "error", message=self.last_turn_error)
+                        publish_semantic(
+                            self.renderer,
+                            "error",
+                            message=self.last_turn_error,
+                            error_class=getattr(self, "last_turn_error_class", None),
+                            code=getattr(self, "last_turn_error_code", None),
+                            retryable=False,
+                        )
                     publish_semantic(
                         self.renderer, "turn_complete",
                         stop_reason="error" if self.last_turn_error else "end_turn",
@@ -2561,37 +2603,26 @@ class QueueProcessor:
             logger.error(f"Error processing message: {type(e).__name__}: {redact_error_media(str(e))}")
             self.renderer.update_thinking(False)
             error_msg = redact_error_media(str(e)) or f"{type(e).__name__} (no details)"
-            if "'str' object has no attribute 'get'" in error_msg:
+            # Typed classification only: the parse boundary raises
+            # APIFormatMismatchError; rendered text is display data (#720).
+            info = structured_error_info(e)
+            if info.error_class == "api_format_mismatch":
+                error_msg = _API_FORMAT_MISMATCH_MESSAGE
+            elif "'str' object has no attribute 'get'" in error_msg:
+                # Bounded base-text fallback (restored from 72f6bc1d for
+                # #754): a payload-shape AttributeError past the parse
+                # boundaries still maps to the actionable mismatch message
+                # for display. Typed errors take precedence; this covers
+                # only that one exact shape-failure signature.
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
 
             # Publish a typed failure separately from the generic UI error.
             # Compaction hooks can react to context overflow, but the failed
-            # request is never resubmitted automatically.
-            error_code = getattr(e, "error_code", None) or getattr(e, "code", None)
-            nested_error = getattr(e, "error", None)
-            if not error_code and isinstance(nested_error, dict):
-                error_code = nested_error.get("code")
-            error_code = safe_provider_error_code(error_code)
-            error_code = error_code[:120] if error_code else None
-            error_text = str(e).lower()
-            context_window_exceeded = (
-                error_code
-                in {
-                    "model_context_window_exceeded",
-                    "context_window_exceeded",
-                    "context_length_exceeded",
-                }
-                or any(
-                    phrase in error_text
-                    for phrase in (
-                        "context window",
-                        "context_window",
-                        "maximum context length",
-                        "too many tokens",
-                        "prompt is too long",
-                    )
-                )
-            )
+            # request is never resubmitted automatically. Classification reads
+            # the structured type/code snapshot only — never the rendered
+            # message, which carries provider names and hints (#549, #720).
+            error_code = info.error_code
+            context_window_exceeded = is_context_overflow_info(info)
             event_bus = getattr(self, "event_bus", None)
             if event_bus is not None:
                 try:
@@ -2599,7 +2630,10 @@ class QueueProcessor:
                         EventType.LLM_REQUEST_ERROR,
                         {
                             "error_type": type(e).__name__,
+                            "error_class": info.error_class,
                             "error_code": error_code,
+                            "provider": info.provider,
+                            "retryable": info.retryable,
                             "context_window_exceeded": context_window_exceeded,
                         },
                         "llm_service",
@@ -2610,8 +2644,12 @@ class QueueProcessor:
             self.message_display_service.display_error_message(error_msg)
             # Web clients follow the turn through semantic events, not the
             # terminal's red line; without this a failed turn ends silently.
-            publish_semantic(self.renderer, "error", message=error_msg)
+            # The structured fields ride along so no consumer has to parse the
+            # message text to classify the failure (#720).
+            publish_turn_error(self.renderer, error_msg, info)
             self.last_turn_error = error_msg
+            self.last_turn_error_code = error_code
+            self.last_turn_error_class = info.error_class
             self.turn_completed = True
 
         # A turn is only done once no tool results need to go back to the model.
