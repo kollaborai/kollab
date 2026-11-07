@@ -1616,7 +1616,7 @@ class ConversationStore:
         with self._connect() as db:
             rows = db.execute(
                 "SELECT id,payload FROM conversation_events WHERE thread=? AND kind='answer' "
-                "AND state='queued' ORDER BY created,id",
+                "AND state='queued' ORDER BY created,rowid",
                 (thread_id,),
             ).fetchall()
         return [
@@ -1630,6 +1630,13 @@ class ConversationStore:
                     "UPDATE conversation_events SET state='consumed' WHERE id=? AND kind='answer' AND state='queued'",
                     (event_id,),
                 ).rowcount
+            )
+
+    def restore_answer(self, event_id: str) -> None:
+        with self._connect() as db:
+            db.execute(
+                "UPDATE conversation_events SET state='queued' WHERE id=? AND kind='answer' AND state='consumed'",
+                (event_id,),
             )
 
     def admit(

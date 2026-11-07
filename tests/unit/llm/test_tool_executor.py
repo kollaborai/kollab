@@ -155,6 +155,124 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error, "")
         self.assertGreaterEqual(result.execution_time, 0)
 
+    async def test_terminal_output_uses_the_only_active_session_when_name_is_missing(self):
+        plugin = MagicMock()
+        plugin.get_session_status = AsyncMock(
+            return_value={
+                "success": True,
+                "sessions": [
+                    {"name": "build", "status": "alive", "command": "pytest"},
+                    {"name": "old", "status": "dead", "command": "true"},
+                ],
+            }
+        )
+        plugin.capture_session_output = AsyncMock(
+            return_value={"success": True, "output": ["done"]}
+        )
+        self.executor.tmux_plugin = plugin
+
+        result = await self.executor.execute_tool(
+            {"type": "terminal_output", "id": "output-1", "lines": 10}
+        )
+
+        self.assertTrue(result.success)
+        self.assertIn("build", result.output)
+        plugin.capture_session_output.assert_awaited_once_with("build", lines=10)
+
+    async def test_terminal_output_lists_active_sessions_when_name_is_ambiguous(self):
+        plugin = MagicMock()
+        plugin.get_session_status = AsyncMock(
+            return_value={
+                "success": True,
+                "sessions": [
+                    {"name": "api", "status": "alive"},
+                    {"name": "worker", "status": "alive"},
+                ],
+            }
+        )
+        self.executor.tmux_plugin = plugin
+
+        result = await self.executor.execute_tool(
+            {"type": "terminal_output", "id": "output-2"}
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("api", result.error)
+        self.assertIn("worker", result.error)
+        self.assertIn("terminal_output", result.error)
+        plugin.capture_session_output.assert_not_called()
+
+    async def test_terminal_output_reports_when_no_active_session_exists(self):
+        plugin = MagicMock()
+        plugin.get_session_status = AsyncMock(
+            return_value={
+                "success": True,
+                "sessions": [{"name": "finished", "status": "dead"}],
+            }
+        )
+        self.executor.tmux_plugin = plugin
+
+        result = await self.executor.execute_tool(
+            {"type": "terminal_output", "id": "output-3"}
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("no active terminal sessions", result.error)
+        self.assertIn("terminal-status", result.error)
+        plugin.capture_session_output.assert_not_called()
+
+    async def test_terminal_output_reports_session_list_failure(self):
+        plugin = MagicMock()
+        plugin.get_session_status = AsyncMock(
+            return_value={"success": False, "message": "terminal unavailable"}
+        )
+        self.executor.tmux_plugin = plugin
+
+        result = await self.executor.execute_tool(
+            {"type": "terminal_output", "id": "output-4"}
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("unable to list active terminal sessions", result.error)
+        self.assertIn("terminal unavailable", result.error)
+        plugin.capture_session_output.assert_not_called()
+
+    async def test_terminal_send_routes_input_to_named_session(self):
+        from kollabor_agent.tool_call_contract import normalize_native_tool_call
+
+        plugin = MagicMock()
+        plugin.send_to_session.return_value = {
+            "success": True,
+            "message": "Input sent to session 'terminal'",
+        }
+        self.executor.tmux_plugin = plugin
+        tool_data = normalize_native_tool_call(
+            {
+                "name": "terminal_send",
+                "arguments": {"session_name": "terminal", "text": "y"},
+            }
+        )
+
+        result = await self.executor.execute_tool(tool_data)
+
+        self.assertTrue(result.success)
+        plugin.send_to_session.assert_called_once_with("terminal", "y")
+
+    async def test_terminal_send_rejects_native_calls_without_session_name(self):
+        from kollabor_agent.tool_call_contract import normalize_native_tool_call
+
+        plugin = MagicMock()
+        self.executor.tmux_plugin = plugin
+        tool_data = normalize_native_tool_call(
+            {"name": "terminal_send", "arguments": {"text": "y"}}
+        )
+
+        result = await self.executor.execute_tool(tool_data)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "Session name required")
+        plugin.send_to_session.assert_not_called()
+
     async def test_file_read_context_hash_metadata_is_preserved(self):
         self.executor.file_ops_executor.execute_operation = MagicMock(
             return_value={

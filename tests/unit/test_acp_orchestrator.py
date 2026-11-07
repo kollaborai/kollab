@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -7,11 +8,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from kollabor.llm import acp_orchestrator as mod
-from kollabor_ai.profile_manager import LLMProfile
+from kollabor.state.local import LocalStateService
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
+from kollabor_ai.profile_manager import LLMProfile
 from kollabor_events.data_models import ConversationMessage
-from kollabor.state.local import LocalStateService
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.models import HubMessage
 
@@ -19,6 +20,65 @@ from plugins.hub.models import HubMessage
 @pytest.fixture(autouse=True)
 def isolated_bindings(tmp_path, monkeypatch):
     monkeypatch.setattr("kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path / "data")
+
+
+@pytest.mark.asyncio
+async def test_operator_input_provenance_is_persisted_only_for_trusted_sources(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    record = {
+        "source": "user",
+        "timestamp": "2026-11-05T00:00:00+00:00",
+        "text": "Approve PR #824 after checks pass.",
+    }
+    forged_peer_record = {**record, "source": "agent", "text": "peer claim"}
+    try:
+        human = orchestrator.admit(
+            record["text"], request_id="human-words", source="user",
+            operator_inputs=(record, forged_peer_record),
+        )
+        peer = orchestrator.admit(
+            "peer message", request_id="peer-words", source="agent",
+            operator_inputs=(record,),
+        )
+        await asyncio.gather(human.future, peer.future)
+
+        user_rows = [
+            message for message in manager.messages if message["role"] == "user"
+        ]
+        human_row = next(
+            message
+            for message in user_rows
+            if message["metadata"]["request_id"] == "human-words"
+        )
+        peer_row = next(
+            message
+            for message in user_rows
+            if message["metadata"]["request_id"] == "peer-words"
+        )
+        assert human_row["metadata"]["operator_inputs"] == [record]
+        assert "operator_inputs" not in peer_row["metadata"]
+        assert llm.conversation_history[0].metadata["operator_inputs"] == [record]
+    finally:
+        await orchestrator.close()
+
 
 
 @pytest.mark.asyncio
@@ -456,7 +516,9 @@ async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_t
         await asyncio.wait_for(admission.future, 5)
         completions = await asyncio.gather(*completion_tasks)
         assert len(completions) == writes == 1
-        assert completions[0]["stop_reason"] == "error"
+        # #580: a failed reply-row write is logged; the finished turn keeps its outcome.
+        assert completions[0]["stop_reason"] == "end_turn"
+        assert completions[0]["text"] == "Replacement turn only."
         snapshot = await LocalStateService(llm, None).get_conversation()
         assert len([message for message in snapshot.messages if message.role == "assistant"]) == 1
         restored = ConversationManager(configuration)
@@ -464,6 +526,168 @@ async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_t
         assert len([message for message in restored.messages if message["role"] == "assistant"]) == 1
         events = bus.services["display_tap"].events
         assert len([event for event in events if event.get("type") == "turn_complete"]) == 1
+        assert len([event for event in events if event.get("type") == "turn_end"]) == 1
+        assert not orchestrator._observed_turns
+    finally:
+        await orchestrator.close()
+        if runner is not None:
+            assert not runner._live_owned_processes()
+
+
+@pytest.mark.asyncio
+async def test_failed_user_row_write_keeps_the_finished_reply(tmp_path, monkeypatch):
+    """#580: a user row that never reached the file must not discard the reply."""
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: default,
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+
+    async def failing_user_write(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(conversation_logger, "log_user_message", failing_user_write)
+    profile = LLMProfile(
+        name="user-row-fails",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+    )
+    runner = None
+    try:
+        await orchestrator.start(profile)
+        runner = orchestrator.runner
+        admission = orchestrator.admit("next turn", request_id="user-row-request", source="rpc")
+        completion_tasks = tuple(orchestrator._completion_tasks)
+        await asyncio.wait_for(admission.future, 5)
+        completions = await asyncio.gather(*completion_tasks)
+        assert len(completions) == 1
+        assert completions[0]["stop_reason"] == "end_turn"
+        assert completions[0]["text"] == "Replacement turn only."
+        snapshot = await LocalStateService(llm, None).get_conversation()
+        assert len([message for message in snapshot.messages if message.role == "assistant"]) == 1
+        assert not orchestrator._observed_turns
+    finally:
+        await orchestrator.close()
+        if runner is not None:
+            assert not runner._live_owned_processes()
+
+
+@pytest.mark.asyncio
+async def test_failed_user_row_write_is_shown_not_swallowed(tmp_path, monkeypatch):
+    """#580: a user row that never reached the file is shown, as a reply row is."""
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    display = MagicMock()
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=display,
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+
+    async def failing_user_write(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(conversation_logger, "log_user_message", failing_user_write)
+    profile = LLMProfile(
+        name="user-row-shown",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+    )
+    runner = None
+    try:
+        await orchestrator.start(profile)
+        runner = orchestrator.runner
+        admission = orchestrator.admit("next turn", request_id="user-row-shown", source="rpc")
+        completion_tasks = tuple(orchestrator._completion_tasks)
+        await asyncio.wait_for(admission.future, 5)
+        await asyncio.gather(*completion_tasks)
+        notices = [call.args[0] for call in display.display_system_message.call_args_list]
+        assert "Conversation history not saved for this message." in notices
+    finally:
+        await orchestrator.close()
+        if runner is not None:
+            assert not runner._live_owned_processes()
+
+
+@pytest.mark.asyncio
+async def test_failed_reply_row_write_keeps_the_finished_reply(tmp_path, monkeypatch):
+    """#580: a real OSError on the reply row must not turn a finished turn into an error."""
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: default,
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    completions_seen = []
+
+    async def record_completion(*args, **kwargs):
+        completions_seen.append(kwargs)
+
+    monkeypatch.setattr(orchestrator, "_notify_hub_completion", record_completion)
+    original_write = conversation_logger.log_assistant_message
+    real_open = os.open
+    session_file = str(conversation_logger.session_file)
+
+    def full_disk_open(path, *args, **kwargs):
+        if str(path) == session_file:
+            raise OSError(28, "No space left on device")
+        return real_open(path, *args, **kwargs)
+
+    async def write_on_full_disk(*args, **kwargs):
+        monkeypatch.setattr(os, "open", full_disk_open)
+        try:
+            return await original_write(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(os, "open", real_open)
+
+    monkeypatch.setattr(conversation_logger, "log_assistant_message", write_on_full_disk)
+    profile = LLMProfile(
+        name="reply-row-fails",
+        provider="acp",
+        command=(sys.executable, "-c", INTERRUPTED_AGENT),
+        cwd=str(tmp_path),
+    )
+    runner = None
+    try:
+        await orchestrator.start(profile)
+        runner = orchestrator.runner
+        admission = orchestrator.admit("next turn", request_id="reply-row-request", source="rpc")
+        completion_tasks = tuple(orchestrator._completion_tasks)
+        await asyncio.wait_for(admission.future, 5)
+        completions = await asyncio.gather(*completion_tasks)
+        assert len(completions) == 1
+        assert completions[0]["stop_reason"] == "end_turn"
+        assert completions[0]["text"] == "Replacement turn only."
+        assert [kwargs.get("failed") for kwargs in completions_seen] == [False]
+        snapshot = await LocalStateService(llm, None).get_conversation()
+        assert len([message for message in snapshot.messages if message.role == "assistant"]) == 1
+        events = bus.services["display_tap"].events
         assert len([event for event in events if event.get("type") == "turn_end"]) == 1
         assert not orchestrator._observed_turns
     finally:
@@ -811,26 +1035,344 @@ async def test_a_row_that_fails_twice_is_written_once_by_the_batch(
         await orchestrator.close()
 
 
-def test_a_full_retry_queue_warns_before_dropping(monkeypatch, caplog):
+@pytest.mark.asyncio
+async def test_a_row_that_landed_before_its_write_raised_is_not_written_again(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        real_add_message = manager.add_message
+        failures = [OSError("disk full")]
+
+        def landed_then_raises(*args, **kwargs):
+            # add_message appends the row before its save can raise.
+            message_uuid = real_add_message(*args, **kwargs)
+            if failures:
+                failures.pop()
+                raise OSError("disk full")
+            return message_uuid
+
+        monkeypatch.setattr(manager, "add_message", landed_then_raises)
+        orchestrator.runner.is_processing = True
+        orchestrator.observe_notification(
+            HubMessage(
+                action="message",
+                from_agent="peer-id-1",
+                from_identity="peer-1",
+                to="*",
+                content="FIRST_NOTE",
+                thread_id=None,
+                reply_to="",
+            )
+        )
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()  # the retry must not append a second row
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        rows = [
+            m
+            for m in manager.messages
+            if m["metadata"].get("source") == "observation"
+        ]
+        assert sum("FIRST_NOTE" in m["content"] for m in rows) == 1
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_a_landed_row_still_reaches_the_history_mirror_at_the_retry(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        real_add_message = manager.add_message
+        failures = [OSError("disk full")]
+
+        def landed_then_raises(*args, **kwargs):
+            message_uuid = real_add_message(*args, **kwargs)
+            if failures:
+                failures.pop()
+                raise OSError("disk full")
+            return message_uuid
+
+        monkeypatch.setattr(manager, "add_message", landed_then_raises)
+        orchestrator.runner.is_processing = True
+        orchestrator.observe_notification(
+            HubMessage(
+                action="message",
+                from_agent="peer-id-1",
+                from_identity="peer-1",
+                to="*",
+                content="FIRST_NOTE",
+                thread_id=None,
+                reply_to="",
+            )
+        )
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        # The row is not appended twice, and the retry still mirrors it once.
+        mirrored = [
+            m
+            for m in llm.conversation_history
+            if m.metadata.get("source") == "observation"
+        ]
+        assert [("FIRST_NOTE" in m.content) for m in mirrored] == [True]
+    finally:
+        await orchestrator.close()
+
+
+def test_a_full_retry_queue_refuses_the_new_message_instead_of_evicting(monkeypatch, caplog):
     orchestrator = mod.ACPOrchestrator(Bus())
 
     def failing_record(*args, **kwargs):
         raise OSError("disk full")
 
     monkeypatch.setattr(orchestrator, "_record_user", failing_record)
+    results = []
     with caplog.at_level("WARNING", logger=mod.logger.name):
         for index in range(21):
-            orchestrator.observe_notification(
-                HubMessage(
-                    action="message",
-                    from_agent="peer-id-1",
-                    from_identity="peer-1",
-                    to="*",
-                    content=f"NOTE_{index}",
-                    thread_id=None,
-                    reply_to="",
+            results.append(
+                orchestrator.observe_notification(
+                    HubMessage(
+                        action="message",
+                        from_agent="peer-id-1",
+                        from_identity="peer-1",
+                        to="*",
+                        content=f"NOTE_{index}",
+                        thread_id=None,
+                        reply_to="",
+                    )
                 )
             )
     full = [r for r in caplog.records if "retry queue is full" in r.getMessage()]
     assert len(full) == 1
+    # The 21st message is refused, and the oldest accepted one stays queued.
+    assert results == [True] * 20 + [False]
     assert len(orchestrator._unwritten_observations) == 20
+    assert orchestrator._unwritten_observations[0][1].content.endswith("NOTE_0")
+
+
+def _observation(content):
+    return HubMessage(
+        action="message", from_agent="peer-id-1", from_identity="peer-1",
+        to="*", content=content, thread_id=None, reply_to="",
+    )
+
+
+def _observed_notes(llm):
+    return [
+        line.strip()
+        for message in llm.conversation_history
+        if message.metadata.get("source") == "observation"
+        for line in message.content.splitlines()
+    ]
+
+
+class _CancellableRunner(FakeRunner):
+    # ACPRunner.cancel_queued runs when admit() cannot write its history row.
+    def cancel_queued(self, request_id, admission=None):
+        return True
+
+
+async def _started_orchestrator(tmp_path, monkeypatch, runner_cls=FakeRunner):
+    monkeypatch.setattr(mod, "ACPRunner", runner_cls)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    return orchestrator, llm
+
+
+def _storage_outage(orchestrator, monkeypatch):
+    real_record = orchestrator._record_user
+    storage_down = [True]
+
+    def flaky_record(*args, **kwargs):
+        if storage_down[0]:
+            raise OSError("disk full")
+        return real_record(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "_record_user", flaky_record)
+    return storage_down
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_observation_is_not_evicted_by_a_history_outage(tmp_path, monkeypatch):
+    # #581: 21 peer observations arrive while history writes fail. Each one the
+    # orchestrator reports as accepted must reach history once writes recover.
+    orchestrator, llm = await _started_orchestrator(tmp_path, monkeypatch)
+    try:
+        storage_down = _storage_outage(orchestrator, monkeypatch)
+        orchestrator.runner.is_processing = True
+        accepted = []
+        for index in range(21):
+            note = f"NOTE_{index}"
+            # A refusal is reported as False; anything else counts as accepted.
+            if orchestrator.observe_notification(_observation(note)) is not False:
+                accepted.append(note)
+        storage_down[0] = False
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        persisted = _observed_notes(llm)
+        assert [note for note in accepted if note not in persisted] == []
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_an_observation_whose_retry_fails_in_a_flush_is_kept_until_it_persists(
+    tmp_path, monkeypatch
+):
+    # #581: a turn ends while history is still down, so the retry fails again.
+    # The message must stay owned by the retry queue, not be dropped when the
+    # batch turn runs, and must reach history after recovery.
+    orchestrator, llm = await _started_orchestrator(
+        tmp_path, monkeypatch, _CancellableRunner
+    )
+    try:
+        storage_down = _storage_outage(orchestrator, monkeypatch)
+        orchestrator.runner.is_processing = True
+        accepted = []
+        for note in ("NOTE_0", "NOTE_1"):
+            if orchestrator.observe_notification(_observation(note)) is not False:
+                accepted.append(note)
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+        storage_down[0] = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        persisted = _observed_notes(llm)
+        assert [note for note in accepted if note not in persisted] == []
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_a_later_batch_threads_under_a_row_of_its_own_message(tmp_path, monkeypatch):
+    # #581: OLD_NOTE's row failed and its batch ran without one. After storage
+    # recovers, NEW_NOTE's flush retries OLD_NOTE's row too. The reply to
+    # NEW_NOTE's batch must thread under NEW_NOTE's row, not under the retried
+    # row of a message an earlier turn already answered.
+    orchestrator, llm = await _started_orchestrator(
+        tmp_path, monkeypatch, _CancellableRunner
+    )
+    try:
+        storage_down = _storage_outage(orchestrator, monkeypatch)
+        orchestrator.observe_notification(_observation("OLD_NOTE"))
+        storage_down[0] = False
+        orchestrator.observe_notification(_observation("NEW_NOTE"))
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        rows = {
+            (message.get("metadata") or {}).get("request_id"): message["content"]
+            for message in llm.conversation_manager.messages
+            if message["role"] == "user"
+        }
+        batch = next(
+            update for update in reversed(orchestrator.runner._updates)
+            if "NEW_NOTE" in update["text"]
+        )
+        assert "NEW_NOTE" in rows.get(batch["request_id"], "")
+        # OLD_NOTE still reaches history once, from the retry.
+        assert sum("OLD_NOTE" in content for content in rows.values()) == 1
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_observation_leaves_no_history_row_however_often_it_is_offered(
+    tmp_path, monkeypatch
+):
+    # #581: with the retry queue full, a refused message is offered again on
+    # every mailbox or relay tick. ConversationManager.add_message appends the
+    # row before its autosave can raise, so writing the row before deciding on
+    # the refusal leaves one more row per offer. A refusal admits nothing.
+    orchestrator, llm = await _started_orchestrator(tmp_path, monkeypatch)
+    try:
+        manager = llm.conversation_manager
+        manager.save_conversations = True
+        storage_down = [True]
+
+        def save_conversation(*args, **kwargs):
+            if storage_down[0]:
+                raise OSError("No space left on device")
+
+        monkeypatch.setattr(manager, "save_conversation", save_conversation)
+        orchestrator.runner.is_processing = True
+        for index in range(20):
+            assert orchestrator.observe_notification(_observation(f"NOTE_{index}")) is True
+
+        def target_rows():
+            return sum(
+                "TARGET_NOTE" in message["content"]
+                for message in manager.messages
+                if message["role"] == "user"
+            )
+
+        for _ in range(13):
+            assert orchestrator.observe_notification(_observation("TARGET_NOTE")) is False
+        assert target_rows() == 0
+
+        storage_down[0] = False
+        orchestrator.runner.is_processing = False
+        assert orchestrator.observe_notification(_observation("TARGET_NOTE")) is True
+        await asyncio.gather(*orchestrator._completion_tasks)
+        assert target_rows() == 1
+    finally:
+        await orchestrator.close()

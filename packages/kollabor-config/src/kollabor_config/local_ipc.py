@@ -20,7 +20,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _NONCE_BYTES = 32
-_HANDSHAKE_SECONDS = 5
+# A loaded Windows runner can stall a loopback handshake for seconds (#774).
+_HANDSHAKE_SECONDS = 30
 _CLIENT_LABEL = b"kollab-ipc/client"
 _SERVER_LABEL = b"kollab-ipc/server"
 

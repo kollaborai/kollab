@@ -250,3 +250,29 @@ def test_peer_pid_is_the_connecting_child(work_dir):
 
     child_pid, got = asyncio.run(main())
     assert got == child_pid
+
+
+class _AsWindows:
+    """``os`` as local_ipc sees it on Windows: ``name`` is ``nt``, the Windows-only open flags exist."""
+
+    name = "nt"
+    O_BINARY = 0
+    O_NOINHERIT = 0
+
+    def __getattr__(self, attr):
+        return getattr(os, attr)
+
+
+def test_a_slow_handshake_on_a_loaded_machine_still_connects(work_dir, monkeypatch):
+    # Windows CI runners stall for seconds under load (#774). The Windows branch is forced on here
+    # so it runs on any platform; only the server's handshake start is delayed, like a busy event loop.
+    monkeypatch.setattr(local_ipc, "os", _AsWindows())
+    real_server_handshake = local_ipc._server_handshake
+
+    async def late_server_handshake(reader, writer, key):
+        await asyncio.sleep(6)
+        await real_server_handshake(reader, writer, key)
+
+    monkeypatch.setattr(local_ipc, "_server_handshake", late_server_handshake)
+
+    assert asyncio.run(_round_trip(work_dir / "ep.json")) == b"hello\n"
