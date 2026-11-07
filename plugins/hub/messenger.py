@@ -2010,6 +2010,10 @@ class AgentSocketServer:
                             return
                         continue
 
+                    # Queued before a /resume or new session: not for this window.
+                    if not self._display_tap.in_live_conversation(event):
+                        continue
+
                     line = json.dumps(event, default=str) + "\n"
                     try:
                         async with write_lock:
