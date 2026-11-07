@@ -10,6 +10,10 @@ on:
   # A push performed with GITHUB_TOKEN cannot trigger another workflow. The
   # post-auto-merge gate uses this explicit event to run CI against main.
   workflow_dispatch:
+  # The merge queue (#857) tests each queued PR merged onto the latest main, so
+  # the required checks must also report on the queue's merge-group commits.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -225,6 +229,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # Depth 2 keeps the PR merge commit's parents, so the changelog check can diff against the base.
+          fetch-depth: 2
           persist-credentials: false
 
       - uses: actions/setup-python@v6
@@ -256,6 +262,20 @@ jobs:
         # PR here instead of surfacing as a false version-mismatch warning in
         # the web UI or a broken desktop release later.
         run: uv run python scripts/check_version_parity.py
+
+      - name: Check changelog entries
+        # Entries live in changes/<issue>.<section>.md, so two PRs never conflict on CHANGELOG.md
+        # (#855). A PR may not edit either changelog copy unless its branch starts with release/
+        # or changelog/. On a PR the checkout is the merge commit, so HEAD^1 is the base.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            uv run python scripts/changelog.py check --diff-base HEAD^1 --branch "$HEAD_BRANCH"
+          else
+            uv run python scripts/changelog.py check
+          fi
 
   security-scan:
     name: ci/security-scan

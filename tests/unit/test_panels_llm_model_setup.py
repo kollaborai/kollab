@@ -10,6 +10,7 @@ from kollabor.panels import PanelError, get_panel
 from kollabor.panels import llm as llm_panel
 from kollabor.panels import model as model_panel
 from kollabor.panels import setup as setup_panel
+from kollabor.state.local import LocalStateService
 from kollabor_ai.loadout_manager import Loadout
 
 KEY = "sk-ant-api03-SECRETSECRETSECRETSECRET"
@@ -393,6 +394,104 @@ async def test_setup_finish_redacts_other_provider_key_from_switch_exception(cap
     assert other_provider_key not in caplog.text
     assert profiles.active == "openai"
     assert profiles.activation_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ("exception", "false"))
+async def test_setup_finish_rolls_back_state_service_provider_activation_failure(
+    failure, caplog
+):
+    other_provider_key = "AIzaSyDUMMYKEYDUMMYKEY12345"
+
+    class Profile:
+        def __init__(self, name, provider, model="", base_url="", api_key=None, **kw):
+            self.name = name
+            self.provider = provider
+            self.model = model
+            self.base_url = base_url
+            self.api_key = api_key
+            self.supports_tools = kw.get("supports_tools", True)
+            self.temperature = kw.get("temperature")
+            self.effort = kw.get("effort")
+            self.extra_headers = kw.get("extra_headers", {})
+            self.auth_type = kw.get("auth_type", "")
+
+    class Profiles:
+        def __init__(self):
+            self.profiles = {
+                "openai": Profile("openai", "openai", model="gpt-stable")
+            }
+            self.active = "openai"
+            self.activation_calls = []
+
+        @property
+        def active_profile_name(self):
+            return self.active
+
+        def get_profile(self, name):
+            return self.profiles.get(name)
+
+        def get_active_profile(self):
+            return self.get_profile(self.active)
+
+        def get_profile_names(self):
+            return list(self.profiles)
+
+        def reload(self):
+            pass
+
+        def create_profile(self, **kwargs):
+            self.profiles[kwargs["name"]] = Profile(**kwargs)
+            return True
+
+        def save_profile_values_to_config(self, profile):
+            pass
+
+        def set_active_profile(self, name, persist=True):
+            self.activation_calls.append((name, persist))
+            if name not in self.profiles:
+                return False
+            self.active = name
+            return True
+
+    class APIService:
+        def __init__(self):
+            self.calls = []
+
+        async def reinitialize_provider(self, profile):
+            self.calls.append(profile.name)
+            if profile.name == "anthropic":
+                if failure == "exception":
+                    raise RuntimeError(f"provider rejected key {other_provider_key}")
+                return False
+            return True
+
+    class LLMService:
+        def __init__(self):
+            self.api_service = APIService()
+            self.switch_calls = []
+
+        async def switch_profile(self, name, persist=True):
+            self.switch_calls.append((name, persist))
+            return True
+
+    profiles = Profiles()
+    llm = LLMService()
+    state_service = LocalStateService(llm_service=llm, profile_manager=profiles)
+    ctx = SimpleNamespace(_profile_manager=profiles, _llm_service=llm)
+    ctx.set_active_profile = state_service.set_active_profile
+
+    result = await SETUP.act(ctx, "finish", PAYLOAD)
+
+    assert result["ok"] is False
+    assert "Could not activate" in result["message"]
+    assert profiles.active == "openai"
+    assert profiles.activation_calls == [("anthropic", True), ("openai", True)]
+    assert llm.api_service.calls == ["anthropic", "openai"]
+    assert llm.switch_calls == []
+    assert other_provider_key not in json.dumps(result)
+    assert other_provider_key not in caplog.text
+
 
 
 @pytest.mark.asyncio
