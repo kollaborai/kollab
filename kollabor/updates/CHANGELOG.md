@@ -16,12 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A definition-of-done check (`pr-gates`) runs configurable hygiene checks on every PR -- docs-path rules, unresolved threads, base currency, Conventional Commit title, linked issue, and regression-test coverage of review finding ids -- and reports every failed item in exactly one check run (default `dod/ready-for-review`), never comments. Every commits, files, and comments page is read and review-thread pagination is followed, so nothing beyond the first page is silently skipped; pagination is bounded and repeat-guarded (identical pages, null or repeated cursors, and runaway loops fail closed with a loud error -- hang never, silently truncate never); base currency is judged by the PR head's merge-base against the target branch tip, so a branch missing commits from main fails. This repository runs it enabled (`pr_gates.dod.enabled = true` in `.github/pr-gates.toml`), with signed-commit validation left out until agent commits are signed (#755); the feature defaults to off elsewhere, and it is usable as a local CLI before pushing (#724).
 
 ### Fixed
-- Development and live checkouts no longer masquerade as release builds:
-  the CLI, application info, and the engine's `/version` and `/status`
-  report a PEP 440 local segment (`0.18.5+<short-sha>`) derived from the
-  checkout, while installed releases and release artifacts keep the exact
-  base version, and an unresolvable revision reports `+unknown` instead
-  of hiding (#630).
 - Google API keys in provider errors and logs are now redacted even when the key was not submitted by the user, and every log file (the app's `kollab.log` and the engine's log) now redacts provider keys whichever code wrote the line, including exception tracebacks (#835, #843).
 - Profile setup now reports state-service provider startup failures instead of claiming success, restores the previous profile when possible, and keeps provider secrets out of errors and logs (#832).
 - Voice-turn rewrites now coordinate with transcript appends (the logger's and compaction's summaries and checkpoints) and session snapshots across processes; rows appended after a rewrite reads its cut survive the atomic replacement (#834).
