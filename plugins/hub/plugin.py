@@ -682,6 +682,9 @@ class HubPlugin(BasePlugin):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
         self._dreaming_task: Optional[asyncio.Task] = None
+        # The insight write of the dream in progress, which a cancelled dream
+        # leaves running in its thread (#562); shutdown waits for it.
+        self._crystal_write: Optional[asyncio.Task] = None
         self._notify_task: Optional[asyncio.Task] = None
         self._notifier: Optional[HubNotifier] = None
 
@@ -753,6 +756,10 @@ class HubPlugin(BasePlugin):
 
         # Message deduplication (LRU via OrderedDict, capped at 1000)
         self._seen_messages: collections.OrderedDict = collections.OrderedDict()
+        # Messages the ACP retry queue refused (#581). Their dedup marks stay, so
+        # a retransmission skips display, vault and bridge effects it already
+        # had, and only asks the queue again.
+        self._refused_observations: collections.OrderedDict = collections.OrderedDict()
 
         # Content dedup: TTL dict keyed by MD5("from_identity:content").
         # Guards against verbatim duplicates produced by concurrent agent
@@ -6037,9 +6044,21 @@ class HubPlugin(BasePlugin):
                 self._vault = AgentVault(self._identity.identity)
                 self._vault.touch()
                 # Project-scoped crystal store: work done in this repo
-                self._crystal_store = CrystalStore(self._vault._vault_dir)
+                project_crystals = CrystalStore(self._vault._vault_dir)
                 # Global crystal store: cross-project personality + skills
-                self._global_crystal_store = CrystalStore(self._vault.global_vault_dir)
+                global_crystals = CrystalStore(self._vault.global_vault_dir)
+                # Parse both in a worker thread, and publish them only once loaded:
+                # a reader on the loop never parses a vault or waits on its lock (#562).
+                try:
+                    await asyncio.gather(
+                        asyncio.to_thread(project_crystals.load),
+                        asyncio.to_thread(global_crystals.load),
+                    )
+                except Exception as e:
+                    # Readers parse again on the loop and raise there, as before.
+                    logger.warning(f"crystal stores failed to load at startup: {e}")
+                self._crystal_store = project_crystals
+                self._global_crystal_store = global_crystals
             else:
                 logger.info(f"Vault disabled for agent {self._identity.identity}")
 
@@ -6646,7 +6665,7 @@ class HubPlugin(BasePlugin):
                 if self._identity:
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
-                        max_replay=INBOX_MAX_REPLAY,
+                        max_replay=self._mailbox_replay_cap(INBOX_MAX_REPLAY),
                     )
                     if messages:
                         await self._deliver_inbox_batch(messages)
@@ -6654,6 +6673,24 @@ class HubPlugin(BasePlugin):
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
+
+    def _mailbox_replay_cap(self, cap: int) -> int:
+        """Return the per-poll cap on ordinary mailbox replay (0 = no cap).
+
+        An ACP agent's queue can refuse a message (#581), and a refused message
+        is only owned again once it is delivered one by one so it can be put
+        back. A capped replay deletes the overflow and coalesces the rest into
+        one block that never reaches the queue, so ACP polls without the cap.
+        The mailbox's own size prune (INBOX_MAX_SIZE) still bounds it.
+        """
+        llm = None
+        try:
+            llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+            if self._agent_dispatch_mode(llm) == "acp":
+                return 0
+        except Exception as exc:
+            logger.debug("mailbox replay cap check failed: %s", exc)
+        return cap
 
     async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
         """Deliver a batch of offline inbox messages.
@@ -6670,7 +6707,17 @@ class HubPlugin(BasePlugin):
             await self._inject_inbox_replay(messages)
         else:
             for msg in messages:
-                await self._on_message_received(msg)
+                await self._deliver_inbox_message(msg)
+
+    async def _deliver_inbox_message(self, msg: HubMessage) -> None:
+        """Deliver one mailbox message; a refusal puts its file back (#581).
+
+        The mailbox read already deleted the file, so a message the ACP retry
+        queue refused would be lost here. It goes back for the next poll, and
+        the mailbox's own age and size limits still apply to it.
+        """
+        if await self._on_message_received(msg) is False and self._identity:
+            await AgentMessenger.send_to_file(self._identity.identity, msg)
 
     async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
         """Coalesce a bounded inbox replay into a single injected block.
@@ -6695,9 +6742,23 @@ class HubPlugin(BasePlugin):
         ]
         ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
         for msg in control_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
         if not ordinary_msgs:
+            return
+
+        llm = None
+        if self.event_bus is not None:
+            try:
+                llm = self.event_bus.get_service("llm_service")
+            except Exception:
+                pass
+
+        # An ACP agent's queue owns each message it admits and can refuse one
+        # (#581); a coalesced block would hide that from it. Deliver one by one.
+        if self._agent_dispatch_mode(llm) == "acp":
+            for msg in ordinary_msgs:
+                await self._deliver_inbox_message(msg)
             return
 
         lines: List[str] = [summary.content, ""]
@@ -6711,13 +6772,6 @@ class HubPlugin(BasePlugin):
             lines.append(f"[{ts}] {sender}: {content_preview}")
 
         block = "\n".join(lines)
-
-        llm = None
-        if self.event_bus is not None:
-            try:
-                llm = self.event_bus.get_service("llm_service")
-            except Exception:
-                pass
 
         if llm is not None and hasattr(llm, "inject_system_message"):
             try:
@@ -6734,7 +6788,7 @@ class HubPlugin(BasePlugin):
 
         # Fallback: individual delivery (no inject_system_message)
         for msg in ordinary_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
     async def _dreaming_loop(self) -> None:
         """Periodically dream when agent is idle -- distill stream into insights.
@@ -6857,11 +6911,16 @@ class HubPlugin(BasePlugin):
                             logger.debug("dreaming: filtered preamble paragraph")
                             continue
                         paragraphs.append(p_stripped)
-                    # On the loop, like every reader of the vault: in a worker
-                    # thread a write outlived a cancelled dream and raced the
-                    # readers (#546).
-                    for paragraph in paragraphs:
-                        self._crystal_store.add_entry(paragraph)
+                    # One worker-thread call for the batch, in order: each add saves
+                    # the whole vault, which stalled the loop (#562). A cancelled
+                    # dream leaves this write running, so shutdown waits for it.
+                    store = self._crystal_store
+                    self._crystal_write = asyncio.create_task(
+                        asyncio.to_thread(
+                            lambda: [store.add_entry(p) for p in paragraphs]
+                        )
+                    )
+                    await asyncio.shield(self._crystal_write)
                     added = len(paragraphs)
                 else:
                     # Fallback to raw append if crystal_store unavailable
@@ -6926,6 +6985,21 @@ class HubPlugin(BasePlugin):
             # Restore previous state (unless something else changed it)
             if self._identity.state == AgentLifecycle.DREAMING.value:
                 self._identity.state = prev_state
+
+    async def _settle_crystal_write(self) -> None:
+        """Wait for an insight write that a cancelled dream left running in its thread.
+
+        The thread outlives the task that awaited it. A save landing after shutdown
+        would write over a newer one (#562), so shutdown calls this after it
+        cancels the dream.
+        """
+        write = getattr(self, "_crystal_write", None)
+        if write is None or write.done():
+            return
+        try:
+            await write
+        except Exception as e:
+            logger.warning(f"dreaming: insight write failed at shutdown: {e}")
 
     async def _vault_autosave_loop(self) -> None:
         """Periodically save working memory so crash != total loss.
@@ -8844,7 +8918,8 @@ class HubPlugin(BasePlugin):
         sender = message.from_identity or message.from_agent or ""
         acp = self.event_bus.get_service("acp_orchestrator")
         if acp is not None and acp.active and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}):
-            acp.observe_notification(message)
+            if not acp.observe_notification(message):
+                return {"status": "refused", "request_id": message.id}
             return {"status": "queued", "request_id": message.id}
         turns[message.id] = _NetworkTurn(
             handle=sender,
@@ -8936,8 +9011,40 @@ class HubPlugin(BasePlugin):
                 )
         return result
 
-    async def _on_message_received(self, message: HubMessage) -> None:
-        """Handle an incoming message from another agent."""
+    _REFUSED_OBSERVATIONS_MAX = 256
+
+    def _remember_refused_message(self, msg_key: tuple) -> None:
+        """Keep a refused message's dedup marks and note it for a retry (#581).
+
+        The message was already shown, logged and mirrored; a retransmission
+        (socket resend, mailbox replay, relay retry) only asks the queue again.
+        """
+        refused = self._refused_observations
+        refused[msg_key] = None
+        while len(refused) > self._REFUSED_OBSERVATIONS_MAX:
+            # Forget the oldest one's dedup mark too, so its retransmission runs
+            # the whole path again instead of being acknowledged and dropped.
+            oldest, _ = refused.popitem(last=False)
+            self._seen_messages.pop(oldest, None)
+
+    def _retry_refused_observation(self, message: HubMessage, msg_key: tuple) -> bool | None:
+        """Ask the ACP queue again for a message it refused. False: still refused."""
+        acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
+        if acp is None or not getattr(acp, "active", False):
+            # No live session can admit it. It stays refused and unacknowledged,
+            # so a later session can still take it (#581).
+            logger.debug("refused observation kept: the ACP session is not running")
+            return False
+        if not acp.observe_notification(message):
+            return False
+        self._refused_observations.pop(msg_key, None)
+        return None
+
+    async def _on_message_received(self, message: HubMessage) -> bool | None:
+        """Handle an incoming message from another agent.
+
+        Returns False when the message was refused and must not be acknowledged.
+        """
         if self._solo:
             # Peers cannot discover a solo agent; this covers direct sends by
             # name (`kollab --hub send`) so nothing reaches its conversation.
@@ -8987,6 +9094,8 @@ class HubPlugin(BasePlugin):
         msg_id = getattr(message, "id", "") or ""
         msg_key = (message.from_identity or message.from_agent, msg_id, message.action)
         if msg_id and msg_key in self._seen_messages:
+            if msg_key in getattr(self, "_refused_observations", ()):
+                return self._retry_refused_observation(message, msg_key)
             logger.debug(f"Dedup: skipping already-seen {message.action} {msg_id}")
             return
         if msg_id and message.action != "turn_end":
@@ -9443,7 +9552,9 @@ class HubPlugin(BasePlugin):
                         )
                 elif message.reply_to or message.to in {"*", "all", "everyone", "team", "project"}:
                     if dispatch_mode == "acp":
-                        acp.observe_notification(message)
+                        if not acp.observe_notification(message):
+                            self._remember_refused_message(msg_key)
+                            return False
                 elif wake_decision.should_trigger:
                     await self._submit_authenticated_agent_message(message, llm_service)
                 else:
@@ -9701,9 +9812,12 @@ class HubPlugin(BasePlugin):
                         if dispatch_mode in {"acp", "unavailable"} and hasattr(
                             llm_service, "submit_human_input"
                         ):
-                            await self._submit_authenticated_agent_message(
+                            admitted = await self._submit_authenticated_agent_message(
                                 message, llm_service
                             )
+                            if admitted.get("status") == "refused":
+                                self._remember_refused_message(msg_key)
+                                return False
                             return
                     await self.event_bus.emit_with_hooks(
                         EventType.TRIGGER_LLM_CONTINUE,
@@ -17131,6 +17245,7 @@ class HubPlugin(BasePlugin):
                 await self._dreaming_task
             except asyncio.CancelledError:
                 pass
+        await self._settle_crystal_write()
 
         if self._notify_task:
             self._notify_task.cancel()
