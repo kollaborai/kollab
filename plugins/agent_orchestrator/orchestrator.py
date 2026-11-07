@@ -90,6 +90,8 @@ class AgentOrchestrator:
         initial_task: str = "",
         profile: str = "",
         harness: bool = False,
+        parent_identity: str = "",
+        parent_agent_id: str = "",
     ) -> Optional[str]:
         """Create session and track agent.
 
@@ -125,6 +127,8 @@ class AgentOrchestrator:
             skills=skills, identity=identity, initial_task=initial_task,
             profile=profile,
             harness=harness,
+            parent_identity=parent_identity,
+            parent_agent_id=parent_agent_id,
         )
         if proc is None:
             logger.error(f"Failed to create subprocess for agent: {name}")
@@ -275,6 +279,8 @@ class AgentOrchestrator:
         identity: str = "",
         profile: str = "",
         harness: bool = False,
+        parent_identity: str = "",
+        parent_agent_id: str = "",
     ) -> bool:
         """Spawn a new agent session.
 
@@ -293,6 +299,8 @@ class AgentOrchestrator:
             skills: Optional list of skills to load
             identity: Optional hub identity to request via --as flag
             profile: Optional LLM profile to use (e.g., "glm4", "claude")
+            parent_identity: Hub identity that started this detached agent
+            parent_agent_id: Runtime ID of the parent agent
 
         Returns:
             True if spawn was initiated successfully
@@ -301,6 +309,8 @@ class AgentOrchestrator:
         full_name = await self._setup_session(
             name, agent_type=agent_type, skills=skills, identity=identity,
             initial_task=message, profile=profile, harness=harness,
+            parent_identity=parent_identity,
+            parent_agent_id=parent_agent_id,
         )
         if not full_name:
             return False
@@ -566,6 +576,8 @@ class AgentOrchestrator:
         initial_task: str = "",
         profile: str = "",
         harness: bool = False,
+        parent_identity: str = "",
+        parent_agent_id: str = "",
     ) -> Tuple[Optional[subprocess.Popen], Optional[RingBuffer]]:
         """Spawn a new agent subprocess.
 
@@ -578,6 +590,8 @@ class AgentOrchestrator:
             initial_task: Optional task passed as positional arg so the
                 spawned agent picks it up as initial_message.
             profile: Optional LLM profile to use (passed as --llm flag)
+            parent_identity: Hub identity that started this detached agent
+            parent_agent_id: Runtime ID of the parent agent
 
         Returns:
             Tuple of (Popen process, RingBuffer) on success, (None, None) on failure
@@ -594,8 +608,14 @@ class AgentOrchestrator:
         # parent-identity instead of propagating it.
         env.pop("KOLLAB_PARENT_PID", None)
         env.pop("KOLLAB_PARENT_CREATE_TIME", None)
+        env.pop("KOLLAB_PARENT_IDENTITY", None)
+        env.pop("KOLLAB_PARENT_AGENT_ID", None)
         env["KOLLAB_ROOT_SOCKET"] = root_socket
         env["KOLLAB_AGENT_NAME"] = agent_name
+        if parent_identity:
+            env["KOLLAB_PARENT_IDENTITY"] = parent_identity
+        if parent_agent_id:
+            env["KOLLAB_PARENT_AGENT_ID"] = parent_agent_id
 
         cmd = self._find_kollab_command()
         cmd.append("--detached")

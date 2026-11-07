@@ -933,17 +933,23 @@ class PeerMeshRuntime:
         frame: dict[str, Any],
         *,
         timeout: float,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Send one opaque carrier frame over the pinned direct TLS endpoint."""
         if not self.direct_enabled or self.endpoint_identity_manager is None:
             raise TransientPeerDeliveryError("direct peer transport is disabled")
         if self._direct_sender is not None:
+            if before_send is not None:
+                # An injected sender has no commit-guard contract. Fall back
+                # to the relay instead of handing it protected output.
+                raise TransientPeerDeliveryError("guarded direct sender is unavailable")
             return await self._direct_sender(peer_key, frame, timeout=timeout)
         return await self._direct_request(
             peer_key,
             {"action": "peer_forward", "frame": frame},
             "peer_forward_result",
             timeout=timeout,
+            **({"before_send": before_send} if before_send is not None else {}),
         )
 
     async def _send_direct_secure(
@@ -953,6 +959,7 @@ class PeerMeshRuntime:
         payload: dict[str, Any],
         *,
         timeout: float,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Carry one end-to-end TLS record to a locator-authenticated peer.
 
@@ -968,6 +975,7 @@ class PeerMeshRuntime:
             {"action": "peer_secure", "method": method, "payload": payload},
             "peer_secure_result",
             timeout=timeout,
+            **({"before_send": before_send} if before_send is not None else {}),
         )
 
     async def _direct_request(
@@ -977,6 +985,7 @@ class PeerMeshRuntime:
         result_type: str,
         *,
         timeout: float,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """One authenticated request/response line over the peer's direct endpoint."""
         locator = self._locator_for_peer(peer_key)
@@ -1021,6 +1030,8 @@ class PeerMeshRuntime:
                     timeout=min(timeout, DIRECT_PEER_CONNECT_TIMEOUT),
                 ):
                     raise PeerRouteError("direct peer endpoint identity was rejected")
+                if before_send is not None:
+                    await before_send()
                 writer.write(request_line)
                 await asyncio.wait_for(
                     writer.drain(), timeout=min(timeout, DIRECT_PEER_CONNECT_TIMEOUT)
@@ -1713,12 +1724,14 @@ class PeerMeshRuntime:
         return frame
 
     async def _send_forward_to_peer(
-        self, peer_key: str, frame: dict[str, Any], *, timeout: float
+        self, peer_key: str, frame: dict[str, Any], *, timeout: float,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         if self.direct_enabled and self._locator_for_peer(peer_key) is not None:
             try:
                 return await self._send_direct_peer_forward(
-                    peer_key, frame, timeout=timeout
+                    peer_key, frame, timeout=timeout,
+                    **({"before_send": before_send} if before_send is not None else {}),
                 )
             except _DIRECT_FAILED:
                 # The envelope's destination replay key makes relay fallback
@@ -1729,6 +1742,7 @@ class PeerMeshRuntime:
             "peer.forward",
             frame,
             timeout=min(timeout, MAX_PEER_FORWARD_TTL_SECONDS),
+            **({"before_send": before_send} if before_send is not None else {}),
         )
 
     def _route_material(self, value: object, ingress_peer_key: str):
@@ -2125,7 +2139,10 @@ class PeerMeshRuntime:
         rows.sort()
         return rows[:PEER_STORE_MAX_RECORDS]
 
-    async def request(self, peer_key: str, method: str, payload: dict, *, timeout: float) -> dict:
+    async def request(
+        self, peer_key: str, method: str, payload: dict, *, timeout: float,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ) -> dict:
         """Carry only secure identity/packet records over direct or mesh routes."""
         if self._closed:
             raise RelayError("peer mesh is closed")
@@ -2142,7 +2159,8 @@ class PeerMeshRuntime:
             # this is how the first link to it is bootstrapped.
             try:
                 return await self._send_direct_secure(
-                    peer_key, method, payload, timeout=timeout
+                    peer_key, method, payload, timeout=timeout,
+                    **({"before_send": before_send} if before_send is not None else {}),
                 )
             except _DIRECT_FAILED:
                 pass
@@ -2155,7 +2173,10 @@ class PeerMeshRuntime:
             # direct dial exists; otherwise the mesh would wrap the same packet
             # in peer.forward over the same relay, so keep the native path.
             if not self.direct_enabled or self._locator_for_peer(peer_key) is None:
-                return await self.client.request(peer_key, method, payload, timeout=timeout)
+                return await self.client.request(
+                    peer_key, method, payload, timeout=timeout,
+                    **({"before_send": before_send} if before_send is not None else {}),
+                )
             record = self.record_store.get(remote_id, scope=router.scope)
             link = router.link_between(self.local_peer_id, remote_id)
             # A link rides the TLS session it names. The handshake that opens a
@@ -2166,7 +2187,10 @@ class PeerMeshRuntime:
                 or not self._link_is_live(peer_key, link)
                 or (method == "secure_packet" and record is None)
             ):
-                return await self.client.request(peer_key, method, payload, timeout=timeout)
+                return await self.client.request(
+                    peer_key, method, payload, timeout=timeout,
+                    **({"before_send": before_send} if before_send is not None else {}),
+                )
         inner = {"v": 1, "method": method, "payload": payload}
         if not isinstance(payload, dict) or _encoded_size(inner) > PEER_ENVELOPE_MAX_BYTES:
             raise RelayError("secure conversation record exceeds the peer envelope limit")
@@ -2192,6 +2216,7 @@ class PeerMeshRuntime:
                 first_record.public_key,
                 frame,
                 timeout=min(float(timeout), MAX_PEER_FORWARD_TTL_SECONDS),
+                **({"before_send": before_send} if before_send is not None else {}),
             )
             if (
                 isinstance(response, dict)
@@ -2224,7 +2249,10 @@ class PeerMeshRuntime:
         except PeerRouteError as exc:
             if direct is not None:
                 # The peer is on the relay too: a stale mesh link costs one failed try.
-                return await self.client.request(peer_key, method, payload, timeout=timeout)
+                return await self.client.request(
+                    peer_key, method, payload, timeout=timeout,
+                    **({"before_send": before_send} if before_send is not None else {}),
+                )
             raise RelayError("peer route delivery failed") from exc
         receipt = result_holder.get("receipt")
         if not isinstance(receipt, dict):

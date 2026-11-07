@@ -49,6 +49,7 @@ from .relay_state import (
     RelayError,
     RelayFrameShapeError,
     RelayStateStore,
+    SendGuardRevoked,
     canonical_origin,
     failure_text,
     is_machine_network_state_dir,
@@ -118,7 +119,9 @@ def _application_payload_limit(method: str) -> int:
     )
 MAX_PEER_PENDING = 4
 MAX_DISPATCH = 16
-MAX_PEER_DISPATCH = 4
+# PhoneLink reserves two app requests plus three media packets and one close.
+# The global dispatch cap still bounds competing approved peers.
+MAX_PEER_DISPATCH = 6
 MAX_REQUEST_TIMEOUT = 300
 APPLICATION_ERRORS = frozenset(
     {"busy", "not_supported", "failed", "deadline", "cancelled"}
@@ -1039,7 +1042,9 @@ class RelayClient:
                 async for message in ws:
                     if message.type == aiohttp.WSMsgType.TEXT:
                         try:
-                            await self._handle_frame(strict_json(message.data))
+                            await self._handle_frame(
+                                strict_json(message.data, limit=MAX_FRAME)
+                            )
                         except RelayFrameShapeError as exc:
                             # Well-formed text that is not a JSON object: a
                             # healthy socket must not reconnect over it.
@@ -1060,7 +1065,7 @@ class RelayClient:
         message = await ws.receive()
         if message.type != aiohttp.WSMsgType.TEXT:
             raise RelayError("relay expected a text frame")
-        return strict_json(message.data)
+        return strict_json(message.data, limit=MAX_FRAME)
 
     def _set_peers(self, frame):
         if (
@@ -1112,7 +1117,7 @@ class RelayClient:
                 PeerSessionEvent(kind, key, previous_session, current_session)
             )
 
-    async def _send_frame(self, payload):
+    async def _send_frame(self, payload, *, before_send: Callable[[], Awaitable[None]] | None = None):
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(raw.encode()) > MAX_FRAME:
             raise RelayError("relay frame too large")
@@ -1130,9 +1135,11 @@ class RelayClient:
                     raise RelayError("relay send rate limit reached")
                 # One wait, sized to refill a token: a burst is smoothed out, not dropped.
                 await asyncio.sleep((1 - self._tokens) / SEND_RATE_PER_SECOND)
-            self._tokens -= 1
             if self._ws is None or self._ws.closed:
                 raise RelayError("relay is not connected")
+            if before_send is not None:
+                await before_send()
+            self._tokens -= 1
             await asyncio.wait_for(self._ws.send_str(raw), timeout=3)
 
     async def ping(self, peer_key: str) -> dict:
@@ -1183,7 +1190,8 @@ class RelayClient:
             raise RelayError("invalid or oversized application payload") from exc
 
     async def request(
-        self, peer_key: str, method: str, payload: dict, *, timeout: float = 10.0
+        self, peer_key: str, method: str, payload: dict, *, timeout: float = 10.0,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> dict:
         """Return an authenticated receiver response, never a relay receipt.
 
@@ -1234,6 +1242,7 @@ class RelayClient:
                         "timeout_ms": max(1, math.ceil(timeout * 1000)),
                     },
                     request_id,
+                    **({"before_send": before_send} if before_send is not None else {}),
                 )
                 return await future
         except TimeoutError as exc:
@@ -1358,7 +1367,10 @@ class RelayClient:
         if not task.cancelled():
             task.exception()
 
-    async def _send_encrypted(self, key, kind, payload, message_id):
+    async def _send_encrypted(
+        self, key, kind, payload, message_id, *,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ):
         if key not in self.state.approvals or key not in self._peers:
             raise RelayError("peer is unapproved or offline")
         now = int(time.time())
@@ -1384,8 +1396,27 @@ class RelayClient:
         ciphertext = base64.b64encode(box.encrypt(encoded.encode())).decode()
         if len(ciphertext) > MAX_CIPHERTEXT:
             raise RelayError("ciphertext size limit exceeded")
+        guard = {}
+        if before_send is not None:
+            def check_peer() -> None:
+                if (
+                    key not in self.state.approvals
+                    or self._state != "online"
+                    or self._session_id != envelope["from_session"]
+                    or self._peers.get(key) != envelope["to_session"]
+                    or self._binding(key) != envelope["room"]
+                ):
+                    raise SendGuardRevoked("peer approval or relay session changed before send")
+
+            async def guarded_send() -> None:
+                check_peer()
+                await before_send()
+                check_peer()
+
+            guard["before_send"] = guarded_send
         await self._send_frame(
-            {"type": "send", "to": key, "id": message_id, "ciphertext": ciphertext}
+            {"type": "send", "to": key, "id": message_id, "ciphertext": ciphertext},
+            **guard,
         )
 
     async def _apply_frame(self, frame):

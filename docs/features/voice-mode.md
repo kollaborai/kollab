@@ -37,10 +37,11 @@ Web voice also needs
 (`brew install uv`); a missing one is named at once. Kollab.app opened from the
 Dock finds them on your login shell's PATH, as a terminal does.
 
-This works on a page served from the computer running the agent (Kollab.app,
-or the web UI at `127.0.0.1` or `localhost`). On a phone, PhoneLink included,
-the mic runs `/voice` on the computer instead; voice from the phone's own
-microphone is not available yet.
+The local web UI joins the computer's voice room directly. PhoneLink carries
+the phone's microphone and speaker audio through its encrypted connection to
+the computer. Both LiveKit signaling and its UDP media socket stay on loopback;
+PhoneLink bridges the audio locally. Other remote web pages use
+the computer's `/voice` toggle.
 
 ## In the terminal
 
@@ -57,6 +58,7 @@ latest transcript. The web UI shows the same line above the message box while
 - `/voice off` releases its microphone lease and cancels unplayed speech.
 - `/voice status` shows the service and the code it runs, owner, devices, transcript and queues.
 - `/voice retry` retries now. Voice also retries on its own (see Recovery).
+- `/voice dismiss` clears spoken requests whose delivery outcome is unknown after a restart. Voice never resends these; `/voice status` lists them.
 - `/voice context` shows the transcript window sent with each request (default 10 lines).
 - `/voice context 20` changes it to 20 lines; the allowed range is 1–50.
 - `/voice enroll` saves your voiceprint from your next 30 seconds of speech; `/voice
@@ -296,6 +298,10 @@ from a pinned Microsoft VibeVoice source archive, verifies the selected voice
 preset by hash, and warms the model without opening the microphone. Read Speech
 Readiness or `/voice status`. A setup error retries on its own; `/voice retry`
 retries now.
+
+Readiness reports the engines running in the device service. Check that active
+engine when verifying a speech change; the configured engine name alone does
+not establish which engine is running.
 
 VibeVoice uses Microsoft VibeVoice-Realtime-0.5B. Presets are Carter, Davis, Emma,
 Frank, Grace, Mike and Samuel. A trusted cached `.pt` file in Custom VibeVoice

@@ -456,6 +456,29 @@ class TestRegistryToParserConsistency(unittest.TestCase):
                     f"{tool.name}: regex does not match sample tag: {sample}",
                 )
 
+    def test_terminal_send_is_auto_enrolled_for_xml_and_native_calls(self):
+        from kollabor_ai.response_parser import ResponseParser
+
+        parser = ResponseParser()
+        _register_tool_tags(parser, self.registry)
+        parsed = parser.parse_response(
+            "<terminal-send><session_name>dev</session_name>"
+            "<text>y</text></terminal-send>"
+        )
+
+        plugin_tools = parsed.get("components", {}).get("plugin_tools", [])
+        send_calls = [
+            tool for tool in plugin_tools if tool.get("type") == "terminal_send"
+        ]
+        definition = self.registry.get("terminal-send")
+
+        self.assertEqual(len(send_calls), 1)
+        self.assertEqual(send_calls[0]["session_name"], "dev")
+        self.assertEqual(send_calls[0]["text"], "y")
+        self.assertEqual(definition.native_name, "terminal_send")
+        self.assertTrue(definition.requires_permission)
+        self.assertEqual(definition.risk_level, "high")
+
     def test_every_tool_produces_valid_json_schema(self):
         """Every tool should produce a valid native JSON schema."""
         for tool in self.registry.list():

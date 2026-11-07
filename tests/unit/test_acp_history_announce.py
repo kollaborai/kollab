@@ -47,7 +47,7 @@ class BusyRunner:
     async def cancel(self):
         pass
 
-    def cancel_queued(self, request_id):
+    def cancel_queued(self, request_id, admission=None):
         self.admissions.pop(request_id, None)
 
     async def close(self):

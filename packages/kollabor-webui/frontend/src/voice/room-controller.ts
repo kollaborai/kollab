@@ -2,6 +2,7 @@ import { initialRoomState, reduceVoiceEvent, type VoiceRoomState } from "./room-
 import type { VoiceApi } from "./voice-api";
 import { encodeCursor } from "./voice-api";
 import type { VoiceSessionView, VoiceStopReason } from "./types";
+import type { PhoneAudio } from "./phone-audio";
 
 /** The slice of livekit-client's Room the controller uses (mocked in tests). */
 export type RoomLike = {
@@ -36,13 +37,21 @@ export class VoiceRoomController {
   private epoch = 0;
   /** The create in flight: a stop before it answers ends the session it makes. */
   private creating: Promise<VoiceSessionView> | null = null;
+  private phoneConnected = false;
 
   private api: VoiceApi;
   private createRoom: () => Promise<RoomLike>;
+  private phoneAudio: PhoneAudio | undefined;
 
-  constructor(api: VoiceApi, createRoom: () => Promise<RoomLike>) {
+  constructor(api: VoiceApi, createRoom: () => Promise<RoomLike>, phoneAudio?: PhoneAudio) {
     this.api = api;
     this.createRoom = createRoom;
+    this.phoneAudio = phoneAudio;
+    phoneAudio?.onError((error) => {
+      if (!this.view || !this.phoneConnected) return;
+      this.set({ state: "error", error: errorText(error), retryable: true });
+      void this.teardown("error");
+    });
   }
 
   getState = () => this.state;
@@ -64,6 +73,8 @@ export class VoiceRoomController {
     const epoch = ++this.epoch;
     this.set({ ...initialRoomState, state: "starting" });
     try {
+      // Capture and audio playback must be unlocked synchronously by the tap.
+      this.phoneAudio?.prepare();
       const creating = this.api.create(sessionId, threadId);
       this.creating = creating;
       const view = await creating.finally(() => (this.creating = null));
@@ -75,6 +86,12 @@ export class VoiceRoomController {
       // loading or downloading); the event stream says when it is.
       await this.untilReady(epoch);
       if (epoch !== this.epoch) return;
+      if (this.phoneAudio) {
+        this.set({ state: "connecting" });
+        await this.phoneAudio.start(view.voice_session_id, view.generation);
+        if (epoch === this.epoch) this.phoneConnected = true;
+        return;
+      }
       const ticket = await this.api.join(view.voice_session_id, view.generation);
       if (epoch !== this.epoch) return;
       this.set({ state: "requesting_permission" });
@@ -120,6 +137,7 @@ export class VoiceRoomController {
       this.creating = null;
       this.epoch++;
       this.set({ state: "stopping" });
+      if (this.phoneAudio) await this.phoneAudio.stop();
       const view = await creating.catch(() => null);
       if (view) await this.api.stop(view.voice_session_id, view.generation, reason).catch(() => undefined);
       if (this.state.state === "stopping") this.set({ state: "stopped" });
@@ -139,6 +157,8 @@ export class VoiceRoomController {
     this.abort = null;
     const room = this.room;
     this.room = null;
+    this.phoneConnected = false;
+    if (this.phoneAudio) await this.phoneAudio.stop();
     try {
       await room?.setMicrophoneEnabled(false);
     } catch {
