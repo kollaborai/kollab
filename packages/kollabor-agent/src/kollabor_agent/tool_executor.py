@@ -118,25 +118,30 @@ def _is_blocked_kollab_spawn(
         if is_background:
             return True
         lowered = [str(arg).lower() for arg in args]
-        if any(
-            arg == "--agent"
-            or arg.startswith("--agent=")
-            or arg == "--detached"
-            or arg.startswith("--detached=")
-            for arg in lowered
-        ):
-            return True
-        for index, arg in enumerate(lowered[:-2]):
-            if (
-                arg == "--hub"
-                and lowered[index + 1] in {"stop", "kill"}
-                and lowered[index + 2] == "all"
+        # Shell indirection such as eval or $(...) is outside this text guard;
+        # cli_main also checks launch context at runtime.
+        for index, arg in enumerate(lowered):
+            if arg == "--":
+                break
+            option = arg.split("=", 1)[0]
+            if arg.startswith("-a") and not arg.startswith("--"):
+                return True
+            if option == "-d" or (
+                option.startswith(("--ag", "--det"))
+                and any(long_option.startswith(option) for long_option in ("--agent", "--detached"))
             ):
                 return True
-        return any(
-            arg in {"--hub=stop", "--hub=kill"} and lowered[index + 1] == "all"
-            for index, arg in enumerate(lowered[:-1])
-        )
+            if option == "--hub":
+                tail = lowered[index + 1:]
+                if "=" in arg:
+                    action = arg.split("=", 1)[1]
+                elif tail:
+                    action, tail = tail[0], tail[1:]
+                else:
+                    continue
+                if action in {"stop", "kill"} and "all" in tail:
+                    return True
+        return False
 
     def python_code_spawns(code: str, is_background: bool, depth: int) -> bool:
         try:
