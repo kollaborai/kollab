@@ -10,9 +10,25 @@ working untouched.
 
 ## Levels
 
-`low` → `medium` → `high` → `xhigh` → `max` → `ultra` (cheapest first).
+`none` → `minimal` → `low` → `medium` → `high` → `xhigh` → `max` → `ultra` (cheapest first).
 
-Anthropic documents `low`–`max`. The ChatGPT codex backend also advertises
+A profile with `provider: auto` (the shipped `default`) counts as Anthropic when
+its key starts with `sk-ant-`, or when its key starts with neither `sk-ant-` nor
+`sk-` and its endpoint is Anthropic's, for every rule below. The key is read first,
+then the endpoint, the same order the server uses.
+
+Anthropic documents `low`–`max`, so `none` and `minimal` are left out of its
+request and its pickers (`/model effort`, `/llm` loadouts, Settings), and an
+Anthropic profile refuses them when written: the profile route, a copy,
+`kollab --effort` and `/model effort` answer with the levels it takes, and a
+value that arrives by hand-edited config or `*_EFFORT` reads back as unset. A
+loadout that holds one of them when its profile is Anthropic does the same: the
+level is ignored (logged) and the loadout's model and other fields still apply.
+`kollab --llm <profile> --effort <level>` is refused before the daemon switches
+profile. The
+OpenAI-shaped providers take them. `/model effort none` sets `none` where the
+provider lists it (it used to clear the level); `default`, `clear` and `off`
+clear it. The ChatGPT codex backend also advertises
 `ultra` on its top tiers and reports the accepted levels per model, which is
 why `/model effort` on an OAuth profile lists that model's real levels instead
 of the generic set. An unrecognized level is dropped with a warning rather than
@@ -24,6 +40,7 @@ sent — providers answer a bad level with a 400.
 /model effort              # show the current level + what this model accepts
 /model effort xhigh        # set it (persisted to the active profile)
 /model effort max          # maximum reasoning, when the model advertises it
+/model effort minimal      # lightest reasoning where the provider takes it (not Anthropic)
 /model effort default      # clear it -- back to the model's own default
 ```
 
