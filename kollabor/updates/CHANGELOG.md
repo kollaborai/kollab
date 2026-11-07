@@ -8,7 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Real-object lifecycle tests cover TUI subscribers and EventBus hooks; the HookRegistrar teardown leak is tracked in #735 (#713).
 - PR throughput KPI report (`.github/scripts/pr_throughput_kpi.py`, opt-in via `kpi.enabled`, default off): closed PRs per hour against a target of 3 on 1h, 8h and 24h rolling windows, with supporting open-PR, review, first-push CI and per-author/lane metrics. Missing data is reported as missing, never zero (#729).
 - Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
 - Optional merge bot for maintainers: `.github/workflows/auto-merge.yml` can merge a PR once CI, an independent review of its exact head, approval and resolved conversations all hold. It ships off; `docs/operations/pr-gates-auto-merge.md` has the steps to turn it on (#736).
