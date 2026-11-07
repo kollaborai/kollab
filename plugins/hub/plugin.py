@@ -1370,6 +1370,7 @@ class HubPlugin(BasePlugin):
         from kollabor_tui.display_tap import DisplayTap
 
         self._display_tap = DisplayTap(history_size=200, on_event=self._follow_tool)
+        self._display_tap.conversation_source = self._live_conversation_uid
         if self.event_bus:
             self.event_bus.register_service("display_tap", self._display_tap)
 
@@ -11172,6 +11173,12 @@ class HubPlugin(BasePlugin):
                 return  # one boundary may only end one turn
         except Exception:
             logger.debug("parked busy message retry failed", exc_info=True)
+
+    def _live_conversation_uid(self) -> Optional[str]:
+        """The live conversation's durable uid: the display tap's scope (#525)."""
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        manager = getattr(llm, "conversation_manager", None)
+        return getattr(manager, "conversation_uid", None)
 
     def _follow_tool(self, event: Dict[str, Any]) -> None:
         """Keep the running tool in presence, from the display tap's events.
