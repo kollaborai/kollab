@@ -400,3 +400,21 @@ def test_a_network_row_keeps_its_harness_and_the_tool_it_runs(tmp_path):
     assert agents["codex"]["current_tool"] == {"name": "terminal", "type": "terminal"}
     assert agents["codex"]["state"] == "working"
     assert agents["lapis"] == {"name": "lapis", "device": "server-box", "handle": "lapis@server-box", "state": "idle"}
+
+
+def test_a_network_row_keeps_the_agent_type_its_device_reported(tmp_path):
+    """The sidebar draws a type glyph for a row on another computer, so the
+    aggregate must carry the bundle its device reported, and only that (#662)."""
+    _memberships(tmp_path, links=[])
+    typed = {"name": "opal", "device": "server-box", "handle": "opal@server-box",
+             "state": "idle", "agent_type": "research"}
+    untyped = {"name": "onyx", "device": "server-box", "handle": "onyx@server-box",
+               "state": "idle", "agent_type": ""}
+
+    aggregate = aggregate_network_snapshot(
+        home=tmp_path, workspace=WORKSPACE, live={"device": "zircon-box", "remote": [typed, untyped]}
+    )
+
+    agents = {row["name"]: row for row in aggregate["networks"][0]["devices"][0]["workspaces"][0]["agents"]}
+    assert agents["opal"]["agent_type"] == "research"
+    assert "agent_type" not in agents["onyx"]
