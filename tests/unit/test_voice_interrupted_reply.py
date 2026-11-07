@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -30,15 +31,24 @@ class FakeLogger:
         self.logged.append((content, parent_uuid, kwargs))
         return f"log-{len(self.logged)}"
 
+    async def rewrite_voice_turn(self, _turn_id, _reply_count, _edits):
+        return {}
+
 
 class FakeLLM:
     """The slice of LLMService the daemon touches, with its real history adder."""
 
     _add_conversation_message = LLMService._add_conversation_message
 
+    claim_turn_serial = LLMService.claim_turn_serial
+    publish_cursor = LLMService.publish_cursor
+
     def __init__(self, logger: FakeLogger | None = None) -> None:
         self.conversation_history = []
         self.current_parent_uuid = "user-uuid"
+        self._turn_serial = 1
+        self._continue_serial = 1
+        self._cursor_winner_serial = 1
         self.conversation_manager = FakeManager()
         self.conversation_logger = logger or FakeLogger()
         self.api_service = SimpleNamespace(model="m1")
@@ -108,6 +118,68 @@ async def test_a_log_failure_still_keeps_the_message_in_the_history():
     }
     assert [m.content for m in llm.conversation_history] == ["So the"]
     assert llm.current_parent_uuid == "user-uuid"  # not lost to the failed log
+
+
+async def test_a_delayed_voice_log_cannot_overwrite_a_newer_turn():
+    llm = FakeLLM()
+    state = service(llm)
+    logger_started, release_logger = asyncio.Event(), asyncio.Event()
+    logged_parents = []
+
+    async def delayed_log(_content, parent_uuid, **_kwargs):
+        logged_parents.append(parent_uuid)
+        logger_started.set()
+        await release_logger.wait()
+        return "stale-log-row"
+
+    llm.conversation_logger.log_assistant_message = delayed_log
+    task = asyncio.create_task(
+        state.record_interrupted_voice_reply("turn-1", "spoken words")
+    )
+    try:
+        await asyncio.wait_for(logger_started.wait(), timeout=1)
+        later_serial = llm.claim_turn_serial()
+        assert llm.publish_cursor("newer-parent", later_serial)
+        release_logger.set()
+        assert await asyncio.wait_for(task, timeout=1) == {"recorded": True}
+    finally:
+        release_logger.set()
+        if not task.done():
+            await task
+
+    assert logged_parents == ["user-uuid"]
+    assert llm.conversation_manager.added[0][2] == "user-uuid"
+    assert llm.current_parent_uuid == "newer-parent"
+
+
+async def test_a_delayed_voice_rewrite_cannot_overwrite_a_newer_turn():
+    logger_started, release_rewrite = asyncio.Event(), asyncio.Event()
+
+    class GatedLogger(FakeLogger):
+        async def rewrite_voice_turn(self, _turn_id, _reply_count, _edits):
+            logger_started.set()
+            await release_rewrite.wait()
+            return {"dropped-parent": "kept-parent"}
+
+    llm = FakeLLM(GatedLogger())
+    llm.current_parent_uuid = "dropped-parent"
+    llm.conversation_history.append(voice_reply("The answer is complete."))
+    task = asyncio.create_task(
+        service(llm).record_interrupted_voice_reply("turn-1", "The answer")
+    )
+    try:
+        await asyncio.wait_for(logger_started.wait(), timeout=1)
+        later_serial = llm.claim_turn_serial()
+        assert llm.publish_cursor("dropped-parent", later_serial)
+        release_rewrite.set()
+        result = await asyncio.wait_for(task, timeout=1)
+    finally:
+        release_rewrite.set()
+        if not task.done():
+            await task
+
+    assert result == {"recorded": True, "replaced": True}
+    assert llm.current_parent_uuid == "dropped-parent"
 
 
 def voice_reply(text, turn_id="turn-1"):
@@ -296,6 +368,27 @@ async def test_a_cut_with_no_round_running_lands_right_after_it_answers():
     await turns._after_turn_flush
     assert llm.conversation_history == [first, result]
     assert [event["type"] for event in events] == ["voice_reply_cut"]  # open windows reload
+
+
+async def test_delayed_after_turn_cut_keeps_admission_parent_and_ticket():
+    llm = FakeLLM()
+    llm._queue_processor = turns = Turns()
+    state = service(llm)
+
+    assert (
+        await state.record_interrupted_voice_reply("turn-1", "spoken words") == PENDING
+    )
+    later_serial = llm.claim_turn_serial()
+    llm._continue_serial = later_serial
+    assert llm.publish_cursor("newer-parent", later_serial)
+
+    await turns._after_turn_flush
+
+    assert llm.conversation_logger.logged == [
+        ("spoken words", "user-uuid", {"model": "m1"})
+    ]
+    assert llm.conversation_manager.added[0][2] == "user-uuid"
+    assert llm.current_parent_uuid == "newer-parent"
 
 
 async def test_a_cut_waits_out_the_rounds_its_turn_still_has_to_run():

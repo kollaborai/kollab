@@ -15,7 +15,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from .base import PanelError, error_result, make_field, ok_result, unknown_action
-from .llm import provider_display
+from .llm import effort_provider, provider_display
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def model_handler(ctx: Any) -> Any:
 async def _effort_control(handler: Any, profile: Any) -> dict:
     from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
-    provider = (profile.get_provider() or "").lower()
+    provider = (effort_provider(profile) or "").lower()
     if provider not in EFFORT_SUPPORTED_PROVIDERS:
         return make_field(
             "level", "dropdown", "Reasoning Effort", action="effort",

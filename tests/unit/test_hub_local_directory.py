@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from kollabor_config.config_utils import encode_project_path
+from kollabor_config.hub_paths import hub_project_socket_key
 from plugins.hub.device_names import default_device_name
 from plugins.hub.local_directory import LocalAgentDirectory, LocalDirectoryError
 
@@ -78,6 +79,29 @@ def test_reads_existing_presence_across_workspaces_without_messages(directory, m
     assert all(r.name == "sapphire" and r.is_coordinator and r.state == "ready" for r in rows)
     assert all(r.to_dict()["online"] for r in rows)
     assert {r.workspace_label for r in rows} == {"one", "two"}
+
+
+def test_reads_shared_socket_root_presence_from_another_home(directory, tmp_path):
+    view, publish = directory
+    legacy, data, workspace = publish("one")
+    legacy.unlink()  # the reader must not depend on the writer's HOME tree
+
+    project_dir = view.socket_dir / hub_project_socket_key(workspace)
+    project_dir.mkdir(mode=0o700)
+    write_private(project_dir / legacy.name, data)
+
+    reader = LocalAgentDirectory(
+        tmp_path / "home-b" / ".kollab", socket_dir=view.socket_dir
+    )
+    rows = reader.agents(workspace)
+    assert [row.agent_id for row in rows] == [data["agent_id"]]
+
+    other_workspace = workspace.parent / "other"
+    other_workspace.mkdir()
+    wrong_key_dir = view.socket_dir / hub_project_socket_key(other_workspace)
+    wrong_key_dir.mkdir(mode=0o700)
+    write_private(wrong_key_dir / legacy.name, data)
+    assert reader.agents(other_workspace) == []
 
 
 def test_machine_id_is_private_stable_and_not_hostname(directory):

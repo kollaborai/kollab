@@ -15,7 +15,7 @@ from kollabor_agent.runtime import AgentRuntime
 from kollabor_tui.color_contrast import readable_agent_color
 from kollabor_tui.design_system import T
 
-from .presence import get_presence_dir, pid_alive
+from .presence import _presence_files, get_presence_dir, pid_alive
 from .rosters import persona_color
 from .vault import find_active_stream, get_vaults_dir
 
@@ -56,7 +56,7 @@ class HubFeed:
         """Get all live agents from presence files."""
         agents = []
         presence_dir = get_presence_dir()
-        for f in presence_dir.glob("*.json"):
+        for f in _presence_files(presence_dir):
             try:
                 with open(f) as fh:
                     data = json.load(fh)

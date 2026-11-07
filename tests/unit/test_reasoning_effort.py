@@ -53,7 +53,7 @@ class EffortProfileTests(unittest.TestCase):
         self.assertNotIn("effort", bare.to_dict())
 
     def test_levels_are_ordered_cheapest_first(self):
-        self.assertEqual(EFFORT_LEVELS[0], "low")
+        self.assertEqual(EFFORT_LEVELS[:3], ("none", "minimal", "low"))
         self.assertIn("xhigh", EFFORT_LEVELS)
         self.assertEqual(EFFORT_LEVELS[-1], "ultra")
 

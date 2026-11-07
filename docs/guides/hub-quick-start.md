@@ -10,7 +10,10 @@ The hub is a zero-config peer-to-peer mesh that lets multiple kollab
 agents discover each other, exchange messages, persist memory across
 sessions, and coordinate work -- all automatically. Launch agents in
 separate terminals and they find each other through presence files and
-unix sockets. No server, no broker, no setup.
+unix sockets. No server, no broker, no setup. On POSIX, presence files share
+the project-hashed socket directory under `/tmp/kollabor-hub`, independent of
+`$HOME`, so a different HOME in a tmux or SSH shell does not hide same-project
+agents.
 
 ## Launch Your First Agent Mesh
 

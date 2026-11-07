@@ -25,6 +25,22 @@ class MessageInjector:
         self.event_bus = event_bus
         self.conversation_manager = conversation_manager
 
+    def acp_owns_chat(self) -> bool:
+        """Whether an ACP agent owns this chat (the test the message handler
+        applies). False when the service cannot say.
+
+        A native wake is refused on an ACP chat, so a message that would wake
+        the model must not be written into native history (#579).
+        """
+        try:
+            llm = self.event_bus.get_service("llm_service")
+            selected = llm._profile_selects_acp()
+            if isinstance(selected, tuple) and selected and selected[0] is True:
+                return True
+            return getattr(llm._acp_service(), "active", False) is True
+        except Exception:
+            return False
+
     async def inject(
         self,
         source: str,
@@ -41,8 +57,14 @@ class MessageInjector:
             metadata: Optional metadata dict
 
         Returns:
-            True if injection was successful
+            True if injection was successful. False when it was blocked, or
+            when it would wake the model on an ACP chat: nothing is written
+            then, and the caller shows the content itself.
         """
+        if trigger_llm and self.acp_owns_chat():
+            logger.info(f"ACP owns the chat, not injecting from: {source}")
+            return False
+
         # Format with XML tags (hidden from user display)
         formatted = f"""<sys_msg>
 {content}
