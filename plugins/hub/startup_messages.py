@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import time
 
-HUB_STARTUP_TIPS: tuple[str, ...] = (
+_BASE_TIPS: tuple[str, ...] = (
     "Use `/hub status` to see the current mesh and each agent's state.",
     "Use `/hub agents` for a compact list of online agents.",
     "Send a direct message with `/hub msg <agent> <message>`.",
     "Broadcast a message with `/hub broadcast <message>`.",
-    "Stop every peer with `/hub stop all`.",
     "Stop one peer with `/hub stop <identity>`.",
     "Ask an agent to work by sending a direct Hub message.",
     'Use `<hub_msg to="agent">...</hub_msg>` when the model needs to message a peer.',
@@ -47,7 +46,6 @@ HUB_STARTUP_TIPS: tuple[str, ...] = (
     "Check the roster after starting a new agent to confirm it is online.",
     "The startup screen shows the current agent identity and peer list.",
     "Lifecycle notices are visible without forcing an idle peer to answer.",
-    "Use `/hub stop all` before closing a coordinator session with active peers.",
     "Use `/hub status` after a restart to confirm the mesh recovered.",
     "Use `/hub msg` for a question and `/hub tasks` for durable work.",
     "Keep human-facing status updates short; put detail in the task report.",
@@ -57,17 +55,28 @@ HUB_STARTUP_TIPS: tuple[str, ...] = (
     "Use `/permissions` to review tool approval behavior.",
 )
 
+# Stop-all tips are only offered to callers that actually started agents
+# (issue #669): the scoped stop is not advertised to agents with nothing
+# of their own to stop. HUB_STARTUP_TIPS keeps the full owner-inclusive
+# catalog; _BASE_TIPS is the pool for everyone else.
+_STOP_ALL_TIPS: tuple[str, ...] = (
+    "Stop every peer you started with `/hub stop all`.",
+    "Use `/hub stop all` before closing a session that started active peers.",
+)
+
+HUB_STARTUP_TIPS: tuple[str, ...] = _BASE_TIPS + _STOP_ALL_TIPS
+
 HUB_NEW_FEATURES: tuple[str, ...] = (
     "Paste images directly into the input bar, including mixed text/image messages.",
     "See an agent's active model, provider, and profile when it joins.",
     "See model-switch notices in the Hub stream without waking peer models.",
-    "Stop the entire mesh with one clear command: `/hub stop all`.",
 )
 
 
-def choose_startup_tip(seed: int | None = None) -> str:
+def choose_startup_tip(seed: int | None = None, include_stop_all: bool = True) -> str:
     """Choose one tip without putting the full catalog in the startup UI."""
-    if not HUB_STARTUP_TIPS:
+    pool = HUB_STARTUP_TIPS if include_stop_all else _BASE_TIPS
+    if not pool:
         return "Use `/hub status` to inspect the current mesh."
     value = time.time_ns() if seed is None else seed
-    return HUB_STARTUP_TIPS[value % len(HUB_STARTUP_TIPS)]
+    return pool[value % len(pool)]

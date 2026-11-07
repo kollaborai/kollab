@@ -288,7 +288,10 @@ hub_broadcast = ToolDefinition(
 
 hub_stop = ToolDefinition(
     name="hub-stop",
-    description="Stop a specific agent or all agents.",
+    description=(
+        "Stop a named local agent, or stop all agents you started. In the 'all' "
+        "case, peers started by other agents or the operator are immune."
+    ),
     category="hub",
     risk_level="high",
     requires_permission=True,
@@ -299,7 +302,10 @@ hub_stop = ToolDefinition(
         ToolParameter(
             name="target",
             type="string",
-            description="Agent identity name, or 'all' to stop everyone",
+            description=(
+                "Local agent identity name, or 'all' to stop only agents you started; "
+                "peers started by others or the operator are immune to 'all'"
+            ),
             required=True,
         ),
     ],
@@ -307,10 +313,13 @@ hub_stop = ToolDefinition(
         "<hub_stop>lapis</hub_stop>",
         "<hub_stop>all</hub_stop>",
     ],
-    result_format="Confirmation that agent(s) were stopped.",
+    result_format=(
+        "Stop result for the named target, or for your agents when target is 'all'; "
+        "peers started by others or the operator are skipped by 'all'."
+    ),
     key_rules=[
-        "hub_stop kills the agent's subprocess session",
-        "use 'all' to stop everyone — use sparingly",
+        "target='all' stops only agents you started; peers started by others or the operator are immune",
+        "use target='all' to stop all of your own agents only — use sparingly",
     ],
 )
 

@@ -16,6 +16,128 @@ from kollabor_config.hub_paths import hub_socket_root
 
 logger = logging.getLogger(__name__)
 
+
+def _system_home_directory() -> Path:
+    """Return the account's home without trusting an overridable HOME value."""
+    if os.name != "nt":
+        try:
+            import pwd
+
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (AttributeError, ImportError, KeyError, OSError):
+            pass
+    return Path.home()
+
+
+def _strict_directory_children(directory: Path) -> List[Path]:
+    """List child directories; only a missing optional root counts as empty."""
+    try:
+        entries = os.scandir(directory)
+    except FileNotFoundError:
+        return []
+    with entries:
+        children = []
+        for entry in entries:
+            if entry.is_symlink():
+                raise RuntimeError(f"refusing symlinked entry in {directory}: {entry.name}")
+            if entry.is_dir():
+                children.append(Path(entry.path))
+        return children
+
+
+def all_presence_dirs(
+    extra_dirs: Optional[List[Path]] = None, *, strict: bool = False
+) -> List[Path]:
+    """Return known current and legacy presence directories without creating them.
+
+    Presence is normally under ``~/.kollab/projects/*/hub/presence`` or the
+    legacy ``~/.kollab/hub/presence``. Include the effective config root and
+    the OS account home so an ``env HOME=...`` wrapper cannot hide existing
+    agents. The shared socket root holds current colocated presence and may also
+    contain older layouts; validate it before trusting files beneath it. Strict
+    callers receive directory-scan and trust failures instead of a partial
+    root list; missing optional directories remain empty.
+    """
+    from kollabor_config.config_utils import get_config_directory
+
+    config_roots = {
+        Path(get_config_directory()),
+        _system_home_directory() / ".kollab",
+    }
+    candidates = set(extra_dirs or [])
+
+    for root in config_roots:
+        candidates.update({root / "presence", root / "hub" / "presence"})
+        projects_root = root / "projects"
+        if strict:
+            project_dirs = _strict_directory_children(projects_root)
+            candidates.update(project_dir / "presence" for project_dir in project_dirs)
+            candidates.update(
+                project_dir / "hub" / "presence" for project_dir in project_dirs
+            )
+        else:
+            candidates.update(projects_root.glob("*/presence"))
+            candidates.update(projects_root.glob("*/hub/presence"))
+
+    socket_roots = {Path(SOCKET_DIR_ROOT), Path(hub_socket_root())}
+    if os.name == "nt":
+        socket_roots.add(_system_home_directory() / ".kollab" / "hub-sockets")
+
+    for root in socket_roots:
+        if strict:
+            try:
+                info = root.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(info.st_mode):
+                raise RuntimeError(f"refusing non-directory shared hub root {root}")
+            if os.name != "nt" and (
+                info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077
+            ):
+                raise RuntimeError(f"refusing untrusted shared hub root {root}")
+        elif root.is_symlink():
+            logger.debug("Skipping symlinked shared hub root %s", root)
+            continue
+        try:
+            if not strict or os.name == "nt":
+                secure_socket_dir(root, create=False)
+        except (OSError, RuntimeError) as exc:
+            if strict:
+                raise
+            logger.debug("Skipping untrusted shared hub root %s: %s", root, exc)
+            continue
+
+        # Current shared presence is colocated with sockets; older layouts may
+        # use nested presence directories.
+        candidates.update({root, root / "presence", root / "hub" / "presence"})
+        if strict:
+            children = _strict_directory_children(root)
+        elif root.is_dir():
+            try:
+                children = list(root.iterdir())
+            except OSError:
+                children = []
+        else:
+            children = []
+        for child in children:
+            if strict:
+                info = child.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    raise RuntimeError(f"refusing symlinked entry in shared hub root {child}")
+                if not stat.S_ISDIR(info.st_mode):
+                    continue
+                if os.name != "nt" and (
+                    info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077
+                ):
+                    raise RuntimeError(f"refusing untrusted shared hub directory {child}")
+            else:
+                if child.is_symlink() or not child.is_dir():
+                    continue
+            candidates.update({child, child / "presence", child / "hub" / "presence"})
+
+    return sorted(candidates, key=str)
+
+
 # The same per-platform root is used by the engine's discovery fallback.
 SOCKET_DIR_ROOT = hub_socket_root()
 
@@ -572,12 +694,7 @@ class PresenceManager:
             return False
 
     def scan_all_presence(self, include_self: bool = False) -> List[AgentRuntime]:
-        """Read all presence files without cleaning up dead ones.
-
-        Used by stop command so it can attempt shutdown signals even
-        on agents that are dying or have stale sockets.  The caller
-        is responsible for cleanup after the operation.
-        """
+        """Read this project's presence files without cleaning up dead ones."""
         agents = []
         for f in _presence_files(self._presence_dir):
             if not include_self and f.stem == self.identity.agent_id:
@@ -586,9 +703,39 @@ class PresenceManager:
                 with open(f) as fh:
                     data = json.load(fh)
                 agents.append(AgentRuntime.from_presence_dict(data))
-            except (json.JSONDecodeError, Exception) as e:
+            except Exception as e:
                 logger.debug(f"Bad presence file {f}: {e}")
         return agents
+
+    def scan_machine_presence(self, include_self: bool = False) -> List[AgentRuntime]:
+        """Read machine-wide presence without cleaning up dead records.
+
+        Stop-all filters these candidates by locally owned process generation.
+        """
+        agents: Dict[str, AgentRuntime] = {}
+        timestamps: Dict[str, float] = {}
+        for presence_dir in all_presence_dirs(extra_dirs=[self._presence_dir]):
+            for f in presence_dir.glob("*.json"):
+                if not include_self and f.stem == self.identity.agent_id:
+                    continue
+                try:
+                    with open(f) as fh:
+                        data = json.load(fh)
+                    agent_id = str(data.get("agent_id") or f.stem)
+                    if not include_self and agent_id == self.identity.agent_id:
+                        continue
+                    timestamp = 0.0
+                    for field in ("last_heartbeat", "started_at"):
+                        try:
+                            timestamp = max(timestamp, float(data.get(field) or 0))
+                        except (TypeError, ValueError):
+                            continue
+                    if agent_id not in agents or timestamp > timestamps[agent_id]:
+                        agents[agent_id] = AgentRuntime.from_presence_dict(data)
+                        timestamps[agent_id] = timestamp
+                except Exception as e:
+                    logger.debug(f"Bad presence file {f}: {e}")
+        return list(agents.values())
 
     @staticmethod
     def _socket_responds(socket_path: str) -> bool:
