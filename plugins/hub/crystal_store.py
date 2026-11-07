@@ -457,17 +457,24 @@ class CrystalStore:
         # Check for duplicates
         merge_target = self._find_merge_target(all_keywords, summary)
         if merge_target is not None:
-            existing = self._entries[merge_target]
+            # Copy-on-write: the merged entry replaces the old one in a new list.
+            # A reader holding the old entry or list never sees half a merge, so
+            # loop readers need no lock while a dream writes (#562).
+            old = self._entries[merge_target]
             # Merge: keep newer date, union keywords, keep longer body
-            existing.date = entry_date
-            existing_kw_set = {k.lower() for k in existing.keywords}
+            keywords = list(old.keywords)
+            existing_kw_set = {k.lower() for k in keywords}
             for kw in all_keywords:
                 if kw.lower() not in existing_kw_set:
-                    existing.keywords.append(kw)
+                    keywords.append(kw)
                     existing_kw_set.add(kw.lower())
-            if len(text) > len(existing.body):
-                existing.body = text
-                existing.summary = summary
+            existing = replace(old, date=entry_date, keywords=keywords)
+            if len(text) > len(old.body):
+                existing = replace(existing, body=text, summary=summary)
+            self._entries = [
+                existing if i == merge_target else e
+                for i, e in enumerate(self._entries)
+            ]
             self._mark(existing.id)
             self._save_to_disk()
             logger.debug(
@@ -485,7 +492,7 @@ class CrystalStore:
             summary=summary,
             body=text,
         )
-        self._entries.append(entry)
+        self._entries = self._entries + [entry]  # a new list: readers keep theirs (#562)
         self._mark(entry.id)
         self._save_to_disk()
         logger.debug("crystal_store: added %s (%d keywords)", entry.id, len(entry.keywords))

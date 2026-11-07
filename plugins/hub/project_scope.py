@@ -1,10 +1,13 @@
 """Project scope resolution for hub siloing.
 
-The hub runs in one of two modes:
-  - PROJECT-SCOPED (default): state at ~/.kollab/projects/<encoded>/hub/,
-    agents only see peers launched from the same project root.
-  - GLOBAL: all state at ~/.kollab/hub/, all agents on this machine
-    share presence/sockets/vaults regardless of which repo spawned them.
+The hub runs in one of two logical metadata modes:
+  - PROJECT-SCOPED (default): hub metadata at
+    ~/.kollab/projects/<encoded>/hub/; agents see peers from that project.
+  - GLOBAL: hub metadata at ~/.kollab/hub/; agents from any project share it.
+
+On POSIX, live presence records and sockets use a private project-hashed
+runtime directory under /tmp/kollabor-hub, independent of HOME. Windows keeps
+presence in the existing per-user hub state directory.
 
 Mode is controlled by env var KOLLAB_HUB_PROJECT_SCOPED (set by the
 hub plugin at init from config key plugins.hub.project_scoped). Env var
@@ -18,12 +21,12 @@ Project identity precedence:
   3. Path.cwd()
 
 The encoded form matches projects/<encoded-path>/conversations/ so hub
-state lives alongside conversation data for the same project.
+metadata lives alongside conversation data for the same project. POSIX
+presence and socket paths use a separate project-hashed runtime directory.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import subprocess
@@ -32,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from kollabor_config.config_utils import encode_project_path, get_project_data_dir
+from kollabor_config.hub_paths import hub_project_socket_key
 
 logger = logging.getLogger(__name__)
 
@@ -101,5 +105,4 @@ def get_project_socket_key() -> str:
     so we hash down to 12 hex chars (~48 bits of entropy, plenty to
     avoid collisions across the handful of projects anyone actually has).
     """
-    pid = resolve_project_id()
-    return hashlib.sha256(pid.encode()).hexdigest()[:12]
+    return hub_project_socket_key(resolve_project_root())
