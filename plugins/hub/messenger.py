@@ -406,6 +406,7 @@ class AgentSocketServer:
         on_connect_proxy: Optional[Callable] = None,
         on_acp_hub_status: Optional[Callable] = None,
         on_acp_hub_call: Optional[Callable] = None,
+        on_cron_jobs: Optional[Callable] = None,
         socket_name: Optional[str] = None,
     ):
         self.agent_id = agent_id
@@ -427,6 +428,10 @@ class AgentSocketServer:
         self._on_connect_proxy = on_connect_proxy
         self._on_acp_hub_status = on_acp_hub_status
         self._on_acp_hub_call = on_acp_hub_call
+        # Read-only view of this agent's scheduled hub cron jobs (#612):
+        # the local operator (and the engine on its behalf) may list them,
+        # nobody may create or delete them through this action.
+        self._on_cron_jobs = on_cron_jobs
         self._identity: Optional[Dict] = None
         self._started_at: float = time.time()
         self._shutdown_requested = False
@@ -1674,6 +1679,31 @@ class AgentSocketServer:
                             "current_task", ""
                         )
                     resp = json.dumps(status_data) + "\n"
+                    writer.write(resp.encode())
+                    await writer.drain()
+
+                elif action == "cron_jobs":
+                    # Read-only schedule view for the Web UI (#612). Local
+                    # operator only: like get_status/get_output, remote
+                    # connections are never admitted to this branch because
+                    # it is absent from the remote allowlist.
+                    jobs: List[Any] = []
+                    error = ""
+                    if self._on_cron_jobs:
+                        try:
+                            result = self._on_cron_jobs()
+                            if asyncio.iscoroutine(result):
+                                result = await result
+                            if isinstance(result, list):
+                                jobs = result
+                            else:
+                                error = "cron jobs callback returned a non-list"
+                        except Exception as exc:
+                            logger.debug(f"cron_jobs callback error: {exc}")
+                            error = str(exc)
+                    resp = json.dumps(
+                        {"type": "cron_jobs", "jobs": jobs, "error": error}
+                    ) + "\n"
                     writer.write(resp.encode())
                     await writer.drain()
 

@@ -608,6 +608,29 @@ export type HubAgent = {
   [key: string]: unknown;
 };
 
+export type HubCronJob = {
+  agent: string;
+  id: string;
+  target: string;
+  message: string;
+  interval_seconds: number;
+  interval: string;
+  next_fire: number;
+  next_in_seconds: number;
+  recurring: boolean;
+  mode: "recurring" | "one-shot";
+  created_at: number;
+  last_error: string | null;
+};
+
+export type HubCronJobsView = {
+  jobs: HubCronJob[];
+  count: number;
+  agents_responded: string[];
+  agents_unavailable: string[];
+  agents_errors: Record<string, string>;
+};
+
 export type SessionState = {
   profile?: Record<string, unknown> | null;
   agent?: Record<string, unknown> | null;
@@ -1571,5 +1594,11 @@ export class EngineApi {
       method: "POST",
       body: JSON.stringify({ target, content, from_identity: fromIdentity, agent_id: agentId }),
     });
+  }
+
+  listHubCronJobs(refresh = false) {
+    return this.json<HubCronJobsView>(
+      `/hub/cron-jobs${refresh ? "?refresh=true" : ""}`,
+    );
   }
 }

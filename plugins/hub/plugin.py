@@ -6045,6 +6045,7 @@ class HubPlugin(BasePlugin):
                 on_connect_proxy=self._handle_connect_proxy,
                 on_acp_hub_status=self._handle_acp_hub_status,
                 on_acp_hub_call=self._handle_acp_hub_call,
+                on_cron_jobs=self._cron_jobs_payload,
                 socket_name=self._identity.identity,
             )
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
@@ -15211,6 +15212,32 @@ class HubPlugin(BasePlugin):
         self._hub_cron_jobs.clear()
         logger.info(f"hub cron cleared: {count} job(s) removed")
         return f"hub cron cleared: {count} job(s) removed"
+
+    def _cron_jobs_payload(self) -> List[Dict[str, Any]]:
+        """Cron jobs as plain dicts for the read-only socket view (#612).
+
+        Times are epoch seconds; the renderer formats them. Same data
+        `/hub cron list` shows, minus terminal formatting.
+        """
+        now = time.time()
+        jobs: List[Dict[str, Any]] = []
+        for job in self._hub_cron_jobs:
+            jobs.append(
+                {
+                    "id": job.id,
+                    "target": job.target,
+                    "message": job.message,
+                    "interval_seconds": job.interval_seconds,
+                    "interval": self._format_seconds(job.interval_seconds),
+                    "next_fire": job.next_fire,
+                    "next_in_seconds": max(0, job.next_fire - now),
+                    "recurring": job.recurring,
+                    "mode": "recurring" if job.recurring else "one-shot",
+                    "created_at": job.created_at,
+                    "last_error": job.last_error,
+                }
+            )
+        return jobs
 
     # -- Task commands --
 
