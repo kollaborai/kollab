@@ -122,9 +122,12 @@ async def peers(monkeypatch):
             peer.hub._identity.socket_path = await peer.server.start()
             peer.hub._presence.publish()
             token, generation = peer.hub.rotate_acp_hub_binding()
+            token_file = workspace / f"{name}.token"
+            token_file.write_text(token)
+            token_file.chmod(0o600)
             parameters = StdioServerParameters(command=sys.executable, args=["-m", "kollabor.mcp_hub"], env={
                 **os.environ, "KOLLAB_ACP_HUB_SOCKET": peer.hub._identity.socket_path,
-                "KOLLAB_ACP_HUB_TOKEN": token, "KOLLAB_ACP_GENERATION": str(generation),
+                "KOLLAB_ACP_HUB_TOKEN_FILE": str(token_file), "KOLLAB_ACP_GENERATION": str(generation),
             })
             ready = asyncio.get_running_loop().create_future()
 

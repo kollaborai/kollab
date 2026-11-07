@@ -1,7 +1,7 @@
 ---
 title: "ContextService"
 created: 2026-04-11
-modified: 2026-10-02
+modified: 2026-11-05
 status: shipped
 ---
 # ContextService
@@ -38,6 +38,20 @@ The model decides what it keeps. The user does not curate anything.
    by the model's own text, `evicted` keeps its stub, and items left
    `pending` go to the summarizer LLM along with the rest of the old
    conversation.
+
+**Operator words and open state.** Compaction preserves exact operator input from
+`user`, `state_rpc`, `cli_initial`, `pipe`, `hub_attachment`, and `hub_message`
+sources, with timestamps; peer, tool, and system messages are excluded. The
+summary keeps the newest 30 records and at most 8,000 characters of operator text.
+Older records are counted, and that count is carried into later compactions. The
+operator block is omitted when there is no trusted operator history.
+
+Every compacted summary ends with `=== OPEN STATE ===`, after the continuation
+suffix. The summarizer is asked to list each open item on one line with its ID,
+owner, current head SHA, last verdict, and next step. Issue-number and SHA tokens
+are retained only when they occur in pre-compaction source messages; a line with
+an unsupported token is dropped. Previously sanitized open-state lines can be
+carried forward, but arbitrary prior summary prose is not accepted as evidence.
 
 | Command | What it does |
 |---|---|

@@ -273,7 +273,11 @@ def test_cli_capture_usage_mentions_raw(capsys):
     else:
         raise AssertionError("capture without an identity must exit with usage")
 
-    assert "kollab --hub capture <identity|agent@device> [lines] [--raw]" in capsys.readouterr().out
+    usage = capsys.readouterr().out
+    assert (
+        "usage: kollab --hub capture <identity|agent@device> [lines] "
+        "[--cursor N] [--follow] [--raw]" in usage
+    )
 
 
 def test_cli_capture_reports_transport_failure_actionably(tmp_path, capsys):

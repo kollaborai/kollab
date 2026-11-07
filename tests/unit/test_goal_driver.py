@@ -21,6 +21,7 @@ from kollabor.goals.service import (
     GoalService,
     TurnOutcome,
 )
+from kollabor.llm.llm_coordinator import LLMService
 from kollabor.state.goal_store import GoalStore
 from kollabor_ai.message_content import EphemeralImageStore
 
@@ -41,7 +42,7 @@ class FakeQueueProcessor:
 class FakeCoordinator:
     """Just enough coordinator surface for the driver."""
 
-    def __init__(self, turn_script=None, pipe_mode=False):
+    def __init__(self, turn_script=None, pipe_mode=False, chain=False):
         self.profile_manager = SimpleNamespace(
             get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "openai")
         )
@@ -61,6 +62,12 @@ class FakeCoordinator:
         self.continues = 0
         # each entry: list of fake tool results produced by that turn
         self.turn_script = turn_script or []
+        # admission-serial surface the driver must claim per goal turn (#676)
+        self._turn_serial = 0
+        self._continue_serial: int | None = None
+        # chain=True keeps the turn open while scripted turns remain, so a
+        # test can drive the driver's chain loop (site two)
+        self.chain = chain
 
     async def inject_system_message(self, content: str, subtype: str = "") -> None:
         self.pending_hud.append((subtype, content))
@@ -84,7 +91,13 @@ class FakeCoordinator:
             batch = self.turn_script.pop(0)
             if self.on_tool_batch_hook and batch:
                 self.on_tool_batch_hook(batch)
-        self._queue_processor.turn_completed = True
+        self._queue_processor.turn_completed = not (
+            self.chain and self.turn_script
+        )
+
+    def claim_turn_serial(self) -> int:
+        self._turn_serial += 1
+        return self._turn_serial
 
     def create_background_task(self, coro, name=None):
         task = asyncio.get_running_loop().create_task(coro)
@@ -109,8 +122,10 @@ class DriverTests(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def _make_driver(self, turn_script=None) -> tuple[GoalTurnDriver, FakeCoordinator]:
-        coord = FakeCoordinator(turn_script)
+    def _make_driver(
+        self, turn_script=None, chain=False
+    ) -> tuple[GoalTurnDriver, FakeCoordinator]:
+        coord = FakeCoordinator(turn_script, chain=chain)
         driver = GoalTurnDriver(self.service, coord)
         coord.on_tool_batch_hook = driver._on_tool_batch
         return driver, coord
@@ -121,6 +136,30 @@ class DriverTests(unittest.TestCase):
         )
         goal_id: str = record.goal_id
         return goal_id
+
+    def test_goal_turns_claim_a_fresh_serial_per_turn(self):
+        """Each goal turn is an admitted turn and claims a fresh admission
+        serial before continuing (#676) -- the hub-wake contract. Reusing the
+        queue's stale ``_continue_serial`` made goal rows publish on an
+        already-consumed ticket, so the cursor ignored them and the next
+        wake re-parented before the goal's rows."""
+        goal_id = self._create(auto_turn_limit=2)
+        script = [
+            [{"tool_type": "terminal", "output": "one", "tool_id": "t1",
+              "success": True}],
+            [{"tool_type": "terminal", "output": "two", "tool_id": "t2",
+              "success": True}],
+        ]
+        driver, coord = self._make_driver(turn_script=script, chain=True)
+        asyncio.run(driver.start(goal_id))
+
+        # Deterministic script: turn 1 chains two scripted rounds, turn 2
+        # (auto_turn_limit=2) runs once -> exactly 3 goal-turn continuations.
+        self.assertEqual(coord.continues, 3)
+        # One fresh claim per goal turn, ticket always the newest claim --
+        # never the queue's stale batch ticket. Exact counts, no looser bound.
+        self.assertEqual(coord._turn_serial, 3)
+        self.assertEqual(coord._continue_serial, 3)
 
     def test_steering_is_internal_context_not_user_message(self):
         goal_id = self._create(auto_turn_limit=1)
@@ -328,6 +367,122 @@ class DriverTests(unittest.TestCase):
         rec = self.store.get(goal_id)
         self.assertEqual(rec.turn_count, 2)  # second turn ran
         self.assertEqual(rec.status, "budget_limited")  # auto limit reached
+
+    def test_human_input_during_goal_hud_logging_keeps_the_human_cursor(self):
+        goal_id = self._create()
+        template = FakeCoordinator()
+        coord = object.__new__(LLMService)
+        coord.profile_manager = template.profile_manager
+        coord.response_parser = template.response_parser
+        coord.tool_executor = template.tool_executor
+        coord.renderer = template.renderer
+        coord._image_store = template._image_store
+        coord.supports_image_input = template.supports_image_input
+        coord.event_bus = SimpleNamespace(get_service=lambda _name: None)
+        coord._queue_processor = FakeQueueProcessor()
+        qp = coord._queue_processor
+        coord._pending_agent_hud = []
+        coord.current_parent_uuid = "parent-before-human"
+        coord._turn_serial = 0
+        coord._cursor_winner_serial = -1
+        coord._continue_serial = None
+
+        hud_log_started = asyncio.Event()
+        release_hud_log = asyncio.Event()
+        goal_serial_at_hud_log: list[int] = []
+        continued_serials: list[int | None] = []
+        enqueued_items: list[Any] = []
+
+        async def log_system_message(_content, **_kwargs):
+            goal_serial_at_hud_log.append(coord._turn_serial)
+            hud_log_started.set()
+            await release_hud_log.wait()
+            return "goal-hud-row"
+
+        async def log_user_message(_content, *, parent_uuid=None):
+            return "human-row"
+
+        async def enqueue(item):
+            enqueued_items.append(item)
+            await qp.processing_queue.put(item)
+            return True
+
+        async def continue_conversation(*, current_parent_uuid):
+            continued_serials.append(coord._continue_serial)
+            return "goal-output"
+
+        qp.enqueue = enqueue
+        qp.continue_conversation = continue_conversation
+        qp.session_stats = {}
+        coord.conversation_logger = SimpleNamespace(
+            log_system_message=log_system_message,
+            log_user_message=log_user_message,
+        )
+        coord.message_display_service = SimpleNamespace(
+            display_user_message=lambda *_args, **_kwargs: None,
+            display_error_message=lambda *_args, **_kwargs: None,
+            display_system_message=lambda *_args, **_kwargs: None,
+        )
+        # Keep the real LLMService continuation path; only the persistence
+        # boundary is stubbed so it can return a deterministic row id.
+        coord._add_conversation_message = lambda *_args, **_kwargs: "goal-hud-row"
+        # The test owns queue draining; record background kicks without racing
+        # an independent fake drain against the gated logger.
+        coord.create_background_task = lambda *_args, **_kwargs: None
+        driver = GoalTurnDriver(self.service, coord)
+
+        async def scenario():
+            goal_task = asyncio.create_task(driver.start(goal_id))
+            try:
+                await asyncio.wait_for(hud_log_started.wait(), timeout=1)
+                result = await coord.process_user_input(
+                    "please handle this first", pre_displayed=True
+                )
+                self.assertEqual(result["status"], "queued")
+                self.assertEqual(coord.current_parent_uuid, "human-row")
+                release_hud_log.set()
+                await asyncio.wait_for(goal_task, timeout=1)
+            finally:
+                release_hud_log.set()
+                if not goal_task.done():
+                    await goal_task
+
+        asyncio.run(scenario())
+
+        self.assertEqual(coord.current_parent_uuid, "human-row")
+        self.assertEqual(goal_serial_at_hud_log, [1])
+        self.assertEqual([item.admission_serial for item in enqueued_items], [2])
+        self.assertEqual(continued_serials, [])
+        self.assertEqual(len(coord._pending_agent_hud), 0)
+        self.assertEqual(qp.processing_queue.qsize(), 1)
+        self.assertEqual(self.store.get(goal_id).status, "active")
+        self.assertIn(goal_id, driver._yielded_goals)
+
+    def test_settle_while_goal_is_running_is_replayed_after_it_exits(self):
+        goal_id = self._create()
+        driver, coord = self._make_driver()
+        scheduled = []
+        coord.create_background_task = lambda coro, name=None: scheduled.append(
+            (coro, name)
+        )
+
+        async def drive(_goal_id):
+            driver._yielded_goals.add(goal_id)
+            # Models the queue's on_turn_settled callback while start() still
+            # owns the running-goal guard.
+            driver.wake_yielded()
+
+        driver._drive = drive
+        asyncio.run(driver.start(goal_id))
+        try:
+            self.assertEqual(
+                [name for _coro, name in scheduled],
+                [f"goal_driver_{goal_id[:8]}"],
+            )
+        finally:
+            for coro, _name in scheduled:
+                coro.close()
+
 
     def test_usage_flows_from_session_stats_to_tokens_used(self):
         """Bug: finish_turn got no usage, tokens_used stayed NULL, the
