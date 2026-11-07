@@ -17,7 +17,9 @@ from kollabor_agent.queue_processor import QueuedInput, TaggedInput
 from kollabor_events import EventBus, EventType, Hook, HookPriority
 
 
-async def _pipeline(*, cancel_pre: bool = False):
+async def _pipeline(
+    *, cancel_pre: bool = False, submission_result: dict | None = None
+):
     bus = EventBus()
     calls: list[tuple[str, str, str]] = []
     pending_tool = AsyncMock()
@@ -33,7 +35,11 @@ async def _pipeline(*, cancel_pre: bool = False):
     async def main(data, event):
         calls.append(("main", event.source, str(data["message"])))
         await pending_tool()
-        return {"status": "queued"}
+        return (
+            submission_result
+            if submission_result is not None
+            else {"status": "queued"}
+        )
 
     async def post(data, event):
         calls.append(("post", event.source, str(data["message"])))
@@ -120,6 +126,28 @@ async def test_state_rpc_uses_one_full_user_input_event_and_propagates_pre_data(
         ("main", "state_rpc", "ordinary request [normalized]"),
         ("post", "state_rpc", "ordinary request [normalized]"),
     ]
+    pending_tool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_state_rpc_accepts_injected_submission_result():
+    bus, llm, calls, pending_tool = await _pipeline(
+        submission_result={"status": "injected"}
+    )
+    proxy = _StateLLMProxy(llm)
+    state = LocalStateService(
+        llm_service=proxy,
+        profile_manager=MagicMock(),
+        event_bus=bus,
+    )
+
+    result = await state.send_message("steered request")
+
+    assert result["accepted"] is True, result
+    assert result["reason"] == ""
+    await asyncio.gather(*proxy.tasks)
+    assert [phase for phase, _, _ in calls] == ["pre", "main", "post"]
+    assert {source for _, source, _ in calls} == {"state_rpc"}
     pending_tool.assert_awaited_once()
 
 
@@ -516,6 +544,59 @@ async def test_acp_admission_rejects_full_queue_before_hooks():
     bus.register_service("acp_orchestrator", ACP())
     result = await service._handle_user_input({"message": "hello"}, SimpleNamespace(source="state_rpc"))
     assert result == {"status": "rejected", "reason": "acp_queue_full"}
+
+
+@pytest.mark.asyncio
+async def test_broad_admission_exception_with_full_text_keeps_queue_full():
+    """Any admission exception whose text contains 'full' stays acp_queue_full.
+
+    Main's broad admission handler maps queue-full text to acp_queue_full
+    regardless of exception class; only the typed-first check narrows to
+    RuntimeError/ValueError. A non-RuntimeError admission failure carrying
+    the canonical queue-full text must not degrade to acp_admission_failed.
+    """
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+
+    class WeirdAdmissionError(Exception):
+        pass
+
+    class ACP:
+        active = True
+
+        async def steer(self, *args, **kwargs):
+            return False
+
+        def admit(self, *args, **kwargs):
+            raise WeirdAdmissionError("ACP prompt queue is full")
+
+    bus.register_service("acp_orchestrator", ACP())
+    result = await service._handle_user_input(
+        {"message": "hello"}, SimpleNamespace(source="state_rpc")
+    )
+    assert result == {"status": "rejected", "reason": "acp_queue_full"}
+
+    class PlainAdmissionError(Exception):
+        pass
+
+    class ACPOther:
+        active = True
+
+        async def steer(self, *args, **kwargs):
+            return False
+
+        def admit(self, *args, **kwargs):
+            raise PlainAdmissionError("registry exploded")
+
+    bus2 = EventBus()
+    service2 = object.__new__(LLMService)
+    service2.event_bus = bus2
+    bus2.register_service("acp_orchestrator", ACPOther())
+    result2 = await service2._handle_user_input(
+        {"message": "hello"}, SimpleNamespace(source="state_rpc")
+    )
+    assert result2 == {"status": "rejected", "reason": "acp_admission_failed"}
 
 
 

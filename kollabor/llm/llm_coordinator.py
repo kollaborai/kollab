@@ -2670,7 +2670,10 @@ class LLMService:
                     **({"images": images} if images else {}),
                 )
             except RuntimeError as exc:
-                if images and "can't take images" in str(exc):
+                if images and (
+                    getattr(exc, "error_class", None) == "images_unsupported"
+                    or "can't take images" in str(exc)
+                ):
                     return {"status": "rejected", "reason": "This harness can't take images."}
                 raise
             if steered:
@@ -2696,9 +2699,12 @@ class LLMService:
                 **({"images": images} if images else {}),
             )
         except (RuntimeError, ValueError) as exc:
-            if "full" in str(exc).lower():
+            error_class = getattr(exc, "error_class", None)
+            if error_class == "queue_full" or "full" in str(exc).lower():
                 return {"status": "rejected", "reason": "acp_queue_full"}
-            if images and "can't take images" in str(exc):
+            if images and (
+                error_class == "images_unsupported" or "can't take images" in str(exc)
+            ):
                 return {"status": "rejected", "reason": "This harness can't take images."}
             return _acp_unavailable_result(acp)
         except Exception as exc:

@@ -9,12 +9,15 @@ import asyncio
 import inspect
 import json
 import logging
+import os
+import secrets
 import sys
 import uuid
 from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
@@ -36,6 +39,10 @@ from .acp_state import ACPBindingStore
 from .agent_hud import AgentHudEntry, format_agent_hud
 
 logger = logging.getLogger(__name__)
+
+# How long a close may hold the session transition. The runner's own teardown
+# is bounded well under this; a close still running after it is set aside.
+RUNNER_CLOSE_TIMEOUT = 30.0
 
 
 @dataclass
@@ -97,6 +104,9 @@ class ACPOrchestrator:
         self._completion_tasks: set[asyncio.Task[Any]] = set()
         self._delivery_tasks: set[asyncio.Task[Any]] = set()
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
+        # Closes that outlived RUNNER_CLOSE_TIMEOUT: their runner is no longer
+        # this orchestrator's, but the close keeps running to completion.
+        self._quarantined_closes: set[asyncio.Task[Any]] = set()
         self._terminal_session_id: str | None = None
         self._selected_profile: LLMProfile | None = None
         # Explicit loadouts and Session-tab overrides belong to this daemon,
@@ -132,6 +142,9 @@ class ACPOrchestrator:
         self._bindings = ACPBindingStore(Path(get_project_data_dir()) / "acp" / "sessions")
         # The model/effort picked for each harness profile, re-applied at start.
         self._options_path = Path(get_project_data_dir()) / "acp" / "options.json"
+        # The Hub child binding's credential file: owner-only, one per rotation.
+        self._hub_token_dir = Path(get_project_data_dir()) / "acp" / "hub-bindings"
+        self._hub_token_file: Path | None = None
         self._binding_conversation_id: str | None = None
         self.restore_notices: list[str] = []
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
@@ -501,7 +514,11 @@ class ACPOrchestrator:
             owned_runner = ACPRunner(
                 acp_profile,
                 permission_bridge=permission_bridge,
-                update_callback=self._on_runner_update,
+                # A runner set aside by a stalled close may still answer; its
+                # late updates must not reach the runner that replaced it.
+                update_callback=lambda update: (
+                    self._on_runner_update(update) if owned_runner is self._runner else None
+                ),
                 lifecycle_callback=self._runner_lifecycle,
             )
             self._runner = owned_runner
@@ -525,6 +542,7 @@ class ACPOrchestrator:
                 "hub_agents to collaborate. A thread handle may be used only after you received or started it."
             )
             self._binding_conversation_id = self._conversation_id()
+            self._resume_requested = binding is not None
             await self._runner.start(binding=binding)
             self.restore_notices = await self._restore_options(profile)
             if loadout is not None:
@@ -593,9 +611,12 @@ class ACPOrchestrator:
                 raise RuntimeError("ACP hub socket is not ready before session/new")
             from kollabor.mcp_hub import kollab_hub_argv
             argv = kollab_hub_argv()
+            # Adapters put the MCP config, env included, on the child's command
+            # line (--mcp-config), so it names a credential file, never the token.
+            token_file = self._write_hub_token_file(token)
             runner.profile = replace(runner.profile, mcp_servers=({
                 "name": "kollab-hub", "command": argv[0], "args": argv[1:],
-                "env": {"KOLLAB_ACP_HUB_TOKEN": token,
+                "env": {"KOLLAB_ACP_HUB_TOKEN_FILE": str(token_file),
                         "KOLLAB_ACP_GENERATION": str(generation),
                         "KOLLAB_ACP_HUB_SOCKET": str(socket_path)},
             },))
@@ -604,6 +625,27 @@ class ACPOrchestrator:
                 self._pending_ready_runner = runner
                 return
             self._publish_runner_ready(runner)
+
+    def _write_hub_token_file(self, token: str) -> Path:
+        """Replace the binding's owner-only credential file and return its path."""
+        from kollabor_config.private_fs import ensure_private_dir, open_nofollow
+
+        self._drop_hub_token_file()
+        ensure_private_dir(self._hub_token_dir)
+        path = self._hub_token_dir / f"{secrets.token_hex(16)}.token"
+        fd = open_nofollow(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        self._hub_token_file = path
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(token)
+        return path
+
+    def _drop_hub_token_file(self) -> None:
+        path, self._hub_token_file = self._hub_token_file, None
+        if path is not None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
     def _publish_runner_ready(self, runner: ACPRunner) -> None:
         self._save_binding()
@@ -615,8 +657,14 @@ class ACPOrchestrator:
         llm = self.event_bus.get_service("llm_service")
         display = getattr(llm, "message_display_service", None)
         if display is not None:
-            line = (f"{self.identity} resumed its session" if runner.resume_mode in {"resumed", "loaded"}
-                    else f"{self.identity} starts with fresh context")
+            harness = profile.description or profile.name if profile else self._profile_name
+            if runner.resume_mode in {"resumed", "loaded"}:
+                line = f"{self.identity} resumed its session"
+            elif getattr(self, "_resume_requested", False):
+                line = (f"{harness} could not resume its previous session, so its earlier context is lost; "
+                        f"{self.identity} starts with fresh context")
+            else:
+                line = f"{self.identity} starts with fresh context"
             display.display_system_message(line)
 
     def admit(
@@ -1207,6 +1255,12 @@ class ACPOrchestrator:
             error_code = getattr(exc, "code", None)
             if error_code is not None:
                 end_frame["code"] = error_code
+            error_class = getattr(exc, "error_class", None)
+            if error_class is not None:
+                end_frame["errorClass"] = error_class
+            error_cause = getattr(exc, "cause", None)
+            if error_cause is not None:
+                end_frame["cause"] = error_cause
             if result is None and observed is not None and any(
                 update.get("kind") in {"text", "agent_thought_chunk", "tool_call", "tool_call_update"}
                 for update in observed.updates
@@ -1231,6 +1285,7 @@ class ACPOrchestrator:
                     display.display_error_message(end_frame["error"])
                 publish_semantic(
                     self.event_bus, "error", message=end_frame["error"], code=error_code,
+                    error_class=error_class, cause=error_cause,
                     request_id=admission.request_id, turn_id=admission.turn_id,
                     session_id=session_id, generation=generation,
                     input_source=admission.source, thread_id=admission.thread_id,
@@ -1584,11 +1639,53 @@ class ACPOrchestrator:
         with self.transition():
             await self._close_owned()
 
+    async def _close_runner_bounded(self, runner: ACPRunner) -> bool:
+        """Close `runner`, but never hold the transition past RUNNER_CLOSE_TIMEOUT.
+
+        Returns True when the close finished. A close still running at the
+        bound is set aside: this orchestrator stops owning the runner (so a
+        successor can be installed), and the close task finishes on its own
+        without touching any orchestrator state. Nothing is signalled here;
+        the runner's close alone decides which processes it owns.
+        """
+        task = asyncio.ensure_future(runner.close())
+        try:
+            await asyncio.wait({task}, timeout=RUNNER_CLOSE_TIMEOUT)
+        except BaseException:
+            # Cancelled while closing: pass the cancellation to the close, as
+            # an inline await would, and give it the same bound to settle.
+            task.cancel()
+            await asyncio.wait({task}, timeout=RUNNER_CLOSE_TIMEOUT)
+            if not task.done():
+                self._set_aside_close(runner, task)
+            elif not task.cancelled():
+                task.exception()
+            raise
+        if not task.done():
+            self._set_aside_close(runner, task)
+            return False
+        task.result()
+        return True
+
+    def _set_aside_close(self, runner: ACPRunner, task: asyncio.Task[Any]) -> None:
+        logger.warning("ACP runner close still running after %ss; set aside", RUNNER_CLOSE_TIMEOUT)
+        self._quarantined_closes.add(task)
+
+        def settled(done: asyncio.Task[Any]) -> None:
+            self._quarantined_closes.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                logger.warning("Set-aside ACP runner close failed (%s)", type(done.exception()).__name__)
+
+        task.add_done_callback(settled)
+        if self._runner is runner:
+            self._runner = None
+
     async def _close_owned(self) -> None:
         if self._closed and self._runner is None:
             return
         self._closed = True
         close_error: BaseException | None = None
+        stalled = False
         runner = self._runner
         if self._pending_ready_runner is runner:
             self._pending_ready_runner = None
@@ -1609,8 +1706,10 @@ class ACPOrchestrator:
         if runner is not None:
             self._terminal_session_id = getattr(runner, "session_id", None)
             try:
-                await runner.close()
+                if not await self._close_runner_bounded(runner):
+                    stalled = True
             except BaseException as exc:
+                stalled = stalled or self._runner is not runner
                 # Cancellation must not skip process/binding cleanup.  Keep the
                 # original error for the caller after all owned resources settle.
                 if close_error is None:
@@ -1620,6 +1719,11 @@ class ACPOrchestrator:
             else:
                 if self._runner is runner:
                     self._runner = None
+        if stalled:
+            # Turns admitted on the set-aside runner will never get their
+            # result: end them rather than wait on a close that may not return.
+            for task in tuple(self._completion_tasks):
+                task.cancel()
         if self._cancel_tasks:
             pending = tuple(self._cancel_tasks)
             for task in pending:
@@ -1648,6 +1752,7 @@ class ACPOrchestrator:
         if self.hub_plugin is not None and self._binding is not None:
             self.hub_plugin.rotate_acp_hub_binding()
             self._binding = None
+        self._drop_hub_token_file()
         publish_semantic(self.event_bus, "acp_session", state="closed", harness="", context="")
         if close_error is not None:
             raise close_error

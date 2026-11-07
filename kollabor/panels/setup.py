@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, List, Optional
 from urllib.parse import urlparse
 
+from ..state.interface import ProfileActivationError
 from .base import PanelError, error_result, make_field, ok_result, unknown_action
 from .llm import short_error
 
@@ -264,6 +265,16 @@ async def create_and_activate_profile(
                 profile_manager.set_active_profile(name, persist=False)
             except TypeError:
                 profile_manager.set_active_profile(name)
+        except ProfileActivationError as exc:
+            logger.warning(
+                "setup: provider activation failed (previous profile restored=%s)",
+                exc.previous_profile_restored,
+            )
+            if exc.previous_profile_restored:
+                message = f"Could not activate '{name}': the previous profile remains active."
+            else:
+                message = f"Could not activate '{name}': the previous profile could not be restored."
+            raise RuntimeError(message) from None
         except Exception as exc:  # noqa: BLE001 - fall through to the fallbacks
             logger.warning(
                 "setup: state-service activation failed: %s",
