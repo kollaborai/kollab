@@ -203,11 +203,11 @@ def _launchd_state(label: str) -> tuple[bool, bool, str]:
 def _agents(root: Path) -> list[tuple[str, int, bool]]:
     """(identity, pid, service) for each agent answering on its hub socket in this folder."""
     from plugins.hub.messenger import AgentMessenger
-    from plugins.hub.presence import get_presence_dir, pid_alive
+    from plugins.hub.presence import _presence_files, get_presence_dir, pid_alive
     from plugins.hub.project_scope import is_project_scoped
 
     found = []
-    for record in get_presence_dir().glob("*.json"):
+    for record in _presence_files(get_presence_dir()):
         try:
             data = json.loads(record.read_text())
             pid = int(data["pid"])

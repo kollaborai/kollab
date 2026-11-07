@@ -80,7 +80,7 @@ from .models import (
 )
 from .notifier import HubNotifier, NtfyNotifier, load_ntfy_settings
 from .nudge_engine import NudgeEngine
-from .presence import PresenceManager, get_messages_dir, pid_alive
+from .presence import PresenceManager, get_messages_dir, pid_alive, wait_until_socket_answers
 from .recurring_jobs import RecurringJobs, default_job_config
 from .rosters import (
     DEFAULT_ROSTER,
@@ -5758,6 +5758,54 @@ class HubPlugin(BasePlugin):
                 f"(identity={identity}): {e}"
             )
 
+    # Deadline nesting (zircon REQUEST_CHANGES @1ce1fc92): this gate runs
+    # between bind and signal_daemon_ready, and the fork parent SIGKILLs a
+    # child that has not signaled within 15s (kollabor/daemon.py:115),
+    # while the app-level wait_until_ready allows 30s
+    # (kollabor/application.py:1611). The gate must finish strictly inside
+    # the parent budget: 10 < 15 < 30, so the degraded publish and the
+    # ready signal always land while the child is still alive, and the
+    # outer wait keeps margin over both.
+    SOCKET_ANSWER_DEADLINE_SECONDS = 10.0
+
+    async def _signal_ready_then_advertise(self, socket_path: str) -> None:
+        """Signal the fork parent, then gate presence advertisement (#692).
+
+        The ready pipe needs only the deterministic socket path, so the
+        signal goes first: the fork parent's 15s budget is mostly consumed
+        by plugin startup before this method runs, and holding the signal
+        behind a socket-answer wait can push it past the budget on any slow
+        start. Third-party presence stays gated inside the advertise step.
+        """
+        # Signal daemon-ready if running in fork-daemon mode
+        try:
+            from kollabor.daemon import signal_daemon_ready
+
+            signal_daemon_ready(socket_path)
+        except Exception:
+            pass  # Not in daemon mode, or import failed
+        await self._advertise_presence_when_socket_answers(socket_path)
+
+    async def _advertise_presence_when_socket_answers(
+        self, socket_path: str, timeout: float = SOCKET_ANSWER_DEADLINE_SECONDS
+    ) -> None:
+        """Publish presence once the endpoint answers a handshake (#692).
+
+        Bind-return is not serving: a busy startup loop can delay the first
+        handshake seconds past bind-return, and a record advertising a socket
+        that refuses breaks every client that trusts it. When the endpoint
+        never answers within the deadline the publish still goes out --
+        degraded, discoverable-but-refusing -- with an error logged so the
+        condition stays visible. The deadline nests inside the fork parent's
+        15s ready budget (see SOCKET_ANSWER_DEADLINE_SECONDS).
+        """
+        if not await wait_until_socket_answers(socket_path, timeout=timeout):
+            logger.error(
+                f"socket {socket_path} never answered a handshake within "
+                f"{timeout:.0f}s — publishing presence anyway; clients may see refusals"
+            )
+        self._presence.publish()
+
     async def _start_hub(self) -> None:
         """Start hub services (called after all plugins init)."""
         if self._started or self._starting or not self._identity:
@@ -6107,17 +6155,10 @@ class HubPlugin(BasePlugin):
                     self._endpoint_setup_error = bind_err
                 self._endpoint_uri = ""
 
-            # The window that forked this daemon looks the agent up in presence
-            # the moment it hears "ready"; until now the record had no socket.
-            self._presence.publish()
-
-            # Signal daemon-ready if running in fork-daemon mode
-            try:
-                from kollabor.daemon import signal_daemon_ready
-
-                signal_daemon_ready(socket_path)
-            except Exception:
-                pass  # Not in daemon mode, or import failed
+            # The fork parent needs the ready signal early (its 15s budget is
+            # mostly consumed by plugin startup before this point); presence
+            # advertisement is gated separately inside the helper.
+            await self._signal_ready_then_advertise(socket_path)
 
             # Initialize vault for this identity (if enabled by agent config)
             _vault_enabled = True
@@ -7150,46 +7191,44 @@ class HubPlugin(BasePlugin):
                 projects_root = config_root / "projects"
                 removed = 0
 
+                # POSIX presence lives beside sockets in the HOME-independent
+                # root. Keep scanning per-HOME locations for older live agents.
+                from .presence import _shared_socket_dirs
+
+                presence_dirs = _shared_socket_dirs()
                 if projects_root.exists():
-                    for presence_dir in projects_root.glob("*/hub/presence/*.json"):
-                        try:
-                            with open(presence_dir) as f:
-                                data = json.load(f)
-                            pid = data.get("pid", 0)
-                            if not pid:
-                                continue
+                    presence_dirs.extend(
+                        sorted(projects_root.glob("*/hub/presence"), key=lambda p: str(p))
+                    )
+                presence_dirs.append(config_root / "hub" / "presence")
 
-                            # Check if PID is alive
-                            if not pid_alive(pid):
-                                # PID is dead — remove presence file
-                                identity = data.get("identity", "?")
-                                presence_dir.unlink(missing_ok=True)
-                                removed += 1
-                                logger.info(
-                                    f"presence sweep: removed dead agent "
-                                    f"{identity} (pid {pid}) from "
-                                    f"{presence_dir.parent.parent.parent.name}"
-                                )
-                        except (json.JSONDecodeError, Exception) as e:
-                            logger.debug(
-                                f"presence sweep: bad file {presence_dir}: {e}"
-                            )
-
-                # Also sweep the legacy global hub dir
-                global_presence = config_root / "hub" / "presence"
-                if global_presence.exists():
-                    for pf in global_presence.glob("*.json"):
-                        try:
-                            with open(pf) as f:
-                                data = json.load(f)
-                            pid = data.get("pid", 0)
-                            if not pid:
+                seen_files: set[Path] = set()
+                for presence_dir in presence_dirs:
+                    try:
+                        files = presence_dir.glob("*.json")
+                        for pf in files:
+                            if pf in seen_files:
                                 continue
-                            if not pid_alive(pid):
-                                pf.unlink(missing_ok=True)
-                                removed += 1
-                        except Exception:
-                            pass
+                            seen_files.add(pf)
+                            try:
+                                with open(pf) as f:
+                                    data = json.load(f)
+                                pid = data.get("pid", 0)
+                                if not pid:
+                                    continue
+
+                                if not pid_alive(pid):
+                                    identity = data.get("identity", "?")
+                                    pf.unlink(missing_ok=True)
+                                    removed += 1
+                                    logger.info(
+                                        f"presence sweep: removed dead agent "
+                                        f"{identity} (pid {pid}) from {presence_dir.name}"
+                                    )
+                            except Exception as e:
+                                logger.debug(f"presence sweep: bad file {pf}: {e}")
+                    except OSError as e:
+                        logger.debug(f"presence sweep: cannot scan {presence_dir}: {e}")
 
                 if removed:
                     logger.info(
