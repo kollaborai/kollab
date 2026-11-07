@@ -8,7 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Usage ledger (off by default, `plugins.usage_ledger.enabled`) records token counts, cache counts, wall time and estimated cost for every LLM turn, per agent, lane, PR, model and day, in a local owner-only JSONL file. Missing provider usage reads as missing, and models without a known price read as unpriced, never zero. `/usage` and `/usage json` report rollups, and optional budget alerts fire once per window (#723).
 - PR throughput KPI report (`.github/scripts/pr_throughput_kpi.py`, opt-in via `kpi.enabled`, default off): closed PRs per hour against a target of 3 on 1h, 8h and 24h rolling windows, with supporting open-PR, review, first-push CI and per-author/lane metrics. Missing data is reported as missing, never zero (#729).
 - Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
 - Optional merge bot for maintainers: `.github/workflows/auto-merge.yml` can merge a PR once CI, an independent review of its exact head, approval and resolved conversations all hold. It ships off; `docs/operations/pr-gates-auto-merge.md` has the steps to turn it on (#736).
@@ -60,9 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A request for an agent that has exited no longer reaches a new agent that took over its socket under the same name: the engine reads the agent's record fresh before it uses that socket, so the request fails instead of returning the new agent's output, including when the agent restarted in place (#566).
 - A live hub agent keeps its presence record and socket when its heartbeat is over ten minutes old and its socket briefly does not answer; peers now remove them only once the agent's process has exited or its process ID has been reused by another process (#575)
 - An accepted peer observation is no longer dropped when its ACP history row cannot be written: the retry queue keeps it until the row lands, and when the queue is full the new message is refused instead of acknowledged. A refused message stays in the mailbox or relay queue until the queue takes it, and a resend does not show, log or mirror it a second time. An ACP agent now reads its mailbox without the per-poll replay cap and delivers each message on its own, so a long outage no longer drops or coalesces refused ones (#581).
-
-### Changed
-- The `LLM_REQUEST_POST` event payload carries the `provider` and a `usage_source` (`provider`, `estimated` or `none`) so consumers can tell reported usage from its absence.
 
 ## [0.19.1] - 2026-11-03
 
