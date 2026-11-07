@@ -60,11 +60,63 @@ workspace_set = ToolDefinition(
     ],
 )
 
+sandbox_promote = ToolDefinition(
+    name="sandbox-promote",
+    description=(
+        "Ask for a promotion token before touching a protected shared checkout. "
+        "Runs the configured validation commands in your scratch checkout and "
+        "requires a clean git status there; on success, one guarded call may "
+        "write to the protected root. Only active when sandbox_gate.enabled is on."
+    ),
+    category="workspace",
+    risk_level="medium",
+    requires_permission=True,
+    xml_tag="sandbox-promote",
+    xml_form="nested",
+    parameters=[
+        ToolParameter(
+            name="scratch",
+            type="string",
+            description="Your scratch checkout (worktree or clone) holding the committed change.",
+            required=True,
+        ),
+        ToolParameter(
+            name="root",
+            type="string",
+            description="The protected shared root you want to write to.",
+            required=True,
+        ),
+    ],
+    examples=[
+        "<sandbox-promote><scratch>/work/scratch-1</scratch><root>/work/main</root></sandbox-promote>",
+    ],
+    result_format=(
+        "On success: the token is held by the tool layer (valid 15 minutes by "
+        "default, one use, void if the scratch HEAD changes). On failure: why "
+        "promotion was refused."
+    ),
+    error_modes=[
+        "validation failed: a configured command exited non-zero",
+        "git status is not clean in the scratch checkout",
+        "that root is not a protected root",
+    ],
+    notes=(
+        "Commit only the intended files in scratch first. Passing validation is "
+        "the entry ticket, not proof the change is right."
+    ),
+    safety_features=[
+        "token is bound to one root and one scratch HEAD SHA",
+        "every promotion is written to the sandbox gate audit log",
+    ],
+    key_rules=["commit the change in scratch before promoting"],
+)
+
 
 def register_all():
     """Register all workspace tool definitions."""
     registry = get_registry()
     registry.register(workspace_set)
+    registry.register(sandbox_promote)
 
 
 # Auto-register on import

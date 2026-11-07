@@ -4,13 +4,14 @@ import asyncio
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from kollabor_agent.runtime import AgentRuntime
+from kollabor_agent.runtime import AgentRuntime, process_start_token
 from kollabor_config.hub_paths import hub_socket_root
 
 logger = logging.getLogger(__name__)
@@ -61,13 +62,12 @@ def _secure_socket_dir_windows(path: Path, *, create: bool) -> Path:
 
 
 def get_hub_dir() -> Path:
-    """Get the hub directory, creating if needed.
+    """Get the HOME-backed hub metadata directory, creating if needed.
 
-    By default, state siloes under
-    ~/.kollab/projects/<encoded>/hub/ so agents launched from
-    different repos stay invisible to each other. Setting
-    KOLLAB_HUB_PROJECT_SCOPED to an explicit false value uses the
-    legacy global directory at ~/.kollab/hub/.
+    By default, metadata is siloed under ~/.kollab/projects/<encoded>/hub/;
+    KOLLAB_HUB_PROJECT_SCOPED explicitly false selects ~/.kollab/hub/ instead.
+    On POSIX, live presence and sockets use the separate shared runtime root
+    under /tmp/kollabor-hub. Windows keeps presence in this per-user state tree.
     """
     from kollabor_config.config_utils import get_config_directory
 
@@ -82,10 +82,56 @@ def get_hub_dir() -> Path:
 
 
 def get_presence_dir() -> Path:
-    """Get the presence directory."""
-    d = get_hub_dir() / "presence"
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return d
+    """Get the current hub presence directory.
+
+    POSIX sockets and their presence records share the project-hashed runtime
+    directory, which is intentionally independent of HOME. Windows retains its
+    existing per-user state location.
+    """
+    if os.name == "nt":
+        directory = get_hub_dir() / "presence"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return directory
+    return secure_socket_dir(get_socket_dir())
+
+
+def _legacy_presence_dir() -> Optional[Path]:
+    """Return this HOME's pre-shared-root presence directory, if applicable."""
+    if os.name == "nt":
+        return None
+
+    from kollabor_config.config_utils import get_config_directory, get_project_data_dir
+
+    from .project_scope import is_project_scoped, resolve_project_root
+
+    if is_project_scoped():
+        base = get_project_data_dir(resolve_project_root())
+    else:
+        base = get_config_directory()
+    return base / "hub" / "presence"
+
+
+def _presence_directories(primary: Path) -> List[Path]:
+    """Current shared location first, then any same-HOME pre-upgrade records."""
+    directories = [primary]
+    legacy = _legacy_presence_dir()
+    if legacy is not None and legacy != primary and legacy.is_dir():
+        directories.append(legacy)
+    return directories
+
+
+def _presence_files(primary: Path):
+    """Yield JSON records, preferring the new shared location on name clashes."""
+    seen: set[str] = set()
+    for directory in _presence_directories(primary):
+        try:
+            for path in directory.glob("*.json"):
+                if path.name in seen:
+                    continue
+                seen.add(path.name)
+                yield path
+        except OSError:
+            continue
 
 
 def get_messages_dir() -> Path:
@@ -145,6 +191,34 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
+def _owner_gone(agent: "AgentRuntime") -> bool:
+    """True only when ``agent``'s pid is provably no longer its process.
+
+    That is a zombie (it exited and nobody reaped it), or a pid now held by a
+    process other than the one that stamped the record: the owner wrote its own
+    kernel start (``start_token``) and the process at the pid now has a different
+    one. The comparison is for equality of values the kernel recorded, never of a
+    wall-clock time, so a clock step cannot make a live owner look replaced.
+    Neither a silent socket nor a long heartbeat proves any of it: a busy owner
+    looks the same (#575). A record with no token, or a start that cannot be
+    read, keeps the record.
+    """
+    import psutil
+
+    try:
+        if psutil.Process(agent.pid).status() == psutil.STATUS_ZOMBIE:
+            return True
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError, ValueError):
+        return False
+    recorded = agent.start_token
+    if not recorded:
+        return False
+    current = process_start_token(agent.pid)
+    return current is not None and current != recorded
+
+
 STALL_AFTER_SECONDS = 15 * 60
 """An idle agent holding an open task is flagged stalled after this long."""
 
@@ -177,29 +251,100 @@ def stall_status(data: dict, *, now: Optional[float] = None, threshold: float = 
     return f"stalled (idle {int(idle_for // 60)}m with open task)"
 
 
+def _shared_socket_dirs() -> List[Path]:
+    """Private POSIX socket directories that may contain shared presence."""
+    if os.name == "nt":
+        return []
+
+    root = Path(SOCKET_DIR_ROOT)
+
+    def owned_private_directory(path: Path) -> bool:
+        try:
+            info = path.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.getuid()
+            and not stat.S_IMODE(info.st_mode) & 0o077
+        )
+
+    if not owned_private_directory(root):
+        return []
+
+    directories = [root]
+    try:
+        children = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return directories
+    for child in children:
+        if re.fullmatch(r"[0-9a-f]{12}", child.name) and owned_private_directory(child):
+            directories.append(child)
+    return directories
+
+
+def _logical_shared_hub_dir(
+    presence_dir: Path, data: dict, config_dir: Path
+) -> Path:
+    """Return the HOME-backed logical hub path for a shared presence record."""
+    if presence_dir == Path(SOCKET_DIR_ROOT):
+        return config_dir / "hub"
+
+    project = data.get("project")
+    if not isinstance(project, str) or not project:
+        return presence_dir
+
+    try:
+        from kollabor_config.config_utils import get_project_data_dir
+        from kollabor_config.hub_paths import hub_project_socket_key
+
+        project_path = Path(project)
+        if hub_project_socket_key(project_path) != presence_dir.name:
+            return presence_dir
+        return get_project_data_dir(project_path) / "hub"
+    except (OSError, TypeError, ValueError):
+        return presence_dir
+
+
 def live_agents_on_machine() -> List[tuple[Path, dict]]:
     """``(hub_dir, presence record)`` for every live agent on this machine.
 
-    Searches every project's hub dir and the global one, so a caller outside
-    an agent's project (an ssh session, say) still finds it. Read-only: no
-    directory is created. A record counts only while its pid is alive and its
-    endpoint exists and is a suitable local IPC endpoint.
+    Searches shared POSIX socket directories and this HOME's legacy project
+    and global dirs, so callers outside an agent's project still find it.
+    Read-only: no directory is created. A record counts only while its pid is
+    alive and its endpoint exists and is a suitable local IPC endpoint.
     """
     from kollabor_config.config_utils import get_config_directory
     from kollabor_config.local_ipc import is_local_endpoint
 
     base = get_config_directory()
+    shared_dirs = _shared_socket_dirs()
+    shared_dir_set = set(shared_dirs)
+    sources = [(directory, directory) for directory in shared_dirs]
+    sources.extend(
+        (hub_dir / "presence", hub_dir)
+        for hub_dir in [base / "hub", *sorted((base / "projects").glob("*/hub"))]
+    )
     found: List[tuple[Path, dict]] = []
-    for hub_dir in [base / "hub", *sorted((base / "projects").glob("*/hub"))]:
-        for pf in (hub_dir / "presence").glob("*.json"):
-            try:
-                data = json.loads(pf.read_text())
-                sock = Path(data.get("socket_path") or "")
-                live = sock.is_absolute() and is_local_endpoint(sock)
-                if live and pid_alive(data.get("pid", 0)):
-                    found.append((hub_dir, data))
-            except Exception:
-                continue
+    for presence_dir, hub_dir in sources:
+        try:
+            presence_files = presence_dir.glob("*.json")
+            for pf in presence_files:
+                try:
+                    data = json.loads(pf.read_text())
+                    sock = Path(data.get("socket_path") or "")
+                    live = sock.is_absolute() and is_local_endpoint(sock)
+                    if live and pid_alive(data.get("pid", 0)):
+                        reported_hub_dir = (
+                            _logical_shared_hub_dir(presence_dir, data, base)
+                            if presence_dir in shared_dir_set
+                            else hub_dir
+                        )
+                        found.append((reported_hub_dir, data))
+                except Exception:
+                    continue
+        except OSError:
+            continue
     return found
 
 
@@ -246,11 +391,6 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 class PresenceManager:
     """Manages this agent's presence file and discovers other agents."""
-
-    # A live pid whose socket does not answer is busy, not dead, until its
-    # heartbeat is this old. Deleting its files sooner cut every connection to
-    # an agent that was only stuck for a couple of minutes (#545).
-    LIVE_PID_GRACE_SECONDS = 600
 
     def __init__(self, identity: "AgentRuntime"):
         self.identity = identity
@@ -305,12 +445,13 @@ class PresenceManager:
         """Scan presence directory for live agents.
 
         Validates PID liveness AND socket connectivity.
-        Both must pass - a recycled PID with a dead socket is stale.
+        Both must pass - a live pid with a dead socket is not a peer, and its
+        files go only once the owner is provably gone (see _owner_gone).
         ``include_busy`` also lists a live pid whose socket does not answer
         yet (stuck on a long turn): identity claims must see it as the holder.
         """
         agents = []
-        for f in self._presence_dir.glob("*.json"):
+        for f in _presence_files(self._presence_dir):
             if not include_self and f.stem == self.identity.agent_id:
                 continue
             try:
@@ -334,13 +475,13 @@ class PresenceManager:
 
                 # Stale heartbeat -- verify socket is actually responding
                 if agent.socket_path and not self._socket_responds(agent.socket_path):
-                    if heartbeat_age < self.LIVE_PID_GRACE_SECONDS:
-                        # busy: not a peer right now, its files stay
+                    if not _owner_gone(agent):
+                        # busy or stuck: not a peer right now, its files stay
                         if include_busy:
                             agents.append(agent)
                         continue
                     logger.info(
-                        f"Cleaning stale agent: {f.stem} (pid alive but socket dead)"
+                        f"Cleaning stale agent: {f.stem} (owner gone, socket dead)"
                     )
                     f.unlink(missing_ok=True)
                     self._cleanup_agent_socket(agent)
@@ -361,7 +502,7 @@ class PresenceManager:
         (prompt renderer, status widgets) get fresh data for free.
         """
         agents: List[AgentRuntime] = []
-        for f in self._presence_dir.glob("*.json"):
+        for f in _presence_files(self._presence_dir):
             if not include_self and f.stem == self.identity.agent_id:
                 continue
             try:
@@ -384,12 +525,12 @@ class PresenceManager:
                 # Stale heartbeat -- async socket check (non-blocking)
                 if agent.socket_path:
                     alive = await self._socket_responds_async(agent.socket_path)
-                    if not alive and heartbeat_age < self.LIVE_PID_GRACE_SECONDS:
-                        continue  # busy: not a peer right now, its files stay
+                    if not alive and not _owner_gone(agent):
+                        continue  # busy or stuck: not a peer right now, its files stay
                     if not alive:
                         logger.info(
                             f"Cleaning stale agent: {f.stem} "
-                            f"(pid alive but socket dead)"
+                            f"(owner gone, socket dead)"
                         )
                         f.unlink(missing_ok=True)
                         self._cleanup_agent_socket(agent)
@@ -438,7 +579,7 @@ class PresenceManager:
         is responsible for cleanup after the operation.
         """
         agents = []
-        for f in self._presence_dir.glob("*.json"):
+        for f in _presence_files(self._presence_dir):
             if not include_self and f.stem == self.identity.agent_id:
                 continue
             try:
@@ -480,8 +621,8 @@ class PresenceManager:
         Public method for callers (like hub stop) that need to
         explicitly clean up an agent they know is dead.
         """
-        pf = self._presence_dir / f"{agent.agent_id}.json"
-        pf.unlink(missing_ok=True)
+        for directory in _presence_directories(self._presence_dir):
+            (directory / f"{agent.agent_id}.json").unlink(missing_ok=True)
         self._cleanup_agent_socket(agent)
 
     def get_agent_by_identity(self, identity: str) -> Optional[AgentRuntime]:
@@ -506,7 +647,7 @@ class PresenceManager:
         Returns count of dead presence files removed.
         """
         removed = 0
-        for f in self._presence_dir.glob("*.json"):
+        for f in _presence_files(self._presence_dir):
             try:
                 with open(f) as fh:
                     data = json.load(fh)
@@ -521,13 +662,13 @@ class PresenceManager:
                     removed += 1
                     continue
 
-                # Also check socket for stale heartbeats
-                heartbeat_age = time.time() - (agent.last_heartbeat or 0)
-                if heartbeat_age > self.LIVE_PID_GRACE_SECONDS and agent.socket_path:
+                # A silent socket does not make an owner gone (#575): only a
+                # provably gone owner (see _owner_gone) loses its files.
+                if agent.socket_path and _owner_gone(agent):
                     if not self._socket_responds(agent.socket_path):
                         logger.info(
                             f"Startup cleanup: stale agent {f.stem} "
-                            f"(pid alive, socket dead)"
+                            f"(owner gone, socket dead)"
                         )
                         f.unlink(missing_ok=True)
                         self._cleanup_agent_socket(agent)
@@ -555,7 +696,7 @@ class PresenceManager:
         # Sockets can be named by agent_id OR identity, so we must
         # read the actual socket_path field from each presence file.
         live_socket_names: set[str] = set()
-        for pf in presence_dir.glob("*.json"):
+        for pf in _presence_files(presence_dir):
             try:
                 with open(pf) as fh:
                     data = json.load(fh)
@@ -611,3 +752,30 @@ class PresenceManager:
             }
             for a in agents
         ]
+
+
+async def wait_until_socket_answers(
+    socket_path: str,
+    timeout: float = 30.0,
+    interval: float = 0.25,
+) -> bool:
+    """Wait until the local IPC endpoint at ``socket_path`` answers a connect.
+
+    Binding a listener is not serving: a busy startup loop can delay the first
+    handshake seconds past bind-return (windows-smoke ConnectionRefused against
+    an already-bound path, #692). Presence must advertise only sockets that
+    answer, so the hub plugin gates its presence publish on this probe.
+    POSIX: a unix connect proves the listener; Windows: local_ipc.connect
+    performs the full HMAC handshake. The probe is awaited, never run inline
+    on this loop: the answering server lives on this same loop, and a probe
+    that blocks the loop starves it of the turns needed to answer, so the
+    handshake can only ever time out (#692 rework). Returns False when the
+    deadline passes without an answer.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if await PresenceManager._socket_responds_async(socket_path):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(interval)
