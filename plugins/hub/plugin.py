@@ -81,6 +81,7 @@ from .models import (
 from .notifier import HubNotifier, NtfyNotifier, load_ntfy_settings
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir, pid_alive, wait_until_socket_answers
+from .recurring_jobs import RecurringJobs, default_job_config
 from .rosters import (
     DEFAULT_ROSTER,
     attach_persona_skills,
@@ -726,6 +727,7 @@ class HubPlugin(BasePlugin):
         # (another session polls the shared token). See _messaging_bridge_loop.
         self._bridge_polling: bool = False
         self._hub_cron_jobs: List[HubCronJob] = []
+        self._recurring_jobs: Optional[RecurringJobs] = None
         self._recent_hub_msgs: Dict[str, float] = {}  # hash -> timestamp
         self._hub_wake_seen_ids: collections.OrderedDict[str, float] = (
             collections.OrderedDict()
@@ -804,6 +806,7 @@ class HubPlugin(BasePlugin):
                     "dreaming_interval": 900,
                     "dreaming_stream_depth": 100,
                     "dreaming_model": "",
+                    "hub_jobs": default_job_config(),
                     "supervisor_enabled": True,
                     "supervisor_poll_interval": 10,
                     "supervisor_stall_threshold": 900,
@@ -902,6 +905,51 @@ class HubPlugin(BasePlugin):
                     "label": "Enabled",
                     "config_path": "plugins.hub.enabled",
                     "help": "Enable agent hub for multi-agent collaboration",
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Koordinator Refresh Job",
+                    "config_path": "plugins.hub.hub_jobs.koordinator_refresh.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Idle Sweep Job",
+                    "config_path": "plugins.hub.hub_jobs.idle_sweep.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Re-review Job",
+                    "config_path": "plugins.hub.hub_jobs.re_review.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "KPI Rebuild Job",
+                    "config_path": "plugins.hub.hub_jobs.kpi_rebuild.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Hub Heartbeat Job",
+                    "config_path": "plugins.hub.hub_jobs.hub_heartbeat.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
                 },
                 {
                     "type": "checkbox",
@@ -7854,6 +7902,33 @@ class HubPlugin(BasePlugin):
         logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
         return False
 
+    async def _run_hub_jobs(self, now: Optional[float] = None) -> None:
+        """Send the configured recurring hub jobs that are due (coordinator only).
+
+        The jobs are opt-in (``plugins.hub.hub_jobs.<name>.enabled``); see
+        recurring_jobs.py for their guardrails.
+        """
+        if not self._identity or not self._identity.is_coordinator or not self.config:
+            return
+        if self._recurring_jobs is None:
+            from .presence import get_hub_dir
+
+            async def send(name: str, target: str, content: str) -> bool:
+                job = HubCronJob(
+                    id=name,
+                    target=target,
+                    message=content,
+                    interval_seconds=0,
+                    next_fire=0,
+                )
+                await self._fire_cron_job(job)
+                return not job.last_error
+
+            self._recurring_jobs = RecurringJobs(
+                self.config.get, send, get_hub_dir() / "hub_jobs_state.json"
+            )
+        await self._recurring_jobs.tick(time.time() if now is None else now)
+
     async def _cron_loop(self) -> None:
         """Check and fire hub cron jobs + task reminders every 10 seconds."""
         while True:
@@ -7861,6 +7936,8 @@ class HubPlugin(BasePlugin):
                 await asyncio.sleep(10)
                 if not self._identity:
                     continue
+
+                await self._run_hub_jobs()
 
                 has_cron_jobs = bool(self._hub_cron_jobs)
                 has_task_ledger = bool(self._task_ledger)
