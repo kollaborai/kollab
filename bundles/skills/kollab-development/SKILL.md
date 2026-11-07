@@ -66,6 +66,8 @@ Create new lanes from the fetched current `origin/main` after checking that the
 worktree path and branch are unused. Keep file ownership explicit and avoid
 concurrent writers to the same paths. Use scoped Conventional Commits and DRAFT
 PRs; update branches only with ordinary merges, never rebase or force-push.
+Put the PR's changelog entry in `changes/<issue>.<section>.md`, never in
+`CHANGELOG.md` (`changes/README.md`; CI refuses the direct edit).
 Review and CI must match the exact final PR head and current base. Marco may
 authorize a concrete integration plan or bounded batch (a class order in his
 own words, such as "merge as many ready PRs as you can tonight", counts; see
@@ -76,7 +78,8 @@ account, `kollaborai` or `maarco`, is not the PR author. Record reviewer
 identity and exact reviewed SHA in private maintainer audit evidence; keep the
 GitHub approval plain, with no AI attribution or footer. GitHub prohibits
 author self-approval. A new head needs fresh review and CI. Every merge uses
-`kollaborai` with a merge commit; never use
+`kollaborai` with a merge commit (GitHub's merge queue needs an
+organization-owned repo, so it is not on yet; #857); never use
 `--admin` or a ruleset bypass. Verify the active identity cannot bypass
 protection and stop if identity, bypass status, or gate evidence is uncertain.
 After code-owner enforcement is enabled, every path including

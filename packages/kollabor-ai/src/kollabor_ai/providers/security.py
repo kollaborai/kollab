@@ -24,9 +24,9 @@ import re
 import secrets
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
+from urllib.parse import urlparse
 
 from ..goal_image_scope import safe_goal_error_cause
-from urllib.parse import urlparse
 
 # Cryptography imports for Tier 2 encrypted file storage
 try:
@@ -854,7 +854,7 @@ class LoggingRedactor:
     Deep recursive redaction of sensitive data from logs.
 
     Redacts:
-    - API keys (sk-*, sk-proj-*, sk-ant-*)
+    - API keys (sk-*, sk-proj-*, sk-ant-*, and Google AIza keys)
     - Bearer tokens
     - Authorization headers
     - API key fields in JSON
@@ -872,6 +872,11 @@ class LoggingRedactor:
         (re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"), "[REDACTED-ANTHROPIC-KEY]"),
         # Bearer tokens
         (re.compile(r"Bearer\s+[a-zA-Z0-9_\-\.]{20,}"), "Bearer [REDACTED]"),
+        # Google API keys are AIza followed by 35 URL-safe characters.
+        (
+            re.compile(r"(?<![\w-])AIza[a-zA-Z0-9_-]{35}(?![\w-])"),
+            "[REDACTED-GOOGLE-API-KEY]",
+        ),
         # Authorization and provider-specific API key headers
         (
             re.compile(
@@ -1122,6 +1127,35 @@ class RedactingLogFilter(logging.Filter):
                 redacted_exc = LoggingRedactor.redact(exc_value)
                 record.exc_info = (exc_type, redacted_exc, exc_tb)  # type: ignore[assignment]
 
+        return True
+
+
+class SecretRedactionFilter(logging.Filter):
+    """Handler-level secret redaction for every record a log handler writes.
+
+    Attached to each kollab log handler (app and engine), so a key reaches no
+    log file whichever logger wrote it. Like the join-code filter, it renders
+    the message once and rewrites it only when a pattern matched, so argument
+    types and format strings never break. Exception and stack text are
+    rendered and redacted too: the formatter would print the raw exception
+    message otherwise.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True  # a malformed record is the formatter's problem, not ours
+        redacted = LoggingRedactor.redact(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = LoggingRedactor.redact(record.exc_text)
+        if record.stack_info:
+            record.stack_info = LoggingRedactor.redact(record.stack_info)
         return True
 
 
