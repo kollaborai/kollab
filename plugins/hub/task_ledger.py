@@ -35,6 +35,10 @@ from kollabor_config.file_lock import lock, unlock
 
 logger = logging.getLogger(__name__)
 
+TERMINAL_TASK_STATUSES = frozenset(
+    {"done", "failed", "closed", "cancelled", "obsolete"}
+)
+
 
 @dataclass
 class TaskCard:
@@ -237,7 +241,7 @@ class TaskCard:
 class TaskLedger:
     """Manages TaskCards on disk. Survives any crash or compaction."""
 
-    TERMINAL_STATUSES = frozenset({"done", "failed", "closed", "cancelled", "obsolete"})
+    TERMINAL_STATUSES = TERMINAL_TASK_STATUSES
     EXPLICIT_TERMINAL_STATUSES = frozenset({"cancelled", "obsolete"})
 
     def __init__(self, tasks_dir: Optional[str] = None):
@@ -868,12 +872,15 @@ class TaskLedger:
     # hub restarts (plain JSON cards like every other card) and are the
     # pool the idle supervisor pulls from when the coordinator goes idle.
 
-    def _mutate_locked(self, task_id: str, mutator) -> Optional[TaskCard]:
+    def _mutate_locked(
+        self, task_id: str, mutator, *, return_unchanged: bool = False
+    ) -> Optional[TaskCard]:
         """Apply ``mutator`` to a card under its advisory file lock.
 
         The lock covers load AND save, so read-modify-write sequences like
         claim are atomic across processes. The mutator returns True to
         persist the mutation, or None/False to leave the card untouched.
+        When requested, the current card is returned for an unchanged result.
         """
         path = self._task_path(task_id)
         if not path.exists():
@@ -887,6 +894,8 @@ class TaskLedger:
             if mutator(card) is True:
                 card.updated_at = time.time()
                 self._write_json_atomic(path, card.to_dict())
+                return card
+            if return_unchanged:
                 return card
         return None
 
@@ -1138,13 +1147,15 @@ class TaskLedger:
         reason: str,
         actor: str = "",
         message_id: str = "",
+        preserve_active: bool = False,
     ) -> Optional[TaskCard]:
         """Move a task to an audited, non-cron terminal state.
 
         Terminalization is idempotent: a stale or duplicate directive cannot
         reopen a finished task or append duplicate audit checkpoints. The
         reason is mandatory so the task does not disappear without an
-        explanation.
+        explanation. When ``preserve_active`` is true, the active-state guard
+        and terminalization are serialized with concurrent claims.
         """
         status = (status or "").strip().lower()
         reason = (reason or "").strip()
@@ -1153,29 +1164,49 @@ class TaskLedger:
         if not reason:
             raise ValueError("terminalization reason is required")
 
-        card = self._load(task_id)
-        if not card:
-            return None
-        if card.status in self.TERMINAL_STATUSES:
-            return card
+        def _apply_terminalization(card: TaskCard) -> None:
+            card.status = status
+            card.cron_active = False
+            card.snoozed_until = 0
+            card.terminal_reason = reason
+            card.terminal_actor = actor or None
+            card.terminal_message_id = message_id or None
+            card.terminalized_at = time.time()
+            card.add_checkpoint(
+                f"task {status}: {reason}",
+                {
+                    "status": status,
+                    "reason": reason,
+                    "actor": actor,
+                    "message_id": message_id,
+                },
+            )
 
-        card.status = status
-        card.cron_active = False
-        card.snoozed_until = 0
-        card.terminal_reason = reason
-        card.terminal_actor = actor or None
-        card.terminal_message_id = message_id or None
-        card.terminalized_at = time.time()
-        card.add_checkpoint(
-            f"task {status}: {reason}",
-            {
-                "status": status,
-                "reason": reason,
-                "actor": actor,
-                "message_id": message_id,
-            },
-        )
-        self._save(card)
+        if preserve_active:
+            terminalized = False
+
+            def _terminalize_unless_active(card: TaskCard) -> bool:
+                nonlocal terminalized
+                if card.status in self.TERMINAL_STATUSES or card.status == "active":
+                    return False
+                _apply_terminalization(card)
+                terminalized = True
+                return True
+
+            card = self._mutate_locked(
+                task_id, _terminalize_unless_active, return_unchanged=True
+            )
+            if card is None or not terminalized:
+                return card
+        else:
+            card = self._load(task_id)
+            if not card:
+                return None
+            if card.status in self.TERMINAL_STATUSES:
+                return card
+            _apply_terminalization(card)
+            self._save(card)
+
         self._resolve_replies_for_task(
             card.id,
             terminal_status=status,

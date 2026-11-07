@@ -51,7 +51,13 @@ def test_append_queued_behind_rewrite_does_not_write_into_replaced_session(
 
         release_rewrite.set()
         await rewriter
-        await append_task
+        # The dropped row was not written, so the writer raises (#580).
+        try:
+            await append_task
+        except OSError:
+            pass
+        else:
+            raise AssertionError("append for a replaced session returned normally")
 
         # The old-session row must NOT land in the new session's file.
         new_rows = (
