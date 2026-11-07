@@ -559,13 +559,18 @@ class PresenceManager:
         return [a for a in agents if not a.solo]
 
     def discover_agents(
-        self, include_self: bool = False, include_solo: bool = False
+        self,
+        include_self: bool = False,
+        include_solo: bool = False,
+        include_busy: bool = False,
     ) -> List[AgentRuntime]:
         """Scan presence directory for live agents.
 
         Validates PID liveness AND socket connectivity.
         Both must pass - a live pid with a dead socket is not a peer, and its
         files go only once the owner is provably gone (see _owner_gone).
+        ``include_busy`` also lists a live pid whose socket does not answer
+        yet (stuck on a long turn): identity claims must see it as the holder.
         """
         agents = []
         for f in _presence_files(self._presence_dir):
@@ -593,7 +598,10 @@ class PresenceManager:
                 # Stale heartbeat -- verify socket is actually responding
                 if agent.socket_path and not self._socket_responds(agent.socket_path):
                     if not _owner_gone(agent):
-                        continue  # busy or stuck: not a peer right now, its files stay
+                        # busy or stuck: not a peer right now, its files stay
+                        if include_busy:
+                            agents.append(agent)
+                        continue
                     logger.info(
                         f"Cleaning stale agent: {f.stem} (owner gone, socket dead)"
                     )
