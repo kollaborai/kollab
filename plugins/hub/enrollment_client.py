@@ -3059,11 +3059,14 @@ class EnrollmentIssuer:
             raise EnrollmentProtocolError("conflict")
         try:
             discovery_origin = urlsplit(discovery.origin)
-            if discovery_origin.scheme != "https" or not discovery_origin.hostname:
-                raise EnrollmentProtocolError("unavailable")
             port = discovery_origin.port
         except ValueError as exc:
             raise EnrollmentProtocolError("unavailable") from exc
+        if discovery_origin.scheme != "https" or not discovery_origin.hostname:
+            raise EnrollmentProtocolError(
+                "unavailable",
+                refusal="This relay address is not https. Device codes only work on https port 443.",
+            )
         if port not in (None, 443):
             raise EnrollmentProtocolError(
                 "unavailable", refusal=ORIGIN_PORT_REFUSAL.format(port=port)

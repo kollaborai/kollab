@@ -819,3 +819,14 @@ async def test_allow_discovery_origin_rejects_empty_and_no_config():
     plugin.config = _FakeConfig()
     assert plugin._allow_discovery_origin("", ["10.0.0.0/8"]) is False
     assert plugin._allow_discovery_origin("*", []) is False
+
+
+def test_a_refused_code_shows_the_refusal_line_not_the_bare_failure():
+    """#693: a failed code shows why it was refused, not only "could not create a code"."""
+    from plugins.altview.connect_altview import ConnectScreenState, _code_value
+
+    reason = "This relay address uses port 8443. Device codes only work on https port 443."
+    refused = ConnectScreenState(code_status="failed", code_reason=reason)
+    assert _code_value(refused) == reason
+    bare = ConnectScreenState(code_status="failed")
+    assert "could not create a code" in _code_value(bare)
