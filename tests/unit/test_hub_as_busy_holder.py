@@ -92,10 +92,12 @@ async def test_implicit_identity_skips_busy_agent(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_explicit_as_reclaims_identity_of_agent_gone_for_good(tmp_path, monkeypatch):
-    """A holder silent past the grace window is stale: its identity is free."""
-    holder_file = _busy_holder(
-        tmp_path, monkeypatch, heartbeat_age=PresenceManager.LIVE_PID_GRACE_SECONDS + 60
-    )
+    """A replaced process no longer holds the recorded owner's identity."""
+    holder_file = _busy_holder(tmp_path, monkeypatch)
+    data = json.loads(holder_file.read_text())
+    data["start_token"] = "original-owner"
+    holder_file.write_text(json.dumps(data))
+    monkeypatch.setattr("plugins.hub.presence.process_start_token", lambda pid: "replacement-process")
     plugin = _plugin(as_identity="jasper")
 
     with patch("os._exit") as mock_exit:
