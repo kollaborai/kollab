@@ -25,6 +25,7 @@ session management:
   <terminal-status>*</terminal-status>              # list all sessions
   <terminal-status>dev</terminal-status>            # check specific session
   <terminal-output lines="50">dev</terminal-output> # capture recent output
+  <terminal-send><session_name>dev</session_name><text>y</text></terminal-send>
   <terminal-kill>dev</terminal-kill>                # kill session
   <terminal-kill>*</terminal-kill>                  # kill all managed sessions
 
@@ -32,7 +33,8 @@ typical workflow:
   1. start background: <terminal background="true" name="dev">npm run dev</terminal>
   2. check status:     <terminal-status>dev</terminal-status>
   3. view output:      <terminal-output>dev</terminal-output>
-  4. clean up:         <terminal-kill>dev</terminal-kill>
+  4. send input:       <terminal-send><session_name>dev</session_name><text>y</text></terminal-send>
+  5. clean up:         <terminal-kill>dev</terminal-kill>
 
 user can view live: /terminal view dev (interactive with keyboard)
 

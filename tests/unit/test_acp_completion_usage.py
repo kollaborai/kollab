@@ -97,7 +97,7 @@ async def test_result_usage_survives_persistence_failure_and_cancellation(tmp_pa
         history = asyncio.get_running_loop().create_future()
         if failure == "user_history":
             history.set_exception(OSError("user history failed"))
-        orch._user_history_tasks["request"] = history
+        orch._turn_user_tasks[(1, 1)] = history
     admission.future.set_result(result())
     task = asyncio.create_task(orch._complete(admission))
     if failure == "cancel_history":
@@ -117,18 +117,21 @@ async def test_result_usage_survives_persistence_failure_and_cancellation(tmp_pa
     assert llm.session_stats["total_output_tokens"] == engine.total_output_tokens == 143
     assert llm.session_stats["total_cache_read_tokens"] == 77184
     assert engine.acp_turn_usage == USAGE
-    if failure == "none":
+    # A user or reply row that never reached the file is logged; the finished
+    # reply is kept either way (#580).
+    survives = failure in {"none", "user_history", "history"}
+    if survives:
         assert outcome["stop_reason"] == "end_turn"
     elif failure in {"cancel_history", "cancel_user_history"}:
         assert outcome["stop_reason"] == "cancelled"
     else:
         assert outcome["stop_reason"] == "error"
-    if failure != "none":
+    if not survives:
         assert outcome["end_frame"]["outcome"] == "failed"
         assert outcome["end_frame"]["acp_turn_usage"] == USAGE
     hub.on_acp_completion.assert_awaited_once()
     assert hub.on_acp_completion.await_args.kwargs["end_frame"]["acp_turn_usage"] == USAGE
-    assert hub.on_acp_completion.await_args.kwargs["failed"] is (failure != "none")
+    assert hub.on_acp_completion.await_args.kwargs["failed"] is (not survives)
 
     local = LocalStateService(llm_service=llm, profile_manager=None)
     class RPC:

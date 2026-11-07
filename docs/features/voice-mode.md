@@ -58,6 +58,7 @@ latest transcript. The web UI shows the same line above the message box while
 - `/voice off` releases its microphone lease and cancels unplayed speech.
 - `/voice status` shows the service and the code it runs, owner, devices, transcript and queues.
 - `/voice retry` retries now. Voice also retries on its own (see Recovery).
+- `/voice dismiss` clears spoken requests whose delivery outcome is unknown after a restart. Voice never resends these; `/voice status` lists them.
 - `/voice context` shows the transcript window sent with each request (default 10 lines).
 - `/voice context 20` changes it to 20 lines; the allowed range is 1–50.
 - `/voice enroll` saves your voiceprint from your next 30 seconds of speech; `/voice

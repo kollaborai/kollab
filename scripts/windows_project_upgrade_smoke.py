@@ -97,7 +97,16 @@ def seed_and_read(kollab, home, project, env):
     assert permissions._acp_project_grants == {"acp:saved-grant"}
     binding_store = ACPBindingStore(config_utils.get_project_data_dir() / "acp" / "sessions")
     assert binding_store.load("upgrade-conversation") == binding
-    assert LocalAgentDirectory().agents(project), "the upgraded workspace's live Hub presence is missing"
+    # The presence record that makes --hub status online precedes the final,
+    # socket-advertising publish by design (#692): the advertised socket must
+    # answer a handshake first. Poll for the live directory entry under the
+    # same deadline discipline as the status wait instead of asserting
+    # one-shot in the startup window.
+    wait_until(
+        lambda: LocalAgentDirectory().agents(project),
+        120,
+        "the upgraded workspace's live Hub presence",
+    )
     vault = AgentVault("upgrade")
     assert vault.get_recent_stream()[0]["content"] == "saved vault"
     assert CrystalStore(vault.global_vault_dir).load()[0].summary == "Retained memory"

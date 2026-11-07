@@ -97,7 +97,7 @@ async def test_a_refused_origin_says_why_instead_of_a_bare_failure():
     plugin, _seen = _daemon()
 
     async def refuse(domain):
-        raise EnrollmentProtocolError("unavailable", reason=reason)
+        raise EnrollmentProtocolError("unavailable", refusal=reason)
 
     plugin._relay_agent = SimpleNamespace(create_enrollment_offer=refuse)
     result = await plugin._run_connect_enrollment_offer("relay.example.test")

@@ -104,22 +104,25 @@ ENROLLMENT_LOOKUP_PATH = "/relay/v1/enrollment/lookup"
 
 
 class EnrollmentProtocolError(ValueError):
-    """A safe fixed enrollment-protocol failure code."""
+    """A safe fixed enrollment-protocol failure code.
 
-    def __init__(
-        self,
-        code: str,
-        *,
-        retry_after_seconds: float | None = None,
-        reason: str = "",
-    ):
+    `refusal` is an optional person-facing line naming the local cause (#693).
+    It is built from fixed text and our own parsed values, never from exception
+    text, and it never carries a join code.
+    """
+
+    def __init__(self, code: str, *, retry_after_seconds: float | None = None, refusal: str = ""):
         local_codes = {"transport", "invalid_response", "session_changed", "internal", "network_mismatch"}
         self.code = code if code in _ALLOWED_ERRORS | local_codes else "transport"
         self.retry_after_seconds = retry_after_seconds
-        # A fixed, local line for the person about why this machine refused
-        # (#693). Never network text, never a code: the wire code stays as is.
-        self.reason = reason
+        self.refusal = refusal if isinstance(refusal, str) else ""
         super().__init__(self.code)
+
+
+# Why an offer is refused before any relay request is sent (#693). Enrollment
+# works only on the standard HTTPS port; the operator must see that, not a bare
+# "could not create a code".
+ORIGIN_PORT_REFUSAL = "Enrollment needs port 443, but this network's origin uses port {port}."
 
 
 def _parse_retry_after(value: str | None) -> float | None:
@@ -3056,21 +3059,17 @@ class EnrollmentIssuer:
             raise EnrollmentProtocolError("conflict")
         try:
             discovery_origin = urlsplit(discovery.origin)
+            port = discovery_origin.port
         except ValueError as exc:
             raise EnrollmentProtocolError("unavailable") from exc
         if discovery_origin.scheme != "https" or not discovery_origin.hostname:
             raise EnrollmentProtocolError(
                 "unavailable",
-                reason="This relay address is not https. Device codes only work on https port 443.",
+                refusal="This relay address is not https. Device codes only work on https port 443.",
             )
-        if discovery_origin.port not in (None, 443):
-            # The port is an int from urlsplit; nothing else from the origin is shown.
+        if port not in (None, 443):
             raise EnrollmentProtocolError(
-                "unavailable",
-                reason=(
-                    f"This relay address uses port {discovery_origin.port}. "
-                    "Device codes only work on https port 443, so serve this network on 443."
-                ),
+                "unavailable", refusal=ORIGIN_PORT_REFUSAL.format(port=port)
             )
         manager = getattr(bridge.plugin, "_dns_identity", None)
         identity = bridge.identity
