@@ -2021,6 +2021,13 @@ class QueueProcessor:
                     f"cache_write={cache_creation_tokens}, cache_read={cache_read_tokens}"
                 )
 
+            # "none" means the provider reported no counts at all, so readers
+            # must not treat the zeros as measured usage (usage ledger, #723).
+            if prompt_tokens or completion_tokens or cache_read_tokens or cache_creation_tokens:
+                usage_source = "estimated" if usage_is_estimated else "provider"
+            else:
+                usage_source = "none"
+
             # Emit LLM_REQUEST_POST with actual token data
             # Also read from session_stats which may have been set by streaming
             final_in = prompt_tokens or self.session_stats.get("input_tokens", 0)
@@ -2029,11 +2036,13 @@ class QueueProcessor:
                 EventType.LLM_REQUEST_POST,
                 {
                     "model": getattr(self.api_service, "model", "unknown"),
+                    "provider": getattr(self.api_service, "provider_type", "") or "",
                     "message_count": len(self.conversation_history),
                     "input_tokens": final_in,
                     "output_tokens": final_out,
                     "cache_creation_tokens": cache_creation_tokens,
                     "cache_read_tokens": cache_read_tokens,
+                    "usage_source": usage_source,
                     "cost_usd": self.session_stats.get("cost_usd", 0.0),
                     "total_cost_usd": self.session_stats.get("total_cost_usd", 0.0),
                     "input_tokens_estimated": bool(
