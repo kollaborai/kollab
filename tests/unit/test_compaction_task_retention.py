@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -471,6 +471,48 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
         and call.args[1] == MAX_PRESERVED_HUB_TASK_MESSAGES
         for call in info.call_args_list
     )
+
+
+def test_emergency_rollover_empty_open_state_clears_prior_item() -> None:
+    valid_sha = "a1b2c3d4e5f6"
+    old_summary = Message(
+        content=(
+            "Prior summary\n=== OPEN STATE ===\n"
+            f"- PR #824 | owner: operator | head SHA: {valid_sha} | "
+            "verdict: pending | next: await review"
+        ),
+        metadata={"context_compaction": True},
+    )
+    empty_summary = Message(
+        content="Updated summary\n=== OPEN STATE ===",
+        metadata={"context_compaction": True},
+    )
+    history = [
+        Message(role="system", content="system instructions"),
+        old_summary,
+        empty_summary,
+        Message(role="user", content="latest input"),
+    ]
+    plugin = _plugin()
+    plugin._get_conversation_history = MagicMock(return_value=history)
+    plugin._keep_recent_count = MagicMock(return_value=1)
+    plugin._find_split_point = MagicMock(return_value=3)
+    plugin._get_live_task_ids = MagicMock(return_value=set())
+    plugin._extract_preservable_messages = MagicMock(return_value=([], []))
+    plugin._build_emergency_summary = MagicMock(return_value="Recovery summary without state.")
+    plugin._build_compacted_history = MagicMock(return_value=[])
+    plugin._get_current_session_id = MagicMock(return_value="session")
+    plugin._apply_pending_compaction = AsyncMock()
+    plugin._log_compaction_event = AsyncMock()
+    plugin._effective_prompt_tokens = MagicMock(return_value=0)
+    plugin._compaction_round = 0
+    plugin._last_summarization_model = None
+
+    result = asyncio.run(plugin._rollover_with_summary({}, None, boundary="turn"))
+
+    assert result is True
+    plugin._build_compacted_history.assert_called_once()
+    assert plugin._build_compacted_history.call_args.kwargs["open_state"] == ""
 
 
 def test_emergency_summary_prioritizes_request_and_filters_stale_tasks() -> None:

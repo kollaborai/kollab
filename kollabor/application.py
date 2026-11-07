@@ -15,7 +15,12 @@ from kollabor_agent import AgentManager
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_ai import KollaborConversationLogger, ProfileManager
-from kollabor_ai.loadout_manager import InvalidACPLoadoutError, acp_loadout_model, validate_acp_loadout
+from kollabor_ai.loadout_manager import (
+    InvalidACPLoadoutError,
+    acp_loadout_model,
+    loadout_sendable_effort,
+    validate_acp_loadout,
+)
 from kollabor_config import ConfigService, local_ipc
 from kollabor_events import EventBus
 from kollabor_events.dict_utils import deep_merge
@@ -349,8 +354,11 @@ class TerminalLLMChat:
                         }
                         if loadout.temperature is not None:
                             update_kwargs["temperature"] = loadout.temperature
-                        if loadout.effort:
-                            update_kwargs["effort"] = loadout.effort
+                        loadout_effort = loadout_sendable_effort(
+                            self.profile_manager, loadout
+                        )
+                        if loadout_effort:
+                            update_kwargs["effort"] = loadout_effort
                         if loadout.max_tokens is not None:
                             update_kwargs["max_tokens"] = loadout.max_tokens
                         applied = self.profile_manager.update_profile(
@@ -400,8 +408,13 @@ class TerminalLLMChat:
                     update_kwargs = {"model": loadout.model, "save_to_config": False}
                     if not is_acp_loadout and loadout.temperature is not None:
                         update_kwargs["temperature"] = loadout.temperature
-                    if not is_acp_loadout and loadout.effort:
-                        update_kwargs["effort"] = loadout.effort
+                    loadout_effort = (
+                        ""
+                        if is_acp_loadout
+                        else loadout_sendable_effort(self.profile_manager, loadout)
+                    )
+                    if loadout_effort:
+                        update_kwargs["effort"] = loadout_effort
                     if not is_acp_loadout and loadout.max_tokens is not None:
                         update_kwargs["max_tokens"] = loadout.max_tokens
 

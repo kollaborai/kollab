@@ -2336,6 +2336,32 @@ class TestLoggingRedactorAllPatterns(unittest.TestCase):
         # Note: OpenAI pattern matches first, so it shows as OPENAI-KEY
         self.assertIn("[REDACTED", redacted)
 
+    def test_redact_google_api_key_pattern(self):
+        """Test redacting a full-length Google API key."""
+        google_key = "AIza" + "x" * 35
+        redacted = LoggingRedactor.redact(f"Google key: {google_key}")
+
+        self.assertNotIn(google_key, redacted)
+        self.assertIn("[REDACTED-GOOGLE-API-KEY]", redacted)
+
+    def test_google_api_key_pattern_rejects_partial_and_embedded_values(self):
+        """Only a complete standalone Google key is treated as a credential."""
+        short_key = "AIza" + "x" * 34
+        long_key = "AIza" + "x" * 36
+        embedded_key = "prefix" + "AIza" + "x" * 35 + "suffix"
+        text = f"AIza is a prefix, not a key: {short_key} {long_key} {embedded_key}"
+
+        self.assertEqual(LoggingRedactor.redact(text), text)
+
+    def test_google_api_key_pattern_preserves_other_provider_redaction(self):
+        """Other provider keys still use their existing redaction pattern."""
+        openai_key = "sk-" + "o" * 24
+        redacted = LoggingRedactor.redact(f"OpenAI key: {openai_key}")
+
+        self.assertNotIn(openai_key, redacted)
+        self.assertIn("[REDACTED-OPENAI-KEY]", redacted)
+        self.assertNotIn("[REDACTED-GOOGLE-API-KEY]", redacted)
+
     def test_redact_multiple_keys_in_string(self):
         """Test multiple keys in same string are redacted."""
         text = "OpenAI: sk-example-openai-redaction-0000, Anthropic: sk-ant-example-anthropic-key-0000"

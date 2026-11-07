@@ -95,6 +95,12 @@ client as patches), `cancelled_event`, `is_cancelled`.
 
 `ToolCallController`: `append_args_text`, `set_result`.
 
+At `turn_complete`, replace provisional streamed row IDs with `history-<index>` only
+when the complete ordered role/content alignment to refreshed history is unique.
+If no full match exists or duplicate history content makes the mapping ambiguous,
+keep the provisional IDs and set `state.synced` to `null`; never claim a snapshot
+watermark based on a guessed duplicate.
+
 **Keep a `dict[tool_id, ToolCallController]` for the duration of a run** — `tool_start`
 and `tool_result` arrive as separate events and you need the same controller for both.
 
