@@ -71,8 +71,9 @@ in `docs/product-ready-checklist.md`.
   configuration behavior; otherwise give a specific N/A reason.
 - [ ] A Learn entry is added or updated for a user-facing change; otherwise
   give a specific N/A reason.
-- [ ] A plain-language entry is added under the `Unreleased` section of
-  `CHANGELOG.md`.
+- [ ] A plain-language changelog entry is added as
+  `changes/<issue>.<section>.md` (see `changes/README.md`). `CHANGELOG.md`
+  itself changes only in release PRs.
 - [ ] New or changed settings, flags, and commands are documented with examples;
   otherwise give a specific N/A reason.
 - [ ] External setup such as router, VPN, or key configuration is documented

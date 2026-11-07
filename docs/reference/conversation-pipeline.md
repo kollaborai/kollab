@@ -156,7 +156,8 @@ Triggered on every user keystroke (Enter).
       |     updates current_parent_uuid
       |
       +-- _enqueue_with_overflow_strategy(message)
-      |     adds to message queue
+      |     adds to message queue; False when the overflow strategy dropped it,
+      |     and submit_human_input then answers rejected (input_not_queued)
       |
       +-- if not is_processing:
             create_background_task(_process_queue())

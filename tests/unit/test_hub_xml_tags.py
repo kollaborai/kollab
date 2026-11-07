@@ -329,6 +329,76 @@ def test_tags_with_no_required_attribute_keep_their_defaults():
     }
 
 
+def test_hub_queue_xml_preserves_explicit_refs_and_accepts_legacy_body_only():
+    pattern, extract = REGISTERED["hub_queue"]
+
+    explicit = extract(
+        pattern.search('<hub_queue upstream_refs="#123, #456">task body</hub_queue>')
+    )
+    legacy = extract(pattern.search("<hub_queue>legacy task body</hub_queue>"))
+
+    assert explicit == {
+        "task": "task body",
+        "upstream_refs": ["#123", "#456"],
+    }
+    assert legacy == {"task": "legacy task body", "upstream_refs": []}
+
+
+def test_hub_queue_xml_rejects_malformed_upstream_refs():
+    pattern, _ = REGISTERED["hub_queue"]
+
+    for value in ("", "#123,broken", "#123,"):
+        assert (
+            pattern.search(f'<hub_queue upstream_refs="{value}">task</hub_queue>')
+            is None
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_data, expected_refs",
+    [
+        ({"task": "close #123"}, []),
+        (
+            {"description": "follow up", "upstream_refs": ["#123", "#456"]},
+            ["#123", "#456"],
+        ),
+    ],
+)
+async def test_hub_queue_tool_forwards_only_explicit_upstream_refs(
+    tool_data, expected_refs
+):
+    hub = HubPlugin(event_bus=MagicMock())
+    hub._work_queue = MagicMock()
+    hub._work_queue.add.return_value = SimpleNamespace(id="slot-1")
+    hub._task_ledger = None
+    hub._identity = SimpleNamespace(project="project", identity="lapis")
+
+    result = await hub._handle_hub_queue_tool(tool_data)
+
+    assert result.success
+    hub._work_queue.add.assert_called_once_with(
+        task=tool_data.get("task", "") or tool_data.get("description", ""),
+        project="project",
+        queued_by="lapis",
+        upstream_refs=expected_refs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_hub_queue_tool_rejects_malformed_upstream_refs():
+    hub = HubPlugin(event_bus=MagicMock())
+    hub._work_queue = MagicMock()
+
+    result = await hub._handle_hub_queue_tool(
+        {"task": "follow up", "upstream_refs": ["not-a-ref"]}
+    )
+
+    assert not result.success
+    assert "upstream_refs" in result.error
+    hub._work_queue.add.assert_not_called()
+
+
 def test_crystal_tags_read_an_id_or_an_entry_id():
     for name in ("id", "entry_id"):
         assert _extract("crystal_delete", f'<crystal_delete {name}="c-1"/>') == {

@@ -10,19 +10,24 @@ on:
   # A push performed with GITHUB_TOKEN cannot trigger another workflow. The
   # post-auto-merge gate uses this explicit event to run CI against main.
   workflow_dispatch:
+  # The merge queue (#857) tests each queued PR merged onto the latest main, so
+  # the required checks must also report on the queue's merge-group commits.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
 
 jobs:
   tests:
-    name: ci/tests (${{ matrix.python-version }})
+    name: ci/tests (unit shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # 3.14 is the floor and the launch runtime.
         python-version: ["3.14"]
+        shard: [0, 1, 2, 3]
 
     steps:
       - uses: actions/checkout@v6
@@ -36,8 +41,103 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
-          # One cache per job. Jobs on the same image, Python and lockfile
-          # otherwise race to save one key ("Unable to reserve cache").
+          # Matrix legs need separate caches; otherwise they race to save one key.
+          cache-suffix: ${{ github.job }}-${{ matrix.shard }}
+
+      # Wheel/editable builds fail instead of substituting an older WebUI.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install workspace
+        run: uv sync --all-packages --extra dev
+
+      # Hash test files across the matrix. Split the high-latency network
+      # membership module by test item so one file can't dominate a shard.
+      # Keep the two parallel-sensitive tests serial in the support job (#470).
+      - name: Run unit test shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ strategy.job-total }}
+        run: |
+          set -euo pipefail
+          selected_files=$(find tests/unit -type f -name 'test_*.py' -print |
+            LC_ALL=C sort |
+            python -c '
+          import hashlib
+          import os
+          import sys
+
+          shard = int(sys.argv[1])
+          shard_count = int(sys.argv[2])
+          for path in sys.stdin.buffer:
+              path = path.rstrip(b"\n")
+              if path == b"tests/unit/test_network_members.py":
+                  continue
+              digest = hashlib.sha256(b"kollab-ci-tests:" + path).digest()
+              if int.from_bytes(digest[:4], "big") % shard_count == shard:
+                  print(os.fsdecode(path))
+          ' "$SHARD" "$SHARD_COUNT")
+          test_files=()
+          if [ -n "$selected_files" ]; then
+            mapfile -t test_files <<< "$selected_files"
+          fi
+
+          network_tests=()
+          if [ -f tests/unit/test_network_members.py ]; then
+            selected_network_tests=$(
+              uv run python -m pytest tests/unit/test_network_members.py --collect-only -q |
+                python -c '
+          import hashlib
+          import os
+          import sys
+
+          shard = int(sys.argv[1])
+          shard_count = int(sys.argv[2])
+          prefix = b"tests/unit/test_network_members.py::"
+          for nodeid in sys.stdin.buffer:
+              nodeid = nodeid.rstrip(b"\n")
+              if not nodeid.startswith(prefix):
+                  continue
+              digest = hashlib.sha256(b"kollab-ci-tests:" + nodeid).digest()
+              if int.from_bytes(digest[:4], "big") % shard_count == shard:
+                  print(os.fsdecode(nodeid))
+          ' "$SHARD" "$SHARD_COUNT"
+            )
+            if [ -z "$selected_network_tests" ]; then
+              echo "Network-membership shard $SHARD discovered no test items" >&2
+              exit 1
+            fi
+            mapfile -t network_tests <<< "$selected_network_tests"
+          fi
+
+          test_targets=("${test_files[@]}" "${network_tests[@]}")
+          if [ "${#test_targets[@]}" -eq 0 ]; then
+            echo "Unit-test shard $SHARD discovered no test targets" >&2
+            exit 1
+          fi
+          printf 'Shard %s selected %s files and %s network-membership test items\n' \
+            "$SHARD" "${#test_files[@]}" "${#network_tests[@]}"
+          uv run python -m pytest "${test_targets[@]}" -q -n auto \
+            --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle \
+            --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
+
+  supporting_tests:
+    name: ci/tests (support)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
           cache-suffix: ${{ github.job }}
 
       # Wheel/editable builds fail instead of substituting an older WebUI.
@@ -48,19 +148,8 @@ jobs:
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
-      # Run the whole unit suite, not a hand-listed subset. The old list named
-      # tests/unit/test_turn_runner_tool_loop.py, which was deleted with the
-      # turn_runner module in dca5e73 -- pytest then exited 4 ("collected 0
-      # items") and every other file in the list was skipped too, so CI
-      # reported failure without ever running a test. A directory can't rot
-      # that way. The two tests below have failed only under parallel load;
-      # keep them covered in a separate serial invocation until fixed (#470).
-      - name: Run unit tests in parallel
-        run: >-
-          uv run python -m pytest tests/unit/ -q -n auto
-          --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle
-          --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
-
+      # These two tests have failed only under parallel load; keep them serial
+      # until fixed (#470).
       - name: Run isolation-sensitive unit tests
         run: >-
           uv run python -m pytest -q
@@ -111,28 +200,27 @@ jobs:
       - name: Validate bundled Agent Skills layout
         run: uv run python scripts/validate_bundled_agent_skills.py
 
-  # The required "ci/tests" check must resolve under that EXACT name. Matrix
-  # legs report as "ci/tests (3.14)", which never matches, leaving a required
-  # rule stuck on "Expected, waiting". This aggregate job carries the exact
-  # name and mirrors the matrix verdict: the 3.14 leg must succeed. A skipped
-  # or cancelled matrix also fails the aggregate, so the check can never
-  # resolve green without the suite having run.
+  # Keep the exact required "ci/tests" check name expected by branch
+  # protection. It succeeds only when every unit shard and the support job do.
+  # !cancelled() makes the aggregate run after upstream failures or skips so
+  # the required check cannot resolve green without all tests running.
   required_tests:
     # The job ID cannot contain '/' (GitHub id charset), but the DISPLAY name
     # is free-form: this resolves as the check "ci/tests", which is the exact
     # name the required rule expects.
     name: ci/tests
-    needs: [tests]
+    needs: [tests, supporting_tests]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Fail unless the required matrix leg passed
+      - name: Fail unless every required test job passed
         env:
-          RESULT: ${{ needs.tests.result }}
+          UNIT_RESULT: ${{ needs.tests.result }}
+          SUPPORT_RESULT: ${{ needs.supporting_tests.result }}
         run: |
-          case "$RESULT" in
-            success) echo "ci/tests: required leg succeeded"; exit 0 ;;
-            *)       echo "ci/tests: required leg result was '$RESULT'"; exit 1 ;;
+          case "$UNIT_RESULT:$SUPPORT_RESULT" in
+            success:success) echo "ci/tests: all required test jobs succeeded"; exit 0 ;;
+            *) echo "ci/tests: unit shards result '$UNIT_RESULT'; support result '$SUPPORT_RESULT'"; exit 1 ;;
           esac
 
   standards-check:
@@ -141,6 +229,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # Depth 2 keeps the PR merge commit's parents, so the changelog check can diff against the base.
+          fetch-depth: 2
           persist-credentials: false
 
       - uses: actions/setup-python@v6
@@ -172,6 +262,20 @@ jobs:
         # PR here instead of surfacing as a false version-mismatch warning in
         # the web UI or a broken desktop release later.
         run: uv run python scripts/check_version_parity.py
+
+      - name: Check changelog entries
+        # Entries live in changes/<issue>.<section>.md, so two PRs never conflict on CHANGELOG.md
+        # (#855). A PR may not edit either changelog copy unless its branch starts with release/
+        # or changelog/. On a PR the checkout is the merge commit, so HEAD^1 is the base.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            uv run python scripts/changelog.py check --diff-base HEAD^1 --branch "$HEAD_BRANCH"
+          else
+            uv run python scripts/changelog.py check
+          fi
 
   security-scan:
     name: ci/security-scan
