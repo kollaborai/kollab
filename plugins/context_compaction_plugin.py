@@ -20,9 +20,10 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
-from kollabor_ai.conversation_logger import utc_stamp
+from kollabor_ai.conversation_logger import _session_file_write_lock_path, utc_stamp
 from kollabor_ai.fast_model import resolve_fast_model
 from kollabor_config.config_utils import resolve_global_path
+from kollabor_config.file_lock import locked_file
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import CommandCategory, CommandDefinition, SubcommandInfo
@@ -30,6 +31,15 @@ from kollabor_plugins import BasePlugin
 from kollabor_tui.display_tap import publish_semantic
 
 logger = logging.getLogger(__name__)
+
+
+def _session_write_lock(target: Any):
+    """Hold the session JSONL's write lock, which the logger's appends and voice rewrites share (#834).
+
+    A voice rewrite copies the transcript's tail and swaps the file under this lock; an append
+    made without it can land between the copy and the swap and be lost.
+    """
+    return locked_file(_session_file_write_lock_path(Path(target)), "a+", private=True)
 
 
 def _append_jsonl_durable(target: str, record: Dict[str, Any]) -> Optional[str]:
@@ -45,7 +55,7 @@ def _append_jsonl_durable(target: str, record: Dict[str, Any]) -> Optional[str]:
     line = json.dumps(record) + "\n"
     for attempt in range(2):
         try:
-            with open(target, "a") as f:
+            with _session_write_lock(target), open(target, "a") as f:
                 f.write(line)
                 f.flush()
                 os.fsync(f.fileno())
@@ -4211,7 +4221,7 @@ class ContextCompactionPlugin(BasePlugin):
         }
 
         try:
-            with open(session_file, "a") as f:
+            with _session_write_lock(session_file), open(session_file, "a") as f:
                 f.write(json.dumps(record) + "\n")
             logger.debug(
                 f"Logged checkpoint event for round {next_round}"

@@ -99,7 +99,7 @@ kollab --llm openai --model gpt-5.6-luna --effort max
 |---|---|---|
 | `--llm` | provider profile **or** loadout name | profile first, then loadout (exact → unique substring), same order as C7.2.1 |
 | `--model` | model id | applied over whatever `--llm` selected |
-| `--effort` | one of `low, medium, high, xhigh, max, ultra` | `EFFORT_LEVELS`, `profile_manager.py:37` |
+| `--effort` | one of `none, minimal, low, medium, high, xhigh, max, ultra` | `EFFORT_LEVELS` in `profile_manager.py` |
 
 **Rules**
 

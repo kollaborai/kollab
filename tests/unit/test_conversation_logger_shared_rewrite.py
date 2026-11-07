@@ -18,6 +18,24 @@ def _records(path: Path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
+def _child_env():
+    """Make subprocess writers import the source tree under test."""
+    repo_root = Path(__file__).resolve().parents[2]
+    source_paths = [
+        repo_root / "packages" / "kollabor-ai" / "src",
+        repo_root / "packages" / "kollabor-config" / "src",
+    ]
+    pythonpath = os.pathsep.join(str(path) for path in source_paths)
+    inherited_pythonpath = os.environ.get("PYTHONPATH")
+    if inherited_pythonpath:
+        pythonpath = f"{pythonpath}{os.pathsep}{inherited_pythonpath}"
+    return {
+        **os.environ,
+        "KOLLAB_NO_KEYRING": "1",
+        "PYTHONPATH": pythonpath,
+    }
+
+
 def _same_session(tmp_path: Path):
     first = KollaborConversationLogger(tmp_path / "conversations")
     second = KollaborConversationLogger(tmp_path / "conversations")
@@ -90,7 +108,10 @@ async def test_another_process_threads_past_a_reply_this_one_cut(tmp_path):
     out = subprocess.run(
         [sys.executable, "-c", script, str(tmp_path / "conversations"),
          str(first.session_file), first.session_id, voice],
-        capture_output=True, text=True, check=True, env={**__import__("os").environ, "KOLLAB_NO_KEYRING": "1"},
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_child_env(),
     )
 
     child = out.stdout.strip().splitlines()[-1]
@@ -194,6 +215,140 @@ async def test_a_row_another_logger_appends_while_the_cut_is_built_is_threaded_p
     assert voice not in by_uuid
     assert by_uuid[appended[0]]["parentUuid"] == root  # not the removed reply
 
+async def test_append_from_another_process_between_tail_copy_and_swap_is_preserved(
+    tmp_path, monkeypatch
+):
+    import time
+
+    first, _ = _same_session(tmp_path)
+    root = await first.log_user_message("hi", parent_uuid=None)
+    voice = await first.log_assistant_message(
+        "sunny", root, voice_turn_id="turn-1"
+    )
+    ready = tmp_path / "append-ready"
+    script = textwrap.dedent(
+        """
+        import asyncio, sys
+        from pathlib import Path
+        from kollabor_ai.conversation_logger import KollaborConversationLogger
+
+        async def main(conv, session_file, session_id, parent, ready_file):
+            log = KollaborConversationLogger(Path(conv))
+            log.session_id, log.session_file = session_id, Path(session_file)
+            Path(ready_file).write_text("ready")
+            print(await log.log_user_message("late append", parent_uuid=parent), flush=True)
+
+        asyncio.run(main(*sys.argv[1:]))
+        """
+    )
+    real_replace = os.replace
+    child_state = {}
+
+    def start_writer_after_tail_copy(source, destination):
+        if Path(destination) == first.session_file:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    script,
+                    str(first.session_file.parent),
+                    str(first.session_file),
+                    first.session_id,
+                    voice,
+                    str(ready),
+                ],
+                cwd=Path.cwd(),
+                env=_child_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            child_state["process"] = process
+            deadline = time.monotonic() + 5
+            while (
+                not ready.exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            assert ready.exists(), "second process did not reach the append boundary"
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(
+        "kollabor_ai.conversation_logger.os.replace", start_writer_after_tail_copy
+    )
+    try:
+        assert await first.rewrite_voice_turn("turn-1", 1, {0: None}) == {voice: root}
+        process = child_state["process"]
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        process = child_state.get("process")
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate()
+
+    assert process.returncode == 0, stderr
+    appended = stdout.strip().splitlines()[-1]
+    by_uuid = {
+        record["uuid"]: record
+        for record in _records(first.session_file)
+        if record.get("uuid")
+    }
+    assert voice not in by_uuid
+    assert appended in by_uuid, "an append after tail copy must not be lost at the swap"
+    assert by_uuid[appended]["parentUuid"] == root
+
+
+async def test_concurrent_session_snapshot_save_waits_for_voice_rewrite(
+    tmp_path, monkeypatch
+):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from kollabor_ai.conversation_manager import ConversationManager
+
+    first, _ = _same_session(tmp_path)
+    root = await first.log_user_message("hi", parent_uuid=None)
+    voice = await first.log_assistant_message(
+        "sunny", root, voice_turn_id="turn-1"
+    )
+    config = SimpleNamespace(
+        _conversations_dir=first.session_file.parent,
+        get=lambda key, default=None: default,
+    )
+    manager = ConversationManager(config, first)
+    manager.messages = [{"role": "user", "content": "snapshot-payload"}]
+    executor = ThreadPoolExecutor(max_workers=1)
+    state = {}
+    real_replace = os.replace
+
+    def save_before_swap(source, destination):
+        if Path(destination) == first.session_file:
+            state["future"] = executor.submit(
+                manager.save_session, first.session_id
+            )
+            deadline = time.monotonic() + 2
+            while not state["future"].done() and time.monotonic() < deadline:
+                time.sleep(0.01)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("kollabor_ai.conversation_logger.os.replace", save_before_swap)
+    try:
+        assert await first.rewrite_voice_turn("turn-1", 1, {0: None}) == {voice: root}
+        assert state["future"].result(timeout=5)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    saved = _records(first.session_file)
+    assert len(saved) == 1
+    assert saved[0].get("messages") == manager.messages
+
+
 async def test_short_sidecar_write_rollback_preserves_prior_rewrite_mapping(
     tmp_path, monkeypatch
 ):
@@ -272,3 +427,50 @@ async def test_explicit_historical_append_threads_past_that_sessions_cut(tmp_pat
     }
     assert dropped not in by_uuid
     assert by_uuid[child]["parentUuid"] == root
+
+
+@pytest.mark.parametrize("writer", ["summary", "checkpoint"])
+async def test_compaction_record_written_during_the_swap_is_preserved(tmp_path, monkeypatch, writer):
+    """Compaction's own appends must wait for the rewrite's tail copy and swap (#834)."""
+    import threading
+    from types import SimpleNamespace
+
+    from plugins.context_compaction_plugin import ContextCompactionPlugin, _append_jsonl_durable
+
+    log, _ = _same_session(tmp_path)
+    root = await log.log_user_message("hi", parent_uuid=None)
+    voice = await log.log_assistant_message("sunny", root, voice_turn_id="turn-1")
+
+    def append() -> None:
+        if writer == "summary":
+            _append_jsonl_durable(
+                str(log.session_file),
+                {"type": "compaction_summary", "uuid": "compaction-1", "sessionId": log.session_id},
+            )
+        else:
+            plugin = SimpleNamespace(_conversation_logger=log, _compaction_round=0)
+            ContextCompactionPlugin._log_checkpoint_event(plugin, "checkpoint-1.json", 2)
+
+    real_replace = os.replace
+    threads = []
+
+    def compaction_writes_during_swap(source, destination):
+        if Path(destination) == log.session_file:
+            appended = threading.Event()
+            thread = threading.Thread(target=lambda: (append(), appended.set()))
+            thread.start()
+            threads.append(thread)
+            appended.wait(0.5)  # an unlocked append lands at once; a locked one waits for the swap
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("kollabor_ai.conversation_logger.os.replace", compaction_writes_during_swap)
+    assert await log.rewrite_voice_turn("turn-1", 1, {0: None}) == {voice: root}
+    for thread in threads:
+        thread.join(5)
+    assert threads and not any(thread.is_alive() for thread in threads)
+
+    records = _records(log.session_file)
+    if writer == "summary":
+        assert any(record.get("uuid") == "compaction-1" for record in records)
+    else:
+        assert any(record.get("checkpoint_file") == "checkpoint-1.json" for record in records)

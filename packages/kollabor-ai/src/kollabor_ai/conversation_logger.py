@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 import tomllib
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from importlib.metadata import version as get_version
@@ -22,12 +23,48 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from kollabor_ai.session_naming import generate_session_name
-from kollabor_config.file_lock import locked_file
+from kollabor_config.file_lock import locked_file, try_lock
 
 logger = logging.getLogger(__name__)
 
 # Bound for the one-time tighten walk over an existing conversations tree.
 _TIGHTEN_ENTRY_LIMIT = 4096
+
+
+def _session_file_write_lock_path(session_file: Path) -> Path:
+    """Return the stable hidden lock path shared by JSONL writers."""
+    path = Path(session_file)
+    return path.with_name(f".{path.name}.write.lock")
+
+
+def _session_file_rewrite_lock_path(session_file: Path) -> Path:
+    """Return the stable hidden lock path for rewrites and full snapshots.
+
+    These lock files must not be unlinked while a session may still have writers:
+    waiters need to open the same inode even while the JSONL is atomically replaced.
+    """
+    path = Path(session_file)
+    return path.with_name(f".{path.name}.rewrite.lock")
+
+
+@asynccontextmanager
+async def _async_session_file_lock(lock_path: Path):
+    """Acquire a cross-process lock without blocking the event loop while waiting."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(
+        lock_path,
+        os.O_CREAT
+        | os.O_RDWR
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        while not try_lock(fd):
+            await asyncio.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
 
 
 def utc_stamp(moment: Optional[datetime] = None) -> str:
@@ -438,51 +475,49 @@ class KollaborConversationLogger:
         # their session_id above.
         bound_file = self.session_file
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
-            if own and self.session_file != bound_file:
-                # The session was replaced while this append waited. The row
-                # belongs to the captured session only: do not write it into
-                # the replaced session's transcript. It was not written, so
-                # raise like every other not-written case (#580) instead of
-                # returning an id for a row that is on no disk.
-                logger.warning(
-                    "dropped a %s JSONL append: session replaced while the "
-                    "append waited on the write lock (%s)",
-                    message.get("type"),
-                    bound_file.name,
+            async with _async_session_file_lock(_session_file_write_lock_path(path)):
+                # reset_session may replace the current binding while we wait on
+                # either lock. Do not let the captured row land in a new session.
+                if own and self.session_file != bound_file:
+                    logger.warning(
+                        "dropped a %s JSONL append: session replaced while the "
+                        "append waited on the write lock (%s)",
+                        message.get("type"),
+                        bound_file.name,
+                    )
+                    raise OSError(
+                        "conversation record not written: session replaced while "
+                        f"the append waited ({bound_file.name})"
+                    )
+                reparent = self._read_reparent(path)  # cuts for the destination session
+                parent = message.get("parentUuid")
+                seen = set()
+                while parent in reparent and parent not in seen:  # a cut dropped it
+                    seen.add(parent)
+                    parent = reparent[parent]
+                if "parentUuid" in message:
+                    message["parentUuid"] = parent
+                data = memoryview((json.dumps(message) + "\n").encode())
+                fd = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                    0o600,
                 )
-                raise OSError(
-                    "conversation record not written: session replaced while "
-                    f"the append waited ({bound_file.name})"
-                )
-            reparent = self._read_reparent(path)  # cuts for the destination session
-            parent = message.get("parentUuid")
-            seen = set()
-            while parent in reparent and parent not in seen:  # a cut dropped it
-                seen.add(parent)
-                parent = reparent[parent]
-            if "parentUuid" in message:
-                message["parentUuid"] = parent
-            data = memoryview((json.dumps(message) + "\n").encode())
-            fd = os.open(
-                path,
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                0o600,
-            )
-            try:
-                start = os.fstat(fd).st_size
                 try:
-                    while data:
-                        written = os.write(fd, data)
-                        if written <= 0:  # never spin on a write that makes no progress
-                            raise OSError("JSONL write made no progress")
-                        data = data[written:]
-                except BaseException:
-                    os.ftruncate(fd, start)  # roll the partial record back
-                    raise
-            finally:
-                os.close(fd)
-            if own:
-                self.message_count += 1
+                    start = os.fstat(fd).st_size
+                    try:
+                        while data:
+                            written = os.write(fd, data)
+                            if written <= 0:  # never spin on a write that makes no progress
+                                raise OSError("JSONL write made no progress")
+                            data = data[written:]
+                    except BaseException:
+                        os.ftruncate(fd, start)  # roll the partial record back
+                        raise
+                finally:
+                    os.close(fd)
+                if own:
+                    self.message_count += 1
 
     def _analyze_user_context(self, content: str) -> Dict[str, Any]:
         """Analyze user context from message content."""
@@ -872,35 +907,65 @@ class KollaborConversationLogger:
         The turn's replies are its assistant records with this voice_turn_id, in
         order: `count` of them, or nothing changes. `edits` maps a reply's
         position to its new text, or None to drop it (its children then thread
-        under its parent). Off the event loop (a 67 MB log takes ~0.7 s) and
-        under the append lock: an append waits for it, and one whose parent it
-        dropped threads under that record's parent. What a writer outside the
-        logger appends meanwhile (compaction's records) is carried over at the
-        swap. Returns each dropped record's uuid with its parent's, None when
-        the log was not cut.
+        under its parent). The cut runs off the event loop. A stable per-session
+        rewrite lock serializes cuts and snapshots; a second stable lock protects
+        append, tail-copy, and swap. Appends can run while the temporary cut is
+        built, then are threaded past dropped replies inside the swap lock.
+        Returns each dropped record's uuid with its parent's, None when the log
+        was not cut.
         """
         async with self._write_lock:
             path = Path(self.session_file)
-            cut = await asyncio.to_thread(self._rewrite_voice_turn, path, turn_id, count, edits)
+            dropped = await asyncio.to_thread(
+                self._rewrite_voice_turn_with_file_locks,
+                path,
+                turn_id,
+                count,
+                edits,
+            )
+            if dropped is None:
+                return None
+            self._reparent.update(dropped)
+            return dropped
+
+    def _rewrite_voice_turn_with_file_locks(
+        self, path: Path, turn_id: str, count: int, edits: Dict[int, Optional[str]]
+    ) -> Optional[Dict[str, Any]]:
+        """Serialize rewrites; atomically thread the final tail past the cut."""
+        with locked_file(
+            _session_file_rewrite_lock_path(path), "a+", private=True
+        ):
+            cut = self._rewrite_voice_turn(path, turn_id, count, edits)
             if cut is None:
                 return None
             dropped, temp, end = cut
-            try:  # on the loop, so nothing lands between the copy and the swap
-                self._edit_reparent(dropped)  # others thread past it from here on
-                with open(path, "rb") as log, open(temp, "ab") as new:
-                    log.seek(end)
-                    # Appended since the cut read the log, possibly by a logger that had not
-                    # read the cut yet: its rows may still hang under a reply this cut drops.
-                    new.write(self._thread_past(log.read(), dropped))
-                os.replace(temp, path)
+            try:
+                with locked_file(
+                    _session_file_write_lock_path(path), "a+", private=True
+                ):
+                    try:
+                        self._edit_reparent(dropped)  # new appends thread past the cut
+                        with open(path, "rb") as log, open(temp, "ab") as new:
+                            log.seek(end)
+                            # Appends during cut construction may still hang under a
+                            # reply this cut drops; rewrite their parent before swap.
+                            new.write(self._thread_past(log.read(), dropped))
+                        os.replace(temp, path)
+                    except BaseException:
+                        Path(temp).unlink(missing_ok=True)
+                        try:
+                            self._edit_reparent({}, remove=dropped)
+                        except (OSError, ValueError) as e:
+                            logger.warning(
+                                "voice cut not taken back from %s: %s",
+                                self._reparent_path(),
+                                e,
+                            )
+                        raise
             except BaseException:
+                # Also clean up if the stable write lock itself could not be opened.
                 Path(temp).unlink(missing_ok=True)
-                try:
-                    self._edit_reparent({}, remove=dropped)  # the cut did not land
-                except (OSError, ValueError) as e:
-                    logger.warning("voice cut not taken back from %s: %s", self._reparent_path(), e)
                 raise
-            self._reparent.update(dropped)
             return dropped
 
     @staticmethod

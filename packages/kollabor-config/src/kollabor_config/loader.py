@@ -431,6 +431,17 @@ class ConfigLoader:
         system_prompt = self._load_system_prompt(skip_render=self.fast_mode)
 
         return {
+            # Promotion gate (#725): protected shared checkouts, off by default.
+            "sandbox_gate": {
+                "enabled": False,
+                "protected_roots": [],
+                "validation": [],
+                "scratch_root": "",
+                "allow_read": True,
+                "token_ttl_seconds": 900,
+                "validation_timeout_seconds": 600,
+                "audit_log": "",
+            },
             "terminal": {
                 "render_fps": 20,
                 "spinner_frames": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"],
@@ -478,6 +489,12 @@ class ConfigLoader:
                 "name": "Kollab",
                 "version": _package_version,
                 "description": "AI Edition",
+            },
+            "adversarial_review": {
+                "enabled": False,
+                "round_caps": {"low": 1, "medium": 2, "high": 3, "critical": 3},
+                "cooldown": 0,
+                "reviewer_pool": [],
             },
             "kollabor": {
                 "updates": {
