@@ -521,3 +521,29 @@ def test_cursor_older_than_retained_ring_resets_with_usable_cursor():
     assert page["truncated"] is True
     assert page["cursor_reset"] is True
     assert page["next_cursor"] == "100"
+
+
+def test_reasoning_between_stream_deltas_does_not_split_the_assistant_block():
+    # A reasoning model streams "thinking" chunks between its answer tokens
+    # (#632). The live tap stores them in one ring, in arrival order.
+    from kollabor_tui.display_tap import DisplayTap, publish_semantic
+
+    tap = DisplayTap()
+    publish_semantic(tap, "user_message", text="question")
+    for word in ("The ", "answer ", "is ", "forty-two."):
+        publish_semantic(tap, "thinking", text="working it out")
+        publish_semantic(tap, "token", text=word, request_id="r1", turn_id="t1")
+    publish_semantic(tap, "tool_start", tool_name="terminal")
+
+    plugin = object.__new__(HubPlugin)
+    plugin._display_tap = tap
+    page = plugin._get_output_lines(limit=50, format="json", max_chars=10_000)
+    rendered = render_transcript(page, identity="lapis")
+
+    assert rendered.splitlines() == [
+        "User: question",
+        "Assistant: The answer is forty-two.",
+        "Tool call: terminal",
+    ]
+    seqs = [int(record["seq"]) for record in page["lines"]]
+    assert seqs == sorted(seqs)
