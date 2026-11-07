@@ -34,11 +34,27 @@ from .acp_state import ACPBinding
 
 
 class ACPError(RuntimeError):
-    """A protocol, lifecycle, or adapter error."""
+    """A protocol, lifecycle, or adapter error.
 
-    def __init__(self, message: str, *, code: int | None = None):
+    ``error_class`` carries the boundary classification (``authentication``,
+    ``refusal``, ``queue_full``, ``images_unsupported``, ...) so downstream
+    consumers never parse the rendered message text (#549, #720).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: int | None = None,
+        error_class: str | None = None,
+        cause: str | None = None,
+    ):
         super().__init__(message)
         self.code = code
+        self.error_class = error_class
+        # Safe cause floor: the original exception's TYPE NAME only, never
+        # its message (#720 — the same floor as StructuredErrorInfo.cause).
+        self.cause = cause
 
 
 def _on_windows() -> bool:
@@ -852,9 +868,24 @@ class ACPRunner:
             message = streamed
         message = re.sub(r"\bsk-[A-Za-z0-9_*-]{8,}", "[redacted]", message)
         message = re.sub(r"(?i)\b(bearer|(?:access_)?token[=:])\s*\S+", r"\1 [redacted]", message)
-        if exc.code == -32000 and any(hint in message.lower() for hint in auth_hints):
+        # Boundary classification, computed once from the raw harness payload:
+        # auth verdicts read the pre-render text here, then ride downstream as
+        # a structured field. The rendered message (provider-name prefix,
+        # appended login guidance) is display-only (#549, #720).
+        is_auth = exc.code == -32000 and any(hint in message.lower() for hint in auth_hints)
+        if is_auth:
             message += " " + self.profile.LOGIN_GUIDANCE.get(self.profile.name, "Log in using this harness's CLI.")
-        return ACPError(f"{self.profile.name}: {message[:2000]}", code=exc.code)
+        error_class = (
+            "authentication" if is_auth
+            else "refusal" if any(hint in message.lower() for hint in refusal_hints)
+            else "request_error"
+        )
+        return ACPError(
+            f"{self.profile.name}: {message[:2000]}",
+            code=exc.code,
+            error_class=error_class,
+            cause=type(exc).__name__,
+        )
 
     async def start(self, binding: ACPBinding | None = None) -> str:
         self._closing = False
@@ -991,11 +1022,13 @@ class ACPRunner:
         images: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
         if not self.session_id or self._connection is None:
-            raise ACPError("ACP runner is not started")
+            raise ACPError("ACP runner is not started", error_class="not_started")
         if not text.strip():
             raise ValueError("prompt must not be empty")
         if images and not self.supports_image_input:
-            raise ACPError("This harness can't take images.")
+            raise ACPError(
+                "This harness can't take images.", error_class="images_unsupported"
+            )
         generation = self.generation
         # A rejected queue admission is not a turn and must not create a hole
         # in the orchestrator's compact completed-turn frontier.
@@ -1007,7 +1040,10 @@ class ACPRunner:
         try:
             self._queue.put_nowait(admission)
         except asyncio.QueueFull as exc:
-            raise ACPError("ACP prompt queue is full") from exc
+            raise ACPError(
+                "ACP prompt queue is full", error_class="queue_full",
+                cause=type(exc).__name__,
+            ) from exc
         self._next_turn_id = turn_id
         return admission
 
@@ -1113,7 +1149,9 @@ class ACPRunner:
                                   "thread_id": admission.thread_id, "generation": generation})
         try:
             if admission.images and not self.supports_image_input:
-                raise ACPError("This harness can't take images.")
+                raise ACPError(
+                    "This harness can't take images.", error_class="images_unsupported"
+                )
             response = await self._connection.prompt(
                 session_id=self.session_id,
                 prompt=[
@@ -1161,7 +1199,7 @@ class ACPRunner:
                 )
             else:
                 line = f"{self.profile.name}: harness request failed ({type(exc).__name__})"
-            raise ACPError(line) from exc
+            raise ACPError(line, cause=type(exc).__name__) from exc
         finally:
             if self.update_callback is not None:
                 self.update_callback({"kind": "turn_finished", "request_id": admission.request_id,
@@ -1203,7 +1241,9 @@ class ACPRunner:
         if not human and not same_requester:
             return False
         if images and not self.supports_image_input:
-            raise ACPError("This harness can't take images.")
+            raise ACPError(
+                "This harness can't take images.", error_class="images_unsupported"
+            )
         try:
             await asyncio.wait_for(self._connection.ext_method("session/steering", {
                 "sessionId": self.session_id,

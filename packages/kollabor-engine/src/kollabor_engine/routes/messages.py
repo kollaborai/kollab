@@ -1182,14 +1182,19 @@ async def _assistant_protocol_stream(stream, completion: Dict[str, Any]):
 
     if completion.get("completed"):
         usage = completion.get("usage") or {}
-        yield _assistant_protocol_chunk(
-            "message-finish",
-            finishReason=_assistant_finish_reason(usage.get("stopReason")),
-            usage={
+        finish_fields: Dict[str, Any] = {
+            "finishReason": _assistant_finish_reason(usage.get("stopReason")),
+            "usage": {
                 "inputTokens": int(usage.get("inputTokens", 0) or 0),
                 "outputTokens": int(usage.get("outputTokens", 0) or 0),
             },
-        )
+        }
+        if completion.get("error"):
+            # Structured run-status error record: class/code/provider/
+            # retryable/cause from the daemon event, display message along
+            # for the UI (#720). Older clients ignore the extra key.
+            finish_fields["error"] = completion["error"]
+        yield _assistant_protocol_chunk("message-finish", **finish_fields)
 
 
 @router.post("/{session_id}/assistant")
@@ -1249,6 +1254,8 @@ async def assistant_transport(
         stream_held = False
         # Why the daemon says the turn failed; the turn still ends normally.
         turn_error = ""
+        # Structured fields from the error event (error_class/code/...).
+        turn_error_fields: dict = {}
 
         def publish_progress() -> None:
             """Publish the in-flight turn so its parts reach the browser.
@@ -1638,6 +1645,20 @@ async def assistant_transport(
                         return
                 elif event_type == "error":
                     turn_error = str(event.get("message") or "") or "engine error"
+                    # Structured classification rides the event untouched so
+                    # clients classify by code/class, never message text
+                    # (#549, #720).
+                    turn_error_fields = {
+                        key: event[key]
+                        for key in ("error_class", "code", "provider", "retryable", "cause")
+                        if event.get(key) is not None
+                    }
+                    # The run-status surface must carry the structured fields
+                    # even when no message state persists — controller.add_error
+                    # is display text only (#720).
+                    completion["error"] = {
+                        "message": turn_error, **turn_error_fields,
+                    }
                     if not persist_message_state:
                         # No message state to carry it: fail the run instead.
                         controller.add_error(turn_error)
@@ -1658,9 +1679,14 @@ async def assistant_transport(
                         session_id,
                         submitted_contents,
                         assistant_parts,
-                        {"type": "incomplete", "reason": "error", "error": turn_error}
-                        if turn_error
-                        else {"type": "complete", "reason": "stop"},
+                        (
+                            {
+                                "type": "incomplete", "reason": "error",
+                                "error": turn_error, **turn_error_fields,
+                            }
+                            if turn_error
+                            else {"type": "complete", "reason": "stop"}
+                        ),
                     )
                     if persist_message_state:
                         if goal_pump is not None:

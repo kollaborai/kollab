@@ -1244,6 +1244,12 @@ class ACPOrchestrator:
             error_code = getattr(exc, "code", None)
             if error_code is not None:
                 end_frame["code"] = error_code
+            error_class = getattr(exc, "error_class", None)
+            if error_class is not None:
+                end_frame["errorClass"] = error_class
+            error_cause = getattr(exc, "cause", None)
+            if error_cause is not None:
+                end_frame["cause"] = error_cause
             if result is None and observed is not None and any(
                 update.get("kind") in {"text", "agent_thought_chunk", "tool_call", "tool_call_update"}
                 for update in observed.updates
@@ -1268,6 +1274,7 @@ class ACPOrchestrator:
                     display.display_error_message(end_frame["error"])
                 publish_semantic(
                     self.event_bus, "error", message=end_frame["error"], code=error_code,
+                    error_class=error_class, cause=error_cause,
                     request_id=admission.request_id, turn_id=admission.turn_id,
                     session_id=session_id, generation=generation,
                     input_source=admission.source, thread_id=admission.thread_id,
