@@ -100,12 +100,6 @@ export function makeFixtures(options = {}) {
     ],
   };
 
-  const session = () => ({
-    sessions: createdSession ? [createdSession] : initialSessions,
-    network,
-    offline: offlineAgents,
-    hidden: [],
-  });
   const remoteSession = {
     session_id: remoteAgent.handle,
     name: "Remote coder session",
@@ -116,6 +110,18 @@ export function makeFixtures(options = {}) {
     device: remoteAgent.device,
     network: remoteAgent.network,
     external: true,
+  };
+  let remoteSessionOpened = false;
+  const session = () => {
+    const sessions = createdSession ? [createdSession] : initialSessions;
+    return {
+      sessions: remoteSessionOpened && !sessions.some((item) => item.session_id === remoteSession.session_id)
+        ? [...sessions, remoteSession]
+        : sessions,
+      network,
+      offline: offlineAgents,
+      hidden: [],
+    };
   };
 
   async function respond(route) {
@@ -170,7 +176,11 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint.startsWith("/sessions/")) {
       const requestedId = endpoint.split("/")[2];
-      return json(route, requestedId === remoteAgent.handle ? remoteSession : createdSession ?? {});
+      if (requestedId === remoteAgent.handle) {
+        remoteSessionOpened = true;
+        return json(route, remoteSession);
+      }
+      return json(route, createdSession ?? {});
     }
     return json(route, {});
   }
@@ -324,9 +334,34 @@ async function main() {
     assert.equal(createPayload.agent, "coder");
     assert.equal(createPayload.identity, "local-coder");
 
+    // createRequest signals POST arrival before its response and the session history load finish.
+    // Wait for the launched chat before starting remote selection, so the flows cannot overlap.
+    const sessionControls = shell.page.getByRole("complementary", { name: "Session Controls", exact: true });
+    await sessionControls.getByText("Learn regression session", { exact: true }).waitFor({
+      state: "visible",
+      timeout: 15_000,
+    });
+
     // A live mocked peer demonstrates the existing Hub-to-remote-session selection path.
-    await shell.page.getByRole("button", { name: "Remote Coder Idle", exact: true }).click();
-    await shell.page.waitForFunction(() => document.body.innerText.includes("Remote coder session"), { timeout: 15000 });
+    const remoteAgentButton = shell.page.getByRole("button", { name: "Remote Coder Idle", exact: true });
+    await remoteAgentButton.click();
+    // The session panel is populated only after the remote session and its history load.
+    const remoteSessionName = sessionControls.getByText("Remote coder session", { exact: true });
+    try {
+      await remoteSessionName.waitFor({ state: "visible", timeout: 15_000 });
+    } catch (reason) {
+      const diagnostic = {
+        remoteButtonActive: await remoteAgentButton.getAttribute("data-active"),
+        remoteButtonText: await remoteAgentButton.innerText(),
+        sessionControlsText: await sessionControls.innerText().catch(() => null),
+        remoteRequests: fixtures.requests.filter((request) => request.endpoint.includes("remote-session-1")),
+        recentSessionRequests: fixtures.requests.filter((request) => request.endpoint.startsWith("/sessions")).slice(-10),
+        bodyText: (await shell.page.locator("body").innerText()).slice(0, 4000),
+      };
+      console.error("Remote session readiness diagnostics:", JSON.stringify(diagnostic, null, 2));
+      throw reason;
+    }
+    assert.equal(await remoteAgentButton.getAttribute("data-active"), "true");
     assert.ok(fixtures.requests.some((request) => request.endpoint === "/sessions/remote-session-1"));
 
     // Learn route entry/exit must preserve the existing main pane and restore keyboard focus.

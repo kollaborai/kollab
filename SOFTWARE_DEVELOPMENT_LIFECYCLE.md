@@ -119,6 +119,11 @@ gh pr create --draft --head issue-8-version-display --title "fix(cli): correct v
 - Make small, scoped commits from the owning worktree, naming only the paths
   owned by that lane. Use Conventional Commits and include the issue reference
   when one exists. Never broadly stage another writer's files.
+- Add the PR's changelog entry as `changes/<issue>.<section>.md`
+  (`changes/README.md`). Do not edit `CHANGELOG.md` or its packaged copy: only
+  release (`release/...`) and changelog repair (`changelog/...`) branches may,
+  and `ci/standards-check` refuses it elsewhere. Every PR writes its own file,
+  so entries never conflict.
 - Push the lane branch normally and open a DRAFT PR against `main`. Agents do
   not mark their own PR ready or merge it. Note overlapping PRs and path
   ownership so the integrator can sequence them.
@@ -251,7 +256,12 @@ only with such a verdict on its current head. CI green alone is not
 sufficient: CI plus an independent pinned-head review is the bar.
 
 Every merge uses `kollaborai` and a merge commit. Never use `--admin` or a
-ruleset bypass. If identity, bypass status, current base, required checks, or
+ruleset bypass. GitHub's merge queue is not on yet (#857): GitHub offers it
+only to organization-owned repos, and this repo belongs to the personal
+account `kollaborai`. `ci.yml` already runs on `merge_group`, so once the repo
+is in an organization the queue can be added to the `main protection` ruleset
+(`.github/scripts/setup-branch-protection.sh`). Until then, a PR behind `main`
+merges `main` into its branch before it lands. If identity, bypass status, current base, required checks, or
 thread evidence is uncertain, stop. Before an authorized merge, recheck the
 current head, base, checks, conversations, approval, and that auto-merge is not
 armed. Then use a merge commit with a head match:
