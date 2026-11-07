@@ -393,6 +393,7 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
     assert frames[5]["textDelta"] == "hello"
     assert frames[6]["operations"] == [
         {"type": "set", "path": ["messages"], "value": state["messages"]},
+        {"type": "set", "path": ["synced"], "value": None},
         {"type": "set", "path": ["usage"], "value": state["usage"]},
     ]
     assert frames[8]["finishReason"] == "stop"
@@ -623,7 +624,7 @@ async def test_a_message_that_answers_a_shown_card_closes_it(monkeypatch, event,
     assert message["content"][0]["result"] == {"decision": decision, "scope": "once"}
     assert message["content"][0]["isError"] is (decision == "deny")
     # Turn end: the card stays answered above the message that answered it.
-    final = sets[-2][1]
+    final = sets[-3][1]
     assert [m["role"] for m in final] == ["user", "assistant", "user", "assistant"]
     assert final[1]["content"][0]["result"]["decision"] == decision
     assert final[3]["content"] == [{"type": "text", "text": "Done."}]
@@ -769,6 +770,7 @@ async def test_assistant_transport_publishes_running_tool_with_timing(monkeypatc
         ["messages", "2"],
         ["messages", "2"],
         ["messages"],
+        ["synced"],
         ["usage"],
     ]
     # tool_start: the user message and an in-flight assistant message, no result
@@ -836,8 +838,8 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
     assert [part["toolCallId"] for part in message["content"]] == ["call-1", "call-2"]
     assert "status" not in message
     # The final publish keeps one assistant message with an explicit status.
-    assert [m["role"] for m in sets[-2][1]] == ["user", "assistant"]
-    assert sets[-2][1][1]["status"] == {"type": "complete", "reason": "stop"}
+    assert [m["role"] for m in sets[-3][1]] == ["user", "assistant"]
+    assert sets[-3][1][1]["status"] == {"type": "complete", "reason": "stop"}
 
 
 @pytest.mark.asyncio
@@ -908,7 +910,7 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
     assert row["result"]["output"] == "a" and row["isError"] is False
     assert row["timing"] == {"startedAt": 1000, "completedAt": 3000}
     # Turn end: one assistant message, each tool call once, the row still finished.
-    final = sets[-2][1]
+    final = sets[-3][1]
     assert [m["role"] for m in final] == ["user", "assistant"]
     tools = [p for p in final[1]["content"] if p["type"] == "tool-call"]
     assert [p["toolCallId"] for p in tools] == ["call-1", "permission_call-1"]
@@ -940,6 +942,7 @@ async def test_assistant_transport_publishes_streamed_text_as_it_grows(monkeypat
         ["messages", "1"],
         ["messages", "1"],
         ["messages"],
+        ["synced"],
         ["usage"],
     ]
     growing = [value["content"] for _, value in sets[1:4]]
@@ -964,6 +967,7 @@ async def test_assistant_transport_throttles_streamed_text_publishes(monkeypatch
         ["messages", "0"],
         ["messages", "1"],
         ["messages"],
+        ["synced"],
         ["usage"],
     ]
     assert sets[1][1]["content"] == [{"type": "text", "text": "a"}]
@@ -993,6 +997,7 @@ async def test_assistant_transport_flushes_held_text_when_the_stream_goes_quiet(
         ["messages", "1"],
         ["messages", "1"],
         ["messages"],
+        ["synced"],
         ["usage"],
     ]
     assert sets[1][1]["content"] == [{"type": "text", "text": "a"}]
@@ -1033,7 +1038,7 @@ async def test_assistant_transport_orders_text_and_tools_chronologically(monkeyp
 
     # tool_start flushes the throttled tail ahead of the row it starts.
     assert shape(sets[2][1]["content"]) == ["Checking. now", "call-1"]
-    final = sets[-2][1][-1]
+    final = sets[-3][1][-1]
     assert [part["type"] for part in final["content"]] == [
         "text",
         "tool-call",
@@ -1108,7 +1113,7 @@ async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
         state,
     )
 
-    final = sets[-2][1]
+    final = sets[-3][1]
     assert [m["role"] for m in final] == ["user", "assistant"]
     assert [part.get("text") or part["toolCallId"] for part in final[1]["content"]] == [
         "before",
@@ -1262,7 +1267,12 @@ async def test_assistant_transport_says_how_much_history_the_messages_show(
     """The page appends later history past this point instead of swapping in
     reloaded copies of the turn it just ran (assistant-ui would keep both)."""
     session = _FakeSession([*_tokens("hi"), {"type": "turn_complete"}])
-    session.refresh_history = AsyncMock(return_value=[{}, {}, {}, {}])
+    session.refresh_history = AsyncMock(return_value=[
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "a"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ])
     monkeypatch.setattr(
         messages, "get_session_registry", lambda: _FakeRegistry(session)
     )
@@ -1281,6 +1291,41 @@ async def test_assistant_transport_says_how_much_history_the_messages_show(
     state = captured["controller"].state
     assert len(state["messages"]) == 3
     assert state["synced"] == {"history": 4, "messages": 3}
+
+
+@pytest.mark.asyncio
+async def test_stale_unrelated_history_never_claims_sync(monkeypatch):
+    """A refresh that missed this turn must not be reconciled by role alone.
+
+    Garnet's round-3 probe: client state with only the provisional rows and
+    a stale history holding an unrelated [user, assistant] pair. Matching
+    by role sequence alone rewrote the new rows to history-0/history-1,
+    colliding with canonical rows the page would later load.
+    """
+    session = _FakeSession([*_tokens("brand new reply"), {"type": "turn_complete"}])
+    session.refresh_history = AsyncMock(return_value=[
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "real question"}],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    state = captured["controller"].state
+    assert state["synced"] is None
+    ids = [m["id"] for m in state["messages"]]
+    assert not any(i.startswith("history-") for i in ids), ids
 
 
 @pytest.mark.asyncio
@@ -1312,6 +1357,157 @@ async def test_failed_history_refresh_publishes_no_watermark(monkeypatch):
     state = captured["controller"].state
     assert len(state["messages"]) == 3
     assert state["synced"] is None
+
+
+@pytest.mark.asyncio
+async def test_partial_client_state_with_stale_rows_never_claims_sync(monkeypatch):
+    """Partial prior state (one shown row) plus stale history: the unshown
+    stale assistant row must not be paired with this turn's fresh reply."""
+    session = _FakeSession([*_tokens("brand new reply"), {"type": "turn_complete"}])
+    session.refresh_history = AsyncMock(return_value=[
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "real question"}],
+            state={"messages": [
+                {"id": "history-0", "role": "user", "content": "old question"},
+            ]},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    state = captured["controller"].state
+    assert state["synced"] is None
+    ids = [m["id"] for m in state["messages"]]
+    # The pre-existing row keeps its id; this turn's rows keep provisional ids.
+    assert ids[0] == "history-0"
+    assert not any(i.startswith("history-") for i in ids[1:]), ids
+
+
+@pytest.mark.asyncio
+async def test_align_requires_content_identity_for_paired_rows(monkeypatch):
+    """Same-role, different-content stored rows must not pair: content, not
+    role order, is the evidence a row was streamed by this turn."""
+    session = _FakeSession([*_tokens("the real answer"), {"type": "turn_complete"}])
+    session.refresh_history = AsyncMock(return_value=[
+        {"role": "user", "content": "real question"},
+        {"role": "assistant", "content": "different answer entirely"},
+    ])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "real question"}],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    assert captured["controller"].state["synced"] is None
+
+
+def test_align_helper_renames_only_matching_content():
+    """Helper-level: exact-content rows rename; a mismatched tail refuses."""
+    fresh = [
+        {"id": "user-x", "role": "user", "content": "q"},
+        {
+            "id": "assistant-x",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "final answer"}],
+        },
+    ]
+    good = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "final answer"},
+    ]
+    assert messages._assistant_align_streamed_ids(fresh, good) is True
+    assert [m["id"] for m in fresh] == ["history-0", "history-1"]
+
+    stale = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a different old answer"},
+    ]
+    other = [
+        {"id": "user-y", "role": "user", "content": "q"},
+        {
+            "id": "assistant-y",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "final answer"}],
+        },
+    ]
+    assert messages._assistant_align_streamed_ids(other, stale) is False
+    assert [m["id"] for m in other] == ["user-y", "assistant-y"]
+
+
+def test_align_helper_tolerates_split_tool_round_with_call_identity():
+    """Stored [user, assistant(calls), tool, assistant(final)] still aligns:
+    the calls row is proven rendered inside the streamed row by call id."""
+    streamed = [
+        {"id": "user-x", "role": "user", "content": "run it"},
+        {
+            "id": "assistant-x",
+            "role": "assistant",
+            "content": [
+                {"type": "tool-call", "toolCallId": "call-1"},
+                {"type": "text", "text": "done"},
+            ],
+        },
+    ]
+    stored = [
+        {"role": "system", "content": "init"},
+        {"role": "user", "content": "run it"},
+        {
+            "role": "assistant",
+            "content": "",
+            "metadata": {"tool_calls": [{"id": "call-1", "name": "f"}]},
+        },
+        {"role": "tool", "content": "out"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is True
+    assert [m["id"] for m in streamed] == ["history-1", "history-4"]
+
+
+def test_align_helper_rejects_calls_row_without_call_identity():
+    """An unexplained calls row (ids absent from the streamed row) is not
+    skippable: the walk must refuse instead of reaching past it."""
+    streamed = [
+        {"id": "user-x", "role": "user", "content": "run it"},
+        {
+            "id": "assistant-x",
+            "role": "assistant",
+            "content": [
+                {"type": "tool-call", "toolCallId": "call-1"},
+                {"type": "text", "text": "done"},
+            ],
+        },
+    ]
+    stored = [
+        {"role": "user", "content": "run it"},
+        {
+            "role": "assistant",
+            "content": "",
+            "metadata": {"tool_calls": [{"id": "call-9", "name": "f"}]},
+        },
+        {"role": "tool", "content": "out"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is False
+    assert [m["id"] for m in streamed] == ["user-x", "assistant-x"]
 
 
 @pytest.mark.asyncio

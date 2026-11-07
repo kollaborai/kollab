@@ -173,7 +173,7 @@ file inside a checked private folder.
     3. `asyncio.start_server(wrapped, "127.0.0.1", 0, reuse_address=False, **kw)`.
     4. Write the file to a temporary name in the same folder (O_CREAT, O_EXCL, O_NOINHERIT), then `os.replace` it
        onto the endpoint.
-  - `wrapped` runs the server side of the handshake inside `asyncio.wait_for(..., 5)` before it calls the handler.
+  - `wrapped` runs the server side of the handshake inside `asyncio.wait_for(..., 30)` before it calls the handler.
   - `Endpoint.close()` closes the server and removes the file only if it still holds this server's port and pid.
 - Handshake, every message a fixed 32 bytes, read with `readexactly`:
   1. The server sends a random N_s.
@@ -189,7 +189,7 @@ file inside a checked private folder.
     2. `owned_private(endpoint, mask=0o077)`. If it fails, raise ConnectionRefusedError.
     3. Read the file. A missing file raises FileNotFoundError, as a missing socket does today. A file whose pid is
        not `pid_alive` raises ConnectionRefusedError, as a stale socket does today.
-    4. `asyncio.open_connection("127.0.0.1", port, **kw)`, then the client side of the handshake within 5 s.
+    4. `asyncio.open_connection("127.0.0.1", port, **kw)`, then the client side of the handshake within 30 s.
 - `connect_blocking(endpoint, timeout) -> socket.socket`: the same, for blocking clients.
 - `peer_pid(writer_or_sock) -> int` (0 when it cannot be read, as today)
   - POSIX: today's SO_PEERCRED (Linux) and LOCAL_PEERPID (macOS) reads, from `halt_runtime.py:219-228`.
