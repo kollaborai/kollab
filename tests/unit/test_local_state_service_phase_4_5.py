@@ -14,6 +14,7 @@ in step 10.
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -28,6 +29,8 @@ from kollabor.state import (
     SkillListSnapshot,
     SystemPromptSnapshot,
 )
+from kollabor.state.interface import ProfileActivationError
+from kollabor.state.remote import _raise_for_error
 
 
 def _make_skill(
@@ -374,6 +377,77 @@ class TestSetActiveProfileProviderReady(unittest.IsolatedAsyncioTestCase):
 
         api_service.reinitialize_provider.assert_awaited_once_with(profile)
         self.assertEqual(snapshot.name, "openrouter")
+
+    async def test_stale_failure_does_not_restore_over_later_successful_switch(self) -> None:
+        """A failed in-flight activation must not undo a newer profile choice."""
+        profiles = {
+            name: SimpleNamespace(
+                name=name,
+                provider="openai",
+                model="gpt-4o-mini",
+                base_url="https://api.openai.com/v1",
+                supports_tools=True,
+                temperature=0.7,
+            )
+            for name in ("prior", "failed", "later")
+        }
+        active = {"profile": profiles["prior"]}
+        manager = MagicMock()
+        manager.get_profile.side_effect = profiles.get
+        manager.get_active_profile.side_effect = lambda: active["profile"]
+
+        def select_profile(name: str) -> bool:
+            active["profile"] = profiles[name]
+            return True
+
+        manager.set_active_profile.side_effect = select_profile
+        failure_started = asyncio.Event()
+        finish_failure = asyncio.Event()
+        reinitialized: list[str] = []
+
+        async def reinitialize_provider(profile):
+            reinitialized.append(profile.name)
+            if profile.name == "failed":
+                failure_started.set()
+                await finish_failure.wait()
+                return False
+            return True
+
+        api_service = SimpleNamespace(reinitialize_provider=reinitialize_provider)
+        svc = LocalStateService(
+            llm_service=SimpleNamespace(api_service=api_service),
+            profile_manager=manager,
+        )
+
+        failed_switch = asyncio.create_task(
+            svc.set_active_profile("failed", persist=False)
+        )
+        await asyncio.wait_for(failure_started.wait(), timeout=1)
+        await svc.set_active_profile("later", persist=False)
+        self.assertIs(active["profile"], profiles["later"])
+
+        finish_failure.set()
+        with self.assertRaises(ProfileActivationError) as caught:
+            await failed_switch
+
+        self.assertFalse(caught.exception.previous_profile_restored)
+        self.assertIs(active["profile"], profiles["later"])
+        self.assertEqual(reinitialized, ["failed", "later"])
+
+
+class TestRemoteStateProfileActivationErrors(unittest.TestCase):
+    def test_reconstructs_typed_profile_activation_error(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            _raise_for_error(
+                {
+                    "error": "provider activation failed",
+                    "error_code": "profile_activation_failed",
+                    "previous_profile_restored": True,
+                }
+            )
+
+        self.assertEqual(type(caught.exception).__name__, "ProfileActivationError")
+        self.assertTrue(caught.exception.previous_profile_restored)
 
 
 # === Agents ===

@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
 from .auth import validate_token
 from .daemon_pool import get_daemon_pool
 from .hub_bridge import HubBridge
+from .runtime_version import get_engine_runtime_version
 from .session import EngineSession
 
 logger = logging.getLogger(__name__)
@@ -74,8 +75,10 @@ async def _open_remote(handle: str) -> Optional[EngineSession]:
     return await _adopt(found) if found else None
 
 
-async def open_named_session(request: Request) -> None:
-    """Attach the live agent a session route names, the first time one does.
+async def open_named_session(
+    request: Request, *, session_id: Optional[str] = None
+) -> Optional[EngineSession]:
+    """Attach a discovered live agent named by a route or proxy request.
 
     Every live agent on this computer is listed (HubBridge.discover_sessions),
     but only sessions in the registry answer the session routes. A terminal
@@ -84,9 +87,12 @@ async def open_named_session(request: Request) -> None:
     computer of this folder's network; an unknown id falls through to the
     route's own 404.
     """
-    session_id = request.path_params.get("session_id")
-    if not session_id or session_id in _sessions:
-        return
+    session_id = session_id or request.path_params.get("session_id")
+    if not session_id:
+        return None
+    existing = _sessions.get(session_id)
+    if existing is not None:
+        return existing
     opening = _adopting.get(session_id)
     if opening is None:
         found = next(
@@ -134,7 +140,7 @@ async def open_named_session(request: Request) -> None:
         _adopting[session_id] = opening
         opening.add_done_callback(lambda _: _adopting.pop(session_id, None))
     try:
-        await asyncio.shield(opening)
+        return await asyncio.shield(opening)
     except Exception as e:
         logger.warning("could not open session %s: %s", session_id, e)
         raise HTTPException(status_code=503, detail=f"could not open this agent: {e}")
@@ -393,7 +399,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
             except Exception:
                 return "unknown"
 
-        v = safe_ver("kollabor-engine")
+        v = get_engine_runtime_version()
         return {
             "version": v,
             "engine": v,
@@ -405,14 +411,6 @@ def create_app(port: Optional[int] = None) -> FastAPI:
 
     @app.get("/status")
     async def status():
-        from importlib.metadata import version as pkg_version
-
-        def safe_ver(pkg: str) -> str:
-            try:
-                return pkg_version(pkg)
-            except Exception:
-                return "unknown"
-
         # The providers in use. An opened agent's profile is what presence says
         # until its daemon answers. MCP servers belong to each daemon: GET /sessions/{id}/mcp.
         providers = sorted(
@@ -420,7 +418,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         )
 
         return {
-            "version": safe_ver("kollabor-engine"),
+            "version": get_engine_runtime_version(),
             "sessions": len(_sessions),
             "uptime": int(time.time() - _start_time),
             "providers": providers,

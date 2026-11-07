@@ -682,6 +682,9 @@ class HubPlugin(BasePlugin):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
         self._dreaming_task: Optional[asyncio.Task] = None
+        # The insight write of the dream in progress, which a cancelled dream
+        # leaves running in its thread (#562); shutdown waits for it.
+        self._crystal_write: Optional[asyncio.Task] = None
         self._notify_task: Optional[asyncio.Task] = None
         self._notifier: Optional[HubNotifier] = None
 
@@ -753,6 +756,10 @@ class HubPlugin(BasePlugin):
 
         # Message deduplication (LRU via OrderedDict, capped at 1000)
         self._seen_messages: collections.OrderedDict = collections.OrderedDict()
+        # Messages the ACP retry queue refused (#581). Their dedup marks stay, so
+        # a retransmission skips display, vault and bridge effects it already
+        # had, and only asks the queue again.
+        self._refused_observations: collections.OrderedDict = collections.OrderedDict()
 
         # Content dedup: TTL dict keyed by MD5("from_identity:content").
         # Guards against verbatim duplicates produced by concurrent agent
@@ -778,6 +785,7 @@ class HubPlugin(BasePlugin):
                     "identity": "",
                     "roster": DEFAULT_ROSTER,
                     "auto_help": False,
+                    "dispatch_list_enabled": False,
                     "mailbox_poll_interval": 5,
                     "dreaming_enabled": True,
                     "dreaming_idle_threshold": 300,
@@ -1428,6 +1436,54 @@ class HubPlugin(BasePlugin):
         tool_executor.register_plugin_handler(
             "hub_dispatch_verify", self._handle_hub_dispatch_verify_tool
         )
+
+        # Read-only paging over this coordinator's unresolved dispatches (#656).
+        # Opt-in: without plugins.hub.dispatch_list_enabled the tags are not
+        # registered, so the model never sees a tool that does not exist.
+        if self._dispatch_list_enabled():
+            hub_dispatch_list_pat = tag_pattern(
+                "hub_dispatch_list",
+                valid={"page": r"\d+", "per_page": r"\d+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_list(m):
+                attrs = tag_attrs(m.group(1))
+                return {
+                    "page": attrs.get("page", ""),
+                    "per_page": attrs.get("per_page", ""),
+                }
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_list",
+                hub_dispatch_list_pat,
+                "hub_dispatch_list",
+                _extract_hub_dispatch_list,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_list", self._handle_hub_dispatch_list_tool
+            )
+
+            hub_dispatch_read_pat = tag_pattern(
+                "hub_dispatch_read",
+                required={"dispatch_id": "some"},
+                valid={"dispatch_id": r"[0-9A-Za-z._:@-]+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_read(m):
+                attrs = tag_attrs(m.group(1))
+                return {"dispatch_id": attrs.get("dispatch_id", "").strip()}
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_read",
+                hub_dispatch_read_pat,
+                "hub_dispatch_read",
+                _extract_hub_dispatch_read,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_read", self._handle_hub_dispatch_read_tool
+            )
 
         # --- hub_reply ---
         # Shorthand for replying in-thread. The agent doesn't need to track
@@ -3489,6 +3545,119 @@ class HubPlugin(BasePlugin):
         )
 
 
+    def _dispatch_list_enabled(self) -> bool:
+        """Whether the opt-in dispatch list/read tags are on (default off)."""
+        try:
+            return bool(
+                self.config and self.config.get("plugins.hub.dispatch_list_enabled", False)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _dispatch_int_arg(value, default: int, maximum: int) -> int:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+        return min(max(number, 1), maximum)
+
+    async def _handle_hub_dispatch_list_tool(self, tool_data: dict):
+        """List one page of this coordinator's unresolved dispatches (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error="Dispatch listing is unavailable without an active identity and TaskLedger.",
+            )
+        page = self._dispatch_int_arg(tool_data.get("page", 1), 1, 10_000)
+        per_page = self._dispatch_int_arg(tool_data.get("per_page", 10), 10, 50)
+        try:
+            items, total = await asyncio.to_thread(
+                self._task_ledger.get_dispatches_page,
+                verified_by,
+                page=page,
+                per_page=per_page,
+            )
+        except Exception as e:
+            logger.exception("failed to list hub dispatches")
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error=f"Could not read dispatches: {e}",
+            )
+        if total == 0:
+            output = "no unresolved dispatches"
+        elif not items:
+            pages = -(-total // per_page)
+            output = (
+                f"no dispatches on page {page} ({total} unresolved; "
+                f"pages 1-{pages})"
+            )
+        else:
+            pages = -(-total // per_page)
+            lines = [
+                f"unresolved dispatches ({total} unresolved; page {page} of {pages}, "
+                "newest first):"
+            ]
+            for item in items:
+                lines.append(
+                    f"  [{item.get('status', 'unknown')}] dispatch "
+                    f"{item.get('dispatch_id', item.get('message_id', ''))} -> "
+                    f"{item.get('assignee', '')} (task {item.get('task_id', '')})"
+                )
+            output = "\n".join(lines)
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_list", success=True, output=output,
+        )
+
+    async def _handle_hub_dispatch_read_tool(self, tool_data: dict):
+        """Return one full dispatch record this coordinator assigned (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        dispatch_id = str(tool_data.get("dispatch_id", "") or "").strip()
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by or not dispatch_id:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="Provide a dispatch_id; reading needs an active identity and TaskLedger.",
+            )
+        try:
+            record = await asyncio.to_thread(self._task_ledger.get_dispatch, dispatch_id)
+        except Exception as e:
+            logger.exception("failed to read hub dispatch %s", dispatch_id)
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error=f"Could not read dispatch: {e}",
+            )
+        if not record or record.get("assigned_by") != verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="No dispatch with that ID is assigned by you.",
+            )
+        fields = (
+            "dispatch_id", "status", "task_id", "assignee", "assigned_by",
+            "directive", "thread_id", "worktree", "commit", "reported_worktree",
+            "reported_commit", "report", "delivery_error", "verified_by",
+            "verification_note", "created_at", "updated_at",
+        )
+        lines = []
+        for name in fields:
+            value = record.get(name)
+            if value not in (None, ""):
+                lines.append(f"{name}: {value}")
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_read", success=True,
+            output="\n".join(lines),
+        )
+
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
         from kollabor_agent.tool_executor import ToolExecutionResult
@@ -3912,7 +4081,7 @@ class HubPlugin(BasePlugin):
                     output="",
                     error=(
                         "Task assignment was not sent because its durable dispatch "
-                        f"record could not be saved: {e}"
+                        f"record could not be saved: {e or type(e).__name__}"
                     ),
                 )
             dispatch_id = msg.id
@@ -3985,7 +4154,7 @@ class HubPlugin(BasePlugin):
                     self._task_ledger.update_dispatch,
                     dispatch_id,
                     status="delivery_failed",
-                    delivery_error=f"routing failed: {e}",
+                    delivery_error=f"routing failed: {e or type(e).__name__}",
                 )
                 if not updated:
                     logger.warning(
@@ -4001,7 +4170,10 @@ class HubPlugin(BasePlugin):
                 tool_type="hub_msg",
                 success=False,
                 output="",
-                error=f"Task assignment could not be routed: {e}",
+                error=(
+                    "Task assignment could not be routed: "
+                    f"{e or type(e).__name__}"
+                ),
             )
         if dispatch_id:
             dispatch_status = "delivery_failed" if rejections else "in_flight"
@@ -4039,7 +4211,7 @@ class HubPlugin(BasePlugin):
         if rejections:
             parts = []
             for ident, reason in rejections:
-                parts.append(f"{ident}: {reason}")
+                parts.append(f"{ident}: {reason or 'refused with no reason given'}")
                 self._record_dispatch_failure(ident, reason)
             output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
                 # The reason already says what to do; force means nothing here.
@@ -4115,6 +4287,7 @@ class HubPlugin(BasePlugin):
         else:
             output = f"delivered to {target}"
 
+        metadata["delivery"] = self._delivery_evidence(msg, target)
         if any_wait and not warned:
             metadata["end_turn"] = True
         if not target.startswith("relay:") and not handle:
@@ -4126,6 +4299,30 @@ class HubPlugin(BasePlugin):
             output=output,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _delivery_evidence(msg: HubMessage, target: str) -> dict:
+        """How far a hub_msg got, for the sender to read.
+
+        ``confirmed``: a recipient's hub socket acked this message's id.
+        ``accepted``: a network peer accepted it (acceptance is not reading).
+        ``queued``: it sits in a mailbox; the recipient has not taken it.
+        ``unconfirmed``: nothing acked it and nothing queued it.
+        """
+        meta = msg.metadata or {}
+        acked = list(meta.get("_acked_by", []))
+        if meta.get("relay_receipt") or meta.get("network"):
+            state = "accepted"
+        elif meta.get("_queued_for") or meta.get("_socket_failed"):
+            state = "queued"
+        elif acked and (
+            target in acked or msg.scope != MessageScope.DIRECT.value
+        ):
+            state = "confirmed"
+        else:
+            state = "unconfirmed"
+        # Ids stay out: a tool result reaches attached clients and the model.
+        return {"state": state, "recipients": acked}
 
     async def _handle_hub_broadcast_tool(self, tool_data: dict):
         """Execute a hub_broadcast tool."""
@@ -5847,9 +6044,21 @@ class HubPlugin(BasePlugin):
                 self._vault = AgentVault(self._identity.identity)
                 self._vault.touch()
                 # Project-scoped crystal store: work done in this repo
-                self._crystal_store = CrystalStore(self._vault._vault_dir)
+                project_crystals = CrystalStore(self._vault._vault_dir)
                 # Global crystal store: cross-project personality + skills
-                self._global_crystal_store = CrystalStore(self._vault.global_vault_dir)
+                global_crystals = CrystalStore(self._vault.global_vault_dir)
+                # Parse both in a worker thread, and publish them only once loaded:
+                # a reader on the loop never parses a vault or waits on its lock (#562).
+                try:
+                    await asyncio.gather(
+                        asyncio.to_thread(project_crystals.load),
+                        asyncio.to_thread(global_crystals.load),
+                    )
+                except Exception as e:
+                    # Readers parse again on the loop and raise there, as before.
+                    logger.warning(f"crystal stores failed to load at startup: {e}")
+                self._crystal_store = project_crystals
+                self._global_crystal_store = global_crystals
             else:
                 logger.info(f"Vault disabled for agent {self._identity.identity}")
 
@@ -5987,6 +6196,7 @@ class HubPlugin(BasePlugin):
                     crystal_store=self._crystal_store,
                     global_crystal_store=self._global_crystal_store,
                     task_ledger=self._task_ledger,
+                    dispatch_paging=self._dispatch_list_enabled(),
                 )
 
                 # Release stale lane claims from previous session
@@ -6455,7 +6665,7 @@ class HubPlugin(BasePlugin):
                 if self._identity:
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
-                        max_replay=INBOX_MAX_REPLAY,
+                        max_replay=self._mailbox_replay_cap(INBOX_MAX_REPLAY),
                     )
                     if messages:
                         await self._deliver_inbox_batch(messages)
@@ -6463,6 +6673,24 @@ class HubPlugin(BasePlugin):
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
+
+    def _mailbox_replay_cap(self, cap: int) -> int:
+        """Return the per-poll cap on ordinary mailbox replay (0 = no cap).
+
+        An ACP agent's queue can refuse a message (#581), and a refused message
+        is only owned again once it is delivered one by one so it can be put
+        back. A capped replay deletes the overflow and coalesces the rest into
+        one block that never reaches the queue, so ACP polls without the cap.
+        The mailbox's own size prune (INBOX_MAX_SIZE) still bounds it.
+        """
+        llm = None
+        try:
+            llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+            if self._agent_dispatch_mode(llm) == "acp":
+                return 0
+        except Exception as exc:
+            logger.debug("mailbox replay cap check failed: %s", exc)
+        return cap
 
     async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
         """Deliver a batch of offline inbox messages.
@@ -6479,7 +6707,17 @@ class HubPlugin(BasePlugin):
             await self._inject_inbox_replay(messages)
         else:
             for msg in messages:
-                await self._on_message_received(msg)
+                await self._deliver_inbox_message(msg)
+
+    async def _deliver_inbox_message(self, msg: HubMessage) -> None:
+        """Deliver one mailbox message; a refusal puts its file back (#581).
+
+        The mailbox read already deleted the file, so a message the ACP retry
+        queue refused would be lost here. It goes back for the next poll, and
+        the mailbox's own age and size limits still apply to it.
+        """
+        if await self._on_message_received(msg) is False and self._identity:
+            await AgentMessenger.send_to_file(self._identity.identity, msg)
 
     async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
         """Coalesce a bounded inbox replay into a single injected block.
@@ -6504,9 +6742,23 @@ class HubPlugin(BasePlugin):
         ]
         ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
         for msg in control_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
         if not ordinary_msgs:
+            return
+
+        llm = None
+        if self.event_bus is not None:
+            try:
+                llm = self.event_bus.get_service("llm_service")
+            except Exception:
+                pass
+
+        # An ACP agent's queue owns each message it admits and can refuse one
+        # (#581); a coalesced block would hide that from it. Deliver one by one.
+        if self._agent_dispatch_mode(llm) == "acp":
+            for msg in ordinary_msgs:
+                await self._deliver_inbox_message(msg)
             return
 
         lines: List[str] = [summary.content, ""]
@@ -6520,13 +6772,6 @@ class HubPlugin(BasePlugin):
             lines.append(f"[{ts}] {sender}: {content_preview}")
 
         block = "\n".join(lines)
-
-        llm = None
-        if self.event_bus is not None:
-            try:
-                llm = self.event_bus.get_service("llm_service")
-            except Exception:
-                pass
 
         if llm is not None and hasattr(llm, "inject_system_message"):
             try:
@@ -6543,7 +6788,7 @@ class HubPlugin(BasePlugin):
 
         # Fallback: individual delivery (no inject_system_message)
         for msg in ordinary_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
     async def _dreaming_loop(self) -> None:
         """Periodically dream when agent is idle -- distill stream into insights.
@@ -6666,11 +6911,16 @@ class HubPlugin(BasePlugin):
                             logger.debug("dreaming: filtered preamble paragraph")
                             continue
                         paragraphs.append(p_stripped)
-                    # On the loop, like every reader of the vault: in a worker
-                    # thread a write outlived a cancelled dream and raced the
-                    # readers (#546).
-                    for paragraph in paragraphs:
-                        self._crystal_store.add_entry(paragraph)
+                    # One worker-thread call for the batch, in order: each add saves
+                    # the whole vault, which stalled the loop (#562). A cancelled
+                    # dream leaves this write running, so shutdown waits for it.
+                    store = self._crystal_store
+                    self._crystal_write = asyncio.create_task(
+                        asyncio.to_thread(
+                            lambda: [store.add_entry(p) for p in paragraphs]
+                        )
+                    )
+                    await asyncio.shield(self._crystal_write)
                     added = len(paragraphs)
                 else:
                     # Fallback to raw append if crystal_store unavailable
@@ -6735,6 +6985,21 @@ class HubPlugin(BasePlugin):
             # Restore previous state (unless something else changed it)
             if self._identity.state == AgentLifecycle.DREAMING.value:
                 self._identity.state = prev_state
+
+    async def _settle_crystal_write(self) -> None:
+        """Wait for an insight write that a cancelled dream left running in its thread.
+
+        The thread outlives the task that awaited it. A save landing after shutdown
+        would write over a newer one (#562), so shutdown calls this after it
+        cancels the dream.
+        """
+        write = getattr(self, "_crystal_write", None)
+        if write is None or write.done():
+            return
+        try:
+            await write
+        except Exception as e:
+            logger.warning(f"dreaming: insight write failed at shutdown: {e}")
 
     async def _vault_autosave_loop(self) -> None:
         """Periodically save working memory so crash != total loss.
@@ -8653,7 +8918,8 @@ class HubPlugin(BasePlugin):
         sender = message.from_identity or message.from_agent or ""
         acp = self.event_bus.get_service("acp_orchestrator")
         if acp is not None and acp.active and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}):
-            acp.observe_notification(message)
+            if not acp.observe_notification(message):
+                return {"status": "refused", "request_id": message.id}
             return {"status": "queued", "request_id": message.id}
         turns[message.id] = _NetworkTurn(
             handle=sender,
@@ -8745,8 +9011,40 @@ class HubPlugin(BasePlugin):
                 )
         return result
 
-    async def _on_message_received(self, message: HubMessage) -> None:
-        """Handle an incoming message from another agent."""
+    _REFUSED_OBSERVATIONS_MAX = 256
+
+    def _remember_refused_message(self, msg_key: tuple) -> None:
+        """Keep a refused message's dedup marks and note it for a retry (#581).
+
+        The message was already shown, logged and mirrored; a retransmission
+        (socket resend, mailbox replay, relay retry) only asks the queue again.
+        """
+        refused = self._refused_observations
+        refused[msg_key] = None
+        while len(refused) > self._REFUSED_OBSERVATIONS_MAX:
+            # Forget the oldest one's dedup mark too, so its retransmission runs
+            # the whole path again instead of being acknowledged and dropped.
+            oldest, _ = refused.popitem(last=False)
+            self._seen_messages.pop(oldest, None)
+
+    def _retry_refused_observation(self, message: HubMessage, msg_key: tuple) -> bool | None:
+        """Ask the ACP queue again for a message it refused. False: still refused."""
+        acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
+        if acp is None or not getattr(acp, "active", False):
+            # No live session can admit it. It stays refused and unacknowledged,
+            # so a later session can still take it (#581).
+            logger.debug("refused observation kept: the ACP session is not running")
+            return False
+        if not acp.observe_notification(message):
+            return False
+        self._refused_observations.pop(msg_key, None)
+        return None
+
+    async def _on_message_received(self, message: HubMessage) -> bool | None:
+        """Handle an incoming message from another agent.
+
+        Returns False when the message was refused and must not be acknowledged.
+        """
         if self._solo:
             # Peers cannot discover a solo agent; this covers direct sends by
             # name (`kollab --hub send`) so nothing reaches its conversation.
@@ -8796,6 +9094,8 @@ class HubPlugin(BasePlugin):
         msg_id = getattr(message, "id", "") or ""
         msg_key = (message.from_identity or message.from_agent, msg_id, message.action)
         if msg_id and msg_key in self._seen_messages:
+            if msg_key in getattr(self, "_refused_observations", ()):
+                return self._retry_refused_observation(message, msg_key)
             logger.debug(f"Dedup: skipping already-seen {message.action} {msg_id}")
             return
         if msg_id and message.action != "turn_end":
@@ -9252,7 +9552,9 @@ class HubPlugin(BasePlugin):
                         )
                 elif message.reply_to or message.to in {"*", "all", "everyone", "team", "project"}:
                     if dispatch_mode == "acp":
-                        acp.observe_notification(message)
+                        if not acp.observe_notification(message):
+                            self._remember_refused_message(msg_key)
+                            return False
                 elif wake_decision.should_trigger:
                     await self._submit_authenticated_agent_message(message, llm_service)
                 else:
@@ -9510,9 +9812,12 @@ class HubPlugin(BasePlugin):
                         if dispatch_mode in {"acp", "unavailable"} and hasattr(
                             llm_service, "submit_human_input"
                         ):
-                            await self._submit_authenticated_agent_message(
+                            admitted = await self._submit_authenticated_agent_message(
                                 message, llm_service
                             )
+                            if admitted.get("status") == "refused":
+                                self._remember_refused_message(msg_key)
+                                return False
                             return
                     await self.event_bus.emit_with_hooks(
                         EventType.TRIGGER_LLM_CONTINUE,
@@ -9540,6 +9845,26 @@ class HubPlugin(BasePlugin):
         """Get the persona color for an identity, or a stable palette fallback."""
         return persona_color(identity)
 
+    def _publish_hub_display(
+        self, from_name: str, to_name: str, content: str, observing: bool
+    ) -> None:
+        """Publish a hub message box as a semantic event for `kollab --hub capture`.
+
+        The box itself is rendered output, which the JSON capture drops whenever a
+        semantic event (a heartbeat's state_snapshot) is in the ring. This copy is
+        semantic, so the transcript keeps the message. Never raises.
+        """
+        from kollabor_tui.display_tap import publish_semantic
+
+        publish_semantic(
+            getattr(self, "_display_tap", None),
+            "hub_display",
+            sender=from_name,
+            target=to_name,
+            observing=observing,
+            text=f"{from_name} -> {to_name}\n{content}",
+        )
+
     def _render_hub_box(
         self, from_name: str, to_name: str, content: str, observing: bool = False
     ) -> None:
@@ -9551,6 +9876,7 @@ class HubPlugin(BasePlugin):
         Direct messages: bright colored ◆ marker
         Observed messages: dimmed colored ◇ marker
         """
+        self._publish_hub_display(from_name, to_name, content, observing)
         renderer = self.event_bus.get_service("renderer") if self.event_bus else None
         if not renderer or not hasattr(renderer, "message_coordinator"):
             return
@@ -11401,7 +11727,7 @@ class HubPlugin(BasePlugin):
                     **({"waiting": True} if (message.metadata or {}).get("acp_waiting") else {}),
                 )
             except RelayError as exc:
-                return [(message.to, str(exc))]
+                return [(message.to, str(exc) or type(exc).__name__)]
             refusal = _receipt_refusal(receipt)
             if refusal:
                 if receipt.get("reason") == "recipient_unavailable" or (
@@ -11839,6 +12165,12 @@ class HubPlugin(BasePlugin):
             target=agent.identity,
             detail=dial_target,
         )
+        if success:
+            # The receiver acked this message's id: it is the sender's proof
+            # of delivery (see _delivery_evidence).
+            acked = list(message.metadata.get("_acked_by", []))
+            if agent.identity not in acked:
+                message.metadata["_acked_by"] = [*acked, agent.identity]
         if not success:
             await AgentMessenger.send_to_file(agent.identity, message)
             # The sender has to hear that this was a mailbox drop, not a
@@ -13047,15 +13379,17 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: the knock screen is unavailable"
 
-    def _offer_failed(self) -> dict[str, str]:
-        """A failed offer, with the network's refusal line when that is why (#355).
+    def _offer_failed(self, refusal: str = "") -> dict[str, str]:
+        """A failed offer, with the reason it failed when we know it (#355, #693).
 
-        The line comes from this machine's state, never from exception text.
+        `refusal` is the issuer's own fixed line for a refusal made before any relay
+        request (#693). Otherwise the network's admit line is used (#355). Both come
+        from this machine's state, never from exception text.
         """
-        reason = ""
+        reason = refusal if isinstance(refusal, str) else ""
         try:
             commands = getattr(self._relay_agent, "commands", None)
-            if commands is not None:
+            if not reason and commands is not None:
                 reason = commands.client.control.admit_refusal()
         except Exception:
             reason = ""
@@ -13082,6 +13416,8 @@ class HubPlugin(BasePlugin):
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
             return {"error": "invalid connect offer request"}
+        from .enrollment_client import EnrollmentProtocolError
+
         try:
             if self._identity is None or self._rpc_server is None:
                 return {"error": "connect enrollment is unavailable"}
@@ -13090,6 +13426,10 @@ class HubPlugin(BasePlugin):
             if create is None:
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
+        except EnrollmentProtocolError as exc:
+            # The issuer refused before any relay request; say why (#693).
+            logger.warning("connect offer refused: %s", exc.refusal or exc.code)
+            return self._offer_failed(exc.refusal)
         except Exception:
             return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
@@ -16905,6 +17245,7 @@ class HubPlugin(BasePlugin):
                 await self._dreaming_task
             except asyncio.CancelledError:
                 pass
+        await self._settle_crystal_write()
 
         if self._notify_task:
             self._notify_task.cancel()
