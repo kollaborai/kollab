@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -125,8 +125,9 @@ def test_live_roundtrip_survives(tree):
 def test_sibling_prefix_workspaces_survive_boot():
     # Avoid underscores in ancestors: they would make the old search start
     # above the sibling prefix and accidentally find both workspaces.
-    with tempfile.TemporaryDirectory(prefix="sweep-", dir=Path("/tmp").resolve()) as tmp:
-        base = Path(tmp)
+    base = Path("/tmp").resolve() / ("sweep-" + uuid.uuid4().hex)
+    base.mkdir()
+    try:
         root = base / "projects"
         root.mkdir()
         workspaces = base / "workspaces"
@@ -145,6 +146,22 @@ def test_sibling_prefix_workspaces_survive_boot():
         assert not plan.quarantines
         assert all(entry.is_dir() for entry in entries)
         assert not (root / TRASH_DIR_NAME).exists()
+    finally:
+        import shutil
+
+        shutil.rmtree(base)
+
+
+def test_search_budget_exhaustion_is_report_only_on_boot(tree, monkeypatch):
+    root, _ = tree
+    entry = _orphan(root, "missing-workspace-with-budget-limit")
+    monkeypatch.setattr(projects_sweep, "DFS_MAX_NODES", 0)
+
+    plan, _ = run_projects_sweep(root, mode="boot", active_window_hours=0)
+
+    assert {d.name: d.category for d in plan.decisions}[entry.name] == "ambiguous"
+    assert not plan.quarantines
+    assert entry.is_dir()
 
 
 def test_owner_marker_vouches_for_entry(tree):
