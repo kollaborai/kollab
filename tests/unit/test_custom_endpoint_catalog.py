@@ -64,17 +64,31 @@ def _isolated_cache(tmp_path, monkeypatch):
     yield
 
 
-def _seed_disk_cache(profile_name, models, age_seconds):
+def _custom_profile():
+    return _Profile(
+        name="local",
+        provider="custom",
+        api_key="sk-dummy",
+        endpoint="http://127.0.0.1:9/api/coding/paas/v4/chat/completions",
+    )
+
+
+def _seed_disk_cache(profile, models, age_seconds, *, with_source=True):
     """Write a cache entry as if a previous process had fetched it."""
     path = model_catalog._cache_file()
     entry = {
         "timestamp": time.time() - age_seconds,
         "models": models,
     }
+    if with_source:
+        entry.update(model_catalog._profile_source(profile))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
-            {"version": model_catalog.CACHE_VERSION, "entries": {profile_name: entry}}
+            {
+                "version": model_catalog.CACHE_VERSION,
+                "entries": {profile.name: entry},
+            }
         ),
         encoding="utf-8",
     )
@@ -84,14 +98,8 @@ def _manager(*profiles):
     return LoadoutManager(config={}, profile_manager=_ProfileManager(profiles))
 
 
-def _custom_manager():
-    profile = _Profile(
-        name="local",
-        provider="custom",
-        api_key="sk-dummy",
-        endpoint="http://127.0.0.1:9/api/coding/paas/v4/chat/completions",
-    )
-    return _manager(profile)
+def _custom_manager(profile=None):
+    return _manager(profile or _custom_profile())
 
 
 def _implicit_ids(manager, profile_name):
@@ -124,7 +132,7 @@ def test_after_successful_fetch_lists_exactly_live_models(monkeypatch):
 def test_stale_cache_then_failed_refresh_lists_no_placeholders(monkeypatch):
     """(c) Cache older than CACHE_TTL_SECONDS + a failed refresh: nothing
     from the bundled registry appears."""
-    _seed_disk_cache("local", LIVE_MODELS, model_catalog.CACHE_TTL_SECONDS + 60)
+    _seed_disk_cache(_custom_profile(), LIVE_MODELS, model_catalog.CACHE_TTL_SECONDS + 60)
 
     async def failed_fetch(profile, timeout=model_catalog.DEFAULT_TIMEOUT):
         return []
@@ -144,10 +152,48 @@ def test_stale_cache_then_failed_refresh_lists_no_placeholders(monkeypatch):
 
 def test_fresh_disk_cache_at_process_start_lists_live_models():
     """(d) A fresh cached entry from a previous process is used as-is."""
-    _seed_disk_cache("local", LIVE_MODELS, 30)
+    _seed_disk_cache(_custom_profile(), LIVE_MODELS, 30)
     ids = _implicit_ids(_custom_manager(), "local")
     assert ids == LIVE_IDS
     assert not (set(ids) & BUNDLED_CUSTOM_IDS)
+
+
+def test_source_less_v2_cache_does_not_list_or_resolve_legacy_models():
+    profile = _custom_profile()
+    legacy_models = [{"id": "legacy-only-model", "note": "old endpoint"}]
+    _seed_disk_cache(profile, legacy_models, 30, with_source=False)
+    manager = _manager(profile)
+
+    assert "legacy-only-model" not in _implicit_ids(manager, "local")
+    assert manager.resolve("legacy-only-model") == (None, [])
+
+
+def test_source_less_v2_cache_is_cold_and_refreshes_live_catalog(monkeypatch):
+    profile = _custom_profile()
+    _seed_disk_cache(
+        profile,
+        [{"id": "legacy-only-model", "note": "old endpoint"}],
+        30,
+        with_source=False,
+    )
+    fetches = []
+
+    async def fake_fetch(current_profile, timeout=model_catalog.DEFAULT_TIMEOUT):
+        fetches.append(current_profile.name)
+        return list(LIVE_MODELS)
+
+    monkeypatch.setattr(model_catalog, "list_provider_models", fake_fetch)
+    manager = _manager(profile)
+
+    counts = asyncio.run(manager.refresh_catalogs())
+
+    assert fetches == ["local"]
+    assert counts == {"local": len(LIVE_MODELS)}
+    assert _implicit_ids(manager, "local") == LIVE_IDS
+    resolved, suggestions = manager.resolve("glm-5.3")
+    assert resolved is not None
+    assert resolved.name == "glm-5.3"
+    assert suggestions == []
 
 
 def test_grok_never_appears_for_custom_anywhere():

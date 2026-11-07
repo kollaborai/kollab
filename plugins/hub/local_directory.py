@@ -35,11 +35,13 @@ from kollabor_config.config_utils import (
     encode_project_path,
     get_config_directory,
 )
+from kollabor_config.hub_paths import hub_project_socket_key
 
 from .device_names import default_device_name
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
+_SOCKET_KEY = re.compile(r"[0-9a-f]{12}\Z")
 _STATES = frozenset(
     {
         "booting",
@@ -272,7 +274,7 @@ class LocalAgentDirectory:
 
     def _presence_dirs(
         self, root: int | Path, workspace: Path | None
-    ) -> Iterator[tuple[int | Path, str | None, Path | None]]:
+    ) -> Iterator[tuple[int | Path, str | None, Path | None, str | None]]:
         """Yield open directory descriptors, never following runtime symlinks."""
         if workspace is None and os.name == "nt":
             # A pre-upgrade cross-drive state directory can be outside the
@@ -288,6 +290,45 @@ class LocalAgentDirectory:
             else None
         )
         external = selected is not None and selected.parent.resolve() != (self.config_dir / "projects").resolve()
+
+        # POSIX presence shares the HOME-independent socket root. Validate it
+        # with the same no-follow directory-FD traversal used for HOME records.
+        if os.name != "nt":
+            try:
+                socket_root = _directory_fd(self.socket_dir)
+            except (OSError, LocalDirectoryError):
+                socket_root = None
+            if socket_root is not None:
+                try:
+                    for directory, _ in self._presence_path(socket_root, (), None):
+                        yield directory, None, current_workspace, None
+
+                    if current_workspace is not None:
+                        project_keys = [hub_project_socket_key(current_workspace)]
+                    else:
+                        try:
+                            with os.scandir(socket_root) as entries:
+                                project_keys = sorted(
+                                    entry.name
+                                    for entry in entries
+                                    if _SOCKET_KEY.fullmatch(entry.name)
+                                )
+                        except OSError:
+                            project_keys = []
+
+                    for number, project_key in enumerate(project_keys):
+                        if number >= self.max_projects:
+                            self.truncated = True
+                            break
+                        if not _SOCKET_KEY.fullmatch(project_key):
+                            continue
+                        for directory, _ in self._presence_path(
+                            socket_root, (project_key,), None
+                        ):
+                            yield directory, None, current_workspace, project_key
+                finally:
+                    if os.name != "nt":  # nt keeps a path, not a descriptor
+                        os.close(socket_root)
         try:
             projects = _directory_fd("projects", parent=root)
         except (OSError, LocalDirectoryError):
@@ -307,7 +348,7 @@ class LocalAgentDirectory:
                             self.truncated = True
                             break
                         for directory, project_name in self._presence_path(projects, (name, "hub", "presence"), name):
-                            yield directory, project_name, None
+                            yield directory, project_name, None, None
             finally:
                 if os.name != "nt":  # nt keeps a path, not a descriptor
                     os.close(projects)
@@ -315,13 +356,13 @@ class LocalAgentDirectory:
             try:
                 external_root = _directory_fd(selected)
                 for directory, _ in self._presence_path(external_root, ("hub", "presence"), None):
-                    yield directory, None, current_workspace
+                    yield directory, None, current_workspace, None
             except (OSError, LocalDirectoryError):
                 pass
         # The configured global-Hub mode uses the same payloads; still filter
         # each payload by its exact workspace when publishing remotely.
         for directory, project_name in self._presence_path(root, ("hub", "presence"), None):
-            yield directory, project_name, None
+            yield directory, project_name, None, None
 
     @staticmethod
     def _presence_path(parent: int, parts: tuple[str, ...], project_name: str | None):
@@ -425,7 +466,8 @@ class LocalAgentDirectory:
                     os.close(fd)
 
     def _record(
-        self, root: int, data: dict, filename: str, project_name: str | None, workspace: Path | None, now: float
+        self, root: int, data: dict, filename: str, project_name: str | None,
+        workspace: Path | None, now: float, project_key: str | None = None,
     ) -> LocalAgent | None:
         agent_id = data.get("agent_id")
         project = data.get("project")
@@ -451,6 +493,12 @@ class LocalAgentDirectory:
         actual_workspace = Path(project).resolve()
         if workspace is not None and actual_workspace != workspace:
             return None
+        if project_key is not None:
+            try:
+                if hub_project_socket_key(actual_workspace) != project_key:
+                    return None
+            except (OSError, ValueError):
+                return None
         if project_name is not None:
             if os.name == "nt":
                 try:
@@ -517,7 +565,7 @@ class LocalAgentDirectory:
         scanned = 0
         now = time.time()
         try:
-            for directory, project_name, source_workspace in self._presence_dirs(root, selected):
+            for directory, project_name, source_workspace, project_key in self._presence_dirs(root, selected):
                 with os.scandir(directory) as entries:
                     for entry in entries:
                         scanned += 1
@@ -529,7 +577,7 @@ class LocalAgentDirectory:
                         try:
                             row = self._record(
                                 root, _json_file(directory, entry.name), entry.name, project_name,
-                                selected or source_workspace, now,
+                                selected or source_workspace, now, project_key,
                             )
                         except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
                             continue

@@ -6,12 +6,13 @@ orchestration methods.
 """
 
 import asyncio
+import inspect
 import logging
 import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
-from kollabor.user_input_source import YES_SOURCES
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, YES_SOURCES
 from kollabor_agent.queue_processor import (
     MAX_CONTINUATION_TURNS,
     RepeatedToolErrorBreaker,
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+# On an ACP chat these native-only events are refused; ACP input goes through
+# submit_human_input (#579).
+ACP_SUBMIT_REASON = "acp_requires_submit_human_input"
 
 
 class MessageHandler:
@@ -57,6 +62,24 @@ class MessageHandler:
         self._coordinator = coordinator
         self._hub_continue_paused_until: float = 0.0
         self._retry_pending: bool = False
+
+    async def _report_detached_chain_break(self, reason: str) -> None:
+        """Notify a detached agent's parent when the tool loop is abandoned."""
+        event_bus = getattr(self._coordinator, "event_bus", None)
+        if event_bus is None or not hasattr(event_bus, "get_service"):
+            return
+        try:
+            hub = event_bus.get_service("hub_plugin")
+            if hub is None:
+                return
+            report = getattr(hub, "report_detached_chain_break", None)
+            if not callable(report):
+                return
+            result = report(reason=reason)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("detached chain-break notification failed", exc_info=True)
 
     async def handle_context_injection(
         self, data: Dict[str, Any], event
@@ -176,6 +199,13 @@ class MessageHandler:
         if not claims_voice_origin:
             origin_context = None
         origin_kwargs = {"origin_context": origin_context} if origin_context else {}
+        input_source = getattr(event, "source", None)
+        source_value = getattr(input_source, "value", input_source)
+        origin_kwargs["operator_source"] = (
+            str(source_value)
+            if source_value in HUMAN_USER_INPUT_SOURCES
+            else None
+        )
         # Only a person answering live (YES_SOURCES) answers what the agent asked
         # them. A hub peer's message (the "agent" source) is a turn like the user's,
         # but its words never do.
@@ -309,6 +339,14 @@ class MessageHandler:
         add_to_history = options.get("add_to_history", True)
         display_messages = options.get("display_messages", True)
         trigger_llm = options.get("trigger_llm", False)
+        if trigger_llm and self._acp_owns_chat():
+            # Refuse before any history, log or display write: a native reply
+            # would answer behind the ACP agent's back (#579).
+            self._coordinator.message_display_service.display_error_message(
+                "ACP owns this chat, so these messages were not added and no native "
+                "reply was started. Send them from the chat to reach the ACP agent."
+            )
+            return {"success": False, "error": ACP_SUBMIT_REASON}
         parent_uuid = options.get("parent_uuid", self._coordinator.current_parent_uuid)
 
         coord = self._coordinator
@@ -320,6 +358,8 @@ class MessageHandler:
                 mds.show_loading(loading_message)
 
             display_sequence: List[tuple] = []
+            # Messages whose history write failed. The batch still runs, but it is not a success.
+            history_failures = 0
 
             for msg in messages:
                 role = msg.get("role", "user")
@@ -334,25 +374,30 @@ class MessageHandler:
                         parent_uuid=parent_uuid,
                     )
 
-                # Log message
+                # Log message. A failed write leaves the chain on the previous
+                # record; the rest of the batch still reaches history.
                 if log_messages:
                     conv_logger = coord.conversation_logger
                     log_content = content_to_text(content)
-                    if role == "user":
-                        parent_uuid = await conv_logger.log_user_message(
-                            log_content, parent_uuid=parent_uuid
-                        )
-                    elif role == "assistant":
-                        parent_uuid = await conv_logger.log_assistant_message(
-                            log_content,
-                            parent_uuid=parent_uuid,
-                            model=coord.api_service.model,
-                            thinking_content=None,
-                        )
-                    elif role == "system":
-                        await conv_logger.log_system_message(
-                            log_content, parent_uuid=parent_uuid
-                        )
+                    try:
+                        if role == "user":
+                            parent_uuid = await conv_logger.log_user_message(
+                                log_content, parent_uuid=parent_uuid
+                            )
+                        elif role == "assistant":
+                            parent_uuid = await conv_logger.log_assistant_message(
+                                log_content,
+                                parent_uuid=parent_uuid,
+                                model=coord.api_service.model,
+                                thinking_content=None,
+                            )
+                        elif role == "system":
+                            await conv_logger.log_system_message(
+                                log_content, parent_uuid=parent_uuid
+                            )
+                    except Exception as exc:
+                        history_failures += 1
+                        logger.error("Message not written to history: %s", exc)
 
                 # Build display sequence
                 if display_messages and role in ("user", "assistant", "system"):
@@ -401,12 +446,15 @@ class MessageHandler:
             logger.info(
                 f"ADD_MESSAGE: Processed {len(messages)} messages, trigger_llm={trigger_llm}"
             )
-            return {
-                "success": True,
+            result = {
+                "success": history_failures == 0,
                 "message_count": len(messages),
                 "parent_uuid": parent_uuid,
                 "llm_triggered": trigger_llm,
             }
+            if history_failures:
+                result["error"] = f"{history_failures} message(s) not written to history"
+            return result
 
         except Exception as e:
             # Ensure loading is hidden on error
@@ -445,6 +493,15 @@ class MessageHandler:
             logger.info("TRIGGER_LLM_CONTINUE: Pipe mode active, skipping")
             return {"status": "pipe_mode"}
 
+        # ACP owns the chat: a native continuation, now or from a retry, would
+        # answer behind the ACP agent's back. Refuse before scheduling anything (#579).
+        if self._acp_owns_chat():
+            coord.message_display_service.display_error_message(
+                "A message from another agent or a background task was not run natively, "
+                "because ACP owns this chat. Send it from the chat to reach the ACP agent."
+            )
+            return {"status": "rejected", "reason": ACP_SUBMIT_REASON}
+
         # Cooldown (user hit ESC to get a word in) or a half-typed message:
         # wait it out below instead of dropping the wake. A dropped wake left
         # the agent silent for good.
@@ -466,6 +523,15 @@ class MessageHandler:
                 if qp.is_processing:
                     logger.info("Hub continue: a turn is already running, it sees the message")
                     return
+                # The hub wake is a new admitted turn. Its HUD row and all
+                # continuation writes must use a fresh ticket, not whichever
+                # queue turn last populated the shared cursor.
+                turn_serial = coord.claim_turn_serial()
+                coord._continue_serial = turn_serial
+                # Fresh chain (#676): the wake's first continuation parents
+                # on the pointer (the mention reply this wake answers), not
+                # the previous chain's tail.
+                coord._batch_tail_uuid = None
                 qp.is_processing = True
                 # Set turn_completed=False so _continue_conversation does not
                 # inject pending_agent_hud as a new user message. Setting True
@@ -503,7 +569,7 @@ class MessageHandler:
                 if isinstance(hud, str) and hud:
                     from kollabor_events.data_models import ConversationMessage
 
-                    coord.current_parent_uuid = coord._add_conversation_message(
+                    hud_uuid = coord._add_conversation_message(
                         ConversationMessage(
                             role="user",
                             content=hud,
@@ -511,8 +577,16 @@ class MessageHandler:
                         ),
                         parent_uuid=coord.current_parent_uuid,
                     )
+                    coord.publish_cursor(hud_uuid, turn_serial)
                 try:
-                    await coord._continue_conversation()
+                    try:
+                        await coord._continue_conversation()
+                    except Exception as e:
+                        logger.error(f"Hub continue error (turn 1): {e}")
+                        await self._report_detached_chain_break(
+                            reason="conversation continuation failed"
+                        )
+                        qp.turn_completed = True
                     turn_count = 0
                     # Same identical-error breaker as the queue drain loop; the
                     # turn above counts toward the run.
@@ -546,6 +620,9 @@ class MessageHandler:
                                 f"({MAX_CONTINUATION_TURNS}) without completing "
                                 f"— stopping runaway chain"
                             )
+                            await self._report_detached_chain_break(
+                                reason="maximum continuation turns reached"
+                            )
                             qp.turn_completed = True
                             break
                         turn_count += 1
@@ -559,6 +636,10 @@ class MessageHandler:
                             await coord._continue_conversation()
                         except Exception as e:
                             logger.error(f"Hub continue error (turn {turn_count}): {e}")
+                            await self._report_detached_chain_break(
+                                reason="conversation continuation failed"
+                            )
+                            qp.turn_completed = True
                             break
                         if stuck.observe(qp._last_tool_error_sig):
                             logger.warning(
@@ -568,6 +649,9 @@ class MessageHandler:
                             coord.message_display_service.display_error_message(
                                 f"Stuck loop detected: same tool error repeated "
                                 f"{stuck.count} times. Breaking."
+                            )
+                            await self._report_detached_chain_break(
+                                reason=f"{stuck.count} identical tool errors"
                             )
                             qp.turn_completed = True
                             break
@@ -658,6 +742,14 @@ class MessageHandler:
                             "TRIGGER_LLM_CONTINUE: Retrying after processing completed"
                         )
                         if not coord.is_processing:
+                            if self._acp_owns_chat():
+                                # ACP was selected while this retry waited (#579).
+                                coord.message_display_service.display_error_message(
+                                    "ACP took over this chat while a native reply was waiting, "
+                                    "so that reply was not started. Send your message from the "
+                                    "chat to reach the ACP agent."
+                                )
+                                return
                             coord.create_background_task(
                                 lambda: _hub_continue(),
                                 name="continue_conversation_retry",
@@ -681,6 +773,12 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error in TRIGGER_LLM_CONTINUE handler: {e}")
             return {"status": "error", "error": str(e)}
+
+    def _acp_owns_chat(self) -> bool:
+        """Whether an ACP agent owns this chat: the test process_user_input applies."""
+        coord = self._coordinator
+        selected_acp, _ = coord._profile_selects_acp()
+        return bool(selected_acp or coord._active_acp() is not None)
 
     def _hub_continue_blocked(self) -> str:
         """Why a hub wake must wait right now ("" when it may run)."""

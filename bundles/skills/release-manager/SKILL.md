@@ -122,9 +122,12 @@ not let another writer edit those paths concurrently.
    release.
 3. Update `uv.lock` using the repository's supported lock command, then inspect
    the diff.
-4. Move the intended user-facing entries from `[Unreleased]` into
+4. Run `python scripts/changelog.py build`: it folds every entry file in
+   `changes/` into `[Unreleased]` of both changelogs and deletes the files. Then
+   move the intended user-facing entries from `[Unreleased]` into
    `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`. Keep a new empty `[Unreleased]`
-   section at the top.
+   section at the top. The release branch is `release/X.Y.Z`; CI refuses
+   changelog edits on any branch outside `release/` and `changelog/`.
 5. Synchronize `kollabor/updates/CHANGELOG.md` with the root changelog and prove
    the copies match (`cmp` or equivalent byte comparison).
 6. Add migration notes for breaking CLI, config, plugin, package, or API behavior.

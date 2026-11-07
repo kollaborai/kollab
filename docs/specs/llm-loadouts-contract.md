@@ -64,10 +64,13 @@ between them. Without it an OAuth-only install synthesizes zero loadouts.
 **C3.4** Name collisions: an explicit loadout shadows an implicit one of the
 same name; among implicits, the first provider profile wins (`:146-174`).
 
-**C3.5 — KNOWN GAP.** Implicit loadouts come from `list_models_for_provider()`
-and nothing else. A provider with zero bundled entries contributes zero rows.
-`list_models_for_provider('openrouter')` returns `0`, so OpenRouter is
-unreachable from `/llm` entirely. See `llm-loadout-live-catalog.md`.
+**C3.5.** A provider's implicit loadouts are its cached live catalog when that
+has entries, plus the profile's own model. `list_models_for_provider()` seeds
+them only while the catalog is cold or the provider has no listing API (#558).
+A provider with zero bundled entries and no cached catalog contributes zero
+rows: `list_models_for_provider('openrouter')` returns `0`, so OpenRouter is
+unreachable from `/llm` until a refresh fills its cache. See
+`llm-loadout-live-catalog.md`.
 
 **C3.6 — KNOWN GAP.** `_build_sections()` (`loadout_altview.py:395-396`) does
 `if not rows: continue`. A configured provider serving zero models renders
@@ -90,7 +93,7 @@ names containing the query, or the closest names by edit distance
 **C4.3** Empty query returns `(None, [])`.
 
 **C4.4** `resolve()` is synchronous and reads only `list_loadouts()`. It
-therefore inherits C3.5 — no OpenRouter model is resolvable by name.
+therefore inherits C3.5 — until the catalog is cached, no OpenRouter model is resolvable by name.
 
 ## 5. Activation
 
