@@ -11,7 +11,7 @@ from mcp.client.stdio import stdio_client
 
 
 @pytest.mark.asyncio
-async def test_mcp_sdk_live_parent_binding_revoke():
+async def test_mcp_sdk_live_parent_binding_revoke(tmp_path):
     current = {"valid": True}
     with tempfile.TemporaryDirectory(prefix="acp-", dir="/tmp") as directory:
         socket_path = os.path.join(directory, "hub.sock")
@@ -31,12 +31,14 @@ async def test_mcp_sdk_live_parent_binding_revoke():
                 await writer.wait_closed()
 
         server = await asyncio.start_unix_server(parent, path=socket_path)
+        token_file = tmp_path / "binding.token"
+        token_file.write_text("current")
         params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "kollabor.mcp_hub"],
             env={
                 **os.environ,
-                "KOLLAB_ACP_HUB_TOKEN": "current",
+                "KOLLAB_ACP_HUB_TOKEN_FILE": str(token_file),
                 "KOLLAB_ACP_HUB_SOCKET": socket_path,
                 "KOLLAB_ACP_GENERATION": "3",
             },
@@ -93,11 +95,13 @@ async def test_agent_socket_acp_hub_action_validates_current_binding(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_mcp_socket_binding_fails_closed_when_fields_missing(monkeypatch):
+async def test_mcp_socket_binding_fails_closed_when_fields_missing(monkeypatch, tmp_path):
     from kollabor.mcp_hub import _binding_from_socket
 
+    token_file = tmp_path / "binding.token"
+    token_file.write_text("token")
     monkeypatch.delenv("KOLLAB_ACP_HUB_SOCKET", raising=False)
-    monkeypatch.setenv("KOLLAB_ACP_HUB_TOKEN", "token")
+    monkeypatch.setenv("KOLLAB_ACP_HUB_TOKEN_FILE", str(token_file))
     monkeypatch.setenv("KOLLAB_ACP_GENERATION", "1")
     assert await _binding_from_socket() is None
 

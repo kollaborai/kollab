@@ -131,30 +131,224 @@ def _safe_profile_load_diagnostic(profile_data: Any, error: Exception) -> str:
 # Sentinel prefix for keys stored in OS keyring
 KEYRING_SENTINEL_PREFIX = "secret:keyring:"
 
-# Reasoning effort levels, cheapest first. Anthropic documents low..max;
-# the ChatGPT codex backend also advertises "ultra" on its top tiers
-# (see query_codex_model_details). Providers 400 on anything else.
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
+# Reasoning effort levels, cheapest first. none and minimal are OpenAI-shaped:
+# Anthropic does not take them (providers/tuning.py leaves them out). Anthropic
+# documents low..max; the ChatGPT codex backend also advertises "ultra" on its
+# top tiers (see query_codex_model_details). Providers 400 on anything else.
+EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+# Levels Anthropic's output_config.effort does not take (it documents low..max).
+# They stay in EFFORT_LEVELS for the OpenAI-shaped fields; an Anthropic profile
+# refuses them when written, never offers them and never reports them as set.
+ANTHROPIC_UNSUPPORTED_EFFORT = frozenset({"none", "minimal"})
+
+# Profiles already warned about a stored unsent level, so a long session logs once.
+_warned_unsent_effort: set = set()
+
+
+def resolve_effort_provider(
+    provider: Optional[str], api_key: str = "", base_url: str = ""
+) -> str:
+    """The provider a request is built for: ``auto`` resolved like the request does.
+
+    A profile with ``provider: "auto"`` (the shipped ``default``) becomes Anthropic
+    from its key or endpoint, so the effort rules must see that, not the word
+    ``auto``. An ``auto`` that detects nothing stays ``auto``.
+    """
+    name = (provider or "").strip().lower()
+    if name != "auto":
+        return name
+    try:
+        from kollabor_ai.providers.registry import detect_provider_from_profile
+
+        detected = detect_provider_from_profile(
+            {
+                "provider": "auto",
+                "api_key": api_key or "",
+                "api_base": base_url or "",
+            }
+        )
+    except Exception:
+        return name
+    return str(getattr(detected, "value", detected)).lower()
+
+
+def effort_unsupported_reason(provider: Optional[str], effort: Optional[str]) -> str:
+    """Why ``provider`` never receives ``effort``; empty when it can.
+
+    Used wherever a level is written (profile route, copy, launch flag) so the
+    typo or wrong-provider pick fails there instead of storing a level that no
+    request carries.
+    """
+    level = (effort or "").strip().lower()
+    if (
+        level in ANTHROPIC_UNSUPPORTED_EFFORT
+        and (provider or "").strip().lower() == "anthropic"
+    ):
+        return (
+            f"Anthropic has no reasoning effort {level!r}; choose one of: "
+            + ", ".join(
+                x for x in EFFORT_LEVELS if x not in ANTHROPIC_UNSUPPORTED_EFFORT
+            )
+            + " (or empty for model default)"
+        )
+    return ""
+
+
+def sendable_effort(provider: Optional[str], effort: Optional[str]) -> str:
+    """``effort`` when ``provider`` sends it, else empty.
+
+    A stored loadout level is applied through this, so one that the provider
+    never receives (``minimal`` on a loadout whose profile moved to Anthropic)
+    reads back as unset, as it does on a profile, and the rest of the preset
+    still applies.
+    """
+    if not effort or effort_unsupported_reason(provider, effort):
+        return ""
+    return effort
+
+
+def _vault_call(
+    key_name: str, value: Optional[str] = None, *, delete: bool = False
+) -> Optional[str]:
+    """Read (value None), store, or delete a secret in the encrypted vault file.
+
+    Thin wrapper over :func:`_vault_op` that drops the "closed" flag.
+    """
+    return _vault_op(key_name, value, delete=delete)[0]
+
+
+def _vault_op(
+    key_name: str, value: Optional[str] = None, *, delete: bool = False
+) -> tuple[Optional[str], bool]:
+    """Read (value None), store, or delete a secret in the encrypted vault file.
+
+    The vault is where a key goes when the OS keyring cannot take it
+    (KOLLAB_NO_KEYRING, no Secret Service, a container): AES-256-GCM in
+    ~/.kollab/vault/secrets.enc. Its password is the random one kept owner-only
+    in ~/.kollab/vault/vault.key when that file exists, otherwise
+    KOLLAB_KEY_ENCRYPTION_PASSWORD; a new vault gets a vault.key only when the
+    variable is unset. So the key file records which password a vault uses,
+    and pipe mode and --detached never prompt. Returns the value read, or the
+    value stored; for a delete the removed value, or "" when the vault holds
+    none. None when the vault is unavailable or cannot be decrypted --
+    an unreadable vault is never rewritten, so a wrong password loses nothing.
+    Returns ``(result, closed)``; ``closed`` is True when ``secrets.enc``
+    exists but this process could not open it (no password, wrong password,
+    corrupt file), so a caller can tell that from a vault that opened and
+    simply lacks the entry (#610).
+    A read or delete never creates the vault, and a vault that exists is never
+    given a new vault.key: without its password it stays closed (#610).
+    """
+    import secrets as _secrets
+
+    from kollabor_ai.providers.security import (
+        CRYPTOGRAPHY_AVAILABLE,
+        EncryptedFileKeyStorage,
+    )
+    from kollabor_config.config_utils import get_config_directory
+    from kollabor_config.file_lock import locked_file
+    from kollabor_config.private_fs import ensure_private_dir
+
+    vault_file = None
+    try:
+        vault_dir = get_config_directory() / "vault"
+        vault_file = vault_dir / "secrets.enc"
+        if not CRYPTOGRAPHY_AVAILABLE:
+            return None, vault_file.exists()
+        writing = value is not None and not delete
+        if not writing and not vault_file.exists():
+            return ("" if delete else None), False
+        ensure_private_dir(vault_dir)
+        with locked_file(vault_dir / "vault.lock", private=True):
+            password = ""
+            key_file = vault_dir / "vault.key"
+            if key_file.exists():
+                with locked_file(key_file, "r", private=True) as f:
+                    password = f.read().strip()
+            else:
+                password = os.environ.get("KOLLAB_KEY_ENCRYPTION_PASSWORD", "")
+            if not password:
+                if vault_file.exists() or not writing:
+                    logger.warning(
+                        "Password vault is locked: set KOLLAB_KEY_ENCRYPTION_PASSWORD"
+                    )
+                    return None, True
+                password = _secrets.token_urlsafe(32)
+                with locked_file(key_file, "w", private=True) as f:
+                    f.write(password)
+            storage = EncryptedFileKeyStorage(vault_file, password)
+            keystore = storage._load_keystore()
+            if delete:
+                found = keystore.pop(key_name, None)
+                if found is None:
+                    return "", False
+                storage._save_keystore(keystore)
+                return found, False
+            if value is None:
+                return keystore.get(key_name), False
+            keystore[key_name] = value
+            storage._save_keystore(keystore)
+            return value, False
+    except Exception as e:
+        # The type only: an exception's text can carry the key being stored.
+        logger.warning(f"Password vault unavailable ({type(e).__name__})")
+        try:
+            closed = vault_file is not None and vault_file.exists()
+        except OSError:
+            closed = False
+        return None, closed
+
+
+def _project_secret_name(profile_name: str, config_path: Path) -> str:
+    """Secret-store name for a key saved into one project's config.
+
+    Profiles merge by name, but a project's profile can hold a different key
+    than the global one or another project's. A shared name would let one
+    project's save replace the key the others run on, so each project config
+    gets an entry of its own (#610).
+    """
+    import hashlib
+
+    digest = hashlib.sha256(str(config_path.resolve()).encode("utf-8")).hexdigest()
+    return f"{profile_name}@{digest[:12]}"
 
 
 def _keyring_get(key_name: str) -> Optional[str]:
-    """Retrieve a value from OS keyring (sync, graceful fallback).
+    """Retrieve a value from OS keyring, then the vault (sync, graceful fallback).
 
     Uses the same service name as APIKeyManager from security.py
     so keys are interchangeable between the async and sync paths.
-    Skipped entirely when the keyring is disabled (KOLLAB_NO_KEYRING, tests) --
-    on macOS a lookup of a missing entry pops a Keychain dialog.
+    The keyring is skipped entirely when disabled (KOLLAB_NO_KEYRING, tests) --
+    on macOS a lookup of a missing entry pops a Keychain dialog. A
+    ``secret:keyring:`` reference resolves from either store (#610). A key
+    lives in one store at a time (see _keyring_set), and the vault is read
+    first because a process without the keyring cannot clear a keyring copy.
+    A vault that exists but this process cannot open ends the lookup with
+    None: the keyring copy may be older than a key that vault holds, and a
+    stale key used in silence is worse than the loud "sentinel found but
+    keyring lookup failed" path.
     """
+    in_vault, vault_closed = _vault_op(key_name)
+    if in_vault:
+        return in_vault
+    if vault_closed:
+        logger.warning(
+            "The vault cannot be opened; not using a keyring copy that may be older"
+        )
+        return None
     try:
         import keyring
 
         from kollabor_ai.providers.security import APIKeyManager, keyring_enabled
 
-        if not keyring_enabled():
-            return None
-        return keyring.get_password(APIKeyManager.SERVICE_NAME, key_name)
+        if keyring_enabled():
+            found = keyring.get_password(APIKeyManager.SERVICE_NAME, key_name)
+            if found:
+                return str(found)
     except Exception:
-        return None
+        pass
+    return None
 
 
 # (profile name, plaintext key) pairs get_api_key() already tried to migrate.
@@ -162,23 +356,33 @@ _KEYRING_MIGRATION_TRIED: set[tuple[str, str]] = set()
 
 
 def _keyring_set(key_name: str, value: str) -> bool:
-    """Store a value in OS keyring (sync, graceful fallback).
+    """Store a value in OS keyring, else the encrypted vault (sync, graceful fallback).
 
-    Returns True on success, False if keyring is unavailable, disabled, or
-    fails. A False return keeps the caller on its plaintext path -- see
-    get_api_key()'s auto-migration, which must not prompt during tests.
+    Returns True on success, False if neither store took it. A False return
+    keeps the caller on its plaintext path. With the keyring disabled
+    (KOLLAB_NO_KEYRING, tests) the keyring is never touched, so no prompt;
+    the key goes to the vault file instead (#610). A keyring write removes the
+    vault's copy, so a reference never resolves to a stale key; when a vault
+    exists that this process cannot open, the write counts as failed, since
+    the stale copy could not be cleared.
     """
     try:
         import keyring
 
         from kollabor_ai.providers.security import APIKeyManager, keyring_enabled
 
-        if not keyring_enabled():
-            return False
-        keyring.set_password(APIKeyManager.SERVICE_NAME, key_name, value)
-        return True
+        if keyring_enabled():
+            keyring.set_password(APIKeyManager.SERVICE_NAME, key_name, value)
+            if _vault_call(key_name, delete=True) is None:
+                logger.warning(
+                    "The vault holds a copy this process cannot open; "
+                    "not writing a reference"
+                )
+                return False
+            return True
     except Exception:
-        return False
+        pass
+    return _vault_call(key_name, value) is not None
 
 
 @dataclass
@@ -453,6 +657,9 @@ class LLMProfile:
     project_id: Optional[str] = None
     location: Optional[str] = None
     store_responses: Optional[bool] = None
+    # Bumped by ProfileManager.update_profile on every edit. Not serialized: a
+    # caller that awaits (such as a model lookup) compares it to see an edit.
+    revision: int = field(default=0, compare=False, repr=False)
 
     def _get_env_key(self, field: str) -> str:
         """Generate env var key for this profile and field.
@@ -630,7 +837,7 @@ class LLMProfile:
         1. Profile-specific env var (KOLLAB_{NAME}_API_KEY)
         2. For provisioned profiles, the private enrolled credential
         3. Global env var (KOLLAB_API_KEY) for ordinary profiles
-        4. Sentinel in config -> resolve from OS keyring
+        4. Sentinel in config -> resolve from OS keyring or the vault file
         5. Keyring lookup by profile name (auto-migration path)
         6. Plaintext from config (backwards compat fallback)
         """
@@ -669,7 +876,15 @@ class LLMProfile:
                 return raw
             if (self.name, raw) not in _KEYRING_MIGRATION_TRIED:
                 _KEYRING_MIGRATION_TRIED.add((self.name, raw))
-                if _keyring_set(self.name, raw):
+                # Profiles are keyed by name only: a project's plaintext key must
+                # not replace the vault entry the global profile points to.
+                in_vault = _vault_call(self.name)
+                if in_vault and in_vault != raw:
+                    logger.info(
+                        f"Profile '{self.name}': another key is stored under this "
+                        "name; leaving this one in config"
+                    )
+                elif _keyring_set(self.name, raw):
                     logger.info(
                         f"Profile '{self.name}': auto-migrated API key to OS keyring"
                     )
@@ -716,6 +931,15 @@ class LLMProfile:
             logger.warning(
                 f"Profile '{self.name}': effort '{value}' is not one of {'/'.join(EFFORT_LEVELS)} — ignoring"
             )
+            return ""
+        if effort_unsupported_reason(self.get_effort_provider(), value):
+            # stored by hand or by an env var: report it as unset, since the
+            # request would not carry it either
+            if self.name not in _warned_unsent_effort:
+                _warned_unsent_effort.add(self.name)
+                logger.warning(
+                    f"Profile '{self.name}': Anthropic has no effort '{value}' — not sent"
+                )
             return ""
         return value
 
@@ -787,6 +1011,13 @@ class LLMProfile:
         if global_val:
             return global_val.lower()
         return self.provider or "openai"
+
+    def get_effort_provider(self) -> str:
+        """``get_provider()`` with ``auto`` resolved to the provider requests use."""
+        provider = self.get_provider()
+        if provider != "auto":
+            return provider
+        return resolve_effort_provider(provider, self.get_api_key(), self.get_endpoint())
 
     def get_provider_type(self) -> str:
         """
@@ -2044,7 +2275,7 @@ class ProfileManager:
                 None,
             )
 
-            def _build_profile_dict() -> dict:
+            def _build_profile_dict(secret_name: str) -> dict:
                 profile_dict = {
                     "provider": profile.provider,
                     "model": profile.model,
@@ -2076,22 +2307,40 @@ class ProfileManager:
                     # Auto-profile from a provider env var -- never persist the key.
                     # The provider env var stays the source of truth.
                     pass
-                elif raw_stored.startswith(KEYRING_SENTINEL_PREFIX):
-                    # Config already references keyring -- keep sentinel stable on save
+                elif raw_stored.startswith(KEYRING_SENTINEL_PREFIX) and (
+                    raw_stored == f"{KEYRING_SENTINEL_PREFIX}{secret_name}"
+                    or not resolved_key
+                ):
+                    # The reference already names this config's own entry (or
+                    # cannot be resolved, so there is nothing to re-store):
+                    # keep it stable on save
                     profile_dict["api_key"] = raw_stored
                 elif resolved_key:
+                    # A plain key, or a reference to another entry (another
+                    # project's, or the profile this one was copied from).
+                    # Sharing that entry would let a later save of the other
+                    # change this config's key, so store it under its own name.
                     key_val = resolved_key
-                    if _keyring_set(profile.name, key_val):
-                        sentinel = f"{KEYRING_SENTINEL_PREFIX}{profile.name}"
+                    if _keyring_set(secret_name, key_val):
+                        sentinel = f"{KEYRING_SENTINEL_PREFIX}{secret_name}"
                         profile_dict["api_key"] = sentinel
                         logger.info(
-                            f"Profile '{profile.name}': stored API key in OS keyring, writing sentinel to config"
+                            f"Profile '{profile.name}': stored API key in OS keyring or vault, "
+                            "writing sentinel to config"
+                        )
+                    elif raw_stored.startswith(KEYRING_SENTINEL_PREFIX):
+                        # No store takes a new entry: keep the reference rather
+                        # than write the key to a config file
+                        profile_dict["api_key"] = raw_stored
+                        logger.warning(
+                            f"Profile '{profile.name}': keyring and vault unavailable, "
+                            "keeping the existing reference"
                         )
                     else:
-                        # Keyring unavailable -- fall back to plaintext
+                        # Keyring and vault unavailable -- fall back to plaintext
                         profile_dict["api_key"] = key_val
                         logger.warning(
-                            f"Profile '{profile.name}': keyring unavailable, API key saved in plaintext"
+                            f"Profile '{profile.name}': keyring and vault unavailable, API key saved in plaintext"
                         )
                 if profile.top_p is not None:
                     profile_dict["top_p"] = profile.top_p
@@ -2134,7 +2383,9 @@ class ProfileManager:
                         profile_dict["install_guidance"] = profile.install_guidance
                 return profile_dict
 
-            def _write_profile_config(config_path: Path, location: str) -> bool:
+            def _write_profile_config(
+                config_path: Path, location: str, secret_name: str
+            ) -> bool:
                 config_path.parent.mkdir(parents=True, exist_ok=True)
 
                 if config_path.exists():
@@ -2151,7 +2402,7 @@ class ProfileManager:
 
                 config_data["kollabor"]["llm"]["profiles"][
                     profile.name
-                ] = _build_profile_dict()
+                ] = _build_profile_dict(secret_name)
 
                 write_text_atomic(
                     config_path,
@@ -2164,21 +2415,27 @@ class ProfileManager:
                 return True
 
             global_path = get_global_config_path()
-            _write_profile_config(global_path, "global")
+            _write_profile_config(global_path, "global", profile.name)
 
             # Also update local config if it already has LLM profiles
             local_path = next(
                 (path for path in get_local_config_path_candidates() if path.exists()),
                 get_local_config_path(),
             )
-            if local_path.exists():
+            # Run from $HOME the "local" config is the global one: it was just
+            # written, and a second write would swap its reference for a scoped one.
+            if local_path.exists() and local_path.resolve() != global_path.resolve():
                 try:
                     local_data = json.loads(local_path.read_text(encoding="utf-8"))
                     local_profiles = (
                         local_data.get("kollabor", {}).get("llm", {}).get("profiles")
                     )
                     if local_profiles:
-                        _write_profile_config(local_path, "local")
+                        _write_profile_config(
+                            local_path,
+                            "local",
+                            _project_secret_name(profile.name, local_path),
+                        )
                 except Exception as e:
                     logger.debug(f"Skipping local config update: {e}")
 
@@ -2309,6 +2566,11 @@ class ProfileManager:
                     "(or empty for model default)"
                 )
             profile.effort = normalized_effort
+            reason = effort_unsupported_reason(
+                profile.get_effort_provider(), normalized_effort
+            )
+            if reason:
+                raise ValueError(f"Profile {source_name!r}: {reason}")
 
         if profile.provider == "acp" and not profile.command:
             raise ValueError(
@@ -2475,6 +2737,21 @@ class ProfileManager:
             return False
         original_profile = copy.deepcopy(profile) if profile.is_provisioned else None
 
+        # A level the resulting provider never sends is refused before anything
+        # changes, so a launch flag or API write cannot store it.
+        if effort:
+            target = provider if provider is not None else profile.provider
+            reason = effort_unsupported_reason(
+                resolve_effort_provider(
+                    target,
+                    api_key if api_key is not None else profile.get_api_key(),
+                    base_url if base_url is not None else profile.get_endpoint(),
+                ),
+                effort,
+            )
+            if reason:
+                raise ValueError(reason)
+
         # Update fields if provided
         if base_url is not None:
             profile.base_url = base_url
@@ -2502,6 +2779,7 @@ class ProfileManager:
             profile.streaming = streaming
         if extra_headers is not None:
             profile.extra_headers = extra_headers
+        profile.revision += 1
 
         # Handle rename
         if new_name and new_name != original_name:

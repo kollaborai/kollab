@@ -19,7 +19,12 @@ import re
 from typing import Any
 
 from .context import ContextListSnapshot, ConversationContext
-from .interface import StateService, enrollment_result, offer_failure
+from .interface import (
+    ProfileActivationError,
+    StateService,
+    enrollment_result,
+    offer_failure,
+)
 from .snapshots import (
     AgentListSnapshot,
     AgentSnapshot,
@@ -49,8 +54,15 @@ class ReloadNeededError(ValueError):
 
 
 def _raise_for_error(result: dict[str, Any]) -> None:
-    """Raise the RPC error result; a reload-needed failure is its own type."""
+    """Raise the RPC error result, preserving typed activation/reload failures."""
     error = str(result.get("error") or "")
+
+    if result.get("error_code") == ProfileActivationError.ERROR_CODE:
+        raise ProfileActivationError(
+            previous_profile_restored=(
+                result.get("previous_profile_restored") is True
+            )
+        )
     if result.get("reload_needed"):
         raise ReloadNeededError(error)
     raise ValueError(error)
