@@ -281,3 +281,30 @@ async def test_inbound_message_resolves_matching_task_only(tmp_path):
     )
 
     assert [item["task_id"] for item in ledger.pending_replies()] == ["task-a"]
+
+
+def test_preserve_active_terminalize_resolves_pending_replies(tmp_path):
+    ledger = TaskLedger(str(tmp_path))
+    card = ledger.create(
+        assigner="koordinator",
+        assignee="lapis",
+        directive="work linked to a stale upstream reference",
+        status="open",
+    )
+    ledger.expect_reply(
+        task_id=card.id,
+        assignee="lapis",
+        requested_by="koordinator",
+        message_id="msg-preserve-active-terminalize",
+        deadline_seconds=120,
+    )
+
+    terminal = ledger.terminalize(
+        card.id,
+        status="cancelled",
+        reason="the linked queue slot became stale",
+        preserve_active=True,
+    )
+
+    assert terminal.status == "cancelled"
+    assert ledger.pending_replies() == []

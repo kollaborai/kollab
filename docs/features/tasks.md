@@ -21,11 +21,24 @@ Tools (registered in plugins/hub/plugin.py):
 
 ## System 2: Work Queue (lightweight dispatch)
 
-Location: plugins/hub/plugin.py (inline)
+Location: plugins/hub/coordinator.py (queue state and sweep);
+plugins/hub/plugin.py (commands and integration)
 
-A simple FIFO queue for dispatching work items to agents. Items are
-claimed by agents and tracked in memory. Use these for one-shot tasks
-that don't need compaction-proof persistence.
+A simple FIFO queue for dispatching work items to agents. Slots are
+persisted and claimed by agents. When the TaskLedger and agent identity are
+available, each queue item is paired with a durable TaskLedger card; the slot
+remains the dispatch unit. Claiming a linked card marks its slot assigned so
+stale sweeps skip claimed work. Completed slots retire unconditionally. A
+pending slot retires when its linked TaskLedger card is terminal (`done`,
+`failed`, `closed`, `cancelled`, or `obsolete`), or when every explicitly linked
+GitHub ref is terminal. Assigned slots are never retired.
+
+When a linked card is active and an explicit upstream ref becomes terminal, the
+slot keeps its current status and records an idempotent `stale_upstream_note`;
+a pending slot remains pending. Assignment is made only by a claim, never
+inferred from a card's assignee. Legacy slots with neither explicit refs nor a
+linked TaskLedger card are report-only: their prose is not parsed and their
+refs are not inferred or backfilled.
 
 Tools:
 
@@ -54,8 +67,20 @@ Quiet reminders while continuing the work:
 Complete a task:
   `<hub_task_complete id="abc123">summary of work done</hub_task_complete>`
 
-Add to queue:
+Add to queue without upstream references (the legacy body-only form):
   `<hub_queue>description of work item</hub_queue>`
+
+Associate explicit GitHub issues or pull requests with the queued work:
+  `<hub_queue upstream_refs="#123,#456">description of work item</hub_queue>`
+
+`upstream_refs` is optional. The queue does not infer references from the
+work description; only explicitly supplied refs are used by stale-queue cleanup.
+
+The manual `/hub queue` command accepts only a task description and does not
+pass `upstream_refs`. Slots created through that command therefore have no
+GitHub refs and are not retired based on issue or pull-request state (a pending
+slot can still retire when its linked TaskLedger card becomes terminal). Use the
+`hub_queue` tool with explicit refs when GitHub-ref stale cleanup is needed.
 
 Claim next item:
   `<hub_claim>item-id</hub_claim>`
