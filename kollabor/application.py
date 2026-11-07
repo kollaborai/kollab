@@ -1560,6 +1560,39 @@ class TerminalLLMChat:
                 return
             await asyncio.sleep(1.0 if create_time is not None else 10.0)
 
+    def _boot_projects_sweep(self) -> None:
+        """Issue #647: retire orphaned project state directories at boot.
+
+        Orphans move to ``_trash`` (recoverable, 14 day retention) and truly
+        empty shells are removed; nothing with content is deleted at boot.
+        Trash purges happen only through ``kollab --cleanup-projects --execute``.
+        Any failure is logged and swallowed so startup never depends on
+        housekeeping.
+        """
+        try:
+            if not self.config.get("kollabor.projects.sweep_boot_enabled", True):
+                return
+            from kollabor_config.projects_sweep import run_projects_sweep
+
+            plan, _report = run_projects_sweep(
+                mode="boot",
+                own_project=Path.cwd(),
+                active_window_hours=float(
+                    self.config.get("kollabor.projects.active_window_hours", 24)
+                ),
+                retention_days=float(
+                    self.config.get("kollabor.projects.retention_days", 14)
+                ),
+            )
+            if plan.quarantines or plan.empty_shells:
+                logger.info(
+                    "boot projects sweep: %d quarantined, %d empty shells removed",
+                    len(plan.quarantines),
+                    len(plan.empty_shells),
+                )
+        except Exception:
+            logger.warning("boot projects sweep failed", exc_info=True)
+
     async def _deferred_startup(self, initial_message: str | None = None) -> None:
         """Run heavy initialization in background after render loop starts.
 
@@ -1569,6 +1602,8 @@ class TerminalLLMChat:
         """
         self._startup_error = ""
         try:
+            self._boot_projects_sweep()
+
             # Fire-and-forget: version check (network, 5s timeout)
             self.create_background_task(self._check_for_updates(), "version_check")
 
