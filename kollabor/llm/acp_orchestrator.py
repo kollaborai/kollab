@@ -531,6 +531,7 @@ class ACPOrchestrator:
                 "hub_agents to collaborate. A thread handle may be used only after you received or started it."
             )
             self._binding_conversation_id = self._conversation_id()
+            self._resume_requested = binding is not None
             await self._runner.start(binding=binding)
             self.restore_notices = await self._restore_options(profile)
             if loadout is not None:
@@ -645,8 +646,14 @@ class ACPOrchestrator:
         llm = self.event_bus.get_service("llm_service")
         display = getattr(llm, "message_display_service", None)
         if display is not None:
-            line = (f"{self.identity} resumed its session" if runner.resume_mode in {"resumed", "loaded"}
-                    else f"{self.identity} starts with fresh context")
+            harness = profile.description or profile.name if profile else self._profile_name
+            if runner.resume_mode in {"resumed", "loaded"}:
+                line = f"{self.identity} resumed its session"
+            elif getattr(self, "_resume_requested", False):
+                line = (f"{harness} could not resume its previous session, so its earlier context is lost; "
+                        f"{self.identity} starts with fresh context")
+            else:
+                line = f"{self.identity} starts with fresh context"
             display.display_system_message(line)
 
     def admit(
