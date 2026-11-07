@@ -1671,10 +1671,12 @@ class LocalStateService(StateService):
 
                 async def restore_previous() -> bool:
                     """Put the previous harness back; False when it did not come back."""
+                    # The rejected loadout never stays as an override, even with
+                    # no previous harness to restart (#651).
+                    orchestrator._loadout_override = prior_loadout if previous is not None else None
                     try:
                         await orchestrator.close()
                         if previous is not None:
-                            orchestrator._loadout_override = prior_loadout
                             if prior_binding is not None and prior_conversation:
                                 orchestrator.save_binding_for(prior_conversation, prior_binding)
                             await orchestrator.start(
