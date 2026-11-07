@@ -46,12 +46,26 @@ class TestRegistryIntegration:
         assert "git" not in names  # git doc-tool is XML-only, not native
         assert "terminal" in names
 
+    def test_hub_queue_native_schema_has_optional_upstream_refs(self):
+        queue = next(
+            tool for tool in get_registry().list() if tool.xml_tag_name == "hub_queue"
+        )
+        params = queue.to_json_schema()["parameters"]
+        refs = params["properties"]["upstream_refs"]
+
+        assert refs["type"] == "array"
+        assert refs["items"] == {"type": "string"}
+        assert refs["default"] == []
+        assert "upstream_refs" not in params.get("required", [])
+
     def test_full_pipeline_regex(self):
         """Registry -> XML regex -> matches sample XML."""
         regexes = generate_all_regexes()
 
         # Test a representative sample
+        queue_sample = '<hub_queue upstream_refs="#123,#456">work item</hub_queue>'
         samples = {
+            "hub-queue": queue_sample,
             "file-read": "<read><file>test.py</file></read>",
             "file-edit": "<edit><file>a.py</file><find>x</find><replace>y</replace></edit>",
             "file-create": "<create><file>a.py</file><content>hi</content></create>",
