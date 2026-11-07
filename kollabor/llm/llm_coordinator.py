@@ -59,6 +59,7 @@ from kollabor_events.data_models import ConversationMessage
 from kollabor_tui import MessageDisplayService
 from kollabor_tui.display_tap import publish_semantic
 
+from .acp_bridge import ACPSteeringUnconfirmed
 from .agent_hud import (
     AgentHudEntry,
     format_agent_hud,
@@ -2669,6 +2670,9 @@ class LLMService:
                     message, origin=origin, thread_id=data.get("thread_id"),
                     **({"images": images} if images else {}),
                 )
+            except ACPSteeringUnconfirmed:
+                # The harness may have accepted it; queueing it would send it twice.
+                return {"status": "rejected", "reason": "steering_unconfirmed"}
             except RuntimeError as exc:
                 if images and (
                     getattr(exc, "error_class", None) == "images_unsupported"
