@@ -9,12 +9,15 @@ import asyncio
 import inspect
 import json
 import logging
+import os
+import secrets
 import sys
 import uuid
 from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
@@ -132,6 +135,9 @@ class ACPOrchestrator:
         self._bindings = ACPBindingStore(Path(get_project_data_dir()) / "acp" / "sessions")
         # The model/effort picked for each harness profile, re-applied at start.
         self._options_path = Path(get_project_data_dir()) / "acp" / "options.json"
+        # The Hub child binding's credential file: owner-only, one per rotation.
+        self._hub_token_dir = Path(get_project_data_dir()) / "acp" / "hub-bindings"
+        self._hub_token_file: Path | None = None
         self._binding_conversation_id: str | None = None
         self.restore_notices: list[str] = []
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
@@ -593,9 +599,12 @@ class ACPOrchestrator:
                 raise RuntimeError("ACP hub socket is not ready before session/new")
             from kollabor.mcp_hub import kollab_hub_argv
             argv = kollab_hub_argv()
+            # Adapters put the MCP config, env included, on the child's command
+            # line (--mcp-config), so it names a credential file, never the token.
+            token_file = self._write_hub_token_file(token)
             runner.profile = replace(runner.profile, mcp_servers=({
                 "name": "kollab-hub", "command": argv[0], "args": argv[1:],
-                "env": {"KOLLAB_ACP_HUB_TOKEN": token,
+                "env": {"KOLLAB_ACP_HUB_TOKEN_FILE": str(token_file),
                         "KOLLAB_ACP_GENERATION": str(generation),
                         "KOLLAB_ACP_HUB_SOCKET": str(socket_path)},
             },))
@@ -604,6 +613,27 @@ class ACPOrchestrator:
                 self._pending_ready_runner = runner
                 return
             self._publish_runner_ready(runner)
+
+    def _write_hub_token_file(self, token: str) -> Path:
+        """Replace the binding's owner-only credential file and return its path."""
+        from kollabor_config.private_fs import ensure_private_dir, open_nofollow
+
+        self._drop_hub_token_file()
+        ensure_private_dir(self._hub_token_dir)
+        path = self._hub_token_dir / f"{secrets.token_hex(16)}.token"
+        fd = open_nofollow(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        self._hub_token_file = path
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(token)
+        return path
+
+    def _drop_hub_token_file(self) -> None:
+        path, self._hub_token_file = self._hub_token_file, None
+        if path is not None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
     def _publish_runner_ready(self, runner: ACPRunner) -> None:
         self._save_binding()
@@ -1648,6 +1678,7 @@ class ACPOrchestrator:
         if self.hub_plugin is not None and self._binding is not None:
             self.hub_plugin.rotate_acp_hub_binding()
             self._binding = None
+        self._drop_hub_token_file()
         publish_semantic(self.event_bus, "acp_session", state="closed", harness="", context="")
         if close_error is not None:
             raise close_error
