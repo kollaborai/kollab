@@ -11,8 +11,6 @@ from kollabor.goals.driver import GoalTurnDriver
 from kollabor.goals.service import GoalService
 from kollabor.llm.agent_hud import AgentHudEntry
 from kollabor.state.goal_store import GoalStore
-from kollabor.state.local import LocalStateService
-from kollabor.commands.parser import SlashCommandParser
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_events.models import SlashCommand
@@ -40,7 +38,16 @@ def goal_runtime(tmp_path):
         _queue_processor=queue,
         inject_system_message=AsyncMock(),
         _continue_conversation=AsyncMock(),
+        _turn_serial=0,
+        _cursor_winner_serial=-1,
+        _continue_serial=None,
     )
+
+    def claim_turn_serial():
+        coordinator._turn_serial += 1
+        return coordinator._turn_serial
+
+    coordinator.claim_turn_serial = claim_turn_serial
     state = SimpleNamespace(get_conversation_uid=lambda: "conversation-1")
     services = {"goal_service": service, "llm_service": coordinator, "state_service": state}
     bus = SimpleNamespace(get_service=services.get)

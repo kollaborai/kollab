@@ -47,7 +47,12 @@ from .capture import (
     render_transcript,
 )
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
-from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
+from .coordinator import (
+    CoordinatorElection,
+    IdentityAssigner,
+    SweepScheduler,
+    WorkQueue,
+)
 from .crystal_store import CrystalStore, normalize_crystal_id
 from .delivery import DeliveryPolicy, DeliveryTrace, SenderContext
 from .device_names import DEFAULT_TRUST, format_handle, parse_handle
@@ -70,6 +75,7 @@ from .models import (
     AgentState,
     HubMessage,
     MessageScope,
+    WorkSlot,
     desired_bundle_for_identity,
 )
 from .notifier import HubNotifier, NtfyNotifier, load_ntfy_settings
@@ -682,6 +688,9 @@ class HubPlugin(BasePlugin):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
         self._dreaming_task: Optional[asyncio.Task] = None
+        # The insight write of the dream in progress, which a cancelled dream
+        # leaves running in its thread (#562); shutdown waits for it.
+        self._crystal_write: Optional[asyncio.Task] = None
         self._notify_task: Optional[asyncio.Task] = None
         self._notifier: Optional[HubNotifier] = None
 
@@ -753,6 +762,10 @@ class HubPlugin(BasePlugin):
 
         # Message deduplication (LRU via OrderedDict, capped at 1000)
         self._seen_messages: collections.OrderedDict = collections.OrderedDict()
+        # Messages the ACP retry queue refused (#581). Their dedup marks stay, so
+        # a retransmission skips display, vault and bridge effects it already
+        # had, and only asks the queue again.
+        self._refused_observations: collections.OrderedDict = collections.OrderedDict()
 
         # Content dedup: TTL dict keyed by MD5("from_identity:content").
         # Guards against verbatim duplicates produced by concurrent agent
@@ -1314,6 +1327,7 @@ class HubPlugin(BasePlugin):
 
         # Work queue
         self._work_queue = WorkQueue()
+        self._queue_sweep_scheduler = SweepScheduler()
 
         # Register slash commands
         if self.command_registry:
@@ -1904,13 +1918,20 @@ class HubPlugin(BasePlugin):
         )
         tool_executor.register_plugin_handler("hub_spawn", self._handle_hub_spawn_tool)
 
-        # hub_queue
+        # hub_queue: body-only remains valid; refs are explicit attributes.
         def _extract_hub_queue(m):
-            return {"task": m.group(1).strip()}
+            attrs = tag_attrs(m.group(1))
+            refs = attrs.get("upstream_refs", "")
+            return {
+                "task": m.group(2).strip(),
+                "upstream_refs": [
+                    ref.strip() for ref in refs.split(",") if ref.strip()
+                ],
+            }
 
-        queue_pat = _re.compile(
-            r"<hub_queue>(.*?)</hub_queue>",
-            _re.DOTALL | _re.IGNORECASE,
+        queue_pat = tag_pattern(
+            "hub_queue",
+            valid={"upstream_refs": r"#\d+(?:\s*,\s*#\d+)*"},
         )
         response_parser.register_plugin_tag(
             "hub_queue", queue_pat, "hub_queue", _extract_hub_queue
@@ -5234,7 +5255,22 @@ class HubPlugin(BasePlugin):
                 error="task description required",
             )
 
-        result = self._handle_queue_command(task)
+        raw_upstream_refs = tool_data.get("upstream_refs", [])
+        if raw_upstream_refs is None:
+            raw_upstream_refs = []
+        if not isinstance(raw_upstream_refs, list) or any(
+            not isinstance(ref, str) or not re.fullmatch(r"#\d+", ref.strip())
+            for ref in raw_upstream_refs
+        ):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_queue",
+                success=False,
+                error="upstream_refs must be an array of GitHub refs like '#123'",
+            )
+        upstream_refs = [ref.strip() for ref in raw_upstream_refs]
+
+        result = self._handle_queue_command(task, upstream_refs=upstream_refs)
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_queue",
@@ -6037,9 +6073,21 @@ class HubPlugin(BasePlugin):
                 self._vault = AgentVault(self._identity.identity)
                 self._vault.touch()
                 # Project-scoped crystal store: work done in this repo
-                self._crystal_store = CrystalStore(self._vault._vault_dir)
+                project_crystals = CrystalStore(self._vault._vault_dir)
                 # Global crystal store: cross-project personality + skills
-                self._global_crystal_store = CrystalStore(self._vault.global_vault_dir)
+                global_crystals = CrystalStore(self._vault.global_vault_dir)
+                # Parse both in a worker thread, and publish them only once loaded:
+                # a reader on the loop never parses a vault or waits on its lock (#562).
+                try:
+                    await asyncio.gather(
+                        asyncio.to_thread(project_crystals.load),
+                        asyncio.to_thread(global_crystals.load),
+                    )
+                except Exception as e:
+                    # Readers parse again on the loop and raise there, as before.
+                    logger.warning(f"crystal stores failed to load at startup: {e}")
+                self._crystal_store = project_crystals
+                self._global_crystal_store = global_crystals
             else:
                 logger.info(f"Vault disabled for agent {self._identity.identity}")
 
@@ -6646,7 +6694,7 @@ class HubPlugin(BasePlugin):
                 if self._identity:
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
-                        max_replay=INBOX_MAX_REPLAY,
+                        max_replay=self._mailbox_replay_cap(INBOX_MAX_REPLAY),
                     )
                     if messages:
                         await self._deliver_inbox_batch(messages)
@@ -6654,6 +6702,24 @@ class HubPlugin(BasePlugin):
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
+
+    def _mailbox_replay_cap(self, cap: int) -> int:
+        """Return the per-poll cap on ordinary mailbox replay (0 = no cap).
+
+        An ACP agent's queue can refuse a message (#581), and a refused message
+        is only owned again once it is delivered one by one so it can be put
+        back. A capped replay deletes the overflow and coalesces the rest into
+        one block that never reaches the queue, so ACP polls without the cap.
+        The mailbox's own size prune (INBOX_MAX_SIZE) still bounds it.
+        """
+        llm = None
+        try:
+            llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+            if self._agent_dispatch_mode(llm) == "acp":
+                return 0
+        except Exception as exc:
+            logger.debug("mailbox replay cap check failed: %s", exc)
+        return cap
 
     async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
         """Deliver a batch of offline inbox messages.
@@ -6670,7 +6736,17 @@ class HubPlugin(BasePlugin):
             await self._inject_inbox_replay(messages)
         else:
             for msg in messages:
-                await self._on_message_received(msg)
+                await self._deliver_inbox_message(msg)
+
+    async def _deliver_inbox_message(self, msg: HubMessage) -> None:
+        """Deliver one mailbox message; a refusal puts its file back (#581).
+
+        The mailbox read already deleted the file, so a message the ACP retry
+        queue refused would be lost here. It goes back for the next poll, and
+        the mailbox's own age and size limits still apply to it.
+        """
+        if await self._on_message_received(msg) is False and self._identity:
+            await AgentMessenger.send_to_file(self._identity.identity, msg)
 
     async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
         """Coalesce a bounded inbox replay into a single injected block.
@@ -6695,9 +6771,23 @@ class HubPlugin(BasePlugin):
         ]
         ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
         for msg in control_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
         if not ordinary_msgs:
+            return
+
+        llm = None
+        if self.event_bus is not None:
+            try:
+                llm = self.event_bus.get_service("llm_service")
+            except Exception:
+                pass
+
+        # An ACP agent's queue owns each message it admits and can refuse one
+        # (#581); a coalesced block would hide that from it. Deliver one by one.
+        if self._agent_dispatch_mode(llm) == "acp":
+            for msg in ordinary_msgs:
+                await self._deliver_inbox_message(msg)
             return
 
         lines: List[str] = [summary.content, ""]
@@ -6711,13 +6801,6 @@ class HubPlugin(BasePlugin):
             lines.append(f"[{ts}] {sender}: {content_preview}")
 
         block = "\n".join(lines)
-
-        llm = None
-        if self.event_bus is not None:
-            try:
-                llm = self.event_bus.get_service("llm_service")
-            except Exception:
-                pass
 
         if llm is not None and hasattr(llm, "inject_system_message"):
             try:
@@ -6734,7 +6817,7 @@ class HubPlugin(BasePlugin):
 
         # Fallback: individual delivery (no inject_system_message)
         for msg in ordinary_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
     async def _dreaming_loop(self) -> None:
         """Periodically dream when agent is idle -- distill stream into insights.
@@ -6857,11 +6940,16 @@ class HubPlugin(BasePlugin):
                             logger.debug("dreaming: filtered preamble paragraph")
                             continue
                         paragraphs.append(p_stripped)
-                    # On the loop, like every reader of the vault: in a worker
-                    # thread a write outlived a cancelled dream and raced the
-                    # readers (#546).
-                    for paragraph in paragraphs:
-                        self._crystal_store.add_entry(paragraph)
+                    # One worker-thread call for the batch, in order: each add saves
+                    # the whole vault, which stalled the loop (#562). A cancelled
+                    # dream leaves this write running, so shutdown waits for it.
+                    store = self._crystal_store
+                    self._crystal_write = asyncio.create_task(
+                        asyncio.to_thread(
+                            lambda: [store.add_entry(p) for p in paragraphs]
+                        )
+                    )
+                    await asyncio.shield(self._crystal_write)
                     added = len(paragraphs)
                 else:
                     # Fallback to raw append if crystal_store unavailable
@@ -6926,6 +7014,21 @@ class HubPlugin(BasePlugin):
             # Restore previous state (unless something else changed it)
             if self._identity.state == AgentLifecycle.DREAMING.value:
                 self._identity.state = prev_state
+
+    async def _settle_crystal_write(self) -> None:
+        """Wait for an insight write that a cancelled dream left running in its thread.
+
+        The thread outlives the task that awaited it. A save landing after shutdown
+        would write over a newer one (#562), so shutdown calls this after it
+        cancels the dream.
+        """
+        write = getattr(self, "_crystal_write", None)
+        if write is None or write.done():
+            return
+        try:
+            await write
+        except Exception as e:
+            logger.warning(f"dreaming: insight write failed at shutdown: {e}")
 
     async def _vault_autosave_loop(self) -> None:
         """Periodically save working memory so crash != total loss.
@@ -7968,6 +8071,97 @@ class HubPlugin(BasePlugin):
                 logger.info(
                     f"Reassigning work {slot_id}: agent {dead_agent} is dead"
                 )
+            # Retire dead work whose upstream already landed (gh
+            # subprocess calls run off the event loop). Throttled by
+            # SweepScheduler: boot + at most once per interval, never
+            # every heartbeat tick, and never fatal to the heartbeat.
+            if self._queue_sweep_scheduler.due(time.monotonic()):
+                try:
+                    await asyncio.to_thread(self._sweep_stale_work_queue)
+                except Exception as e:
+                    logger.warning(f"Work-queue sweep failed: {e}")
+
+    def _sweep_stale_work_queue(self) -> List[WorkSlot]:
+        """Retire stale slots and terminalize their paired ledger cards.
+
+        Active linked cards are preserved with their slot's status unchanged;
+        a claim that races the sweep is also preserved by the atomic ledger
+        terminalize guard and recorded on the slot for the next reader.
+        Retired linked slots are retried after transient ledger write failures.
+        """
+        if not self._work_queue:
+            return []
+
+        task_card_status_checker = None
+        if self._task_ledger:
+
+            def task_card_status_checker(task_card_id: str) -> Optional[str]:
+                try:
+                    card = self._task_ledger.get(task_card_id)
+                except Exception as e:
+                    logger.warning(
+                        "TaskLedger status read failed for card %s: %s",
+                        task_card_id,
+                        e,
+                    )
+                    return None
+                return card.status if card else None
+
+        retired = self._work_queue.sweep_stale(
+            task_card_status_checker=task_card_status_checker
+        )
+        if not self._task_ledger:
+            return retired
+
+        for slot in retired:
+            if not slot.task_card_id:
+                continue
+            reason = slot.retired_reason or "stale work queue slot retired"
+            try:
+                card = self._task_ledger.terminalize(
+                    slot.task_card_id,
+                    status="cancelled",
+                    reason=f"work queue slot [{slot.id}] retired: {reason}",
+                    actor="work-queue-sweep",
+                    preserve_active=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not cancel task card %s for retired work slot %s: %s",
+                    slot.task_card_id,
+                    slot.id,
+                    e,
+                )
+                continue
+            if card is None:
+                logger.warning(
+                    "Task card %s for retired work slot %s is missing",
+                    slot.task_card_id,
+                    slot.id,
+                )
+            elif card.status == "active":
+                logger.warning(
+                    "Leaving active task card %s for retired work slot %s "
+                    "unchanged; assigned to %s",
+                    slot.task_card_id,
+                    slot.id,
+                    card.assignee or "unknown",
+                )
+                if reason != "terminal slot (completed)":
+                    try:
+                        self._work_queue.record_stale_upstream_note(
+                            slot.id,
+                            f"terminal upstream: {reason}",
+                            restore_pending_reason=reason,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Could not preserve active task card %s work slot %s: %s",
+                            slot.task_card_id,
+                            slot.id,
+                            e,
+                        )
+        return retired
 
     async def _try_assign_work(self) -> None:
         """Try to assign pending work to idle agents using capability matching."""
@@ -8844,7 +9038,8 @@ class HubPlugin(BasePlugin):
         sender = message.from_identity or message.from_agent or ""
         acp = self.event_bus.get_service("acp_orchestrator")
         if acp is not None and acp.active and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}):
-            acp.observe_notification(message)
+            if not acp.observe_notification(message):
+                return {"status": "refused", "request_id": message.id}
             return {"status": "queued", "request_id": message.id}
         turns[message.id] = _NetworkTurn(
             handle=sender,
@@ -8936,8 +9131,40 @@ class HubPlugin(BasePlugin):
                 )
         return result
 
-    async def _on_message_received(self, message: HubMessage) -> None:
-        """Handle an incoming message from another agent."""
+    _REFUSED_OBSERVATIONS_MAX = 256
+
+    def _remember_refused_message(self, msg_key: tuple) -> None:
+        """Keep a refused message's dedup marks and note it for a retry (#581).
+
+        The message was already shown, logged and mirrored; a retransmission
+        (socket resend, mailbox replay, relay retry) only asks the queue again.
+        """
+        refused = self._refused_observations
+        refused[msg_key] = None
+        while len(refused) > self._REFUSED_OBSERVATIONS_MAX:
+            # Forget the oldest one's dedup mark too, so its retransmission runs
+            # the whole path again instead of being acknowledged and dropped.
+            oldest, _ = refused.popitem(last=False)
+            self._seen_messages.pop(oldest, None)
+
+    def _retry_refused_observation(self, message: HubMessage, msg_key: tuple) -> bool | None:
+        """Ask the ACP queue again for a message it refused. False: still refused."""
+        acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
+        if acp is None or not getattr(acp, "active", False):
+            # No live session can admit it. It stays refused and unacknowledged,
+            # so a later session can still take it (#581).
+            logger.debug("refused observation kept: the ACP session is not running")
+            return False
+        if not acp.observe_notification(message):
+            return False
+        self._refused_observations.pop(msg_key, None)
+        return None
+
+    async def _on_message_received(self, message: HubMessage) -> bool | None:
+        """Handle an incoming message from another agent.
+
+        Returns False when the message was refused and must not be acknowledged.
+        """
         if self._solo:
             # Peers cannot discover a solo agent; this covers direct sends by
             # name (`kollab --hub send`) so nothing reaches its conversation.
@@ -8987,6 +9214,8 @@ class HubPlugin(BasePlugin):
         msg_id = getattr(message, "id", "") or ""
         msg_key = (message.from_identity or message.from_agent, msg_id, message.action)
         if msg_id and msg_key in self._seen_messages:
+            if msg_key in getattr(self, "_refused_observations", ()):
+                return self._retry_refused_observation(message, msg_key)
             logger.debug(f"Dedup: skipping already-seen {message.action} {msg_id}")
             return
         if msg_id and message.action != "turn_end":
@@ -9443,7 +9672,9 @@ class HubPlugin(BasePlugin):
                         )
                 elif message.reply_to or message.to in {"*", "all", "everyone", "team", "project"}:
                     if dispatch_mode == "acp":
-                        acp.observe_notification(message)
+                        if not acp.observe_notification(message):
+                            self._remember_refused_message(msg_key)
+                            return False
                 elif wake_decision.should_trigger:
                     await self._submit_authenticated_agent_message(message, llm_service)
                 else:
@@ -9701,9 +9932,12 @@ class HubPlugin(BasePlugin):
                         if dispatch_mode in {"acp", "unavailable"} and hasattr(
                             llm_service, "submit_human_input"
                         ):
-                            await self._submit_authenticated_agent_message(
+                            admitted = await self._submit_authenticated_agent_message(
                                 message, llm_service
                             )
+                            if admitted.get("status") == "refused":
+                                self._remember_refused_message(msg_key)
+                                return False
                             return
                     await self.event_bus.emit_with_hooks(
                         EventType.TRIGGER_LLM_CONTINUE,
@@ -9981,6 +10215,10 @@ class HubPlugin(BasePlugin):
         )
         lines.append("  <hub_work/>  -- view work queue")
         lines.append("  <hub_queue>task description</hub_queue>  -- add to queue")
+        lines.append(
+            '  <hub_queue upstream_refs="#123,#456">task description</hub_queue>'
+        )
+        lines.append("    -- optional explicit refs; never infer from task text")
         lines.append('  <hub_claim/>  or  <hub_claim id="slot-id"/>  -- claim work')
         lines.append('  <hub_vault name="identity"/>  -- read agent vault summary')
         lines.append("  <hub_vaults/>  -- list all vaults")
@@ -15902,7 +16140,9 @@ class HubPlugin(BasePlugin):
             return "work queue: empty"
         return "\n".join(lines)
 
-    def _handle_queue_command(self, task: str) -> str:
+    def _handle_queue_command(
+        self, task: str, upstream_refs: Optional[List[str]] = None
+    ) -> str:
         if not task:
             return "usage: /hub queue <task description>"
         if not self._work_queue:
@@ -15911,12 +16151,14 @@ class HubPlugin(BasePlugin):
             task=task,
             project=self._identity.project if self._identity else "",
             queued_by=self._identity.identity if self._identity else "",
+            upstream_refs=upstream_refs or [],
         )
         # Dual-write to the durable open ledger queue (issue #211): open
         # cards are what the idle supervisor watches and what survives
-        # coordinator restarts. The WorkQueue slot keeps legacy claim
-        # behavior; the card's checkpoint cross-references the slot id.
+        # coordinator restarts. Persist both a human-readable checkpoint and
+        # a durable WorkSlot -> TaskLedger card id for stale-sweep cleanup.
         card = None
+        card_warning = None
         if self._task_ledger and self._identity:
             try:
                 card = self._task_ledger.enqueue(
@@ -15925,12 +16167,102 @@ class HubPlugin(BasePlugin):
                     report_to=self._identity.identity,
                     project=self._identity.project,
                 )
+            except Exception as e:
+                logger.warning("Open-card enqueue failed for slot %s: %s", slot.id, e)
+                card_warning = "TaskLedger card could not be created"
+
+        if card:
+            try:
                 card.add_checkpoint(f"queued as slot [{slot.id}]")
                 self._task_ledger._save(card)
             except Exception as e:
-                logger.debug(f"open-card enqueue failed for slot {slot.id}: {e}")
-        suffix = f" + open card [{card.id}]" if card else ""
+                logger.warning(
+                    "Could not save slot checkpoint for task card %s: %s", card.id, e
+                )
+                card_warning = "TaskLedger checkpoint could not be saved"
+
+            try:
+                linked_slot = self._work_queue.link_task_card(slot.id, card.id)
+            except Exception as e:
+                linked_slot = None
+                logger.warning(
+                    "Could not link task card %s to work slot %s: %s",
+                    card.id,
+                    slot.id,
+                    e,
+                )
+            if linked_slot is None:
+                card_warning = "work-slot link failed; card cancellation attempted"
+                try:
+                    card = (
+                        self._task_ledger.terminalize(
+                            card.id,
+                            status="cancelled",
+                            reason=f"work queue slot [{slot.id}] could not be linked",
+                            actor="work-queue-link",
+                        )
+                        or card
+                    )
+                except Exception as e:
+                    card_warning = "work-slot link and card cancellation failed"
+                    logger.error(
+                        "Could not cancel unlinked task card %s for work slot %s: %s",
+                        card.id,
+                        slot.id,
+                        e,
+                    )
+            elif linked_slot.status == "retired":
+                card_warning = (
+                    "slot retired before card link; card cancellation attempted"
+                )
+                try:
+                    card = (
+                        self._task_ledger.terminalize(
+                            card.id,
+                            status="cancelled",
+                            reason=(
+                                f"work queue slot [{slot.id}] was already retired: "
+                                f"{linked_slot.retired_reason or 'stale'}"
+                            ),
+                            actor="work-queue-sweep",
+                        )
+                        or card
+                    )
+                except Exception as e:
+                    card_warning = (
+                        "slot retired before link and card cancellation failed"
+                    )
+                    logger.error(
+                        "Could not cancel task card %s for already-retired slot %s: %s",
+                        card.id,
+                        slot.id,
+                        e,
+                    )
+
+        suffix = f" + {card.status} card [{card.id}]" if card else ""
+        if card_warning:
+            suffix += f" (warning: {card_warning})"
         return f"queued: [{slot.id}] {task[:60]}{suffix}"
+
+    def _sync_claimed_task_card_slot(self, card_id: str, identity: str) -> None:
+        try:
+            slot = self._work_queue.claim_task_card(card_id, identity)
+        except Exception as e:
+            logger.warning(
+                "Could not synchronize work slot for claimed task card %s: %s",
+                card_id,
+                e,
+            )
+            return
+        if slot and (slot.status != "assigned" or slot.assigned_to != identity):
+            logger.warning(
+                "Claimed task card %s has linked work slot %s in status %s "
+                "assigned to %s",
+                card_id,
+                slot.id,
+                slot.status,
+                slot.assigned_to or "nobody",
+            )
 
     async def _handle_claim_command(self, slot_id: str) -> str:
         if not self._work_queue or not self._identity:
@@ -15949,6 +16281,7 @@ class HubPlugin(BasePlugin):
                 rest, self._identity.identity, project=self._identity.project
             )
             if card:
+                self._sync_claimed_task_card_slot(card.id, self._identity.identity)
                 await self._supervisor_kick()
                 return f"claimed: [{card.id}] {card.directive[:60]}"
             return f"slot '{rest}' not found or not pending"
@@ -15962,6 +16295,7 @@ class HubPlugin(BasePlugin):
             self._identity.identity, project=self._identity.project
         )
         if card:
+            self._sync_claimed_task_card_slot(card.id, self._identity.identity)
             await self._supervisor_kick()
             return f"claimed: [{card.id}] {card.directive[:60]}"
         return "no available work to claim"
@@ -17131,6 +17465,7 @@ class HubPlugin(BasePlugin):
                 await self._dreaming_task
             except asyncio.CancelledError:
                 pass
+        await self._settle_crystal_write()
 
         if self._notify_task:
             self._notify_task.cancel()

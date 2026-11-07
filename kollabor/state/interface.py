@@ -37,6 +37,24 @@ ACP_CONVERSATION_BUSY = "ACP startup or profile change is in progress; retry whe
 ACP_HARNESS_UNAVAILABLE = "ACP harness unavailable; retry when ready"
 
 
+class ProfileActivationError(ValueError):
+    """Provider startup failed while switching profiles.
+
+    This typed error lets setup distinguish a failed provider activation from
+    a state-service transport failure, which may still use its legacy fallback.
+    """
+
+    ERROR_CODE = "profile_activation_failed"
+
+    def __init__(self, *, previous_profile_restored: bool) -> None:
+        self.previous_profile_restored = bool(previous_profile_restored)
+        if self.previous_profile_restored:
+            message = "provider activation failed; previous profile was restored"
+        else:
+            message = "provider activation failed; previous profile restoration failed"
+        super().__init__(message)
+
+
 def offer_failure(result: Any = None) -> dict[str, str]:
     """A failed join-code offer, keeping a refusal ``reason`` a person can act on.
 

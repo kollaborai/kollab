@@ -114,12 +114,19 @@ jobs:
             statuses="$(gh api --paginate "repos/$REPO/commits/$sha/statuses?per_page=100" --jq '.[]' | jq -s '.')"
 
             # Required checks: latest run per name, from the pinned app when the rule pins one.
-            missing="$(jq -rn --argjson req "$req" --argjson runs "$runs" --argjson st "$statuses" --arg rc "$REVIEW_CONTEXT" '
-              [ $req[] | select(.context != $rc) | . as $r
-                | ([ $runs[] | select(.name == $r.context and ($r.integration_id == null or .app.id == $r.integration_id)) ]
+            # Pass large JSON via temp files (--slurpfile). --argjson puts the payload on
+            # argv and blows ARG_MAX once check-runs grow past ~100KB (seen on PR #839).
+            _gate_tmp="$(mktemp -d)"
+            printf '%s' "$req" >"$_gate_tmp/req.json"
+            printf '%s' "$runs" >"$_gate_tmp/runs.json"
+            printf '%s' "$statuses" >"$_gate_tmp/st.json"
+            missing="$(jq -rn --slurpfile req "$_gate_tmp/req.json" --slurpfile runs "$_gate_tmp/runs.json" --slurpfile st "$_gate_tmp/st.json" --arg rc "$REVIEW_CONTEXT" '
+              [ $req[0][] | select(.context != $rc) | . as $r
+                | ([ $runs[0][] | select(.name == $r.context and ($r.integration_id == null or .app.id == $r.integration_id)) ]
                    | sort_by(.started_at) | last) as $cr
-                | ([ $st[] | select(.context == $r.context and $r.integration_id == null) ] | .[0]) as $s
+                | ([ $st[0][] | select(.context == $r.context and $r.integration_id == null) ] | .[0]) as $s
                 | select(($cr.conclusion // "") != "success" and ($s.state // "") != "success") | $r.context ] | join(",")')"
+            rm -rf "$_gate_tmp"
             [[ -z "$missing" ]] || { log "skip: required checks not green on $sha: $missing"; continue; }
 
             # Independent pinned-head review: newest status for the context on THIS sha,
