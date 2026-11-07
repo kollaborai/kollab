@@ -113,6 +113,7 @@ from .supervisor import (
 )
 from .task_ledger import TaskLedger
 from .vault import AgentVault, sanitize_rebirth_text
+from .wake_hooks import WakeAction, WakeEvent, WakeHookEngine, default_hook_config
 from .xml_tags import embedded_attrs, tag_attrs, tag_pattern
 
 # Agent DNS (discovery, identity, trust) — guarded: PyNaCl is optional
@@ -705,6 +706,11 @@ class HubPlugin(BasePlugin):
         self._presence_sweep_task: Optional[asyncio.Task] = None
         self._supervisor_task: Optional[asyncio.Task] = None
         self._supervisor_state = SupervisorState()
+        self._wake_hooks = WakeHookEngine(
+            lambda path, default=None: (
+                self.config.get(path, default) if self.config else default
+            )
+        )
         # Bounded (timestamp, text) pairs surfaced in /hub status (issue #283).
         self._supervisor_alerts: List[Tuple[float, str]] = []
         # Bounded (timestamp, text) pairs for sends that did not reach their
@@ -810,6 +816,7 @@ class HubPlugin(BasePlugin):
                     "supervisor_alert_cooldown": 900,
                     "supervisor_handoff_ack_timeout": 120,
                     "supervisor_handoff_resend": False,
+                    "hooks": default_hook_config(),
                     "notify_enabled": False,
                     "notify_channel": "",
                     "notify": {
@@ -11359,6 +11366,48 @@ class HubPlugin(BasePlugin):
             ago = max(1, int((now - ts) // 60))
             lines.append(f"  ({ago}m ago) {' '.join(text.split())[:110]}")
         return lines
+
+    async def dispatch_wake_event(self, event: WakeEvent) -> List[WakeAction]:
+        """Run one event through the opt-in wake hooks (issue #727).
+
+        The engine decides (dedupe, cooldown, hourly cap, no self-wakes, no
+        chaining); this delivers. A wake goes out as a hook-marked direct
+        message, so an event it causes arrives flagged and starts nothing.
+        Returns the actions that were delivered.
+        """
+        engine = getattr(self, "_wake_hooks", None)
+        if engine is None or not self._identity:
+            return []
+        actions = engine.handle(event, time.time())
+        delivered: List[WakeAction] = []
+        for action in actions:
+            logger.info(
+                "wake hook %s: %s -> %s", action.hook, action.kind, action.target or "log"
+            )
+            if action.kind == "alert":
+                self._record_supervisor_alert(action.text)
+                await self._notify_supervisor_alert(action.text)
+                delivered.append(action)
+                continue
+            message = HubMessage(
+                action="message",
+                from_agent=self._identity.agent_id,
+                from_identity=f"wake-hook:{action.hook}",
+                to=action.target,
+                content=action.text,
+                scope=MessageScope.DIRECT.value,
+                metadata={"wake_hook": action.hook},
+            )
+            if action.target == self._identity.identity:
+                await self._on_message_received(message)
+                delivered.append(action)
+                continue
+            rejections = await self._route_message(message)
+            for ident, reason in rejections or []:
+                self._record_dispatch_failure(ident, reason)
+            if not rejections:
+                delivered.append(action)
+        return delivered
 
     async def _notify_supervisor_alert(self, text: str) -> None:
         """Send the alert through the configured notifier channel, if any."""
