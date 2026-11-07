@@ -6,6 +6,7 @@ orchestration methods.
 """
 
 import asyncio
+import inspect
 import logging
 import re
 import time
@@ -61,6 +62,24 @@ class MessageHandler:
         self._coordinator = coordinator
         self._hub_continue_paused_until: float = 0.0
         self._retry_pending: bool = False
+
+    async def _report_detached_chain_break(self, reason: str) -> None:
+        """Notify a detached agent's parent when the tool loop is abandoned."""
+        event_bus = getattr(self._coordinator, "event_bus", None)
+        if event_bus is None or not hasattr(event_bus, "get_service"):
+            return
+        try:
+            hub = event_bus.get_service("hub_plugin")
+            if hub is None:
+                return
+            report = getattr(hub, "report_detached_chain_break", None)
+            if not callable(report):
+                return
+            result = report(reason=reason)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("detached chain-break notification failed", exc_info=True)
 
     async def handle_context_injection(
         self, data: Dict[str, Any], event
@@ -560,7 +579,14 @@ class MessageHandler:
                     )
                     coord.publish_cursor(hud_uuid, turn_serial)
                 try:
-                    await coord._continue_conversation()
+                    try:
+                        await coord._continue_conversation()
+                    except Exception as e:
+                        logger.error(f"Hub continue error (turn 1): {e}")
+                        await self._report_detached_chain_break(
+                            reason="conversation continuation failed"
+                        )
+                        qp.turn_completed = True
                     turn_count = 0
                     # Same identical-error breaker as the queue drain loop; the
                     # turn above counts toward the run.
@@ -594,6 +620,9 @@ class MessageHandler:
                                 f"({MAX_CONTINUATION_TURNS}) without completing "
                                 f"— stopping runaway chain"
                             )
+                            await self._report_detached_chain_break(
+                                reason="maximum continuation turns reached"
+                            )
                             qp.turn_completed = True
                             break
                         turn_count += 1
@@ -607,6 +636,10 @@ class MessageHandler:
                             await coord._continue_conversation()
                         except Exception as e:
                             logger.error(f"Hub continue error (turn {turn_count}): {e}")
+                            await self._report_detached_chain_break(
+                                reason="conversation continuation failed"
+                            )
+                            qp.turn_completed = True
                             break
                         if stuck.observe(qp._last_tool_error_sig):
                             logger.warning(
@@ -616,6 +649,9 @@ class MessageHandler:
                             coord.message_display_service.display_error_message(
                                 f"Stuck loop detected: same tool error repeated "
                                 f"{stuck.count} times. Breaking."
+                            )
+                            await self._report_detached_chain_break(
+                                reason=f"{stuck.count} identical tool errors"
                             )
                             qp.turn_completed = True
                             break

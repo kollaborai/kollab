@@ -561,6 +561,15 @@ error: Session not found: dev
 error: No output captured for session: dev
 ```
 
+#### `<terminal-send>`
+
+```xml
+<terminal-send><session_name>dev</session_name><text>y</text></terminal-send>
+```
+
+Sends the text followed by a newline to the named live background session.
+This operation requires permission because it writes to a running process.
+
 #### `<terminal-kill>`
 
 ```xml

@@ -83,3 +83,69 @@ async def test_natural_exit_cancels_timer_and_preserves_output():
     assert task.cancelled()
     assert captured["output"] == ["completed output"]
     assert "session" not in plugin._timeout_tasks
+
+
+@pytest.mark.asyncio
+async def test_new_session_duplicate_explains_recovery_tools():
+    plugin = TmuxPlugin()
+    process = Mock()
+    process.poll.return_value = None
+    plugin.sessions["terminal"] = TerminalSession(
+        name="terminal", command="python", proc=process
+    )
+
+    result = await plugin._handle_new_session(["terminal"])
+
+    assert not result.success
+    assert "terminal_output" in result.message
+    assert "terminal_send" in result.message
+
+
+@pytest.mark.asyncio
+async def test_background_session_duplicate_explains_recovery_tools():
+    plugin = TmuxPlugin()
+    process = Mock()
+    process.poll.return_value = None
+    plugin.sessions["terminal"] = TerminalSession(
+        name="terminal", command="python", proc=process
+    )
+
+    result = await plugin.execute_background("python", name="terminal")
+
+    assert not result["success"]
+    assert "terminal_output" in result["message"]
+    assert "terminal_send" in result["message"]
+
+
+def test_send_to_session_writes_one_line_to_live_session():
+    plugin = TmuxPlugin()
+    process = Mock()
+    process.poll.return_value = None
+    process.stdin = Mock()
+    plugin.sessions["terminal"] = TerminalSession(
+        name="terminal", command="python", proc=process
+    )
+
+    result = plugin.send_to_session("terminal", "print('ok')")
+
+    assert result["success"]
+    process.stdin.write.assert_called_once_with(b"print('ok')\n")
+    process.stdin.flush.assert_called_once_with()
+
+
+def test_send_to_session_reports_missing_and_exited_sessions():
+    plugin = TmuxPlugin()
+
+    missing = plugin.send_to_session("missing", "y")
+
+    process = Mock()
+    process.poll.return_value = 0
+    plugin.sessions["finished"] = TerminalSession(
+        name="finished", command="true", proc=process
+    )
+    exited = plugin.send_to_session("finished", "y")
+
+    assert not missing["success"]
+    assert "not found" in missing["message"]
+    assert not exited["success"]
+    assert "already exited" in exited["message"]

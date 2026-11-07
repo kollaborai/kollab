@@ -1347,6 +1347,8 @@ class HubPlugin(BasePlugin):
             )
             or None,
             solo=hub_solo_by_env(),
+            parent_identity=os.environ.get("KOLLAB_PARENT_IDENTITY", "").strip(),
+            parent_agent_id=os.environ.get("KOLLAB_PARENT_AGENT_ID", "").strip(),
             # The model rides in presence, so a row reads the same before the
             # engine opens this agent as after.
             tags={"model": model} if model else {},
@@ -3318,6 +3320,39 @@ class HubPlugin(BasePlugin):
             turn.ended = True
             turn.failed = turn.failed or failed
         self._publish_idle_if_settled()
+
+    async def report_detached_chain_break(self, *, reason: str) -> bool:
+        """Tell the agent that started this detached process that work stopped."""
+        identity = getattr(self, "_identity", None)
+        parent = str(getattr(identity, "parent_identity", "") or "").strip()
+        if not identity or not parent or parent == getattr(identity, "identity", ""):
+            return False
+
+        task = redact_secrets(str(getattr(identity, "current_task", "") or "").strip())
+        task = task[:200] or "unknown task"
+        child = str(getattr(identity, "identity", "") or "detached agent")
+        message = HubMessage(
+            action="message",
+            from_agent=identity.agent_id,
+            from_identity=child,
+            to=parent,
+            content=(
+                f"Detached agent '{child}' stopped before completing its task "
+                f"after {reason}. Current task: {task}. "
+                "Please send a recovery instruction."
+            ),
+            scope=MessageScope.DIRECT.value,
+            force=True,
+            metadata={"task_report": True, "chain_break": True},
+        )
+        try:
+            rejections = await self._route_message(message)
+        except Exception:
+            logger.debug("detached chain-break report failed", exc_info=True)
+            return False
+        if rejections:
+            logger.debug("detached chain-break report rejected: %s", rejections)
+        return not rejections
 
     async def settle_network_turn(self, llm, now: Optional[float] = None) -> None:
         """Relay tick: send the end-of-turn frame of a request whose turn is over.
@@ -14532,6 +14567,8 @@ class HubPlugin(BasePlugin):
             agent_type=effective_agent_type,
             identity=resolved_identity,
             profile=resolved_profile,
+            parent_identity=(self._identity.identity if self._identity else ""),
+            parent_agent_id=(getattr(self._identity, "agent_id", "") if self._identity else ""),
             **({"harness": True} if harness else {}),
         )
         if not result:
