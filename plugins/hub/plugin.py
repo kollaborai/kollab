@@ -14967,10 +14967,10 @@ class HubPlugin(BasePlugin):
             return "hub not active"
 
         if target.lower() == "all":
-            # Use scan_all_presence so we see agents even if they're
+            # Scan machine-wide so owned agents are found even if they're
             # mid-shutdown (discover_agents would clean them up first
             # and report "no peers" even though we just killed them).
-            peers = self._presence.scan_all_presence()
+            peers = self._presence.scan_machine_presence()
             if not peers:
                 return "no peers to stop"
 

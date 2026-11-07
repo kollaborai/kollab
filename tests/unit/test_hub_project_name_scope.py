@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -58,5 +58,18 @@ def test_cli_message_stays_in_project(collision, monkeypatch):
     send = AsyncMock(return_value=True)
     monkeypatch.setattr("plugins.hub.messenger.AgentMessenger.send_to_agent", send)
     asyncio.run(_handle_cli_hub(["msg", "lapis", "hello"]))
+    assert send.await_count == 1
+    assert send.await_args.args[0] == str(local / "lapis.sock")
+
+
+def test_hub_message_stays_in_project(collision, monkeypatch):
+    plugin, local, _ = collision
+    send = AsyncMock(return_value=True)
+    monkeypatch.setattr("plugins.hub.messenger.AgentMessenger.send_to_agent", send)
+    monkeypatch.setattr(plugin, "_trace_delivery", MagicMock())
+    monkeypatch.setattr(plugin, "_display_outgoing_message", MagicMock())
+    monkeypatch.setattr(plugin, "_bridge_forward", AsyncMock())
+    result = asyncio.run(plugin._handle_hub_msg_tool({"to": "lapis", "message": "hello"}))
+    assert result.success
     assert send.await_count == 1
     assert send.await_args.args[0] == str(local / "lapis.sock")

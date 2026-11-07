@@ -92,7 +92,7 @@ def test_stop_all_only_sweeps_agents_the_caller_started(monkeypatch):
         plugin = HubPlugin()
         now = time.time()
         plugin._presence = SimpleNamespace(
-            scan_all_presence=lambda: [
+            scan_machine_presence=lambda: [
                 _peer("helper", 111, started_at=now - 5),
                 _peer("ruby", 222, started_at=now - 3),
             ]
@@ -131,7 +131,7 @@ def test_stop_all_does_not_infer_detached_child_ownership_from_launcher_pid(
         now = time.time()
         plugin = HubPlugin()
         plugin._presence = SimpleNamespace(
-            scan_all_presence=lambda: [_peer("helper", 222, started_at=now - 5)]
+            scan_machine_presence=lambda: [_peer("helper", 222, started_at=now - 5)]
         )
         plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
         _patch_process_create_time(monkeypatch, plugin)
@@ -164,7 +164,7 @@ def test_stop_all_with_no_started_agents_stops_nothing(monkeypatch):
     async def run_test():
         plugin = HubPlugin()
         plugin._presence = SimpleNamespace(
-            scan_all_presence=lambda: [_peer("ruby", 222, started_at=time.time())]
+            scan_machine_presence=lambda: [_peer("ruby", 222, started_at=time.time())]
         )
         plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
         monkeypatch.setattr(plugin, "_get_orchestrator", lambda: None)
@@ -232,7 +232,7 @@ def test_stop_all_ignores_stale_row_sharing_caller_pid(monkeypatch):
         now = time.time()
         plugin = HubPlugin()
         plugin._presence = SimpleNamespace(
-            scan_all_presence=lambda: [
+            scan_machine_presence=lambda: [
                 # the caller's own agent: live socket, booted right after spawn
                 _peer("helper", 4242, started_at=now - 5),
                 # another session's stale row (dead socket, still in the
@@ -278,7 +278,7 @@ def test_stop_all_rejects_recent_stale_presence_within_old_120_second_window(
         plugin = HubPlugin()
         session = _session(4242, now - 10)
         plugin._presence = SimpleNamespace(
-            scan_all_presence=lambda: [
+            scan_machine_presence=lambda: [
                 _peer("previous-owner", 4242, started_at=now - 100)
             ],
             cleanup_agent=lambda agent: None,
@@ -315,7 +315,7 @@ def test_stop_all_never_kills_by_reused_pid_of_dead_session(monkeypatch):
         now = time.time()
         plugin = HubPlugin()
         plugin._presence = SimpleNamespace(
-            scan_all_presence=lambda: [
+            scan_machine_presence=lambda: [
                 # another lane's live process that recycled the dead session's PID
                 _peer("new-owner", 777, started_at=now - 10),
             ]
@@ -357,7 +357,7 @@ def test_stop_all_never_signals_reused_pid_after_mid_stop_exit(monkeypatch):
         plugin = HubPlugin()
         session = _session(4242, now - 7, alive=True)
         plugin._presence = SimpleNamespace(
-            scan_all_presence=lambda: [_peer("helper", 4242, started_at=now - 5)],
+            scan_machine_presence=lambda: [_peer("helper", 4242, started_at=now - 5)],
             cleanup_agent=lambda agent: None,
         )
         plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
@@ -412,7 +412,7 @@ def test_stop_all_withholds_escalation_when_session_dies_after_guard(monkeypatch
         plugin = HubPlugin()
         session = _session(4242, now - 7, alive=True)
         plugin._presence = SimpleNamespace(
-            scan_all_presence=lambda: [_peer("helper", 4242, started_at=now - 5)],
+            scan_machine_presence=lambda: [_peer("helper", 4242, started_at=now - 5)],
             cleanup_agent=lambda agent: None,
         )
         plugin._identity = SimpleNamespace(agent_id="me", identity="citrine")
@@ -648,7 +648,7 @@ def test_hub_signal_serializes_with_orchestrator_child_reaping():
     assert not signal_entered.is_set()
 
 
-def test_scan_all_presence_includes_home_shared_and_legacy_roots(tmp_path, monkeypatch):
+def test_scan_machine_presence_includes_home_shared_and_legacy_roots(tmp_path, monkeypatch):
     """Stop-all must see agents outside a spoofed HOME and current project."""
     import json
     import os
@@ -702,7 +702,7 @@ def test_scan_all_presence_includes_home_shared_and_legacy_roots(tmp_path, monke
     write_agent(shared_root / "duplicate" / "presence", "home-agent", last_heartbeat=2)
 
     manager = presence.PresenceManager(AgentRuntime(agent_id="caller"))
-    agents = manager.scan_all_presence()
+    agents = manager.scan_machine_presence()
 
     agent_ids = [agent.agent_id for agent in agents]
     assert set(agent_ids) == {

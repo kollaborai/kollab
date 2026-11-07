@@ -686,12 +686,23 @@ class PresenceManager:
             return False
 
     def scan_all_presence(self, include_self: bool = False) -> List[AgentRuntime]:
-        """Read all presence files without cleaning up dead ones.
+        """Read this project's presence files without cleaning up dead ones."""
+        agents = []
+        for f in _presence_files(self._presence_dir):
+            if not include_self and f.stem == self.identity.agent_id:
+                continue
+            try:
+                with open(f) as fh:
+                    data = json.load(fh)
+                agents.append(AgentRuntime.from_presence_dict(data))
+            except Exception as e:
+                logger.debug(f"Bad presence file {f}: {e}")
+        return agents
 
-        Used by stop command so it can attempt shutdown signals even
-        on agents that are dying or have stale sockets. Searches every known
-        runtime root, including the OS-account home and shared socket root,
-        while leaving cleanup to the caller.
+    def scan_machine_presence(self, include_self: bool = False) -> List[AgentRuntime]:
+        """Read machine-wide presence without cleaning up dead records.
+
+        Stop-all filters these candidates by locally owned process generation.
         """
         agents: Dict[str, AgentRuntime] = {}
         timestamps: Dict[str, float] = {}

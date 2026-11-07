@@ -36,6 +36,19 @@ def _scratch_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
 
 
+@pytest.fixture(autouse=True)
+def _scratch_presence_roots(tmp_path, monkeypatch, request):
+    """Keep presence scans away from the account home and shared Hub root."""
+    from plugins.hub import presence
+
+    # This test exercises the home resolver itself with a stubbed pwd record.
+    if request.node.name != "test_system_home_directory_ignores_home_override":
+        monkeypatch.setattr(presence, "_system_home_directory", lambda: tmp_path / "account")
+    root = tmp_path / "hub-root"
+    monkeypatch.setattr(presence, "hub_socket_root", lambda: root)
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", root)
+
+
 def _policy_loop(policy: asyncio.AbstractEventLoopPolicy):
     """Return the current policy loop without allocating one."""
     policy_local = getattr(policy, "_local", None)

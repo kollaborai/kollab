@@ -37,6 +37,9 @@ class FakePresence:
     def scan_all_presence(self):
         return list(self.agents)
 
+    def scan_machine_presence(self):
+        return list(self.agents)
+
 
 def test_stop_peer_waits_after_shutdown_ack_then_sigterms(monkeypatch):
     async def run_test():
