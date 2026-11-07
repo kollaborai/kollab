@@ -21,6 +21,18 @@ def _status() -> dict[str, Any]:
     return {"status": "ok", "generation": os.environ.get("KOLLAB_ACP_GENERATION", "0")}
 
 
+def _token() -> str | None:
+    """The binding token, read from the owner-only file the parent named; None once it is gone."""
+    path = os.environ.get("KOLLAB_ACP_HUB_TOKEN_FILE")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as stream:
+            return stream.read().strip() or None
+    except OSError:
+        return None
+
+
 async def _require_binding(binding: Callable[[], bool | Any]) -> Any:
     result = binding()
     if hasattr(result, "__await__"):
@@ -32,7 +44,7 @@ async def _require_binding(binding: Callable[[], bool | Any]) -> Any:
 
 async def _binding_from_socket() -> dict[str, Any] | None:
     socket_path = os.environ.get("KOLLAB_ACP_HUB_SOCKET")
-    token = os.environ.get("KOLLAB_ACP_HUB_TOKEN")
+    token = _token()
     generation = os.environ.get("KOLLAB_ACP_GENERATION")
     if not socket_path or not token or generation is None:
         return None
@@ -63,7 +75,7 @@ async def _call_socket(name: str, arguments: dict[str, Any]) -> Any:
     try:
         request = {
             "action": "acp_hub_call", "name": name, "arguments": arguments,
-            "token": os.environ.get("KOLLAB_ACP_HUB_TOKEN"),
+            "token": _token(),
             "generation": os.environ.get("KOLLAB_ACP_GENERATION"),
         }
         writer.write((json.dumps(request) + "\n").encode())
@@ -148,8 +160,8 @@ def kollab_hub_argv() -> list[str]:
 
 
 def main(*, protocol: Any = None) -> None:
-    if not os.environ.get("KOLLAB_ACP_HUB_TOKEN"):
-        print("KOLLAB_ACP_HUB_TOKEN is required", file=sys.stderr)
+    if not _token():
+        print("KOLLAB_ACP_HUB_TOKEN_FILE must name a readable binding file", file=sys.stderr)
         raise SystemExit(2)
     from .acp_stdio import isolated_stdout
     protocol = protocol or isolated_stdout()
