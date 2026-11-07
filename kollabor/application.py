@@ -1563,11 +1563,11 @@ class TerminalLLMChat:
     def _boot_projects_sweep(self) -> None:
         """Issue #647: retire orphaned project state directories at boot.
 
-        Quarantine-only: orphans move to ``_trash`` (recoverable, 14 day
-        retention) and truly empty shells are removed. Nothing is ever
-        deleted at boot; trash purges happen only through
-        ``kollab --cleanup-projects --execute``. Any failure is logged and
-        swallowed so startup never depends on housekeeping.
+        Orphans move to ``_trash`` (recoverable, 14 day retention) and truly
+        empty shells are removed; nothing with content is deleted at boot.
+        Trash purges happen only through ``kollab --cleanup-projects --execute``.
+        Any failure is logged and swallowed so startup never depends on
+        housekeeping.
         """
         try:
             if not self.config.get("kollabor.projects.sweep_boot_enabled", True):

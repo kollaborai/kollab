@@ -266,17 +266,19 @@ an encoded form of the project path. Kollab keeps these directories safe:
 
 - **Reserved names** (`default`, `hub`, `logs`, `voice`, `_trash`) are never swept.
 - **Activity guard**: directories written recently (configurable via
-  `kollabor.projects.sweep_boot_active_window_hours`, default 24) are left alone.
+  `kollabor.projects.active_window_hours`, default 24) are left alone.
 - **Provenance**: an entry is kept when its slug decodes back to an existing
   project, its owner marker names a live project, it matches a tmp-path
   workspace, or a pruned prefix search finds a live project. Entries whose
   provenance cannot be resolved (lossy encodings make look-alike slugs
   possible) are only reported, never moved.
-- **Quarantine, not delete**: confirmed orphans and empty shells move to
-  `~/.kollab/projects/_trash` at boot (gated by
-  `kollabor.projects.sweep_boot_enabled`, on by default). Quarantined content
-  is purged after `kollabor.projects.sweep_retention_days` (default 14), and
-  only if no project with that path has reappeared.
+- **Quarantine, not delete**: at boot, confirmed orphans move to
+  `~/.kollab/projects/_trash` and empty orphan directories are removed
+  (gated by `kollabor.projects.sweep_boot_enabled`, on by default; set it to
+  `false` to turn the boot sweep off). Boot never purges the trash: a
+  `kollab --cleanup-projects --execute` run purges quarantined content older
+  than `kollabor.projects.retention_days` (default 14), and only if no project
+  with that path has reappeared.
 - **Manual sweep**: `kollab --cleanup-projects` prints the plan and changes
   nothing. Add `--execute` to apply it; `--retention-days N` overrides
   retention for that run.

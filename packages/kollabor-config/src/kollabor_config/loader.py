@@ -508,7 +508,7 @@ class ConfigLoader:
                 "projects": {
                     # Issue #647 orphan sweep: boot-time quarantine of
                     # project state dirs whose workspace no longer exists.
-                    # Boot never deletes; trash purges need
+                    # Boot removes only empty dirs; trash purges need
                     # kollab --cleanup-projects --execute.
                     "sweep_boot_enabled": True,
                     "retention_days": 14,
