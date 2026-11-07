@@ -14,8 +14,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from kollabor_ai.conversation_logger import (
+    _acp_display_metadata,
+    _session_file_rewrite_lock_path,
+    _session_file_write_lock_path,
+)
 from kollabor_ai.session_naming import generate_branch_name, generate_session_name
-from kollabor_ai.conversation_logger import _acp_display_metadata
+from kollabor_config.file_lock import locked_file
 
 logger = logging.getLogger(__name__)
 
@@ -590,13 +595,23 @@ class ConversationManager:
                 "saved_at": datetime.now().isoformat(),
             }
 
-            fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                os.fchmod(f.fileno(), 0o600)
-                # Write as single-line JSON for JSONL compatibility
-                f.write(json.dumps(session_data) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
+            # Match the logger's lock order: snapshot/rewrite, then JSONL write.
+            # The stable sidecars survive atomic transcript replacement.
+            with locked_file(
+                _session_file_rewrite_lock_path(filepath), "a+", private=True
+            ):
+                with locked_file(
+                    _session_file_write_lock_path(filepath), "a+", private=True
+                ):
+                    fd = os.open(
+                        filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+                    )
+                    with os.fdopen(fd, "w") as f:
+                        os.fchmod(f.fileno(), 0o600)
+                        # Write as single-line JSON for JSONL compatibility
+                        f.write(json.dumps(session_data) + "\n")
+                        f.flush()
+                        os.fsync(f.fileno())
 
             logger.info(f"Saved session {session_id} to: {filepath}")
             return True
@@ -1058,7 +1073,11 @@ class ConversationManager:
                         ):
                             continue
                         structured = data.get("tool_result")
-                        entry = deepcopy(structured) if isinstance(structured, dict) else {"content": data.get("content", "")}
+                        entry = (
+                            deepcopy(structured)
+                            if isinstance(structured, dict)
+                            else {"content": data.get("content", "")}
+                        )
                         entry["id"] = tool_id
                         entry["content"] = str(entry.get("content") or "")
                         batch = result_batches.setdefault(parent_uuid, {
