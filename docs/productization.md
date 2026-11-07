@@ -51,7 +51,7 @@ reusable surface. Those items are listed so they are not silently dropped.
 | #723 | token and cost tracking per agent per lane | plugin or extension (usage) | repo-agnostic | Off by default; storage path from config. |
 | #724 | definition-of-done check before review | skill (PR gate) | repo-agnostic | Checklist source from `docs/productization.md` or config. |
 | #725 | promotion gate for shared checkouts | plugin | Kollab-internal | Tied to Kollab's sandbox layout; flagged as internal. |
-| #726 | adversarial cross-agent review with round caps | agent | repo-agnostic | Agent identities and round caps from config. |
+| #726 | adversarial cross-agent review with round caps | agent | repo-agnostic | Agent identities and round caps from config. Policy engine in `kollabor/review/adversarial.py`, off by default; see `docs/features/adversarial-review.md`. |
 | #727 | hub event hooks to wake agents | plugin (hooks) | repo-agnostic | Hub job and wake registration needs owner sign-off. |
 | #728 | recurring hub jobs (refresh, sweep, KPI rebuild) | plugin (hub jobs) | repo-agnostic | Hub job registration needs owner sign-off. |
 | #729 | PR throughput KPIs with rolling rate | extension or plugin (KPI) | repo-agnostic | Target rate from config. |
