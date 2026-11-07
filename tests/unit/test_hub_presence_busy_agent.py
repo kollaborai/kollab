@@ -45,9 +45,8 @@ async def test_a_busy_live_agent_keeps_its_files_async(tmp_path, monkeypatch):
     assert presence_file.exists() and sock.exists()
 
 
-def test_a_live_pid_silent_past_the_grace_is_cleaned(tmp_path, monkeypatch):
-    # Most likely a recycled pid: the agent's own process is gone.
-    age = PresenceManager.LIVE_PID_GRACE_SECONDS + 60
-    me, presence_file, sock = _peer_with_heartbeat_age(tmp_path, monkeypatch, age=age)
+def test_a_live_pid_silent_for_ten_minutes_keeps_its_files(tmp_path, monkeypatch):
+    # The owner is alive; a long silence proves nothing about its pid (#575).
+    me, presence_file, sock = _peer_with_heartbeat_age(tmp_path, monkeypatch, age=660)
     assert me.discover_agents(include_solo=True) == []
-    assert not presence_file.exists() and not sock.exists()
+    assert presence_file.exists() and sock.exists()
