@@ -2,8 +2,6 @@
 
 import asyncio
 
-import pytest
-
 from kollabor_events import EventBus, Hook
 from kollabor_tui.display_tap import DisplayTap
 from kollabor_tui.input.hook_registrar import HookRegistrar
@@ -135,7 +133,6 @@ def test_event_bus_repeated_register_unregister_does_not_grow():
     _run(scenario())
 
 
-@pytest.mark.xfail(strict=True, reason="#735: HookRegistrar cleanup leak")
 def test_hook_registrar_shutdown_detaches_all_hooks_and_nothing_fires_after():
     async def scenario():
         bus = EventBus()
