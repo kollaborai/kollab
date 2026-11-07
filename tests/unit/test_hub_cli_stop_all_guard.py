@@ -171,7 +171,7 @@ def test_cli_stop_all_guard_fails_closed_when_shared_root_scan_fails(
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     shared_root = tmp_path / "shared-hub"
-    shared_root.mkdir()
+    shared_root.mkdir(mode=0o700)
     monkeypatch.setattr(config_utils, "get_config_directory", lambda: config_dir)
     monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
     monkeypatch.setattr(presence, "_system_home_directory", lambda: tmp_path / "home")
@@ -485,3 +485,48 @@ def test_cli_stop_all_enumerates_all_runtime_roots_with_redirected_home(
         call.kwargs["presence_dir"] for call in stop.await_args_list
     } == expected_presence_dirs
     assert "4/4 agent(s) stopped" in capsys.readouterr().out
+
+
+def test_cli_stop_all_guard_finds_ancestor_in_current_shared_layout(tmp_path, monkeypatch):
+    from kollabor.cli import _cli_is_hub_agent_context
+    from kollabor_config import config_utils
+    from plugins.hub import presence
+    from plugins.hub.network_halt import TOOL_SHELL_VARS
+
+    root = tmp_path / "shared"
+    root.mkdir(mode=0o700)
+    project = root / "123456abcdef"
+    project.mkdir(mode=0o700)
+    _presence(project, "parent", pid=4242)
+    monkeypatch.setattr(config_utils, "get_config_directory", lambda: tmp_path / "config")
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(presence, "_system_home_directory", lambda: tmp_path / "account")
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", root)
+    monkeypatch.setattr(presence, "hub_socket_root", lambda: root)
+    monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
+    for var in TOOL_SHELL_VARS:
+        monkeypatch.delenv(var, raising=False)
+    assert _cli_is_hub_agent_context() is True
+
+
+def test_cli_stop_all_guard_denies_unreadable_shared_record(tmp_path, monkeypatch):
+    from kollabor.cli import _cli_is_hub_agent_context
+    from kollabor_config import config_utils
+    from plugins.hub import presence
+    from plugins.hub.network_halt import TOOL_SHELL_VARS
+
+    root = tmp_path / "shared"
+    root.mkdir(mode=0o700)
+    project = root / "123456abcdef"
+    project.mkdir(mode=0o700)
+    record = project / "parent.json"
+    record.write_text("not-json")
+    monkeypatch.setattr(config_utils, "get_config_directory", lambda: tmp_path / "config")
+    monkeypatch.setattr(config_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(presence, "_system_home_directory", lambda: tmp_path / "account")
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", root)
+    monkeypatch.setattr(presence, "hub_socket_root", lambda: root)
+    monkeypatch.setattr("kollabor.cli._current_process_and_ancestors", lambda: {4242})
+    for var in TOOL_SHELL_VARS:
+        monkeypatch.delenv(var, raising=False)
+    assert _cli_is_hub_agent_context() is True
