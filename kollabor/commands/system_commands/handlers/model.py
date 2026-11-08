@@ -217,22 +217,36 @@ class ModelCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
         label = "model" if category == "model" else "reasoning effort"
+        if option.get("type") == "select" and str(value) not in self._acp_option_values(option):
+            return CommandResult(success=False, message=f"ACP {label} value is not advertised.", display_type="error")
         try:
             async with asyncio.timeout(_ACP_OPTION_TIMEOUT):
                 if persist:
                     updated = await service.set_config_option(str(option["id"]), value)
                 else:
                     updated = await service.set_config_option(str(option["id"]), value, persist=False)
-            actual = next((o.get("currentValue") for o in updated if o.get("id") == option["id"]), None)
-            if actual != value:
-                raise ValueError("ACP harness did not apply the requested value")
+        except asyncio.CancelledError:
+            quarantine = getattr(service, "quarantine_config_options", None)
+            if callable(quarantine):
+                quarantine()
+            raise
         except Exception as exc:
-            logger.warning(
-                "ACP %s option update failed (%s)", label, type(exc).__name__
-            )
+            # The request may have reached the harness even when its reply is lost.
+            logger.warning("ACP %s option outcome unknown (%s)", label, type(exc).__name__)
+            quarantine = getattr(service, "quarantine_config_options", None)
+            if callable(quarantine):
+                quarantine()
             return CommandResult(
                 success=False,
-                message=f"Could not update ACP {label}; check the adapter settings and logs.",
+                message="ACP configuration is unknown after an update error; restart the harness session.",
+                data={"outcome_unknown": True},
+                display_type="error",
+            )
+        actual = next((o.get("currentValue") for o in updated if o.get("id") == option["id"]), None)
+        if actual != value:
+            return CommandResult(
+                success=False,
+                message=f"ACP harness did not apply the requested {label}.",
                 display_type="error",
             )
         return CommandResult(success=True, message=f"ACP {label} set to {value}.", display_type="success")

@@ -373,7 +373,7 @@ async def test_a_pick_sets_the_model_and_level_as_one_change_or_puts_both_back()
     acp.calls.clear()
     result = await panel.act(ctx, "pick", {"model": "harness-default", "level": "max", "profile": "codex"})
     assert result["ok"] is False
-    assert acp.calls == [("model", "harness-default"), ("effort", "max"), ("model", "gpt-5"), ("effort", "low")]
+    assert acp.calls == [("model", "harness-default"), ("model", "gpt-5"), ("effort", "low")]
     assert [option["currentValue"] for option in acp.options] == ["gpt-5", "low"]
 
 
@@ -528,3 +528,55 @@ async def test_profile_activation_is_refused_during_picker_transaction():
         await state._set_active_profile_serialized("codex")
     resume.set()
     assert (await picker)["ok"]
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "lost_reply"])
+async def test_late_applied_model_after_timeout_is_quarantined(monkeypatch, failure):
+    import kollabor.commands.system_commands.handlers.model as model_module
+    from kollabor.llm.acp_orchestrator import ACPOrchestrator
+    from kollabor.panels.model import ModelPanel
+
+    monkeypatch.setattr(model_module, "_ACP_OPTION_TIMEOUT", 0.02)
+    applied = asyncio.Event()
+    actual = {"model": "harness-default"}
+    pending = []
+
+    async def delayed_apply():
+        await asyncio.sleep(0.04)
+        actual["model"] = "gpt-5"
+        applied.set()
+
+    class Connection:
+        async def set_config_option(self, config_id, session_id, value):
+            pending.append(asyncio.create_task(delayed_apply()))
+            if failure == "lost_reply":
+                raise OSError("reply lost")
+            await asyncio.Event().wait()
+
+    runner = object.__new__(ACPRunner)
+    runner._connection = Connection()
+    runner.session_id = "session-1"
+    runner.config_options = _options()
+    service = ACPOrchestrator(None)
+    service._runner = runner
+    ctx = _panel_ctx(service)
+    result = await ModelPanel().act(ctx, "pick", {"model": "gpt-5", "level": "low"})
+    assert not result["ok"]
+    await asyncio.wait_for(applied.wait(), 1)
+    assert actual["model"] == "gpt-5"
+    assert service.advertised_config_options() == []
+    assert service.config_outcome_unknown
+    description = await ModelPanel().describe(ctx, {})
+    assert "unknown" in description["notice"].lower()
+    assert "unknown" in result["message"].lower()
+    with pytest.raises(ACPError, match="unknown"):
+        await service.set_config_option("effort", "low")
+    await asyncio.gather(*pending)
+    # A late option update from the old runner does not clear quarantine.
+    runner.config_options = _options()
+    assert service.advertised_config_options() == []
+    # A new runner represents a new session and has its own authoritative options.
+    replacement = _ACP(_options())
+    service._runner = replacement
+    assert service.advertised_config_options() == replacement.advertised_config_options()
+    assert not service.config_outcome_unknown

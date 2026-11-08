@@ -13,7 +13,6 @@ and readers never see a partially written file.
 
 import asyncio
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -61,7 +60,10 @@ def login_mark(tokens: dict) -> str:
     if tokens.get("account_id"):
         return str(tokens["account_id"])
     secret = str(tokens.get("refresh_token") or tokens.get("access_token") or "")
-    return "token:" + hmac.new(_LOGIN_MARK_KEY, secret.encode(), hashlib.sha256).hexdigest()[:16] if secret else ""
+    if not secret:
+        return ""
+    marker = hashlib.pbkdf2_hmac("sha256", secret.encode(), _LOGIN_MARK_KEY, 100_000)
+    return "token:" + marker.hex()[:16]
 
 
 def stored_login_mark(provider: str, profile_name: str | None = None) -> str:

@@ -162,6 +162,9 @@ class ModelPanel:
             service = getattr(ctx, "_event_bus", None)
             service = service.get_service("acp_orchestrator") if service is not None else None
             getter = getattr(service, "advertised_config_options", None)
+            if getattr(service, "config_outcome_unknown", False) is True:
+                base["notice"] = "ACP configuration is unknown. Restart the harness session."
+                return base
             options = getter() if callable(getter) else []
             model = _acp_option(options, "model")
             effort = _acp_option(options, "thought_level") or _acp_option(options, "effort")
@@ -303,11 +306,17 @@ class ModelPanel:
         if level:
             outcome = await handler._set_acp_option(_level_category(handler), level, persist=False)
             if not outcome.success:
+                if outcome.data.get("outcome_unknown"):
+                    return error_result(_one_line(outcome.message))
                 # A model switch can move the level too, so both go back; the engine reads back what runs.
                 if model and before[0]:
                     restored = await handler._set_acp_option("model", before[0], persist=False)
+                    if restored.data.get("outcome_unknown"):
+                        return error_result(_one_line(restored.message))
                     if restored.success and before[1]:
-                        await handler._set_acp_option(category, before[1], persist=False)
+                        restored_level = await handler._set_acp_option(category, before[1], persist=False)
+                        if restored_level.data.get("outcome_unknown"):
+                            return error_result(_one_line(restored_level.message))
                 return error_result(_one_line(outcome.message))
         return ok_result(f"ACP set to {' · '.join(filter(None, (model, level)))}.", panel=await self.describe(ctx, {}))
 
