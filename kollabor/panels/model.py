@@ -303,25 +303,41 @@ class ModelPanel:
             return error_result(
                 "The harness has not reported its current model; choose a model before setting its effort."
             )
+        previous_effort = handler._acp_option(handler._acp_options(), category)
+        if model and level and previous_effort is not None and not before[1]:
+            return error_result(
+                "The harness has not reported its current effort; set its effort before changing the model."
+            )
+
+        async def restore_previous() -> str:
+            if not model or not before[0]:
+                return ""
+            restored = await handler._set_acp_option("model", before[0], persist=False)
+            if restored.data.get("outcome_unknown"):
+                return _one_line(restored.message)
+            if restored.success and before[1]:
+                restored_level = await handler._set_acp_option(category, before[1], persist=False)
+                if restored_level.data.get("outcome_unknown"):
+                    return _one_line(restored_level.message)
+            return ""
+
         if model:
             outcome = await handler._set_acp_option("model", model, persist=False)
             if not outcome.success:
+                if outcome.data.get("outcome_unknown"):
+                    return error_result(_one_line(outcome.message))
+                if before[0] and _acp_current(handler, "model") != before[0]:
+                    uncertain = await restore_previous()
+                    if uncertain:
+                        return error_result(uncertain)
                 return error_result(_one_line(outcome.message))
         if level:
             outcome = await handler._set_acp_option(_level_category(handler), level, persist=False)
             if not outcome.success:
                 if outcome.data.get("outcome_unknown"):
                     return error_result(_one_line(outcome.message))
-                # A model switch can move the level too, so both go back; the engine reads back what runs.
-                if model and before[0]:
-                    restored = await handler._set_acp_option("model", before[0], persist=False)
-                    if restored.data.get("outcome_unknown"):
-                        return error_result(_one_line(restored.message))
-                    if restored.success and before[1]:
-                        restored_level = await handler._set_acp_option(category, before[1], persist=False)
-                        if restored_level.data.get("outcome_unknown"):
-                            return error_result(_one_line(restored_level.message))
-                return error_result(_one_line(outcome.message))
+                uncertain = await restore_previous()
+                return error_result(uncertain or _one_line(outcome.message))
         return ok_result(f"ACP set to {' · '.join(filter(None, (model, level)))}.", panel=await self.describe(ctx, {}))
 
 

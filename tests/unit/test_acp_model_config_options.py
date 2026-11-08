@@ -592,3 +592,31 @@ async def test_combined_pick_refuses_when_previous_model_is_unknown():
     assert not result["ok"]
     assert acp.calls == []
     assert acp.options[0]["currentValue"] == ""
+
+@pytest.mark.asyncio
+async def test_picker_restores_model_when_harness_returns_a_different_value():
+    from kollabor.panels.model import ModelPanel
+
+    class ClampingACP(_ACP):
+        async def set_config_option(self, config_id, value, *, persist=True):
+            if config_id == "model" and value == "gpt-5":
+                self.calls.append((config_id, value))
+                self.options[0]["currentValue"] = "other-model"
+                return self.advertised_config_options()
+            return await super().set_config_option(config_id, value, persist=persist)
+
+    acp = ClampingACP(_options())
+    result = await ModelPanel().act(_panel_ctx(acp), "pick", {"model": "gpt-5", "level": "low"})
+    assert not result["ok"]
+    assert acp.options[0]["currentValue"] == "harness-default"
+
+@pytest.mark.asyncio
+async def test_combined_pick_refuses_when_previous_effort_is_unknown():
+    from kollabor.panels.model import ModelPanel
+
+    options = _options()
+    options[1]["currentValue"] = ""
+    acp = _OfferedOnlyACP(options)
+    result = await ModelPanel().act(_panel_ctx(acp), "pick", {"model": "gpt-5", "level": "low"})
+    assert not result["ok"]
+    assert acp.calls == []
