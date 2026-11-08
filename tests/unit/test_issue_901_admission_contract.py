@@ -107,3 +107,87 @@ def test_duplicate_batch_tokens_are_rejected_without_partial_commit(fence, admis
     with pytest.raises(admission.AdmissionError):
         fence.commit_native_batch((token, token), history_id="batch", record_ids=("row", "row"))
     assert fence.state(token) is admission.AdmissionState.WRITTEN
+
+
+def test_distinct_tokens_cannot_share_record_id(fence, admission):
+    first = fence.reserve("native")
+    second = fence.reserve("native")
+    fence.mark_written(first, record_id="same-row")
+    with pytest.raises(admission.AdmissionError):
+        fence.mark_written(second, record_id="same-row")
+    assert fence.state(first) is admission.AdmissionState.WRITTEN
+    assert fence.state(second) is admission.AdmissionState.PENDING
+    assert fence.try_snapshot().reason == "pending"
+
+
+def test_distinct_committed_batches_cannot_share_history_id(fence, admission):
+    first = fence.reserve("native")
+    second = fence.reserve("native")
+    fence.mark_written(first, record_id="row-a")
+    fence.mark_written(second, record_id="row-b")
+    fence.commit_native_batch((first,), history_id="same-history", record_ids=("row-a",))
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_native_batch((second,), history_id="same-history", record_ids=("row-b",))
+    assert fence.state(first) is admission.AdmissionState.COMMITTED
+    assert fence.state(second) is admission.AdmissionState.WRITTEN
+
+
+@pytest.mark.parametrize("terminal", ["aborted", "committed", "indeterminate"])
+def test_terminal_states_reject_late_transitions(fence, admission, terminal):
+    token = fence.reserve("acp")
+    if terminal == "aborted":
+        fence.abort_before_write(token)
+        expected = admission.AdmissionState.ABORTED
+    elif terminal == "committed":
+        fence.mark_written(token, record_id="row")
+        fence.commit_acp(token, history_id="history", record_id="row")
+        expected = admission.AdmissionState.COMMITTED
+    else:
+        fence.mark_indeterminate(token)
+        expected = admission.AdmissionState.INDETERMINATE
+    for operation in (
+        lambda: fence.mark_written(token, record_id="late"),
+        lambda: fence.abort_before_write(token),
+        lambda: fence.mark_indeterminate(token),
+        lambda: fence.commit_acp(token, history_id="late-history", record_id="late"),
+    ):
+        with pytest.raises(admission.AdmissionError):
+            operation()
+        assert fence.state(token) is expected
+
+
+def test_snapshot_is_nonblocking_when_state_lock_is_contended(fence):
+    from threading import Event, Thread
+
+    finished = Event()
+    result = []
+
+    def capture():
+        result.append(fence.try_snapshot())
+        finished.set()
+
+    fence._state_lock.acquire()
+    worker = Thread(target=capture, daemon=True)
+    try:
+        worker.start()
+        completed_while_locked = finished.wait(timeout=1)
+    finally:
+        fence._state_lock.release()
+        worker.join(timeout=1)
+    assert completed_while_locked, "snapshot waited on a contended state lock"
+    assert not worker.is_alive()
+    assert result[0].allowed is False and result[0].reason == "busy"
+
+
+def test_capacity_refuses_new_tokens_without_forgetting_terminal_ids(admission):
+    fence = admission.LocalAdmissionFence(admission.SessionKey("synthetic", "owner"), max_entries=2)
+    first = fence.reserve("native")
+    fence.mark_written(first, record_id="row")
+    fence.commit_native_batch((first,), history_id="history", record_ids=("row",))
+    second = fence.reserve("acp")
+    fence.abort_before_write(second)
+    with pytest.raises(admission.AdmissionError):
+        fence.reserve("native")
+    assert fence.state(first) is admission.AdmissionState.COMMITTED
+    assert fence.state(second) is admission.AdmissionState.ABORTED
+    assert fence.try_snapshot().reason == "coverage_unverified"

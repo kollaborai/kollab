@@ -33,10 +33,10 @@ class AdmissionState(Enum):
 @dataclass(frozen=True)
 class SnapshotDecision:
     allowed: bool
-    reason: Literal["pending", "indeterminate", "coverage_unverified"]
+    reason: Literal["busy", "pending", "indeterminate", "coverage_unverified"]
 
 class LocalAdmissionFence:
-    def __init__(self, key: SessionKey) -> None: ...
+    def __init__(self, key: SessionKey, *, max_entries: int = 4096) -> None: ...
     def reserve(self, kind: Literal["native", "acp"]) -> AdmissionToken: ...
     def mark_written(self, token: AdmissionToken, *, record_id: str) -> None: ...
     def commit_native_batch(self, tokens: tuple[AdmissionToken, ...], *,
@@ -53,6 +53,9 @@ Each method is synchronous and must return without waiting for an async task;
 no lock is held across an await. An implementation must serialize access by
 using a short critical section, or reject a contended `try_snapshot` promptly.
 No await, disk I/O, callback, or provider call is permitted inside that section.
+For deterministic contention testing, the implementation exposes its private
+`_state_lock` as a standard `threading.Lock`; `try_snapshot` must acquire it
+with `blocking=False` and return `busy` if unavailable.
 A future cross-process contract needs a distinct durable fence and cannot infer
 coverage from this object.
 
@@ -76,12 +79,22 @@ coverage from this object.
   foreign-session, wrong-kind or missing membership raises AdmissionError and
   changes no state. ACP commit similarly matches its single confirmed record
   and history row. A token cannot be reused or committed twice.
+- Record IDs are unique across all tokens in one fence, including terminal
+  tokens; history IDs are unique across committed batches and ACP commits.
+  Duplicate IDs or invalid transitions raise AdmissionError without any state
+  change. COMMITTED, ABORTED and INDETERMINATE are terminal and cannot be
+  rewritten or re-used.
+- Keep terminal IDs until the fence owner can be retired safely. Bound memory by
+  `max_entries` across pending and terminal tokens; once full, `reserve` raises
+  AdmissionError without evicting anything. This is an explicit local-only
+  availability limit, not a safe durable compaction or cross-process scheme.
 - Tokens are bound to their SessionKey; a new incarnation with the same session
   name rejects old tokens. The old owner must remain unresolved/fenced until its
   operations are safely reconciled; creating a new fence does not resolve them.
 - `try_snapshot` never succeeds in this scaffold, even when no tokens exist or
   all tokens are terminal: global producer coverage and durable state are
-  unknown. It returns `pending` for unresolved PENDING or WRITTEN, otherwise
+  unknown. If the state lock is held, it returns `busy` immediately without
+  inspecting state. Otherwise it returns `pending` for unresolved PENDING or WRITTEN, otherwise
   `indeterminate` if any outcome is indeterminate, else `coverage_unverified`.
   A future snapshot permit must add owner/generation fencing and an immutable
   capture, under the shared cross-process contract.
