@@ -25,7 +25,8 @@ test("continues after a failure and does not pass unrelated secrets to workers",
     assert.notEqual(results[0].artifacts, results[1].artifacts);
     const output = JSON.parse(await readFile(path.join(results[1].artifacts, "output.log"), "utf8"));
     assert.equal(output.secret, null);
-    assert.equal(output.home, results[1].artifacts);
+    assert.notEqual(output.home, results[1].artifacts);
+    assert.match(output.home, /kb-good-/);
     assert.equal(JSON.parse(await readFile(path.join(root, "results.json"), "utf8")).length, 2);
   } finally {
     delete process.env.KOLLAB_TEST_SECRET;

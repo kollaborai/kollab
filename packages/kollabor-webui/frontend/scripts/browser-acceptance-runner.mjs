@@ -15,7 +15,7 @@ export const browserSuites = Object.freeze([
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function cleanEnvironment(home, chromePath) {
+function cleanEnvironment(home, chromePath, artifacts) {
   const inherited = ["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "LANG", "LC_ALL", "CI"];
   const env = Object.fromEntries(inherited.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
   return {
@@ -24,7 +24,7 @@ function cleanEnvironment(home, chromePath) {
     USERPROFILE: home,
     TMPDIR: home,
     KOLLAB_NO_KEYRING: "1",
-    KOLLAB_BROWSER_ARTIFACT_DIR: home,
+    KOLLAB_BROWSER_ARTIFACT_DIR: artifacts,
     LEARN_CAPTURE_SCREENSHOTS: "0",
     PROFILE_ROWS_CAPTURE: "0",
     PROFILE_COPY_CAPTURE: "0",
@@ -46,7 +46,11 @@ export async function runBrowserSuites({ suites, workers, timeoutMs, root, artif
     while (next < suites.length) {
       const index = next++;
       const suite = suites[index];
-      const home = await mkdtemp(path.join(artifacts, `${suite.name}-`));
+      const suiteArtifacts = await mkdtemp(path.join(artifacts, `${suite.name}-`));
+      // Chromium creates a Unix socket below TMPDIR; long CI artifact paths
+      // can exceed the kernel socket path limit.
+      const tempRoot = process.platform === "linux" ? "/tmp" : os.tmpdir();
+      const home = await mkdtemp(path.join(tempRoot, `kb-${suite.name}-`));
       let output = Buffer.alloc(0);
       const collect = (data) => {
         output = Buffer.concat([output, Buffer.from(data)]).subarray(-1_000_000);
@@ -54,7 +58,7 @@ export async function runBrowserSuites({ suites, workers, timeoutMs, root, artif
       const started = Date.now();
       const child = spawn(process.execPath, [suite.script], {
         cwd: root,
-        env: cleanEnvironment(home, chromePath),
+        env: cleanEnvironment(home, chromePath, suiteArtifacts),
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -87,7 +91,7 @@ export async function runBrowserSuites({ suites, workers, timeoutMs, root, artif
       clearTimeout(timer);
       clearTimeout(cleanupTimer);
       const text = output.toString("utf8");
-      await writeFile(path.join(home, "output.log"), text);
+      await writeFile(path.join(suiteArtifacts, "output.log"), text);
       results[index] = {
         name: suite.name,
         ok: ended.code === 0 && !timedOut,
@@ -96,9 +100,9 @@ export async function runBrowserSuites({ suites, workers, timeoutMs, root, artif
         timedOut,
         error: ended.error ?? null,
         seconds: (Date.now() - started) / 1000,
-        artifacts: home,
+        artifacts: suiteArtifacts,
       };
-      console.log(`${results[index].ok ? "PASS" : "FAIL"} ${suite.name} (${results[index].seconds.toFixed(1)}s) ${home}`);
+      console.log(`${results[index].ok ? "PASS" : "FAIL"} ${suite.name} (${results[index].seconds.toFixed(1)}s) ${suiteArtifacts}`);
       if (!results[index].ok) console.error(text.slice(-8000));
     }
   };
