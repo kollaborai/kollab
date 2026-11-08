@@ -764,3 +764,82 @@ async def test_stale_raises_covers_an_unjoinable_tail(registry, conversations):
     assert cached == []
     with pytest.raises(HistoryRefreshUnavailable):
         await session.refresh_history(stale_raises=True)
+
+
+class SlowRemoteState(SilentState):
+    """An agent on another computer: every answer crosses the relay.
+
+    It answers, but later than the open path waits for a busy local daemon
+    (HISTORY_REFRESH_TIMEOUT_SECONDS, cut to 0.02 s in these tests).
+    """
+
+    def __init__(self, *texts):
+        self.texts = texts
+        self.calls = 0
+
+    async def get_conversation(self, since=None, anchor=None, **kwargs):
+        self.calls += 1
+        await asyncio.sleep(0.2)
+        return _answer(*self.texts)
+
+
+def _remote_session(registry, conversations, state):
+    _, workspace_root = conversations
+    session = EngineSession(
+        session_id="koordinator@omarchy", profile=None, workspace=workspace_root
+    )
+    session.device = "omarchy"  # remote: no disk of its own to seed from
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    return session
+
+
+@pytest.mark.asyncio
+async def test_a_slow_remote_agent_history_reaches_the_page(
+    registry, conversations, monkeypatch
+):
+    """Switching back to a remote chat showed "No conversation messages yet"
+    (issue #927): every refresh gave up before the relay answered, and the
+    never-filled mirror was handed out as the agent's whole conversation."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    state = SlowRemoteState("check the servers", "all four are up")
+    session = _remote_session(registry, conversations, state)
+    emitted = []
+    session.daemon.fan_out = emitted.append
+
+    # Opening the chat waits only briefly, and the relay is slower.
+    assert await session.refresh_history() == []
+
+    first = await session.get_history_nonblocking()
+    assert first["history"] == []
+    assert first["stale"] is True, "an unconfirmed empty mirror is not an empty chat"
+
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+    assert {"type": "history_updated"} in emitted
+    second = await session.get_history_nonblocking()
+    assert second["stale"] is False
+    assert [m["content"] for m in second["history"]] == [
+        "check the servers",
+        "all four are up",
+    ]
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_a_remote_agent_with_no_messages_settles_as_empty(
+    registry, conversations, monkeypatch
+):
+    """Once the daemon confirms an empty conversation the page leaves its
+    syncing state: the empty answer is announced and no longer stale."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    session = _remote_session(registry, conversations, SlowRemoteState())
+    emitted = []
+    session.daemon.fan_out = emitted.append
+
+    assert (await session.get_history_nonblocking())["stale"] is True
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+    assert emitted == [{"type": "history_updated"}]
+    settled = await session.get_history_nonblocking()
+    assert (settled["history"], settled["stale"]) == ([], False)
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
