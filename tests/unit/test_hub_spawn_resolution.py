@@ -29,7 +29,9 @@ class _FakeProfileManager:
 
     def get_profile(self, name):
         if name == "codex-cli":
-            return SimpleNamespace(get_provider=lambda: "acp")
+            return SimpleNamespace(provider="acp", get_provider=lambda: "acp")
+        if name in {"openai-oauth", "deepseek"}:
+            return SimpleNamespace(provider="openai", get_provider=lambda: "openai")
         return None
 
 
@@ -100,6 +102,213 @@ class TestHubSpawnResolution(IsolatedAsyncioTestCase):
         self.assertEqual(call["identity"], "jasper")
         self.assertEqual(call["agent_type"], "")
         self.assertTrue(call["harness"])
+
+    async def test_profile_name_wins_over_colliding_loadout_for_harness_detection(self):
+        """Explicit profile selection outranks a loadout with the same name."""
+        from unittest.mock import patch
+
+        for profile_provider, loadout_provider, expected_harness in (
+            ("openai", "acp", False),
+            ("acp", "openai", True),
+        ):
+            with self.subTest(profile_provider=profile_provider):
+                event_bus = _FakeEventBus()
+                native_or_acp_profile = SimpleNamespace(
+                    provider=profile_provider,
+                    get_provider=lambda provider=profile_provider: provider,
+                )
+                fallback = SimpleNamespace(
+                    provider=loadout_provider,
+                    get_provider=lambda provider=loadout_provider: provider,
+                )
+                event_bus.profile_manager.get_profile = lambda name: {
+                    "shared": native_or_acp_profile,
+                    "loadout-target": fallback,
+                }.get(name)
+                loadout = SimpleNamespace(provider_profile="loadout-target")
+                plugin = HubPlugin(event_bus=event_bus)
+                plugin._identity = SimpleNamespace(
+                    identity="koordinator", profile="openai-oauth", is_coordinator=True
+                )
+                plugin._presence = _FakePresence()
+                with (
+                    patch("kollabor_ai.loadout_manager.LoadoutManager.resolve", return_value=(loadout, [])) as resolve,
+                    patch("plugins.hub.plugin.find_persona", return_value=None),
+                    patch(
+                        "plugins.hub.plugin.roster_personas",
+                        return_value=[SimpleNamespace(name="jasper", agent="coder")],
+                    ),
+                ):
+                    await plugin._handle_spawn_command(
+                        {"name": "coder", "task": "inspect", "llm": "shared"}
+                    )
+
+                call = event_bus.orchestrator_plugin.orchestrator.calls[0]
+                self.assertEqual(call.get("harness", False), expected_harness)
+                self.assertEqual(resolve.call_count, 0)
+
+    async def test_inherited_acp_profile_uses_harness_role_resolution(self):
+        """An inherited ACP profile has the same role semantics as explicit ACP."""
+        from unittest.mock import patch
+
+        event_bus = _FakeEventBus()
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._identity = SimpleNamespace(
+            identity="koordinator", profile="codex-cli", is_coordinator=True
+        )
+        plugin._presence = _FakePresence()
+        personas = [SimpleNamespace(name="jasper", agent="coder")]
+        with (
+            patch("plugins.hub.plugin.find_persona", return_value=None),
+            patch("plugins.hub.plugin.roster_personas", return_value=personas),
+        ):
+            await plugin._handle_spawn_command({"name": "coder", "task": "inspect"})
+
+        call = event_bus.orchestrator_plugin.orchestrator.calls[0]
+        self.assertTrue(call["harness"])
+        self.assertEqual(call["identity"], "jasper")
+        self.assertEqual(call["profile"], "codex-cli")
+
+    async def test_loadout_fallback_uses_its_selected_profile_and_keeps_role_identity(self):
+        """A loadout without a same-named profile selects its provider profile."""
+        from unittest.mock import patch
+
+        event_bus = _FakeEventBus()
+        acp_profile = SimpleNamespace(provider="acp", get_provider=lambda: "acp")
+        event_bus.profile_manager.get_profile = lambda name: (
+            acp_profile if name == "acp-target" else None
+        )
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._identity = SimpleNamespace(
+            identity="koordinator", profile="openai-oauth", is_coordinator=True
+        )
+        plugin._presence = _FakePresence()
+        with (
+            patch(
+                "kollabor_ai.loadout_manager.LoadoutManager.resolve",
+                return_value=(SimpleNamespace(provider_profile="acp-target"), []),
+            ),
+            patch("plugins.hub.plugin.find_persona", return_value=None),
+            patch(
+                "plugins.hub.plugin.roster_personas",
+                return_value=[SimpleNamespace(name="jasper", agent="coder")],
+            ),
+        ):
+            await plugin._handle_spawn_command(
+                {"name": "coder", "task": "inspect", "llm": "shared-loadout"}
+            )
+
+        call = event_bus.orchestrator_plugin.orchestrator.calls[0]
+        self.assertTrue(call["harness"])
+        self.assertEqual(call["identity"], "jasper")
+        self.assertEqual(call["profile"], "shared-loadout")
+
+    async def test_bundle_profile_wins_parent_profile_for_role_and_persona_names(self):
+        """The profile classified for launch is also the profile passed to child startup."""
+        from unittest.mock import patch
+
+        for bundle_profile, parent_profile, expected_harness in (
+            ("codex-cli", "openai-oauth", True),
+            ("openai-oauth", "codex-cli", False),
+        ):
+            for spawn_name in ("coder", "jasper"):
+                with self.subTest(
+                    bundle_profile=bundle_profile,
+                    parent_profile=parent_profile,
+                    spawn_name=spawn_name,
+                ):
+                    event_bus = _FakeEventBus()
+                    event_bus.agent_manager.get_agent = lambda _name, profile=bundle_profile: SimpleNamespace(
+                        name="coder", profile=profile
+                    )
+                    plugin = HubPlugin(event_bus=event_bus)
+                    plugin._identity = SimpleNamespace(
+                        identity="koordinator",
+                        profile=parent_profile,
+                        is_coordinator=True,
+                    )
+                    plugin._presence = _FakePresence()
+                    personas = [SimpleNamespace(name="jasper", agent="coder")]
+                    with (
+                        patch("plugins.hub.plugin.find_persona", side_effect=lambda ref: personas[0] if ref == "jasper" else None),
+                        patch("plugins.hub.plugin.roster_personas", return_value=personas),
+                    ):
+                        await plugin._handle_spawn_command(
+                            {"name": spawn_name, "task": "inspect"}
+                        )
+
+                    call = event_bus.orchestrator_plugin.orchestrator.calls[0]
+                    self.assertEqual(call["profile"], bundle_profile)
+                    self.assertEqual(call.get("harness", False), expected_harness)
+                    self.assertEqual(call["identity"], "jasper")
+
+    async def test_default_llm_placeholder_does_not_override_bundle_or_parent_profile(self):
+        """`llm=default` is empty so normal bundle/parent precedence applies."""
+        from unittest.mock import patch
+
+        for bundle_profile, parent_profile, expected_profile in (
+            ("codex-cli", "openai-oauth", "codex-cli"),
+            ("default", "codex-cli", "codex-cli"),
+        ):
+            with self.subTest(bundle_profile=bundle_profile):
+                event_bus = _FakeEventBus()
+                event_bus.agent_manager.get_agent = lambda _name, profile=bundle_profile: SimpleNamespace(
+                    name="coder", profile=profile
+                )
+                plugin = HubPlugin(event_bus=event_bus)
+                plugin._identity = SimpleNamespace(
+                    identity="koordinator", profile=parent_profile, is_coordinator=True
+                )
+                plugin._presence = _FakePresence()
+                personas = [SimpleNamespace(name="jasper", agent="coder")]
+                with (
+                    patch("plugins.hub.plugin.find_persona", return_value=None),
+                    patch("plugins.hub.plugin.roster_personas", return_value=personas),
+                ):
+                    await plugin._handle_spawn_command(
+                        {"name": "coder", "task": "inspect", "llm": "default"}
+                    )
+
+                call = event_bus.orchestrator_plugin.orchestrator.calls[0]
+                self.assertEqual(call["profile"], expected_profile)
+                self.assertEqual(call.get("harness", False), True)
+
+    async def test_harness_detection_uses_effective_environment_provider(self):
+        """`get_provider()` env overrides match LLM coordinator provider selection."""
+        from unittest.mock import patch
+
+        for stored_provider, effective_provider, expected_harness in (
+            ("acp", "openai", False),
+            ("openai", "acp", True),
+        ):
+            with self.subTest(effective_provider=effective_provider):
+                event_bus = _FakeEventBus()
+                selected = SimpleNamespace(
+                    provider=stored_provider,
+                    get_provider=lambda provider=effective_provider: provider,
+                )
+                event_bus.profile_manager.get_profile = lambda name: (
+                    selected if name == "shared" else None
+                )
+                plugin = HubPlugin(event_bus=event_bus)
+                plugin._identity = SimpleNamespace(
+                    identity="koordinator", profile="openai-oauth", is_coordinator=True
+                )
+                plugin._presence = _FakePresence()
+                with (
+                    patch("plugins.hub.plugin.find_persona", return_value=None),
+                    patch(
+                        "plugins.hub.plugin.roster_personas",
+                        return_value=[SimpleNamespace(name="jasper", agent="coder")],
+                    ),
+                ):
+                    await plugin._handle_spawn_command(
+                        {"name": "coder", "task": "inspect", "llm": "shared"}
+                    )
+
+                call = event_bus.orchestrator_plugin.orchestrator.calls[0]
+                self.assertEqual(call.get("harness", False), expected_harness)
+                self.assertEqual(call["identity"], "jasper")
 
     async def test_acp_exact_persona_and_explicit_custom_identity_are_preserved(self):
         """Exact names and an explicit identity beat role-to-persona assignment."""

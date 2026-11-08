@@ -14463,20 +14463,72 @@ class HubPlugin(BasePlugin):
             if not agent_name or not task:
                 return "usage: /hub spawn <name> [identity=X] [type=X] <task>"
 
-        harness = False
-        if requested_llm and self.event_bus:
-            profile_mgr = self.event_bus.get_service("profile_manager")
-            if profile_mgr is not None:
-                from kollabor_ai.loadout_manager import LoadoutManager
-                loadout, _ = LoadoutManager(profile_mgr).resolve(requested_llm)
-                selected = profile_mgr.get_profile(loadout.provider_profile if loadout else requested_llm)
-                harness = selected is not None and selected.get_provider() == "acp"
-
-        # --- Resolve what was requested ---
         # Is agent_name a pool identity? (e.g. "lapis")
         pool_match = find_persona(agent_name)
         if pool_match and pool_match.name != split_ref(agent_name)[1]:
             pool_match = None  # lapis-2 is not a persona to spawn
+
+        def _explicit_profile(value: object) -> str:
+            if not isinstance(value, str):
+                return ""
+            profile = value.strip()
+            return profile if profile and profile != "default" else ""
+
+        # Match application startup: --llm selects an exact profile first, and
+        # resolves a loadout only when no profile has that name. The identity
+        # profile is inherited when no explicit request or bundle profile wins.
+        harness = False
+        profile_mgr = (
+            self.event_bus.get_service("profile_manager") if self.event_bus else None
+        )
+        profile_candidate = _explicit_profile(requested_llm)
+        if not profile_candidate:
+            requested_persona = find_persona(requested_identity) if requested_identity else None
+            if requested_persona and requested_persona.name != split_ref(requested_identity)[1]:
+                requested_persona = None
+            if agent_type_override:
+                selected_type = agent_type_override
+            elif pool_match:
+                selected_type = pool_match.agent or "coder"
+            elif requested_persona:
+                selected_type = requested_persona.agent or agent_name
+            else:
+                selected_type = agent_name
+            try:
+                agent_mgr = (
+                    self.event_bus.get_service("agent_manager") if self.event_bus else None
+                )
+                agent_def = agent_mgr.get_agent(selected_type) if agent_mgr else None
+                profile_candidate = _explicit_profile(
+                    getattr(agent_def, "profile", "") if agent_def else ""
+                )
+            except Exception:
+                profile_candidate = ""
+            if not profile_candidate and self._identity:
+                profile_candidate = _explicit_profile(self._identity.profile)
+            if not profile_candidate and profile_mgr:
+                profile_candidate = _explicit_profile(
+                    getattr(profile_mgr, "active_profile_name", "")
+                )
+
+        if profile_candidate and profile_mgr:
+            selected_profile = profile_mgr.get_profile(profile_candidate)
+            if selected_profile is None:
+                from kollabor_ai.loadout_manager import LoadoutManager
+
+                loadout, _ = LoadoutManager(profile_mgr).resolve(profile_candidate)
+                if loadout:
+                    selected_profile = profile_mgr.get_profile(loadout.provider_profile)
+            if selected_profile is not None:
+                get_provider = getattr(selected_profile, "get_provider", None)
+                provider = (
+                    get_provider()
+                    if callable(get_provider)
+                    else getattr(selected_profile, "provider", "")
+                )
+                harness = str(provider).lower() == "acp"
+
+        # --- Resolve what was requested ---
 
         if harness:
             # ACP owns the brain/tools, but the name still follows hub_spawn's
@@ -14682,13 +14734,10 @@ class HubPlugin(BasePlugin):
         # auto-detect, not an explicit provider selection.  Passing it to a
         # child can silently auto-select a billable provider, so never let it
         # override a real parent profile or escape this resolver.
-        def _explicit_profile(value: object) -> str:
-            if not isinstance(value, str):
-                return ""
-            profile = value.strip()
-            return profile if profile and profile != "default" else ""
-
-        resolved_profile = _explicit_profile(requested_llm)
+        # Keep the profile selected for harness detection identical to the
+        # profile passed to the child. This matters when the bundle's explicit
+        # profile overrides the parent's inherited profile.
+        resolved_profile = _explicit_profile(requested_llm) or profile_candidate
         try:
             agent_mgr = (
                 self.event_bus.get_service("agent_manager") if self.event_bus else None
