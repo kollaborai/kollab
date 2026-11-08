@@ -3,11 +3,11 @@
 Status: proposed, local-only, not a replay or release contract. No in-memory
 state here proves process-wide coverage, durability, or crash recovery. Existing
 compaction and existing-destination replacement remain disabled. The companion
-tests describe behavior that the current implementation does not yet provide.
+tests exercise only the isolated local implementation.
 
 ## Types and signatures
 
-Module: `kollabor_ai.session_admission` (proposed; does not exist yet).
+Module: `kollabor_ai.session_admission` (isolated implementation; not integrated).
 
 ```python
 class AdmissionError(Exception): ...
@@ -106,3 +106,35 @@ coverage from this object.
 The test scaffold exercises only this state machine. It does not claim real
 native or ACP wiring, provider/tool behavior, cross-process exclusion, durable
 sequence, crash recovery, sidecar correlation, or repaired replay.
+
+## Ownership, errors, and uncovered connectivity
+
+- A token is accepted only by the exact fence instance that issued that exact
+  object. Equal SessionKey values on separate fences do not confer ownership;
+  even an equal, reconstructed token is rejected. There is no serialization or
+  cross-process token contract here. Invalid types, empty/whitespace IDs, empty
+  batches, unknown tokens, invalid states, wrong kind, duplicate record/history
+  IDs, and exhausted capacity raise AdmissionError without changing any state.
+- QueueProcessor currently ignores `_add_message_fn`'s return value, while
+  LLMService `_add_conversation_message` returns the manager's UUID after
+  manager/history mutation and event publication. Future integration must
+  capture that returned ID and commit only after verifying the corresponding
+  history membership. An exception can occur after partial or complete mutation
+  and before return, including publication failure; mark indeterminate, do not
+  assume no row was added. Native log-before-enqueue rejection likewise leaves
+  a possibly durable row; it cannot become ABORTED without durable resolution.
+- ACP `_record_user`, including steering, creates history before an async append;
+  observation/retry/handover and delayed callbacks have distinct lifetimes.
+  None is wired to this state machine. MessageHandler may independently add
+  history and log, including history-only/log-only modes; native/ACP assistant
+  results, tool outputs and other logger/Hub producers are also uncovered.
+  `save_conversation` and ACP display/stats/UID sidecars are separate unfenced
+  writes. The object grants no snapshot permit for any configuration.
+- The existing create-only `save_session` allows an absent destination but
+  does not prove its memory snapshot covers all producers; this scaffold does
+  not certify creation safety. Existing-destination replacement and compaction
+  remain disabled. Do not call this a complete admission or save fix.
+- Voice deletion requires removal according to the actual deletion contract
+  from relevant log rewrites and all applicable sidecars, recovery artifacts,
+  retained snapshots and backups; an append-only tombstone or hidden replay is
+  insufficient. Exact recovery/retention design remains unresolved.

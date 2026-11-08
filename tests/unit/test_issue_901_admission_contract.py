@@ -1,8 +1,8 @@
-"""Red conformance tests for the proposed local-only #901 admission seam.
+"""Conformance tests for the isolated local-only #901 admission seam.
 
 These tests use no providers, subprocesses, network, or real session data. They
-intentionally fail until the proposed module and API exist; passing them alone
-would not establish cross-process or durable correctness.
+exercise a state machine without production integration; passing them alone
+does not establish cross-process or durable correctness.
 """
 
 import asyncio
@@ -240,3 +240,114 @@ def test_acp_cannot_reuse_native_batch_history_id(fence, admission):
         fence.commit_acp(acp, history_id="history", record_id="acp-row")
     assert fence.state(native) is admission.AdmissionState.COMMITTED
     assert fence.state(acp) is admission.AdmissionState.WRITTEN
+
+
+def test_equal_session_key_other_fence_and_forged_token_rejected(admission):
+    key = admission.SessionKey("synthetic", "same-generation")
+    first = admission.LocalAdmissionFence(key)
+    second = admission.LocalAdmissionFence(key)
+    token = first.reserve("native")
+    forged = admission.AdmissionToken(token.key, token.op_id, token.kind)
+    for fence, candidate in ((second, token), (first, forged)):
+        with pytest.raises(admission.AdmissionError):
+            fence.mark_written(candidate, record_id="row")
+    assert first.state(token) is admission.AdmissionState.PENDING
+    assert second.try_snapshot().reason == "coverage_unverified"
+
+
+@pytest.mark.parametrize("bad", ["", " ", None, 1])
+def test_invalid_record_and_history_ids_fail_without_transition(fence, admission, bad):
+    token = fence.reserve("acp")
+    with pytest.raises(admission.AdmissionError):
+        fence.mark_written(token, record_id=bad)
+    assert fence.state(token) is admission.AdmissionState.PENDING
+    fence.mark_written(token, record_id="row")
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_acp(token, history_id=bad, record_id="row")
+    assert fence.state(token) is admission.AdmissionState.WRITTEN
+
+
+def test_invalid_kinds_empty_batch_and_unwritten_commit_fail_closed(fence, admission):
+    for kind in ("", "steer", None):
+        with pytest.raises(admission.AdmissionError):
+            fence.reserve(kind)
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_native_batch((), history_id="history", record_ids=())
+    token = fence.reserve("native")
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_native_batch((token,), history_id="history", record_ids=("row",))
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_acp(token, history_id="history", record_id="row")
+    assert fence.state(token) is admission.AdmissionState.PENDING
+
+
+def test_rejection_after_durable_append_is_not_an_abort(fence, admission):
+    token = fence.reserve("native")
+    fence.mark_written(token, record_id="logged-before-enqueue")
+    # Queue rejection does not undo the append; a durable resolution is absent.
+    fence.mark_indeterminate(token)
+    assert fence.state(token) is admission.AdmissionState.INDETERMINATE
+    assert fence.try_snapshot().reason == "indeterminate"
+
+
+def test_history_callback_failure_after_mutation_is_indeterminate(fence, admission):
+    token = fence.reserve("native")
+    fence.mark_written(token, record_id="row")
+    history = []
+
+    def add_then_fail():
+        history.append("mutated-history")
+        raise RuntimeError("synthetic after mutation")
+
+    try:
+        add_then_fail()
+    except RuntimeError:
+        fence.mark_indeterminate(token)
+    assert history == ["mutated-history"]
+    assert fence.try_snapshot().reason == "indeterminate"
+
+
+def test_acp_steering_is_tracked_as_acp_and_fails_closed(fence, admission):
+    token = fence.reserve("acp")
+    assert fence.try_snapshot().reason == "pending"
+    fence.mark_written(token, record_id="steer-row")
+    fence.commit_acp(token, history_id="steer-history", record_id="steer-row")
+    assert fence.state(token) is admission.AdmissionState.COMMITTED
+    assert fence.try_snapshot().reason == "coverage_unverified"
+
+
+@pytest.mark.parametrize("key,capacity", [(("", "g"), 1), (("s", ""), 1), (("s", "g"), 0)])
+def test_invalid_fence_configuration_is_rejected(admission, key, capacity):
+    with pytest.raises(admission.AdmissionError):
+        admission.LocalAdmissionFence(admission.SessionKey(*key), max_entries=capacity)
+
+
+def test_concurrent_duplicate_record_has_one_winner(fence, admission):
+    from threading import Barrier, Thread
+
+    tokens = (fence.reserve("native"), fence.reserve("native"))
+    start = Barrier(3)
+    results = []
+
+    def write(token):
+        start.wait()
+        try:
+            fence.mark_written(token, record_id="same-row")
+        except admission.AdmissionError:
+            results.append("rejected")
+        else:
+            results.append("written")
+
+    workers = [Thread(target=write, args=(token,)) for token in tokens]
+    for worker in workers:
+        worker.start()
+    start.wait()
+    for worker in workers:
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+    assert sorted(results) == ["rejected", "written"]
+    assert {fence.state(token) for token in tokens} == {
+        admission.AdmissionState.PENDING,
+        admission.AdmissionState.WRITTEN,
+    }
+    assert fence.try_snapshot().reason == "pending"
