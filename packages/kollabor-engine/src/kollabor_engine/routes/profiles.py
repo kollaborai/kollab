@@ -224,26 +224,74 @@ async def list_profiles():
     }
 
 
-@router.get("/choices")
-async def list_choices():
-    """Every provider profile x model x effort to start or switch a session
-    on, for the web UI's searchable model picker. ACP choices are discovered
-    in a short-lived, isolated session when a harness has no fresh options."""
+_CATALOG_WAIT_SECONDS = 1.5  # a cold start waits this long, once, for the first catalog refresh
+
+
+class _CatalogRefresh:
+    """The one background refresh of the providers' model catalogs.
+
+    One runs at a time; every request just makes sure one is running. A request
+    waits for it only until the first one has finished since the engine started
+    (a cold cache would list each profile's own model only); after that every
+    answer comes from the cache at once and the refresh runs behind it.
+    """
+
+    def __init__(self) -> None:
+        self.task: Optional["asyncio.Task[None]"] = None
+        self.settled = False  # a refresh has finished since the engine started
+
+    def ensure(self, manager: Any) -> "asyncio.Task[None]":
+        loop = asyncio.get_running_loop()
+        task = self.task
+        if task is not None and not task.done() and task.get_loop() is loop:
+            return task
+
+        async def refresh() -> None:
+            try:  # a cold or expired catalog lists only each profile's own model
+                await asyncio.wait_for(manager.refresh_catalogs(), 8.0)
+            except Exception as exc:  # noqa: BLE001 - cached and bundled models still list
+                logger.warning("model picker: catalog refresh failed: %s", type(exc).__name__)
+            finally:
+                self.settled = True
+
+        self.task = loop.create_task(refresh(), name="model-picker-catalogs")
+        return self.task
+
+
+_catalogs = _CatalogRefresh()
+
+
+def _picker_manager():
     from kollabor_ai.loadout_manager import LoadoutManager
     from kollabor_config import ConfigService
     from kollabor_config.config_utils import get_global_config_path
 
     config = ConfigService(get_global_config_path(), fast_mode=True)  # saved loadouts live here
-    manager = LoadoutManager(_get_profile_manager(), config=config)
+    return LoadoutManager(_get_profile_manager(), config=config)
+
+
+async def warm_model_choices() -> None:
+    """Learn the picker's choices before any page asks (engine start, #953)."""
+    from kollabor.llm import acp_discovery
+
+    if not acp_discovery.warming_enabled():
+        return
+    manager = _picker_manager()
     profiles = manager.provider_profiles()
+    _catalogs.ensure(manager)
+    acp_discovery.warm_in_background(profiles)
+
+
+async def _discover_on_request(manager: Any, profiles: list) -> dict:
+    """The pre-#953 route: wait for every catalog and every ACP harness probe.
+    Only with KOLLAB_PICKER_WARM=0."""
+    from kollabor.llm.acp_discovery import discover_profiles
 
     async def refresh_catalogs() -> None:
         try:  # a cold or expired catalog lists only each profile's own model
             await asyncio.wait_for(manager.refresh_catalogs(), 8.0)
         except Exception as exc:  # noqa: BLE001 - cached and bundled models still list
             logger.warning("model picker: catalog refresh failed: %s", type(exc).__name__)
-
-    from kollabor.llm.acp_discovery import discover_profiles
 
     catalog_task = asyncio.create_task(refresh_catalogs())
     discovery_task = asyncio.create_task(discover_profiles(profiles))
@@ -254,6 +302,36 @@ async def list_choices():
         discovery_task.cancel()
         await asyncio.gather(catalog_task, discovery_task, return_exceptions=True)
         raise
+    return discovered
+
+
+@router.get("/choices")
+async def list_choices(refresh: bool = False):
+    """Every provider profile x model x effort to start or switch a session
+    on, for the web UI's searchable model picker.
+
+    ACP choices come from the engine's background warm cache
+    (``kollabor.llm.acp_discovery``): the answer is immediate and never waits
+    for a harness. A harness not learned yet reads as "loading" (``more``),
+    and the page asks again. ``refresh`` (the picker's Retry) probes again the
+    profiles whose list is incomplete."""
+    from kollabor.llm import acp_discovery
+
+    manager = _picker_manager()
+    profiles = manager.provider_profiles()
+
+    if acp_discovery.warming_enabled():
+        refreshing = _catalogs.ensure(manager)
+        try:
+            acp_discovery.warm_in_background(profiles, force=refresh)
+        except Exception:  # noqa: BLE001 - the answer below still comes from what is known
+            logger.warning("model picker: could not start the background warm", exc_info=True)
+        native = [p for p in profiles if str(getattr(p, "provider", "")).lower() != "acp"]
+        if native and not _catalogs.settled:
+            await asyncio.wait({refreshing}, timeout=_CATALOG_WAIT_SECONDS)
+        discovered = acp_discovery.known_outcomes(profiles)
+    else:
+        discovered = await _discover_on_request(manager, profiles)
 
     acp_options = {name: outcome.options for name, outcome in discovered.items()}
     discovery = {

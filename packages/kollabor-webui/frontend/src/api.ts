@@ -1385,11 +1385,12 @@ export class EngineApi {
     );
   }
 
-  listModelChoices() {
+  /** `refresh` is the picker's Retry: the engine probes the harnesses whose list is incomplete again. */
+  listModelChoices(refresh = false) {
     return this.json<{
       choices: ModelChoice[];
       discovery?: Record<string, { status: "ready" | "partial" | "unavailable"; message?: string; more?: boolean }>;
-    }>("/profiles/choices");
+    }>(refresh ? "/profiles/choices?refresh=true" : "/profiles/choices");
   }
 
   listProfiles() {

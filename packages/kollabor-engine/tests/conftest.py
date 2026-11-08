@@ -25,6 +25,12 @@ def appearance_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_picker_warm(monkeypatch):
+    """The model picker's background warm launches real harnesses (#953): a test that wants it sets 1."""
+    monkeypatch.setenv("KOLLAB_PICKER_WARM", "0")
+
+
+@pytest.fixture(autouse=True)
 def bypass_auth(monkeypatch):
     """Bypass auth middleware for all tests."""
     monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
