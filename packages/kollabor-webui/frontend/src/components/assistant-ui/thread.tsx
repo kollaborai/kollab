@@ -39,6 +39,7 @@ import { usePendingPermissionCancellation } from "@/runtime";
 import { imageAttachmentAdapter } from "@/components/assistant-ui/attachment-adapter";
 import {
   busyComposerSubmitErrorMessage,
+  clearAmbiguousBusyComposerGuard,
   createBusyComposerSubmitHandler,
   createBusyComposerSubmitTracker,
   observeBusyComposerDraft,
@@ -522,7 +523,11 @@ export const Composer: FC<{
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isRunning && !lastBusySubmit.current.queuedDraft) {
+    if (
+      !isRunning &&
+      !lastBusySubmit.current.queuedDraft &&
+      !lastBusySubmit.current.ambiguousDraft
+    ) {
       setBusySubmitError(null);
     }
   }, [isRunning]);
@@ -548,7 +553,7 @@ export const Composer: FC<{
   // /connect knocks) opens its Settings tab and posts no text. Any other line is
   // sent exactly as typed. Runs on form submit (Enter) and on the Send button.
   const openPanelFromComposer = (event: { preventDefault: () => void }) => {
-    if (!onOpenPanel) return;
+    if (lastBusySubmit.current.ambiguousDraft || !onOpenPanel) return;
     const { text, attachments } = aui.composer.getState();
     const request =
       attachments.length === 0 ? panelCommandRequest(text, commands) : null;
@@ -595,7 +600,11 @@ export const Composer: FC<{
     id: string;
     metadata?: Record<string, unknown> | undefined;
   }) => {
-    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
+    if (
+      lastBusySubmit.current.ambiguousDraft ||
+      !onOpenPanel ||
+      aui.composer.getState().attachments.length > 0
+    ) return;
     const insert = item.metadata?.insertText;
     const request = panelCommandRequest(
       `/${typeof insert === "string" ? insert : item.id}`,
@@ -862,9 +871,34 @@ export const Composer: FC<{
           >
             <ComposerAttachments />
             {busySubmitError ? (
-              <p role="alert" className="px-2 text-xs text-destructive">
-                {busySubmitError}
-              </p>
+              <div className="flex flex-col items-start gap-1 px-2 text-xs">
+                <p role="alert" className="text-destructive">
+                  {busySubmitError}
+                </p>
+                {lastBusySubmit.current.ambiguousDraft ? (
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      aria-label="I checked; allow another send"
+                      onClick={() => {
+                        if (
+                          clearAmbiguousBusyComposerGuard(lastBusySubmit.current)
+                        ) {
+                          setBusySubmitError(null);
+                        }
+                      }}
+                    >
+                      I checked; allow another send
+                    </Button>
+                    <span className="text-muted-foreground">
+                      This clears the guard only; it does not send or clear your
+                      draft.
+                    </span>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />

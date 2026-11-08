@@ -25,12 +25,13 @@ export type BusyComposerSubmitTracker = {
   last: { fingerprint: string; at: number } | null;
   inFlight: Set<string>;
   queuedDraft: { fingerprint: string; error: unknown } | null;
+  ambiguousDraft: { fingerprint: string; error: unknown } | null;
   observedFingerprint: string | null;
   revision: number;
 };
 
 export type BusyComposerSubmitIssue = {
-  kind: "prepare" | "enqueue" | "reset" | "already-queued";
+  kind: "prepare" | "ambiguous" | "reset" | "already-queued";
   error: unknown;
 };
 
@@ -40,8 +41,12 @@ export function busyComposerSubmitErrorMessage(
   switch (issue.kind) {
     case "prepare":
       return "Could not prepare the image. Your draft is still here; try sending again.";
-    case "enqueue":
-      return "Could not confirm this message was queued. Your draft is still here; check the conversation before retrying.";
+    case "ambiguous":
+      return (
+        "Could not confirm whether this message entered the send queue. " +
+        "Your draft is still here. Check the conversation before allowing " +
+        "another send; it may create a duplicate."
+      );
     case "reset":
       return "Message queued, but the draft could not be cleared. Clear or edit it before submitting again.";
     case "already-queued":
@@ -54,9 +59,19 @@ export function createBusyComposerSubmitTracker(): BusyComposerSubmitTracker {
     last: null,
     inFlight: new Set(),
     queuedDraft: null,
+    ambiguousDraft: null,
     observedFingerprint: null,
     revision: 0,
   };
+}
+
+export function clearAmbiguousBusyComposerGuard(
+  tracker: BusyComposerSubmitTracker,
+): boolean {
+  if (!tracker.ambiguousDraft) return false;
+  tracker.ambiguousDraft = null;
+  tracker.last = null;
+  return true;
 }
 
 export function busyComposerFingerprint(state: BusyComposerState): string {
@@ -117,6 +132,12 @@ export function createBusyComposerSubmitHandler(
     if (event.defaultPrevented) return;
     const state = options.getState();
     const draftChanged = observeBusyComposerDraft(options.tracker, state);
+    const ambiguousDraft = options.tracker.ambiguousDraft;
+    if (ambiguousDraft) {
+      event.preventDefault();
+      options.onError({ kind: "ambiguous", error: ambiguousDraft.error });
+      return;
+    }
     if (draftChanged) options.onError(null);
 
     if (!options.isRunning) {
@@ -241,7 +262,8 @@ async function submitBusyComposerMessage(
       });
     } catch (error) {
       // The queue may contain the command if scheduling failed after enqueue.
-      onError({ kind: "enqueue", error });
+      tracker.ambiguousDraft = { fingerprint, error };
+      onError({ kind: "ambiguous", error });
       return;
     }
 

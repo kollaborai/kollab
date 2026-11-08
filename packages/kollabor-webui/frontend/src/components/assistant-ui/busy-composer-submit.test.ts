@@ -134,7 +134,10 @@ describe("busy composer submit", () => {
     expect(test.sendCommand).toHaveBeenCalledTimes(1);
     expect(test.resetComposer).not.toHaveBeenCalled();
     expect(test.onError).toHaveBeenLastCalledWith({
-      kind: "enqueue",
+      kind: "ambiguous",
+      error: enqueueError,
+    });
+    expect(test.tracker.ambiguousDraft).toMatchObject({
       error: enqueueError,
     });
     expect(state).toEqual({ text: "retain me", attachments: [attachment] });

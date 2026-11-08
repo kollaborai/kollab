@@ -61,6 +61,10 @@ import {
 
 const PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/xioAAAAASUVORK5CYII=";
+const AMBIGUOUS_SEND_WARNING =
+  "Could not confirm whether this message entered the send queue. " +
+  "Your draft is still here. Check the conversation before allowing " +
+  "another send; it may create a duplicate.";
 
 async function pendingPng() {
   const bytes = Uint8Array.from(atob(PNG_BASE64), (character) =>
@@ -384,7 +388,7 @@ describe("thread Composer busy-send wiring", () => {
     );
   });
 
-  it("keeps the draft and reports a synchronous queue failure separately from conversion", async () => {
+  it("preserves the draft and reports ambiguity when the synchronous handoff throws", async () => {
     const attachment = await pendingPng();
     const harness = setupComposer({
       text: "retain after queue failure",
@@ -405,37 +409,79 @@ describe("thread Composer busy-send wiring", () => {
       attachments: [attachment],
     });
     expect(harness.setBusySubmitError).toHaveBeenLastCalledWith(
-      "Could not confirm this message was queued. Your draft is still here; check the conversation before retrying.",
+      AMBIGUOUS_SEND_WARNING,
     );
   });
 
-  it("suppresses an immediate duplicate after an ambiguous queue handoff throw", async () => {
-    vi.spyOn(Date, "now").mockReturnValue(1_000);
+  it("blocks an append-then-schedule throw past the duplicate window until explicit confirmation", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     const attachment = await pendingPng();
     const harness = setupComposer({
       text: "retain after ambiguous queue failure",
       attachments: [attachment],
     });
-    harness.sendCommand.mockImplementationOnce(() => {
-      throw new Error("queue handoff failed");
+    const queue: Parameters<BusyComposerSubmitHandlerOptions["sendCommand"]>[0][] = [];
+    harness.sendCommand.mockImplementationOnce((command) => {
+      queue.push(command);
+      throw new Error("schedule failed after append");
     });
     const submit = harness.form.props.onSubmit as (
       event: SubmitEvent,
     ) => Promise<void>;
 
     await submit(submitEvent());
-    const duplicateEvent = submitEvent();
-    await submit(duplicateEvent);
-
-    expect(duplicateEvent.preventDefault).toHaveBeenCalledOnce();
-    expect(harness.sendCommand).toHaveBeenCalledOnce();
+    expect(queue).toHaveLength(1);
+    expect(queue[0]).toMatchObject({
+      type: "add-message",
+      message: {
+        role: "user",
+        parts: [
+          { type: "text", text: "retain after ambiguous queue failure" },
+          { type: "image", image: "data:image/png;base64," + PNG_BASE64 },
+        ],
+      },
+    });
+    const draft = {
+      text: "retain after ambiguous queue failure",
+      attachments: [attachment],
+    };
+    expect(harness.getCurrentState()).toEqual(draft);
     expect(harness.resetComposer).not.toHaveBeenCalled();
+
+    harness.setCurrentState({ text: "edited temporarily", attachments: [attachment] });
+    harness.setCurrentState(draft);
+
+    now.mockReturnValue(1_600);
+    const retryEvent = submitEvent();
+    await submit(retryEvent);
+
+    expect(retryEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(queue).toHaveLength(1);
+    expect(harness.sendCommand).toHaveBeenCalledOnce();
+    expect(harness.getBusySubmitError()).toBe(
+      AMBIGUOUS_SEND_WARNING,
+    );
+
+    const warningComposer = harness.render(true);
+    const allowAnotherSend = findElement(
+      warningComposer.form,
+      (element) =>
+        element.props["aria-label"] === "I checked; allow another send",
+    );
+    if (!allowAnotherSend) throw new Error("Ambiguous-send confirmation is missing.");
+    (allowAnotherSend.props.onClick as () => void)();
+
+    expect(harness.getBusySubmitError()).toBeNull();
     expect(harness.getCurrentState().text).toBe(
       "retain after ambiguous queue failure",
     );
-    expect(harness.getBusySubmitError()).toBe(
-      "Could not confirm this message was queued. Your draft is still here; check the conversation before retrying.",
-    );
+    expect(harness.sendCommand).toHaveBeenCalledOnce();
+    expect(harness.resetComposer).not.toHaveBeenCalled();
+
+    await submit(submitEvent());
+    expect(harness.sendCommand).toHaveBeenCalledTimes(2);
+    expect(harness.resetComposer).toHaveBeenCalledOnce();
+    expect(harness.getCurrentState()).toEqual({ text: "", attachments: [] });
   });
 
   it("does not invite retry after a successful queue handoff when reset fails", async () => {
@@ -460,33 +506,59 @@ describe("thread Composer busy-send wiring", () => {
     );
   });
 
-  it("clears a transient busy-send error at idle and lets the ordinary submit proceed", async () => {
+  it("keeps the ambiguous guard through idle until explicit confirmation", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     const attachment = await pendingPng();
-    const harness = setupComposer({ text: "retry when idle", attachments: [attachment] });
-    harness.sendCommand.mockImplementationOnce(() => {
-      throw new Error("queue handoff failed");
+    const draft = { text: "retain after schedule failure", attachments: [attachment] };
+    const harness = setupComposer(draft);
+    const queue: Parameters<BusyComposerSubmitHandlerOptions["sendCommand"]>[0][] = [];
+    harness.sendCommand.mockImplementationOnce((command) => {
+      queue.push(command);
+      throw new Error("schedule failed after append");
     });
 
     await (harness.form.props.onSubmit as (event: SubmitEvent) => Promise<void>)(
       submitEvent(),
     );
-    expect(harness.getBusySubmitError()).toBe(
-      "Could not confirm this message was queued. Your draft is still here; check the conversation before retrying.",
-    );
+    const warning =
+      AMBIGUOUS_SEND_WARNING;
+    expect(queue).toHaveLength(1);
+    expect(harness.getBusySubmitError()).toBe(warning);
 
+    now.mockReturnValue(1_600);
     const idleComposer = harness.render(false);
-    expect(harness.getBusySubmitError()).toBeNull();
-    const idleEvent = submitEvent();
+    expect(harness.getBusySubmitError()).toBe(warning);
+    const blockedEvent = submitEvent();
     await (idleComposer.form.props.onSubmit as (event: SubmitEvent) => Promise<void>)(
-      idleEvent,
+      blockedEvent,
     );
 
-    expect(idleEvent.preventDefault).not.toHaveBeenCalled();
+    expect(blockedEvent.preventDefault).toHaveBeenCalledOnce();
     expect(harness.sendCommand).toHaveBeenCalledOnce();
-    expect(harness.getCurrentState()).toEqual({
-      text: "retry when idle",
-      attachments: [attachment],
-    });
+    expect(harness.resetComposer).not.toHaveBeenCalled();
+    expect(harness.getCurrentState()).toEqual(draft);
+    expect(harness.getBusySubmitError()).toBe(warning);
+
+    const allowAnotherSend = findElement(
+      idleComposer.form,
+      (element) =>
+        element.props["aria-label"] === "I checked; allow another send",
+    );
+    if (!allowAnotherSend) throw new Error("Ambiguous-send confirmation is missing.");
+    (allowAnotherSend.props.onClick as () => void)();
+
+    expect(harness.getBusySubmitError()).toBeNull();
+    expect(harness.getCurrentState()).toEqual(draft);
+    expect(harness.sendCommand).toHaveBeenCalledOnce();
+    expect(harness.resetComposer).not.toHaveBeenCalled();
+
+    const manualIdleSubmit = submitEvent();
+    await (idleComposer.form.props.onSubmit as (event: SubmitEvent) => Promise<void>)(
+      manualIdleSubmit,
+    );
+    expect(manualIdleSubmit.preventDefault).not.toHaveBeenCalled();
+    expect(harness.sendCommand).toHaveBeenCalledOnce();
+    expect(harness.getCurrentState()).toEqual(draft);
   });
 
   it("keeps the queued-but-not-cleared warning after the turn becomes idle", async () => {
