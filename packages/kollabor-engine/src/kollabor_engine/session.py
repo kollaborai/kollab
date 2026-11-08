@@ -803,13 +803,9 @@ class EngineSession:
             self._history_anchor = ""
             self._history_refresh_failed = True
             return self.history
-        self._raw_history = (held[:since] if since else []) + received
-        self._history_anchor = getattr(snapshot, "anchor", "") or ""
+        raw_history = (held[:since] if since else []) + received
         uid_changed = bool(previous_uid and current_uid and previous_uid != current_uid)
-        self._history_conversation_uid = current_uid if isinstance(current_uid, str) and current_uid else None
-        self._history_authoritative = True
-        self._history_refresh_failed = False
-        display_history = self._raw_history
+        display_history = raw_history
         native_session_id = (
             snapshot.get("session_id", "")
             if isinstance(snapshot, dict)
@@ -835,6 +831,14 @@ class EngineSession:
                     display_history = [first, *display_history[1:]]
             except Exception as exc:
                 logger.debug("session %s display provenance unavailable: %s", self.session_id, exc)
+        # Publish the raw mirror and what windows read together, with no await
+        # between them: a caller that gives up mid-refresh records the mirror
+        # its window holds, so the announcement it is owed is never lost (#927).
+        self._raw_history = raw_history
+        self._history_anchor = getattr(snapshot, "anchor", "") or ""
+        self._history_conversation_uid = current_uid if isinstance(current_uid, str) and current_uid else None
+        self._history_authoritative = True
+        self._history_refresh_failed = False
         # XML tool turns in the shape the web renders for native tools.
         self.history = web_history(display_history)
         seed_replaced, self._history_seeded = self._history_seeded, False
