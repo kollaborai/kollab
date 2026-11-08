@@ -10,6 +10,7 @@ import logging
 import re
 import uuid
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, cast
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, UserInputSource
@@ -903,6 +904,7 @@ class LLMService:
         self._provider_registry = ProviderRegistry
         self._tool_accumulator = ToolCallAccumulator(legacy_mode=True)
         self._provider_lock = asyncio.Lock()
+        self._provider_transition_owner = None
         self._current_provider = None
 
         # Queue overflow metrics counters (shared between task manager and queue processor)
@@ -1479,6 +1481,27 @@ class LLMService:
         except Exception:
             logger.debug("hub model-switch announcement failed", exc_info=True)
 
+    @asynccontextmanager
+    async def provider_transition(self):
+        """Hold the provider lock for a whole profile-selection transition.
+
+        ``/model`` (``switch_profile``) and the state service both pick a
+        profile and initialize the request provider; running them at once left
+        the selected profile and the request provider on different profiles.
+        A task that already holds the transition passes through, so an
+        activation nested in the same task does not wait on itself.
+        """
+        task = asyncio.current_task()
+        if getattr(self, "_provider_transition_owner", None) is task:
+            yield
+            return
+        async with self._provider_lock:
+            self._provider_transition_owner = task
+            try:
+                yield
+            finally:
+                self._provider_transition_owner = None
+
     async def switch_profile(self, profile_name: str, persist: bool = True) -> bool:
         """Switch to a different profile with thread-safe provider reinitialization.
 
@@ -1499,7 +1522,9 @@ class LLMService:
         Returns:
             True if switch successful, False otherwise
         """
-        async with self._provider_lock:
+        provider_touched = False
+        selected = False
+        async with LLMService.provider_transition(self):
             try:
                 if not self.profile_manager:
                     logger.error("Cannot switch profile: no profile manager")
@@ -1530,6 +1555,7 @@ class LLMService:
                 previous_provider = getattr(self, "_current_provider", None)
                 acp_orchestrator = None
                 acp_closed = False
+                acp_close_started = False
 
                 if str(getattr(profile, "provider", "") or "").lower() == "acp":
                     event_bus = getattr(self, "event_bus", None)
@@ -1700,6 +1726,7 @@ class LLMService:
                                 active_profile.name,
                                 type(exc).__name__,
                             )
+                provider_touched = True
                 api_reinitialized = await self.api_service.reinitialize_provider(
                     profile
                 )
@@ -1736,6 +1763,7 @@ class LLMService:
                     )
                     if acp_orchestrator is not None:
                         try:
+                            acp_close_started = True
                             await acp_orchestrator.close()
 
                             acp_closed = True
@@ -1814,6 +1842,7 @@ class LLMService:
                                 type(persist_error).__name__,
                             )
 
+                selected = True
                 self.conversation_logger.set_provider(profile.provider)
 
                 if acp_orchestrator is not None:
@@ -1841,6 +1870,10 @@ class LLMService:
                 )
                 return True
 
+            except asyncio.CancelledError:
+                if provider_touched and not selected:
+                    await restore_previous_runtime(restart_acp=acp_close_started)
+                raise
             except Exception as e:
                 logger.error(
                     "Failed to switch profile %r (%s)",

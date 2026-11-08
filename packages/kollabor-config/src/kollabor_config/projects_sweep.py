@@ -170,13 +170,6 @@ def _tmp_variant_exists(decoded: Path) -> bool:
     return False
 
 
-def _deepest_existing(decoded: Path) -> Path:
-    probe = decoded
-    while not probe.is_dir() and probe != probe.parent:
-        probe = probe.parent
-    return probe
-
-
 def _encode_literal(path_str: str) -> str:
     """Encode a path string WITHOUT resolving symlinks.
 
@@ -283,9 +276,9 @@ def _provenance_is_live(
     if _tmp_variant_exists(decoded):
         return True, "temp workspace variant exists"
 
-    # 4. Prefix-pruned search under the deepest existing ancestor: covers
-    #    live workspaces whose real names contain literal underscores.
-    start = _deepest_existing(decoded)
+    # 4. Search from the root: every separator in the decoded path could
+    #    instead be a literal underscore, including above existing ancestors.
+    start = Path(decoded.anchor)
     found, exhausted = _dfs_slug_match(start, slug)
     if found:
         return True, "live workspace found under ancestor search"

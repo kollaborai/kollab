@@ -1372,6 +1372,29 @@ class LocalStateService(StateService):
         model: str | None = None,
         effort: str | None = None,
     ) -> ProfileSnapshot:
+        """Activate a profile while no other activation changes the provider.
+
+        Shares the LLM service's provider transition with ``/model`` so the
+        selected profile and the request provider cannot end up on different
+        profiles when two activations overlap (#585).
+        """
+        transition = getattr(self._llm_service, "provider_transition", None)
+        async with transition() if callable(transition) else nullcontext():
+            return await self._set_active_profile_serialized(
+                name, persist=persist, persist_local=persist_local,
+                reload_profile=reload_profile, model=model, effort=effort,
+            )
+
+    async def _set_active_profile_serialized(
+        self,
+        name: str,
+        *,
+        persist: bool = False,
+        persist_local: bool = False,
+        reload_profile: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> ProfileSnapshot:
         """Keep ACP profile activation and rollback with one lifecycle owner."""
         bus = getattr(self, "_event_bus", None)
         orchestrator = bus.get_service("acp_orchestrator") if bus else None
