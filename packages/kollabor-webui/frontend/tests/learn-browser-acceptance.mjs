@@ -147,6 +147,13 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint === "/sessions" && method === "GET") return json(route, session());
     if (endpoint === "/profiles") return json(route, profiles);
+    if (endpoint === "/profiles/choices") {
+      return json(route, {
+        choices: profiles.profiles.map(({ name, provider, model }) => ({
+          profile: name, provider, model, effort: "",
+        })),
+      });
+    }
     if (endpoint === "/rosters") {
       return json(route, { workspace: "/learn-demo", default: "test", rosters: [], problems: [] });
     }
@@ -321,7 +328,8 @@ async function main() {
 
     await shell.page.getByTestId("new-session-options").click();
     await shell.page.locator("#new-session-model").click();
-    await shell.page.getByRole("option", { name: /review/ }).click();
+    await shell.page.getByRole("group", { name: "review", exact: true })
+      .getByRole("option", { name: /claude-haiku/ }).click();
     await shell.page.locator("#new-session-gem").click();
     await shell.page.getByRole("option", { name: /Local Coder/ }).click();
     const createWait = fixtures.createRequest;

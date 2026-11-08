@@ -299,6 +299,10 @@ class ModelPanel:
             raise PanelError("a model or level is required", errors={"model": "Choose a model."})
         category = _level_category(handler)
         before = (_acp_current(handler, "model"), _acp_current(handler, category))
+        if model and level and not before[0]:
+            return error_result(
+                "The harness has not reported its current model; choose a model before setting its effort."
+            )
         if model:
             outcome = await handler._set_acp_option("model", model, persist=False)
             if not outcome.success:

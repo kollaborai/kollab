@@ -580,3 +580,15 @@ async def test_late_applied_model_after_timeout_is_quarantined(monkeypatch, fail
     service._runner = replacement
     assert service.advertised_config_options() == replacement.advertised_config_options()
     assert not service.config_outcome_unknown
+
+@pytest.mark.asyncio
+async def test_combined_pick_refuses_when_previous_model_is_unknown():
+    from kollabor.panels.model import ModelPanel
+
+    options = _options()
+    options[0]["currentValue"] = ""
+    acp = _OfferedOnlyACP(options)
+    result = await ModelPanel().act(_panel_ctx(acp), "pick", {"model": "gpt-5", "level": "max"})
+    assert not result["ok"]
+    assert acp.calls == []
+    assert acp.options[0]["currentValue"] == ""
