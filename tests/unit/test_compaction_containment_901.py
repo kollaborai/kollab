@@ -110,3 +110,43 @@ def test_auto_curation_and_overflow_refuse_without_false_ready(tmp_path):
     assert history == before
     p._build_curation_request.assert_not_called()
     assert not list(tmp_path.iterdir())
+
+
+def test_budget_cancellation_reaches_provider_and_tool_callers(tmp_path):
+    from kollabor_agent.tool_executor import ToolExecutor
+    from tests.unit.llm.test_queue_processor import TestQueueProcessor
+
+    p, _ = make_plugin(tmp_path)
+    p._get_hard_cap_threshold = lambda: 100
+    p._outgoing_prompt_tokens = lambda _: 100
+    fixture = TestQueueProcessor(methodName="test_cancelled_pre_request_never_calls_provider")
+    fixture.setUp()
+    try:
+        async def request_hook(_event_type, data, _source):
+            event = SimpleNamespace(cancelled=False, data=data)
+            await p._on_llm_request_pre(data, event)
+            return {"cancelled": event.cancelled}
+        fixture.event_bus.emit_with_hooks.side_effect = request_hook
+        with pytest.raises(asyncio.CancelledError):
+            fixture.loop.run_until_complete(fixture.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="synthetic",
+            ))
+        fixture.streaming_handler.call_llm.assert_not_awaited()
+        fixture.api_service.call_llm.assert_not_awaited()
+    finally:
+        fixture.tearDown()
+
+    async def tool_run():
+        bus = MagicMock()
+        async def tool_hook(_event_type, data, _source):
+            event = SimpleNamespace(cancelled=False, data=data)
+            await p._on_tool_call_pre(data, event)
+            return {"cancelled": event.cancelled, "main": {"final_data": event.data}}
+        bus.emit_with_hooks = AsyncMock(side_effect=tool_hook)
+        executor = ToolExecutor(MagicMock(), bus)
+        handler = AsyncMock(side_effect=AssertionError("tool invoked"))
+        executor.register_plugin_handler("synthetic", handler)
+        result = await executor.execute_tool({"type": "synthetic", "id": "test"})
+        assert not result.success and "temporarily unavailable" in result.error
+        handler.assert_not_awaited()
+    asyncio.run(tool_run())
