@@ -30,6 +30,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+from kollabor.daemon import DETACHED_CHILD_ENV
 from plugins.agent_orchestrator.orchestrator import AgentOrchestrator
 
 
@@ -51,12 +52,13 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         self.orch.session_init_delay = 0.0
 
     def _spawn(self, extra_env, **spawn_kwargs):
-        """Run _create_session with a fake Popen and return the child env."""
+        """Run _create_session with a fake detached child and capture its env."""
         captured = {}
 
-        def fake_popen(cmd, **kwargs):
+        def fake_start_child(cmd, **kwargs):
             captured["cmd"] = list(cmd)
             captured["env"] = dict(kwargs["env"])
+            captured["detached"] = kwargs["detached"]
             proc = MagicMock()
             proc.pid = 42424
             proc.stdin = MagicMock()
@@ -75,8 +77,8 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             with (
                 patch(
-                    "plugins.agent_orchestrator.orchestrator.subprocess.Popen",
-                    side_effect=fake_popen,
+                    "kollabor_config.proc_ctl.start_child",
+                    side_effect=fake_start_child,
                 ),
                 patch(
                     "plugins.agent_orchestrator.orchestrator.os.environ",
@@ -122,6 +124,8 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         captured = self._spawn({})
         env = captured["env"]
         self.assertEqual(env.get("KOLLAB_AGENT_NAME"), "tester-id")
+        self.assertEqual(env.get(DETACHED_CHILD_ENV), "1")
+        self.assertTrue(captured["detached"])
         # Spawn propagates the ambient root socket (already "test-proj" in
         # the base env here) rather than inventing its own.
         self.assertEqual(env.get("KOLLAB_ROOT_SOCKET"), "test-proj")

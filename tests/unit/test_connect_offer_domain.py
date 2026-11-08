@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from kollabor.state.handlers import register_state_handlers
+from plugins.hub.enrollment_client import EnrollmentProtocolError
 from plugins.hub.plugin import HubPlugin
 
 OFFER = {"status": "offered", "offer_id": "a" * 32, "expires_at": "123", "code": "ABCD-EFGH"}
@@ -86,3 +87,20 @@ async def test_the_guided_join_starts_on_the_known_relay_domain():
     plugin._open_connect_altview = AsyncMock(return_value="")
     await plugin._guided_join()
     plugin._open_connect_altview.assert_awaited_once_with("relay.example.test")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_origin_says_why_instead_of_a_bare_failure():
+    """#693: a non-443 origin is refused before any relay request; the window
+    must get the cause, not only "could not create a code"."""
+    reason = "This relay address uses port 8443. Device codes only work on https port 443."
+    plugin, _seen = _daemon()
+
+    async def refuse(domain):
+        raise EnrollmentProtocolError("unavailable", refusal=reason)
+
+    plugin._relay_agent = SimpleNamespace(create_enrollment_offer=refuse)
+    result = await plugin._run_connect_enrollment_offer("relay.example.test")
+    assert "status" not in result
+    assert result["reason"] == reason
+    assert "could not be created" in result["error"]
