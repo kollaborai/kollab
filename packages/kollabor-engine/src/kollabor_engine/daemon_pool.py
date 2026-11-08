@@ -83,6 +83,9 @@ logger = logging.getLogger(__name__)
 # Plugin discovery plus the hub join dominate this; a cold start on a laptop is
 # a few seconds, so the ceiling is generous rather than tight.
 SPAWN_TIMEOUT_SECONDS = 45.0
+# An agent on another device answers over the relay, where its replies wait
+# behind the attach stream's frame budget: give its state calls longer (#880).
+REMOTE_STATE_TIMEOUT_SECONDS = 60.0
 
 # Events the daemon publishes that are rendered ANSI rather than structured
 # data. Web clients cannot use them, and forwarding them would double every
@@ -215,6 +218,8 @@ class DaemonHandle:
         self.owned = launcher is not None
         self.webui_owned = False
         self.pid: int = 0
+        # State-call budget; None is RemoteStateService.DEFAULT_TIMEOUT (#880).
+        self.state_timeout: Optional[float] = None
 
         self.process_started_at: Optional[float] = None
         # Folder a spawned daemon runs in (its presence ``project``). Gem names
@@ -303,7 +308,7 @@ class DaemonHandle:
         # RPC replies and display events share this one connection, so the read
         # loop below is the only thing allowed to consume the reader.
         self.rpc = RpcClient(self._writer)
-        self.state = RemoteStateService(rpc_client=self.rpc)
+        self.state = RemoteStateService(rpc_client=self.rpc, timeout=self.state_timeout)
         self._read_task = asyncio.create_task(
             self._read_loop(), name=f"daemon-read-{self.session_id}"
         )
@@ -1051,6 +1056,8 @@ class DaemonPool:
             )
             handle.project = str(found.get("workspace") or found.get("project") or "")
             handle.agent_name = str(found.get("agent") or "")
+            if found.get("device"):
+                handle.state_timeout = REMOTE_STATE_TIMEOUT_SECONDS
             try:
                 await handle.connect(str(found.get("socket_path") or ""))
             except BaseException:
