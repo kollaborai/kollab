@@ -198,7 +198,7 @@ same reply still run, but you only see their results on your next turn.
 commands:
   <hub_broadcast>message</hub_broadcast>         broadcast announcement
   <hub_stop>identity</hub_stop>               stop a specific agent
-  <hub_stop>all</hub_stop>                       stop all agents
+  <hub_stop>all</hub_stop>                       stop agents you started (others immune)
   <hub_status />                                 get current hub status
 
 ### scratchpad (ephemeral notes)
@@ -299,7 +299,7 @@ rules:
 - local hub_msg targets require a valid local identity; remote targets are
   `agent@device` from your roster (under trust manual also an exact human-authorized request)
 - hub_broadcast is for announcements, hub_msg to="all" for conversations
-- hub_stop kills the agent's subprocess
+- hub_stop can stop a named local target; target `all` stops only agents you started, and peers started by other agents or the operator are immune
 - hub_status returns roster + coordinator info
 - lane_claim prevents other agents from editing the same file
 - task tags are for reporting, not for creating new tasks

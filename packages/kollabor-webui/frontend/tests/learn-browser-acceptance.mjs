@@ -398,19 +398,20 @@ async function main() {
     await shell.page.getByRole("button", { name: "What’s New", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/whats-new");
     await shell.page.getByRole("heading", { level: 1, name: "What’s New", exact: true }).waitFor();
-    await shell.page.getByText("Unreleased", { exact: true }).waitFor();
+    // The first release section: "Unreleased" between releases, "Kollab X.Y.Z" right after one (#887).
+    await shell.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
     await shell.page.getByRole("button", { name: "Close What’s New", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
     const changelogFailure = await openPage(browser, baseUrl, makeFixtures(), { failChangelogOnce: true });
     await changelogFailure.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
     await changelogFailure.page.getByRole("button", { name: "Retry", exact: true }).click();
-    await changelogFailure.page.getByText("Unreleased", { exact: true }).waitFor({ state: "visible" });
+    await changelogFailure.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
     await changelogFailure.context.close();
 
     const delayed = await openPage(browser, baseUrl, makeFixtures(), { delayChangelogMs: 900, viewport: { width: 390, height: 844 }, isMobile: true });
     await delayed.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
     await delayed.page.getByRole("status").getByText("Loading release notes…").waitFor({ state: "visible" });
-    await delayed.page.getByText("Unreleased", { exact: true }).waitFor({ state: "visible" });
+    await delayed.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
     await delayed.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
