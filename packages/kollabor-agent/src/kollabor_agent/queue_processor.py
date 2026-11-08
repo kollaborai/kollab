@@ -79,6 +79,14 @@ def publish_turn_error(
     )
 
 
+@dataclass(frozen=True)
+class NativeAdmissionReceipt:
+    """A native input's durable row identity; not yet a replay cutline."""
+
+    session_id: str
+    record_uuid: str
+
+
 @dataclass
 class TaggedInput:
     """Typed input a client follows by request id (#551).
@@ -101,6 +109,7 @@ class TaggedInput:
     parent_uuid: str | None = None
     # Authenticated operator words carried to the resulting history message.
     operator_inputs: tuple[dict[str, str], ...] = ()
+    durable_receipts: tuple[NativeAdmissionReceipt, ...] = ()
 
 
 def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
@@ -127,6 +136,7 @@ class QueuedInput:
     parent_uuid: str | None = None
     # Authenticated operator words carried to the resulting history message.
     operator_inputs: tuple[dict[str, str], ...] = ()
+    durable_receipts: tuple[NativeAdmissionReceipt, ...] = ()
 
 
 _UNFINISHED_TAG_RE = re.compile(r"<([a-zA-Z_][\w-]*)>?\s*$")
@@ -1451,6 +1461,14 @@ class QueueProcessor:
             ]
             if operator_inputs:
                 metadata["operator_inputs"] = operator_inputs
+            receipts = [
+                {"session_id": receipt.session_id, "record_uuid": receipt.record_uuid}
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for receipt in item.durable_receipts
+            ]
+            if receipts:
+                metadata["durable_input_receipts"] = receipts
 
             # Add user message to conversation history
             self._add_message_fn(

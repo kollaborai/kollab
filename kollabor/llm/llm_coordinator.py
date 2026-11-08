@@ -19,6 +19,7 @@ from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.queue_processor import (
     CancellationOrigin,
+    NativeAdmissionReceipt,
     QueuedInput,
     QueueProcessor,
     TaggedInput,
@@ -1972,6 +1973,12 @@ class LLMService:
                 if isinstance(item, (QueuedInput, TaggedInput))
                 for record in item.operator_inputs
             )
+            durable_receipts = tuple(
+                receipt
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for receipt in item.durable_receipts
+            )
             merged_origin_context = merge_voice_origin_contexts(messages)
             combined = combine_message_contents(
                 [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
@@ -1985,14 +1992,16 @@ class LLMService:
                     parent_uuid=admission_parent,
                     admission_serial=batch_serial,
                     operator_inputs=operator_inputs,
+                    durable_receipts=durable_receipts,
                 )
-            elif operator_inputs:
+            elif operator_inputs or durable_receipts:
                 merged_input = TaggedInput(
                     combined,
                     request_ids,
                     parent_uuid=admission_parent,
                     admission_serial=batch_serial,
                     operator_inputs=operator_inputs,
+                    durable_receipts=durable_receipts,
                 )
             else:
                 merged_input = combined
@@ -2401,6 +2410,8 @@ class LLMService:
         # (publishing None would cut the chain) and the queue item keeps the
         # parent captured at admission.
         admitted_parent_uuid = admission_parent_uuid
+        durable_receipts: tuple[NativeAdmissionReceipt, ...] = ()
+        receipt_session = getattr(self.conversation_logger, "session_id", None)
         try:
             user_uuid = await self.conversation_logger.log_user_message(
                 display_text, parent_uuid=admission_parent_uuid
@@ -2417,6 +2428,14 @@ class LLMService:
             # during the logger await. Never re-read mutable
             # current_parent_uuid after yielding.
             admitted_parent_uuid = user_uuid
+            if (
+                isinstance(receipt_session, str)
+                and receipt_session
+                and receipt_session == getattr(self.conversation_logger, "session_id", None)
+                and isinstance(user_uuid, str)
+                and user_uuid
+            ):
+                durable_receipts = (NativeAdmissionReceipt(receipt_session, user_uuid),)
 
         # Add to processing queue with overflow handling. Plain input rides a
         # zero-id TaggedInput so the capture travels with the item (#676); a
@@ -2431,6 +2450,7 @@ class LLMService:
                     parent_uuid=admitted_parent_uuid,
                     admission_serial=turn_serial,
                     operator_inputs=operator_inputs,
+                    durable_receipts=durable_receipts,
                 )
                 if voice or trusted_origin_context
                 else TaggedInput(
@@ -2439,6 +2459,7 @@ class LLMService:
                     parent_uuid=admitted_parent_uuid,
                     admission_serial=turn_serial,
                     operator_inputs=operator_inputs,
+                    durable_receipts=durable_receipts,
                 )
             )
         except RuntimeError:

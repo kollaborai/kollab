@@ -450,7 +450,7 @@ class KollaborConversationLogger:
                 raise
 
     async def _append_to_jsonl(
-        self, message: Dict[str, Any], session_id: Optional[str] = None
+        self, message: Dict[str, Any], session_id: Optional[str] = None, *, durable: bool = False
     ):
         """Append to the current or explicitly named conversation JSONL.
 
@@ -511,6 +511,8 @@ class KollaborConversationLogger:
                             if written <= 0:  # never spin on a write that makes no progress
                                 raise OSError("JSONL write made no progress")
                             data = data[written:]
+                        if durable:
+                            os.fsync(fd)
                     except BaseException:
                         os.ftruncate(fd, start)  # roll the partial record back
                         raise
@@ -776,7 +778,8 @@ class KollaborConversationLogger:
             },
         }
 
-        await self._append_to_jsonl(message)
+        # Native admission receipts must not be issued before the row is flushed.
+        await self._append_to_jsonl(message, durable=True)
 
         # Update conversation themes
         intent = message["kollabor_intelligence"]["user_context"].get("detected_intent")
