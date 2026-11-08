@@ -51,7 +51,9 @@ class LocalAdmissionFence:
 
 Each method is synchronous and must return without waiting for an async task;
 no lock is held across an await. An implementation must serialize access by
-using a short critical section, or reject a contended `try_snapshot` promptly.
+using bounded short critical sections. Every method attempts its lock without
+waiting: `try_snapshot` returns `busy`; all other methods raise AdmissionError
+with no state change. Work within a lock is bounded by the maximum capacity.
 No await, disk I/O, callback, or provider call is permitted inside that section.
 For deterministic contention testing, the implementation exposes its private
 `_state_lock` as a standard `threading.Lock`; `try_snapshot` must acquire it
@@ -85,7 +87,7 @@ coverage from this object.
   change. COMMITTED, ABORTED and INDETERMINATE are terminal and cannot be
   rewritten or re-used.
 - Keep terminal IDs until the fence owner can be retired safely. Bound memory by
-  `max_entries` across pending and terminal tokens; once full, `reserve` raises
+  `max_entries` (an integer from 1 through 4096) across pending and terminal tokens; once full, `reserve` raises
   AdmissionError without evicting anything. This is an explicit local-only
   availability limit, not a safe durable compaction or cross-process scheme.
 - Tokens are bound to their SessionKey; a new incarnation with the same session
@@ -138,3 +140,13 @@ sequence, crash recovery, sidecar correlation, or repaired replay.
   from relevant log rewrites and all applicable sidecars, recovery artifacts,
   retained snapshots and backups; an append-only tombstone or hidden replay is
   insufficient. Exact recovery/retention design remains unresolved.
+
+- `reserve` must complete successfully before its caller starts any producer
+  side effect. Capacity, contention, collision and invalid-kind errors return
+  without reserving; callers must not enqueue, log, mutate history or dispatch
+  a provider/tool for that operation after refusal. The isolated module cannot
+  enforce this caller obligation; producer wiring remains an acceptance gate.
+- An equal-value copy of a token is rejected even by its issuing fence. The
+  original token object must be retained. Every token-taking method rejects a
+  foreign fence token, fabricated token, malformed token, and wrong-kind token
+  where a kind-specific commit is required, without changing state.

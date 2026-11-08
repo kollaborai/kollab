@@ -4,6 +4,7 @@ This isolated scaffold does not coordinate producers, processes, or durable
 history. It must not be used as evidence for compaction or session replacement.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
@@ -62,7 +63,7 @@ class LocalAdmissionFence:
             or not _identifier(key.session_id)
             or not _identifier(key.incarnation)
             or type(max_entries) is not int
-            or max_entries < 1
+            or not 1 <= max_entries <= 4096
         ):
             raise AdmissionError("invalid session key or capacity")
         self._key = key
@@ -71,6 +72,15 @@ class LocalAdmissionFence:
         self._entries: dict[str, _Entry] = {}
         self._records: set[str] = set()
         self._histories: set[str] = set()
+
+    @contextmanager
+    def _guard(self):
+        if not self._state_lock.acquire(blocking=False):
+            raise AdmissionError("admission fence busy")
+        try:
+            yield
+        finally:
+            self._state_lock.release()
 
     def _entry(self, token: AdmissionToken) -> _Entry:
         # Identity is intentional: an equal copy or a token from another fence
@@ -86,7 +96,7 @@ class LocalAdmissionFence:
         if type(kind) is not str or kind not in ("native", "acp"):
             raise AdmissionError("invalid admission kind")
         token = AdmissionToken(self._key, uuid4().hex, kind)
-        with self._state_lock:
+        with self._guard():
             if len(self._entries) >= self._max_entries or token.op_id in self._entries:
                 raise AdmissionError("admission capacity or identifier collision")
             self._entries[token.op_id] = _Entry(token)
@@ -95,7 +105,7 @@ class LocalAdmissionFence:
     def mark_written(self, token: AdmissionToken, *, record_id: str) -> None:
         if not _identifier(record_id):
             raise AdmissionError("invalid record id")
-        with self._state_lock:
+        with self._guard():
             entry = self._entry(token)
             if entry.state is not AdmissionState.PENDING or record_id in self._records:
                 raise AdmissionError("invalid write transition or duplicate record")
@@ -111,11 +121,12 @@ class LocalAdmissionFence:
             or not tokens
             or type(record_ids) is not tuple
             or len(tokens) != len(record_ids)
+            or len(tokens) > self._max_entries
             or not _identifier(history_id)
             or any(not _identifier(value) for value in record_ids)
         ):
             raise AdmissionError("invalid batch")
-        with self._state_lock:
+        with self._guard():
             entries = [self._entry(token) for token in tokens]
             if (
                 len({id(entry) for entry in entries}) != len(entries)
@@ -131,7 +142,7 @@ class LocalAdmissionFence:
     def commit_acp(self, token: AdmissionToken, *, history_id: str, record_id: str) -> None:
         if not _identifier(history_id) or not _identifier(record_id):
             raise AdmissionError("invalid ACP identifiers")
-        with self._state_lock:
+        with self._guard():
             entry = self._entry(token)
             if (
                 entry.token.kind != "acp"
@@ -144,21 +155,21 @@ class LocalAdmissionFence:
             self._histories.add(history_id)
 
     def abort_before_write(self, token: AdmissionToken) -> None:
-        with self._state_lock:
+        with self._guard():
             entry = self._entry(token)
             if entry.state is not AdmissionState.PENDING:
                 raise AdmissionError("cannot abort after possible write")
             entry.state = AdmissionState.ABORTED
 
     def mark_indeterminate(self, token: AdmissionToken) -> None:
-        with self._state_lock:
+        with self._guard():
             entry = self._entry(token)
             if entry.state not in (AdmissionState.PENDING, AdmissionState.WRITTEN):
                 raise AdmissionError("invalid indeterminate transition")
             entry.state = AdmissionState.INDETERMINATE
 
     def state(self, token: AdmissionToken) -> AdmissionState:
-        with self._state_lock:
+        with self._guard():
             return self._entry(token).state
 
     def try_snapshot(self) -> SnapshotDecision:

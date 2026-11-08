@@ -351,3 +351,162 @@ def test_concurrent_duplicate_record_has_one_winner(fence, admission):
         admission.AdmissionState.WRITTEN,
     }
     assert fence.try_snapshot().reason == "pending"
+
+
+@pytest.mark.parametrize("origin", ["copy", "other-fence", "forged"])
+def test_every_token_method_rejects_foreign_or_fabricated(fence, admission, origin):
+    genuine = fence.reserve("native")
+    if origin == "copy":
+        candidate = admission.AdmissionToken(genuine.key, genuine.op_id, genuine.kind)
+    elif origin == "other-fence":
+        other = admission.LocalAdmissionFence(genuine.key)
+        candidate = other.reserve("native")
+    else:
+        candidate = admission.AdmissionToken(genuine.key, "fabricated", "native")
+    operations = (
+        lambda: fence.state(candidate),
+        lambda: fence.mark_written(candidate, record_id="row"),
+        lambda: fence.abort_before_write(candidate),
+        lambda: fence.mark_indeterminate(candidate),
+        lambda: fence.commit_acp(candidate, history_id="history", record_id="row"),
+        lambda: fence.commit_native_batch((candidate,), history_id="history", record_ids=("row",)),
+    )
+    for operation in operations:
+        with pytest.raises(admission.AdmissionError):
+            operation()
+        assert fence.state(genuine) is admission.AdmissionState.PENDING
+
+
+def test_repeated_mark_written_and_wrong_kind_commit_are_rejected(fence, admission):
+    native = fence.reserve("native")
+    acp = fence.reserve("acp")
+    fence.mark_written(native, record_id="native")
+    fence.mark_written(acp, record_id="acp")
+    with pytest.raises(admission.AdmissionError):
+        fence.mark_written(native, record_id="another")
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_acp(native, history_id="history", record_id="native")
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_native_batch((acp,), history_id="history", record_ids=("acp",))
+    assert fence.state(native) is admission.AdmissionState.WRITTEN
+    assert fence.state(acp) is admission.AdmissionState.WRITTEN
+
+
+def test_native_cannot_reuse_acp_history_id(fence, admission):
+    acp = fence.reserve("acp")
+    native = fence.reserve("native")
+    fence.mark_written(acp, record_id="acp")
+    fence.mark_written(native, record_id="native")
+    fence.commit_acp(acp, history_id="history", record_id="acp")
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_native_batch((native,), history_id="history", record_ids=("native",))
+    assert fence.state(native) is admission.AdmissionState.WRITTEN
+
+
+@pytest.mark.parametrize("capacity", [-1, 0, 4097, True, "1", None])
+def test_invalid_max_entries_rejected(admission, capacity):
+    with pytest.raises(admission.AdmissionError):
+        admission.LocalAdmissionFence(admission.SessionKey("s", "g"), max_entries=capacity)
+
+
+def test_all_methods_refuse_without_waiting_when_lock_is_held(fence, admission):
+    from threading import Event, Thread
+
+    token = fence.reserve("native")
+    finished = Event()
+    outcomes = []
+
+    def call_methods():
+        operations = (
+            lambda: fence.reserve("native"),
+            lambda: fence.state(token),
+            lambda: fence.mark_written(token, record_id="row"),
+            lambda: fence.abort_before_write(token),
+            lambda: fence.mark_indeterminate(token),
+            lambda: fence.commit_acp(token, history_id="history", record_id="row"),
+            lambda: fence.commit_native_batch((token,), history_id="history", record_ids=("row",)),
+        )
+        try:
+            for operation in operations:
+                try:
+                    operation()
+                except admission.AdmissionError as exc:
+                    outcomes.append(str(exc))
+                else:
+                    outcomes.append("unexpected success")
+            outcomes.append(fence.try_snapshot().reason)
+        finally:
+            finished.set()
+
+    fence._state_lock.acquire()
+    worker = Thread(target=call_methods, daemon=True)
+    try:
+        worker.start()
+        completed_while_locked = finished.wait(timeout=1)
+    finally:
+        fence._state_lock.release()
+        worker.join(timeout=1)
+    assert completed_while_locked, "an admission method waited on the state lock"
+    assert not worker.is_alive()
+    assert outcomes == ["admission fence busy"] * 7 + ["busy"]
+    assert fence.state(token) is admission.AdmissionState.PENDING
+
+
+def test_concurrent_reservations_obey_capacity(admission):
+    from threading import Barrier, Thread
+
+    fence = admission.LocalAdmissionFence(admission.SessionKey("s", "g"), max_entries=1)
+    barrier = Barrier(3)
+    results = []
+
+    def reserve():
+        barrier.wait()
+        try:
+            results.append(fence.reserve("native"))
+        except admission.AdmissionError:
+            results.append(None)
+
+    workers = [Thread(target=reserve) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+    tokens = [token for token in results if token is not None]
+    assert len(tokens) == 1
+    assert fence.state(tokens[0]) is admission.AdmissionState.PENDING
+    with pytest.raises(admission.AdmissionError):
+        fence.reserve("native")
+
+
+def test_concurrent_commits_cannot_share_history(fence, admission):
+    from threading import Barrier, Thread
+
+    tokens = (fence.reserve("native"), fence.reserve("native"))
+    fence.mark_written(tokens[0], record_id="one")
+    fence.mark_written(tokens[1], record_id="two")
+    barrier = Barrier(3)
+    results = []
+
+    def commit(token, record):
+        barrier.wait()
+        try:
+            fence.commit_native_batch((token,), history_id="same", record_ids=(record,))
+        except admission.AdmissionError:
+            results.append("rejected")
+        else:
+            results.append("committed")
+
+    workers = [Thread(target=commit, args=pair) for pair in zip(tokens, ("one", "two"))]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+    assert sorted(results) == ["committed", "rejected"]
+    assert {fence.state(token) for token in tokens} == {
+        admission.AdmissionState.WRITTEN,
+        admission.AdmissionState.COMMITTED,
+    }
