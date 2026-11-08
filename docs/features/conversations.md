@@ -99,9 +99,10 @@ not trimmed by a fixed message count.
 Compaction is temporarily unavailable because a concurrent message can be lost
 from reconstructed context. Refused new compactions leave the current in-memory
 history unchanged; previously compacted sessions may still reload incompletely. Manual,
-model-requested, automatic, and emergency compaction are refused. Normal turns
-below the context hard cap continue; requests and tool calls at the cap stop and
-require a new session. This containment does not repair existing compaction
+model-requested, automatic, and emergency compaction are refused. With the
+context-compaction plugin enabled, normal turns below the context hard cap continue;
+requests and tool calls at the cap stop and require a new session. If the plugin is
+disabled in configuration, its budget hooks do not run. This containment does not repair existing compaction
 records or restore previously lost content. Remove it only after a shared,
 per-session admission and durable sequence contract covers every history writer,
 reload and rewrite path, with interleaving and stale-write regressions passing.

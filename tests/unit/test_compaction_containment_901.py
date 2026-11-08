@@ -162,3 +162,21 @@ def test_budget_cancellation_reaches_provider_and_tool_callers(tmp_path):
         handler.assert_not_awaited()
 
     asyncio.run(tool_run())
+
+
+def test_disabled_plugin_does_not_register_budget_hooks(tmp_path):
+    from kollabor_events import EventBus, EventType
+
+    p, _ = make_plugin(tmp_path)
+    p.config = SimpleNamespace(
+        get=lambda key, default=None: False if key == "plugins.context_compaction.enabled" else default
+    )
+    p.event_bus = EventBus()
+
+    async def run():
+        await p.register_hooks()
+        for event_type in (EventType.LLM_REQUEST_PRE, EventType.TOOL_CALL_PRE):
+            result = await p.event_bus.emit_with_hooks(event_type, {}, "synthetic")
+            assert not result["cancelled"]
+
+    asyncio.run(run())
