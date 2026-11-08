@@ -993,3 +993,49 @@ async def test_a_turn_end_the_daemon_answers_late_is_announced_later(
 
     assert [m["content"] for m in session.history] == ["old", "new reply"]
     assert emitted == [{"type": "history_updated"}]
+
+
+class LateFirstAnswerState(SilentState):
+    """The first answer arrives late and already holds the finished turn."""
+
+    def __init__(self):
+        self.texts = ["old"]
+        self.calls = 0
+        self.first_delay = 0.0
+
+    async def get_conversation(self, since=None, anchor=None, **kwargs):
+        self.calls += 1
+        if self.calls == 2:
+            await asyncio.sleep(self.first_delay)
+        return _answer(*self.texts)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_turn_end_is_announced_by_the_refresh_that_absorbs_it(
+    registry, conversations, monkeypatch
+):
+    """Review round 2 on #960: the in-flight background answer already held
+    the finished reply and stored it silently; the queued notifying refresh
+    then found nothing new against that mirror, so no history_updated ever
+    told the window, which still showed what it fetched at turn end."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    _, workspace_root = conversations
+    state = LateFirstAnswerState()
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    emitted = []
+    session.daemon.fan_out = emitted.append
+    assert [m["content"] for m in await session.refresh_history()] == ["old"]
+
+    state.texts.append("new reply")  # the turn ends on the daemon
+    state.first_delay = 0.08
+    session._schedule_refresh(notify=False)  # a user_message warms the mirror
+    await asyncio.sleep(0.01)
+    shown = await session.refresh_history(notify=True)  # turn_complete, lock busy
+    assert [m["content"] for m in shown] == ["old"]
+    await _settled(session)
+
+    assert [m["content"] for m in session.history] == ["old", "new reply"]
+    assert emitted == [{"type": "history_updated"}]
