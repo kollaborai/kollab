@@ -463,6 +463,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to kollab…");
   const [error, setError] = useState<string | null>(null);
+  // New Session started this chat, but the model picked for it did not apply: it runs another one (#956).
+  const [pickFailure, setPickFailure] = useState<{ sessionId: string; message: string } | null>(null);
   const [creationError, setCreationError] = useState<string | null>(null);
   // The sidebar row being opened, and why it could not be: a failed open keeps
   // the chat that was open, so the reason shows under the row clicked.
@@ -1297,6 +1299,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       "Starting kollab (first start can take ~10 seconds)…",
     );
     setError(null);
+    setPickFailure(null);
     setCreationError(null);
     try {
       const session = await api.createSession({
@@ -1315,7 +1318,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       if (selectedPick.model || selectedPick.effort) {
         // A session starts on a profile; the picked model and effort go on next.
         await applyModelChoice(api, session, { ...selectedPick, profile: selectedProfile }).catch((reason) =>
-          setError(`Started on ${selectedProfile} without the picked model: ${errorText(reason)}`),
+          setPickFailure({
+            sessionId: session.session_id,
+            message: `Started on ${selectedProfile} without the picked model: ${errorText(reason)}`,
+          }),
         );
       }
       const result = await loadSessions();
@@ -1528,6 +1534,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   const handleSessionUpdated = useCallback((updated: Session) => {
     sessionGate.recordApply();
+    // The model was changed by hand since: the failed pick is no longer news.
+    setPickFailure((current) => (current?.sessionId === updated.session_id ? null : current));
     setSessions((current) =>
       current.map((item) =>
         item.session_id === updated.session_id ? updated : item,
@@ -1685,6 +1693,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               className="bg-amber-500/10 text-amber-600 dark:text-amber-400 px-4 py-2 text-sm"
             >
               {versionMismatch}
+            </div>
+          ) : null}
+          {pickFailure && pickFailure.sessionId === activeId ? (
+            <div role="alert" className="bg-amber-500/10 text-amber-600 dark:text-amber-400 px-4 py-2 text-sm">
+              {pickFailure.message}
             </div>
           ) : null}
           {updateInfo?.release ? (
