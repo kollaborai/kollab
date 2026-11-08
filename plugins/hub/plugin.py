@@ -1961,10 +1961,13 @@ class HubPlugin(BasePlugin):
         #     → by agent_type: picks next available gem with agent_type=coder
         #   <hub_spawn name="lapis" type="research">task</hub_spawn>
         #     → explicit identity + type override
+        #   <hub_spawn name="coder" identity="jasper" llm="codex-cli">task</hub_spawn>
+        #     → explicit identity under an ACP harness
         def _extract_hub_spawn(m):
             attrs = tag_attrs(m.group(1))
             return {
                 "name": attrs.get("name", "").strip(),
+                "identity": attrs.get("identity", "").strip(),
                 "agent_type_override": attrs.get("type", "").strip(),
                 "llm": attrs.get("llm", "").strip(),
                 "task": m.group(2).strip(),
@@ -14476,8 +14479,93 @@ class HubPlugin(BasePlugin):
             pool_match = None  # lapis-2 is not a persona to spawn
 
         if harness:
-            resolved_identity = requested_identity or agent_name
+            # ACP owns the brain/tools, but the name still follows hub_spawn's
+            # identity-vs-role contract. A roster persona is an explicit
+            # identity; a known bundle role picks a free roster identity.
+            # `identity=` is the escape hatch for a custom identity, and an
+            # unknown adapter name (for example `claude`) remains usable as-is.
             effective_agent_type = ""
+            resolved_identity = requested_identity
+            if not resolved_identity and pool_match:
+                resolved_identity = pool_match.name
+
+            if not resolved_identity:
+                selected_type = agent_type_override or agent_name
+                personas = roster_personas()
+                online_identities = set()
+                if self._presence:
+                    online_identities = {
+                        peer.identity for peer in self._presence.scan_all_presence()
+                    }
+
+                for persona in personas:
+                    if persona.agent == selected_type and persona.name not in online_identities:
+                        resolved_identity = persona.name
+                        break
+
+                agent_def = None
+                if not resolved_identity and self.event_bus:
+                    try:
+                        agent_mgr = self.event_bus.get_service("agent_manager")
+                        agent_def = agent_mgr.get_agent(selected_type) if agent_mgr else None
+                    except Exception:
+                        agent_def = None
+
+                if agent_def is not None:
+                    # A recognized bundle with no persona bound to that bundle
+                    # may use the next free identity. If it has bound personas,
+                    # never substitute an identity belonging to another role.
+                    bound_personas = [
+                        persona for persona in personas
+                        if persona.agent == selected_type
+                    ]
+                    if bound_personas:
+                        busy = [
+                            persona.name for persona in bound_personas
+                            if persona.name in online_identities
+                        ]
+                        return (
+                            f"all {selected_type} agents are busy: "
+                            f"{', '.join(busy)}. use hub_msg to assign work to an existing one."
+                        )
+                    for persona in personas:
+                        if persona.name not in online_identities:
+                            resolved_identity = persona.name
+                            break
+                    if not resolved_identity:
+                        if not personas:
+                            return (
+                                f"no persona found with agent_type '{selected_type}'. "
+                                "check the roster configuration (plugins.hub.roster)."
+                            )
+                        return (
+                            f"all identities are busy for agent_type '{selected_type}'. "
+                            "use hub_msg to assign work to an existing one."
+                        )
+                elif not resolved_identity:
+                    # An unrecognized ACP name is a harness identity, not a
+                    # role. Keep the explicit name rather than guessing.
+                    resolved_identity = agent_name
+        elif requested_identity:
+            # An explicit identity wins over either a role name or a persona
+            # shorthand. The role/persona still selects the bundle when one is
+            # available, unless the caller supplied a type override.
+            resolved_identity = requested_identity
+            requested_persona = find_persona(requested_identity)
+            if requested_persona and requested_persona.name != split_ref(requested_identity)[1]:
+                requested_persona = None
+            if pool_match:
+                effective_agent_type = (
+                    agent_type_override or pool_match.agent or "coder"
+                )
+            else:
+                effective_agent_type = agent_type_override or agent_name
+                if requested_persona:
+                    effective_agent_type = (
+                        agent_type_override
+                        or requested_persona.agent
+                        or effective_agent_type
+                    )
         elif pool_match:
             # MODE 1 or 3: spawning by identity
             resolved_identity = pool_match.name
@@ -14490,18 +14578,6 @@ class HubPlugin(BasePlugin):
             # Find next available gem from pool with matching agent_type
             effective_agent_type = agent_name
             resolved_identity = ""
-
-            if requested_identity:
-                requested_pool = find_persona(requested_identity)
-                if requested_pool and requested_pool.name != split_ref(requested_identity)[1]:
-                    requested_pool = None
-                resolved_identity = requested_identity
-                if requested_pool:
-                    effective_agent_type = (
-                        agent_type_override
-                        or requested_pool.agent
-                        or effective_agent_type
-                    )
 
             # Get online identities to exclude
             online_identities = set()
@@ -14529,11 +14605,24 @@ class HubPlugin(BasePlugin):
                 except Exception:
                     agent_def = None
                 if agent_def is not None:
-                    for gem in roster_personas():
-                        if gem.name not in online_identities:
-                            resolved_identity = gem.name
-                            break
+                    personas = roster_personas()
+                    bound_personas = [gem for gem in personas if gem.agent == agent_name]
+                    if not bound_personas:
+                        for gem in personas:
+                            if gem.name not in online_identities:
+                                resolved_identity = gem.name
+                                break
                     if not resolved_identity:
+                        if bound_personas:
+                            busy = [
+                                gem.name for gem in bound_personas
+                                if gem.name in online_identities
+                            ]
+                            return (
+                                f"all {agent_name} agents are busy: "
+                                f"{', '.join(busy)}. "
+                                "use hub_msg to assign work to an existing one."
+                            )
                         return (
                             f"all identities are busy for agent_type '{agent_name}'. "
                             f"use hub_msg to assign work to an existing one."
