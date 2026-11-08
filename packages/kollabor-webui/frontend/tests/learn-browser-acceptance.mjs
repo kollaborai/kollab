@@ -115,6 +115,7 @@ export function makeFixtures(options = {}) {
     external: true,
   };
   let remoteSessionOpened = false;
+  const pickFails = options.pickFails ?? false;
   const session = () => {
     const sessions = createdSession ? [createdSession] : initialSessions;
     return {
@@ -189,6 +190,9 @@ export function makeFixtures(options = {}) {
     if (endpoint.endsWith("/permissions")) return json(route, { pending_prompts: [], approval_mode: "trust_all" });
     if (endpoint.endsWith("/events")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+    }
+    if (pickFails && method === "POST" && endpoint.endsWith("/profile")) {
+      return json(route, { detail: "The agent could not switch models." }, 502);
     }
     if (endpoint.startsWith("/sessions/")) {
       const requestedId = endpoint.split("/")[2];
@@ -438,6 +442,21 @@ async function main() {
     await delayed.page.getByRole("status").getByText("Loading release notes…").waitFor({ state: "visible" });
     await delayed.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
     await delayed.context.close();
+
+    // A pick that fails after New Session started the chat leaves it on another model: say so in the chat (#956).
+    const failing = await openPage(browser, baseUrl, makeFixtures({ pickFails: true }));
+    await failing.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await failing.page.getByTestId("new-session-options").click();
+    await failing.page.locator("#new-session-model").click();
+    await failing.page.getByRole("group", { name: "review", exact: true })
+      .getByRole("option", { name: /claude-haiku/ }).click();
+    await failing.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
+    await failing.page.getByRole("complementary", { name: "Session Controls", exact: true })
+      .getByText("Learn regression session", { exact: true }).waitFor({ state: "visible", timeout: 15_000 });
+    const pickNotice = failing.page.getByRole("alert").filter({ hasText: "without the picked model" });
+    await pickNotice.waitFor({ state: "visible", timeout: 5_000 });
+    assert.match(await pickNotice.innerText(), /Started on review without the picked model: .*could not switch models/);
+    await failing.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
       const captures = [
