@@ -49,12 +49,15 @@ every exit code is 0. DoD is a hygiene gate, not a correctness verdict.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -736,6 +739,37 @@ def _gh(*args: str) -> Any:
     return json.loads(proc.stdout) if proc.stdout.strip() else None
 
 
+def _gh_blob(endpoint: str, max_output: int) -> Any:
+    """Read bounded blob data with a deadline, without starting a worker."""
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        auth = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+        if auth.returncode != 0 or not auth.stdout.strip():
+            raise RuntimeError("GitHub authentication unavailable; failing closed")
+        token = auth.stdout.strip()
+    base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+    request = urllib.request.Request(f"{base}/{endpoint}", headers={
+        "Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    deadline = time.monotonic() + 30
+    output = bytearray()
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("blob request timed out; failing closed")
+                chunk = response.read1(min(65536, max_output + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > max_output:
+                    raise RuntimeError("blob response exceeds limit; failing closed")
+        return json.loads(output)
+    except (OSError, urllib.error.URLError) as exc:
+        raise RuntimeError("blob request failed or timed out; failing closed") from exc
+
+
 PAGE_SIZE = 100
 # Liveness bound: 50 full pages of 100 items (5000) is far above any real
 # PR's commits, files, or comments. A gate script must hang never and
@@ -784,8 +818,8 @@ def _gh_paginate(endpoint: str) -> list[dict[str, Any]]:
         page += 1
 
 
-def collect_pr_data(repo: str, pr: int, *, root: str = ".") -> PRData:
-    """Collect PR facts with the gh CLI against the checked-out PR head."""
+def collect_pr_data(repo: str, pr: int, *, root: str = ".", test_paths: tuple[str, ...] = ("tests/",)) -> PRData:
+    """Collect PR facts without checking out or executing PR-controlled code."""
     pull = _gh("api", f"repos/{repo}/pulls/{pr}")
     commits_raw = _gh_paginate(f"repos/{repo}/pulls/{pr}/commits")
     files_raw = _gh_paginate(f"repos/{repo}/pulls/{pr}/files")
@@ -907,15 +941,60 @@ def collect_pr_data(repo: str, pr: int, *, root: str = ".") -> PRData:
         + [entry["body"] for entry in issue_comments]
     )
 
-    # The action checks out the PR head, so test-file contents come from the
-    # local tree; a local run from the PR branch sees the same files.
+    # Use immutable trees to identify changed tests and their blob IDs. The
+    # PR files endpoint is mutable during pagination and is not a snapshot.
+    def test_tree(commit_sha: str) -> dict[str, dict[str, Any]]:
+        tree = _gh("api", f"repos/{repo}/git/trees/{commit_sha}?recursive=1")
+        if not isinstance(tree, dict) or tree.get("truncated") is not False or not isinstance(tree.get("tree"), list):
+            raise RuntimeError("incomplete commit tree; failing closed")
+        result: dict[str, dict[str, Any]] = {}
+        for item in tree["tree"]:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                raise RuntimeError("invalid commit tree entry; failing closed")
+            path = item["path"]
+            if item.get("type") == "tree" or not any(path.startswith(prefix) for prefix in test_paths):
+                continue
+            if path in result or item.get("type") != "blob" or item.get("mode") not in {"100644", "100755"}:
+                raise RuntimeError(f"unsupported test tree entry {path}; failing closed")
+            result[path] = item
+        return result
+
+    base_tree = test_tree(compare["merge_base_commit"]["sha"])
+    head_tree = test_tree(head_sha)
+    changed_tests = [(path, entry) for path, entry in head_tree.items()
+                     if path not in base_tree or (entry.get("sha"), entry.get("mode")) !=
+                     (base_tree[path].get("sha"), base_tree[path].get("mode"))]
+    if len(changed_tests) > 256:
+        raise RuntimeError("too many changed test files; failing closed")
+    total_bytes = 0
     contents: dict[str, str] = {}
-    for path in changed_files:
+    for path, entry in changed_tests:
+        sha = entry.get("sha")
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise RuntimeError(f"missing blob identity for {path}; failing closed")
+        size = entry.get("size")
+        if type(size) is not int or size < 0 or size > 1_000_000:
+            raise RuntimeError(f"invalid test blob size for {path}; failing closed")
+        total_bytes += size
+        if total_bytes > 16_000_000:
+            raise RuntimeError("changed test files exceed size limit; failing closed")
+        blob = _gh_blob(f"repos/{repo}/git/blobs/{sha}", 2 * size + 8192)
+        if (not isinstance(blob, dict) or blob.get("encoding") != "base64" or blob.get("sha") != sha
+                or blob.get("size") != size or not isinstance(blob.get("content"), str)
+                or len(blob["content"]) > 2 * size + 1024):
+            raise RuntimeError(f"invalid blob response for {path}; failing closed")
         try:
-            with open(os.path.join(root, path), encoding="utf-8") as fh:
-                contents[path] = fh.read()
-        except (OSError, UnicodeDecodeError):
-            contents[path] = ""
+            raw = base64.b64decode("".join(blob["content"].split()), validate=True)
+            if len(raw) != size:
+                raise ValueError("test blob size mismatch")
+            contents[path] = raw.decode("utf-8")
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError, binascii.Error) as exc:
+            raise RuntimeError(f"invalid test blob for {path}; failing closed") from exc
+
+    # The files listing and the original head must describe the same PR state.
+    current_pull = _gh("api", f"repos/{repo}/pulls/{pr}")
+    if current_pull.get("head", {}).get("sha") != head_sha:
+        raise RuntimeError("PR head changed while collecting facts; failing closed")
 
     return PRData(
         title=pull.get("title") or "",
@@ -960,7 +1039,9 @@ def main(argv: list[str] | None = None) -> int:
         if not cfg.enabled:
             print("pr-gates DoD is disabled (pr_gates.dod.enabled = false); exit 0.")
             return 0
-        data = collect_pr_data(args.repo, args.pr)
+        data = collect_pr_data(args.repo, args.pr, test_paths=tuple(cfg.regression.test_paths))
+        if args.post and data.head_sha != args.head_sha:
+            raise RuntimeError("event head differs from collected PR head; failing closed")
     except (ConfigError, RuntimeError, KeyError, ValueError) as exc:
         print(f"pr-gates DoD: error: {_redact(str(exc))}", file=sys.stderr)
         return 2
