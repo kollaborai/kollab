@@ -182,3 +182,16 @@ def test_disabled_plugin_does_not_register_budget_hooks(tmp_path):
             assert not result["cancelled"]
 
     asyncio.run(run())
+
+
+def test_high_budget_hud_recommends_a_new_session(tmp_path):
+    p, _ = make_plugin(tmp_path)
+    p._llm_service.queue_agent_hud = MagicMock()
+    p._turns_since_budget_hud = 4
+    p._resolve_context_window = lambda: 100_000
+    p._get_prompt_tokens = lambda: 85_000
+    p._maybe_emit_budget_hud([])
+    text = p._llm_service.queue_agent_hud.call_args.kwargs["content"]
+    assert "start a new session" in text
+    assert "compaction is temporarily unavailable" in text
+    assert "/compact" not in text

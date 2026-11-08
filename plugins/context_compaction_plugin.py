@@ -2164,7 +2164,7 @@ class ContextCompactionPlugin(BasePlugin):
         if pct >= 85:
             body = (
                 f"{used_k}K / {window_k}K tokens ({pct}%) — nearly full; "
-                "wrap up or /compact soon"
+                "wrap up and start a new session; compaction is temporarily unavailable"
             )
         elif pct >= 70:
             body = (
