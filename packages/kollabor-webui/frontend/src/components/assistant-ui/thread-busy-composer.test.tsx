@@ -413,13 +413,16 @@ describe("thread Composer busy-send wiring", () => {
     );
   });
 
-  it("blocks an append-then-schedule throw past the duplicate window until explicit confirmation", async () => {
+  it("blocks an append-then-schedule throw after 450ms while the runtime remains busy", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     const attachment = await pendingPng();
-    const harness = setupComposer({
-      text: "retain after ambiguous queue failure",
-      attachments: [attachment],
-    });
+    const harness = setupComposer(
+      {
+        text: "retain after ambiguous queue failure",
+        attachments: [attachment],
+      },
+      { isRunning: true },
+    );
     const queue: Parameters<BusyComposerSubmitHandlerOptions["sendCommand"]>[0][] = [];
     harness.sendCommand.mockImplementationOnce((command) => {
       queue.push(command);
@@ -506,11 +509,11 @@ describe("thread Composer busy-send wiring", () => {
     );
   });
 
-  it("keeps the ambiguous guard through idle until explicit confirmation", async () => {
+  it("keeps an ambiguous draft blocked if the runtime later reports idle", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     const attachment = await pendingPng();
     const draft = { text: "retain after schedule failure", attachments: [attachment] };
-    const harness = setupComposer(draft);
+    const harness = setupComposer(draft, { isRunning: true });
     const queue: Parameters<BusyComposerSubmitHandlerOptions["sendCommand"]>[0][] = [];
     harness.sendCommand.mockImplementationOnce((command) => {
       queue.push(command);
@@ -526,6 +529,9 @@ describe("thread Composer busy-send wiring", () => {
     expect(harness.getBusySubmitError()).toBe(warning);
 
     now.mockReturnValue(1_600);
+    // This is a controlled idle snapshot, not a guaranteed result of the
+    // failed schedule: the stock runtime marks the thread busy before invoking
+    // queueMicrotask, and a synchronous scheduling throw can strand that state.
     const idleComposer = harness.render(false);
     expect(harness.getBusySubmitError()).toBe(warning);
     const blockedEvent = submitEvent();
