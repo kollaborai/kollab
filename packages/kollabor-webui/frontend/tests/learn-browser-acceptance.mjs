@@ -82,9 +82,12 @@ export function makeFixtures(options = {}) {
     ...(options.additionalOfflineAgents ?? []),
   ];
   const agents = { agents: poolEntries, live: [], active: [], available: poolEntries.map((entry) => entry.name) };
+  const profileSwitches = [];
   const profiles = {
     active: "default",
     providers: [],
+    // The loadout the terminal would start on; null when none is set (#957).
+    default_loadout: options.defaultLoadout ?? null,
     profiles: [
       {
         name: "default",
@@ -190,6 +193,12 @@ export function makeFixtures(options = {}) {
     if (endpoint.endsWith("/events")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
     }
+    if (method === "POST" && endpoint.endsWith("/profile")) {
+      // A session put on a pick answers with what it now runs, as the engine does.
+      const body = request.postDataJSON();
+      profileSwitches.push(body);
+      return json(route, { ...(createdSession ?? {}), profile: body.name, model: body.model, effort: body.effort });
+    }
     if (endpoint.startsWith("/sessions/")) {
       const requestedId = endpoint.split("/")[2];
       if (requestedId === remoteAgent.handle) {
@@ -207,6 +216,7 @@ export function makeFixtures(options = {}) {
     discoveryRequests: () => discoveryRequests,
     createRequest,
     network,
+    profileSwitches: () => profileSwitches,
     profiles,
     remoteAgent,
     requests,
@@ -280,6 +290,16 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
   });
 
   return { context, externalRequests, fixture: fixtures, page, pageErrors, consoleErrors };
+}
+
+async function until(check, message, timeoutMs = 15_000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const value = check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(message);
 }
 
 async function waitForLesson(page, title) {
@@ -438,6 +458,33 @@ async function main() {
     await delayed.page.getByRole("status").getByText("Loading release notes…").waitFor({ state: "visible" });
     await delayed.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
     await delayed.context.close();
+
+    // New Session starts on the default loadout, not on the active profile's own saved model (#957).
+    const defaultLoadout = { name: "haiku-low", profile: "review", provider: "anthropic", model: "claude-haiku", effort: "low" };
+    const onDefault = makeFixtures({ defaultLoadout });
+    const defaultView = await openPage(browser, baseUrl, onDefault);
+    await defaultView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await defaultView.page.getByTestId("new-session-options").click();
+    // The active profile is "default" (gpt-6-luna); the form shows the loadout before Start.
+    await defaultView.page.locator("#new-session-model", { hasText: "claude-haiku" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.doesNotMatch(await defaultView.page.locator("#new-session-model").innerText(), /gpt-6-luna/);
+    await defaultView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
+    const defaultPayload = await Promise.race([
+      onDefault.createRequest,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Default-loadout launch request did not arrive.")), 15000)),
+    ]);
+    assert.equal(defaultPayload.profile, "review");
+    const switches = await until(() => onDefault.profileSwitches().length && onDefault.profileSwitches(), "The loadout's model never reached the session.");
+    assert.deepEqual(switches, [{ name: "review", model: "claude-haiku", effort: "low" }]);
+    await defaultView.context.close();
+
+    // A default loadout on a profile that no longer exists leaves the form on the active profile.
+    const staleFixtures = makeFixtures({ defaultLoadout: { ...defaultLoadout, profile: "deleted" } });
+    const stale = await openPage(browser, baseUrl, staleFixtures);
+    await stale.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await stale.page.getByTestId("new-session-options").click();
+    await stale.page.locator("#new-session-model", { hasText: "gpt-6-luna" }).waitFor({ state: "visible", timeout: 5000 });
+    await stale.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
       const captures = [
