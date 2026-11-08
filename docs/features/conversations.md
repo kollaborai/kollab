@@ -106,3 +106,5 @@ disabled in configuration, its budget hooks do not run. This containment does no
 records or restore previously lost content. Remove it only after a shared,
 per-session admission and durable sequence contract covers every history writer,
 reload and rewrite path, with interleaving and stale-write regressions passing.
+Until that contract is available, a session snapshot save refuses an existing
+destination rather than replacing transcript rows that may have arrived later.

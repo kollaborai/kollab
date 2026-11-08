@@ -7,6 +7,7 @@ and message threading for LLM interactions.
 import json
 import logging
 import os
+import tempfile
 from collections import Counter, defaultdict
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -603,15 +604,23 @@ class ConversationManager:
                 with locked_file(
                     _session_file_write_lock_path(filepath), "a+", private=True
                 ):
-                    fd = os.open(
-                        filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+                    # No admitted snapshot cursor exists yet. Refuse every
+                    # existing destination: a lock alone cannot prove this
+                    # in-memory snapshot includes all previously appended rows.
+                    fd, temporary = tempfile.mkstemp(
+                        prefix=f".{filepath.name}.", suffix=".tmp", dir=filepath.parent
                     )
-                    with os.fdopen(fd, "w") as f:
-                        os.fchmod(f.fileno(), 0o600)
-                        # Write as single-line JSON for JSONL compatibility
-                        f.write(json.dumps(session_data) + "\n")
-                        f.flush()
-                        os.fsync(f.fileno())
+                    try:
+                        with os.fdopen(fd, "w") as f:
+                            os.fchmod(f.fileno(), 0o600)
+                            f.write(json.dumps(session_data) + "\n")
+                            f.flush()
+                            os.fsync(f.fileno())
+                        # Same-directory link installs a complete file without
+                        # replacing a destination created by another writer.
+                        os.link(temporary, filepath)
+                    finally:
+                        os.unlink(temporary)
 
             logger.info(f"Saved session {session_id} to: {filepath}")
             return True
@@ -1365,6 +1374,11 @@ class ConversationManager:
                 }
                 new_messages.append(new_msg)
 
+            # Preserve the loaded source if the new destination cannot be installed.
+            source_state = (
+                self.current_session_id, self.messages, self.message_index,
+                self.context_window, self.current_parent_uuid, self.conversation_metadata,
+            )
             # Set up the new session state
             self.current_session_id = new_session_id
             self.messages = new_messages
@@ -1386,8 +1400,13 @@ class ConversationManager:
                 "model_used": None,
             }
 
-            # Save the branched session
-            self.save_session(new_session_id)
+            # Never report a branch as saved if its destination was refused.
+            if not self.save_session(new_session_id):
+                (
+                    self.current_session_id, self.messages, self.message_index,
+                    self.context_window, self.current_parent_uuid, self.conversation_metadata,
+                ) = source_state
+                raise OSError("failed to persist branched session")
 
             logger.info(
                 f"Created branch session {new_session_id} from {source_session_id} at message {branch_point_index}"
