@@ -38,7 +38,7 @@ import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-
 import { usePendingPermissionCancellation } from "@/runtime";
 import { imageAttachmentAdapter } from "@/components/assistant-ui/attachment-adapter";
 import {
-  busyComposerFingerprint,
+  busyComposerSubmitErrorMessage,
   createBusyComposerSubmitHandler,
   createBusyComposerSubmitTracker,
 } from "@/components/assistant-ui/busy-composer-submit";
@@ -491,7 +491,7 @@ const ThreadSuggestionItem: FC = () => {
   );
 };
 
-const Composer: FC<{
+export const Composer: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
@@ -543,21 +543,9 @@ const Composer: FC<{
     finalizeImageAttachment: (attachment) =>
       imageAttachmentAdapter.send(attachment),
     sendCommand: sendTransportCommand,
-    resetComposer: async (submittedFingerprint) => {
-      if (
-        busyComposerFingerprint(aui.composer.getState()) ===
-        submittedFingerprint
-      ) {
-        await aui.composer.reset();
-      }
-    },
-    onError: (error) => {
-      setBusySubmitError(
-        error
-          ? "Could not send this message. Your draft is still here; try sending again."
-          : null,
-      );
-    },
+    resetComposer: () => aui.composer.reset(),
+    onError: (issue) =>
+      setBusySubmitError(issue ? busyComposerSubmitErrorMessage(issue) : null),
   });
 
   const submitBusyMessage = (event: {
@@ -565,7 +553,7 @@ const Composer: FC<{
     defaultPrevented?: boolean;
   }) => {
     openPanelFromComposer(event);
-    sendBusyMessage(event);
+    return sendBusyMessage(event);
   };
 
   const handleComposerSubmit = (event: {
@@ -576,7 +564,7 @@ const Composer: FC<{
     // disabled-send predicate while a turn is running. The transport already
     // queues this append message behind the active run.
     openPanelFromComposer(event);
-    sendBusyMessage(event);
+    return sendBusyMessage(event);
   };
 
   const openPanelForItem = (item: {

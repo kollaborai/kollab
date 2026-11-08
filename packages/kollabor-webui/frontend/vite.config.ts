@@ -191,6 +191,7 @@ const mainConfig = defineConfig({
       "tests/hub-note-recipient.test.tsx",
       "src/components/assistant-ui/tool-fallback.test.tsx",
       "src/components/assistant-ui/busy-composer-submit.test.ts",
+      "src/components/assistant-ui/thread-busy-composer.test.tsx",
       "tests/agent-type-glyph.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",

@@ -112,7 +112,10 @@ describe("busy composer submit", () => {
 
     expect(test.sendCommand).not.toHaveBeenCalled();
     expect(test.resetComposer).not.toHaveBeenCalled();
-    expect(test.onError).toHaveBeenLastCalledWith(conversionError);
+    expect(test.onError).toHaveBeenLastCalledWith({
+      kind: "prepare",
+      error: conversionError,
+    });
     expect(state).toEqual({ text: "retain me", attachments: [attachment] });
   });
 
