@@ -83,6 +83,9 @@ logger = logging.getLogger(__name__)
 # Plugin discovery plus the hub join dominate this; a cold start on a laptop is
 # a few seconds, so the ceiling is generous rather than tight.
 SPAWN_TIMEOUT_SECONDS = 45.0
+# An agent on another device answers over the relay, where its replies wait
+# behind the attach stream's frame budget: give its state calls longer (#880).
+REMOTE_STATE_TIMEOUT_SECONDS = 60.0
 
 # Events the daemon publishes that are rendered ANSI rather than structured
 # data. Web clients cannot use them, and forwarding them would double every
@@ -250,7 +253,7 @@ class DaemonHandle:
 
     # === lifecycle ===
 
-    async def connect(self, socket_path: str) -> None:
+    async def connect(self, socket_path: str, *, state_timeout: Optional[float] = None) -> None:
         """Attach to the daemon's socket and start pumping its event stream."""
         from kollabor.state import RemoteStateService
         from kollabor_rpc import RpcClient, open_unix_connection_with_large_buffer
@@ -303,7 +306,7 @@ class DaemonHandle:
         # RPC replies and display events share this one connection, so the read
         # loop below is the only thing allowed to consume the reader.
         self.rpc = RpcClient(self._writer)
-        self.state = RemoteStateService(rpc_client=self.rpc)
+        self.state = RemoteStateService(rpc_client=self.rpc, timeout=state_timeout)
         self._read_task = asyncio.create_task(
             self._read_loop(), name=f"daemon-read-{self.session_id}"
         )
@@ -1052,7 +1055,10 @@ class DaemonPool:
             handle.project = str(found.get("workspace") or found.get("project") or "")
             handle.agent_name = str(found.get("agent") or "")
             try:
-                await handle.connect(str(found.get("socket_path") or ""))
+                await handle.connect(
+                    str(found.get("socket_path") or ""),
+                    state_timeout=REMOTE_STATE_TIMEOUT_SECONDS if found.get("device") else None,
+                )
             except BaseException:
                 try:
                     # Attach failure is not an explicit Delete or /quit request.
