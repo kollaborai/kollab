@@ -843,3 +843,36 @@ async def test_a_remote_agent_with_no_messages_settles_as_empty(
     settled = await session.get_history_nonblocking()
     assert (settled["history"], settled["stale"]) == ([], False)
     await asyncio.wait_for(session._history_refresh_task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_caller_never_inherits_the_background_wait(
+    registry, conversations, monkeypatch
+):
+    """The background refresh may wait seconds on the relay with the history
+    lock held; opening the chat or ending a turn still returns within its
+    own short budget, with the cached mirror (#927)."""
+    from kollabor_engine.session import HistoryRefreshUnavailable
+
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    release = asyncio.Event()
+    state = SlowRemoteState("hello")
+
+    async def get_conversation(since=None, anchor=None, **kwargs):
+        await release.wait()
+        return _answer("hello")
+
+    state.get_conversation = get_conversation
+    session = _remote_session(registry, conversations, state)
+
+    await session.get_history_nonblocking()  # starts the background refresh
+    await asyncio.sleep(0.01)
+    started = time.monotonic()
+    assert await session.refresh_history() == []
+    with pytest.raises(HistoryRefreshUnavailable):
+        await session.refresh_history(stale_raises=True)
+    assert time.monotonic() - started < 0.5
+
+    release.set()
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+    assert [m["content"] for m in session.history] == ["hello"]

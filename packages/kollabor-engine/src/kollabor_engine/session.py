@@ -51,6 +51,12 @@ INLINE_PROFILE = "app-inline"
 # RPC can be queued behind a long-running tool, so this is deliberately shorter
 # than the normal RPC timeout and falls back to the cached snapshot.
 HISTORY_REFRESH_TIMEOUT_SECONDS = 0.75
+# The background refresh has no caller waiting on it, so it lets the daemon
+# answer: an agent on another computer answers over the relay in seconds, and
+# cutting it at the open-path budget dropped every answer (#927). The state
+# client's own RPC timeout normally ends a dead call first; this only bounds
+# the coalesced task.
+HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS = 30.0
 
 
 class HistoryRefreshUnavailable(Exception):
@@ -227,6 +233,9 @@ class EngineSession:
         # is no prefix of the daemon's history (hub messages are logged apart),
         # so a page showing it replaces its thread whole when the daemon answers.
         self._history_seeded = False
+        # A page was told the mirror is still unconfirmed (empty and never
+        # answered by the daemon); the first answer must reach it (#927).
+        self._history_unconfirmed_shown = False
 
         # The daemon's own conversation id (its conversations/<id>.jsonl
         # name). Arrives with the first answered snapshot; before that, disk
@@ -632,7 +641,10 @@ class EngineSession:
         await self.state.reload_mcp_servers()
 
     async def refresh_history(
-        self, notify: bool = False, stale_raises: bool = False,
+        self,
+        notify: bool = False,
+        stale_raises: bool = False,
+        timeout: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """Pull the daemon's conversation into the local mirror.
 
@@ -640,135 +652,168 @@ class EngineSession:
         the daemon gave for them; a daemon whose history changed (compaction,
         /clear, /resume), or one too old to know, sends all of it.
 
+        ``timeout``: how long to wait for each answer; default
+        ``HISTORY_REFRESH_TIMEOUT_SECONDS``, for callers that are waiting.
+
         Subscribers hear ``history_updated`` when the answer replaces a disk
-        seed (whoever asked) or, with ``notify``, when it changed anything.
+        seed or an unconfirmed empty mirror a page was shown (whoever asked)
+        or, with ``notify``, when it changed anything.
         """
-        async with self._history_lock:
-            held = self._raw_history
-            before = anchor_digest(held)
-            previous_uid = getattr(self, "_history_conversation_uid", None)
-            try:
-                kwargs = {"since": len(held) or None, "anchor": self._history_anchor or None}
-                if previous_uid:
-                    kwargs["expected_conversation_uid"] = previous_uid
+        wait = HISTORY_REFRESH_TIMEOUT_SECONDS if timeout is None else timeout
+        # The background refresh holds the lock while the daemon answers; a
+        # caller that is waiting gets the same budget for the lock as for
+        # the answer, never the whole background wait (#927).
+        try:
+            await asyncio.wait_for(self._history_lock.acquire(), timeout=wait)
+        except asyncio.TimeoutError as exc:
+            if stale_raises:
+                raise HistoryRefreshUnavailable(
+                    f"timed out after {wait}s waiting for another history refresh"
+                ) from exc
+            logger.debug(
+                "session %s history refresh busy; using cached history",
+                self.session_id,
+            )
+            return self.history
+        try:
+            return await self._refresh_history_locked(notify, stale_raises, wait)
+        finally:
+            self._history_lock.release()
+
+    async def _refresh_history_locked(
+        self, notify: bool, stale_raises: bool, wait: float,
+    ) -> List[Dict[str, Any]]:
+        """refresh_history's work; the caller holds ``_history_lock``."""
+        held = self._raw_history
+        before = anchor_digest(held)
+        previous_uid = getattr(self, "_history_conversation_uid", None)
+        try:
+            kwargs = {"since": len(held) or None, "anchor": self._history_anchor or None}
+            if previous_uid:
+                kwargs["expected_conversation_uid"] = previous_uid
+            snapshot = await asyncio.wait_for(
+                self.state.get_conversation(**kwargs), timeout=wait,
+            )
+            metadata = (
+                snapshot.get("metadata", {}) if isinstance(snapshot, dict)
+                else getattr(snapshot, "metadata", {})
+            )
+            current_uid = metadata.get("conversation_uid") if isinstance(metadata, dict) else None
+            # An older daemon may ignore the expected uid and send a tail
+            # from a different conversation. Ask again for a full snapshot.
+            since = snapshot.get("since") if isinstance(snapshot, dict) else getattr(snapshot, "since", None)
+            if previous_uid and current_uid and previous_uid != current_uid and since is not None:
                 snapshot = await asyncio.wait_for(
-                    self.state.get_conversation(**kwargs),
-                    timeout=HISTORY_REFRESH_TIMEOUT_SECONDS,
+                    self.state.get_conversation(), timeout=wait,
                 )
                 metadata = (
                     snapshot.get("metadata", {}) if isinstance(snapshot, dict)
                     else getattr(snapshot, "metadata", {})
                 )
                 current_uid = metadata.get("conversation_uid") if isinstance(metadata, dict) else None
-                # An older daemon may ignore the expected uid and send a tail
-                # from a different conversation. Ask again for a full snapshot.
-                since = snapshot.get("since") if isinstance(snapshot, dict) else getattr(snapshot, "since", None)
-                if previous_uid and current_uid and previous_uid != current_uid and since is not None:
-                    snapshot = await asyncio.wait_for(
-                        self.state.get_conversation(), timeout=HISTORY_REFRESH_TIMEOUT_SECONDS,
-                    )
-                    metadata = (
-                        snapshot.get("metadata", {}) if isinstance(snapshot, dict)
-                        else getattr(snapshot, "metadata", {})
-                    )
-                    current_uid = metadata.get("conversation_uid") if isinstance(metadata, dict) else None
-            except asyncio.TimeoutError as exc:
-                if stale_raises:
-                    raise HistoryRefreshUnavailable(
-                        "timed out after "
-                        f"{HISTORY_REFRESH_TIMEOUT_SECONDS}s waiting for the daemon"
-                    ) from exc
-                logger.debug(
-                    "session %s history refresh timed out; using cached history",
-                    self.session_id,
-                )
-                return self.history
-            except Exception as e:
-                if stale_raises:
-                    raise HistoryRefreshUnavailable(
-                        f"daemon answered with an error: {e}"
-                    ) from e
-                logger.debug(
-                    "session %s history refresh failed: %s", self.session_id, e
-                )
-                return self.history
-
-            messages = getattr(snapshot, "messages", None)
-            if messages is None and isinstance(snapshot, dict):
-                messages = snapshot.get("messages", [])
-
-            # StateService returns MessageDto snapshots with timestamps, metadata,
-            # and thinking. Keep the complete wire shape in the engine mirror;
-            # reducing messages to role/content here hides native tool-call IDs
-            # from both the trajectory projector and the restored chat runtime.
-            received: List[Dict[str, Any]] = []
-            for message in messages or []:
-                if isinstance(message, dict):
-                    received.append(message)
-                    continue
-                to_dict = getattr(message, "to_dict", None)
-                if callable(to_dict):
-                    received.append(to_dict())
-                    continue
-                received.append(
-                    {
-                        "role": getattr(message, "role", ""),
-                        "content": getattr(message, "content", "") or "",
-                        "timestamp": str(getattr(message, "timestamp", "") or ""),
-                        "metadata": dict(getattr(message, "metadata", None) or {}),
-                        "thinking": getattr(message, "thinking", None),
-                    }
-                )
-            since = getattr(snapshot, "since", None)
-            if since is not None and since > len(held):
-                # A tail past what is held cannot be joined; the next refresh
-                # sends no anchor and gets all of it.
-                if stale_raises:
-                    raise HistoryRefreshUnavailable(
-                        "the daemon sent a tail the mirror cannot join"
-                    )
-                self._history_anchor = ""
-                return self.history
-            self._raw_history = (held[:since] if since else []) + received
-            self._history_anchor = getattr(snapshot, "anchor", "") or ""
-            uid_changed = bool(previous_uid and current_uid and previous_uid != current_uid)
-            self._history_conversation_uid = current_uid if isinstance(current_uid, str) and current_uid else None
-            self._history_authoritative = True
-            display_history = self._raw_history
-            native_session_id = (
-                snapshot.get("session_id", "")
-                if isinstance(snapshot, dict)
-                else getattr(snapshot, "session_id", "")
-            ) or ""
-            if native_session_id and not getattr(self, "conversation_id", ""):
-                self.conversation_id = native_session_id
-
-                self._notify_persistence_changed()
-            if native_session_id and display_history and display_history[0].get("role") == "user":
-                # Old resumed bases lost initialization metadata. Recover it
-                # from typed source records for display only; the daemon and
-                # raw mirror/anchor must remain byte-for-byte unchanged.
-                try:
-                    workspace = getattr(self, "workspace", None)
-                    first = await asyncio.to_thread(
-                        mark_system_initialization,
-                        get_conversations_dir(Path(workspace) if workspace else None),
-                        native_session_id,
-                        display_history[0],
-                    )
-                    if first is not display_history[0]:
-                        display_history = [first, *display_history[1:]]
-                except Exception as exc:
-                    logger.debug("session %s display provenance unavailable: %s", self.session_id, exc)
-            # XML tool turns in the shape the web renders for native tools.
-            self.history = web_history(display_history)
-            seed_replaced, self._history_seeded = self._history_seeded, False
-            if uid_changed or seed_replaced or (notify and anchor_digest(self._raw_history) != before):
-                event = {"type": "history_updated"}
-                if self._history_conversation_uid:
-                    event["conversation_uid"] = self._history_conversation_uid
-                self._emit_event(event)
+        except asyncio.TimeoutError as exc:
+            if stale_raises:
+                raise HistoryRefreshUnavailable(
+                    f"timed out after {wait}s waiting for the daemon"
+                ) from exc
+            logger.debug(
+                "session %s history refresh timed out; using cached history",
+                self.session_id,
+            )
             return self.history
+        except Exception as e:
+            if stale_raises:
+                raise HistoryRefreshUnavailable(
+                    f"daemon answered with an error: {e}"
+                ) from e
+            logger.debug(
+                "session %s history refresh failed: %s", self.session_id, e
+            )
+            return self.history
+
+        messages = getattr(snapshot, "messages", None)
+        if messages is None and isinstance(snapshot, dict):
+            messages = snapshot.get("messages", [])
+
+        # StateService returns MessageDto snapshots with timestamps, metadata,
+        # and thinking. Keep the complete wire shape in the engine mirror;
+        # reducing messages to role/content here hides native tool-call IDs
+        # from both the trajectory projector and the restored chat runtime.
+        received: List[Dict[str, Any]] = []
+        for message in messages or []:
+            if isinstance(message, dict):
+                received.append(message)
+                continue
+            to_dict = getattr(message, "to_dict", None)
+            if callable(to_dict):
+                received.append(to_dict())
+                continue
+            received.append(
+                {
+                    "role": getattr(message, "role", ""),
+                    "content": getattr(message, "content", "") or "",
+                    "timestamp": str(getattr(message, "timestamp", "") or ""),
+                    "metadata": dict(getattr(message, "metadata", None) or {}),
+                    "thinking": getattr(message, "thinking", None),
+                }
+            )
+        since = getattr(snapshot, "since", None)
+        if since is not None and since > len(held):
+            # A tail past what is held cannot be joined; the next refresh
+            # sends no anchor and gets all of it.
+            if stale_raises:
+                raise HistoryRefreshUnavailable(
+                    "the daemon sent a tail the mirror cannot join"
+                )
+            self._history_anchor = ""
+            return self.history
+        self._raw_history = (held[:since] if since else []) + received
+        self._history_anchor = getattr(snapshot, "anchor", "") or ""
+        uid_changed = bool(previous_uid and current_uid and previous_uid != current_uid)
+        self._history_conversation_uid = current_uid if isinstance(current_uid, str) and current_uid else None
+        self._history_authoritative = True
+        display_history = self._raw_history
+        native_session_id = (
+            snapshot.get("session_id", "")
+            if isinstance(snapshot, dict)
+            else getattr(snapshot, "session_id", "")
+        ) or ""
+        if native_session_id and not getattr(self, "conversation_id", ""):
+            self.conversation_id = native_session_id
+
+            self._notify_persistence_changed()
+        if native_session_id and display_history and display_history[0].get("role") == "user":
+            # Old resumed bases lost initialization metadata. Recover it
+            # from typed source records for display only; the daemon and
+            # raw mirror/anchor must remain byte-for-byte unchanged.
+            try:
+                workspace = getattr(self, "workspace", None)
+                first = await asyncio.to_thread(
+                    mark_system_initialization,
+                    get_conversations_dir(Path(workspace) if workspace else None),
+                    native_session_id,
+                    display_history[0],
+                )
+                if first is not display_history[0]:
+                    display_history = [first, *display_history[1:]]
+            except Exception as exc:
+                logger.debug("session %s display provenance unavailable: %s", self.session_id, exc)
+        # XML tool turns in the shape the web renders for native tools.
+        self.history = web_history(display_history)
+        seed_replaced, self._history_seeded = self._history_seeded, False
+        unconfirmed_replaced = getattr(self, "_history_unconfirmed_shown", False)
+        self._history_unconfirmed_shown = False
+        if (
+            uid_changed
+            or seed_replaced
+            or unconfirmed_replaced
+            or (notify and anchor_digest(self._raw_history) != before)
+        ):
+            event = {"type": "history_updated"}
+            if self._history_conversation_uid:
+                event["conversation_uid"] = self._history_conversation_uid
+            self._emit_event(event)
+        return self.history
 
     # --- nonblocking open path -------------------------------------------
 
@@ -826,6 +871,13 @@ class EngineSession:
                         )
                         self._history_seeded = True
         history = self.history[-limit:] if limit else self.history
+        # An empty mirror the daemon never confirmed is unknown, not an empty
+        # chat: an agent on another computer has no disk here to seed from, so
+        # its page waits for the daemon's answer instead of showing "No
+        # conversation messages yet" (#927).
+        unconfirmed = not self.history and not getattr(self, "_history_authoritative", False)
+        if unconfirmed:
+            self._history_unconfirmed_shown = True
         self._schedule_refresh()
         turn_error = dict(self.last_turn_error) if self.last_turn_error else None
         if turn_error and limit and history is not self.history:
@@ -841,7 +893,7 @@ class EngineSession:
             "conversation_uid": getattr(self, "_history_conversation_uid", None),
             "last_turn_error": turn_error,
             "source": "disk" if self._history_seeded else "mirror",
-            "stale": self._history_seeded,
+            "stale": self._history_seeded or unconfirmed,
         }
 
     def _schedule_refresh(self, notify: bool = True) -> None:
@@ -869,7 +921,10 @@ class EngineSession:
                         self._history_refresh_notify,
                         False,
                     )
-                    await self.refresh_history(notify=announce)
+                    await self.refresh_history(
+                        notify=announce,
+                        timeout=HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS,
+                    )
                     if not self._history_refresh_again:
                         break
             except Exception as e:  # a background refresh never breaks a route
