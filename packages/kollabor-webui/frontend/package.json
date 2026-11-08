@@ -12,7 +12,10 @@
     "test:e2e:learn": "node tests/learn-browser-acceptance.mjs",
     "test:e2e:agent-sidebar-glyph": "node tests/agent-sidebar-glyph-browser-acceptance.mjs",
     "test:e2e:team-launch": "node tests/team-launch-browser-acceptance.mjs",
-    "test:e2e:profile-rows": "node tests/acceptance/profile-rows.browser.mjs"
+    "test:e2e:profile-rows": "node tests/acceptance/profile-rows.browser.mjs",
+    "test:e2e:runner": "node --test tests/browser-acceptance-runner.test.mjs tests/inventory-webui-controls.test.mjs",
+    "test:e2e:parallel": "node scripts/browser-acceptance-runner.mjs",
+    "inventory:controls": "node scripts/inventory-webui-controls.mjs"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.15.27",
@@ -41,6 +44,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@babel/parser": "^8.1.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.1.2",
     "@types/react": "^19.0.0",

@@ -192,10 +192,22 @@ jobs:
       - name: Run web UI browser acceptance
         working-directory: packages/kollabor-webui/frontend
         env:
-          LEARN_CAPTURE_SCREENSHOTS: "0"
+          KOLLAB_BROWSER_WORKERS: "2"
+          KOLLAB_BROWSER_RESULTS_DIR: ${{ runner.temp }}/kollab-browser-results
         run: |
-          npm run test:e2e:learn
-          npm run test:e2e:profile-rows
+          npm run build
+          npm run test:e2e:runner
+          mkdir -p "$KOLLAB_BROWSER_RESULTS_DIR"
+          npm run inventory:controls -- "$KOLLAB_BROWSER_RESULTS_DIR/control-candidates.json"
+          npm run test:e2e:parallel
+
+      - name: Upload browser acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-acceptance-results
+          path: ${{ runner.temp }}/kollab-browser-results
+          if-no-files-found: ignore
 
       - name: Validate bundled Agent Skills layout
         run: uv run python scripts/validate_bundled_agent_skills.py
