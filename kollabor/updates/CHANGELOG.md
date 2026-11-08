@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-08
+
+### Added
+- Web UI: Search configured profiles, models and reasoning efforts from New Session and the session panel. A selection applies only to that session; Manage Profiles opens the profile editor from Loadouts (#552).
+
+### Fixed
+- Read changed regression tests from the pull request's immutable file blobs while keeping the readiness checker on trusted base code.
+- The PR readiness gate keeps every finding-ID mention blocking unless a trusted current-head reviewer annotates that exact comment occurrence; each accepted suppression is audited (#724).
+
 ## [0.20.0] - 2026-11-08
 
 ### Added
