@@ -36,6 +36,12 @@ import {
 } from "@/voice-mode";
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
 import { usePendingPermissionCancellation } from "@/runtime";
+import { imageAttachmentAdapter } from "@/components/assistant-ui/attachment-adapter";
+import {
+  busyComposerFingerprint,
+  createBusyComposerSubmitTracker,
+  submitBusyComposerMessage,
+} from "@/components/assistant-ui/busy-composer-submit";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
@@ -79,6 +85,7 @@ import {
   useMemo,
   useLayoutEffect,
   useRef,
+  useState,
   type ComponentType,
   type FC,
   type KeyboardEvent,
@@ -510,9 +517,8 @@ const Composer: FC<{
     composerSlotMode(s, voiceAvailable ? voice : null, Boolean(permissionStop)),
   );
   const isRunning = useAuiState((s) => s.thread.isRunning);
-  const lastBusySubmit = useRef<{ fingerprint: string; at: number } | null>(
-    null,
-  );
+  const lastBusySubmit = useRef(createBusyComposerSubmitTracker());
+  const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   // A bare /config, /llm, /model, /setup or /connect (also /connect code and
   // /connect knocks) opens its Settings tab and posts no text. Any other line is
@@ -536,42 +542,30 @@ const Composer: FC<{
   }) => {
     if (!isRunning || event.defaultPrevented) return;
     const state = aui.composer.getState();
-    if (!state.text.trim() && state.attachments.length === 0) return;
-
-    const fingerprint = `${state.text}\u0000${state.attachments
-      .map((attachment) => attachment.id)
-      .join(",")}`;
-    const now = Date.now();
-    const previous = lastBusySubmit.current;
-    if (
-      previous &&
-      previous.fingerprint === fingerprint &&
-      now - previous.at < 450
-    ) {
-      event.preventDefault();
-      return;
-    }
-    lastBusySubmit.current = { fingerprint, at: now };
-    event.preventDefault();
-    const parts: Array<
-      | { type: "text"; text: string }
-      | { type: "image"; image: string }
-    > = [];
-    if (state.text.trim()) parts.push({ type: "text", text: state.text });
-    for (const attachment of state.attachments) {
-      for (const part of attachment.content ?? []) {
-        if (part.type === "text") parts.push({ type: "text", text: part.text });
-        if (part.type === "image") parts.push({ type: "image", image: part.image });
-      }
-    }
-    if (parts.length === 0) return;
-    sendTransportCommand({
-      type: "add-message",
-      message: { role: "user", parts },
-      parentId: null,
-      sourceId: null,
+    setBusySubmitError(null);
+    void submitBusyComposerMessage({
+      state,
+      event,
+      tracker: lastBusySubmit.current,
+      finalizeImageAttachment: (attachment) =>
+        imageAttachmentAdapter.send(attachment),
+      sendCommand: sendTransportCommand,
+      resetComposer: async (submittedFingerprint) => {
+        if (
+          busyComposerFingerprint(aui.composer.getState()) ===
+          submittedFingerprint
+        ) {
+          await aui.composer.reset();
+        }
+      },
+      onError: (error) => {
+        setBusySubmitError(
+          error
+            ? "Could not send this message. Your draft is still here; try sending again."
+            : null,
+        );
+      },
     });
-    void aui.composer.reset();
   };
 
   const submitBusyMessage = (event: {
@@ -863,6 +857,11 @@ const Composer: FC<{
             className="flex w-full flex-col gap-2 rounded-(--composer-radius) bg-(--composer-bg) focus-within:bg-[color-mix(in_oklab,var(--color-muted)_45%,var(--color-background))] p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[background-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
             <ComposerAttachments />
+            {busySubmitError ? (
+              <p role="alert" className="px-2 text-xs text-destructive">
+                {busySubmitError}
+              </p>
+            ) : null}
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}

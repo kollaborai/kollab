@@ -1,6 +1,5 @@
 import {
   AssistantRuntimeProvider,
-  SimpleImageAttachmentAdapter,
   type AssistantTransportConnectionMetadata,
   type ImageMessagePart,
   type ThreadMessageLike,
@@ -64,6 +63,7 @@ import {
   type TurnClock,
 } from "./turn-timing";
 import { VoiceModeProvider } from "./voice-mode";
+import { imageAttachmentAdapter } from "./components/assistant-ui/attachment-adapter";
 
 export type EngineState = {
   sessionId: string;
@@ -90,8 +90,6 @@ export type EngineState = {
 const messageConverter = createMessageConverter<ThreadMessageLike>((message) => message);
 // The converter reads convertConfig off a message: "none" ends its join group.
 type JoinableMessage = ThreadMessageLike & { convertConfig?: { joinStrategy?: "concat-content" | "none" } };
-const imageAttachmentAdapter = new SimpleImageAttachmentAdapter();
-
 const PermissionCancellationContext = createContext<{
   cancel: (expected: readonly PendingPermission[]) => Promise<void>;
   cancelling: boolean;

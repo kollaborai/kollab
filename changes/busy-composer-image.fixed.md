@@ -1,0 +1,1 @@
+- Busy-turn sends preserve pasted image attachments through adapter conversion (#busy-composer-image).
