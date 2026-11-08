@@ -1749,7 +1749,8 @@ class ContextCompactionPlugin(BasePlugin):
         """Temporary #901 containment until durable reconstruction is proven."""
         self._set_compaction_status(
             "failed",
-            "Compaction is temporarily unavailable because safe history recovery cannot be guaranteed. History was preserved.",
+            "Compaction is temporarily unavailable because safe history recovery "
+            "cannot be guaranteed. History was preserved.",
             action="Start a new session if the context budget is exhausted.",
         )
 

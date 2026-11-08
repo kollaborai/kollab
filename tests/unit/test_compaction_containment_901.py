@@ -4,7 +4,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from plugins.context_compaction_plugin import ContextCompactionPlugin, _append_jsonl_durable
+
+from plugins.context_compaction_plugin import (
+    ContextCompactionPlugin,
+    _append_jsonl_durable,
+)
 
 
 def make_plugin(tmp_path):
