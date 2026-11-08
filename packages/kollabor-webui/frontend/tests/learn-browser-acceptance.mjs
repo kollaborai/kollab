@@ -25,6 +25,9 @@ export function makeFixtures(options = {}) {
     resolveCreate = resolve;
   });
   const requests = [];
+  let discoveryFailurePending = options.discoveryFailureOnce ?? false;
+  let discoveryProgressPending = options.discoveryProgressOnce ?? false;
+  let discoveryRequests = 0;
 
   const remoteAgent = {
     name: "remote-coder",
@@ -147,6 +150,19 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint === "/sessions" && method === "GET") return json(route, session());
     if (endpoint === "/profiles") return json(route, profiles);
+    if (endpoint === "/profiles/choices") {
+      discoveryRequests += 1;
+      const more = discoveryProgressPending;
+      discoveryProgressPending = false;
+      const status = more || discoveryFailurePending ? "partial" : "ready";
+      if (!more) discoveryFailurePending = false;
+      return json(route, {
+        choices: profiles.profiles.map(({ name, provider, model }) => ({
+          profile: name, provider, model, effort: "",
+        })),
+        discovery: { review: { status, more } },
+      });
+    }
     if (endpoint === "/rosters") {
       return json(route, { workspace: "/learn-demo", default: "test", rosters: [], problems: [] });
     }
@@ -188,6 +204,7 @@ export function makeFixtures(options = {}) {
   return {
     agents,
     createPayload: () => createPayload,
+    discoveryRequests: () => discoveryRequests,
     createRequest,
     network,
     profiles,
@@ -282,7 +299,7 @@ async function main() {
       args: process.platform === "linux" ? ["--no-sandbox"] : [],
     });
 
-    const fixtures = makeFixtures();
+    const fixtures = makeFixtures({ discoveryFailureOnce: true, discoveryProgressOnce: true });
     const shell = await openPage(browser, baseUrl, fixtures);
     await shell.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await shell.page.getByRole("button", { name: "Learn", exact: true }).waitFor({ state: "visible" });
@@ -321,7 +338,15 @@ async function main() {
 
     await shell.page.getByTestId("new-session-options").click();
     await shell.page.locator("#new-session-model").click();
-    await shell.page.getByRole("option", { name: /review/ }).click();
+    const loadingMore = shell.page.getByRole("status").filter({ hasText: "Loading more model options: review" });
+    await loadingMore.waitFor({ state: "visible" });
+    const discoveryWarning = shell.page.getByRole("status").filter({ hasText: "Some model options did not load: review" });
+    await discoveryWarning.waitFor({ state: "visible" });
+    await discoveryWarning.getByRole("button", { name: "Retry" }).click();
+    await discoveryWarning.waitFor({ state: "hidden" });
+    assert.equal(fixtures.discoveryRequests(), 3);
+    await shell.page.getByRole("group", { name: "review", exact: true })
+      .getByRole("option", { name: /claude-haiku/ }).click();
     await shell.page.locator("#new-session-gem").click();
     await shell.page.getByRole("option", { name: /Local Coder/ }).click();
     const createWait = fixtures.createRequest;

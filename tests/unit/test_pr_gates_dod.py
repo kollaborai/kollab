@@ -7,6 +7,7 @@ one check run, and never posts comments.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -512,6 +513,8 @@ def _install_fake_gh(monkeypatch, calls, pull_payload, branch_tip, pages):
                 }
             return graph_pages[cursor]
         endpoint = args[1]
+        if endpoint.startswith("repos/o/r/git/trees/"):
+            return {"truncated": False, "tree": []}
         if endpoint.startswith("repos/o/r/compare/"):
             if "compare" not in pages:  # default: head contains base tip
                 return {
@@ -603,6 +606,129 @@ def test_collect_files_and_comments_read_every_page(monkeypatch):
     data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
     assert len(data.changed_files) == 101 and "late.py" in data.changed_files
     assert "late-finding" in data.review_comment_bodies
+
+
+def test_collect_reads_test_blob_from_pr_head_not_base_checkout(monkeypatch, tmp_path):
+    blob_sha = "a" * 40
+    pull = {"title": "t", "body": "Fixes #1", "base": {"ref": "main"}, "head": {"sha": HEAD_SHA}}
+    pages = {"rest": {f"repos/o/r/pulls/{PR_NUM}/files": {1: [
+        # The mutable PR listing may have seen a transient different head.
+        {"filename": "tests/test_x.py", "sha": "b" * 40, "status": "modified"},
+    ]}}}
+    _install_fake_gh(monkeypatch, [], pull, BASE_TIP, pages)
+    old_gh = pr_gates_dod._gh
+
+    def fake_gh(*args):
+        if args[1] == f"repos/o/r/git/trees/{HEAD_SHA}?recursive=1":
+            return {"truncated": False, "tree": [{"path": "tests/test_x.py", "type": "blob", "mode": "100644",
+                                                   "sha": blob_sha, "size": len(b"# F1 head test")}]}
+        return old_gh(*args)
+
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", lambda endpoint, limit: {
+        "sha": blob_sha, "size": len(b"# F1 head test"), "encoding": "base64",
+        "content": base64.b64encode(b"# F1 head test").decode(),
+    })
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_x.py").write_text("# base without the finding")
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root=str(tmp_path))
+    assert data.changed_file_contents == {"tests/test_x.py": "# F1 head test"}
+
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", lambda endpoint, limit: {
+        "sha": "b" * 40, "encoding": "base64", "content": "",
+    })
+    with pytest.raises(RuntimeError, match="invalid blob response"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM, root=str(tmp_path))
+
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", lambda endpoint, limit: {
+        "sha": blob_sha, "size": len(b"# F1 head test"), "encoding": "base64",
+        "content": base64.b64encode(b"# F1 head test").decode(),
+    })
+
+    pull_reads = 0
+
+    def changed_head(*args):
+        nonlocal pull_reads
+        if args[1] == f"repos/o/r/pulls/{PR_NUM}":
+            pull_reads += 1
+            if pull_reads == 2:
+                return {**pull, "head": {"sha": "b" * 40}}
+        return fake_gh(*args)
+
+    monkeypatch.setattr(pr_gates_dod, "_gh", changed_head)
+    with pytest.raises(RuntimeError, match="head changed"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM, root=str(tmp_path))
+
+
+def test_blob_response_is_bounded_before_json_decode(monkeypatch):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def read1(self, size): return b"x" * size
+
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
+    monkeypatch.setattr(pr_gates_dod.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    with pytest.raises(RuntimeError, match="exceeds limit"):
+        pr_gates_dod._gh_blob("fake", 8)
+
+
+def test_blob_deadline_ends_slow_stream(monkeypatch):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def read1(self, _size): return b"x"
+
+    ticks = iter((0, 1, 31))
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
+    monkeypatch.setattr(pr_gates_dod.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(pr_gates_dod.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    with pytest.raises(RuntimeError, match="timed out"):
+        pr_gates_dod._gh_blob("fake", 100)
+
+
+def test_changed_test_tree_excludes_unchanged_and_deleted_and_rejects_truncation(monkeypatch):
+    pull = {"title": "t", "body": "Fixes #1", "base": {"ref": "main"}, "head": {"sha": HEAD_SHA}}
+    _install_fake_gh(monkeypatch, [], pull, BASE_TIP, {"rest": {}})
+    old_gh = pr_gates_dod._gh
+    def entry(path, sha):
+        return {"path": path, "type": "blob", "mode": "100644", "sha": sha, "size": 1}
+    base = [entry("tests/same.py", "a" * 40), entry("tests/deleted.py", "b" * 40),
+            entry("tests/changed.py", "c" * 40)]
+    head = [entry("tests/same.py", "a" * 40), entry("tests/changed.py", "d" * 40),
+            entry("tests/added.py", "e" * 40)]
+    truncated = False
+    def fake_gh(*args):
+        if args[1] == f"repos/o/r/git/trees/{BASE_TIP}?recursive=1":
+            return {"truncated": truncated, "tree": base}
+        if args[1] == f"repos/o/r/git/trees/{HEAD_SHA}?recursive=1":
+            return {"truncated": False, "tree": head}
+        return old_gh(*args)
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", lambda endpoint, limit: {
+        "sha": endpoint.rsplit("/", 1)[1], "size": 1, "encoding": "base64", "content": "eA==",
+    })
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM)
+    assert data.changed_file_contents == {"tests/changed.py": "x", "tests/added.py": "x"}
+    truncated = True
+    with pytest.raises(RuntimeError, match="incomplete commit tree"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM)
+
+
+def test_oversized_test_tree_entry_is_rejected_before_blob_fetch(monkeypatch):
+    pull = {"title": "t", "body": "Fixes #1", "base": {"ref": "main"}, "head": {"sha": HEAD_SHA}}
+    _install_fake_gh(monkeypatch, [], pull, BASE_TIP, {"rest": {}})
+    old_gh = pr_gates_dod._gh
+    def fake_gh(*args):
+        if args[1] == f"repos/o/r/git/trees/{HEAD_SHA}?recursive=1":
+            return {"truncated": False, "tree": [{"path": "tests/huge.py", "type": "blob", "mode": "100644",
+                                                   "sha": "a" * 40, "size": 1_000_001}]}
+        return old_gh(*args)
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    def unexpected_blob(*_args):
+        pytest.fail("oversized blob must not be fetched")
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", unexpected_blob)
+    with pytest.raises(RuntimeError, match="invalid test blob size"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM)
 
 
 def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(monkeypatch):
@@ -1227,7 +1353,7 @@ def test_main_audits_accepted_exact_reference_suppression(tmp_path, monkeypatch,
         reviews=(approved_review(),),
         changed_file_contents={},
     )
-    monkeypatch.setattr(pr_gates_dod, "collect_pr_data", lambda *_args: data)
+    monkeypatch.setattr(pr_gates_dod, "collect_pr_data", lambda *_args, **_kwargs: data)
     assert pr_gates_dod.main(
         ["--config", str(cfg), "--repo", "o/r", "--pr", "1"]
     ) == 0

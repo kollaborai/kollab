@@ -1,5 +1,6 @@
 """Profile management routes."""
 
+import asyncio
 import logging
 import time
 from dataclasses import replace
@@ -221,6 +222,49 @@ async def list_profiles():
         "providers": [provider.value for provider in ProviderType],
         "invalid_profiles": getattr(pm, "get_invalid_profiles", lambda: {})(),
     }
+
+
+@router.get("/choices")
+async def list_choices():
+    """Every provider profile x model x effort to start or switch a session
+    on, for the web UI's searchable model picker. ACP choices are discovered
+    in a short-lived, isolated session when a harness has no fresh options."""
+    from kollabor_ai.loadout_manager import LoadoutManager
+    from kollabor_config import ConfigService
+    from kollabor_config.config_utils import get_global_config_path
+
+    config = ConfigService(get_global_config_path(), fast_mode=True)  # saved loadouts live here
+    manager = LoadoutManager(_get_profile_manager(), config=config)
+    profiles = manager.provider_profiles()
+
+    async def refresh_catalogs() -> None:
+        try:  # a cold or expired catalog lists only each profile's own model
+            await asyncio.wait_for(manager.refresh_catalogs(), 8.0)
+        except Exception as exc:  # noqa: BLE001 - cached and bundled models still list
+            logger.warning("model picker: catalog refresh failed: %s", type(exc).__name__)
+
+    from kollabor.llm.acp_discovery import discover_profiles
+
+    catalog_task = asyncio.create_task(refresh_catalogs())
+    discovery_task = asyncio.create_task(discover_profiles(profiles))
+    try:
+        _catalog_result, discovered = await asyncio.gather(catalog_task, discovery_task)
+    except asyncio.CancelledError:
+        catalog_task.cancel()
+        discovery_task.cancel()
+        await asyncio.gather(catalog_task, discovery_task, return_exceptions=True)
+        raise
+
+    acp_options = {name: outcome.options for name, outcome in discovered.items()}
+    discovery = {
+        name: {
+            "status": outcome.status,
+            "more": outcome.more,
+            **({"message": outcome.message} if outcome.message else {}),
+        }
+        for name, outcome in discovered.items()
+    }
+    return {"choices": manager.list_choices(acp_options), "discovery": discovery}
 
 
 @router.get("/{name}")
