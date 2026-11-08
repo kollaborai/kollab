@@ -1013,6 +1013,7 @@ class ACPOrchestrator:
             # later. Do not advertise a receipt until that append succeeds and
             # the same session and history owners still contain the row.
             receipt_session = getattr(logger_service, "session_id", None)
+            receipt_generation = getattr(logger_service, "_session_generation", None)
             manager_messages = getattr(manager, "messages", None)
             manager_row = next(
                 (row for row in (manager_messages or []) if row.get("uuid") == self._parents.get(request_id)),
@@ -1028,6 +1029,9 @@ class ACPOrchestrator:
                         and isinstance(record_uuid, str) and record_uuid
                         and getattr(record_uuid, "sync_confirmed", False) is True
                         and getattr(record_uuid, "session_id", None) == receipt_session
+                        and isinstance(receipt_generation, int)
+                        and receipt_generation == getattr(logger_service, "_session_generation", None)
+                        and receipt_generation == getattr(record_uuid, "logger_generation", None)
                         and getattr(logger_service, "session_id", None) == receipt_session
                         and getattr(manager, "current_session_id", None) == receipt_session
                         and getattr(manager, "messages", None) is manager_messages

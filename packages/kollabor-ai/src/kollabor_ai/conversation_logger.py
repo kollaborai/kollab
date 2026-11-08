@@ -37,10 +37,11 @@ class SyncedUserLogId(str):
     This is not a session generation, sequence cursor, or universal crash proof.
     """
 
-    def __new__(cls, value: str, session_id: str, sync_confirmed: bool):
+    def __new__(cls, value: str, session_id: str, sync_confirmed: bool, logger_generation: int):
         result = super().__new__(cls, value)
         result.session_id = session_id
         result.sync_confirmed = sync_confirmed
+        result.logger_generation = logger_generation
         return result
 
 
@@ -165,6 +166,7 @@ class KollaborConversationLogger:
         self.raw_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Session management - use memorable session names
+        self._session_generation = 0
         self.session_id = generate_session_name()
         self.session_file = self.conversations_dir / f"{self.session_id}.jsonl"
 
@@ -270,6 +272,7 @@ class KollaborConversationLogger:
         Args:
             new_session_id: The new session identifier
         """
+        self._session_generation += 1
         self.session_id = new_session_id
         self.session_file = self.conversations_dir / f"{new_session_id}.jsonl"
         self._reparent = {}
@@ -501,11 +504,12 @@ class KollaborConversationLogger:
         # Explicit old-session ACP results instead use the path selected from
         # their session_id above.
         bound_file = self.session_file
+        bound_generation = self._session_generation
         async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
             async with _async_session_file_lock(_session_file_write_lock_path(path)):
                 # reset_session may replace the current binding while we wait on
                 # either lock. Do not let the captured row land in a new session.
-                if own and self.session_file != bound_file:
+                if own and (self.session_file != bound_file or self._session_generation != bound_generation):
                     logger.warning(
                         "dropped a %s JSONL append: session replaced while the "
                         "append waited on the write lock (%s)",
@@ -791,6 +795,7 @@ class KollaborConversationLogger:
         """Log user message with intelligence features."""
         message_uuid = str(uuid4())
         target_session = session_id or self.session_id
+        logger_generation = self._session_generation
 
         message: Dict[str, Any] = {
             "parentUuid": parent_uuid,
@@ -826,7 +831,7 @@ class KollaborConversationLogger:
         # Save updated conversation memory
         self._save_conversation_memory()
 
-        return SyncedUserLogId(message_uuid, target_session, sync_confirmed)
+        return SyncedUserLogId(message_uuid, target_session, sync_confirmed, logger_generation)
 
     async def log_assistant_message(
         self,

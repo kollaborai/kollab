@@ -95,3 +95,25 @@ async def test_acp_directory_sync_failure_does_not_attach_receipt(tmp_path, monk
     assert "durable_input_receipts" not in manager.messages[0]["metadata"]
     assert "durable_input_receipts" not in llm.conversation_history[0].metadata
     assert "synthetic input" in logger.session_file.read_text()
+
+
+@pytest.mark.asyncio
+async def test_acp_same_session_reset_withholds_receipt(tmp_path, monkeypatch):
+    orchestrator, manager, logger, llm = make_rig(tmp_path, monkeypatch)
+    started, release = asyncio.Event(), asyncio.Event()
+    original = logger.log_user_message
+
+    async def blocked(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    logger.log_user_message = blocked
+    orchestrator._record_user("synthetic-request", "synthetic input", "rpc", None, track_completion=True)
+    tasks = tuple(orchestrator._history_tasks)
+    await started.wait()
+    logger.reset_session(logger.session_id)
+    release.set()
+    await asyncio.gather(*tasks)
+    assert "durable_input_receipts" not in manager.messages[0]["metadata"]
+    assert "durable_input_receipts" not in llm.conversation_history[0].metadata

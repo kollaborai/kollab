@@ -2412,6 +2412,7 @@ class LLMService:
         admitted_parent_uuid = admission_parent_uuid
         durable_receipts: tuple[NativeAdmissionReceipt, ...] = ()
         receipt_session = getattr(self.conversation_logger, "session_id", None)
+        receipt_generation = getattr(self.conversation_logger, "_session_generation", None)
         try:
             user_uuid = await self.conversation_logger.log_user_message(
                 display_text, parent_uuid=admission_parent_uuid
@@ -2438,6 +2439,9 @@ class LLMService:
                 and user_uuid
                 and getattr(user_uuid, "sync_confirmed", False) is True
                 and getattr(user_uuid, "session_id", None) == receipt_session
+                and isinstance(receipt_generation, int)
+                and receipt_generation == getattr(self.conversation_logger, "_session_generation", None)
+                and receipt_generation == getattr(user_uuid, "logger_generation", None)
             ):
                 durable_receipts = (NativeAdmissionReceipt(receipt_session, user_uuid),)
 

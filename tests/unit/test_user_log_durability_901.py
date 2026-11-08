@@ -87,3 +87,19 @@ async def test_failed_rollback_sync_reports_indeterminate(tmp_path, monkeypatch)
     with pytest.raises(OSError, match="rollback is indeterminate"):
         await logger.log_user_message("synthetic")
     assert logger.session_file.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_same_session_reset_rejects_waiting_append(tmp_path):
+    import asyncio
+
+    logger = synthetic_logger(tmp_path)
+    session_id = logger.session_id
+    await logger._write_lock.acquire()
+    task = asyncio.create_task(logger.log_user_message("synthetic waiting"))
+    await asyncio.sleep(0)
+    logger.reset_session(session_id)
+    logger._write_lock.release()
+    with pytest.raises(OSError, match="session replaced"):
+        await task
+    assert not logger.session_file.exists()

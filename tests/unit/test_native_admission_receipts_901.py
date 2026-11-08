@@ -142,3 +142,42 @@ def test_native_receipt_is_not_issued_if_logger_session_changes():
         assert items[0].durable_receipts == ()
 
     asyncio.run(run())
+
+
+def test_same_session_reset_after_append_withholds_native_receipt(tmp_path):
+    import asyncio
+
+    async def run():
+        service, _ = await _native_route_service("native", acp_active=False)
+        log = KollaborConversationLogger(tmp_path)
+        log.reset_session("synthetic-reset")
+        log._get_working_directory = lambda: "/synthetic"
+        log._get_git_branch = lambda: "synthetic"
+        log._get_session_context = lambda: {}
+        log._get_project_awareness = lambda: {}
+        log._analyze_user_context = lambda _: {}
+        log._save_conversation_memory = lambda: None
+        original = log.log_user_message
+
+        async def reset_after_log(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            log.reset_session(log.session_id)
+            return result
+
+        log.log_user_message = reset_after_log
+        service.conversation_logger = log
+        service._turn_serial = 0
+        service._cursor_winner_serial = -1
+        service._continue_serial = None
+        items = []
+
+        async def enqueue(item):
+            items.append(item)
+            return True
+
+        service._enqueue_with_overflow_strategy = enqueue
+        assert (await service.process_user_input("synthetic"))["status"] == "queued"
+        assert items[0].durable_receipts == ()
+        assert log.session_file.exists()
+
+    asyncio.run(run())
