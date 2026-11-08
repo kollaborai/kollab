@@ -97,7 +97,8 @@ not trimmed by a fixed message count.
 ### Temporary compaction containment (#901)
 
 Compaction is temporarily unavailable because a concurrent message can be lost
-from reconstructed context. Existing conversation history is preserved. Manual,
+from reconstructed context. Refused new compactions leave current history unchanged.
+Existing v1 compaction records can still replay with missing history. Manual,
 model-requested, automatic, and emergency compaction are refused. Normal turns
 below the context hard cap continue; requests and tool calls at the cap stop and
 require a new session. This containment does not repair existing compaction
