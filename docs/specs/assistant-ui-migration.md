@@ -305,7 +305,9 @@ Opening a chat answers from the engine's mirror at once (`GET
 /sessions/{id}/history`); a background refresh then asks the daemon. A caller
 that waits (opening the agent, a turn's end, the synced claim) gives the daemon
 `HISTORY_REFRESH_TIMEOUT_SECONDS` (0.75 s) for the history lock and again for
-the answer, and otherwise keeps the cached mirror. The background refresh has no
+the answer, and otherwise keeps the cached mirror; a notifying refresh that got
+no answer in that time (a turn's end behind an older answer, or a slow remote)
+is handed to the background refresh, so the finished turn is still announced. The background refresh has no
 caller waiting, so it lets the daemon answer (`HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS`,
 30 s, normally ended first by the state client's own RPC timeout): an agent on
 another computer answers over the relay in seconds. Until the daemon has answered

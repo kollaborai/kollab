@@ -652,6 +652,7 @@ class EngineSession:
         notify: bool = False,
         stale_raises: bool = False,
         timeout: Optional[float] = None,
+        requeue: bool = True,
     ) -> List[Dict[str, Any]]:
         """Pull the daemon's conversation into the local mirror.
 
@@ -661,6 +662,10 @@ class EngineSession:
 
         ``timeout``: how long to wait for each answer; default
         ``HISTORY_REFRESH_TIMEOUT_SECONDS``, for callers that are waiting.
+        ``requeue``: a notifying refresh that got no answer in that time (the
+        lock was busy, the daemon slow) is handed to the background refresh,
+        so what it would have announced still reaches the page. The
+        background refresh itself passes False.
 
         Subscribers hear ``history_updated`` when the answer replaces a disk
         seed or an unconfirmed empty mirror a page was shown (whoever asked)
@@ -673,6 +678,9 @@ class EngineSession:
         try:
             await asyncio.wait_for(self._history_lock.acquire(), timeout=wait)
         except asyncio.TimeoutError as exc:
+            self._history_refresh_failed = True
+            if notify and requeue:
+                self._schedule_refresh()
             if stale_raises:
                 raise HistoryRefreshUnavailable(
                     f"timed out after {wait}s waiting for another history refresh"
@@ -681,12 +689,14 @@ class EngineSession:
                 "session %s history refresh busy; using cached history",
                 self.session_id,
             )
-            self._history_refresh_failed = True
             return self.history
         try:
-            return await self._refresh_history_locked(notify, stale_raises, wait)
+            history = await self._refresh_history_locked(notify, stale_raises, wait)
         finally:
             self._history_lock.release()
+        if notify and requeue and getattr(self, "_history_refresh_failed", False):
+            self._schedule_refresh()
+        return history
 
     async def _refresh_history_locked(
         self, notify: bool, stale_raises: bool, wait: float,
@@ -937,6 +947,7 @@ class EngineSession:
                     await self.refresh_history(
                         notify=announce,
                         timeout=HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS,
+                        requeue=False,
                     )
                     if (
                         not getattr(self, "_history_authoritative", False)
