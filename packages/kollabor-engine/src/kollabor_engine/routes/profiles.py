@@ -209,6 +209,48 @@ class _DictConfig:
         return self._data.get(key, default)
 
 
+def _loadout_config():
+    """The saved config: loadouts and the default loadout live there."""
+    from kollabor_config import ConfigService
+    from kollabor_config.config_utils import get_global_config_path
+
+    return ConfigService(get_global_config_path(), fast_mode=True)
+
+
+def _default_loadout(pm: ProfileManager) -> Optional[Dict[str, str]]:
+    """The loadout the terminal starts on (``kollabor.llm.default_loadout``).
+
+    A web session always names a profile, which makes the terminal skip its
+    default, so the form needs this to start on it (#957). ``None`` when none is
+    set or it names no saved loadout, as in the terminal; never an error, the
+    profile list must still answer.
+    """
+    from kollabor_ai.loadout_manager import (
+        LoadoutManager,
+        acp_loadout_model,
+        loadout_sendable_effort,
+    )
+
+    try:
+        manager = LoadoutManager(pm, config=_loadout_config())
+        name = manager.get_default()
+        loadout = manager.resolve(name)[0] if name else None
+        profile = pm.get_profile(loadout.provider_profile) if loadout else None
+        if loadout is None or profile is None:
+            return None
+        harness = profile.get_provider() == "acp"
+        return {
+            "name": loadout.name,
+            "profile": loadout.provider_profile,
+            "provider": profile.get_provider(),
+            "model": acp_loadout_model(loadout, profile) if harness else loadout.model,
+            "effort": loadout.effort if harness else loadout_sendable_effort(pm, loadout),
+        }
+    except Exception as exc:  # noqa: BLE001 - a broken config must not hide the profiles
+        logger.warning("default loadout: could not read it: %s", type(exc).__name__)
+        return None
+
+
 @router.get("")
 async def list_profiles():
     """List all available profiles."""
@@ -221,6 +263,7 @@ async def list_profiles():
         "count": len(profiles),
         "providers": [provider.value for provider in ProviderType],
         "invalid_profiles": getattr(pm, "get_invalid_profiles", lambda: {})(),
+        "default_loadout": _default_loadout(pm),
     }
 
 
