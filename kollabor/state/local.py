@@ -707,11 +707,11 @@ class LocalStateService(StateService):
             acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
             if acp is None or getattr(acp, "active", False) is not True:
                 return snapshot
+            from kollabor_ai.acp_options import find_option
+
             harness_model = self._acp_harness_model()
             options = acp.advertised_config_options()
-            effort = next((o for o in options
-                           if o.get("id") == "effort"
-                           or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
+            effort = find_option(options, "thought_level") or find_option(options, "effort")
             harness_effort = str(effort["currentValue"]) if (
                 effort is not None and effort.get("currentValue") is not None
             ) else ""
@@ -1358,10 +1358,10 @@ class LocalStateService(StateService):
     async def _apply_acp_effort(orchestrator: Any, effort: str) -> None:
         """Send an effort the harness advertises; otherwise raise with the choices."""
         from kollabor.llm.acp_orchestrator import option_values
+        from kollabor_ai.acp_options import find_option
 
-        option = next((o for o in orchestrator.advertised_config_options()
-                       if o.get("id") == "effort"
-                       or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
+        options = orchestrator.advertised_config_options()
+        option = find_option(options, "thought_level") or find_option(options, "effort")
         offered = option_values(option)
         if option is None or effort not in offered:
             raise ValueError(
@@ -1764,20 +1764,11 @@ class LocalStateService(StateService):
                     # actually applied the loadout before the provider
                     # profile is persisted.
                     try:
+                        from kollabor_ai.acp_options import find_option
+
                         options = orchestrator.advertised_config_options()
-                        model_opt = next(
-                            (o for o in options
-                             if str(o.get("category") or "").lower() == "model"
-                             or o.get("id") == "model"),
-                            None,
-                        )
-                        effort_opt = next(
-                            (o for o in options
-                             if str(o.get("category") or "").lower()
-                             in {"thought_level", "effort"}
-                             or o.get("id") == "effort"),
-                            None,
-                        )
+                        model_opt = find_option(options, "model")
+                        effort_opt = find_option(options, "thought_level") or find_option(options, "effort")
                         if loadout_model and (
                             not model_opt
                             or model_opt.get("currentValue") != loadout_model

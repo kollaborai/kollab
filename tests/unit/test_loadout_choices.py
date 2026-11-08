@@ -306,6 +306,10 @@ async def test_an_acp_session_reports_the_harness_effort(monkeypatch):
     options[:] = [{"id": "model", "category": "_custom", "currentValue": "actual-harness-model"}]
     snapshot = await state.get_active_profile()
     assert (snapshot.model, snapshot.effort) == ("actual-harness-model", "")
+    # F5: id-only effort_level must survive the live snapshot too.
+    options.append({"id": "effort_level", "currentValue": "high"})
+    snapshot = await state.get_active_profile()
+    assert (snapshot.model, snapshot.effort) == ("actual-harness-model", "high")
     acp.active = False  # a native turn: the profile's own
     snapshot = await state.get_active_profile()
     assert (snapshot.model, snapshot.effort) == ("saved-model", "high")
