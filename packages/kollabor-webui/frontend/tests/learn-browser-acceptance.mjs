@@ -115,7 +115,8 @@ export function makeFixtures(options = {}) {
     external: true,
   };
   let remoteSessionOpened = false;
-  const pickFails = options.pickFails ?? false;
+  // A number: that many profile switches fail, then they work. true: every one fails.
+  let pickFailuresLeft = options.pickFails === true ? Infinity : (options.pickFails ?? 0);
   const session = () => {
     const sessions = createdSession ? [createdSession] : initialSessions;
     return {
@@ -191,8 +192,18 @@ export function makeFixtures(options = {}) {
     if (endpoint.endsWith("/events")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
     }
-    if (pickFails && method === "POST" && endpoint.endsWith("/profile")) {
-      return json(route, { detail: "The agent could not switch models." }, 502);
+    if (method === "POST" && endpoint.endsWith("/profile")) {
+      if (pickFailuresLeft > 0) {
+        pickFailuresLeft -= 1;
+        return json(route, { detail: "The agent could not switch models." }, 502);
+      }
+      // A session put on a pick answers with what it now runs, as the engine does.
+      const body = request.postDataJSON();
+      return json(route, { ...(createdSession ?? {}), profile: body.name, model: body.model, effort: body.effort });
+    }
+    if (endpoint === "/config" && options.engineVersion) return json(route, { engine_version: options.engineVersion });
+    if (endpoint === "/update/check" && options.update) {
+      return json(route, { current_version: "0.0.1", available: true, release: options.update, notes: [] });
     }
     if (endpoint.startsWith("/sessions/")) {
       const requestedId = endpoint.split("/")[2];
@@ -443,8 +454,9 @@ async function main() {
     await delayed.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
     await delayed.context.close();
 
-    // A pick that fails after New Session started the chat leaves it on another model: say so in the chat (#956).
-    const failing = await openPage(browser, baseUrl, makeFixtures({ pickFails: true }));
+    // A pick that fails after New Session started the chat leaves it on another model: say so in one compact
+    // line and let the person try again (#956).
+    const failing = await openPage(browser, baseUrl, makeFixtures({ pickFails: 1 }));
     await failing.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await failing.page.getByTestId("new-session-options").click();
     await failing.page.locator("#new-session-model").click();
@@ -453,10 +465,46 @@ async function main() {
     await failing.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
     await failing.page.getByRole("complementary", { name: "Session Controls", exact: true })
       .getByText("Learn regression session", { exact: true }).waitFor({ state: "visible", timeout: 15_000 });
-    const pickNotice = failing.page.getByRole("alert").filter({ hasText: "without the picked model" });
+    const pickNotice = failing.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
     await pickNotice.waitFor({ state: "visible", timeout: 5_000 });
-    assert.match(await pickNotice.innerText(), /Started on review without the picked model: .*could not switch models/);
+    const pickText = await pickNotice.innerText();
+    assert.match(pickText, /Couldn't switch to claude-haiku\. .*could not switch models/);
+    // What a person reads has no issue numbers, versions or build ids.
+    assert.doesNotMatch(pickText, /#\d|\bv?\d+\.\d+\.\d+|[0-9a-f]{7,}/);
+    assert.ok((await pickNotice.boundingBox()).height <= 40, "the notice is one compact line at desktop width");
+    // Try Again puts the session on the pick; the fixture answers it this time, so the notice goes away.
+    await pickNotice.getByRole("button", { name: "Try Again", exact: true }).click();
+    await pickNotice.waitFor({ state: "hidden", timeout: 5_000 });
+    assert.equal(
+      failing.fixture.requests.filter((request) => request.method === "POST" && request.endpoint.endsWith("/profile")).length,
+      2,
+    );
     await failing.context.close();
+
+    // A page and an engine on different versions: one compact line with a Reload button. The versions
+    // are a hover away, never in the line.
+    const mismatch = await openPage(browser, baseUrl, makeFixtures({ engineVersion: "999.1.0+deadbeef" }));
+    await mismatch.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    const versionNotice = mismatch.page.getByRole("status")
+      .filter({ has: mismatch.page.getByRole("button", { name: "Reload", exact: true }) });
+    await versionNotice.waitFor({ state: "visible", timeout: 5_000 });
+    assert.doesNotMatch(await versionNotice.innerText(), /999|deadbeef|\bv\d/);
+    assert.match(await versionNotice.getAttribute("title"), /999\.1\.0\+deadbeef/);
+    assert.ok((await versionNotice.boundingBox()).height <= 40, "the notice is one compact line at desktop width");
+    await versionNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await versionNotice.waitFor({ state: "hidden", timeout: 5_000 });
+    await mismatch.context.close();
+
+    // The update notice is the same line, with its two actions.
+    const updating = await openPage(browser, baseUrl, makeFixtures({ update: { version: "999.2.0", url: "https://example.invalid/notes" } }));
+    await updating.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    const updateNotice = updating.page.getByRole("status").filter({ hasText: "999.2.0" });
+    await updateNotice.getByRole("button", { name: "Update now", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
+    await updateNotice.getByRole("link", { name: "Release notes", exact: true }).waitFor({ state: "visible" });
+    assert.ok((await updateNotice.boundingBox()).height <= 40, "the notice is one compact line at desktop width");
+    await updateNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await updateNotice.waitFor({ state: "hidden", timeout: 5_000 });
+    await updating.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
       const captures = [
