@@ -4301,6 +4301,8 @@ class LocalStateService(StateService):
         }
         saved_stats = getattr(conv_mgr, "_session_stats", None)
         saved_stats_values = dict(saved_stats) if isinstance(saved_stats, dict) else None
+        live_stats = getattr(llm, "session_stats", None)
+        live_stats_values = dict(live_stats) if isinstance(live_stats, dict) else None
 
         # Load the target session.
         previous_messages = getattr(conv_mgr, "messages", None)
@@ -4333,6 +4335,12 @@ class LocalStateService(StateService):
 
             new_session_id = generate_session_name()
             conv_mgr.current_session_id = new_session_id
+            # Use the same count as the converted live history in the saved base.
+            message_count = sum(isinstance(message, dict) for message in raw_messages)
+            if isinstance(live_stats, dict):
+                live_stats["messages"] = message_count
+            if isinstance(saved_stats, dict):
+                saved_stats["messages"] = message_count
             # Persist before moving logger, API, or live history ownership. A
             # refused destination must leave the previous conversation intact.
             try:
@@ -4345,6 +4353,9 @@ class LocalStateService(StateService):
                 if saved_stats_values is not None:
                     saved_stats.clear()
                     saved_stats.update(saved_stats_values)
+                if live_stats_values is not None:
+                    live_stats.clear()
+                    live_stats.update(live_stats_values)
                 raise ValueError(f"failed to persist resumed session {new_session_id!r}")
             mark_changed()
 
@@ -4429,7 +4440,13 @@ class LocalStateService(StateService):
         if uses_acp:
             # Read the original harness binding, but open/save the continued
             # session only after all native conversation owners have its new ID.
-            await self._restore_conversation_acp(acp, session_id)
+            try:
+                await self._restore_conversation_acp(acp, session_id)
+            except Exception as exc:
+                raise ValueError(
+                    "The resumed conversation was saved and selected, but ACP could not reopen. "
+                    "Reopen the harness for the selected conversation before continuing."
+                ) from exc
 
         header = f"--- Resumed: {session_id[:20]}... as {new_session_id} ---"
         success_message = f"[ok] Resumed: {new_session_id}. Continue below."

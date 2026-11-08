@@ -179,3 +179,82 @@ def test_branch_modal_displays_save_failure():
     data = {"command": {"action": "branch_execute", "metadata": {"session_id": "synthetic", "message_index": 0}}}
     result = asyncio.run(plugin._handle_modal_command(data, None))
     assert "failed to persist branched session" in result["display_messages"][0][1]
+
+
+def test_resume_persists_normalized_message_count(tmp_path):
+    import asyncio
+
+    from kollabor.state.local import LocalStateService
+
+    writer = manager(tmp_path)
+    writer.bind_session_stats({"messages": 91})
+    writer.add_message("user", "first synthetic")
+    writer.add_message("assistant", "second synthetic")
+    assert writer.save_session("target")
+    current = manager(tmp_path)
+    stats = {"messages": 7}
+    current.bind_session_stats(stats)
+    llm = SimpleNamespace(conversation_manager=current, conversation_history=[], session_stats=stats)
+    result = asyncio.run(LocalStateService(llm, None).resume_conversation("target"))
+    assert stats["messages"] == 2
+    restored = manager(tmp_path)
+    restored_stats = {}
+    restored.bind_session_stats(restored_stats)
+    assert restored.load_session(result["new_session_id"])
+    assert restored_stats["messages"] == 2
+
+
+def test_refused_resume_restores_message_counter(tmp_path, monkeypatch):
+    import asyncio
+
+    from kollabor.state.local import LocalStateService
+
+    writer = manager(tmp_path)
+    writer.bind_session_stats({"messages": 91})
+    writer.add_message("user", "target synthetic")
+    assert writer.save_session("target")
+    current = manager(tmp_path)
+    stats = {"messages": 7, "input_tokens": 12}
+    current.bind_session_stats(stats)
+    llm = SimpleNamespace(conversation_manager=current, conversation_history=[], session_stats=stats)
+    monkeypatch.setattr(current, "save_session", lambda _: False)
+    with pytest.raises(ValueError, match="persist resumed session"):
+        asyncio.run(LocalStateService(llm, None).resume_conversation("target"))
+    assert stats == {"messages": 7, "input_tokens": 12}
+
+
+def test_resume_acp_restore_failure_reports_saved_selected_conversation(tmp_path):
+    import asyncio
+    from contextlib import nullcontext
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kollabor.state.local import LocalStateService
+
+    writer = manager(tmp_path)
+    writer.add_message("user", "target synthetic")
+    assert writer.save_session("target")
+    current = manager(tmp_path)
+    current.current_session_id = "current"
+    acp = SimpleNamespace(
+        active=True,
+        transition=lambda: nullcontext(),
+        close=AsyncMock(),
+        restore=AsyncMock(side_effect=RuntimeError("synthetic restore failure")),
+        startup_error=None,
+    )
+    bus = SimpleNamespace(get_service=lambda name: acp if name == "acp_orchestrator" else None)
+    logger = SimpleNamespace(reset_session=MagicMock())
+    api = SimpleNamespace(set_session_id=MagicMock())
+    history = []
+    llm = SimpleNamespace(
+        conversation_manager=current, conversation_logger=logger, api_service=api, conversation_history=history
+    )
+    with pytest.raises(ValueError, match="saved and selected.*ACP could not reopen"):
+        asyncio.run(LocalStateService(llm, None, event_bus=bus).resume_conversation("target"))
+    selected = current.current_session_id
+    assert selected != "current"
+    assert (tmp_path / f"{selected}.jsonl").exists()
+    assert [message.content for message in history] == ["target synthetic"]
+    logger.reset_session.assert_called_once_with(selected)
+    api.set_session_id.assert_called_once_with(selected)
+    acp.close.assert_awaited_once()
