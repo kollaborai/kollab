@@ -170,6 +170,10 @@ describe("thread Composer busy-send wiring", () => {
     const harness = setupComposer({ text: "describe this", attachments: [attachment] });
     const finalize = vi.spyOn(imageAttachmentAdapter, "send");
     const event = submitEvent();
+    expect(harness.form.props.onSubmit).toHaveProperty(
+      "name",
+      "handleComposerSubmit",
+    );
 
     await (harness.form.props.onSubmit as (event: SubmitEvent) => Promise<void>)(event);
 
@@ -194,6 +198,10 @@ describe("thread Composer busy-send wiring", () => {
     const harness = setupComposer({ text: "", attachments: [attachment] });
     const finalize = vi.spyOn(imageAttachmentAdapter, "send");
     const event = submitEvent();
+    expect(harness.steerButton.props.onClick).toHaveProperty(
+      "name",
+      "submitBusyMessage",
+    );
 
     await (harness.steerButton.props.onClick as (event: SubmitEvent) => Promise<void>)(event);
 
