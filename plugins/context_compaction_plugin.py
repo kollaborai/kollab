@@ -52,6 +52,7 @@ def _append_jsonl_durable(target: str, record: Dict[str, Any]) -> Optional[str]:
     otherwise the sidecar path that now holds it. Raises only if even the
     sidecar write fails, so a broken disk still fails loudly.
     """
+    raise RuntimeError("Compaction persistence is temporarily disabled (#901)")
     line = json.dumps(record) + "\n"
     for attempt in range(2):
         try:
@@ -831,6 +832,8 @@ class ContextCompactionPlugin(BasePlugin):
         sub = str(args[0]).lower() if args else ""
 
         if sub in ("", "now"):
+            self._refuse_unsafe_compaction()
+            return self._compaction_status_message
             remote = self._remote_state()
             if remote is not None:
                 # Attach client: history, ledger and the LLM loop live in the
@@ -1740,10 +1743,20 @@ class ContextCompactionPlugin(BasePlugin):
     # Model-first compaction
     # ------------------------------------------------------------------
 
+    def _refuse_unsafe_compaction(self) -> None:
+        """Temporary #901 containment until durable reconstruction is proven."""
+        self._set_compaction_status(
+            "failed",
+            "Compaction is temporarily unavailable because safe history recovery cannot be guaranteed. History was preserved.",
+            action="Start a new session if the context budget is exhausted.",
+        )
+
     def _start_compaction(
         self, reason: str = "threshold", *, force: bool = False
     ) -> bool:
         """Spawn one background compaction run. False if one can't start."""
+        self._refuse_unsafe_compaction()
+        return False
         if self._compaction_in_progress or (
             self._disabled_for_session and not force
         ):
@@ -1767,6 +1780,8 @@ class ContextCompactionPlugin(BasePlugin):
 
     async def _start_manual_compaction(self, ask: bool) -> str:
         """/compact and /compact now, run where the history lives."""
+        self._refuse_unsafe_compaction()
+        return self._compaction_status_message
         if self._disabled_for_session:
             return "compaction is disabled for this session (3 failed runs)"
         if self._compaction_in_progress:
@@ -2018,6 +2033,9 @@ class ContextCompactionPlugin(BasePlugin):
                 error=message,
             )
 
+        self._refuse_unsafe_compaction()
+        return failure(self._compaction_status_message, self._compaction_status_action, clear_model_notes=True)
+
         if self._compaction_in_progress:
             return failure(
                 "Compaction is already running; this request was not retried.",
@@ -2174,8 +2192,7 @@ class ContextCompactionPlugin(BasePlugin):
             return self._context_budget_cancellation(
                 data,
                 event,
-                "Context compaction could not reduce the prompt below the configured "
-                "budget before the next model request.",
+                "Compaction is temporarily unavailable; the model request was stopped at the context budget.",
             )
         return data
 
@@ -2192,8 +2209,7 @@ class ContextCompactionPlugin(BasePlugin):
             return self._context_budget_cancellation(
                 data,
                 event,
-                "Context compaction could not reduce the prompt below the configured "
-                "budget; the tool call was stopped to avoid an API context overflow.",
+                "Compaction is temporarily unavailable; the tool call was stopped at the context budget.",
             )
         return data
 
@@ -2213,7 +2229,7 @@ class ContextCompactionPlugin(BasePlugin):
         self._set_compaction_status(
             "failed",
             reason,
-            action="Run /compact now or start a new session before continuing.",
+            action="Compaction is temporarily unavailable; start a new session before continuing.",
         )
         return result
 
@@ -2231,6 +2247,9 @@ class ContextCompactionPlugin(BasePlugin):
         current_tokens = self._outgoing_prompt_tokens(history)
         if current_tokens < hard_cap:
             return True
+
+        self._refuse_unsafe_compaction()
+        return False
 
         signature = self._history_signature(history)
         if (
@@ -2416,6 +2435,9 @@ class ContextCompactionPlugin(BasePlugin):
         unavailable, a concise extract of recent user/assistant messages plus
         the capped live-task excerpts is enough to safely continue.
         """
+
+        self._refuse_unsafe_compaction()
+        return False
 
         rollover_started_at = time.perf_counter()
         history = self._get_conversation_history() or []
@@ -2679,6 +2701,11 @@ class ContextCompactionPlugin(BasePlugin):
 
         if self._pending_compaction is None:
             return data
+        self._pending_compaction = None
+        self._pending_session_id = None
+        self._pre_compaction_len = 0
+        self._refuse_unsafe_compaction()
+        return data
 
         history = self._get_conversation_history()
         if not history:
@@ -3302,6 +3329,9 @@ class ContextCompactionPlugin(BasePlugin):
 
     async def _run_compaction(self) -> None:
         """Background task: summarize old messages and stage compaction."""
+        self._refuse_unsafe_compaction()
+        self._compaction_in_progress = False
+        return
         staged = False
         round_started_at = time.perf_counter()
         round_number = self._compaction_round + 1
@@ -4164,6 +4194,8 @@ class ContextCompactionPlugin(BasePlugin):
 
         Returns the checkpoint filename, or None on failure.
         """
+        return None  # Temporary #901 containment: do not write checkpoints.
+
         if not self._conversation_logger:
             return None
 
@@ -4200,6 +4232,7 @@ class ContextCompactionPlugin(BasePlugin):
         message_count: int,
     ) -> None:
         """Append a checkpoint record to the main session JSONL."""
+        return  # Temporary #901 containment.
         if not self._conversation_logger:
             return
 
@@ -4250,6 +4283,8 @@ class ContextCompactionPlugin(BasePlugin):
         from disk — the in-memory summary_message never reaches JSONL on its
         own (aquamarine's review, gap [A]).
         """
+        return  # Temporary #901 containment: never publish replay markers.
+
         if not self.config.get(
             "plugins.context_compaction.log_compaction_events", True
         ):

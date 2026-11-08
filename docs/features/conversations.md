@@ -105,3 +105,14 @@ paused. The failed request is never sent again automatically: wait until the sta
 says compaction is ready, then retry your turn. The TUI status widget and Web UI banner
 show whether compaction is paused, running, ready to retry, or failed, with a next
 step. Use `/compact now` for an explicit manual attempt.
+
+### Temporary compaction containment (#901)
+
+Compaction is temporarily unavailable because a concurrent message can be lost
+from reconstructed context. Existing conversation history is preserved. Manual,
+model-requested, automatic, and emergency compaction are refused. Normal turns
+below the context hard cap continue; requests and tool calls at the cap stop and
+require a new session. This containment does not repair existing compaction
+records or restore previously lost content. Remove it only after a shared,
+per-session admission and durable sequence contract covers every history writer,
+reload and rewrite path, with interleaving and stale-write regressions passing.
