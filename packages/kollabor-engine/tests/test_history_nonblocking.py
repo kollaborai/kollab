@@ -876,3 +876,43 @@ async def test_a_waiting_caller_never_inherits_the_background_wait(
     release.set()
     await asyncio.wait_for(session._history_refresh_task, timeout=2)
     assert [m["content"] for m in session.history] == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_mirror_retries_until_the_remote_answers(
+    registry, conversations, monkeypatch
+):
+    """The relay can outlast the state client's own RPC timeout (an agent on
+    another computer took ~19 s live). The page polls the session list, not
+    history, so one failed background answer left it syncing forever; the
+    refresh tries again while the daemon has never answered (#927)."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(
+        session_module,
+        "HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS",
+        (0.01, 0.01, 0.01),
+        raising=False,
+    )
+    state = SlowRemoteState("check the servers", "all four are up")
+    answers = iter([asyncio.TimeoutError(), asyncio.TimeoutError()])
+
+    async def get_conversation(since=None, anchor=None, **kwargs):
+        state.calls += 1
+        failure = next(answers, None)
+        if failure is not None:
+            raise failure  # the state client's own 10 s RPC timeout
+        return _answer("check the servers", "all four are up")
+
+    state.get_conversation = get_conversation
+    session = _remote_session(registry, conversations, state)
+    emitted = []
+    session.daemon.fan_out = emitted.append
+
+    assert (await session.get_history_nonblocking())["stale"] is True  # one ask only
+    await _settled(session)
+    assert state.calls == 3
+    assert emitted == [{"type": "history_updated"}]
+    assert [m["content"] for m in session.history] == [
+        "check the servers",
+        "all four are up",
+    ]
