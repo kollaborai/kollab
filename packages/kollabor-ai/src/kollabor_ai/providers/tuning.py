@@ -18,6 +18,7 @@ import logging
 from typing import Any, Dict
 
 from ..model_registry import supports_sampling, thinking_default
+from ..profile_manager import ANTHROPIC_UNSUPPORTED_EFFORT
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,9 @@ def effort_params(config: Any, style: str) -> Dict[str, Any]:
     if not effort:
         return {}
     if style == EffortStyle.ANTHROPIC:
+        if effort in ANTHROPIC_UNSUPPORTED_EFFORT:
+            logger.warning("Anthropic has no effort level %r; not sent", effort)
+            return {}
         return {"output_config": {"effort": effort}}
     if style == EffortStyle.RESPONSES:
         return {"reasoning": {"effort": effort}}

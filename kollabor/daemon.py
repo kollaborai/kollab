@@ -32,8 +32,9 @@ LAUNCH_ARGS_ENV = "KOLLAB_LAUNCH_ARGS"
 # reports `service` from that.
 SERVICE_ENV = "KOLLAB_SERVICE"
 SERVICE_PID_ENV = "KOLLAB_SERVICE_PID"
-# Set by exec_detached_child: this process was forked, detached and exec'd
-# already, so cli_main's --detached branch must not fork again.
+# Set when the process is already detached before cli_main, either by
+# exec_detached_child or by a supervisor that owns its Popen handle. The CLI
+# must not fork again or the supervisor would retain only the exiting parent.
 DETACHED_CHILD_ENV = "KOLLAB_DETACHED_CHILD"
 
 
@@ -208,11 +209,11 @@ def find_workspace_daemon(argv: list[str]) -> tuple[int, str, bool] | None:
     import json
 
     from plugins.hub.messenger import AgentMessenger
-    from plugins.hub.presence import get_presence_dir
+    from plugins.hub.presence import _presence_files, get_presence_dir
     from plugins.hub.project_scope import is_project_scoped
 
     try:
-        records = list(get_presence_dir().glob("*.json"))
+        records = list(_presence_files(get_presence_dir()))
     except OSError:
         return None
     live = []

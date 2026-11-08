@@ -199,6 +199,32 @@ def encoder_proof(name: str, project: Path, env: dict[str, str]) -> None:
 # ------------------------------------------------------------- hub sockets
 
 
+def socket_answers(sock_path: str, timeout: float = 2.0) -> bool:
+    """Bind-return is not serving: the endpoint must answer a local IPC connect.
+
+    Under a busy startup loop the first handshake can land seconds after the
+    socket file exists (#692), so a presence row whose socket never answers
+    must not release the presence wait.
+    """
+    if os.name == "nt":
+        from kollabor_config import local_ipc
+
+        try:
+            local_ipc.connect_blocking(sock_path, timeout).close()
+            return True
+        except (ConnectionRefusedError, OSError, TimeoutError):
+            return False
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(sock_path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 def folder_socket(home: Path, project: Path) -> str | None:
     """This home's live daemon socket for `project`, read straight from the presence folder."""
     if (
@@ -226,6 +252,7 @@ def folder_socket(home: Path, project: Path) -> str | None:
             recorded
             and os.path.normcase(os.path.realpath(recorded)) == wanted
             and data.get("socket_path")
+            and socket_answers(data["socket_path"])
         ):
             return data["socket_path"]
     return None

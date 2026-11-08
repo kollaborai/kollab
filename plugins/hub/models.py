@@ -121,6 +121,10 @@ class WorkSlot:
     status: str = "pending"
     context: str = ""
     required_capabilities: List[str] = field(default_factory=list)
+    upstream_refs: List[str] = field(default_factory=list)
+    task_card_id: Optional[str] = None
+    retired_reason: Optional[str] = None
+    stale_upstream_note: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -134,6 +138,10 @@ class WorkSlot:
             "status": self.status,
             "context": self.context,
             "required_capabilities": self.required_capabilities,
+            "upstream_refs": self.upstream_refs,
+            "task_card_id": self.task_card_id,
+            "retired_reason": self.retired_reason,
+            "stale_upstream_note": self.stale_upstream_note,
         }
 
     @classmethod

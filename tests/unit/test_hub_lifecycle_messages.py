@@ -164,24 +164,47 @@ async def test_join_notice_includes_the_active_model():
     assert "profile: anthropic-main" in message.content
 
 
-def test_startup_status_explicitly_shows_stop_all_command():
+def test_startup_status_shows_stop_all_only_to_callers_that_started_agents(monkeypatch):
+    """Issue #669: the stop-all hint is gated on owning started agents."""
     renderer = SimpleNamespace(
         message_coordinator=SimpleNamespace(display_message_sequence=MagicMock())
     )
     plugin = HubPlugin()
     plugin._identity = _runtime("koordinator", "koordinator-id", name="koordinator")
+    monkeypatch.setattr(
+        "plugins.hub.plugin.choose_startup_tip",
+        lambda *a, **kw: "Use /hub status.",
+    )
 
+    def _orch(agents):
+        if agents is None:
+            return None
+        return SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                get_all_agents=lambda: {
+                    name: SimpleNamespace(pid=pid) for name, pid in agents.items()
+                }
+            )
+        )
+
+    monkeypatch.setattr(plugin, "_get_orchestrator", lambda: _orch({}))
     plugin._display_startup_status(renderer, "coordinator", [])
 
     displayed = renderer.message_coordinator.display_message_sequence.call_args.args[0]
     assert displayed[0][1] == "koordinator (coordinator) | peers: none"
     assert displayed[1][0] == "system"
-    assert "To stop all agents, submit: /hub stop all" in displayed[1][1]
+    assert "stop all" not in displayed[1][1].lower()
     assert "Tip: " in displayed[1][1]
     assert "New features:" in displayed[1][1]
     for feature in HUB_NEW_FEATURES:
         assert feature in displayed[1][1]
     assert displayed[1][2] == {"display_type": "info"}
+
+    monkeypatch.setattr(plugin, "_get_orchestrator", lambda: _orch({"helper": 111}))
+    plugin._display_startup_status(renderer, "coordinator", [])
+
+    displayed = renderer.message_coordinator.display_message_sequence.call_args.args[0]
+    assert "To stop all agents you started, submit: /hub stop all" in displayed[1][1]
 
 
 def test_startup_message_catalog_has_50_tips_and_rotates_by_seed():

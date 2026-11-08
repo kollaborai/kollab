@@ -16,6 +16,7 @@ from kollabor_events.models import EventType
 
 from .file_operations_executor import FileOperationsExecutor
 from .mcp_integration import MCPIntegration
+from .sandbox_gate import SandboxGate
 from .shell_executor import ShellExecutor
 from .tool_output_budget import ToolOutputArtifactStore
 from .voice_admission import is_voice_origin
@@ -84,6 +85,478 @@ class ToolExecutionResult:
         )
 
 
+def _is_blocked_kollab_spawn(
+    command: str, *, background: bool = False, _depth: int = 0
+) -> bool:
+    """Detect Kollab agent launches and all-agent stops through common wrappers."""
+    import ast
+    import base64
+    import re
+    import shlex
+
+    assignment = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+    shell_names = {"sh", "bash", "dash", "zsh", "ksh"}
+    python_name = re.compile(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?")
+    separators = {";", "&", "&&", "|", "||", "(", ")"}
+
+    def basename(token: str) -> str:
+        return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+    def suspicious_launch(text: str, is_background: bool) -> bool:
+        target = re.search(
+            r"\b(?:kollab|main\.py|kollabor_cli_main)\b", text, re.IGNORECASE
+        )
+        dangerous = re.search(
+            r"--agent(?:=|\b)|--detached(?:=|\b)|"
+            r"--hub(?:=|\s+)(?:stop|kill)(?:\s+|=)all",
+            text,
+            re.IGNORECASE,
+        )
+        return bool(target and (is_background or dangerous))
+
+    def blocked_args(args: list[str], is_background: bool) -> bool:
+        if is_background:
+            return True
+        lowered = [str(arg).lower() for arg in args]
+        # Shell indirection such as eval or $(...) is outside this text guard;
+        # cli_main also checks launch context at runtime.
+        for index, arg in enumerate(lowered):
+            if arg == "--":
+                break
+            option = arg.split("=", 1)[0]
+            if arg.startswith("-a") and not arg.startswith("--"):
+                return True
+            if option == "-d" or (
+                option.startswith(("--ag", "--det"))
+                and any(long_option.startswith(option) for long_option in ("--agent", "--detached"))
+            ):
+                return True
+            if option == "--hub":
+                tail = lowered[index + 1:]
+                if "=" in arg:
+                    action = arg.split("=", 1)[1]
+                elif tail:
+                    action, tail = tail[0], tail[1:]
+                else:
+                    continue
+                if action in {"stop", "kill"} and "all" in tail:
+                    return True
+        return False
+
+    def python_code_spawns(code: str, is_background: bool, depth: int) -> bool:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return False
+        spawn_calls = {
+            "Popen",
+            "run",
+            "call",
+            "check_call",
+            "check_output",
+            "system",
+            "exec",
+            "execv",
+            "execve",
+            "execvp",
+            "execvpe",
+            "getoutput",
+            "popen",
+            "create_subprocess_exec",
+            "create_subprocess_shell",
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            name = (
+                function.id
+                if isinstance(function, ast.Name)
+                else getattr(function, "attr", "")
+            )
+            if name not in spawn_calls and not name.startswith(("spawn", "exec")):
+                continue
+            for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
+                try:
+                    value = ast.literal_eval(argument)
+                except ValueError, TypeError:
+                    continue
+                if isinstance(value, str):
+                    if _is_blocked_kollab_spawn(
+                        value, background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                elif isinstance(value, (list, tuple)) and all(
+                    isinstance(item, str) for item in value
+                ):
+                    if scan_tokens(list(value), is_background, depth + 1):
+                        return True
+        return False
+
+    def unwrap(
+        tokens: list[str], is_background: bool, depth: int
+    ) -> tuple[list[str], bool]:
+        tokens = list(tokens)
+        while tokens:
+            executable = basename(tokens[0]).removesuffix(".exe")
+            if assignment.match(tokens[0]):
+                tokens = tokens[1:]
+                continue
+
+            if executable == "env":
+                index = 1
+                while index < len(tokens):
+                    token = tokens[index]
+                    if token == "--":
+                        index += 1
+                        break
+                    if token in {"-u", "--unset", "-C", "--chdir"}:
+                        index += 2
+                    elif token.startswith("--unset=") or token.startswith("--chdir="):
+                        index += 1
+                    elif token in {"-S", "--split-string"} and index + 1 < len(tokens):
+                        return [], _is_blocked_kollab_spawn(
+                            tokens[index + 1],
+                            background=is_background,
+                            _depth=depth + 1,
+                        )
+                    elif token.startswith("-") or assignment.match(token):
+                        index += 1
+                    else:
+                        break
+                tokens = tokens[index:]
+                continue
+            if executable == "nohup":
+                tokens = tokens[1:]
+                if tokens and tokens[0] == "--":
+                    tokens = tokens[1:]
+                continue
+            if executable == "setsid":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += 1
+                tokens = tokens[index:]
+                continue
+            if executable == "time":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    if tokens[index] in {"-f", "--format", "-o", "--output"}:
+                        index += 2
+                    elif tokens[index] == "--":
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                tokens = tokens[index:]
+                continue
+            if executable == "stdbuf":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    if tokens[index] in {"-i", "-o", "-e"}:
+                        index += 2
+                    elif tokens[index] == "--":
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                tokens = tokens[index:]
+                continue
+            if executable in {"command", "exec"}:
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    token = tokens[index]
+                    if token == "--":
+                        index += 1
+                        break
+                    if executable == "exec" and token in {"-a", "--argv0"}:
+                        index += 2
+                    elif executable == "exec" and token in {"-c", "-l"}:
+                        index += 1
+                    elif executable == "command" and token in {"-p", "-v", "-V"}:
+                        index += 1
+                    else:
+                        break
+                tokens = tokens[index:]
+                continue
+            if executable == "xargs":
+                index = 1
+                value_options = {
+                    "-a",
+                    "--arg-file",
+                    "-I",
+                    "--replace",
+                    "-L",
+                    "--max-lines",
+                    "-n",
+                    "--max-args",
+                    "-d",
+                    "--delimiter",
+                    "-P",
+                    "--max-procs",
+                }
+                while index < len(tokens):
+                    token = tokens[index]
+                    if token == "--":
+                        index += 1
+                        break
+                    if token in value_options:
+                        index += 2
+                    elif token.startswith("-"):
+                        index += 1
+                    else:
+                        break
+                tokens = tokens[index:]
+                continue
+            if executable in {"sudo", "doas"}:
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    if tokens[index] in {
+                        "-u",
+                        "--user",
+                        "-g",
+                        "--group",
+                        "-h",
+                        "--host",
+                        "-p",
+                        "--prompt",
+                    }:
+                        index += 2
+                    else:
+                        index += 1
+                tokens = tokens[index:]
+                continue
+            if executable == "nice":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += 2 if tokens[index] in {"-n", "--adjustment"} else 1
+                tokens = tokens[index:]
+                continue
+            if executable == "timeout":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += (
+                        2
+                        if tokens[index] in {"-k", "--kill-after", "-s", "--signal"}
+                        else 1
+                    )
+                if index < len(tokens):
+                    index += 1  # timeout duration
+                tokens = tokens[index:]
+                continue
+            if (
+                executable in {"uv", "poetry", "pipenv", "pipx"}
+                and len(tokens) > 1
+                and tokens[1] == "run"
+            ):
+                tokens = tokens[2:]
+                continue
+            break
+        return tokens, False
+
+    def inspect_windows_wrapper(
+        executable: str, args: list[str], is_background: bool, depth: int
+    ) -> bool | None:
+        if executable in shell_names or python_name.fullmatch(executable):
+            return None
+
+        def inspect_command(command_text: str) -> bool:
+            return _is_blocked_kollab_spawn(
+                command_text, background=is_background, _depth=depth + 1
+            )
+
+        def suspicious_wrapper() -> bool:
+            return suspicious_launch(f"{executable} {' '.join(args)}", is_background)
+
+        if executable in {"powershell", "pwsh"}:
+            index = 0
+            while index < len(args):
+                option = args[index].lower()
+                if option in {
+                    "-noprofile",
+                    "-nop",
+                    "-nologo",
+                    "-nol",
+                    "-noexit",
+                    "-noe",
+                    "-noninteractive",
+                    "-noni",
+                }:
+                    index += 1
+                    continue
+
+                if option in {"-command", "-commandwithargs", "-c"}:
+                    command_text = " ".join(args[index + 1 :]).strip()
+                    return command_text == "-" or (
+                        bool(command_text) and inspect_command(command_text)
+                    )
+
+                if option in {"-encodedcommand", "-enc", "-ec", "-e"}:
+                    if index + 1 >= len(args):
+                        return True
+                    try:
+                        command_text = (
+                            base64.b64decode(args[index + 1], validate=True)
+                            .decode("utf-16le")
+                            .lstrip("\ufeff")
+                        )
+                    except ValueError:
+                        return True
+                    return inspect_command(command_text)
+
+                if option in {
+                    "-executionpolicy",
+                    "-ep",
+                    "-inputformat",
+                    "-if",
+                    "-outputformat",
+                    "-of",
+                    "-version",
+                    "-v",
+                }:
+                    if index + 1 >= len(args):
+                        return suspicious_wrapper()
+                    index += 2
+                    continue
+
+                if option.startswith("-"):
+                    return suspicious_wrapper()
+                return inspect_command(" ".join(args[index:]))
+            return False
+
+        if executable == "cmd":
+            index = 0
+            while index < len(args):
+                option = args[index].lower()
+                if option in {"/d", "/s", "/q", "/a", "/u"}:
+                    index += 1
+                    continue
+                if option in {"/c", "/k"}:
+                    command_text = " ".join(args[index + 1 :]).strip()
+                    return bool(command_text) and inspect_command(command_text)
+                if option.startswith("/"):
+                    return suspicious_wrapper()
+                return inspect_command(" ".join(args[index:]))
+            return False
+
+        wrapper_options = {
+            "-c",
+            "-command",
+            "-commandwithargs",
+            "-e",
+            "-ec",
+            "-enc",
+            "-encodedcommand",
+            "/c",
+            "/k",
+        }
+        normalized = [argument.lower().split("=", 1)[0] for argument in args]
+        if any(option in wrapper_options for option in normalized):
+            if any(
+                option in {"-e", "-ec", "-enc", "-encodedcommand"}
+                for option in normalized
+            ):
+                return True
+            return suspicious_wrapper()
+        return None
+
+    def inspect_segment(tokens: list[str], is_background: bool, depth: int) -> bool:
+        if not tokens:
+            return False
+        tokens, nested_result = unwrap(tokens, is_background, depth)
+        if nested_result:
+            return True
+        if not tokens:
+            return False
+
+        executable = basename(tokens[0]).removesuffix(".exe")
+        args = tokens[1:]
+        windows_result = inspect_windows_wrapper(executable, args, is_background, depth)
+        if windows_result is not None:
+            return windows_result
+        if executable in shell_names:
+            for index, token in enumerate(args[:-1]):
+                if token == "-c" or (
+                    token.startswith("-")
+                    and not token.startswith("--")
+                    and "c" in token[1:]
+                ):
+                    return _is_blocked_kollab_spawn(
+                        args[index + 1], background=is_background, _depth=depth + 1
+                    )
+            return False
+
+        if python_name.fullmatch(executable):
+            index = 0
+            while index < len(args):
+                token = args[index]
+                if token == "-c" and index + 1 < len(args):
+                    return python_code_spawns(args[index + 1], is_background, depth)
+                if token == "-m" and index + 1 < len(args):
+                    module = args[index + 1].split(":", 1)[0].lower()
+                    if module in {"kollabor_cli_main", "kollabor"}:
+                        return blocked_args(args[index + 2 :], is_background)
+                    return False
+                if token in {"-X", "-W"}:
+                    index += 2
+                    continue
+                if token.startswith("-"):
+                    index += 1
+                    continue
+                script = basename(token)
+                if script in {"main.py", "kollabor_cli_main.py", "kollabor_cli_main"}:
+                    return blocked_args(args[index + 1 :], is_background)
+                return False
+            return False
+
+        if executable in {
+            "kollab",
+            "main.py",
+            "kollabor_cli_main",
+            "kollabor_cli_main.py",
+        }:
+            return blocked_args(args, is_background)
+        return False
+
+    def scan_tokens(tokens: list[str], is_background: bool, depth: int) -> bool:
+        if depth > 8:
+            return suspicious_launch(" ".join(tokens), is_background)
+        segment: list[str] = []
+        for token in tokens:
+            if token in separators:
+                if inspect_segment(segment, is_background or token == "&", depth):
+                    return True
+                segment = []
+            else:
+                segment.append(token)
+        if inspect_segment(segment, is_background, depth):
+            return True
+
+        # Catch shell command substitutions without treating ordinary quoted
+        # mentions (e.g. echo 'kollab --agent') as executable commands.
+        for token in tokens:
+            nested_commands = re.findall(
+                r"\$\(([^()]*)\)|`([^`]+)`|[<>]\(([^()]*)\)", token
+            )
+            for groups in nested_commands:
+                nested = next((group for group in groups if group), "")
+                if nested and _is_blocked_kollab_spawn(
+                    nested, background=is_background, _depth=depth + 1
+                ):
+                    return True
+        return False
+
+    if _depth > 8:
+        return suspicious_launch(command, background)
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = list(lexer)
+    except ValueError:
+        return suspicious_launch(command, background)
+    return scan_tokens(tokens, background, _depth)
+
+
 class ToolExecutor:
     """Execute tools with unified interface for terminal, MCP, and file operations.
 
@@ -131,6 +604,8 @@ class ToolExecutor:
         self.shell_executor = ShellExecutor(interactive=interactive_shell)
         self._voice_tool_guard = VoiceToolExecutionGuard()
         self.yes_approvals = YesApprovals()
+        # Promotion gate (#725): off unless sandbox_gate.enabled.
+        self.sandbox_gate = SandboxGate(config)
         # Trust All, kept in step by PermissionManager: a voice turn then runs its
         # tools as a typed one does, with no voice list and no spoken yes.
         self.trust_all = False
@@ -682,6 +1157,17 @@ class ToolExecutor:
                 metadata={"scope_denied": True},
             )
 
+        gate_refusal = self.sandbox_gate.check(tool_data, self.workspace or Path.cwd())
+        if gate_refusal:
+            logger.warning(f"Tool {tool_id} refused by sandbox gate")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=gate_refusal,
+                metadata={"sandbox_gate": True},
+            )
+
         # Set tool executing state for spinner animation
         tool_name = self._get_display_name(tool_data)
         self.tool_executing = True  # watchdog: real work in flight
@@ -758,6 +1244,7 @@ class ToolExecutor:
                         "terminal",
                         "terminal_status",
                         "terminal_output",
+                        "terminal_send",
                         "terminal_kill",
                     ):
                         logger.debug(
@@ -800,6 +1287,9 @@ class ToolExecutor:
                         mark_tool_execution()
                         result = await self._execute_file_operation(tool_data)
                         logger.debug(f"_execute_file_operation completed for {tool_id}")
+                    elif tool_type in ("sandbox_promote", "sandbox-promote"):
+                        mark_tool_execution()
+                        result = await self._execute_sandbox_promote(tool_data)
                     elif tool_type in ("workspace_set", "workspace-set"):
                         logger.debug(
                             f"About to call _execute_workspace_set for {tool_id}"
@@ -1041,6 +1531,8 @@ class ToolExecutor:
             return await self._execute_terminal_status(tool_data)
         elif tool_type == "terminal_output":
             return await self._execute_terminal_output(tool_data)
+        elif tool_type == "terminal_send":
+            return await self._execute_terminal_send(tool_data)
         elif tool_type == "terminal_kill":
             return await self._execute_terminal_kill(tool_data)
 
@@ -1059,20 +1551,15 @@ class ToolExecutor:
         # Block agents from spawning kollab processes via terminal.
         # Agents MUST use hub_spawn to spawn peers -- direct spawning
         # bypasses the hub mesh and creates invisible rogue processes.
-        import re as _re
-
-        _spawn_pat = _re.compile(
-            r"^\s*(?:python3?\s+main\.py|kollab)\s+.*(?:--detached|--agent|&\s*$)",
-            _re.IGNORECASE,
-        )
-        if _spawn_pat.search(command):
+        if _is_blocked_kollab_spawn(command, background=bool(background)):
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type=tool_type,
                 success=False,
                 error=(
                     "spawning agents via terminal is blocked. "
-                    "use <hub_spawn name=\"agent-name\">task</hub_spawn> instead."
+                    "CLI stop-all is also blocked; use /hub stop all for agents "
+                    "owned by this caller. Use <hub_spawn> to spawn peers."
                 ),
             )
 
@@ -1238,12 +1725,69 @@ class ToolExecutor:
             )
 
         if not session_name:
-            return ToolExecutionResult(
-                tool_id=tool_id,
-                tool_type="terminal_output",
-                success=False,
-                error="Session name required",
+            try:
+                status = await self.tmux_plugin.get_session_status("*")
+            except Exception as e:
+                logger.error(f"Error listing terminal sessions: {e}")
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error="Session name required; unable to list active terminal sessions",
+                )
+
+            if not isinstance(status, dict) or not status.get("success"):
+                message = (
+                    status.get("message", "") if isinstance(status, dict) else ""
+                )
+                error = "Session name required; unable to list active terminal sessions"
+                if message:
+                    error = f"{error}: {message}"
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=error,
+                )
+
+            session_list = status.get("sessions")
+            sessions = (
+                [
+                    session
+                    for session in session_list
+                    if isinstance(session, dict)
+                    and isinstance(session.get("name"), str)
+                    and session["name"].strip()
+                    and str(session.get("status", "")).lower() == "alive"
+                ]
+                if isinstance(session_list, list)
+                else []
             )
+            if len(sessions) == 1:
+                session_name = sessions[0].get("name", "")
+            elif not sessions:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=(
+                        "Session name required; no active terminal sessions. "
+                        "Use terminal-status to list sessions."
+                    ),
+                )
+            else:
+                names = ", ".join(
+                    str(session.get("name", "?")) for session in sessions
+                )
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=(
+                        "Session name required; multiple active terminal sessions: "
+                        f"{names}. Use terminal_output with one of these names."
+                    ),
+                )
 
         try:
             result = await self.tmux_plugin.capture_session_output(
@@ -1317,6 +1861,60 @@ class ToolExecutor:
             logger.error(f"Error killing terminal session: {e}")
             return ToolExecutionResult(
                 tool_id=tool_id, tool_type="terminal_kill", success=False, error=str(e)
+            )
+
+    async def _execute_terminal_send(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Send one line of input to a named background terminal session."""
+        tool_id = tool_data.get("id", "unknown")
+        arguments = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        session_name = (
+            tool_data.get("session_name")
+            or arguments.get("session_name")
+        )
+        text = tool_data.get("text", arguments.get("text"))
+
+        if not self.tmux_plugin:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Tmux plugin not available",
+            )
+        if not isinstance(session_name, str) or not session_name.strip():
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Session name required",
+            )
+        if not isinstance(text, str):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Text must be a string",
+            )
+
+        try:
+            result = self.tmux_plugin.send_to_session(session_name.strip(), text)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=result.get("success", False),
+                output=result.get("message", ""),
+                error="" if result.get("success") else result.get("message", ""),
+            )
+        except Exception as e:
+            logger.error(f"Error sending input to terminal session: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error=str(e),
             )
 
     async def _execute_mcp_tool(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
@@ -1511,6 +2109,35 @@ class ToolExecutor:
         if not path.is_absolute() and self.workspace is not None:
             path = self.workspace / path
         return path.resolve()
+
+    async def _execute_sandbox_promote(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Validate a scratch checkout and issue a promotion token (#725)."""
+        args = tool_data.get("arguments") or {}
+        scratch = tool_data.get("scratch") or args.get("scratch") or ""
+        root = tool_data.get("root") or args.get("root") or ""
+        tool_id = tool_data.get("id", "unknown")
+        if not scratch or not root:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="sandbox_promote",
+                success=False,
+                error="sandbox-promote needs both scratch and root",
+            )
+        outcome = await asyncio.to_thread(
+            self.sandbox_gate.promote,
+            self._resolve_workspace_path(scratch),
+            self._resolve_workspace_path(root),
+        )
+        ok = outcome["success"]
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="sandbox_promote",
+            success=ok,
+            output=outcome["message"] if ok else "",
+            error="" if ok else outcome["message"],
+        )
 
     async def _execute_workspace_set(
         self, tool_data: Dict[str, Any]

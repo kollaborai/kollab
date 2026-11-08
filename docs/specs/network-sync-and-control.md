@@ -115,16 +115,61 @@ What option A still cannot stop, stated so nobody claims more:
 
 ### Today
 
-- `kollab --hub stop all` (`kollabor/cli.py:1752`) stops the agents of this
-  project folder only: hub socket shutdown, then SIGTERM, then SIGKILL
-  (`_stop_agent_record`, `kollabor/cli.py:1607`). `/hub stop` in the TUI is the
-  same over sockets (`plugins/hub/plugin.py:12909`).
+- `kollab --hub stop all` (`kollabor/cli.py`) stops the agents of this project
+  folder only: hub socket shutdown, then SIGTERM, then SIGKILL
+  (`_stop_agent_record`). It refuses when tool-shell markers are present or
+  when the CLI process or one of its OS ancestors matches a Hub presence PID
+  from any local project (`_cli_is_hub_agent_context`). The ancestry check covers ordinary
+  foreground and background terminal-tool children even when the background
+  terminal filters those markers; errors while enumerating an existing Hub
+  directory fail closed. No CLI
+  flag can override the refusal because agents control argv. This is an
+  accident guard for normal tool launches, not a security boundary against
+  arbitrary same-user code that deliberately detaches, as described in the
+  threat model above.
+  `/hub stop all` in the TUI is scoped to the
+  agents that session started: peers launched by other lanes or the operator
+  are immune, and the startup status advertises the command only to sessions
+  that started agents (`plugins/hub/plugin.py:_handle_stop_command`). The
+  presence PID and row boot time are compared with the tracked `AgentSession`
+  PID and the OS process creation time; there is no timestamp grace window.
+  On Windows, the scan also validates and includes an inherited external
+  project-state selection, even when a terminal child has changed cwd. It
+  cross-checks that selection against `KOLLAB_PROJECT_ROOT` when available
+  and requires the private owner marker for an external state path; incomplete,
+  inconsistent, or unverified selections fail closed. A
+  caller-owned graceful stop carries the selected agent ID, PID and start time
+  to the socket server; a replacement generation refuses the request before
+  acknowledging shutdown. Caller-owned cleanup leaves the identity-named
+  socket and presence row untouched, so a stale snapshot cannot unlink a
+  replacement's listener or race its presence record. Cleanup is deferred to
+  normal presence discovery. Named operator stops retain their existing socket
+  cleanup behavior.
+  The tracked Popen object is a child-management reference, not an atomic OS
+  identity token. `AgentSession.process_lock` serializes every in-process
+  lifecycle poll, wait, and signal for that child: `AgentSession.is_alive`,
+  orchestrator `_kill_session`, and Hub `_signal_session` share the lock.
+  Hub holds it across the final poll and `Popen.send_signal`; the orchestrator
+  holds it over its complete terminate/wait/kill/reap sequence. This prevents
+  this process's lifecycle reaper from freeing the child PID during POSIX
+  `send_signal`'s internal poll-then-signal sequence. If `send_signal` observes
+  an exited child, it declines to signal; if the child exits after that check,
+  the shared lock prevents this process from reaping it until the signal call
+  returns. This is a process-local
+  serialization guarantee, not a kernel identity primitive; a
+  caller that bypasses the shared lock is outside it. The orchestrator starts
+  the detached child directly rather than keeping the short-lived parent of a
+  second detach fork. Raw `os.kill` by PID remains available on session-less
+  single-target `/hub stop`, including the `<hub_stop>` tool route through
+  `_handle_hub_stop_tool`.
 - A remote handle is refused: "spawn, stop and wake stay local"
   (`plugins/hub/plugin.py:12352`). No network-wide stop exists.
 - `kollab service` agents come back by themselves: systemd `Restart=always`
   and launchd `KeepAlive: true` (`kollabor/service.py:81`, `:99`).
 - `presence.live_agents_on_machine()` (`plugins/hub/presence.py:128`) finds
-  every agent that wrote presence. Presence does not record argv, start mode,
+  every live agent that wrote presence. POSIX records share the HOME-independent
+  project-hashed socket directories; current-HOME paths remain a legacy fallback.
+  Presence does not record argv, start mode,
   loadout, `--as` or `KOLLAB_LAUNCH_BRIEF` (`kollabor_agent/runtime.py:624`);
   pipe runs and `KOLLAB_NO_HUB` runs write none.
 - `kollab_argv()` (`kollabor/binary.py:46` to `:51`) returns the binary or app
@@ -501,7 +546,8 @@ keys, the managed-config record or MCP settings.
   normally; and `-p` pipe runs and ACP stdio, which
   print the halted line and exit with code 75 (`EX_TEMPFAIL`), so cron jobs do
   not hang (N7).
-- `--detached` (R3-F11): the check runs in the forked child, after it detached.
+- `--detached` (R3-F11): the check runs in the detached child, after it is
+  separated from its launcher (the CLI fork or a supervisor-owned direct spawn).
   The parent returns as today; the child becomes the waiter, so the waiter
   holds the detached process's own argv and environment.
 - A waiter captures its full argv and environment at process entry, before
