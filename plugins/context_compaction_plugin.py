@@ -63,7 +63,9 @@ def _append_jsonl_durable(target: str, record: Dict[str, Any]) -> Optional[str]:
             return None
         except Exception as exc:
             if attempt == 0:
-                logger.warning(f"Compaction record append to {target} failed, retrying: {exc}")
+                logger.warning(
+                    f"Compaction record append to {target} failed, retrying: {exc}"
+                )
     sidecar = str(target) + ".compaction-recovery.jsonl"
     with open(sidecar, "a") as f:
         f.write(line)
@@ -74,6 +76,7 @@ def _append_jsonl_durable(target: str, record: Dict[str, Any]) -> Optional[str]:
         f"recovered to {sidecar}; merge it before the live tail on resume"
     )
     return sidecar
+
 
 
 # Keep verbatim hub context bounded by both count and payload size.
@@ -122,7 +125,9 @@ def _load_model_registry() -> Dict[str, Any]:
             if "models" in user_data:
                 registry.setdefault("models", {}).update(user_data["models"])
             if "provider_defaults" in user_data:
-                registry.setdefault("provider_defaults", {}).update(user_data["provider_defaults"])
+                registry.setdefault("provider_defaults", {}).update(
+                    user_data["provider_defaults"]
+                )
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"Failed to load user model overrides {user_path}: {e}")
 
@@ -208,7 +213,10 @@ _TASK_INDICATORS = [
     "investigate ",
 ]
 
-SUMMARY_INJECTION_PREFIX = "[Previous Context Summary]\nThe following is a summary of our earlier conversation:\n\n"
+SUMMARY_INJECTION_PREFIX = (
+    "[Previous Context Summary]\n"
+    "The following is a summary of our earlier conversation:\n\n"
+)
 SUMMARY_INJECTION_SUFFIX = "\n\nContinue from where we left off."
 
 MAX_OPERATOR_WORD_MESSAGES = 30
@@ -270,7 +278,8 @@ class ContextCompactionPlugin(BasePlugin):
                     "max_value": 0.95,
                     "step": 0.05,
                     "help": (
-                        "Hard prompt budget is the lower of the provider-window percentage and the 272K cost ceiling."
+                        "Hard prompt budget is the lower of the provider-window "
+                        "percentage and the 272K cost ceiling."
                     ),
                 },
                 {
@@ -427,6 +436,7 @@ class ContextCompactionPlugin(BasePlugin):
         event_bus=None,
         config=None,
         command_registry=None,
+
         renderer=None,
         llm_service=None,
         conversation_logger=None,
@@ -480,6 +490,7 @@ class ContextCompactionPlugin(BasePlugin):
             callback=self._on_llm_turn_complete,
         )
         await self.event_bus.register_hook(post_hook)
+
 
         error_hook = Hook(
             name="context_compaction_request_error",
@@ -535,8 +546,12 @@ class ContextCompactionPlugin(BasePlugin):
         has_session_usage = llm_service is not None
         history = (self._get_conversation_history() or []) if has_session_usage else []
         reported_prompt_tokens = self._get_prompt_tokens() if has_session_usage else 0
-        last_request_prompt_tokens = reported_prompt_tokens if reported_prompt_tokens > 0 else None
-        token_usage_stale = bool(getattr(self, "_token_usage_stale_after_compaction", False))
+        last_request_prompt_tokens = (
+            reported_prompt_tokens if reported_prompt_tokens > 0 else None
+        )
+        token_usage_stale = bool(
+            getattr(self, "_token_usage_stale_after_compaction", False)
+        )
 
         if has_session_usage:
             if token_usage_stale:
@@ -554,11 +569,14 @@ class ContextCompactionPlugin(BasePlugin):
 
             current_prompt_tokens = self._effective_prompt_tokens()
             current_prompt_tokens_estimated = bool(
-                token_usage_stale or reported_prompt_tokens <= 0 or self._prompt_tokens_are_estimated()
+                token_usage_stale
+                or reported_prompt_tokens <= 0
+                or self._prompt_tokens_are_estimated()
             )
             outgoing_prompt_tokens = self._outgoing_prompt_tokens(history)
             outgoing_prompt_tokens_estimated = bool(
-                current_prompt_tokens_estimated or outgoing_prompt_tokens > current_prompt_tokens
+                current_prompt_tokens_estimated
+                or outgoing_prompt_tokens > current_prompt_tokens
             )
         else:
             token_gate_prompt_tokens = None
@@ -573,15 +591,21 @@ class ContextCompactionPlugin(BasePlugin):
         automatic_threshold, threshold_source = self._get_token_threshold_details()
         hard_cap = self._get_hard_cap_threshold()
         tokens_until_automatic_compaction = (
-            max(0, automatic_threshold - token_gate_prompt_tokens) if token_gate_prompt_tokens is not None else None
+            max(0, automatic_threshold - token_gate_prompt_tokens)
+            if token_gate_prompt_tokens is not None
+            else None
         )
-        raw_manual_threshold = self.config.get("plugins.context_compaction.token_threshold_k", 0)
+        raw_manual_threshold = self.config.get(
+            "plugins.context_compaction.token_threshold_k", 0
+        )
         try:
             configured_token_threshold_k = max(0, int(raw_manual_threshold))
-        except TypeError, ValueError, OverflowError:
+        except (TypeError, ValueError, OverflowError):
             configured_token_threshold_k = 0
 
-        configured_enabled = bool(self.config.get("plugins.context_compaction.enabled", True))
+        configured_enabled = bool(
+            self.config.get("plugins.context_compaction.enabled", True)
+        )
         disabled_for_session = bool(getattr(self, "_disabled_for_session", False))
         automatic_compaction_enabled = configured_enabled and not disabled_for_session
         if not configured_enabled:
@@ -614,7 +638,9 @@ class ContextCompactionPlugin(BasePlugin):
             "compaction_action": getattr(self, "_compaction_status_action", ""),
         }
 
-    def _set_compaction_status(self, status: str, message: str, action: str = "") -> None:
+    def _set_compaction_status(
+        self, status: str, message: str, action: str = ""
+    ) -> None:
         """Publish persistent compaction state and retain its next action."""
         self._compaction_status = status
         self._compaction_status_message = message
@@ -659,6 +685,7 @@ class ContextCompactionPlugin(BasePlugin):
                 exc_info=True,
             )
 
+
     def _register_status_widget(self) -> None:
         """Register a status widget via the widget_api service."""
         if not self.event_bus:
@@ -682,7 +709,11 @@ class ContextCompactionPlugin(BasePlugin):
             layout_mgr = self.event_bus.get_service("layout_manager")
             if layout_mgr:
                 layout = layout_mgr.get_layout()
-                already_placed = any(w.id == "context-compaction" for row in layout.rows for w in row.widgets)
+                already_placed = any(
+                    w.id == "context-compaction"
+                    for row in layout.rows
+                    for w in row.widgets
+                )
                 if not already_placed:
                     layout_mgr.add_widget_to_row(1, "context-compaction")
                     logger.info("Added context-compaction widget to row 1")
@@ -694,20 +725,30 @@ class ContextCompactionPlugin(BasePlugin):
         """Render the context compaction status widget."""
         prompt_tokens = 0
         tokens_estimated = False
-        remote_state = (getattr(context, "remote_state", None) if context is not None else None) or {}
+        remote_state = (
+            getattr(context, "remote_state", None) if context is not None else None
+        ) or {}
 
         # In attach mode the daemon is authoritative even when the local
         # shadow service has stale/nonzero counters. During an in-flight turn,
         # use its explicit estimate until the provider reports final usage.
-        if remote_state and any(key in remote_state for key in ("input_tokens", "current_processing_tokens")):
+        if remote_state and any(
+            key in remote_state
+            for key in ("input_tokens", "current_processing_tokens")
+        ):
             prompt_tokens = int(remote_state.get("input_tokens", 0) or 0)
             tokens_estimated = bool(remote_state.get("input_tokens_estimated", False))
             if prompt_tokens == 0 and remote_state.get("is_processing"):
-                prompt_tokens = int(remote_state.get("current_processing_tokens", 0) or 0)
+                prompt_tokens = int(
+                    remote_state.get("current_processing_tokens", 0) or 0
+                )
                 tokens_estimated = prompt_tokens > 0
         else:
             prompt_tokens = self._effective_prompt_tokens()
-            tokens_estimated = self._prompt_tokens_are_estimated() or self._token_usage_stale_after_compaction
+            tokens_estimated = (
+                self._prompt_tokens_are_estimated()
+                or self._token_usage_stale_after_compaction
+            )
         threshold = self._get_token_threshold()
         token_prefix = "~" if tokens_estimated and prompt_tokens > 0 else ""
         if not prompt_tokens:
@@ -730,7 +771,11 @@ class ContextCompactionPlugin(BasePlugin):
             thresh_k = f"{threshold / 1000:.0f}K"
         if budget_status:
             limit = self._get_session_turn_budget()
-            turn_label = f" {self._turn_count}/{limit}t" if limit > 0 and self._turn_count >= limit else ""
+            turn_label = (
+                f" {self._turn_count}/{limit}t"
+                if limit > 0 and self._turn_count >= limit
+                else ""
+            )
             agent, _hub_identity = self._get_agent_labels()
             agent_label = f" {agent}" if agent not in {"interactive", "unknown"} else ""
             rendered = f"ctx: {status} {token_k}/{thresh_k}{turn_label}{agent_label}"
@@ -824,35 +869,57 @@ class ContextCompactionPlugin(BasePlugin):
             ctx_window = self._resolve_context_window()
 
         # Threshold source
-        token_k_override = int(self.config.get("plugins.context_compaction.token_threshold_k", 0))
+        token_k_override = int(
+            self.config.get("plugins.context_compaction.token_threshold_k", 0)
+        )
         threshold = self._get_token_threshold()
         if token_k_override > 0:
             source = f"manual ({token_k_override}K)"
         elif ctx_window:
-            ratio = float(self.config.get("plugins.context_compaction.compaction_ratio", 0.75))
+            ratio = float(
+                self.config.get(
+                    "plugins.context_compaction.compaction_ratio", 0.75
+                )
+            )
             source = f"auto ({ratio:.0%} of {ctx_window // 1000}K)"
         else:
             source = "fallback (no provider detected)"
 
         # Current state (prompt_tokens fetched above, daemon-preferred)
-        keep_recent_cfg = self.config.get("plugins.context_compaction.keep_recent", 8)
+        keep_recent_cfg = self.config.get(
+            "plugins.context_compaction.keep_recent", 8
+        )
         if ctx_window:
             keep_actual = max(keep_recent_cfg, ctx_window // 100_000)
         else:
             keep_actual = keep_recent_cfg
-        min_turns = int(self.config.get("plugins.context_compaction.min_human_turns", 6))
+        min_turns = int(
+            self.config.get("plugins.context_compaction.min_human_turns", 6)
+        )
 
         # History stats (history fetched above, daemon-preferred)
         msg_count = len(history) if history else 0
         human_turns = 0
         if history:
-            human_turns = sum(1 for m in history if m.role == "user" and not m.metadata.get("hub_message"))
+            human_turns = sum(
+                1
+                for m in history
+                if m.role == "user" and not m.metadata.get("hub_message")
+            )
 
-        pct = f" ({prompt_tokens * 100 // threshold}%)" if threshold > 0 else ""
-        keep_str = (
-            f"{keep_actual} (scaled from {keep_recent_cfg})" if keep_actual != keep_recent_cfg else str(keep_actual)
+        pct = (
+            f" ({prompt_tokens * 100 // threshold}%)"
+            if threshold > 0
+            else ""
         )
-        ctx_str = f"{ctx_window // 1000}K" if ctx_window else "unknown"
+        keep_str = (
+            f"{keep_actual} (scaled from {keep_recent_cfg})"
+            if keep_actual != keep_recent_cfg
+            else str(keep_actual)
+        )
+        ctx_str = (
+            f"{ctx_window // 1000}K" if ctx_window else "unknown"
+        )
 
         lines = [
             "compaction profile:",
@@ -900,15 +967,21 @@ class ContextCompactionPlugin(BasePlugin):
         """
         if history is None:
             history = self._get_conversation_history() or []
-        keep_recent = int(self.config.get("plugins.context_compaction.keep_recent", 8))
+        keep_recent = int(
+            self.config.get("plugins.context_compaction.keep_recent", 8)
+        )
         split = self._find_split_point(history, keep_recent)
         remove_candidates = history[:split]
         to_keep = history[split:]
-        preserved, summarizable = self._extract_preservable_messages(remove_candidates)
+        preserved, summarizable = self._extract_preservable_messages(
+            remove_candidates
+        )
 
         if prompt_tokens is None:
             prompt_tokens = self._get_prompt_tokens()
-        estimated_removed = int(prompt_tokens * (len(summarizable) / max(1, len(history))))
+        estimated_removed = int(
+            prompt_tokens * (len(summarizable) / max(1, len(history)))
+        )
 
         return "\n".join(
             [
@@ -963,9 +1036,13 @@ class ContextCompactionPlugin(BasePlugin):
             return bool(session_stats.get("input_tokens_estimated"))
 
         api_service = getattr(self._llm_service, "api_service", None)
-        return bool(getattr(api_service, "last_token_usage_is_estimated", False) is True)
+        return bool(
+            getattr(api_service, "last_token_usage_is_estimated", False) is True
+        )
 
-    def _estimate_history_tokens(self, history: List[ConversationMessage]) -> int:
+    def _estimate_history_tokens(
+        self, history: List[ConversationMessage]
+    ) -> int:
         """Estimate tokens from message text (~3 chars/token) when no usage was reported.
 
         Fallback only. It counts content chars (not tool schemas or tool-call
@@ -1002,14 +1079,18 @@ class ContextCompactionPlugin(BasePlugin):
             elif isinstance(raw_window, (int, float)):
                 try:
                     numeric_window = float(raw_window)
-                    window = int(numeric_window) if math.isfinite(numeric_window) and numeric_window > 0 else None
-                except TypeError, ValueError, OverflowError:
+                    window = (
+                        int(numeric_window)
+                        if math.isfinite(numeric_window) and numeric_window > 0
+                        else None
+                    )
+                except (TypeError, ValueError, OverflowError):
                     window = None
             elif isinstance(raw_window, str):
                 try:
                     parsed_window = int(raw_window)
                     window = parsed_window if parsed_window > 0 else None
-                except TypeError, ValueError, OverflowError:
+                except (TypeError, ValueError, OverflowError):
                     window = None
             else:
                 window = None
@@ -1093,20 +1174,25 @@ class ContextCompactionPlugin(BasePlugin):
 
     def _get_session_turn_budget(self) -> int:
         """Return a validated per-session warning budget; zero disables it."""
-        raw_limit = self.config.get("plugins.context_compaction.max_session_turns", 0)
+        raw_limit = self.config.get(
+            "plugins.context_compaction.max_session_turns", 0
+        )
         try:
             return max(0, int(raw_limit))
-        except TypeError, ValueError, OverflowError:
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     def _get_hard_cap_compaction_attempts(self) -> int:
         """Return the bounded number of forced compaction attempts."""
-        raw_attempts = self.config.get("plugins.context_compaction.hard_cap_compaction_attempts", 2)
+        raw_attempts = self.config.get(
+            "plugins.context_compaction.hard_cap_compaction_attempts", 2
+        )
         try:
             attempts = int(raw_attempts)
-        except TypeError, ValueError, OverflowError:
+        except (TypeError, ValueError, OverflowError):
             attempts = 2
         return max(1, min(attempts, 3))
+
 
     def _history_signature(self, history: Optional[List[ConversationMessage]] = None) -> tuple:
         """Stable, cheap marker used to avoid redundant compaction in one turn."""
@@ -1118,7 +1204,9 @@ class ContextCompactionPlugin(BasePlugin):
             total_chars += len(content if isinstance(content, str) else str(content))
         return (len(history), total_chars)
 
-    def _estimated_current_prompt_tokens(self, history: Optional[List[ConversationMessage]] = None) -> int:
+    def _estimated_current_prompt_tokens(
+        self, history: Optional[List[ConversationMessage]] = None
+    ) -> int:
         """Estimate current history after a compaction made provider usage stale."""
         if history is None:
             history = self._get_conversation_history() or []
@@ -1136,7 +1224,9 @@ class ContextCompactionPlugin(BasePlugin):
             return reported
         return self._estimated_current_prompt_tokens()
 
-    def _outgoing_prompt_tokens(self, history: Optional[List[ConversationMessage]] = None) -> int:
+    def _outgoing_prompt_tokens(
+        self, history: Optional[List[ConversationMessage]] = None
+    ) -> int:
         """What the next request would actually carry.
 
         The provider count covers only the history already sent; tool results
@@ -1175,15 +1265,19 @@ class ContextCompactionPlugin(BasePlugin):
             return
 
         stats = getattr(self._llm_service, "session_stats", None)
-        restored = isinstance(stats, dict) and (stats.get("context_compaction_session_id") == session_id)
+        restored = isinstance(stats, dict) and (
+            stats.get("context_compaction_session_id") == session_id
+        )
         if restored:
             try:
-                self._turn_count = max(0, int(stats.get("context_compaction_turn_count", 0)))
-            except TypeError, ValueError:
+                self._turn_count = max(
+                    0, int(stats.get("context_compaction_turn_count", 0))
+                )
+            except (TypeError, ValueError):
                 self._turn_count = 0
             try:
                 started_at = float(stats.get("context_compaction_started_at", 0.0))
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 started_at = 0.0
             if started_at > 0:
                 self._session_started_at_epoch = started_at
@@ -1237,6 +1331,7 @@ class ContextCompactionPlugin(BasePlugin):
             action="Run /compact now or start a new session.",
         )
 
+
     def _get_context_window_tokens(self) -> int:
         """Return a validated context-window size, or zero when unknown."""
         raw_context_window = self._resolve_context_window()
@@ -1244,14 +1339,16 @@ class ContextCompactionPlugin(BasePlugin):
             if isinstance(raw_context_window, bool):
                 return 0
             if isinstance(raw_context_window, (int, float)):
-                if isinstance(raw_context_window, float) and not math.isfinite(raw_context_window):
+                if isinstance(raw_context_window, float) and not math.isfinite(
+                    raw_context_window
+                ):
                     return 0
                 context_window = int(raw_context_window)
             elif isinstance(raw_context_window, str):
                 context_window = int(raw_context_window)
             else:
                 return 0
-        except TypeError, ValueError, OverflowError:
+        except (TypeError, ValueError, OverflowError):
             return 0
         return max(0, context_window)
 
@@ -1271,10 +1368,12 @@ class ContextCompactionPlugin(BasePlugin):
         model windows retain the conservative 100K automatic fallback.
         """
         context_window = self._get_context_window_tokens()
-        raw_ratio = self.config.get("plugins.context_compaction.compaction_ratio", 0.75)
+        raw_ratio = self.config.get(
+            "plugins.context_compaction.compaction_ratio", 0.75
+        )
         try:
             ratio = float(raw_ratio)
-        except TypeError, ValueError, OverflowError:
+        except (TypeError, ValueError, OverflowError):
             ratio = 0.75
         if not math.isfinite(ratio):
             ratio = 0.75
@@ -1283,10 +1382,12 @@ class ContextCompactionPlugin(BasePlugin):
         safe_cap = min(provider_cap, AUTO_THRESHOLD_CAP)
         policy_source = "automatic" if context_window > 0 else "fallback"
 
-        raw_token_k = self.config.get("plugins.context_compaction.token_threshold_k", 0)
+        raw_token_k = self.config.get(
+            "plugins.context_compaction.token_threshold_k", 0
+        )
         try:
             token_k = int(raw_token_k)
-        except TypeError, ValueError, OverflowError:
+        except (TypeError, ValueError, OverflowError):
             token_k = 0
         if token_k > 0:
             manual_threshold = token_k * 1000
@@ -1347,13 +1448,20 @@ class ContextCompactionPlugin(BasePlugin):
             self._shrink_floor = None
 
         # Gate 2: minimum human turns (safety floor)
-        min_turns = int(self.config.get("plugins.context_compaction.min_human_turns", 6))
-        human_turns = sum(1 for msg in history if msg.role == "user" and not msg.metadata.get("hub_message"))
+        min_turns = int(
+            self.config.get("plugins.context_compaction.min_human_turns", 6)
+        )
+        human_turns = sum(
+            1
+            for msg in history
+            if msg.role == "user" and not msg.metadata.get("hub_message")
+        )
         # A reported count over the threshold compacts once older messages can
         # be summarized, even before min_human_turns: a hub agent whose work
         # comes in one brief has few. The estimate runs ~2.3x high, so it waits.
         if human_turns < min_turns and (
-            estimated or self._find_split_point(history, self._keep_recent_count(history)) < 2
+            estimated
+            or self._find_split_point(history, self._keep_recent_count(history)) < 2
         ):
             return False
 
@@ -1414,7 +1522,11 @@ class ContextCompactionPlugin(BasePlugin):
         if self.event_bus is not None:
             try:
                 hub_plugin = self.event_bus.get_service("hub_plugin")
-                ledger = getattr(hub_plugin, "_task_ledger", None) if hub_plugin is not None else None
+                ledger = (
+                    getattr(hub_plugin, "_task_ledger", None)
+                    if hub_plugin is not None
+                    else None
+                )
                 if (
                     ledger is not None
                     and type(ledger).__module__ != "unittest.mock"
@@ -1509,7 +1621,9 @@ class ContextCompactionPlugin(BasePlugin):
         except Exception:
             logger.exception("Failed to inspect completed compaction task")
 
-    async def _on_llm_turn_complete(self, data: Dict[str, Any], event) -> Dict[str, Any]:
+    async def _on_llm_turn_complete(
+        self, data: Dict[str, Any], event
+    ) -> Dict[str, Any]:
         """LLM_REQUEST_POST: check if compaction threshold reached."""
         self._sync_session_budget()
         self._record_prompt_token_scale()
@@ -1533,6 +1647,7 @@ class ContextCompactionPlugin(BasePlugin):
         }:
             self._set_compaction_status("idle", "")
 
+
         if not history:
             return data
 
@@ -1544,7 +1659,8 @@ class ContextCompactionPlugin(BasePlugin):
             elif (
                 self._coordination_pending()
                 and self._coordination_deferrals < MAX_COORDINATION_DEFERRALS
-                and self._outgoing_prompt_tokens(history) < self._get_hard_cap_threshold()
+                and self._outgoing_prompt_tokens(history)
+                < self._get_hard_cap_threshold()
             ):
                 self._coordination_deferrals += 1
                 logger.info(
@@ -1555,7 +1671,9 @@ class ContextCompactionPlugin(BasePlugin):
                 )
             else:
                 self._coordination_deferrals = 0
-                if self.config.get("plugins.context_compaction.ask_model_first", True):
+                if self.config.get(
+                    "plugins.context_compaction.ask_model_first", True
+                ):
                     await self._request_model_curation(wake=False, reason="threshold")
                 else:
                     self._start_compaction()
@@ -1616,10 +1734,12 @@ class ContextCompactionPlugin(BasePlugin):
         if not self._start_compaction(reason="context_window_exceeded"):
             self._set_compaction_status(
                 "failed",
-                "The context-overflow compaction could not be started. The failed request was not retried.",
+                "The context-overflow compaction could not be started. The failed "
+                "request was not retried.",
                 action="Run /compact now or reduce conversation history.",
             )
         return data
+
 
     # ------------------------------------------------------------------
     # Model-first compaction
@@ -1634,11 +1754,15 @@ class ContextCompactionPlugin(BasePlugin):
             action="Start a new session if the context budget is exhausted.",
         )
 
-    def _start_compaction(self, reason: str = "threshold", *, force: bool = False) -> bool:
+    def _start_compaction(
+        self, reason: str = "threshold", *, force: bool = False
+    ) -> bool:
         """Spawn one background compaction run. False if one can't start."""
         self._refuse_unsafe_compaction()
         return False
-        if self._compaction_in_progress or (self._disabled_for_session and not force):
+        if self._compaction_in_progress or (
+            self._disabled_for_session and not force
+        ):
             return False
         self._awaiting_model = False
         self._compaction_in_progress = True
@@ -1647,7 +1771,8 @@ class ContextCompactionPlugin(BasePlugin):
             message = (
                 "Compaction is running synchronously before the next tool/request boundary."
                 if force
-                else "Compaction is running in the background and will be applied before the next model request."
+                else "Compaction is running in the background and will be applied before "
+                "the next model request."
             )
             self._set_compaction_status("compacting", message)
         task = asyncio.create_task(self._run_compaction())
@@ -1667,7 +1792,10 @@ class ContextCompactionPlugin(BasePlugin):
         history = self._get_conversation_history() or []
         keep = self._keep_recent_count(history)
         if self._find_split_point(history, keep) <= 1:
-            return f"nothing to compact yet: {len(history)} messages, the last {keep} are always kept"
+            return (
+                f"nothing to compact yet: {len(history)} messages, "
+                f"the last {keep} are always kept"
+            )
         if not ask:
             if self._start_compaction():
                 return "compacting now, applied before the next request"
@@ -1683,7 +1811,10 @@ class ContextCompactionPlugin(BasePlugin):
         if self._awaiting_model:
             return "already asked the model, waiting for its <compact>"
         await self._request_model_curation(wake=True, reason="requested by user")
-        return "asked the model what to keep; it compacts when ready (or when its turn ends)"
+        return (
+            "asked the model what to keep; it compacts when ready "
+            "(or when its turn ends)"
+        )
 
     def _acp_owns_chat(self) -> bool:
         """Whether an ACP agent owns this chat (the test the message handler
@@ -1697,7 +1828,9 @@ class ContextCompactionPlugin(BasePlugin):
         except Exception:
             return False
 
-    def _keep_recent_count(self, history: Optional[List[ConversationMessage]] = None) -> int:
+    def _keep_recent_count(
+        self, history: Optional[List[ConversationMessage]] = None
+    ) -> int:
         """Messages always kept intact. Scales with the window (~1 per 100K)
         so 1M-token models don't lose the thread keeping only 8.
 
@@ -1749,13 +1882,20 @@ class ContextCompactionPlugin(BasePlugin):
         entries = []
         if context_svc is not None:
             try:
-                entries = [e for e in context_svc.all_entries() if e.decision in ("pending", "keep", "summary")]
+                entries = [
+                    e
+                    for e in context_svc.all_entries()
+                    if e.decision in ("pending", "keep", "summary")
+                ]
             except Exception:
                 entries = []
         if entries:
             lines.append("Heavy items in your context:")
             for e in entries:
-                lines.append(f"  {e.ctx_id}  {e.kind:<10} {e.label:<40} {e.size_bytes // 1024:>5}KB  {e.decision}")
+                lines.append(
+                    f"  {e.ctx_id}  {e.kind:<10} {e.label:<40} "
+                    f"{e.size_bytes // 1024:>5}KB  {e.decision}"
+                )
             lines += [
                 "Mark each one:",
                 '  <curate id="ctx-N" decision="keep">why you need it verbatim</curate>',
@@ -1767,7 +1907,8 @@ class ContextCompactionPlugin(BasePlugin):
             "Then write what you must remember (current task, decisions, file "
             "paths, next step) and start compaction in the same reply:",
             "  <compact>your notes, kept verbatim at the top of your context</compact>",
-            "Durable knowledge can also go to <scratchpad> or <vault_write>, both survive compaction.",
+            "Durable knowledge can also go to <scratchpad> or <vault_write>, "
+            "both survive compaction.",
         ]
         return "\n".join(lines)
 
@@ -1776,7 +1917,11 @@ class ContextCompactionPlugin(BasePlugin):
         if not self.event_bus:
             return None
         svc = self.event_bus.get_service("context_service")
-        if svc is None or type(svc).__module__ == "unittest.mock" or not hasattr(svc, "all_entries"):
+        if (
+            svc is None
+            or type(svc).__module__ == "unittest.mock"
+            or not hasattr(svc, "all_entries")
+        ):
             return None
         return svc
 
@@ -1817,7 +1962,9 @@ class ContextCompactionPlugin(BasePlugin):
 
         if not delivered:
             context_svc = self._get_context_service()
-            if context_svc is not None and hasattr(context_svc, "queue_ephemeral_injection"):
+            if context_svc is not None and hasattr(
+                context_svc, "queue_ephemeral_injection"
+            ):
                 context_svc.queue_ephemeral_injection(prompt)
             elif llm is not None and hasattr(llm, "queue_agent_hud"):
                 llm.queue_agent_hud(section="context", label="compaction", content=prompt)
@@ -1859,7 +2006,9 @@ class ContextCompactionPlugin(BasePlugin):
             return
         import re
 
-        pattern = re.compile(r"<compact\s*/>|<compact>(.*?)</compact>", re.DOTALL | re.IGNORECASE)
+        pattern = re.compile(
+            r"<compact\s*/>|<compact>(.*?)</compact>", re.DOTALL | re.IGNORECASE
+        )
 
         def _extract(m):
             return {"notes": (m.group(1) or "").strip()}
@@ -1917,8 +2066,10 @@ class ContextCompactionPlugin(BasePlugin):
         pending_before = self._pending_compaction
         if not self._start_compaction():
             return failure(
-                self._compaction_status_message or "Compaction could not start; no history was changed.",
-                self._compaction_status_action or "Check the compaction status and run /compact now.",
+                self._compaction_status_message
+                or "Compaction could not start; no history was changed.",
+                self._compaction_status_action
+                or "Check the compaction status and run /compact now.",
                 clear_model_notes=True,
             )
 
@@ -1948,13 +2099,16 @@ class ContextCompactionPlugin(BasePlugin):
                     "Check the log, then run /compact now.",
                     clear_model_notes=True,
                 )
-            logger.exception("Model-first compaction staged history but failed final bookkeeping")
+            logger.exception(
+                "Model-first compaction staged history but failed final bookkeeping"
+            )
 
         if self._pending_compaction is pending_before:
             return failure(
                 self._compaction_status_message
                 or "Compaction did not stage a replacement history; no history was changed.",
-                self._compaction_status_action or "Check the compaction status, then run /compact now.",
+                self._compaction_status_action
+                or "Check the compaction status, then run /compact now.",
                 clear_model_notes=True,
             )
 
@@ -1984,7 +2138,9 @@ class ContextCompactionPlugin(BasePlugin):
         API-reported token count when available (estimate only as a fallback),
         and the resolved per-model window.
         """
-        every = int(self.config.get("plugins.context_compaction.budget_hud_every_n_turns", 5))
+        every = int(
+            self.config.get("plugins.context_compaction.budget_hud_every_n_turns", 5)
+        )
         if every <= 0:
             return
         count = getattr(self, "_turns_since_budget_hud", 0) + 1
@@ -2005,9 +2161,15 @@ class ContextCompactionPlugin(BasePlugin):
         pct = int(used * 100 / window)
         used_k, window_k = used // 1000, window // 1000
         if pct >= 85:
-            body = f"{used_k}K / {window_k}K tokens ({pct}%) — nearly full; wrap up or /compact soon"
+            body = (
+                f"{used_k}K / {window_k}K tokens ({pct}%) — nearly full; "
+                "wrap up or /compact soon"
+            )
         elif pct >= 70:
-            body = f"{used_k}K / {window_k}K tokens ({pct}%) — getting full; prefer grep over whole-file reads"
+            body = (
+                f"{used_k}K / {window_k}K tokens ({pct}%) — getting full; "
+                "prefer grep over whole-file reads"
+            )
         else:
             body = f"{used_k}K / {window_k}K tokens ({pct}%)"
 
@@ -2016,7 +2178,9 @@ class ContextCompactionPlugin(BasePlugin):
         except Exception:
             pass
 
-    async def _on_llm_request_pre(self, data: Dict[str, Any], event) -> Dict[str, Any]:
+    async def _on_llm_request_pre(
+        self, data: Dict[str, Any], event
+    ) -> Dict[str, Any]:
         """Apply staged history, then enforce the prompt budget before sending."""
         data = data if isinstance(data, dict) else {}
         try:
@@ -2029,7 +2193,9 @@ class ContextCompactionPlugin(BasePlugin):
             logger.exception("Failed to apply pending context compaction before request")
         if not self.config.get("plugins.context_compaction.enabled", True):
             return data
-        if not await self._enforce_context_budget_at_boundary(data, event, boundary="request"):
+        if not await self._enforce_context_budget_at_boundary(
+            data, event, boundary="request"
+        ):
             return self._context_budget_cancellation(
                 data,
                 event,
@@ -2037,12 +2203,16 @@ class ContextCompactionPlugin(BasePlugin):
             )
         return data
 
-    async def _on_tool_call_pre(self, data: Dict[str, Any], event) -> Dict[str, Any]:
+    async def _on_tool_call_pre(
+        self, data: Dict[str, Any], event
+    ) -> Dict[str, Any]:
         """Do not execute another tool while the prompt is above its hard budget."""
         data = data if isinstance(data, dict) else {}
         if not self.config.get("plugins.context_compaction.enabled", True):
             return data
-        if not await self._enforce_context_budget_at_boundary(data, event, boundary="tool"):
+        if not await self._enforce_context_budget_at_boundary(
+            data, event, boundary="tool"
+        ):
             return self._context_budget_cancellation(
                 data,
                 event,
@@ -2050,7 +2220,9 @@ class ContextCompactionPlugin(BasePlugin):
             )
         return data
 
-    def _context_budget_cancellation(self, data: Dict[str, Any], event, reason: str) -> Dict[str, Any]:
+    def _context_budget_cancellation(
+        self, data: Dict[str, Any], event, reason: str
+    ) -> Dict[str, Any]:
         """Cancel the event and return an actionable decision to its caller."""
         result = dict(data)
         decision = {"allowed": False, "reason": reason}
@@ -2068,7 +2240,9 @@ class ContextCompactionPlugin(BasePlugin):
         )
         return result
 
-    async def _enforce_context_budget_at_boundary(self, data: Dict[str, Any], event, *, boundary: str) -> bool:
+    async def _enforce_context_budget_at_boundary(
+        self, data: Dict[str, Any], event, *, boundary: str
+    ) -> bool:
         """Wait for compaction or roll over before a tool/API boundary.
 
         A paused no-shrink floor is only a normal auto-trigger guard. It must
@@ -2094,7 +2268,10 @@ class ContextCompactionPlugin(BasePlugin):
 
         agent, hub_identity = self._get_agent_labels()
         used_k, hard_cap_k = current_tokens // 1000, hard_cap // 1000
-        message = f"Context budget reached ({used_k}K/{hard_cap_k}K hard cap); compacting before the next {boundary}."
+        message = (
+            f"Context budget reached ({used_k}K/{hard_cap_k}K hard cap); "
+            f"compacting before the next {boundary}."
+        )
         logger.warning(
             "[context_compaction][agent=%s][hub=%s] hard_cap_boundary=%s "
             "prompt_tokens=%s hard_cap_tokens=%s auto_trigger_tokens=%s "
@@ -2145,7 +2322,9 @@ class ContextCompactionPlugin(BasePlugin):
                     )
             elif not self._compaction_in_progress:
                 try:
-                    started = self._start_compaction(reason=f"hard_cap_{boundary}_attempt_{attempt}", force=True)
+                    started = self._start_compaction(
+                        reason=f"hard_cap_{boundary}_attempt_{attempt}", force=True
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -2192,7 +2371,8 @@ class ContextCompactionPlugin(BasePlugin):
                 self._last_hard_cap_guard_signature = after_signature
                 self._set_compaction_status(
                     "applied",
-                    f"Context reduced to approximately {current_tokens // 1000}K tokens before the next {boundary}.",
+                    f"Context reduced to approximately {current_tokens // 1000}K tokens "
+                    f"before the next {boundary}.",
                 )
                 await self._log_compaction_event(
                     messages_summarized=max(0, len(before_history) - len(history)),
@@ -2218,7 +2398,9 @@ class ContextCompactionPlugin(BasePlugin):
             )
 
         try:
-            rolled_over = await self._rollover_with_summary(data, event, boundary=boundary)
+            rolled_over = await self._rollover_with_summary(
+                data, event, boundary=boundary
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -2251,7 +2433,9 @@ class ContextCompactionPlugin(BasePlugin):
         )
         return False
 
-    async def _rollover_with_summary(self, data: Dict[str, Any], event, *, boundary: str) -> bool:
+    async def _rollover_with_summary(
+        self, data: Dict[str, Any], event, *, boundary: str
+    ) -> bool:
         """Replace the old prefix with a deterministic recovery summary.
 
         This path is intentionally local and bounded: if the summary model is
@@ -2273,7 +2457,9 @@ class ContextCompactionPlugin(BasePlugin):
             split_point = max(1, len(history) - keep_count)
         system_msg = history[0] if history and history[0].role == "system" else None
         live_task_ids = self._get_live_task_ids()
-        preserved_tasks, _summarizable_tasks = self._extract_preservable_messages(history, live_task_ids=live_task_ids)
+        preserved_tasks, _summarizable_tasks = self._extract_preservable_messages(
+            history, live_task_ids=live_task_ids
+        )
         recent = history[split_point:]
         safe_recent = [self._truncate_message_for_rollover(message) for message in recent]
         fallback_summary = self._build_emergency_summary(history[1:split_point])
@@ -2284,23 +2470,35 @@ class ContextCompactionPlugin(BasePlugin):
                 "preserved live-task excerpts below. The full transcript remains in logs."
             )
 
-        operator_records, prior_operator_omissions = self._collect_operator_word_records(history[1:split_point])
-        operator_word_records, operator_words_omitted = self._bound_operator_word_records(
-            operator_records, prior_operator_omissions
+        operator_records, prior_operator_omissions = (
+            self._collect_operator_word_records(history[1:split_point])
+        )
+        operator_word_records, operator_words_omitted = (
+            self._bound_operator_word_records(
+                operator_records, prior_operator_omissions
+            )
         )
         open_state_candidate: str | None = None
         for prior_message in history:
             metadata = getattr(prior_message, "metadata", None)
             content = getattr(prior_message, "content", "")
-            if isinstance(metadata, dict) and metadata.get("context_compaction") is True and isinstance(content, str):
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("context_compaction") is True
+                and isinstance(content, str)
+            ):
                 _, prior_open_state = self._split_open_state(content)
                 if prior_open_state is not None:
                     open_state_candidate = prior_open_state
         fallback_summary = self._strip_model_operator_word_blocks(fallback_summary)
-        fallback_summary, emergency_open_state = self._split_open_state(fallback_summary)
+        fallback_summary, emergency_open_state = self._split_open_state(
+            fallback_summary
+        )
         if emergency_open_state is not None:
             open_state_candidate = emergency_open_state
-        open_state = self._sanitize_open_state(open_state_candidate or "", history)
+        open_state = self._sanitize_open_state(
+            open_state_candidate or "", history
+        )
 
         next_round = self._compaction_round + 1
         compacted_history = self._build_compacted_history(
@@ -2337,7 +2535,8 @@ class ContextCompactionPlugin(BasePlugin):
             summarization_model=None,
         )
         logger.warning(
-            "[context_compaction][agent=%s][hub=%s] emergency rollover applied round=%s prompt_estimate=%s",
+            "[context_compaction][agent=%s][hub=%s] emergency rollover applied "
+            "round=%s prompt_estimate=%s",
             *self._get_agent_labels(),
             self._compaction_round,
             self._effective_prompt_tokens(),
@@ -2374,15 +2573,21 @@ class ContextCompactionPlugin(BasePlugin):
         wrapper_chars = len(SUMMARY_INJECTION_PREFIX) + len(SUMMARY_INJECTION_SUFFIX)
         body_limit = max(0, max_chars - wrapper_chars)
         lines = [
-            "Automatic context rollover: the summarization provider failed at the hard prompt budget.",
-            "The transcript remains available in the session log; this note preserves the latest user intent.",
+            "Automatic context rollover: the summarization provider failed at "
+            "the hard prompt budget.",
+            "The transcript remains available in the session log; this note "
+            "preserves the latest user intent.",
         ]
         body_length = len("\n".join(lines))
         if body_length >= body_limit:
             return "\n".join(lines)[:body_limit]
 
         _, hub_identity = self._get_agent_labels()
-        hub_identity_key = hub_identity.strip().casefold() if isinstance(hub_identity, str) else ""
+        hub_identity_key = (
+            hub_identity.strip().casefold()
+            if isinstance(hub_identity, str)
+            else ""
+        )
         eligible_messages = []
         for index, message in enumerate(messages):
             metadata = getattr(message, "metadata", None) or {}
@@ -2410,15 +2615,22 @@ class ContextCompactionPlugin(BasePlugin):
                 metadata.get("hub_message")
                 and metadata.get("hub_is_intended")
                 and not explicit_task_id
-                and str(metadata.get("hub_scope", "direct")).strip().casefold() == "direct"
+                and str(metadata.get("hub_scope", "direct")).strip().casefold()
+                == "direct"
                 and hub_identity_key not in {"", "unknown"}
                 and isinstance(recipient, str)
                 and recipient.strip().casefold() == hub_identity_key
             )
             is_hub_notice = bool(
-                metadata.get("hub_message") and not explicit_task_id and not is_untracked_direct_hub_request
+                metadata.get("hub_message")
+                and not explicit_task_id
+                and not is_untracked_direct_hub_request
             )
-            if is_hub_notice or metadata.get("agent_hud") or metadata.get("agent_hud_sources"):
+            if (
+                is_hub_notice
+                or metadata.get("agent_hud")
+                or metadata.get("agent_hud_sources")
+            ):
                 continue
 
             content = getattr(message, "content", "") or ""
@@ -2435,7 +2647,7 @@ class ContextCompactionPlugin(BasePlugin):
             if not is_hub_task and not is_untracked_direct_hub_request:
                 try:
                     is_hub_task = self._is_hub_task(message)
-                except AttributeError, TypeError:
+                except (AttributeError, TypeError):
                     is_hub_task = False
             if is_hub_task:
                 continue
@@ -2444,14 +2656,22 @@ class ContextCompactionPlugin(BasePlugin):
 
         recent_messages = eligible_messages[-8:]
         latest_user = next(
-            (item for item in reversed(eligible_messages) if item[1] == "user"),
+            (
+                item
+                for item in reversed(eligible_messages)
+                if item[1] == "user"
+            ),
             None,
         )
         latest_user_index = latest_user[0] if latest_user is not None else None
         ordered_messages = []
         if latest_user is not None:
             ordered_messages.append(latest_user)
-        ordered_messages.extend(item for item in reversed(recent_messages) if item[0] != latest_user_index)
+        ordered_messages.extend(
+            item
+            for item in reversed(recent_messages)
+            if item[0] != latest_user_index
+        )
 
         for message_index, role, content in ordered_messages:
             prefix = f"[{role}] "
@@ -2467,7 +2687,9 @@ class ContextCompactionPlugin(BasePlugin):
 
         return "\n".join(lines)
 
-    async def _apply_pending_compaction(self, data: Dict[str, Any], event) -> Dict[str, Any]:
+    async def _apply_pending_compaction(
+        self, data: Dict[str, Any], event
+    ) -> Dict[str, Any]:
         """LLM_REQUEST_PRE: apply staged compaction atomically."""
         # Terminal compaction states can publish from a background task after
         # the previous turn's event stream closed, so web clients that missed
@@ -2499,7 +2721,8 @@ class ContextCompactionPlugin(BasePlugin):
             self._pre_compaction_len = 0
             self._set_compaction_status(
                 "failed",
-                "The staged compaction could not be applied because conversation history is empty.",
+                "The staged compaction could not be applied because conversation history "
+                "is empty.",
                 action="Use /compact now or start a new conversation.",
             )
             return data
@@ -2515,7 +2738,9 @@ class ContextCompactionPlugin(BasePlugin):
             return data
 
         if len(history) < self._pre_compaction_len:
-            logger.info("Discarded staged compaction because conversation history was reset")
+            logger.info(
+                "Discarded staged compaction because conversation history was reset"
+            )
             self._set_compaction_status(
                 "failed",
                 "The staged compaction was discarded because conversation history changed.",
@@ -2547,7 +2772,10 @@ class ContextCompactionPlugin(BasePlugin):
                 metadata["post_message_count"] = post_len
                 break
 
-        logger.info(f"Applied compaction round {self._compaction_round}: {pre_len} -> {post_len} messages")
+        logger.info(
+            f"Applied compaction round {self._compaction_round}: "
+            f"{pre_len} -> {post_len} messages"
+        )
 
         self._display_compaction_event(pre_len, post_len)
 
@@ -2585,7 +2813,10 @@ class ContextCompactionPlugin(BasePlugin):
         if coordinator is None or not hasattr(coordinator, "display_message_sequence"):
             return
 
-        content = f"Context compacted (round {self._compaction_round}): {pre_count} -> {post_count} messages."
+        content = (
+            f"Context compacted (round {self._compaction_round}): "
+            f"{pre_count} -> {post_count} messages."
+        )
         try:
             coordinator.display_message_sequence(
                 [
@@ -2664,11 +2895,15 @@ class ContextCompactionPlugin(BasePlugin):
 
     def _get_current_session_id(self) -> Optional[str]:
         """Return current session ID for stale-stage detection."""
-        if self._conversation_logger and hasattr(self._conversation_logger, "session_id"):
+        if self._conversation_logger and hasattr(
+            self._conversation_logger, "session_id"
+        ):
             return self._conversation_logger.session_id
         return None
 
-    def _find_split_point(self, history: List[ConversationMessage], keep_recent: int) -> int:
+    def _find_split_point(
+        self, history: List[ConversationMessage], keep_recent: int
+    ) -> int:
         """Find the split point for compaction.
 
         Returns the index of the first message to keep (keep_recent count).
@@ -2720,7 +2955,10 @@ class ContextCompactionPlugin(BasePlugin):
         # CONTAINMENT, not startswith: hub messages that arrive mid-turn are
         # drained as a MERGED agent-HUD block (context/budget sections first),
         # so "[hub channel:" appears mid-content, not at the start.
-        if msg.role == "user" and ("[hub channel:" in msg.content or "[hub:" in msg.content):
+        if (
+            msg.role == "user"
+            and ("[hub channel:" in msg.content or "[hub:" in msg.content)
+        ):
             return True
         return False
 
@@ -2735,7 +2973,12 @@ class ContextCompactionPlugin(BasePlugin):
         if not msg.metadata.get("hub_message"):
             # Fallback: content-based detection for untagged messages.
             # Containment — see _is_hub_message for the merged-HUD rationale.
-            if not (msg.role == "user" and ("[hub channel:" in msg.content or "[hub:" in msg.content)):
+            if not (
+                msg.role == "user"
+                and (
+                    "[hub channel:" in msg.content or "[hub:" in msg.content
+                )
+            ):
                 return False
 
         content_lower = msg.content.lower()
@@ -2743,12 +2986,18 @@ class ContextCompactionPlugin(BasePlugin):
         # Observed messages (not intended for us) are never tasks.
         # Check BEFORE the hub_is_intended shortcut: an intended message
         # that is explicitly observed-flagged is still not a task.
-        if "you do not need to respond" in content_lower or "do not relay, repeat, or respond" in content_lower:
+        if (
+            "you do not need to respond" in content_lower
+            or "do not relay, repeat, or respond" in content_lower
+        ):
             return False
 
         metadata = getattr(msg, "metadata", None) or {}
-        if metadata.get("hub_task_id") or (metadata.get("task_id") and metadata.get("hub_is_intended")):
+        if metadata.get("hub_task_id") or (
+            metadata.get("task_id") and metadata.get("hub_is_intended")
+        ):
             return True
+
 
         # Check for task indicators
         for indicator in _TASK_INDICATORS:
@@ -2776,14 +3025,19 @@ class ContextCompactionPlugin(BasePlugin):
             hub_plugin = self.event_bus.get_service("hub_plugin")
             ledger = getattr(hub_plugin, "_task_ledger", None)
             identity = getattr(getattr(hub_plugin, "_identity", None), "identity", None)
-            if not ledger or not identity or type(ledger).__module__ == "unittest.mock":
+            if (
+                not ledger
+                or not identity
+                or type(ledger).__module__ == "unittest.mock"
+            ):
                 return set()
 
             cards = list(ledger.get_active_for(identity))
             cards.extend(
                 card
                 for card in ledger.get_all(status="paused")
-                if getattr(card, "status", None) == "paused" and getattr(card, "assignee", "") == identity
+                if getattr(card, "status", None) == "paused"
+                and getattr(card, "assignee", "") == identity
             )
             cards.extend(
                 card
@@ -2792,7 +3046,11 @@ class ContextCompactionPlugin(BasePlugin):
                 and not getattr(card, "assignee", "")
                 and str(getattr(card, "directive", "")).startswith(f"{identity}:")
             )
-            return {str(card.id) for card in cards if getattr(card, "id", None)}
+            return {
+                str(card.id)
+                for card in cards
+                if getattr(card, "id", None)
+            }
         except Exception:
             logger.debug("Unable to read live TaskLedger IDs for compaction", exc_info=True)
             return set()
@@ -2816,7 +3074,9 @@ class ContextCompactionPlugin(BasePlugin):
             return None
         return {"source": source, "timestamp": timestamp, "text": text}
 
-    def _collect_operator_word_records(self, messages: List[ConversationMessage]) -> tuple[List[Dict[str, str]], int]:
+    def _collect_operator_word_records(
+        self, messages: List[ConversationMessage]
+    ) -> tuple[List[Dict[str, str]], int]:
         """Collect trusted records from source messages and prior summaries."""
         records: List[Dict[str, str]] = []
         previously_omitted = 0
@@ -2865,13 +3125,20 @@ class ContextCompactionPlugin(BasePlugin):
         return retained, omitted
 
     @staticmethod
-    def _format_operator_word_block(records: List[Dict[str, str]], omitted: int) -> str:
+    def _format_operator_word_block(
+        records: List[Dict[str, str]], omitted: int
+    ) -> str:
         if not records and not omitted:
             return ""
         lines = [OPERATOR_WORDS_MARKER]
         if omitted:
-            lines.append(f"[{omitted} older operator messages omitted by the preservation limit.]")
-        lines.extend(f"[{record['timestamp']} | {record['source']}] {record['text']}" for record in records)
+            lines.append(
+                f"[{omitted} older operator messages omitted by the preservation limit.]"
+            )
+        lines.extend(
+            f"[{record['timestamp']} | {record['source']}] {record['text']}"
+            for record in records
+        )
         lines.append(OPERATOR_WORDS_END_MARKER)
         return "\n".join(lines)
 
@@ -2883,7 +3150,11 @@ class ContextCompactionPlugin(BasePlugin):
         empty section that may clear an older state.
         """
         lines = summary_text.splitlines(keepends=True)
-        marker_indices = [index for index, line in enumerate(lines) if line.rstrip() == OPEN_STATE_MARKER]
+        marker_indices = [
+            index
+            for index, line in enumerate(lines)
+            if line.rstrip() == OPEN_STATE_MARKER
+        ]
         if not marker_indices:
             return summary_text, None
 
@@ -2891,7 +3162,11 @@ class ContextCompactionPlugin(BasePlugin):
         summary_prefix = "".join(lines[:marker_index]).rstrip()
         candidate_lines = lines[marker_index + 1 :]
         end_index = next(
-            (index for index, line in enumerate(candidate_lines) if line.rstrip() == END_OPEN_STATE_MARKER),
+            (
+                index
+                for index, line in enumerate(candidate_lines)
+                if line.rstrip() == END_OPEN_STATE_MARKER
+            ),
             len(candidate_lines),
         )
         candidate = "".join(candidate_lines[:end_index]).strip()
@@ -2907,10 +3182,15 @@ class ContextCompactionPlugin(BasePlugin):
             end = summary_text.find(OPERATOR_WORDS_END_MARKER, start)
             if end < 0:
                 return summary_text[:start].rstrip()
-            summary_text = summary_text[:start] + summary_text[end + len(OPERATOR_WORDS_END_MARKER) :]
+            summary_text = (
+                summary_text[:start]
+                + summary_text[end + len(OPERATOR_WORDS_END_MARKER) :]
+            )
 
     @staticmethod
-    def _sanitize_open_state(candidate: str, source_messages: List[ConversationMessage]) -> str:
+    def _sanitize_open_state(
+        candidate: str, source_messages: List[ConversationMessage]
+    ) -> str:
         """Drop an entire item line if any issue/SHA token lacks source evidence."""
         source_text_parts = []
         for message in source_messages:
@@ -2920,8 +3200,13 @@ class ContextCompactionPlugin(BasePlugin):
             if not isinstance(content, str):
                 continue
             metadata = getattr(message, "metadata", None)
-            if isinstance(metadata, dict) and metadata.get("context_compaction") is True:
-                _, prior_open_state = ContextCompactionPlugin._split_open_state(content)
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("context_compaction") is True
+            ):
+                _, prior_open_state = ContextCompactionPlugin._split_open_state(
+                    content
+                )
                 if prior_open_state is not None:
                     source_text_parts.append(prior_open_state)
             else:
@@ -2929,7 +3214,9 @@ class ContextCompactionPlugin(BasePlugin):
         source_text = "\n".join(source_text_parts)
         known_issues = set(re.findall(r"(?<![\w])#\d+\b", source_text))
         sha_pattern = r"(?<![A-Fa-f0-9])[A-Fa-f0-9]{7,40}(?![A-Fa-f0-9])"
-        known_shas = {token.lower() for token in re.findall(sha_pattern, source_text)}
+        known_shas = {
+            token.lower() for token in re.findall(sha_pattern, source_text)
+        }
         retained_lines = []
         for line in candidate.splitlines():
             line = line.strip()
@@ -2958,7 +3245,9 @@ class ContextCompactionPlugin(BasePlugin):
         wholesale merely because it mentions a control command.
         """
         live_ids = (
-            {str(task_id) for task_id in live_task_ids} if live_task_ids is not None else self._get_live_task_ids()
+            {str(task_id) for task_id in live_task_ids}
+            if live_task_ids is not None
+            else self._get_live_task_ids()
         )
         latest_by_task: Dict[str, tuple[int, ConversationMessage]] = {}
 
@@ -2969,7 +3258,9 @@ class ContextCompactionPlugin(BasePlugin):
             if task_id and task_id in live_ids:
                 latest_by_task[task_id] = (index, msg)
 
-        latest_tasks = sorted(latest_by_task.values(), key=lambda entry: entry[0])[-MAX_PRESERVED_HUB_TASK_MESSAGES:]
+        latest_tasks = sorted(
+            latest_by_task.values(), key=lambda entry: entry[0]
+        )[-MAX_PRESERVED_HUB_TASK_MESSAGES:]
         preserved_by_index: Dict[int, ConversationMessage] = {}
         oversized_indices: set[int] = set()
         for index, msg in latest_tasks:
@@ -2981,7 +3272,9 @@ class ContextCompactionPlugin(BasePlugin):
             task_id = (self._message_task_id(msg) or "unknown")[:128]
             prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
             suffix = "\n[Remaining assignment text is summarized below.]"
-            excerpt_budget = max(0, MAX_PRESERVED_HUB_TASK_CHARS - len(prefix) - len(suffix))
+            excerpt_budget = max(
+                0, MAX_PRESERVED_HUB_TASK_CHARS - len(prefix) - len(suffix)
+            )
             truncated = copy.copy(msg)
             truncated.content = f"{prefix}{content[:excerpt_budget]}{suffix}"
             truncated.metadata = {
@@ -2991,14 +3284,20 @@ class ContextCompactionPlugin(BasePlugin):
             preserved_by_index[index] = truncated
             oversized_indices.add(index)
 
-        preserved = [preserved_by_index[index] for index in sorted(preserved_by_index)]
+        preserved = [
+            preserved_by_index[index]
+            for index in sorted(preserved_by_index)
+        ]
         summarizable = [
-            msg for index, msg in enumerate(messages) if index not in preserved_by_index or index in oversized_indices
+            msg
+            for index, msg in enumerate(messages)
+            if index not in preserved_by_index or index in oversized_indices
         ]
 
         if preserved:
             logger.info(
-                "Task extraction: preserved %d bounded live-task messages; %d messages will be summarized",
+                "Task extraction: preserved %d bounded live-task messages; "
+                "%d messages will be summarized",
                 len(preserved),
                 len(summarizable),
             )
@@ -3027,7 +3326,8 @@ class ContextCompactionPlugin(BasePlugin):
             # For assistant messages with tool_calls, note which tools ran
             if self._has_tool_calls(msg):
                 tool_names = [
-                    tc.get("function", {}).get("name", tc.get("name", "?")) for tc in msg.metadata["tool_calls"]
+                    tc.get("function", {}).get("name", tc.get("name", "?"))
+                    for tc in msg.metadata["tool_calls"]
                 ]
                 content += f"\n[Used tools: {', '.join(tool_names)}]"
 
@@ -3049,7 +3349,8 @@ class ContextCompactionPlugin(BasePlugin):
             if not history:
                 self._set_compaction_status(
                     "failed",
-                    "Compaction could not run because conversation history is empty; no history was changed.",
+                    "Compaction could not run because conversation history is empty; "
+                    "no history was changed.",
                     action="Start a new request before compacting.",
                 )
                 return
@@ -3058,7 +3359,9 @@ class ContextCompactionPlugin(BasePlugin):
             snapshot_session_id = self._get_current_session_id()
 
             keep_recent = self._keep_recent_count(history_snapshot)
-            max_summary_tokens = self.config.get("plugins.context_compaction.max_summary_tokens", 2000)
+            max_summary_tokens = self.config.get(
+                "plugins.context_compaction.max_summary_tokens", 2000
+            )
 
             # Identify boundaries
             split_point = self._find_split_point(history_snapshot, keep_recent)
@@ -3067,7 +3370,8 @@ class ContextCompactionPlugin(BasePlugin):
                 logger.info("Not enough messages to summarize, skipping")
                 self._set_compaction_status(
                     "failed",
-                    "Compaction could not run because there are not enough older messages to summarize.",
+                    "Compaction could not run because there are not enough older messages "
+                    "to summarize.",
                     action="Use /compact preview or reduce the conversation history.",
                 )
                 return
@@ -3081,9 +3385,13 @@ class ContextCompactionPlugin(BasePlugin):
 
             to_summarize = history_snapshot[start_idx:split_point]
             to_keep = history_snapshot[split_point:]
-            operator_records, prior_operator_omissions = self._collect_operator_word_records(to_summarize)
-            operator_word_records, operator_words_omitted = self._bound_operator_word_records(
-                operator_records, prior_operator_omissions
+            operator_records, prior_operator_omissions = (
+                self._collect_operator_word_records(to_summarize)
+            )
+            operator_word_records, operator_words_omitted = (
+                self._bound_operator_word_records(
+                    operator_records, prior_operator_omissions
+                )
             )
 
             if not to_summarize:
@@ -3097,8 +3405,14 @@ class ContextCompactionPlugin(BasePlugin):
 
             # Save verbatim messages to vault before they're lost to compaction
             try:
-                hub_plugin = self.event_bus.get_service("hub_plugin") if self.event_bus else None
-                vault = hub_plugin.get_vault() if hub_plugin and hasattr(hub_plugin, "get_vault") else None
+                hub_plugin = (
+                    self.event_bus.get_service("hub_plugin") if self.event_bus else None
+                )
+                vault = (
+                    hub_plugin.get_vault()
+                    if hub_plugin and hasattr(hub_plugin, "get_vault")
+                    else None
+                )
                 if vault:
                     snapshot_lines = []
                     for msg in to_summarize[-20:]:  # last 20 messages max
@@ -3117,12 +3431,16 @@ class ContextCompactionPlugin(BasePlugin):
             # --- Context service ledger integration ---
             # Partition messages: those with ctx_ids in metadata get
             # handled by the ledger; the rest go to LLM summarization.
-            ledger_handled, untracked_msgs = self._partition_by_ledger(to_summarize)
+            ledger_handled, untracked_msgs = (
+                self._partition_by_ledger(to_summarize)
+            )
 
             # --- Task-aware extraction ---
             # Separate hub task messages (preserved verbatim) from
             # regular conversation (summarized by LLM).
-            preserved_tasks, summarizable = self._extract_preservable_messages(untracked_msgs)
+            preserved_tasks, summarizable = self._extract_preservable_messages(
+                untracked_msgs
+            )
 
             # --- Deterministic coordination block (no LLM discretion) -----
             # Any hub-coordination line still present in the SUMMARIZABLE
@@ -3139,15 +3457,22 @@ class ContextCompactionPlugin(BasePlugin):
                     + "\n---\n".join(coordination_lines)
                     + "\n=== END COORDINATION STATE ==="
                 )
-                logger.info(f"Coordination block: {len(coordination_lines)} hub lines extracted verbatim into summary")
+                logger.info(
+                    f"Coordination block: {len(coordination_lines)} hub lines "
+                    "extracted verbatim into summary"
+                )
 
             summary_text = None
             if summarizable:
                 # Format only the summarizable portion for the LLM
                 formatted = self._format_messages_for_summary(summarizable)
-                system_prompt = SUMMARIZATION_SYSTEM_PROMPT.format(max_tokens=max_summary_tokens)
+                system_prompt = SUMMARIZATION_SYSTEM_PROMPT.format(
+                    max_tokens=max_summary_tokens
+                )
 
-                summary_text = await self._call_summarization_llm(formatted, system_prompt, max_summary_tokens)
+                summary_text = await self._call_summarization_llm(
+                    formatted, system_prompt, max_summary_tokens
+                )
 
                 if not summary_text or len(summary_text) < 100:
                     logger.warning(
@@ -3182,10 +3507,14 @@ class ContextCompactionPlugin(BasePlugin):
                     + model_notes
                     + "\n=== END NOTES ==="
                 )
-                summary_text = notes_block + "\n\n" + summary_text if summary_text else notes_block
+                summary_text = (
+                    notes_block + "\n\n" + summary_text if summary_text else notes_block
+                )
             summary_text = self._strip_model_operator_word_blocks(summary_text or "")
             summary_text, open_state_candidate = self._split_open_state(summary_text)
-            open_state = self._sanitize_open_state(open_state_candidate or "", history_snapshot)
+            open_state = self._sanitize_open_state(
+                open_state_candidate or "", history_snapshot
+            )
             compacted = self._build_compacted_history(
                 system_msg,
                 summary_text or "",
@@ -3200,9 +3529,13 @@ class ContextCompactionPlugin(BasePlugin):
             )
 
             # Write checkpoint before staging the compaction swap
-            checkpoint_filename = self._write_compaction_checkpoint(history_snapshot)
+            checkpoint_filename = self._write_compaction_checkpoint(
+                history_snapshot
+            )
             if checkpoint_filename:
-                self._log_checkpoint_event(checkpoint_filename, len(history_snapshot))
+                self._log_checkpoint_event(
+                    checkpoint_filename, len(history_snapshot)
+                )
 
             # Stage for safe application from the snapshot baseline.
             self._pre_compaction_len = snapshot_len
@@ -3244,9 +3577,13 @@ class ContextCompactionPlugin(BasePlugin):
                 )
                 action = "Retry the failed turn to apply compaction and continue."
             else:
-                ready_message = "Compaction is ready and will be applied before the next model request."
+                ready_message = (
+                    "Compaction is ready and will be applied before the next model request."
+                )
                 action = "Continue with the next request."
-            self._set_compaction_status("ready_to_retry", ready_message, action=action)
+            self._set_compaction_status(
+                "ready_to_retry", ready_message, action=action
+            )
 
             try:
                 from kollabor_ai.notifications.producer import push_env
@@ -3255,7 +3592,10 @@ class ContextCompactionPlugin(BasePlugin):
                 push_env(
                     self.event_bus,
                     "file",
-                    (f"compacted r{self._compaction_round}: {removed} msgs removed"),
+                    (
+                        f"compacted r{self._compaction_round}: "
+                        f"{removed} msgs removed"
+                    ),
                     kind="compaction",
                 )
             except Exception:
@@ -3272,7 +3612,8 @@ class ContextCompactionPlugin(BasePlugin):
             if staged:
                 self._set_compaction_status(
                     "ready_to_retry",
-                    "Compaction was staged before cancellation and will be applied before the next model request.",
+                    "Compaction was staged before cancellation and will be applied "
+                    "before the next model request.",
                     action="Start a new request to apply the staged history.",
                 )
             else:
@@ -3312,7 +3653,8 @@ class ContextCompactionPlugin(BasePlugin):
             self._last_compaction_duration_seconds = time.perf_counter() - round_started_at
             agent, hub_identity = self._get_agent_labels()
             logger.info(
-                "[context_compaction][agent=%s][hub=%s] round=%s model=%s duration_seconds=%.3f status=%s",
+                "[context_compaction][agent=%s][hub=%s] round=%s model=%s "
+                "duration_seconds=%.3f status=%s",
                 agent,
                 hub_identity,
                 round_number,
@@ -3348,7 +3690,7 @@ class ContextCompactionPlugin(BasePlugin):
 
         try:
             max_retries = max(0, int(self.config.get("kollabor.llm.max_retries", 5)))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             max_retries = 5
         for attempt in range(max_retries + 1):
             try:
@@ -3373,17 +3715,15 @@ class ContextCompactionPlugin(BasePlugin):
                     raise
                 try:
                     wait = float(getattr(e, "retry_after", None))
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     wait = None
                 if wait is not None and not 0 <= wait <= RETRY_MAX_DELAY_SECONDS:
                     raise  # the server asked for longer than we will wait
-                delay = (
-                    wait
-                    if wait is not None
-                    else min(
-                        RETRY_BASE_DELAY_SECONDS * 2**attempt * random.uniform(RETRY_JITTER_MIN, RETRY_JITTER_MAX),
-                        RETRY_MAX_DELAY_SECONDS,
-                    )
+                delay = wait if wait is not None else min(
+                    RETRY_BASE_DELAY_SECONDS
+                    * 2**attempt
+                    * random.uniform(RETRY_JITTER_MIN, RETRY_JITTER_MAX),
+                    RETRY_MAX_DELAY_SECONDS,
                 )
                 logger.warning(
                     "Summarization call failed (attempt %d/%d), retrying in %.0fs: %s",
@@ -3394,7 +3734,9 @@ class ContextCompactionPlugin(BasePlugin):
                 )
                 await asyncio.sleep(delay)
 
-    def _get_active_session_model(self, profile_data: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    def _get_active_session_model(
+        self, profile_data: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
         """Resolve the model already selected for the active conversation."""
         llm_service = self._llm_service
         api_service = getattr(llm_service, "api_service", None)
@@ -3426,20 +3768,27 @@ class ContextCompactionPlugin(BasePlugin):
         model = profile_data.get("model") if isinstance(profile_data, dict) else None
         return model.strip() if isinstance(model, str) and model.strip() else None
 
-    def _resolve_summarization_model(self, profile_data: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    def _resolve_summarization_model(
+        self, profile_data: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
         """Choose plugin override, shared fast model, then active session model."""
-        fast_model = resolve_fast_model(self.config, "plugins.context_compaction.summarization_model")
+        fast_model = resolve_fast_model(
+            self.config, "plugins.context_compaction.summarization_model"
+        )
         if fast_model:
             return str(fast_model)
         return self._get_active_session_model(profile_data)
 
     def _summarization_model_source(self) -> str:
         """Identify the configured precedence layer used for summarization."""
-        plugin_model = self.config.get("plugins.context_compaction.summarization_model", None)
+        plugin_model = self.config.get(
+            "plugins.context_compaction.summarization_model", None
+        )
         if plugin_model:
             return "plugin"
         shared_model = self.config.get("kollabor.llm.fast_model", None)
         return "shared_fast_model" if shared_model else "session"
+
 
     async def _call_summarization_llm(
         self,
@@ -3459,7 +3808,9 @@ class ContextCompactionPlugin(BasePlugin):
 
         try:
             # Get profile for summarization
-            profile_name = self.config.get("plugins.context_compaction.summarization_profile", None)
+            profile_name = self.config.get(
+                "plugins.context_compaction.summarization_profile", None
+            )
             profile_data = None
 
             if profile_name and self._profile_manager:
@@ -3467,7 +3818,10 @@ class ContextCompactionPlugin(BasePlugin):
                 if profile_obj:
                     profile_data = profile_obj.to_dict()
                 else:
-                    logger.warning(f"Summarization profile '{profile_name}' not found, falling back to current")
+                    logger.warning(
+                        f"Summarization profile '{profile_name}' not found, "
+                        "falling back to current"
+                    )
 
             if not profile_data and self._profile_manager:
                 profile_obj = self._profile_manager.get_active_profile()
@@ -3485,7 +3839,8 @@ class ContextCompactionPlugin(BasePlugin):
             self._last_summarization_model = selected_model
             agent, hub_identity = self._get_agent_labels()
             logger.info(
-                "[context_compaction][agent=%s][hub=%s] round=%s summarization_start model=%s source=%s",
+                "[context_compaction][agent=%s][hub=%s] round=%s "
+                "summarization_start model=%s source=%s",
                 agent,
                 hub_identity,
                 self._compaction_round + 1,
@@ -3520,7 +3875,8 @@ class ContextCompactionPlugin(BasePlugin):
 
             self._last_compaction_duration_seconds = time.perf_counter() - started_at
             logger.info(
-                "[context_compaction][agent=%s][hub=%s] round=%s summarization_complete model=%s duration_seconds=%.3f",
+                "[context_compaction][agent=%s][hub=%s] round=%s "
+                "summarization_complete model=%s duration_seconds=%.3f",
                 agent,
                 hub_identity,
                 self._compaction_round + 1,
@@ -3532,7 +3888,8 @@ class ContextCompactionPlugin(BasePlugin):
         except Exception as e:
             self._last_compaction_duration_seconds = time.perf_counter() - started_at
             logger.error(
-                "[context_compaction][agent=%s][hub=%s] summarization_failed model=%s duration_seconds=%.3f error=%s",
+                "[context_compaction][agent=%s][hub=%s] summarization_failed "
+                "model=%s duration_seconds=%.3f error=%s",
                 agent,
                 hub_identity,
                 selected_model or self._last_summarization_model or "unresolved",
@@ -3560,7 +3917,11 @@ class ContextCompactionPlugin(BasePlugin):
         context_svc = None
         if self.event_bus:
             _svc = self.event_bus.get_service("context_service")
-            if _svc is not None and type(_svc).__module__ != "unittest.mock" and hasattr(_svc, "entry_for_message"):
+            if (
+                _svc is not None
+                and type(_svc).__module__ != "unittest.mock"
+                and hasattr(_svc, "entry_for_message")
+            ):
                 context_svc = _svc
 
         if context_svc is None:
@@ -3592,8 +3953,12 @@ class ContextCompactionPlugin(BasePlugin):
 
             # Decision priority: keep > summary > pending > evicted
             has_keep = any(e.decision == "keep" for e in entries)
-            has_summary = any(e.decision == "summary" and e.decision_body for e in entries)
-            has_evicted = all(e.decision == "evicted" for e in entries)
+            has_summary = any(
+                e.decision == "summary" and e.decision_body for e in entries
+            )
+            has_evicted = all(
+                e.decision == "evicted" for e in entries
+            )
 
             if has_keep or has_evicted:
                 # keep: verbatim. evicted: the already-rewritten stub.
@@ -3603,7 +3968,9 @@ class ContextCompactionPlugin(BasePlugin):
                 summary_parts = []
                 for e in entries:
                     if e.decision == "summary" and e.decision_body:
-                        summary_parts.append(f"[{e.ctx_id} summary] {e.decision_body}")
+                        summary_parts.append(
+                            f"[{e.ctx_id} summary] {e.decision_body}"
+                        )
                 new_msg = ConversationMessage(
                     role="user" if msg.role == "tool" else msg.role,
                     content="\n".join(summary_parts),
@@ -3620,12 +3987,17 @@ class ContextCompactionPlugin(BasePlugin):
                 untracked.append(msg)
 
         if ledger_handled:
-            logger.info(f"Ledger partition: {len(ledger_handled)} handled, {len(untracked)} untracked")
+            logger.info(
+                f"Ledger partition: {len(ledger_handled)} handled, "
+                f"{len(untracked)} untracked"
+            )
 
         return ledger_handled, untracked
 
     @staticmethod
-    def _detach_tool_result(msg: ConversationMessage, ctx_ids: List[str]) -> ConversationMessage:
+    def _detach_tool_result(
+        msg: ConversationMessage, ctx_ids: List[str]
+    ) -> ConversationMessage:
         """A native tool result whose tool_call is summarized away would be an
         orphan the API rejects (400), so it is kept as a plain user message."""
         if msg.role != "tool":
@@ -3666,11 +4038,11 @@ class ContextCompactionPlugin(BasePlugin):
             # Issue #279: say what was dropped so the model knows the
             # preserved record is incomplete.
             summary_text = (
-                (summary_text or "") + f"\n\n[Dropped {_dropped_preserved} oldest preserved task "
+                (summary_text or "")
+                + f"\n\n[Dropped {_dropped_preserved} oldest preserved task "
                 "message(s) to fit the hard context cap; the full text remains "
                 "in the session transcript.]"
             )
-
         # Every round writes a fresh reminder and older ones ride along (as kept
         # messages, or as "tasks" because they say "report back"), so five piled up
         # (23K chars) in the 2026-09-30 r8 checkpoint. Keep one: this round's, or
@@ -3678,7 +4050,11 @@ class ContextCompactionPlugin(BasePlugin):
         def _is_reminder(m: ConversationMessage) -> bool:
             return bool(m.metadata.get("compaction_task_reminder"))
 
-        stale = [m for m in (*(ledger_handled or ()), *(preserved_tasks or ()), *to_keep) if _is_reminder(m)]
+        stale = [
+            m
+            for m in (*(ledger_handled or ()), *(preserved_tasks or ()), *to_keep)
+            if _is_reminder(m)
+        ]
         if stale:
             ledger_handled = [m for m in ledger_handled or () if not _is_reminder(m)]
             preserved_tasks = [m for m in preserved_tasks or () if not _is_reminder(m)]
@@ -3689,8 +4065,12 @@ class ContextCompactionPlugin(BasePlugin):
         if system_msg:
             compacted.append(system_msg)
 
-        summary_content = SUMMARY_INJECTION_PREFIX + summary_text.rstrip() + SUMMARY_INJECTION_SUFFIX
-        operator_block = self._format_operator_word_block(operator_word_records or [], max(0, operator_words_omitted))
+        summary_content = (
+            SUMMARY_INJECTION_PREFIX + summary_text.rstrip() + SUMMARY_INJECTION_SUFFIX
+        )
+        operator_block = self._format_operator_word_block(
+            operator_word_records or [], max(0, operator_words_omitted)
+        )
         if operator_block:
             summary_content += "\n\n" + operator_block
         summary_content += "\n\n" + OPEN_STATE_MARKER
@@ -3715,7 +4095,10 @@ class ContextCompactionPlugin(BasePlugin):
         # Inject ledger-handled messages (decisions already applied)
         if ledger_handled:
             compacted.extend(ledger_handled)
-            logger.info(f"Injected {len(ledger_handled)} ledger-handled message(s) into compacted history")
+            logger.info(
+                f"Injected {len(ledger_handled)} ledger-handled "
+                f"message(s) into compacted history"
+            )
 
         # Inject preserved task messages verbatim
         if preserved_tasks:
@@ -3726,7 +4109,8 @@ class ContextCompactionPlugin(BasePlugin):
             # list of what it still needs to do after compaction.
             reminder_lines = [
                 "[Task Reminder after context compaction]",
-                "The following tasks from hub agents are still active and were preserved verbatim above:",
+                "The following tasks from hub agents are still active "
+                "and were preserved verbatim above:",
                 "",
             ]
             for i, task_msg in enumerate(preserved_tasks, 1):
@@ -3741,7 +4125,8 @@ class ContextCompactionPlugin(BasePlugin):
 
             reminder_lines.append("")
             reminder_lines.append(
-                "Complete these tasks and report back as instructed. The full task text is in the messages above."
+                "Complete these tasks and report back as instructed. "
+                "The full task text is in the messages above."
             )
 
             compacted.append(
@@ -3752,7 +4137,10 @@ class ContextCompactionPlugin(BasePlugin):
                 )
             )
 
-            logger.info(f"Injected {len(preserved_tasks)} preserved task(s) and task reminder into compacted history")
+            logger.info(
+                f"Injected {len(preserved_tasks)} preserved task(s) "
+                f"and task reminder into compacted history"
+            )
         elif stale:
             compacted.append(stale[-1])
 
@@ -3793,7 +4181,9 @@ class ContextCompactionPlugin(BasePlugin):
     def _check_failure_threshold(self) -> None:
         """Disable compaction for session after 3 consecutive failures."""
         if self._consecutive_failures >= 3:
-            logger.warning("3 consecutive compaction failures, disabling for this session")
+            logger.warning(
+                "3 consecutive compaction failures, disabling for this session"
+            )
             self._disabled_for_session = True
 
     # ------------------------------------------------------------------
@@ -3834,7 +4224,10 @@ class ContextCompactionPlugin(BasePlugin):
                         record["timestamp"] = ts.isoformat()
                     f.write(json.dumps(record, default=str) + "\n")
 
-            logger.info(f"Wrote compaction checkpoint: {checkpoint_name} ({len(history_snapshot)} messages)")
+            logger.info(
+                f"Wrote compaction checkpoint: {checkpoint_name} "
+                f"({len(history_snapshot)} messages)"
+            )
             return checkpoint_name
         except Exception as e:
             logger.warning(f"Failed to write compaction checkpoint: {e}")
@@ -3870,9 +4263,12 @@ class ContextCompactionPlugin(BasePlugin):
         try:
             with _session_write_lock(session_file), open(session_file, "a") as f:
                 f.write(json.dumps(record) + "\n")
-            logger.debug(f"Logged checkpoint event for round {next_round}")
+            logger.debug(
+                f"Logged checkpoint event for round {next_round}"
+            )
         except Exception as e:
             logger.warning(f"Failed to log checkpoint event: {e}")
+
 
     async def _log_compaction_event(
         self,
@@ -3896,7 +4292,9 @@ class ContextCompactionPlugin(BasePlugin):
         """
         return  # Temporary #901 containment: never publish replay markers.
 
-        if not self.config.get("plugins.context_compaction.log_compaction_events", True):
+        if not self.config.get(
+            "plugins.context_compaction.log_compaction_events", True
+        ):
             return
 
         if not self._conversation_logger:
@@ -3944,7 +4342,10 @@ class ContextCompactionPlugin(BasePlugin):
             # cap, :2315 rollover, :3142 threshold) have already marked the
             # compaction applied by now; raising here would leave status and
             # history disagreeing. The record is lost either way - log it.
-            logger.exception(f"Compaction record lost (append and sidecar both failed) for {session_file}")
+            logger.exception(
+                f"Compaction record lost (append and sidecar both failed) "
+                f"for {session_file}"
+            )
             spilled = None
         if spilled is None:
             logger.debug(f"Logged compaction event for round {self._compaction_round}")
@@ -3975,7 +4376,11 @@ class ContextCompactionPlugin(BasePlugin):
 
         if hard_cap_active:
             limit = self._get_session_turn_budget()
-            turn_label = f" {self._turn_count}/{limit}t" if limit > 0 and self._turn_count >= limit else ""
+            turn_label = (
+                f" {self._turn_count}/{limit}t"
+                if limit > 0 and self._turn_count >= limit
+                else ""
+            )
             agent, _hub_identity = self._get_agent_labels()
             agent_label = f" {agent}" if agent not in {"interactive", "unknown"} else ""
             status = f"ctx: {state} {token_k}/{thresh_k}{turn_label}{agent_label}"
