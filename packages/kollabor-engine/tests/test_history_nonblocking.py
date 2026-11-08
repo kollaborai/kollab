@@ -786,9 +786,9 @@ class SlowRemoteState(SilentState):
 def _remote_session(registry, conversations, state):
     _, workspace_root = conversations
     session = EngineSession(
-        session_id="koordinator@omarchy", profile=None, workspace=workspace_root
+        session_id="koordinator@devbox", profile=None, workspace=workspace_root
     )
-    session.device = "omarchy"  # remote: no disk of its own to seed from
+    session.device = "devbox"  # remote: no disk of its own to seed from
     session.daemon = _daemon(state)
     session._event_task = None
     registry[session.session_id] = session
