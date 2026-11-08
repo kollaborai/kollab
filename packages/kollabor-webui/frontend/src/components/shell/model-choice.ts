@@ -21,6 +21,10 @@ export class PickError extends Error {
 const label = (state?: { model?: string; effort?: string }) =>
   [state?.model, state?.effort].filter(Boolean).join(" · ");
 
+/** What a pick is called in a sentence: its model and level, or the profile when it names no model. */
+export const pickLabel = (pick: Pick<ModelChoice, "profile" | "model" | "effort">) =>
+  [pick.model || pick.profile, pick.effort].filter(Boolean).join(" · ");
+
 /**
  * The picker's label: the model a session runs, its level and its profile. An ACP harness owns its
  * model, so one it has not reported stays unnamed rather than showing the profile's saved one.

@@ -63,7 +63,8 @@ import {
   type SlashCommand,
   type Session,
 } from "./api";
-import { applyModelChoice } from "@/components/shell/model-choice";
+import { applyModelChoice, pickLabel } from "@/components/shell/model-choice";
+import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import {
   EngineRuntimeProvider,
   buildInitialState,
@@ -464,7 +465,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [busyMessage, setBusyMessage] = useState("Connecting to kollab…");
   const [error, setError] = useState<string | null>(null);
   // New Session started this chat, but the model picked for it did not apply: it runs another one (#956).
-  const [pickFailure, setPickFailure] = useState<{ sessionId: string; message: string } | null>(null);
+  const [pickFailure, setPickFailure] = useState<{
+    sessionId: string;
+    pick: ModelChoice;
+    reason: string;
+    retrying: boolean;
+  } | null>(null);
   const [creationError, setCreationError] = useState<string | null>(null);
   // The sidebar row being opened, and why it could not be: a failed open keeps
   // the chat that was open, so the reason shows under the row clicked.
@@ -1192,7 +1198,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   // A page served from an older (or newer) bundle than the running engine can
   // hit renamed API fields. Warn instead of failing; reload clears it.
-  const [versionMismatch, setVersionMismatch] = useState<string | null>(null);
+  const [versionMismatch, setVersionMismatch] = useState<{ page: string; engine: string } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<Awaited<ReturnType<EngineApi["checkForUpdate"]>> | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
 
@@ -1224,9 +1230,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const bundle = __APP_VERSION__;
         const engine = (config?.engine_version || "").trim();
         if (!engine || !bundle || engine === bundle) return;
-        setVersionMismatch(
-          `This page (v${bundle}) does not match the running engine (v${engine}). Reload after the engine finishes updating.`,
-        );
+        setVersionMismatch({ page: bundle, engine });
       } catch {
         // The session bootstrap effect surfaces WebUI host/origin denials.
       }
@@ -1317,11 +1321,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       });
       if (selectedPick.model || selectedPick.effort) {
         // A session starts on a profile; the picked model and effort go on next.
-        await applyModelChoice(api, session, { ...selectedPick, profile: selectedProfile }).catch((reason) =>
-          setPickFailure({
-            sessionId: session.session_id,
-            message: `Started on ${selectedProfile} without the picked model: ${errorText(reason)}`,
-          }),
+        const pick = { ...selectedPick, profile: selectedProfile };
+        await applyModelChoice(api, session, pick).catch((reason) =>
+          setPickFailure({ sessionId: session.session_id, pick, reason: errorText(reason), retrying: false }),
         );
       }
       const result = await loadSessions();
@@ -1543,6 +1545,20 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     );
   }, [sessionGate]);
 
+  /** The failed New Session pick, tried again on the chat it was raised for. */
+  const retryPick = async () => {
+    const failed = pickFailure;
+    const session = sessions.find((item) => item.session_id === failed?.sessionId);
+    if (!failed || !session || failed.retrying) return;
+    setPickFailure({ ...failed, retrying: true });
+    try {
+      handleSessionUpdated(await applyModelChoice(api, session, failed.pick)); // applied: the notice goes
+    } catch (reason) {
+      setPickFailure({ ...failed, reason: errorText(reason), retrying: false });
+      void loadSessions(); // what runs may have changed
+    }
+  };
+
   const aliveKey = agents.filter((agent) => agent.active).map((agent) => agent.name).join(",");
 
   return (
@@ -1688,47 +1704,57 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
           <div className={whatsNewActive ? "hidden" : "contents"}>
           {versionMismatch ? (
-            <div
-              role="status"
-              className="bg-amber-500/10 text-amber-600 dark:text-amber-400 px-4 py-2 text-sm"
+            <NoticeBar
+              detail={`Page v${versionMismatch.page} · engine v${versionMismatch.engine}`}
+              actions={<NoticeAction onClick={() => window.location.reload()}>Reload</NoticeAction>}
+              onDismiss={() => setVersionMismatch(null)}
             >
-              {versionMismatch}
-            </div>
+              This page and Kollab are on different versions. Reload once the update finishes.
+            </NoticeBar>
           ) : null}
           {pickFailure && pickFailure.sessionId === activeId ? (
-            <div role="alert" className="bg-amber-500/10 text-amber-600 dark:text-amber-400 px-4 py-2 text-sm">
-              {pickFailure.message}
-            </div>
+            <NoticeBar
+              urgent
+              actions={
+                <NoticeAction disabled={pickFailure.retrying} onClick={() => void retryPick()}>
+                  {pickFailure.retrying ? "Trying…" : "Try Again"}
+                </NoticeAction>
+              }
+              onDismiss={() => setPickFailure(null)}
+            >
+              {`Couldn't switch to ${pickLabel(pickFailure.pick)}. ${pickFailure.reason}`}
+            </NoticeBar>
           ) : null}
           {updateInfo?.release ? (
-            <div role="status" className="bg-primary/5 flex flex-wrap items-center gap-2 px-4 py-2 text-sm">
-              <span>Update available: v{updateInfo.release.version}</span>
-              <a className="underline" href={updateInfo.release.url} target="_blank" rel="noreferrer">Release notes</a>
-              <button className="bg-primary/10 hover:bg-primary/20 rounded-md px-2 py-0.5 text-xs font-medium" disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>{updateBusy ? "Updating…" : "Update now"}</button>
-            </div>
+            <NoticeBar
+              actions={
+                <>
+                  <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
+                    Release notes
+                  </a>
+                  <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
+                    {updateBusy ? "Updating…" : "Update now"}
+                  </NoticeAction>
+                </>
+              }
+              onDismiss={() => setUpdateInfo(null)}
+            >
+              Kollab {updateInfo.release.version} is available.
+            </NoticeBar>
           ) : null}
           {contextCompactionStatus ? (
-            <div
-              role={
-                isUrgentContextCompactionStatus(contextCompactionStatus.status)
-                  ? "alert"
-                  : "status"
-              }
-              aria-live={
-                isUrgentContextCompactionStatus(contextCompactionStatus.status)
-                  ? "assertive"
-                  : "polite"
-              }
-              className="bg-amber-500/10 text-amber-700 dark:text-amber-300 flex flex-wrap items-baseline gap-x-2 gap-y-1 px-4 py-2 text-sm"
-            >
-              <strong>
+            <NoticeBar urgent={isUrgentContextCompactionStatus(contextCompactionStatus.status)}>
+              <strong className="text-foreground font-medium">
                 {contextCompactionStatusTitle(contextCompactionStatus.status)}
-              </strong>
-              <span>{contextCompactionStatus.message}</span>
+              </strong>{" "}
+              {contextCompactionStatus.message}
               {contextCompactionStatus.action ? (
-                <span className="font-medium">{contextCompactionStatus.action}</span>
+                <>
+                  {" "}
+                  <span className="text-foreground font-medium">{contextCompactionStatus.action}</span>
+                </>
               ) : null}
-            </div>
+            </NoticeBar>
           ) : null}
           {activeSession?.halted ? (
             <>
