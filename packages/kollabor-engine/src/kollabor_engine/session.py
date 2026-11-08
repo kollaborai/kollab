@@ -57,6 +57,10 @@ HISTORY_REFRESH_TIMEOUT_SECONDS = 0.75
 # client's own RPC timeout normally ends a dead call first; this only bounds
 # the coalesced task.
 HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS = 30.0
+# Until the daemon has answered once, a failed background answer is tried again
+# after these pauses: the relay can outlast that RPC timeout (~19 s seen live),
+# and the page waits for history_updated rather than asking again.
+HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 
 
 class HistoryRefreshUnavailable(Exception):
@@ -236,6 +240,9 @@ class EngineSession:
         # A page was told the mirror is still unconfirmed (empty and never
         # answered by the daemon); the first answer must reach it (#927).
         self._history_unconfirmed_shown = False
+        # The last refresh got no usable answer (timeout, error, unjoinable
+        # tail, lock busy); with no answer ever, the background one retries.
+        self._history_refresh_failed = False
 
         # The daemon's own conversation id (its conversations/<id>.jsonl
         # name). Arrives with the first answered snapshot; before that, disk
@@ -674,6 +681,7 @@ class EngineSession:
                 "session %s history refresh busy; using cached history",
                 self.session_id,
             )
+            self._history_refresh_failed = True
             return self.history
         try:
             return await self._refresh_history_locked(notify, stale_raises, wait)
@@ -720,6 +728,7 @@ class EngineSession:
                 "session %s history refresh timed out; using cached history",
                 self.session_id,
             )
+            self._history_refresh_failed = True
             return self.history
         except Exception as e:
             if stale_raises:
@@ -729,6 +738,7 @@ class EngineSession:
             logger.debug(
                 "session %s history refresh failed: %s", self.session_id, e
             )
+            self._history_refresh_failed = True
             return self.history
 
         messages = getattr(snapshot, "messages", None)
@@ -766,12 +776,14 @@ class EngineSession:
                     "the daemon sent a tail the mirror cannot join"
                 )
             self._history_anchor = ""
+            self._history_refresh_failed = True
             return self.history
         self._raw_history = (held[:since] if since else []) + received
         self._history_anchor = getattr(snapshot, "anchor", "") or ""
         uid_changed = bool(previous_uid and current_uid and previous_uid != current_uid)
         self._history_conversation_uid = current_uid if isinstance(current_uid, str) and current_uid else None
         self._history_authoritative = True
+        self._history_refresh_failed = False
         display_history = self._raw_history
         native_session_id = (
             snapshot.get("session_id", "")
@@ -914,6 +926,7 @@ class EngineSession:
         self.history_syncing = True
 
         async def _run() -> None:
+            retries = iter(HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS)
             try:
                 while True:
                     self._history_refresh_again = False
@@ -925,6 +938,20 @@ class EngineSession:
                         notify=announce,
                         timeout=HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS,
                     )
+                    if (
+                        not getattr(self, "_history_authoritative", False)
+                        and getattr(self, "_history_refresh_failed", False)
+                        and self.alive
+                    ):
+                        # The daemon has never answered: the page waits on this
+                        # refresh alone, since it polls sessions, not history.
+                        delay = next(retries, None)
+                        if delay is not None:
+                            self._history_refresh_notify = (
+                                self._history_refresh_notify or announce
+                            )
+                            await asyncio.sleep(delay)
+                            continue
                     if not self._history_refresh_again:
                         break
             except Exception as e:  # a background refresh never breaks a route

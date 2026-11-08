@@ -312,6 +312,10 @@ another computer answers over the relay in seconds. Until the daemon has answere
 once, an empty mirror is unknown, not an empty chat: the history answer says
 `stale`, the page shows that history is still syncing instead of "No conversation
 messages yet", and the first answer is announced with `history_updated` (#927).
+The page polls the session list, not history, so while the daemon has never
+answered a failed background answer is tried again after
+`HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS` (1, 2 and 4 s); after those the next
+history request starts a new refresh.
 
 Online notices are quiet, transparent activity rows with optional details, without
 a background or border. Markdown list-item containers use normal whitespace so
