@@ -1750,7 +1750,8 @@ class ContextCompactionPlugin(BasePlugin):
         self._set_compaction_status(
             "failed",
             "Compaction is temporarily unavailable because safe history recovery "
-            "cannot be guaranteed. History was preserved.",
+            "cannot be guaranteed. This request did not apply a new compaction; "
+            "previously compacted sessions may still reload incompletely.",
             action="Start a new session if the context budget is exhausted.",
         )
 

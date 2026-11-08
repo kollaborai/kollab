@@ -43,6 +43,8 @@ def test_all_entry_points_refuse_and_preserve_history(tmp_path):
     asyncio.run(run())
     assert history == before
     assert p._compaction_status == "failed"
+    assert "did not apply a new compaction" in p._compaction_status_message
+    assert "previously compacted sessions may still reload incompletely" in p._compaction_status_message
     assert not list(tmp_path.iterdir())
     assert p._write_compaction_checkpoint(history) is None
     p._log_checkpoint_event("synthetic", 1)
