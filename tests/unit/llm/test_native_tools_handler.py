@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "packages" / "kollabor-agent" / "src"))
 
+from kollabor.llm.streaming_handler import StreamingHandler
 from kollabor_agent.native_tools_handler import NativeToolsHandler
 
 
@@ -49,6 +50,50 @@ class CapturingToolExecutor:
         self.calls.append(tool_data)
         self.execution_contexts.append(execution_context)
         return SimpleNamespace(success=True, output="ok", error="")
+
+
+@pytest.mark.asyncio
+async def test_slow_discovery_keeps_builtins_on_first_request_and_refreshes():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    builtin = {"name": "file_read"}
+    external = {"name": "browser"}
+    schemas = [builtin]
+
+    async def discover():
+        started.set()
+        await release.wait()
+        schemas.append(external)
+        return {"browser": {}}
+
+    integration = SimpleNamespace(
+        discover_mcp_servers=discover,
+        get_tool_definitions_for_api=lambda: list(schemas),
+    )
+    native = NativeToolsHandler(
+        integration, FakeProfileManager(), FakeApiService([]), FakeConfig()
+    )
+    api = Mock()
+    api.call_llm = AsyncMock(return_value="ok")
+    api._profile.get_supports_tools.return_value = True
+    streaming = StreamingHandler(api, Mock(), Mock())
+    task = asyncio.create_task(native.background_discovery())
+    try:
+        await started.wait()
+        await streaming.call_llm(
+            conversation_history=[],
+            native_tools=None,
+            mcp_discovery_complete=native.discovery_complete,
+            is_cancelled_fn=lambda: False,
+            native_tools_provider=lambda: native.tools,
+        )
+        assert api.call_llm.call_args.kwargs["tools"] == [builtin]
+        release.set()
+        await task
+        assert native.tools == [builtin, external]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -108,7 +153,6 @@ async def test_native_tool_executor_receives_livekit_execution_context():
     assert executor.execution_contexts == [origin_context]
 
 
-
 @pytest.mark.asyncio
 async def test_registered_mcp_native_tool_remains_mcp_tool():
     api_service = FakeApiService(
@@ -156,7 +200,7 @@ async def test_global_mcp_disabled_skips_discovery_but_loads_builtin_tools():
     await handler.background_discovery()
 
     mcp_integration.discover_mcp_servers.assert_not_awaited()
-    mcp_integration.get_tool_definitions_for_api.assert_called_once_with()
+    assert mcp_integration.get_tool_definitions_for_api.call_count == 2
     assert handler.discovery_complete.is_set()
     assert handler.tools == builtin_tools
 
@@ -197,7 +241,7 @@ async def test_mcp_discovery_failure_still_loads_builtin_tool_schemas():
     await handler.background_discovery()
 
     mcp_integration.discover_mcp_servers.assert_awaited_once_with()
-    mcp_integration.get_tool_definitions_for_api.assert_called_once_with()
+    assert mcp_integration.get_tool_definitions_for_api.call_count == 2
     assert handler.discovery_complete.is_set()
     assert handler.tools == builtin_tools
 
@@ -230,7 +274,8 @@ async def test_discovery_failure_keeps_native_tools_disabled_for_profile():
 @pytest.mark.asyncio
 async def test_cancelled_discovery_still_signals_completion_and_propagates():
     mcp_integration = SimpleNamespace(
-        discover_mcp_servers=AsyncMock(side_effect=asyncio.CancelledError())
+        discover_mcp_servers=AsyncMock(side_effect=asyncio.CancelledError()),
+        get_tool_definitions_for_api=Mock(return_value=[{"name": "file_read"}]),
     )
     handler = NativeToolsHandler(
         mcp_integration=mcp_integration,
@@ -243,3 +288,4 @@ async def test_cancelled_discovery_still_signals_completion_and_propagates():
         await handler.background_discovery()
 
     assert handler.discovery_complete.is_set()
+    assert handler.tools == [{"name": "file_read"}]
