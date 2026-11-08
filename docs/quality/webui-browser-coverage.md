@@ -26,13 +26,23 @@ environment variables. `KOLLAB_BROWSER_WORKERS` accepts 1–4;
 existing Chromium executable. Results, captured worker output, and any suite
 screenshots are written under a unique temporary directory, or under
 `KOLLAB_BROWSER_RESULTS_DIR` when specified. A failed or timed-out suite makes
-the command fail; a worker that does not exit after SIGTERM is reported by PID
-and is never counted as passed.
+the command fail. A timeout stops dispatch, requests graceful shutdown of all
+active workers, and marks queued suites as `skipped`. On POSIX, the runner
+checks that each owned process group has exited before reporting cleanup
+complete. If a group remains after the grace period, results record
+`unresolved-cleanup`, its PID/process-group ID, and the runner exits nonzero so
+CI can upload the evidence. It does not force termination; that process tree
+may still be running after the runner exits, so this is a visible fail-closed
+limitation rather than an orphan-free guarantee. On Windows, the runner cannot
+gracefully signal and verify a whole process tree with its current Node-only
+mechanism. It reports cleanup as unverified and does not count that suite as
+passed.
 
-CI runs the runner and uploads its artifacts, including on failure. A parallel run must
-not connect to a real user's engine, use their home directory, or reuse a
-fixed port. The included suites intercept application API requests or use
-synthetic fixtures; they do not test a real remote agent or provider.
+CI prepares the artifact directory before build and test commands and uploads
+it with `if: always()`. A parallel run must not connect to a real user's
+engine, use their home directory, or reuse a fixed port. The included suites
+intercept application API requests or use synthetic fixtures; they do not
+test a real remote agent or provider.
 
 ## Current evidence and gaps
 

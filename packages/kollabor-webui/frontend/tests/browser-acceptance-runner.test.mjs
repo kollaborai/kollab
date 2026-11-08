@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import { runBrowserSuites } from "../scripts/browser-acceptance-runner.mjs";
 
@@ -35,9 +37,126 @@ test("continues after a failure and does not pass unrelated secrets to workers",
 
 test("times out the owned worker and reports failure", async () => {
   const { root, script } = await fixture("timeout", "setInterval(() => {}, 1000);");
-  const results = await runBrowserSuites({ suites: [{ name: "stalled", script }], workers: 1, timeoutMs: 300, root, artifacts: root });
+  const results = await runBrowserSuites({
+    suites: [{ name: "stalled", script }, { name: "after-timeout", script }],
+    workers: 1,
+    timeoutMs: 300,
+    graceMs: 1000,
+    root,
+    artifacts: root,
+  });
   assert.equal(results[0].ok, false);
   assert.equal(results[0].timedOut, true);
+  assert.equal(results[0].cleanup, "complete");
+  assert.equal(results[1].status, "skipped", "timeout must stop dispatch even when graceful cleanup succeeds");
+});
+
+test("unresolved cleanup stops dispatch, records skipped suites, and never claims cleanup", async () => {
+  const { root, script } = await fixture("noncooperative", "void 0;");
+  let child;
+  let signals = 0;
+  let spawned = 0;
+  const fakeSpawn = () => {
+    spawned += 1;
+    child = new EventEmitter();
+    child.pid = 45678;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.unref = () => {};
+    return child;
+  };
+  try {
+    const suites = [{ name: "resistant", script }, { name: "must-skip", script }];
+    const results = await runBrowserSuites({
+      suites,
+      workers: 1,
+      timeoutMs: 15,
+      graceMs: 20,
+      pollIntervalMs: 2,
+      root,
+      artifacts: root,
+      spawnChild: fakeSpawn,
+      signalGroup: () => { signals += 1; return { sent: true, detail: null }; },
+      groupExists: () => true,
+    });
+    assert.equal(spawned, 1, "runner must not start the queued suite after timeout");
+    assert.equal(signals, 1, "runner requests graceful shutdown exactly once");
+    assert.equal(results[0].status, "unresolved-cleanup");
+    assert.equal(results[0].cleanup, "unresolved");
+    assert.equal(results[0].ok, false);
+    assert.equal(results[0].processGroupId, 45678);
+    assert.equal(results[1].status, "skipped");
+    assert.equal(results[1].ok, false);
+    const saved = JSON.parse(await readFile(path.join(root, "results.json"), "utf8"));
+    assert.equal(saved[0].cleanup, "unresolved");
+    assert.equal(saved[1].status, "skipped");
+    assert.match(saved[0].error, /may still be running|remained/);
+  } finally {
+    child?.stdout.destroy();
+    child?.stderr.destroy();
+  }
+});
+
+test("a worker released from workspace setup after timeout cannot spawn", async () => {
+  const { root, script } = await fixture("setup-race", "void 0;");
+  let child;
+  let spawned = 0;
+  let markLateStarted;
+  let releaseLateSetup;
+  const lateStarted = new Promise((resolve) => { markLateStarted = resolve; });
+  const lateSetup = new Promise((resolve) => { releaseLateSetup = resolve; });
+  const prepareWorkspace = async ({ suite, artifacts }) => {
+    if (suite.name === "late-setup") {
+      markLateStarted();
+      await lateSetup;
+    }
+    return {
+      suiteArtifacts: await mkdtemp(path.join(artifacts, `${suite.name}-`)),
+      home: await mkdtemp(path.join(os.tmpdir(), `kb-${suite.name}-`)),
+    };
+  };
+  const fakeSpawn = () => {
+    spawned += 1;
+    child = new EventEmitter();
+    child.pid = 56789;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.unref = () => {};
+    return child;
+  };
+  try {
+    const run = runBrowserSuites({
+      suites: [
+        { name: "times-out", script },
+        { name: "late-setup", script },
+        { name: "queued", script },
+      ],
+      workers: 2,
+      timeoutMs: 30,
+      graceMs: 10,
+      pollIntervalMs: 2,
+      root,
+      artifacts: root,
+      prepareWorkspace,
+      spawnChild: fakeSpawn,
+      signalGroup: () => {
+        releaseLateSetup();
+        return { sent: true, detail: null };
+      },
+      groupExists: () => true,
+    });
+    await lateStarted;
+    const results = await run;
+    assert.equal(spawned, 1, "the delayed worker must recheck abort before spawning");
+    assert.equal(results[0].status, "unresolved-cleanup");
+    assert.equal(results[1].status, "skipped");
+    assert.equal(results[2].status, "skipped");
+    const saved = JSON.parse(await readFile(path.join(root, "results.json"), "utf8"));
+    assert.deepEqual(saved.map(({ status }) => status), ["unresolved-cleanup", "skipped", "skipped"]);
+  } finally {
+    child?.stdout.destroy();
+    child?.stderr.destroy();
+  }
 });
 
 test("rejects invalid worker count and duplicate suites before spawning", async () => {

@@ -195,9 +195,9 @@ jobs:
           KOLLAB_BROWSER_WORKERS: "2"
           KOLLAB_BROWSER_RESULTS_DIR: ${{ runner.temp }}/kollab-browser-results
         run: |
+          mkdir -p "$KOLLAB_BROWSER_RESULTS_DIR"
           npm run build
           npm run test:e2e:runner
-          mkdir -p "$KOLLAB_BROWSER_RESULTS_DIR"
           npm run inventory:controls -- "$KOLLAB_BROWSER_RESULTS_DIR/control-candidates.json"
           npm run test:e2e:parallel
 
