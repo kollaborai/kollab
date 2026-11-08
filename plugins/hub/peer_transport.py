@@ -639,6 +639,7 @@ class PeerMeshRuntime:
         self.router: PeerRouter | None = None
         self._local_record: PeerRecord | None = None
         self._exchange_offsets: dict[str, tuple[int, int]] = {}
+        self._exchange_link_first: dict[str, bool] = {}
         # Highest link revision this node proposed per edge, replied to or not.
         self._proposed_revisions: dict[tuple[str, str, str], int] = {}
         self._exchange_lock = asyncio.Lock()
@@ -1383,19 +1384,19 @@ class PeerMeshRuntime:
         return {"payload": payload, "signature": signature}
 
     def _exchange_request(self, peer_key: str, local: PeerRecord, proposal) -> dict:
-        records, links = self._gossip_page(peer_key)
         value = {
             "v": 1,
             "record": local.to_wire(),
-            "records": records,
-            "links": links,
+            "records": [],
+            "links": [],
             "link_signature": proposal,
         }
         if _encoded_size(value) > MAX_PEER_EXCHANGE_BYTES:
             raise PeerRouteError("peer exchange exceeds its size limit")
+        self._gossip_page(peer_key, value)
         return value
 
-    def _gossip_page(self, peer_key: str) -> tuple[list[dict], list[dict]]:
+    def _gossip_page(self, peer_key: str, value: dict) -> None:
         router = self._ensure_router()
         peer_id = peer_id_for_key(peer_key)
         records = [
@@ -1410,14 +1411,39 @@ class PeerMeshRuntime:
             if {link.left, link.right} != {self.local_peer_id, peer_id}
         ]
         links.sort(key=lambda item: (item["left"], item["right"], item["revision"]))
-        record_offset, link_offset = self._exchange_offsets.get(peer_key, (0, 0))
-        record_page = records[record_offset : record_offset + MAX_PEER_GOSSIP_RECORDS]
-        link_page = links[link_offset : link_offset + MAX_PEER_GOSSIP_LINKS]
-        self._exchange_offsets[peer_key] = (
-            0 if record_offset + len(record_page) >= len(records) else record_offset + len(record_page),
-            0 if link_offset + len(link_page) >= len(links) else link_offset + len(link_page),
-        )
-        return record_page, link_page
+        offsets = list(self._exchange_offsets.get(peer_key, (0, 0)))
+        # Alternate priority so a large record cannot indefinitely starve links,
+        # or vice versa, when only one item fits beside the fixed frame.
+        if not hasattr(self, "_exchange_link_first"):
+            self._exchange_link_first = {}
+        link_first = self._exchange_link_first.get(peer_key, False)
+        self._exchange_link_first[peer_key] = not link_first
+        groups = [
+            ("records", records, MAX_PEER_GOSSIP_RECORDS, 0),
+            ("links", links, MAX_PEER_GOSSIP_LINKS, 1),
+        ]
+        if link_first:
+            groups.reverse()
+        empty = {**value, "records": [], "links": []}
+        for name, items, limit, index in groups:
+            if not items:
+                offsets[index] = 0
+                continue
+            position = offsets[index] % len(items)
+            examined = 0
+            while examined < len(items) and len(value[name]) < limit:
+                item = items[position]
+                value[name].append(item)
+                if _encoded_size(value) > MAX_PEER_EXCHANGE_BYTES:
+                    value[name].pop()
+                    single = {**empty, name: [item]}
+                    if _encoded_size(single) <= MAX_PEER_EXCHANGE_BYTES:
+                        break
+                    logger.debug("Skipping oversized peer exchange %s item", name)
+                position = (position + 1) % len(items)
+                examined += 1
+            offsets[index] = position
+        self._exchange_offsets[peer_key] = tuple(offsets)
 
     def _accept_exchange_response(
         self, peer_key: str, value, *, proposal: dict | None
@@ -1600,16 +1626,16 @@ class PeerMeshRuntime:
         link.verify(left, right, expected_scope=router.scope, expected_session_id=tls_id, now=now)
 
     def _exchange_response(self, peer_key: str, local: PeerRecord, link) -> dict:
-        records, links = self._gossip_page(peer_key)
         value = {
             "v": 1,
             "record": local.to_wire(),
-            "records": records,
-            "links": links,
+            "records": [],
+            "links": [],
             "link": None if link is None else link.to_wire(),
         }
         if _encoded_size(value) > MAX_PEER_EXCHANGE_BYTES:
             raise PeerRouteError("peer exchange response exceeds its size limit")
+        self._gossip_page(peer_key, value)
         return value
 
     def _accept_gossip(self, records, links, *, now: int) -> None:

@@ -1,9 +1,10 @@
 """Data models for agent orchestration."""
 
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 if TYPE_CHECKING:
     from .ring_buffer import RingBuffer
@@ -31,6 +32,10 @@ class AgentSession:
     proc: Optional[subprocess.Popen] = None
     ring_buffer: Optional["RingBuffer"] = None
     pid: int = 0
+    # Shared by every managed Popen poll, wait, and signal for this session.
+    process_lock: Any = field(
+        default_factory=threading.RLock, repr=False, compare=False
+    )
 
     @property
     def duration(self) -> str:
@@ -45,7 +50,8 @@ class AgentSession:
         """Check if the subprocess is still running."""
         if self.proc is None:
             return False
-        return self.proc.poll() is None
+        with self.process_lock:
+            return self.proc.poll() is None
 
 
 @dataclass

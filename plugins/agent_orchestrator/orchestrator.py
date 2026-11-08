@@ -103,8 +103,8 @@ class AgentOrchestrator:
             identity: Optional hub identity to request via --as flag
             initial_task: Optional task to pass as positional arg so the
                 spawned agent processes it as initial_message on startup.
-                Required for --detached spawns since their stdin is
-                redirected to /dev/null (writes to proc.stdin go nowhere).
+            Required for detached spawns since their stdin is directed to
+            /dev/null (writes to proc.stdin go nowhere).
             profile: Optional LLM profile to use (passed as --llm flag)
 
         Returns:
@@ -334,9 +334,9 @@ class AgentOrchestrator:
     ) -> None:
         """Mark agent running. Initial task already passed via cmd arg.
 
-        Detached agents redirect stdout to /dev/null so ring-buffer-based
-        readiness detection can't work. We just record startup -- if the
-        task fails the agent will surface errors via hub messages.
+        Captured stdout is diagnostic output, not a readiness protocol. We
+        record startup after the configured delay and check that this exact
+        Popen child is still alive; task failures surface via hub messages.
         """
         try:
             await asyncio.sleep(self.kollab_init_delay)
@@ -449,7 +449,7 @@ class AgentOrchestrator:
         """Send message to agent (legacy /sub orchestrator path).
 
         WARNING: this writes to proc.stdin via _send_keys. Agents spawned
-        with --detached have stdin redirected to /dev/null after fork,
+        with --detached have stdin directed to /dev/null,
         so this is a no-op for them. Hub agents should use the hub socket
         (kollab --hub msg) instead. This method is kept for the legacy
         agent_orchestrator (/sub) flow only.
@@ -617,6 +617,16 @@ class AgentOrchestrator:
         if parent_agent_id:
             env["KOLLAB_PARENT_AGENT_ID"] = parent_agent_id
 
+        # This Popen tracks the actual detached agent child, which writes Hub
+        # presence. AgentSession serializes every in-process poll, wait, and
+        # signal operation on this handle; Popen is not an atomic OS identity
+        # token. Without this marker the CLI would fork a second time and exit
+        # its Popen parent, leaving the child untracked here.
+        from kollabor.daemon import DETACHED_CHILD_ENV
+        from kollabor_config import proc_ctl
+
+        env[DETACHED_CHILD_ENV] = "1"
+
         cmd = self._find_kollab_command()
         cmd.append("--detached")
         if not harness:
@@ -642,10 +652,10 @@ class AgentOrchestrator:
         if identity:
             cmd.extend(["--as", identity])
 
-        # Pass initial task as positional arg. --detached redirects stdin
-        # to /dev/null in the child after fork, so writing to proc.stdin
-        # via _send_keys is a no-op. The positional arg is parsed by
-        # argparse in the child and becomes initial_message in cli.py.
+        # Pass initial task as positional arg. The detached child receives
+        # stdin from /dev/null, so writing to proc.stdin via _send_keys is a
+        # no-op. The positional arg is parsed by argparse and becomes
+        # initial_message in cli.py.
         # The "--" separator stops argparse from interpreting tasks that
         # start with "-" as flags.
         if initial_task:
@@ -653,14 +663,14 @@ class AgentOrchestrator:
             cmd.append(initial_task)
 
         try:
-            proc = subprocess.Popen(
+            proc = proc_ctl.start_child(
                 cmd,
-                stdin=subprocess.PIPE,
+                detached=True,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=cwd,
                 env=env,
-                start_new_session=True,
             )
         except Exception as e:
             logger.error(f"Failed to spawn subprocess for {full_name}: {e}")
@@ -767,23 +777,28 @@ class AgentOrchestrator:
             return False
 
         proc = agent.proc
-        if proc.poll() is not None:
-            logger.info(f"Process already exited for {full_name}")
-            return True
+        # On POSIX, Hub's Popen.send_signal() polls then signals by numeric PID.
+        # Share one lock across that operation and every lifecycle poll/wait so
+        # this process cannot reap the child between send_signal's check and
+        # signal syscall. This is serialization, not an atomic kernel identity.
+        with agent.process_lock:
+            if proc.poll() is not None:
+                logger.info(f"Process already exited for {full_name}")
+                return True
 
-        try:
-            proc.terminate()
             try:
-                proc.wait(timeout=5)
-                logger.info(f"Terminated process for {full_name} (pid={proc.pid})")
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2)
-                logger.warning(f"Killed process for {full_name} (pid={proc.pid})")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to kill process for {full_name}: {e}")
-            return False
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                    logger.info(f"Terminated process for {full_name} (pid={proc.pid})")
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                    logger.warning(f"Killed process for {full_name} (pid={proc.pid})")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to kill process for {full_name}: {e}")
+                return False
 
     def cleanup_stale_sessions(self) -> int:
         """Clean up stale agent processes that have exited.
