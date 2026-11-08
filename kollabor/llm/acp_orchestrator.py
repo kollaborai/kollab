@@ -1002,18 +1002,51 @@ class ACPOrchestrator:
             if landed is None:
                 landed = manager.add_message("user", text, metadata=metadata)
             self._parents[request_id] = landed
+        history = getattr(llm, "conversation_history", None)
+        history_message = None
+        if isinstance(history, list) and history is not getattr(manager, "messages", None):
+            history_message = ConversationMessage(role="user", content=text, metadata=metadata)
+            history.append(history_message)
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
-            task = asyncio.create_task(logger_service.log_user_message(text))
+            # The ACP row is admitted synchronously but its durable append runs
+            # later. Do not advertise a receipt until that append succeeds and
+            # the same session and history owners still contain the row.
+            receipt_session = getattr(logger_service, "session_id", None)
+            manager_messages = getattr(manager, "messages", None)
+            manager_row = next(
+                (row for row in (manager_messages or []) if row.get("uuid") == self._parents.get(request_id)),
+                None,
+            )
+
+            async def log_with_receipt():
+                if receipt_session and getattr(logger_service, "session_id", None) != receipt_session:
+                    raise OSError("ACP user history session changed before logging")
+                kwargs = {"session_id": receipt_session} if isinstance(receipt_session, str) and receipt_session else {}
+                record_uuid = await logger_service.log_user_message(text, **kwargs)
+                if not (isinstance(receipt_session, str) and receipt_session
+                        and isinstance(record_uuid, str) and record_uuid
+                        and getattr(logger_service, "session_id", None) == receipt_session
+                        and getattr(manager, "current_session_id", None) == receipt_session
+                        and getattr(manager, "messages", None) is manager_messages
+                        and manager_row is not None
+                        and any(row is manager_row for row in manager_messages)
+                        and getattr(llm, "conversation_history", None) is history
+                        and (history_message is None or any(row is history_message for row in history))):
+                    return record_uuid
+                receipt = [{"session_id": receipt_session, "record_uuid": record_uuid}]
+                manager_row.setdefault("metadata", {})["durable_input_receipts"] = receipt
+                if history_message is not None:
+                    history_message.metadata["durable_input_receipts"] = receipt
+                return record_uuid
+
+            task = asyncio.create_task(log_with_receipt())
             self._history_tasks.add(task)
             if track_completion:
                 self._user_history_tasks[request_id] = task
             task.add_done_callback(
                 self._observation_task_done if source == "observation" else self._history_task_done
             )
-        history = getattr(llm, "conversation_history", None)
-        if isinstance(history, list) and history is not getattr(manager, "messages", None):
-            history.append(ConversationMessage(role="user", content=text, metadata=metadata))
         # A row that landed outside the turn it belongs to (a peer's admitted
         # message, steering, a flushed observation) announces itself: the
         # engine warms its mirror and watching windows reload before

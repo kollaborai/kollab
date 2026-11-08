@@ -751,16 +751,19 @@ class KollaborConversationLogger:
         content: str,
         parent_uuid: Optional[str] = None,
         user_context: Optional[Dict] = None,
+        *,
+        session_id: Optional[str] = None,
     ) -> str:
         """Log user message with intelligence features."""
         message_uuid = str(uuid4())
+        target_session = session_id or self.session_id
 
         message: Dict[str, Any] = {
             "parentUuid": parent_uuid,
             "isSidechain": False,
             "userType": "external",
             "cwd": self._get_working_directory(),
-            "sessionId": self.session_id,
+            "sessionId": target_session,
             "version": (
                 self.app_version
                 if self.app_version != "unknown"
@@ -779,7 +782,7 @@ class KollaborConversationLogger:
         }
 
         # Native admission receipts must not be issued before the row is flushed.
-        await self._append_to_jsonl(message, durable=True)
+        await self._append_to_jsonl(message, session_id=session_id, durable=True)
 
         # Update conversation themes
         intent = message["kollabor_intelligence"]["user_context"].get("detected_intent")
