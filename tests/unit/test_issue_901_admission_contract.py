@@ -191,3 +191,52 @@ def test_capacity_refuses_new_tokens_without_forgetting_terminal_ids(admission):
     assert fence.state(first) is admission.AdmissionState.COMMITTED
     assert fence.state(second) is admission.AdmissionState.ABORTED
     assert fence.try_snapshot().reason == "coverage_unverified"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_inflight_append_remains_indeterminate(fence, admission):
+    started = asyncio.Event()
+    token = fence.reserve("acp")
+
+    async def simulated_append_with_unknown_outcome():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # The caller cannot prove whether an append crossed its boundary.
+            fence.mark_indeterminate(token)
+            raise
+
+    task = asyncio.create_task(simulated_append_with_unknown_outcome())
+    await started.wait()
+    assert fence.try_snapshot().reason == "pending"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert fence.state(token) is admission.AdmissionState.INDETERMINATE
+    assert fence.try_snapshot().reason == "indeterminate"
+
+
+@pytest.mark.parametrize("record_ids", [(), ("row-a",), ("row-a", "row-b", "extra")])
+def test_incomplete_or_extra_batch_membership_is_atomic(fence, admission, record_ids):
+    first = fence.reserve("native")
+    second = fence.reserve("native")
+    fence.mark_written(first, record_id="row-a")
+    fence.mark_written(second, record_id="row-b")
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_native_batch((first, second), history_id="batch", record_ids=record_ids)
+    assert fence.state(first) is admission.AdmissionState.WRITTEN
+    assert fence.state(second) is admission.AdmissionState.WRITTEN
+    assert fence.try_snapshot().reason == "pending"
+
+
+def test_acp_cannot_reuse_native_batch_history_id(fence, admission):
+    native = fence.reserve("native")
+    acp = fence.reserve("acp")
+    fence.mark_written(native, record_id="native-row")
+    fence.mark_written(acp, record_id="acp-row")
+    fence.commit_native_batch((native,), history_id="history", record_ids=("native-row",))
+    with pytest.raises(admission.AdmissionError):
+        fence.commit_acp(acp, history_id="history", record_id="acp-row")
+    assert fence.state(native) is admission.AdmissionState.COMMITTED
+    assert fence.state(acp) is admission.AdmissionState.WRITTEN
