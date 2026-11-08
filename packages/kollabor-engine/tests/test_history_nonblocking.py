@@ -1039,3 +1039,47 @@ async def test_a_dropped_turn_end_is_announced_by_the_refresh_that_absorbs_it(
 
     assert [m["content"] for m in session.history] == ["old", "new reply"]
     assert emitted == [{"type": "history_updated"}]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_end_that_lands_mid_publication_is_announced(
+    registry, conversations, monkeypatch
+):
+    """Review round 3 on #960: the raw mirror was replaced before the display
+    provenance lookup ran in a thread, so a turn end giving up during that
+    lookup recorded the new mirror as what its window holds while returning
+    the old chat, and no history_updated followed."""
+    import threading
+
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    gate = threading.Event()
+    gate.set()
+
+    def provenance(conversations_dir, native_session_id, first):
+        gate.wait(5)
+        return first
+
+    monkeypatch.setattr(session_module, "mark_system_initialization", provenance)
+    _, workspace_root = conversations
+    state = LateFirstAnswerState()
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    emitted = []
+    session.daemon.fan_out = emitted.append
+    assert [m["content"] for m in await session.refresh_history()] == ["old"]
+
+    state.texts.append("new reply")  # the turn ends on the daemon
+    gate.clear()  # the next publication waits in its provenance lookup
+    try:
+        session._schedule_refresh(notify=False)  # a user_message warms the mirror
+        await asyncio.sleep(0.05)
+        shown = await session.refresh_history(notify=True)  # turn_complete gives up
+    finally:
+        gate.set()
+    await _settled(session)
+
+    assert [m["content"] for m in shown] == ["old"]
+    assert [m["content"] for m in session.history] == ["old", "new reply"]
+    assert {"type": "history_updated"} in emitted
