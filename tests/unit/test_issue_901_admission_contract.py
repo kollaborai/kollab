@@ -510,3 +510,47 @@ def test_concurrent_commits_cannot_share_history(fence, admission):
         admission.AdmissionState.WRITTEN,
         admission.AdmissionState.COMMITTED,
     }
+
+
+@pytest.mark.parametrize("stage", ["written", "commit", "indeterminate"])
+def test_busy_after_side_effect_requires_local_retry_only(fence, admission, stage):
+    token = fence.reserve("native")
+    effects = ["record-appended-once"]
+    if stage == "written":
+
+        def operation():
+            fence.mark_written(token, record_id="row")
+
+        before = admission.AdmissionState.PENDING
+        after = admission.AdmissionState.WRITTEN
+    elif stage == "commit":
+        fence.mark_written(token, record_id="row")
+        effects.append("history-mutated-once")
+
+        def operation():
+            fence.commit_native_batch((token,), history_id="history", record_ids=("row",))
+
+        before = admission.AdmissionState.WRITTEN
+        after = admission.AdmissionState.COMMITTED
+    else:
+
+        def operation():
+            fence.mark_indeterminate(token)
+
+        before = admission.AdmissionState.PENDING
+        after = admission.AdmissionState.INDETERMINATE
+
+    fence._state_lock.acquire()
+    try:
+        with pytest.raises(admission.AdmissionError, match="busy"):
+            operation()
+        assert fence.try_snapshot().reason == "busy"
+    finally:
+        fence._state_lock.release()
+    assert fence.state(token) is before
+    assert fence.try_snapshot().reason == "pending"
+    operation()  # retry only the in-memory transition, not the external effect
+    assert fence.state(token) is after
+    assert effects.count("record-appended-once") == 1
+    assert effects.count("history-mutated-once") == (1 if stage == "commit" else 0)
+    assert fence.try_snapshot().allowed is False

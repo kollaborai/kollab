@@ -150,3 +150,22 @@ sequence, crash recovery, sidecar correlation, or repaired replay.
   original token object must be retained. Every token-taking method rejects a
   foreign fence token, fabricated token, malformed token, and wrong-kind token
   where a kind-specific commit is required, without changing state.
+
+## Contention after side effects
+
+`reserve` precedes producer side effects, but later `mark_written`, batch/ACP
+commit, or `mark_indeterminate` can encounter a busy lock after the caller has
+already appended a record or mutated history. Busy changes no fence state and
+is neither an abort nor evidence of success. The caller retains the original
+token and exact observed record/history IDs and retries only the local state
+transition after contention clears; it must not repeat the external append,
+history mutation, provider call, or tool action. Until transition succeeds,
+PENDING or WRITTEN blocks any future snapshot even if producer wiring exists.
+
+If the caller cannot establish the outcome or cannot complete that local retry,
+it must retain/reconcile the unresolved operation; when possible it records
+INDETERMINATE, retrying that local transition on contention as well. The local
+fence cannot persist this obligation across a crash, cancellation, owner loss,
+or process restart. Shared durable admission/recovery and caller integration
+are prerequisites for lifting any compaction or replacement gate. This text
+specifies a caller obligation; no existing producer implements it here.
