@@ -5862,8 +5862,11 @@ class HubPlugin(BasePlugin):
             self._identity.is_coordinator = is_coordinator
 
             # Discover existing agents to get taken identities (solo ones
-            # too: their sockets are named by identity)
-            existing = self._presence.discover_agents(include_solo=True)
+            # too: their sockets are named by identity, and busy ones whose
+            # socket is silent for now still hold theirs, #673)
+            existing = self._presence.discover_agents(
+                include_solo=True, include_busy=True
+            )
             taken = [a.identity for a in existing]
 
             # Resolve active agent for identity and vault config
@@ -5933,9 +5936,13 @@ class HubPlugin(BasePlugin):
                     None,
                 )
                 if holder:
+                    from .presence import _owner_gone
+
+                    # A busy holder answers no ping but is not dead (#673): only an
+                    # owner that is provably gone frees the identity (#575).
                     still_alive = await AgentMessenger.ping_agent(
                         holder.socket_path, timeout=2.0
-                    )
+                    ) or not _owner_gone(holder)
                     if not still_alive:
                         logger.info(
                             f"Force-claiming '{preferred}': holder "
@@ -6606,11 +6613,16 @@ class HubPlugin(BasePlugin):
         peer_names = [agent.identity for agent in peers]
         peer_list = ", ".join(peer_names) if peer_names else "none"
         new_features = "\n".join(f"  - {feature}" for feature in HUB_NEW_FEATURES)
-        operator_help = (
-            "To stop all agents, submit: /hub stop all\n"
-            f"Tip: {choose_startup_tip()}\n"
-            f"New features:\n{new_features}"
-        )
+        # Advertise stop all only to callers that actually started agents
+        # of their own (issue #669); agents with nothing of their own to
+        # stop get no mesh-wide stop hint.
+        started = self._locally_started_agent_count() > 0
+        help_lines = []
+        if started:
+            help_lines.append("To stop all agents you started, submit: /hub stop all")
+        help_lines.append(f"Tip: {choose_startup_tip(include_stop_all=started)}")
+        help_lines.append(f"New features:\n{new_features}")
+        operator_help = "\n".join(help_lines)
         try:
             renderer.message_coordinator.display_message_sequence(
                 [
@@ -14171,6 +14183,83 @@ class HubPlugin(BasePlugin):
             return None
         return self.event_bus.get_service("agent_orchestrator")
 
+    def _locally_started_agent_count(self) -> int:
+        """How many agent subprocesses this process started itself."""
+        orch = self._get_orchestrator()
+        if orch is None:
+            return 0
+        try:
+            return len(orch.orchestrator.get_all_agents())
+        except Exception:
+            return 0
+
+    def _locally_managed_sessions(self) -> dict:
+        """Agent sessions this process started itself, keyed by PID.
+
+        The agent_orchestrator tracks every subprocess it launched; PID
+        matching bridges hub identities to those sessions (issue #669).
+        Values are the full session objects so callers can verify liveness
+        and process generation -- a PID alone is not a kill token (the OS
+        reuses PIDs and stale presence rows can share a PID number).
+        """
+        orch = self._get_orchestrator()
+        if orch is None:
+            return {}
+        try:
+            sessions = orch.orchestrator.get_all_agents()
+        except Exception:
+            return {}
+        return {
+            session.pid: session
+            for session in sessions.values()
+            if getattr(session, "pid", None)
+        }
+
+    def _presence_generation_matches(self, session, agent) -> bool:
+        """True when presence row and tracked session are the same process
+        generation (fail closed on missing or inconsistent process identity).
+
+        The tracked child PID and OS process creation time are compared with
+        the presence row. The Popen handle is a child-management reference,
+        not an atomic kernel identity token. Presence from an older PID
+        generation predates that process; there is no timestamp grace window
+        that can make it look current.
+        """
+        agent_pid = getattr(agent, "pid", None)
+        session_pid = getattr(session, "pid", None)
+        proc = getattr(session, "proc", None)
+        if (
+            not agent_pid
+            or agent_pid != session_pid
+            or proc is None
+            or getattr(proc, "pid", None) != session_pid
+            or not getattr(session, "is_alive", False)
+        ):
+            return False
+
+        started_at = getattr(agent, "started_at", None)
+        process_created_at = self._session_process_create_time(session)
+        if started_at is None or process_created_at is None:
+            return False
+        try:
+            return float(started_at) >= float(process_created_at)
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _session_process_create_time(session) -> Optional[float]:
+        """Read the kernel creation time for a tracked Popen child."""
+        proc = getattr(session, "proc", None)
+        pid = getattr(session, "pid", None)
+        if proc is None or not pid or getattr(proc, "pid", None) != pid:
+            return None
+        try:
+            import psutil
+
+            return float(psutil.Process(pid).create_time())
+        except Exception:  # noqa: BLE001 - inability to prove generation fails closed
+            return None
+
     def _resolve_identity_to_agent_name(self, identity: str) -> Optional[str]:
         """Resolve a hub identity (gem name) to the orchestrator agent name.
 
@@ -14869,9 +14958,11 @@ class HubPlugin(BasePlugin):
     async def _handle_stop_command(self, rest: str) -> str:
         """Handle /hub stop <name|all>.
 
-        Sends shutdown signals via hub sockets (works for org-launched
-        agents and any other peer on the mesh, not just orchestrator-
-        managed agents).
+        Sends shutdown signals via hub sockets. `stop all` is scoped to
+        the agents the CALLER started (agent_orchestrator-managed
+        sessions matched by PID, issue #669): peers launched by other
+        lanes or the operator are immune. The mesh-wide stop is the
+        operator CLI, `kollab --hub stop all`.
         """
         target = rest.strip()
         if not target:
@@ -14884,32 +14975,65 @@ class HubPlugin(BasePlugin):
             return "hub not active"
 
         if target.lower() == "all":
-            # Use scan_all_presence so we see agents even if they're
+            # Scan machine-wide so owned agents are found even if they're
             # mid-shutdown (discover_agents would clean them up first
             # and report "no peers" even though we just killed them).
-            peers = self._presence.scan_all_presence()
+            peers = self._presence.scan_machine_presence()
             if not peers:
                 return "no peers to stop"
 
             results = []
-            stop_targets = [
-                agent for agent in peers if agent.agent_id != self._identity.agent_id
-            ]
+            managed = self._locally_managed_sessions()
+            stop_targets = []
+            owned_sessions = []
+            immune = []
+            for agent in peers:
+                if agent.agent_id == self._identity.agent_id:
+                    continue
+                pid = getattr(agent, "pid", None)
+                session = managed.get(pid) if pid is not None else None
+                if (
+                    session is not None
+                    and getattr(session, "is_alive", True)
+                    and self._presence_generation_matches(session, agent)
+                ):
+                    stop_targets.append(agent)
+                    owned_sessions.append(session)
+                else:
+                    immune.append(agent.identity)
+            # Carry each target's session into the stop call. The sweep's
+            # ownership gate runs before dispatch, but the process may exit
+            # during the awaited shutdown window. Final escalation uses the
+            # session's shared process lock to serialize Popen polling,
+            # reaping, and signal dispatch (issue #669).
             stop_results = await asyncio.gather(
                 *[
                     self._stop_peer_agent(
                         agent,
                         reason=f"stopped by {self._identity.identity}",
+                        session=session,
                     )
-                    for agent in stop_targets
+                    for agent, session in zip(stop_targets, owned_sessions)
                 ]
             )
             for agent, result in zip(stop_targets, stop_results):
                 results.append(f"  {agent.identity}: {result}")
 
-            if not results:
+            if not stop_targets:
+                if immune:
+                    return (
+                        "no agents started by you to stop "
+                        f"(immune: {', '.join(immune)}); only the operator "
+                        "CLI or their launcher can stop them"
+                    )
                 return "no peers to stop (only you on mesh)"
-            return f"stopping {len(results)} agent(s):\n" + "\n".join(results)
+            summary = f"stopping {len(results)} agent(s):"
+            if immune:
+                summary += (
+                    f"\nskipped {len(immune)} agent(s) not started by you "
+                    f"(immune): {', '.join(immune)}"
+                )
+            return summary + "\n" + "\n".join(results)
         else:
             # Single agent
             if target == self._identity.identity:
@@ -14965,26 +15089,144 @@ class HubPlugin(BasePlugin):
             )
             return f"'{target}' {result}"
 
-    async def _stop_peer_agent(self, agent, reason: str) -> str:
+    @staticmethod
+    def _signal_allowed(session) -> bool:
+        """Advisory liveness recheck before escalation (issue #669).
+
+        This check does not make a later signal safe by itself. The final
+        Popen poll and signal operation must hold the session's shared process
+        lock. ``session=None`` is the operator single-stop path and retains
+        its existing raw-PID behavior.
+        """
+        return session is None or bool(getattr(session, "is_alive", False))
+
+    def _cleanup_stopped_peer(self, agent, session) -> bool:
+        """Clean up a stopped peer without crossing its selected generation.
+
+        Named operator stops have no tracked session and retain the existing
+        presence-plus-socket cleanup. Caller-owned stop-all defers cleanup to
+        normal presence discovery; it cannot atomically compare-and-unlink a
+        presence row or identity-named socket that may have been replaced.
+        """
+        if not self._presence:
+            return False
+        if session is None:
+            self._presence.cleanup_agent(agent)
+            return True
+        return False
+
+    def _signal_session(
+        self, session, sig, *, expected_pid=None, expected_started_at=None
+    ) -> bool:
+        """Signal a tracked child while serializing its Popen lifecycle calls.
+
+        On POSIX, Python's Popen.send_signal() polls and then signals by
+        numeric PID.
+        Hold the same session lock as AgentSession.is_alive and
+        AgentOrchestrator._kill_session across the final check and dispatch so
+        this process cannot reap the child between those operations. This is
+        process-local serialization, not an atomic kernel identity guarantee.
+        Returns False if the session, lock, or selected generation is missing.
+        """
+        proc = getattr(session, "proc", None) if session is not None else None
+        process_lock = (
+            getattr(session, "process_lock", None) if session is not None else None
+        )
+        if proc is None or process_lock is None:
+            return False
+        with process_lock:
+            if expected_pid is not None and (
+                getattr(session, "pid", None) != expected_pid
+                or getattr(proc, "pid", None) != expected_pid
+            ):
+                return False
+            if expected_started_at is not None:
+                process_created_at = self._session_process_create_time(session)
+                try:
+                    if (
+                        process_created_at is None
+                        or float(expected_started_at) < process_created_at
+                    ):
+                        return False
+                except (TypeError, ValueError, OverflowError):
+                    return False
+            if proc.poll() is not None:
+                return False
+            try:
+                proc.send_signal(sig)
+                return True
+            except (ProcessLookupError, OSError):
+                return False
+
+    def _escalate_agent(self, agent, session, sig) -> bool:
+        """Escalate a stop signal for ``agent`` under ``session`` ownership.
+
+        Caller-owned sweep targets use the serialized tracked-child path
+        (``_signal_session``); only the session-less operator
+        single-stop path falls back to raw ``os.kill`` by PID (issue #669 r3).
+        """
+        if session is not None:
+            return self._signal_session(
+                session,
+                sig,
+                expected_pid=getattr(agent, "pid", None),
+                expected_started_at=getattr(agent, "started_at", None),
+            )
+        if sig == signal.SIGKILL:
+            return self._hard_kill_agent(agent)
+        return self._force_kill_agent(agent)
+
+    async def _stop_peer_agent(self, agent, reason: str, session=None) -> str:
         """Stop a peer and only report success after the pid exits.
 
         A socket shutdown ack means "request received", not "process is gone".
         Wait briefly for graceful exit, then fall back to SIGTERM and verify
         that exit too. This avoids the first-run lie where status still sees
         the agent online and a second stop is needed.
+
+        ``session`` is the orchestrator's tracked child for caller-owned
+        agents; when present, escalation shares its process lock and fails
+        closed if that child has exited or cannot be checked.
         """
         if not self._presence:
             return "hub not active"
 
+        guard = (
+            "process exited during stop wait; fallback signals withheld "
+            "(tracked-process guard)"
+        )
+
+        # Revalidate the selected child generation before the first socket
+        # request. The receiver also checks this generation after the async
+        # connect, because a replacement may bind the identity socket while
+        # this task is waiting.
+        if session is not None and not self._presence_generation_matches(
+            session, agent
+        ):
+            self._cleanup_stopped_peer(agent, session)
+            return guard
+
         if not getattr(agent, "socket_path", ""):
-            self._presence.cleanup_agent(agent)
+            cleaned = self._cleanup_stopped_peer(agent, session)
+            if session is not None and not cleaned:
+                return "no socket; presence cleanup deferred"
             return "no socket, cleaned up"
 
         try:
+            generation = (
+                {
+                    "expected_agent_id": getattr(agent, "agent_id", None),
+                    "expected_pid": getattr(agent, "pid", None),
+                    "expected_started_at": getattr(agent, "started_at", None),
+                }
+                if session is not None
+                else {}
+            )
             success = await AgentMessenger.signal_shutdown(
                 agent.socket_path,
                 reason=reason,
                 timeout=3.0,
+                **generation,
             )
         except Exception as e:
             success = False
@@ -14992,35 +15234,69 @@ class HubPlugin(BasePlugin):
 
         if success:
             if await self._wait_for_agent_exit(agent, timeout=STOP_GRACE_SECONDS):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return "stopped"
 
-            killed = self._force_kill_agent(agent)
+            if not self._signal_allowed(session):
+                self._cleanup_stopped_peer(agent, session)
+                return guard
+
+            killed = self._escalate_agent(agent, session, signal.SIGTERM)
+            if session is not None and not killed:
+                # Child is gone or cannot be checked; never fall back to raw
+                # os.kill for a caller-owned session.
+                self._cleanup_stopped_peer(agent, session)
+                return guard
             if killed and await self._wait_for_agent_exit(
                 agent, timeout=STOP_TERM_SECONDS
             ):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGTERM after graceful timeout)"
-            if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
+            if not self._signal_allowed(session):
+                self._cleanup_stopped_peer(agent, session)
+                return guard
+
+            killed = self._escalate_agent(agent, session, signal.SIGKILL)
+            if session is not None and not killed:
+                self._cleanup_stopped_peer(agent, session)
+                return guard
+            if killed and await self._wait_for_agent_exit(
                 agent, timeout=STOP_KILL_SECONDS
             ):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGKILL — was unresponsive)"
             return "stop timed out (pid survived SIGKILL)"
 
-        killed = self._force_kill_agent(agent)
+        if not self._signal_allowed(session):
+            self._cleanup_stopped_peer(agent, session)
+            return guard
+
+        killed = self._escalate_agent(agent, session, signal.SIGTERM)
+        if session is not None and not killed:
+            self._cleanup_stopped_peer(agent, session)
+            return guard
         if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return "killed (SIGTERM fallback)"
 
         if not self._agent_pid_alive(getattr(agent, "pid", 0)):
-            self._presence.cleanup_agent(agent)
+            cleaned = self._cleanup_stopped_peer(agent, session)
+            if session is not None and not cleaned:
+                return "already dead; presence cleanup deferred"
             return "already dead, cleaned up"
 
-        if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
+        if not self._signal_allowed(session):
+            self._cleanup_stopped_peer(agent, session)
+            return guard
+
+        killed = self._escalate_agent(agent, session, signal.SIGKILL)
+        if session is not None and not killed:
+            self._cleanup_stopped_peer(agent, session)
+            return guard
+        if killed and await self._wait_for_agent_exit(
             agent, timeout=STOP_KILL_SECONDS
         ):
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return "killed (SIGKILL fallback)"
 
         return "failed (pid survived SIGKILL)"
