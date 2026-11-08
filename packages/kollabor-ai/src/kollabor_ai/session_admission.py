@@ -16,6 +16,10 @@ class AdmissionError(Exception):
     """A token, identifier, or state transition violates the local contract."""
 
 
+class AdmissionBusy(AdmissionError):
+    """No state changed; retry only the local transition when contention clears."""
+
+
 @dataclass(frozen=True)
 class SessionKey:
     session_id: str
@@ -54,6 +58,26 @@ def _identifier(value: object) -> bool:
     return type(value) is str and bool(value.strip())
 
 
+def normalize_synced_user_log_id(value: object, *, session_id: str, logger_generation: int) -> str:
+    """Check local receipt evidence and return a plain string; not a cutline."""
+    from kollabor_ai.conversation_logger import SyncedUserLogId
+
+    if (
+        type(value) is not SyncedUserLogId
+        or not _identifier(session_id)
+        or type(logger_generation) is not int
+        or logger_generation < 0
+        or getattr(value, "sync_confirmed", None) is not True
+        or type(getattr(value, "session_id", None)) is not str
+        or value.session_id != session_id
+        or type(getattr(value, "logger_generation", None)) is not int
+        or value.logger_generation != logger_generation
+        or not _identifier(str(value))
+    ):
+        raise AdmissionError("invalid or unconfirmed user log receipt")
+    return str(value)
+
+
 class LocalAdmissionFence:
     """Bounded, instance-owned local state; never a durable admission fence."""
 
@@ -76,7 +100,7 @@ class LocalAdmissionFence:
     @contextmanager
     def _guard(self):
         if not self._state_lock.acquire(blocking=False):
-            raise AdmissionError("admission fence busy")
+            raise AdmissionBusy("admission fence busy")
         try:
             yield
         finally:

@@ -322,6 +322,17 @@ def test_invalid_fence_configuration_is_rejected(admission, key, capacity):
         admission.LocalAdmissionFence(admission.SessionKey(*key), max_entries=capacity)
 
 
+def retry_busy(admission, operation):
+    from time import sleep
+
+    for _ in range(1000):
+        try:
+            return operation()
+        except admission.AdmissionBusy:
+            sleep(0)
+    raise AssertionError("admission stayed busy after bounded retries")
+
+
 def test_concurrent_duplicate_record_has_one_winner(fence, admission):
     from threading import Barrier, Thread
 
@@ -332,8 +343,10 @@ def test_concurrent_duplicate_record_has_one_winner(fence, admission):
     def write(token):
         start.wait()
         try:
-            fence.mark_written(token, record_id="same-row")
-        except admission.AdmissionError:
+            retry_busy(admission, lambda: fence.mark_written(token, record_id="same-row"))
+        except admission.AdmissionError as exc:
+            assert not isinstance(exc, admission.AdmissionBusy)
+            assert "duplicate record" in str(exc)
             results.append("rejected")
         else:
             results.append("written")
@@ -462,8 +475,10 @@ def test_concurrent_reservations_obey_capacity(admission):
     def reserve():
         barrier.wait()
         try:
-            results.append(fence.reserve("native"))
-        except admission.AdmissionError:
+            results.append(retry_busy(admission, lambda: fence.reserve("native")))
+        except admission.AdmissionError as exc:
+            assert not isinstance(exc, admission.AdmissionBusy)
+            assert "capacity" in str(exc)
             results.append(None)
 
     workers = [Thread(target=reserve) for _ in range(2)]
@@ -492,8 +507,10 @@ def test_concurrent_commits_cannot_share_history(fence, admission):
     def commit(token, record):
         barrier.wait()
         try:
-            fence.commit_native_batch((token,), history_id="same", record_ids=(record,))
-        except admission.AdmissionError:
+            retry_busy(admission, lambda: fence.commit_native_batch((token,), history_id="same", record_ids=(record,)))
+        except admission.AdmissionError as exc:
+            assert not isinstance(exc, admission.AdmissionBusy)
+            assert "duplicate history" in str(exc)
             results.append("rejected")
         else:
             results.append("committed")
@@ -542,7 +559,7 @@ def test_busy_after_side_effect_requires_local_retry_only(fence, admission, stag
 
     fence._state_lock.acquire()
     try:
-        with pytest.raises(admission.AdmissionError, match="busy"):
+        with pytest.raises(admission.AdmissionBusy, match="busy"):
             operation()
         assert fence.try_snapshot().reason == "busy"
     finally:
@@ -554,3 +571,57 @@ def test_busy_after_side_effect_requires_local_retry_only(fence, admission, stag
     assert effects.count("record-appended-once") == 1
     assert effects.count("history-mutated-once") == (1 if stage == "commit" else 0)
     assert fence.try_snapshot().allowed is False
+
+
+def test_synced_user_log_id_requires_explicit_checked_conversion(fence, admission):
+    from kollabor_ai.conversation_logger import SyncedUserLogId
+
+    row = SyncedUserLogId("row-1", "synthetic", True, 7)
+    token = fence.reserve("native")
+    with pytest.raises(admission.AdmissionError):
+        fence.mark_written(token, record_id=row)
+    converted = admission.normalize_synced_user_log_id(row, session_id="synthetic", logger_generation=7)
+    assert type(converted) is str and converted == "row-1"
+    fence.mark_written(token, record_id=converted)
+    assert fence.state(token) is admission.AdmissionState.WRITTEN
+    assert fence.try_snapshot().allowed is False
+
+
+@pytest.mark.parametrize(
+    "row_value,row_session,synced,row_generation,expected_session,expected_generation",
+    [
+        ("row", "synthetic", False, 7, "synthetic", 7),
+        ("row", "other", True, 7, "synthetic", 7),
+        ("row", "synthetic", True, 8, "synthetic", 7),
+        ("row", "synthetic", True, 7, "", 7),
+        ("", "synthetic", True, 7, "synthetic", 7),
+        ("row", "synthetic", True, True, "synthetic", 1),
+    ],
+)
+def test_receipt_normalization_rejects_unconfirmed_or_mismatched(
+    admission, row_value, row_session, synced, row_generation, expected_session, expected_generation
+):
+    from kollabor_ai.conversation_logger import SyncedUserLogId
+
+    row = SyncedUserLogId(row_value, row_session, synced, row_generation)
+    with pytest.raises(admission.AdmissionError):
+        admission.normalize_synced_user_log_id(row, session_id=expected_session, logger_generation=expected_generation)
+
+
+def test_busy_has_stable_retryable_type(fence, admission):
+    fence._state_lock.acquire()
+    try:
+        with pytest.raises(admission.AdmissionBusy):
+            fence.reserve("native")
+    finally:
+        fence._state_lock.release()
+    assert fence.try_snapshot().reason == "coverage_unverified"
+
+
+def test_receipt_conversion_rejects_plain_or_malformed_value(admission):
+    from kollabor_ai.conversation_logger import SyncedUserLogId
+
+    malformed = str.__new__(SyncedUserLogId, "row")
+    for value in ("row", malformed):
+        with pytest.raises(admission.AdmissionError):
+            admission.normalize_synced_user_log_id(value, session_id="synthetic", logger_generation=1)

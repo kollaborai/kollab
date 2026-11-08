@@ -11,6 +11,10 @@ Module: `kollabor_ai.session_admission` (isolated implementation; not integrated
 
 ```python
 class AdmissionError(Exception): ...
+class AdmissionBusy(AdmissionError): ...  # local transition retryable, no change
+
+def normalize_synced_user_log_id(value: object, *, session_id: str,
+                                 logger_generation: int) -> str: ...
 
 @dataclass(frozen=True)
 class SessionKey:
@@ -52,8 +56,9 @@ class LocalAdmissionFence:
 Each method is synchronous and must return without waiting for an async task;
 no lock is held across an await. An implementation must serialize access by
 using bounded short critical sections. Every method attempts its lock without
-waiting: `try_snapshot` returns `busy`; all other methods raise AdmissionError
-with no state change. Work within a lock is bounded by the maximum capacity.
+waiting: `try_snapshot` returns `busy`; all other methods raise the typed `AdmissionBusy`
+with no state change. Capacity, duplicate IDs and invalid transitions raise
+`AdmissionError` and must never be treated as retryable contention. Work within a lock is bounded by the maximum capacity.
 No await, disk I/O, callback, or provider call is permitted inside that section.
 For deterministic contention testing, the implementation exposes its private
 `_state_lock` as a standard `threading.Lock`; `try_snapshot` must acquire it
@@ -169,3 +174,20 @@ fence cannot persist this obligation across a crash, cancellation, owner loss,
 or process restart. Shared durable admission/recovery and caller integration
 are prerequisites for lifting any compaction or replacement gate. This text
 specifies a caller obligation; no existing producer implements it here.
+
+## Receipt conversion and order limitations
+
+`normalize_synced_user_log_id` accepts only the actual `SyncedUserLogId` type,
+requires confirmed file/immediate-directory sync evidence, matching nonempty
+session ID and matching nonnegative local logger generation, and returns a
+plain `str` suitable for `mark_written`. Missing, stale, unconfirmed, malformed,
+or differently typed values raise AdmissionError; a direct string subclass is
+not silently accepted by identifier methods. The caller supplies and must still
+validate the current owner/session/generation; the conversion alone proves no
+cross-process generation, batch membership, cursor or universal crash safety.
+
+Native batch commit checks only that the caller-supplied IDs match the order of
+the caller-supplied tokens. It does not independently know actual append order,
+queue order, or batch membership. Reservation order must not be assumed to equal
+any of those orders. Capturing and validating the actual queue/log/batch order
+is an unresolved integration and durable-recovery gate.
