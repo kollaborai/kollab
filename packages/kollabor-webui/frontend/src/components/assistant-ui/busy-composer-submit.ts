@@ -25,6 +25,8 @@ export type BusyComposerSubmitTracker = {
   last: { fingerprint: string; at: number } | null;
   inFlight: Set<string>;
   sentDraft: { fingerprint: string; error: unknown } | null;
+  observedFingerprint: string | null;
+  revision: number;
 };
 
 export type BusyComposerSubmitIssue = {
@@ -48,13 +50,40 @@ export function busyComposerSubmitErrorMessage(
 }
 
 export function createBusyComposerSubmitTracker(): BusyComposerSubmitTracker {
-  return { last: null, inFlight: new Set(), sentDraft: null };
+  return {
+    last: null,
+    inFlight: new Set(),
+    sentDraft: null,
+    observedFingerprint: null,
+    revision: 0,
+  };
 }
 
 export function busyComposerFingerprint(state: BusyComposerState): string {
   return `${state.text}\u0000${state.attachments
     .map((attachment) => attachment.id)
     .join(",")}`;
+}
+
+export function observeBusyComposerDraft(
+  tracker: BusyComposerSubmitTracker,
+  state: BusyComposerState,
+): boolean {
+  const fingerprint = busyComposerFingerprint(state);
+  const changed =
+    tracker.observedFingerprint !== null &&
+    tracker.observedFingerprint !== fingerprint;
+  tracker.observedFingerprint = fingerprint;
+
+  if (changed) {
+    tracker.revision += 1;
+    if (tracker.sentDraft) {
+      tracker.sentDraft = null;
+      tracker.last = null;
+      return true;
+    }
+  }
+  return false;
 }
 
 export type BusyComposerSubmitOptions = {
@@ -85,9 +114,29 @@ export function createBusyComposerSubmitHandler(
   | Promise<void>
   | void {
   return (event) => {
-    if (!options.isRunning || event.defaultPrevented) return;
+    if (event.defaultPrevented) return;
+    const state = options.getState();
+    const draftChanged = observeBusyComposerDraft(options.tracker, state);
+    if (draftChanged) options.onError(null);
+
+    if (!options.isRunning) {
+      const fingerprint = busyComposerFingerprint(state);
+      const alreadySent = options.tracker.sentDraft;
+      if (alreadySent?.fingerprint === fingerprint) {
+        event.preventDefault();
+        options.onError({ kind: "already-sent", error: alreadySent.error });
+        return;
+      }
+      if (alreadySent) {
+        options.tracker.sentDraft = null;
+        options.tracker.last = null;
+      }
+      if (!draftChanged) options.onError(null);
+      return;
+    }
+
     return submitBusyComposerMessage({
-      state: options.getState(),
+      state,
       event,
       tracker: options.tracker,
       finalizeImageAttachment: options.finalizeImageAttachment,
@@ -117,6 +166,7 @@ async function submitBusyComposerMessage(
   if (!state.text.trim() && state.attachments.length === 0) return;
 
   const fingerprint = busyComposerFingerprint(state);
+  const draftRevision = tracker.revision;
   const alreadySent = tracker.sentDraft;
   if (alreadySent?.fingerprint === fingerprint) {
     event.preventDefault();
@@ -194,7 +244,12 @@ async function submitBusyComposerMessage(
     }
 
     try {
-      if (busyComposerFingerprint(getCurrentState()) !== fingerprint) return;
+      if (
+        tracker.revision !== draftRevision ||
+        busyComposerFingerprint(getCurrentState()) !== fingerprint
+      ) {
+        return;
+      }
       await resetComposer();
     } catch (error) {
       tracker.sentDraft = { fingerprint, error };

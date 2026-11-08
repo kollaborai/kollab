@@ -41,6 +41,7 @@ import {
   busyComposerSubmitErrorMessage,
   createBusyComposerSubmitHandler,
   createBusyComposerSubmitTracker,
+  observeBusyComposerDraft,
 } from "@/components/assistant-ui/busy-composer-submit";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -519,6 +520,29 @@ export const Composer: FC<{
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const lastBusySubmit = useRef(createBusyComposerSubmitTracker());
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isRunning && !lastBusySubmit.current.sentDraft) {
+      setBusySubmitError(null);
+    }
+  }, [isRunning]);
+
+  useEffect(() => {
+    observeBusyComposerDraft(
+      lastBusySubmit.current,
+      aui.composer.getState(),
+    );
+    return aui.subscribe(() => {
+      if (
+        observeBusyComposerDraft(
+          lastBusySubmit.current,
+          aui.composer.getState(),
+        )
+      ) {
+        setBusySubmitError(null);
+      }
+    });
+  }, [aui.composer]);
 
   // A bare /config, /llm, /model, /setup or /connect (also /connect code and
   // /connect knocks) opens its Settings tab and posts no text. Any other line is
