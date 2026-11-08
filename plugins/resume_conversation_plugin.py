@@ -1846,5 +1846,12 @@ class ResumeConversationPlugin:
                                 (role, content, meta)
                                 for role, content, meta in display_messages
                             ]
+                    else:
+                        reason = result.get("error", "Unknown error")
+                        data["display_messages"] = [("system", f"[error] Branch failed: {reason}", {})]
+                else:
+                    data["display_messages"] = [
+                        ("system", "[error] Conversation manager unavailable; branch failed.", {})
+                    ]
 
         return data

@@ -4291,6 +4291,17 @@ class LocalStateService(StateService):
         except Exception as e:
             logger.debug(f"resume: auto-save error (non-fatal): {e}")
 
+        # The target load mutates the manager. Keep its prior state until the
+        # resumed base has been persisted successfully.
+        saved_manager = {
+            name: getattr(conv_mgr, name)
+            for name in ("current_session_id", "messages", "message_index", "context_window",
+                         "current_parent_uuid", "conversation_metadata")
+            if hasattr(conv_mgr, name)
+        }
+        saved_stats = getattr(conv_mgr, "_session_stats", None)
+        saved_stats_values = dict(saved_stats) if isinstance(saved_stats, dict) else None
+
         # Load the target session.
         previous_messages = getattr(conv_mgr, "messages", None)
         try:
@@ -4305,7 +4316,6 @@ class LocalStateService(StateService):
                     or getattr(conv_mgr, "messages", None) is not previous_messages):
                 mark_changed()
             raise ValueError(f"failed to load session {session_id!r}")
-        mark_changed()
 
         raw_messages = getattr(conv_mgr, "messages", None) or []
 
@@ -4323,6 +4333,20 @@ class LocalStateService(StateService):
 
             new_session_id = generate_session_name()
             conv_mgr.current_session_id = new_session_id
+            # Persist before moving logger, API, or live history ownership. A
+            # refused destination must leave the previous conversation intact.
+            try:
+                saved = conv_mgr.save_session(new_session_id)
+            except Exception:
+                saved = False
+            if not saved:
+                for name, value in saved_manager.items():
+                    setattr(conv_mgr, name, value)
+                if saved_stats_values is not None:
+                    saved_stats.clear()
+                    saved_stats.update(saved_stats_values)
+                raise ValueError(f"failed to persist resumed session {new_session_id!r}")
+            mark_changed()
 
             conv_logger = getattr(conv_mgr, "conversation_logger", None) or getattr(
                 llm, "conversation_logger", None
@@ -4401,12 +4425,6 @@ class LocalStateService(StateService):
                 llm.session_stats["messages"] = len(loaded_messages)
             except Exception as e:
                 logger.debug(f"resume: session_stats update error: {e}")
-
-        # The ACP stable handle now points at this new native conversation ID.
-        # Persist its restored base before reporting success, so another
-        # process can reopen it even if no new prompt has run yet.
-        if not conv_mgr.save_session(new_session_id):
-            raise ValueError(f"failed to persist resumed session {new_session_id!r}")
 
         if uses_acp:
             # Read the original harness binding, but open/save the continued

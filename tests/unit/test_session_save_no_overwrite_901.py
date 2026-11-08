@@ -4,6 +4,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
+import pytest
+
 from kollabor_ai.conversation_manager import ConversationManager
 
 
@@ -107,3 +109,73 @@ def test_append_during_new_save_survives_after_atomic_install(tmp_path, monkeypa
     assert rows[0]["messages"][0]["content"] == "base synthetic"
     assert rows[1]["message"]["content"] == "tail synthetic"
     assert len(rows) == 2
+
+
+def test_refused_resume_preserves_live_owners(tmp_path, monkeypatch):
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from kollabor.state.local import LocalStateService
+    from kollabor_events.data_models import ConversationMessage
+
+    writer = manager(tmp_path)
+    writer.add_message("user", "target synthetic")
+    assert writer.save_session("target")
+    current = manager(tmp_path)
+    current.current_session_id = "current"
+    current.add_message("user", "current synthetic")
+    original_messages = current.messages
+    logger = SimpleNamespace(reset_session=MagicMock())
+    api = SimpleNamespace(set_session_id=MagicMock())
+    history = [ConversationMessage(role="user", content="current synthetic")]
+    llm = SimpleNamespace(
+        conversation_manager=current, conversation_logger=logger, api_service=api, conversation_history=history
+    )
+    state = LocalStateService(llm, None)
+    monkeypatch.setattr(current, "save_session", lambda _: False)
+    with pytest.raises(ValueError, match="persist resumed session"):
+        asyncio.run(state.resume_conversation("target"))
+    assert current.current_session_id == "current"
+    assert current.messages is original_messages
+    assert [message.content for message in history] == ["current synthetic"]
+    logger.reset_session.assert_not_called()
+    api.set_session_id.assert_not_called()
+
+
+def test_refused_resume_does_not_close_live_acp(tmp_path, monkeypatch):
+    import asyncio
+    from contextlib import nullcontext
+    from unittest.mock import AsyncMock, MagicMock
+
+    from kollabor.state.local import LocalStateService
+
+    writer = manager(tmp_path)
+    writer.add_message("user", "target synthetic")
+    assert writer.save_session("target")
+    current = manager(tmp_path)
+    current.current_session_id = "current"
+    current.add_message("user", "current synthetic")
+    acp = SimpleNamespace(active=True, transition=lambda: nullcontext(), close=AsyncMock())
+    bus = SimpleNamespace(get_service=lambda name: acp if name == "acp_orchestrator" else None)
+    llm = SimpleNamespace(conversation_manager=current, conversation_history=[])
+    monkeypatch.setattr(current, "save_session", MagicMock(return_value=False))
+    with pytest.raises(ValueError, match="persist resumed session"):
+        asyncio.run(LocalStateService(llm, None, event_bus=bus).resume_conversation("target"))
+    assert current.current_session_id == "current"
+    acp.close.assert_not_awaited()
+
+
+def test_branch_modal_displays_save_failure():
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+    plugin = ResumeConversationPlugin(event_bus=MagicMock(), config={})
+    plugin.conversation_manager = SimpleNamespace(
+        branch_session=lambda *_: {"success": False, "error": "failed to persist branched session"}
+    )
+    plugin._ensure_conversation_manager = lambda: True
+    data = {"command": {"action": "branch_execute", "metadata": {"session_id": "synthetic", "message_index": 0}}}
+    result = asyncio.run(plugin._handle_modal_command(data, None))
+    assert "failed to persist branched session" in result["display_messages"][0][1]
