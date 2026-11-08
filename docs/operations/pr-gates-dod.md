@@ -97,6 +97,11 @@ trusted_reviewers = ["owner-login"]
   `trusted_reviewers` and must not be the PR author. The approval review stays
   plain; the marker is a separate issue comment.
 
+  The collector reads changed test files as immutable GitHub blob data from
+  the PR head. The workflow executes only the trusted base-branch script and
+  configuration; it never checks out or executes PR code. A changed head or
+  unreadable test blob fails the collection rather than grading stale data.
+
   The marker is an HTML comment containing one JSON object:
 
   ```html
