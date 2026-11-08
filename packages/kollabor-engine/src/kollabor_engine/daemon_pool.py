@@ -218,6 +218,8 @@ class DaemonHandle:
         self.owned = launcher is not None
         self.webui_owned = False
         self.pid: int = 0
+        # State-call budget; None is RemoteStateService.DEFAULT_TIMEOUT (#880).
+        self.state_timeout: Optional[float] = None
 
         self.process_started_at: Optional[float] = None
         # Folder a spawned daemon runs in (its presence ``project``). Gem names
@@ -253,7 +255,7 @@ class DaemonHandle:
 
     # === lifecycle ===
 
-    async def connect(self, socket_path: str, *, state_timeout: Optional[float] = None) -> None:
+    async def connect(self, socket_path: str) -> None:
         """Attach to the daemon's socket and start pumping its event stream."""
         from kollabor.state import RemoteStateService
         from kollabor_rpc import RpcClient, open_unix_connection_with_large_buffer
@@ -306,7 +308,7 @@ class DaemonHandle:
         # RPC replies and display events share this one connection, so the read
         # loop below is the only thing allowed to consume the reader.
         self.rpc = RpcClient(self._writer)
-        self.state = RemoteStateService(rpc_client=self.rpc, timeout=state_timeout)
+        self.state = RemoteStateService(rpc_client=self.rpc, timeout=self.state_timeout)
         self._read_task = asyncio.create_task(
             self._read_loop(), name=f"daemon-read-{self.session_id}"
         )
@@ -1054,11 +1056,10 @@ class DaemonPool:
             )
             handle.project = str(found.get("workspace") or found.get("project") or "")
             handle.agent_name = str(found.get("agent") or "")
+            if found.get("device"):
+                handle.state_timeout = REMOTE_STATE_TIMEOUT_SECONDS
             try:
-                await handle.connect(
-                    str(found.get("socket_path") or ""),
-                    state_timeout=REMOTE_STATE_TIMEOUT_SECONDS if found.get("device") else None,
-                )
+                await handle.connect(str(found.get("socket_path") or ""))
             except BaseException:
                 try:
                     # Attach failure is not an explicit Delete or /quit request.
