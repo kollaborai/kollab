@@ -1,4 +1,4 @@
-import type { EngineApi, ModelChoice, Session } from "@/api";
+import type { DefaultLoadout, EngineApi, ModelChoice, Profile, Session } from "@/api";
 
 /** Every typed word is part of the row's profile, model or effort: "codex luna max". */
 export function matchesChoice(choice: ModelChoice, query: string): boolean {
@@ -99,3 +99,20 @@ export async function applyModelChoice(
 
 export const sameChoice = (a: Partial<ModelChoice>, b: Partial<ModelChoice>) =>
   a.profile === b.profile && (a.model || "") === (b.model || "") && (a.effort || "") === (b.effort || "");
+
+/**
+ * What New Session starts on. The terminal starts on the default loadout, but a web session always names a
+ * profile, which makes the terminal skip it; so the form does: the loadout's profile, model and level. A
+ * loadout on a profile that is gone, or on an ACP harness (which takes its model through its own options),
+ * leaves the active profile's own model.
+ */
+export function startingChoice(
+  profiles: Pick<Profile, "name">[],
+  active: string | undefined,
+  loadout?: DefaultLoadout | null,
+): ModelChoice {
+  if (loadout && loadout.provider !== "acp" && profiles.some((profile) => profile.name === loadout.profile)) {
+    return { profile: loadout.profile, provider: loadout.provider, model: loadout.model, effort: loadout.effort };
+  }
+  return { profile: active || profiles[0]?.name || "default", provider: "", model: "", effort: "" };
+}

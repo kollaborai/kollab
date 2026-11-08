@@ -63,7 +63,7 @@ import {
   type SlashCommand,
   type Session,
 } from "./api";
-import { applyModelChoice } from "@/components/shell/model-choice";
+import { applyModelChoice, startingChoice } from "@/components/shell/model-choice";
 import {
   EngineRuntimeProvider,
   buildInitialState,
@@ -1245,7 +1245,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       await api.loadConfig();
       const [result, profileResult, agentResult] = await Promise.all([
         loadSessions(),
-        api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
+        api.listProfiles().catch(() => ({ profiles: [], active: undefined, default_loadout: undefined })),
         refreshAgentPool(),
       ]);
       if (!mounted || operation !== operationRef.current) return;
@@ -1253,9 +1253,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setProfiles(nextProfiles);
       const nextAgents = agentResult || [];
       setAgents(nextAgents);
-      setSelectedProfile(
-        profileResult.active || nextProfiles[0]?.name || "default",
-      );
+      // New Session starts on the default loadout when there is one, else the active profile's own model.
+      const start = startingChoice(nextProfiles, profileResult.active, profileResult.default_loadout);
+      setSelectedProfile(start.profile);
+      setSelectedPick({ provider: start.provider, model: start.model, effort: start.effort });
       // Restore this engine's newest chat unless the person has opened one.
       const first = chatToRestore(result, openedRef.current);
       if (first) {

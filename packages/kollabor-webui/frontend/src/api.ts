@@ -241,6 +241,15 @@ export type ModelChoice = {
   effort: string;
 };
 
+/** The loadout the terminal starts on (`kollabor.llm.default_loadout`), as `GET /profiles` reports it. */
+export type DefaultLoadout = {
+  name: string;
+  profile: string;
+  provider: string;
+  model: string;
+  effort: string;
+};
+
 export type ProfileWrite = {
   name: string;
   provider?: string;
@@ -1400,6 +1409,8 @@ export class EngineApi {
       providers?: string[];
       /** Invalid user profiles skipped while loading; names map to safe diagnostics. */
       invalid_profiles?: Record<string, string>;
+      /** What New Session starts on; null when no default loadout is set. */
+      default_loadout?: DefaultLoadout | null;
     }>("/profiles");
   }
 
