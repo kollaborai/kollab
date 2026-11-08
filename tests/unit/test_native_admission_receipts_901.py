@@ -107,6 +107,7 @@ def test_failed_native_log_never_yields_a_receipt(tmp_path, monkeypatch):
         assert items[0].durable_receipts == ()
         assert log.session_file.read_bytes() == b""
         service.message_display_service.display_system_message.assert_called_once()
+        assert "outcome is uncertain" in service.message_display_service.display_system_message.call_args.args[0]
 
     try:
         fixture.loop.run_until_complete(run())

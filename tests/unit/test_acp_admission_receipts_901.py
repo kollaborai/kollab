@@ -84,3 +84,14 @@ async def test_acp_delayed_log_keeps_original_session_and_never_marks_new_histor
     assert reader.load_session(old_session)
     assert [row["content"] for row in reader.messages] == ["synthetic input"]
     assert manager.messages == [] and llm.conversation_history == []
+
+
+@pytest.mark.asyncio
+async def test_acp_directory_sync_failure_does_not_attach_receipt(tmp_path, monkeypatch):
+    orchestrator, manager, logger, llm = make_rig(tmp_path, monkeypatch)
+    monkeypatch.setattr("kollabor_ai.conversation_logger._sync_session_directory", lambda _: False)
+    orchestrator._record_user("synthetic-request", "synthetic input", "rpc", None, track_completion=True)
+    await asyncio.gather(*tuple(orchestrator._history_tasks))
+    assert "durable_input_receipts" not in manager.messages[0]["metadata"]
+    assert "durable_input_receipts" not in llm.conversation_history[0].metadata
+    assert "synthetic input" in logger.session_file.read_text()

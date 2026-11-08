@@ -31,6 +31,33 @@ logger = logging.getLogger(__name__)
 _TIGHTEN_ENTRY_LIMIT = 4096
 
 
+class SyncedUserLogId(str):
+    """String-compatible row ID with observed file/parent sync evidence.
+
+    This is not a session generation, sequence cursor, or universal crash proof.
+    """
+
+    def __new__(cls, value: str, session_id: str, sync_confirmed: bool):
+        result = super().__new__(cls, value)
+        result.session_id = session_id
+        result.sync_confirmed = sync_confirmed
+        return result
+
+
+def _sync_session_directory(path: Path) -> bool:
+    """Sync the immediate directory; unsupported platforms issue no receipt."""
+    try:
+        fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        logger.warning("Could not sync session directory; durable receipt withheld")
+        return False
+
+
 def _session_file_write_lock_path(session_file: Path) -> Path:
     """Return the stable hidden lock path shared by JSONL writers."""
     path = Path(session_file)
@@ -514,12 +541,19 @@ class KollaborConversationLogger:
                         if durable:
                             os.fsync(fd)
                     except BaseException:
-                        os.ftruncate(fd, start)  # roll the partial record back
+                        try:
+                            os.ftruncate(fd, start)
+                            if durable:
+                                os.fsync(fd)
+                        except BaseException as rollback_error:
+                            raise OSError("JSONL append rollback is indeterminate") from rollback_error
                         raise
                 finally:
                     os.close(fd)
+                sync_confirmed = _sync_session_directory(path) if durable else False
                 if own:
                     self.message_count += 1
+                return sync_confirmed
 
     def _analyze_user_context(self, content: str) -> Dict[str, Any]:
         """Analyze user context from message content."""
@@ -782,7 +816,7 @@ class KollaborConversationLogger:
         }
 
         # Native admission receipts must not be issued before the row is flushed.
-        await self._append_to_jsonl(message, session_id=session_id, durable=True)
+        sync_confirmed = await self._append_to_jsonl(message, session_id=target_session, durable=True)
 
         # Update conversation themes
         intent = message["kollabor_intelligence"]["user_context"].get("detected_intent")
@@ -792,7 +826,7 @@ class KollaborConversationLogger:
         # Save updated conversation memory
         self._save_conversation_memory()
 
-        return message_uuid
+        return SyncedUserLogId(message_uuid, target_session, sync_confirmed)
 
     async def log_assistant_message(
         self,

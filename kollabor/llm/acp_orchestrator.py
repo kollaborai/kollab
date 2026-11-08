@@ -1026,6 +1026,8 @@ class ACPOrchestrator:
                 record_uuid = await logger_service.log_user_message(text, **kwargs)
                 if not (isinstance(receipt_session, str) and receipt_session
                         and isinstance(record_uuid, str) and record_uuid
+                        and getattr(record_uuid, "sync_confirmed", False) is True
+                        and getattr(record_uuid, "session_id", None) == receipt_session
                         and getattr(logger_service, "session_id", None) == receipt_session
                         and getattr(manager, "current_session_id", None) == receipt_session
                         and getattr(manager, "messages", None) is manager_messages

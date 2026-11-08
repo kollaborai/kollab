@@ -2419,7 +2419,9 @@ class LLMService:
         except Exception as exc:
             logger.error("User message not written to history: %s", exc)
             self.message_display_service.display_system_message(
-                "Conversation history not saved for this message."
+                "Conversation history write outcome is uncertain; check the session before retrying."
+                if "rollback is indeterminate" in str(exc)
+                else "Conversation history not saved for this message."
             )
         else:
             self.publish_cursor(user_uuid, turn_serial)
@@ -2434,6 +2436,8 @@ class LLMService:
                 and receipt_session == getattr(self.conversation_logger, "session_id", None)
                 and isinstance(user_uuid, str)
                 and user_uuid
+                and getattr(user_uuid, "sync_confirmed", False) is True
+                and getattr(user_uuid, "session_id", None) == receipt_session
             ):
                 durable_receipts = (NativeAdmissionReceipt(receipt_session, user_uuid),)
 
