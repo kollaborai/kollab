@@ -916,3 +916,80 @@ async def test_an_unconfirmed_mirror_retries_until_the_remote_answers(
         "check the servers",
         "all four are up",
     ]
+
+
+class TurnEndingState(SilentState):
+    """A daemon whose turn ends while an older history answer is in flight.
+
+    Each answer is the conversation as it stood when the call arrived; the
+    first call is held until ``release`` is set.
+    """
+
+    def __init__(self, *texts):
+        self.texts = list(texts)
+        self.calls = 0
+        self.release = asyncio.Event()
+        self.delay = 0.0
+
+    async def get_conversation(self, since=None, anchor=None, **kwargs):
+        self.calls += 1
+        snapshot = _answer(*self.texts)
+        if self.calls == 1:
+            await self.release.wait()
+        await asyncio.sleep(self.delay)
+        return snapshot
+
+
+@pytest.mark.asyncio
+async def test_a_turn_end_that_finds_the_lock_busy_is_announced_later(
+    registry, conversations, monkeypatch
+):
+    """Review finding on #960: an older background answer holding the lock
+    made turn_complete's notifying refresh give up after its short budget,
+    and nothing asked again, so the finished reply never reached the page."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    _, workspace_root = conversations
+    state = TurnEndingState("old")
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    emitted = []
+    session.daemon.fan_out = emitted.append
+
+    session._schedule_refresh(notify=False)  # a user_message warms the mirror
+    await asyncio.sleep(0.01)  # its answer is in flight, holding the lock
+    state.texts.append("new reply")  # the turn ends
+    assert await session.refresh_history(notify=True) == []  # lock busy
+    state.release.set()
+    await _settled(session)
+
+    assert [m["content"] for m in session.history] == ["old", "new reply"]
+    assert {"type": "history_updated"} in emitted
+
+
+@pytest.mark.asyncio
+async def test_a_turn_end_the_daemon_answers_late_is_announced_later(
+    registry, conversations, monkeypatch
+):
+    """A remote daemon answers the turn's notifying refresh after the short
+    budget; the reply still reaches the page once it lands (#927)."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    _, workspace_root = conversations
+    state = TurnEndingState("old")
+    state.release.set()
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    emitted = []
+    session.daemon.fan_out = emitted.append
+    assert [m["content"] for m in await session.refresh_history()] == ["old"]
+
+    state.texts.append("new reply")
+    state.delay = 0.2  # the relay is slower than the short budget
+    assert [m["content"] for m in await session.refresh_history(notify=True)] == ["old"]
+    await _settled(session)
+
+    assert [m["content"] for m in session.history] == ["old", "new reply"]
+    assert emitted == [{"type": "history_updated"}]
