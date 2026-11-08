@@ -7,8 +7,9 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from kollabor.state.remote import RemoteStateService
 from kollabor_engine import daemon_pool
+
+from kollabor.state.remote import RemoteStateService
 
 
 async def _adopt(row_extra):
