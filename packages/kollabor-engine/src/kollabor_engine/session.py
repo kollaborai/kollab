@@ -243,6 +243,9 @@ class EngineSession:
         # The last refresh got no usable answer (timeout, error, unjoinable
         # tail, lock busy); with no answer ever, the background one retries.
         self._history_refresh_failed = False
+        # Digest of the mirror a window holds after a notifying refresh got
+        # no answer; the next refresh to land announces any change since it.
+        self._history_announce_from: Optional[str] = None
 
         # The daemon's own conversation id (its conversations/<id>.jsonl
         # name). Arrives with the first answered snapshot; before that, disk
@@ -680,7 +683,7 @@ class EngineSession:
         except asyncio.TimeoutError as exc:
             self._history_refresh_failed = True
             if notify and requeue:
-                self._schedule_refresh()
+                self._owe_history_announcement()
             if stale_raises:
                 raise HistoryRefreshUnavailable(
                     f"timed out after {wait}s waiting for another history refresh"
@@ -695,8 +698,20 @@ class EngineSession:
         finally:
             self._history_lock.release()
         if notify and requeue and getattr(self, "_history_refresh_failed", False):
-            self._schedule_refresh()
+            self._owe_history_announcement()
         return history
+
+    def _owe_history_announcement(self) -> None:
+        """A waiting caller's notifying refresh got no answer in its budget.
+
+        Its window holds the mirror as it is now. Whichever refresh lands
+        next (the one in flight may already hold the change, stored without
+        an event) announces any change since then, and one is queued in case
+        none is running.
+        """
+        if getattr(self, "_history_announce_from", None) is None:
+            self._history_announce_from = anchor_digest(self._raw_history)
+        self._schedule_refresh()
 
     async def _refresh_history_locked(
         self, notify: bool, stale_raises: bool, wait: float,
@@ -825,11 +840,15 @@ class EngineSession:
         seed_replaced, self._history_seeded = self._history_seeded, False
         unconfirmed_replaced = getattr(self, "_history_unconfirmed_shown", False)
         self._history_unconfirmed_shown = False
+        owed_from = getattr(self, "_history_announce_from", None)
+        self._history_announce_from = None
+        current = anchor_digest(self._raw_history)
         if (
             uid_changed
             or seed_replaced
             or unconfirmed_replaced
-            or (notify and anchor_digest(self._raw_history) != before)
+            or (owed_from is not None and current != owed_from)
+            or (notify and current != before)
         ):
             event = {"type": "history_updated"}
             if self._history_conversation_uid:
