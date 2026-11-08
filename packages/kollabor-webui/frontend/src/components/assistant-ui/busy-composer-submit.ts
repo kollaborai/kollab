@@ -49,7 +49,30 @@ export type BusyComposerSubmitOptions = {
   now?: () => number;
 };
 
-export async function submitBusyComposerMessage(
+export type BusyComposerSubmitHandlerOptions = Omit<
+  BusyComposerSubmitOptions,
+  "state" | "event"
+> & {
+  isRunning: boolean;
+  getState: () => BusyComposerState;
+};
+
+export function createBusyComposerSubmitHandler(
+  options: BusyComposerSubmitHandlerOptions,
+): (event: { preventDefault: () => void; defaultPrevented?: boolean }) =>
+  | Promise<void>
+  | void {
+  return (event) => {
+    if (!options.isRunning || event.defaultPrevented) return;
+    return submitBusyComposerMessage({
+      ...options,
+      state: options.getState(),
+      event,
+    });
+  };
+}
+
+async function submitBusyComposerMessage(
   options: BusyComposerSubmitOptions,
 ): Promise<void> {
   const {

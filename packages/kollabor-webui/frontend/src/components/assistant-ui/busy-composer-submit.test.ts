@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { imageAttachmentAdapter } from "./attachment-adapter";
 import {
+  createBusyComposerSubmitHandler,
   createBusyComposerSubmitTracker,
-  submitBusyComposerMessage,
   type BusyComposerState,
 } from "./busy-composer-submit";
 
@@ -23,16 +23,18 @@ async function pendingPng() {
 
 function attempt(
   state: BusyComposerState,
-  overrides: Partial<Parameters<typeof submitBusyComposerMessage>[0]> = {},
+  overrides: Partial<
+    Parameters<typeof createBusyComposerSubmitHandler>[0]
+  > = {},
 ) {
   const sendCommand = vi.fn();
   const resetComposer = vi.fn();
   const onError = vi.fn();
   const event = { preventDefault: vi.fn() };
   const tracker = createBusyComposerSubmitTracker();
-  const options: Parameters<typeof submitBusyComposerMessage>[0] = {
-    state,
-    event,
+  const options: Parameters<typeof createBusyComposerSubmitHandler>[0] = {
+    isRunning: true,
+    getState: () => state,
     tracker,
     finalizeImageAttachment: (attachment: Parameters<typeof imageAttachmentAdapter.send>[0]) =>
       imageAttachmentAdapter.send(attachment),
@@ -41,7 +43,8 @@ function attempt(
     onError,
     ...overrides,
   };
-  return { options, sendCommand, resetComposer, onError, event, tracker };
+  const handleSubmit = createBusyComposerSubmitHandler(options);
+  return { handleSubmit, sendCommand, resetComposer, onError, event, tracker };
 }
 
 describe("busy composer submit", () => {
@@ -49,7 +52,7 @@ describe("busy composer submit", () => {
     const attachment = await pendingPng();
     const test = attempt({ text: "describe this", attachments: [attachment] });
 
-    await submitBusyComposerMessage(test.options);
+    await test.handleSubmit(test.event);
 
     expect(test.sendCommand).toHaveBeenCalledTimes(1);
     expect(test.sendCommand.mock.calls[0][0]).toMatchObject({
@@ -70,7 +73,7 @@ describe("busy composer submit", () => {
     const attachment = await pendingPng();
     const test = attempt({ text: "", attachments: [attachment] });
 
-    await submitBusyComposerMessage(test.options);
+    await test.handleSubmit(test.event);
 
     expect(test.sendCommand).toHaveBeenCalledTimes(1);
     expect(test.sendCommand.mock.calls[0][0]).toMatchObject({
@@ -85,12 +88,9 @@ describe("busy composer submit", () => {
     const state: BusyComposerState = { text: "  keep this text  ", attachments: [] };
     const test = attempt(state);
 
-    await submitBusyComposerMessage(test.options);
+    await test.handleSubmit(test.event);
     const duplicateEvent = { preventDefault: vi.fn() };
-    await submitBusyComposerMessage({
-      ...test.options,
-      event: duplicateEvent,
-    });
+    await test.handleSubmit(duplicateEvent);
 
     expect(test.sendCommand).toHaveBeenCalledTimes(1);
     expect(test.sendCommand.mock.calls[0][0]).toMatchObject({
@@ -108,7 +108,7 @@ describe("busy composer submit", () => {
       finalizeImageAttachment: vi.fn().mockRejectedValue(conversionError),
     });
 
-    await submitBusyComposerMessage(test.options);
+    await test.handleSubmit(test.event);
 
     expect(test.sendCommand).not.toHaveBeenCalled();
     expect(test.resetComposer).not.toHaveBeenCalled();
@@ -129,12 +129,9 @@ describe("busy composer submit", () => {
       { finalizeImageAttachment },
     );
 
-    const first = submitBusyComposerMessage(test.options);
+    const first = test.handleSubmit(test.event);
     const duplicateEvent = { preventDefault: vi.fn() };
-    const second = submitBusyComposerMessage({
-      ...test.options,
-      event: duplicateEvent,
-    });
+    const second = test.handleSubmit(duplicateEvent);
     expect(finalizeImageAttachment).toHaveBeenCalledTimes(1);
     expect(duplicateEvent.preventDefault).toHaveBeenCalledTimes(1);
 
@@ -143,5 +140,19 @@ describe("busy composer submit", () => {
 
     expect(test.sendCommand).toHaveBeenCalledTimes(1);
     expect(test.resetComposer).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not run outside a busy turn or after another submit handler consumed the event", async () => {
+    const test = attempt(
+      { text: "keep this draft", attachments: [] },
+      { isRunning: false },
+    );
+    await test.handleSubmit(test.event);
+    expect(test.sendCommand).not.toHaveBeenCalled();
+
+    const consumed = attempt({ text: "do not send twice", attachments: [] });
+    const consumedEvent = { preventDefault: vi.fn(), defaultPrevented: true };
+    await consumed.handleSubmit(consumedEvent);
+    expect(consumed.sendCommand).not.toHaveBeenCalled();
   });
 });

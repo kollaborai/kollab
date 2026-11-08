@@ -39,8 +39,8 @@ import { usePendingPermissionCancellation } from "@/runtime";
 import { imageAttachmentAdapter } from "@/components/assistant-ui/attachment-adapter";
 import {
   busyComposerFingerprint,
+  createBusyComposerSubmitHandler,
   createBusyComposerSubmitTracker,
-  submitBusyComposerMessage,
 } from "@/components/assistant-ui/busy-composer-submit";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -536,37 +536,29 @@ const Composer: FC<{
 
   // Picking a panel command in the slash menu (Enter or click) opens its tab
   // instead of leaving "/config" in the box for a second Enter.
-  const sendBusyMessage = (event: {
-    preventDefault: () => void;
-    defaultPrevented?: boolean;
-  }) => {
-    if (!isRunning || event.defaultPrevented) return;
-    const state = aui.composer.getState();
-    setBusySubmitError(null);
-    void submitBusyComposerMessage({
-      state,
-      event,
-      tracker: lastBusySubmit.current,
-      finalizeImageAttachment: (attachment) =>
-        imageAttachmentAdapter.send(attachment),
-      sendCommand: sendTransportCommand,
-      resetComposer: async (submittedFingerprint) => {
-        if (
-          busyComposerFingerprint(aui.composer.getState()) ===
-          submittedFingerprint
-        ) {
-          await aui.composer.reset();
-        }
-      },
-      onError: (error) => {
-        setBusySubmitError(
-          error
-            ? "Could not send this message. Your draft is still here; try sending again."
-            : null,
-        );
-      },
-    });
-  };
+  const sendBusyMessage = createBusyComposerSubmitHandler({
+    isRunning,
+    getState: () => aui.composer.getState(),
+    tracker: lastBusySubmit.current,
+    finalizeImageAttachment: (attachment) =>
+      imageAttachmentAdapter.send(attachment),
+    sendCommand: sendTransportCommand,
+    resetComposer: async (submittedFingerprint) => {
+      if (
+        busyComposerFingerprint(aui.composer.getState()) ===
+        submittedFingerprint
+      ) {
+        await aui.composer.reset();
+      }
+    },
+    onError: (error) => {
+      setBusySubmitError(
+        error
+          ? "Could not send this message. Your draft is still here; try sending again."
+          : null,
+      );
+    },
+  });
 
   const submitBusyMessage = (event: {
     preventDefault: () => void;
