@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Any
 
-from .interface import enrollment_result, offer_failure
+from .interface import ProfileActivationError, enrollment_result, offer_failure
 from .local import LocalStateService
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,10 @@ def _error_result(exc: Exception) -> dict[str, Any]:
     instead of surfacing a bare error string.
     """
     result: dict[str, Any] = {"error": str(exc)}
+
+    if isinstance(exc, ProfileActivationError):
+        result["error_code"] = ProfileActivationError.ERROR_CODE
+        result["previous_profile_restored"] = exc.previous_profile_restored
     if isinstance(exc, ModuleNotFoundError):
         result["reload_needed"] = True
     return result
@@ -210,6 +214,8 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
                 model=str(model) if model else None,
                 effort=None if effort is None else str(effort),
             )
+        except ProfileActivationError as e:
+            return _error_result(e)
         except ValueError as e:
             return {"error": str(e)}
         return snapshot.to_dict()

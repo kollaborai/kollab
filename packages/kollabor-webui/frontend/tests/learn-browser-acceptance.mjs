@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { chromium } from "playwright-core";
 import { createServer } from "vite";
@@ -17,7 +17,7 @@ const topics = [
   { id: "phone-access", title: "PhoneLink" },
 ];
 
-function makeFixtures() {
+export function makeFixtures(options = {}) {
   let createdSession = null;
   let createPayload = null;
   let resolveCreate;
@@ -35,11 +35,12 @@ function makeFixtures() {
     state: "idle",
     last_seen: 1,
   };
+  const remoteAgents = [remoteAgent, ...(options.additionalRemoteAgents ?? [])];
   const network = {
     device: "learn-laptop",
     folder: "/learn-demo",
     live: true,
-    remote: [remoteAgent],
+    remote: remoteAgents,
     contacts: [],
     networks: [
       {
@@ -51,7 +52,7 @@ function makeFixtures() {
           {
             device: "remote-build",
             live: true,
-            workspaces: [{ label: "/remote/demo", agents: [remoteAgent] }],
+            workspaces: [{ label: "/remote/demo", agents: remoteAgents }],
           },
         ],
       },
@@ -71,7 +72,13 @@ function makeFixtures() {
     active: false,
     pool: true,
   };
-  const agents = { agents: [localCoder], live: [], active: [], available: ["local-coder"] };
+  const poolEntries = options.poolEntries ?? [localCoder];
+  const initialSessions = options.sessions ?? [];
+  const offlineAgents = [
+    ...(options.offline ?? []),
+    ...(options.additionalOfflineAgents ?? []),
+  ];
+  const agents = { agents: poolEntries, live: [], active: [], available: poolEntries.map((entry) => entry.name) };
   const profiles = {
     active: "default",
     providers: [],
@@ -93,12 +100,6 @@ function makeFixtures() {
     ],
   };
 
-  const session = () => ({
-    sessions: createdSession ? [createdSession] : [],
-    network,
-    offline: [],
-    hidden: [],
-  });
   const remoteSession = {
     session_id: remoteAgent.handle,
     name: "Remote coder session",
@@ -109,6 +110,18 @@ function makeFixtures() {
     device: remoteAgent.device,
     network: remoteAgent.network,
     external: true,
+  };
+  let remoteSessionOpened = false;
+  const session = () => {
+    const sessions = createdSession ? [createdSession] : initialSessions;
+    return {
+      sessions: remoteSessionOpened && !sessions.some((item) => item.session_id === remoteSession.session_id)
+        ? [...sessions, remoteSession]
+        : sessions,
+      network,
+      offline: offlineAgents,
+      hidden: [],
+    };
   };
 
   async function respond(route) {
@@ -163,7 +176,11 @@ function makeFixtures() {
     }
     if (endpoint.startsWith("/sessions/")) {
       const requestedId = endpoint.split("/")[2];
-      return json(route, requestedId === remoteAgent.handle ? remoteSession : createdSession ?? {});
+      if (requestedId === remoteAgent.handle) {
+        remoteSessionOpened = true;
+        return json(route, remoteSession);
+      }
+      return json(route, createdSession ?? {});
     }
     return json(route, {});
   }
@@ -185,7 +202,7 @@ async function json(route, body, status = 200) {
   return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
-async function openVite() {
+export async function openVite() {
   const server = await createServer({
     configFile: path.join(frontendRoot, "vite.config.ts"),
     root: frontendRoot,
@@ -199,7 +216,7 @@ async function openVite() {
   return { server, baseUrl: `http://127.0.0.1:${address.port}` };
 }
 
-async function openPage(browser, baseUrl, fixtures, options = {}) {
+export async function openPage(browser, baseUrl, fixtures, options = {}) {
   const viewport = options.viewport ?? { width: 1280, height: 900 };
   const context = await browser.newContext({
     viewport,
@@ -284,10 +301,17 @@ async function main() {
     await shell.page.getByTestId("new-session-options").click();
     // Help is a hover card on the control, never an inline link.
     assert.equal(await shell.page.getByRole("link", { name: /Learn about|Learn more/ }).count(), 0);
-    await shell.page.getByRole("button", { name: "Manage Profiles", exact: true }).hover();
+    const manageProfiles = shell.page.getByRole("button", { name: "Manage Profiles", exact: true });
+    await manageProfiles.hover();
     await shell.page.getByRole("tooltip").filter({ hasText: "A profile picks the provider" }).first().waitFor({ state: "visible" });
-    await shell.page.keyboard.press("Escape"); // the card
-    await shell.page.keyboard.press("Escape"); // the options popover
+
+    // Exercise App -> AppSidebar -> ProfilesDialog, not just the isolated dialog fixture.
+    await manageProfiles.click();
+    const profilesDialog = shell.page.getByRole("dialog", { name: "Profiles", exact: true });
+    await profilesDialog.waitFor({ state: "visible" });
+    await profilesDialog.getByText("default", { exact: true }).waitFor({ state: "visible" });
+    await profilesDialog.getByText("openai_responses · gpt-6-luna", { exact: true }).waitFor({ state: "visible" });
+    await profilesDialog.getByRole("button", { name: "Close", exact: true }).click();
 
     await shell.page.getByRole("button", { name: "Agents", exact: true }).first().click();
     const agentLibrary = shell.page.getByRole("dialog", { name: "Agents", exact: true });
@@ -310,9 +334,34 @@ async function main() {
     assert.equal(createPayload.agent, "coder");
     assert.equal(createPayload.identity, "local-coder");
 
+    // createRequest signals POST arrival before its response and the session history load finish.
+    // Wait for the launched chat before starting remote selection, so the flows cannot overlap.
+    const sessionControls = shell.page.getByRole("complementary", { name: "Session Controls", exact: true });
+    await sessionControls.getByText("Learn regression session", { exact: true }).waitFor({
+      state: "visible",
+      timeout: 15_000,
+    });
+
     // A live mocked peer demonstrates the existing Hub-to-remote-session selection path.
-    await shell.page.getByRole("button", { name: "Remote Coder Idle", exact: true }).click();
-    await shell.page.waitForFunction(() => document.body.innerText.includes("Remote coder session"), { timeout: 15000 });
+    const remoteAgentButton = shell.page.getByRole("button", { name: "Remote Coder Idle", exact: true });
+    await remoteAgentButton.click();
+    // The session panel is populated only after the remote session and its history load.
+    const remoteSessionName = sessionControls.getByText("Remote coder session", { exact: true });
+    try {
+      await remoteSessionName.waitFor({ state: "visible", timeout: 15_000 });
+    } catch (reason) {
+      const diagnostic = {
+        remoteButtonActive: await remoteAgentButton.getAttribute("data-active"),
+        remoteButtonText: await remoteAgentButton.innerText(),
+        sessionControlsText: await sessionControls.innerText().catch(() => null),
+        remoteRequests: fixtures.requests.filter((request) => request.endpoint.includes("remote-session-1")),
+        recentSessionRequests: fixtures.requests.filter((request) => request.endpoint.startsWith("/sessions")).slice(-10),
+        bodyText: (await shell.page.locator("body").innerText()).slice(0, 4000),
+      };
+      console.error("Remote session readiness diagnostics:", JSON.stringify(diagnostic, null, 2));
+      throw reason;
+    }
+    assert.equal(await remoteAgentButton.getAttribute("data-active"), "true");
     assert.ok(fixtures.requests.some((request) => request.endpoint === "/sessions/remote-session-1"));
 
     // Learn route entry/exit must preserve the existing main pane and restore keyboard focus.
@@ -349,19 +398,20 @@ async function main() {
     await shell.page.getByRole("button", { name: "What’s New", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/whats-new");
     await shell.page.getByRole("heading", { level: 1, name: "What’s New", exact: true }).waitFor();
-    await shell.page.getByText("Unreleased", { exact: true }).waitFor();
+    // The first release section: "Unreleased" between releases, "Kollab X.Y.Z" right after one (#887).
+    await shell.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
     await shell.page.getByRole("button", { name: "Close What’s New", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
     const changelogFailure = await openPage(browser, baseUrl, makeFixtures(), { failChangelogOnce: true });
     await changelogFailure.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
     await changelogFailure.page.getByRole("button", { name: "Retry", exact: true }).click();
-    await changelogFailure.page.getByText("Unreleased", { exact: true }).waitFor({ state: "visible" });
+    await changelogFailure.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
     await changelogFailure.context.close();
 
     const delayed = await openPage(browser, baseUrl, makeFixtures(), { delayChangelogMs: 900, viewport: { width: 390, height: 844 }, isMobile: true });
     await delayed.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
     await delayed.page.getByRole("status").getByText("Loading release notes…").waitFor({ state: "visible" });
-    await delayed.page.getByText("Unreleased", { exact: true }).waitFor({ state: "visible" });
+    await delayed.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
     await delayed.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
@@ -402,7 +452,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.stack ?? error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error.stack ?? error);
+    process.exitCode = 1;
+  });
+}

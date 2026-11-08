@@ -1,11 +1,11 @@
 name: Binaries
 
 # The single-file kollab binary for each platform (scripts/build_binary.py) and
-# the desktop apps built around it. publish.yml calls this for every v* release
-# tag and attaches the results to the GitHub Release, where install.sh and
-# /upgrade download them.
+# the desktop apps built around it. publish.yml calls this with an immutable
+# release source SHA and attaches the results to the GitHub Release, where
+# install.sh and /upgrade download them.
 #
-# Packaging runs only for a release tag or by hand (workflow_dispatch). A
+# Packaging runs only through the release controller or by hand. A
 # writer-branch run is rehearsal; pre-tag proof must identify the merged source.
 # Pull requests and branch pushes build nothing
 # here: PR CI was waiting on this matrix.
@@ -14,12 +14,16 @@ name: Binaries
 # installer ships only if the runtime passes the agent check
 # (docs/specs/windows-desktop.md, "The gate").
 on:
-  # No tags trigger: publish.yml calls this for every release tag. A tags trigger
-  # here built every binary and desktop app twice per release.
+  # No tags trigger: the main publishing controller supplies release source.
+  # A tags trigger here built every binary and desktop app twice per release.
   workflow_call:
     inputs:
       version:
         description: The version every binary must report (a release tag such as v0.15.1)
+        required: true
+        type: string
+      source_ref:
+        description: Immutable release source commit resolved by the main controller
         required: true
         type: string
   workflow_dispatch:
@@ -32,15 +36,19 @@ jobs:
     name: frontend/shared
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - name: Compile the selected frontend once
         working-directory: packages/kollabor-webui/frontend
@@ -48,7 +56,7 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build -- --outDir "$RUNNER_TEMP/kollab-frontend"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: frontend-dist
           path: ${{ runner.temp }}/kollab-frontend
@@ -61,7 +69,7 @@ jobs:
           cd "$RUNNER_TEMP/kollab-service"
           sha256sum source.tar.gz > source.tar.gz.sha256
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: connection-service
           path: ${{ runner.temp }}/kollab-service/*
@@ -83,19 +91,22 @@ jobs:
           - platform: linux-aarch64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          cache-suffix: ${{ github.job }}  # one cache per job, see ci.yml
+          enable-cache: false
 
       - name: Download the selected frontend
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: frontend-dist
           path: ${{ runner.temp }}/kollab-frontend
@@ -115,7 +126,7 @@ jobs:
         if: runner.os == 'Linux'
         run: docker run --rm -v "$PWD/dist/bin:/bin-dir:ro" almalinux:8 /bin-dir/kollab-${{ matrix.platform }} --version
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: kollab-${{ matrix.platform }}
           path: |
@@ -139,29 +150,33 @@ jobs:
             target: x86_64-apple-darwin
             runner: macos-15-intel
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
 
       - name: Install uv (desktop_release.py stages the runtime with uvx)
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          cache-suffix: ${{ github.job }}
+          enable-cache: false
 
       - name: Test Apple signing helper and documented build commands
         run: python desktop/tests/test_apple_signing.py
 
       - name: Download the CLI sidecar
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: kollab-${{ matrix.binary_platform }}
           path: dist/bin
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
+          package-manager-cache: false
 
       # The npm package ships the prebuilt CLI; `cargo install` compiled it on every run.
       - name: Check pinned Tauri CLI
@@ -213,7 +228,7 @@ jobs:
           )
           ls -lh dist/desktop
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: kollab-desktop-${{ matrix.platform }}
           path: dist/desktop/*
@@ -228,9 +243,12 @@ jobs:
       # A scie holds an appended Python archive. Keep its packaged bytes intact.
       NO_STRIP: "1"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
 
@@ -243,11 +261,11 @@ jobs:
             xvfb xauth dbus-x11 xdotool
 
       - name: Install uv (desktop_release.py stages the runtime with uvx)
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          cache-suffix: ${{ github.job }}
+          enable-cache: false
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: kollab-linux-x86_64
           path: dist/bin
@@ -257,9 +275,10 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: python scripts/desktop_release.py --version "$VERSION" stage --platform linux-x86_64 --source dist/bin/kollab-linux-x86_64
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
+          package-manager-cache: false
 
       - name: Check pinned Tauri CLI
         run: npx --yes @tauri-apps/cli@2.12.0 --version
@@ -298,7 +317,7 @@ jobs:
             sha256sum -c ./*.sha256
           )
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: kollab-desktop-linux-x86_64
@@ -321,19 +340,22 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
 
       - name: Install uv (the runtime build and staging run uvx)
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          cache-suffix: ${{ github.job }}
+          enable-cache: false
 
       - name: Download the selected frontend
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: frontend-dist
           path: ${{ runner.temp }}/kollab-frontend
@@ -358,9 +380,10 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: python scripts/desktop_release.py --version "$VERSION" stage --platform windows-x86_64 --source dist/bin/kollab-windows-x86_64.exe
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
+          package-manager-cache: false
 
       - name: Check pinned Tauri CLI
         run: npx --yes @tauri-apps/cli@2.12.0 --version
@@ -386,7 +409,7 @@ jobs:
         run: python scripts/check_desktop_package_windows.py dist/desktop/*-setup.exe
 
       # Not a kollab-* artifact: nothing downloads it into a release.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: ${{ !cancelled() }}
         with:
           name: windows-desktop-unverified
@@ -399,7 +422,7 @@ jobs:
           echo "::error::The Windows runtime failed the agent check (docs/specs/windows-desktop.md, 'The gate'); the installer is not released."
           exit 1
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: kollab-desktop-windows-x86_64
           path: dist/desktop/*
@@ -410,13 +433,16 @@ jobs:
     needs: [build, desktop, desktop-linux, desktop-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: kollab-*
           path: dist/bin

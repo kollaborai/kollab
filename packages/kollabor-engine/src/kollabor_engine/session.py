@@ -221,6 +221,8 @@ class EngineSession:
         self._history_conversation_uid: str | None = None
         self._history_authoritative = False
         self._history_lock = asyncio.Lock()
+        # Serializes same-session MCP attach snapshot/apply/rollback transactions.
+        self._mcp_lock = asyncio.Lock()
         # The mirror holds a disk seed the daemon has not replaced yet. A seed
         # is no prefix of the daemon's history (hub messages are logged apart),
         # so a page showing it replaces its thread whole when the daemon answers.
@@ -603,16 +605,21 @@ class EngineSession:
 
     # === conversation ===
 
-    async def _apply_mcp_servers(self) -> None:
-        """Enable the session's requested MCP servers on the live daemon.
+    async def _apply_mcp_servers(
+        self, server_names: Optional[List[str]] = None
+    ) -> None:
+        """Enable the selected MCP servers on the live daemon.
 
-        Mirrors the /sessions/{id}/mcp/{name}/connect route: enable each
-        server in the daemon's settings, then one hot-reload reconnects the
-        whole set. Unknown server names are surfaced in a warning instead of
-        failing session creation -- a bad name should degrade the tool set,
-        not take the session down.
+        By default, session creation enables the full requested list. An
+        adopted-session attach passes only newly requested names so an
+        unrelated attach cannot re-enable a server that was explicitly
+        disconnected. One hot-reload reconnects the whole enabled set. Unknown
+        names are warned about instead of failing session creation.
         """
-        for server_name in self.mcp_server_names:
+        requested_servers = (
+            self.mcp_server_names if server_names is None else server_names
+        )
+        for server_name in requested_servers:
             try:
                 await self.state.enable_mcp_server(server_name)
             except ValueError as e:
@@ -1094,6 +1101,7 @@ class EngineSession:
         """
         queue = self.subscribe()
         turn_error = ""
+        turn_error_fields: Dict[str, Any] = {}
         try:
             while True:
                 event = await queue.get()
@@ -1101,6 +1109,13 @@ class EngineSession:
 
                 if etype == "error":
                     turn_error = str(event.get("message") or "") or "engine error"
+                    # Structured classification rides the event untouched so
+                    # consumers read code/class, never message text (#549, #720).
+                    turn_error_fields = {
+                        key: event[key]
+                        for key in ("error_class", "code", "provider", "retryable", "cause")
+                        if event.get(key) is not None
+                    }
 
                 elif etype == "turn_start" and event.get("generation") is not None:
                     # ACP can start another prompt while the prior completion
@@ -1125,13 +1140,22 @@ class EngineSession:
                     usage_turn = (str(event.get("request_id") or ""), int(event.get("turn_id") or 0))
                     if self._acp_usage_display_turn in (None, usage_turn):
                         self.acp_turn_usage = dict(event.get("turn_usage") or {})
-                    await self.refresh_history()
+                    # This awaited completion refresh may be queued behind an
+                    # older, non-notifying user_message refresh. Announce the
+                    # digest it finds so pages that fetched the warm mirror
+                    # once at turn_complete can replace their transient reply.
+                    await self.refresh_history(notify=True)
                     self.last_turn_error = (
-                        {"message": turn_error, "history_length": len(self.history)}
+                        {
+                            "message": turn_error,
+                            "history_length": len(self.history),
+                            **turn_error_fields,
+                        }
                         if turn_error
                         else None
                     )
                     turn_error = ""
+                    turn_error_fields = {}
 
                 elif etype == "user_message":
                     # The daemon took a human's message into its history, from

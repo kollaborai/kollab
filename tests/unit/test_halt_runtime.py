@@ -10,6 +10,7 @@ import asyncio
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -642,15 +643,13 @@ def test_await_acks_waits_longer_for_an_online_member(monkeypatch):
 
     clock = iter(range(0, 1000, 5))
     monkeypatch.setattr(hr, "sock_call", fake_call)
-    monkeypatch.setattr(hr.asyncio, "sleep", nosleep)
-    monkeypatch.setattr(hr.time, "monotonic", lambda: next(clock))
+    # Scoped to halt_runtime: the asyncio loop and background threads read the process clock too (#642).
+    monkeypatch.setattr(hr, "asyncio", SimpleNamespace(sleep=nosleep, TimeoutError=asyncio.TimeoutError))
+    monkeypatch.setattr(hr, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     status = asyncio.run(hr._await_acks("/f", None, seconds=10.0, online_seconds=40.0))
     assert status["acked"] == ["b"] and len(calls) == 3
 
 
-def test_cli_resume_lines(monkeypatch, capsys):
-    monkeypatch.setattr(os, "isatty", lambda fd: True)
-    monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)
 def test_cli_resume_lines(monkeypatch, capsys):
     monkeypatch.setattr(os, "isatty", lambda fd: True)
     monkeypatch.delenv("KOLLAB_TOOL_SHELL", raising=False)

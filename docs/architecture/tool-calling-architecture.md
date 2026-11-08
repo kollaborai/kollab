@@ -561,6 +561,15 @@ error: Session not found: dev
 error: No output captured for session: dev
 ```
 
+#### `<terminal-send>`
+
+```xml
+<terminal-send><session_name>dev</session_name><text>y</text></terminal-send>
+```
+
+Sends the text followed by a newline to the named live background session.
+This operation requires permission because it writes to a running process.
+
 #### `<terminal-kill>`
 
 ```xml
@@ -807,7 +816,12 @@ tags silently dropped. Source: `plugins/hub/plugin.py:2682-2694`,
 
 ```xml
 <hub_queue>analyze report section 3 and extract key findings</hub_queue>
+<hub_queue upstream_refs="#123,#456">implement scoped follow-up work</hub_queue>
 ```
+
+`upstream_refs` is optional and contains only explicitly supplied GitHub issue
+or pull-request refs. Body-only tags remain valid with no refs; refs are never
+inferred from the description text.
 
 cmd_results entry (shape — exact return from `_handle_queue_command`
 varies, it's just the result string with `[hub_queue]` prefix):

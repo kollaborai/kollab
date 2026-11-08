@@ -22,7 +22,7 @@ def _sha(text: str) -> str:
 
 def _write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
 
 
 def _global(layout, name, text):
@@ -56,6 +56,7 @@ def layout(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.chdir(workspace)
     monkeypatch.setattr(
         config_utils,

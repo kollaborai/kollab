@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
+from unittest.mock import AsyncMock
 
 from plugins.hub.plugin import HubPlugin
 
@@ -72,6 +73,8 @@ class TestHubSpawnResolution(IsolatedAsyncioTestCase):
         self.assertEqual(call["identity"], "lapis")
         self.assertEqual(call["agent_type"], "research")
         self.assertEqual(call["task"], "review this project")
+        self.assertEqual(call["parent_identity"], "koordinator")
+        self.assertEqual(call["parent_agent_id"], "")
 
     async def test_native_spawn_reads_identity_and_type_from_input(self):
         event_bus = _FakeEventBus()
@@ -163,3 +166,24 @@ class TestHubSpawnResolution(IsolatedAsyncioTestCase):
 
         self.assertIn("no explicit LLM profile", result)
         self.assertFalse(event_bus.orchestrator_plugin.orchestrator.calls)
+
+    async def test_detached_chain_break_report_targets_spawn_parent(self):
+        plugin = HubPlugin()
+        plugin._identity = SimpleNamespace(
+            identity="lapis",
+            agent_id="lapis-1",
+            parent_identity="koordinator",
+            current_task="review the terminal recovery path",
+        )
+        plugin._route_message = AsyncMock(return_value=[])
+
+        result = await plugin.report_detached_chain_break(
+            reason="3 identical tool errors"
+        )
+
+        self.assertTrue(result)
+        message = plugin._route_message.await_args.args[0]
+        self.assertEqual(message.to, "koordinator")
+        self.assertTrue(message.force)
+        self.assertTrue(message.metadata["chain_break"])
+        self.assertIn("review the terminal recovery path", message.content)

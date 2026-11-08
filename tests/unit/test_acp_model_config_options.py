@@ -408,3 +408,50 @@ def test_config_options_wire_shape_survives_reload_response():
         ]
     )
     assert ACPRunner._wire_config_options(result)[0]["currentValue"] == "gpt-5"
+
+@pytest.mark.asyncio
+async def test_terminal_change_waits_for_picker_rollback():
+    from kollabor.panels.model import ModelPanel
+
+    changed, resume = asyncio.Event(), asyncio.Event()
+
+    class PausingACP(_OfferedOnlyACP):
+        async def set_config_option(self, config_id, value):
+            result = await super().set_config_option(config_id, value)
+            if (config_id, value) == ("model", "gpt-5") and not changed.is_set():
+                changed.set()
+                await resume.wait()
+            return result
+
+    acp = PausingACP(_options())
+    panel = ModelPanel()
+    pick = asyncio.create_task(panel.act(_panel_ctx(acp), "pick", {"model": "gpt-5", "level": "max"}))
+    await asyncio.wait_for(changed.wait(), 1)
+    terminal = asyncio.create_task(_handler(acp)._set_acp_option("model", "gpt-5"))
+    await asyncio.sleep(0)
+    resume.set()
+    assert not (await pick)["ok"]
+    assert (await terminal).success
+    assert acp.options[0]["currentValue"] == "gpt-5"
+
+
+@pytest.mark.asyncio
+async def test_stalled_acp_change_releases_picker_for_next_action(monkeypatch):
+    import kollabor.commands.system_commands.handlers.model as model_module
+    from kollabor.panels.model import ModelPanel
+
+    monkeypatch.setattr(model_module, "_ACP_OPTION_TIMEOUT", 0.02, raising=False)
+    class StallingACP(_ACP):
+        async def set_config_option(self, config_id, value):
+            if value == "gpt-5":
+                await asyncio.Event().wait()
+            return await super().set_config_option(config_id, value)
+
+    acp = StallingACP(_options())
+    panel, ctx = ModelPanel(), _panel_ctx(acp)
+    first = asyncio.create_task(panel.act(ctx, "select", {"model": "gpt-5"}))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(panel.act(ctx, "effort", {"level": "low"}))
+    result, next_result = await asyncio.wait_for(asyncio.gather(first, second), 0.5)
+    assert not result["ok"]
+    assert next_result["ok"]

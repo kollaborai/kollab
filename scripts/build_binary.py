@@ -63,7 +63,10 @@ UVX_PEX = ["uvx", "--python", PYTHON.rsplit(".", 1)[0], "--from", PEX]
 # machine, so a newer CI image cannot raise the floor unnoticed. Windows wheels
 # (win_amd64) carry no OS floor; the portable CPython sets it.
 FLOORS = {"macosx": (11, 0), "manylinux": (2, 28)}
-IMPORTS = "import kollabor.application, kollabor_cli_main, kollabor_engine, kollabor_webui, kollabor_voice, plugins"
+IMPORTS = (
+    "import kollabor.application, kollabor_cli_main, kollabor_engine, kollabor_webui, "
+    "kollabor_voice, kollabor_voice.module_runtime, plugins"
+)
 TLS_URL = "https://pypi.org/simple/kollab/"
 # Workspace members with no wheel of their own: the kollab wheel carries their code.
 BUNDLED = ("kollabor_voice-",)
@@ -330,13 +333,30 @@ def agent_smoke(binary: Path, timeout: float = 120.0) -> None:
                 time.sleep(2)
             if online:
                 # This machine-wide lookup uses endpoint discovery, separately
-                # from the project-local status command above.
-                where = kollab("--hub", "where", online["name"], capture_output=True)
-                endpoint = where.stdout.strip()
-                if where.returncode != 0 or not endpoint or not Path(endpoint).exists():
+                # from the project-local status command above. Discovery needs
+                # the advertised socket to answer a handshake (#692), so the
+                # record that makes status online precedes it by design —
+                # poll under the same deadline as the status loop instead of
+                # one-shotting the startup window.
+                where = None
+                endpoint = ""
+                while time.monotonic() < deadline:
+                    where = kollab("--hub", "where", online["name"], capture_output=True)
+                    endpoint = where.stdout.strip()
+                    if where.returncode == 0 and endpoint and Path(endpoint).exists():
+                        break
+                    time.sleep(2)
+                if where is None or where.returncode != 0 or not endpoint or not Path(endpoint).exists():
+                    tail = (
+                        where.stderr[-1000:]
+                        if where is not None
+                        else "(deadline expired before any attempt)"
+                    )
+                    code = where.returncode if where is not None else "n/a"
                     raise SystemExit(
-                        f"{binary.name} --hub where {online['name']} did not find its live endpoint: "
-                        f"exit {where.returncode}; {where.stderr[-1000:]}"
+                        f"{binary.name} --hub where {online['name']} did not find its "
+                        f"live endpoint within the smoke deadline: "
+                        f"exit {code}; {tail}"
                     )
                 print("machine-wide hub discovery found the live agent endpoint")
         finally:

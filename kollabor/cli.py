@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shlex
+import stat
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -539,7 +540,7 @@ Telegram bridge setup (run inside interactive mode):
         default=None,
         metavar="CMD",
         help=(
-            "Hub CLI: status, agents, stop <name|all>, capture <name> [lines] [--raw], "
+            "Hub CLI: status, agents, stop <name|all>, capture <name> [lines] [--cursor N] [--follow] [--raw], "
             "msg <name> <text>, broadcast <text>, where <name>, user [name], on/off, "
             "org <name> [mission] [--dir FOLDER] [--only a,b | --without a,b]. "
             "Pass '--hub help' for the full list. "
@@ -575,6 +576,25 @@ Telegram bridge setup (run inside interactive mode):
     parser.add_argument(
         "--raw",
         dest="hub_capture_raw",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+
+    # --hub uses nargs='*', so capture-only flags that the hub subcommand
+    # consumes must be registered top-level (like --raw above) or argparse
+    # stops consuming at the first '-...' token and drops them as unknown.
+    parser.add_argument(
+        "--cursor",
+        dest="hub_capture_cursor",
+        default=None,
+        metavar="N",
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
+        "--follow",
+        dest="hub_capture_follow",
         action="store_true",
         default=False,
         help=argparse.SUPPRESS,
@@ -708,6 +728,37 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
+        "--cleanup-projects",
+        dest="cleanup_projects",
+        action="store_true",
+        help=(
+            "Sweep orphaned session directories under ~/.kollab/projects "
+            "(issue #647). Dry-run report by default; pair with --execute "
+            "to quarantine orphans, remove empty shells and purge expired "
+            "quarantine trash."
+        ),
+    )
+
+    parser.add_argument(
+        "--execute",
+        dest="cleanup_execute",
+        action="store_true",
+        help="Apply the --cleanup-projects plan (without it: dry run only)",
+    )
+
+    parser.add_argument(
+        "--retention-days",
+        dest="retention_days",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Override the quarantine retention window (default 14) for "
+            "--cleanup-projects --execute"
+        ),
+    )
+
+    parser.add_argument(
         "--update",
         "--upgrade",
         dest="update",
@@ -760,7 +811,21 @@ Telegram bridge setup (run inside interactive mode):
     if args.hub_capture_raw:
         if not args.hub or args.hub[0].lower() != "capture":
             parser.error("--raw is only valid with --hub capture")
+        if args.hub_capture_cursor is not None or args.hub_capture_follow:
+            # --raw keeps the byte-for-byte request/response path; it has no
+            # cursor semantics, so silently dropping the flags would lie.
+            parser.error(
+                "--raw cannot be combined with --cursor/--follow"
+            )
         args.hub.append("--raw")
+
+    if args.hub_capture_cursor is not None or args.hub_capture_follow:
+        if not args.hub or args.hub[0].lower() != "capture":
+            parser.error("--cursor and --follow are only valid with --hub capture")
+        if args.hub_capture_cursor is not None:
+            args.hub.extend(["--cursor", str(args.hub_capture_cursor)])
+        if args.hub_capture_follow:
+            args.hub.append("--follow")
 
     hub_org_options_used = (
         args.hub_org_dir is not None
@@ -1118,6 +1183,32 @@ async def async_main() -> None:
         print(f"  - Local config:  {local_config}")
         return
 
+    if args.cleanup_projects:
+        from kollabor_config.projects_sweep import run_projects_sweep
+
+        kwargs: dict = {"mode": "execute" if args.cleanup_execute else "dry-run"}
+        if args.retention_days is not None:
+            kwargs["retention_days"] = float(args.retention_days)
+        plan, report = run_projects_sweep(own_project=Path.cwd(), **kwargs)
+        if report:
+            for line in report:
+                print(line)
+        else:
+            print("No orphaned project directories found.")
+        if kwargs["mode"] == "dry-run":
+            print(
+                "Dry run: nothing was changed. Re-run with --execute to "
+                "quarantine these directories (recoverable for the retention "
+                "window)."
+            )
+        else:
+            print(
+                f"Done: {len(plan.quarantines)} quarantined, "
+                f"{len(plan.empty_shells)} empty shells removed, "
+                f"{len(plan.purges)} expired trash entries purged."
+            )
+        return
+
     if args.update:
         from .updates import run_auto_update
 
@@ -1202,8 +1293,9 @@ async def async_main() -> None:
         has_cli_command = True
         args.pipe = False
 
-    # --detached renders full TUI (to /dev/null) so attach clients get rich output.
-    # stdout/stderr are already redirected to /dev/null in cli_main().
+    # --detached renders the full TUI so attach clients get rich output.
+    # Standalone launches redirect stdout/stderr; an owning supervisor may
+    # keep captured output connected to its directly tracked child.
 
     # Determine if we're in pipe mode and what the input is.
     # Pipe mode ONLY when:
@@ -1389,7 +1481,7 @@ async def _handle_cli_attach(identity: str) -> None:
 
     _apply_hub_project_scope_from_config()
 
-    from plugins.hub.presence import get_presence_dir
+    from plugins.hub.presence import _presence_files, get_presence_dir
 
     presence_dir = get_presence_dir()
 
@@ -1397,7 +1489,7 @@ async def _handle_cli_attach(identity: str) -> None:
     target_socket = None
     target_identity = None
 
-    for f in presence_dir.glob("*.json"):
+    for f in _presence_files(presence_dir):
         try:
             with open(f) as fh:
                 data = json.load(fh)
@@ -1424,7 +1516,7 @@ async def _handle_cli_attach(identity: str) -> None:
         print(f"no agent found with identity '{identity}'", file=sys.stderr)
 
         available = []
-        for f in presence_dir.glob("*.json"):
+        for f in _presence_files(presence_dir):
             try:
                 with open(f) as fh:
                     data = json.load(fh)
@@ -1479,7 +1571,7 @@ def _print_hub_help() -> None:
     print("  halt [--reason <text>] [--revoke <device>]   halt the network (a person's terminal only)")
     print("  resume [--confirm <8-hex> | --local]         propose, confirm or lift here only")
     print(
-        "  capture <name> [lines] [--raw]  readable transcript; --raw keeps terminal output"
+        "  capture <name> [lines] [--raw]  readable transcript; --cursor N resumes a marker; --follow drains pages"
     )
     print("  msg <name> <text>          send a direct message to one agent")
     print("  broadcast <text>           send a message to all online agents")
@@ -1542,10 +1634,146 @@ async def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
     return not pid_alive(pid)
 
 
+def _current_process_and_ancestors() -> set[int]:
+    """Return this process and its OS parent chain, nearest parent first."""
+    import psutil
+
+    current = psutil.Process(os.getpid())
+    return {current.pid, *(parent.pid for parent in current.parents())}
+
+
+def _directory_children(
+    directory: Path, *, directories_only: bool = False
+) -> list[Path]:
+    """List direct children without pathlib.glob's suppressed scan errors.
+
+    These roots are optional until created, but once present their directory
+    scan must complete. Missing directories are empty; other I/O failures
+    propagate to the caller's fail-closed guard.
+    """
+    try:
+        directory.stat()
+    except FileNotFoundError:
+        return []
+
+    children = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            child = Path(entry.path)
+            if directories_only and not stat.S_ISDIR(child.stat().st_mode):
+                continue
+            children.append(child)
+    return children
+
+
+def _cli_is_hub_agent_context() -> bool:
+    """Whether a mesh-wide CLI stop was launched from a local Hub agent.
+
+    Tool-shell environment markers are a deny-only hint: background terminal
+    commands intentionally strip them. Process ancestry is checked against all
+    known local Hub presence roots, including legacy and shared-socket layouts,
+    so changing the command's working directory or HOME cannot hide its agent
+    parent. If that context cannot be read, fail closed.
+    """
+
+    from plugins.hub.network_halt import TOOL_SHELL_VARS
+
+    if any(os.environ.get(var) for var in TOOL_SHELL_VARS):
+        return True
+
+    try:
+        from kollabor_config import config_utils
+        from kollabor_config.config_utils import get_config_directory
+        from plugins.hub import presence as hub_presence
+
+        process_ids = _current_process_and_ancestors()
+        config_dir = get_config_directory()
+        project_dirs = _directory_children(
+            config_dir / "projects", directories_only=True
+        )
+        hub_dirs = [
+            config_dir / "hub",
+            *(project_dir / "hub" for project_dir in project_dirs),
+        ]
+        extra_presence_dirs = []
+        if config_utils.IS_WINDOWS:
+            # Windows permits an explicitly selected project state directory
+            # outside ~/.kollab/projects. A terminal child can change cwd, so
+            # use the inherited project selection that belongs to that state
+            # path instead of resolving the child's current repository.
+            from plugins.hub.project_scope import resolve_project_root
+
+            selected_project = os.environ.get("KOLLAB_PROJECT_DATA_PROJECT", "").strip()
+            configured_root = os.environ.get("KOLLAB_PROJECT_ROOT", "").strip()
+            project_root = (
+                Path(configured_root).expanduser().resolve()
+                if configured_root
+                else resolve_project_root()
+            )
+            if selected_project:
+                selected_project_root = Path(selected_project).expanduser().resolve()
+                if configured_root:
+                    if (
+                        selected_project_root
+                        != Path(configured_root).expanduser().resolve()
+                    ):
+                        raise config_utils.ProjectStateLocationError(
+                            "selected project state disagrees with KOLLAB_PROJECT_ROOT"
+                        )
+                elif selected_project_root != project_root:
+                    raise config_utils.ProjectStateLocationError(
+                        "external project state selection has no trusted project root"
+                    )
+                project_root = selected_project_root
+            selected_state_dir = config_utils._windows_project_state_dir(
+                project_root, config_dir, create_new=False
+            )
+            selected_hub_dir = selected_state_dir / "hub"
+            selected_hub_resolved = selected_hub_dir.resolve()
+            if all(path.resolve() != selected_hub_resolved for path in hub_dirs):
+                # External selections are environment-provided and can be
+                # changed by a terminal child. Require the existing private
+                # project owner claim before letting one replace the trusted
+                # current/default ancestry scan roots.
+                expected_owner = config_utils._project_owner(project_root, None)
+                if (
+                    config_utils._read_project_owner(selected_state_dir)
+                    != expected_owner
+                ):
+                    raise config_utils.ProjectStateLocationError(
+                        "cannot verify selected external project state for Hub ancestry scan"
+                    )
+                hub_dirs.append(selected_hub_dir)
+                extra_presence_dirs.append(selected_hub_dir / "presence")
+        presence_dirs = hub_presence.all_presence_dirs(
+            extra_dirs=extra_presence_dirs, strict=True
+        )
+        agent_pids = set()
+        for presence_dir in presence_dirs:
+            for path in _directory_children(presence_dir):
+                if not path.name.endswith(".json"):
+                    continue
+                with path.open() as fh:
+                    data = json.load(fh)
+                if not isinstance(data, dict):
+                    raise ValueError(f"invalid Hub presence record: {path.name}")
+                pid = int(data.get("pid") or 0)
+                if pid > 0:
+                    agent_pids.add(pid)
+        return bool(process_ids & agent_pids)
+    except Exception as exc:  # noqa: BLE001 - uncertainty must not grant mesh-wide stop
+        logging.getLogger(__name__).warning(
+            "cannot verify Hub CLI caller ancestry; refusing stop all: %s", exc
+        )
+        return True
+
+
 def _cleanup_presence_for_pid(presence_dir: Path, pid: int) -> None:
+    from plugins.hub.presence import _presence_files
+
     if not pid:
         return
-    for f in presence_dir.glob("*.json"):
+    for f in _presence_files(presence_dir):
         try:
             with open(f) as fh:
                 d = json.load(fh)
@@ -1685,7 +1913,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
         status                  show online agents
         agents / list           same as status
         stop <identity|all>     send shutdown signal (alias: kill)
-        capture <name> [n]      readable transcript; add --raw for terminal output
+        capture <name> [n]      readable transcript; --cursor N resumes; --follow drains; --raw terminal
         msg <name> <text>       send hub message to agent
         broadcast <text>        send message to all agents
         user [name]             show or set hub user name
@@ -1699,7 +1927,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
     _apply_hub_project_scope_from_config()
 
     from plugins.hub.messenger import AgentMessenger
-    from plugins.hub.presence import get_presence_dir
+    from plugins.hub.presence import _presence_files, get_presence_dir
 
     subcmd = hub_args[0].lower() if hub_args else "status"
     rest = hub_args[1:] if len(hub_args) > 1 else []
@@ -1732,7 +1960,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
         import time as _time
 
         agents = []
-        for f in presence_dir.glob("*.json"):
+        for f in _presence_files(presence_dir):
             try:
                 with open(f) as fh:
                     data = json.load(fh)
@@ -1773,6 +2001,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     if not alive:
                         f.unlink(missing_ok=True)
                         continue
+                data["_presence_path"] = str(f)
                 agents.append(data)
             except Exception:
                 continue
@@ -1800,7 +2029,12 @@ async def _handle_cli_hub(hub_args: list) -> None:
         return pid_alive(pid)  # a zombie is not alive: the window may not have reaped it
 
     async def _stop_agent_record(agent: dict, reason: str) -> tuple[bool, str]:
-        return await stop_agent_record(agent, reason, presence_dir=presence_dir)
+        record = dict(agent)
+        presence_path = record.pop("_presence_path", None)
+        record_presence_dir = Path(presence_path).parent if presence_path else presence_dir
+        return await stop_agent_record(
+            record, reason, presence_dir=record_presence_dir
+        )
 
     # --- config helpers for on/off/user ---
     from kollabor_config.config_utils import get_existing_global_config_path
@@ -1922,6 +2156,17 @@ async def _handle_cli_hub(hub_args: list) -> None:
         target = rest[0]
 
         if target == "all":
+            # The CLI stop-all path belongs to an operator shell. Environment
+            # markers alone are insufficient because background terminal
+            # commands filter them, so also check the caller's process tree.
+            # --confirm is argv and cannot grant an agent an override.
+            if _cli_is_hub_agent_context():
+                print(
+                    "refusing `stop all`: agent-context present; agents may "
+                    "only stop agents they started (run from an operator shell).",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             agents = _get_live_agents()
             if not agents:
                 print("no agents online")
@@ -1953,18 +2198,54 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "capture":
         raw = "--raw" in rest
-        capture_args = [arg for arg in rest if arg != "--raw"]
+        follow = "--follow" in rest
+        capture_args = [arg for arg in rest if arg not in ("--raw", "--follow")]
         if not capture_args:
-            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
+            print(
+                "usage: kollab --hub capture <identity|agent@device> [lines] "
+                "[--cursor N] [--follow] [--raw]"
+            )
             sys.exit(1)
         target = capture_args[0]
-        if len(capture_args) > 2:
-            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
+        positionals = capture_args[1:]
+        cursor: Any = None
+        if "--cursor" in positionals:
+            flag_index = positionals.index("--cursor")
+            value_index = flag_index + 1
+            if value_index >= len(positionals):
+                print(
+                    "usage: kollab --hub capture <identity|agent@device> [lines] "
+                    "[--cursor N] [--follow] [--raw]"
+                )
+                sys.exit(2)
+            cursor_value = positionals[value_index]
+            positionals = [
+                arg
+                for index, arg in enumerate(positionals)
+                if index not in (flag_index, value_index)
+            ]
+            try:
+                int(cursor_value)
+            except ValueError:
+                print(
+                    "usage: kollab --hub capture <identity|agent@device> [lines] "
+                    "[--cursor N] [--follow] [--raw]"
+                )
+                sys.exit(2)
+            cursor = cursor_value
+        if len(positionals) > 1:
+            print(
+                "usage: kollab --hub capture <identity|agent@device> [lines] "
+                "[--cursor N] [--follow] [--raw]"
+            )
             sys.exit(2)
         try:
-            num_lines = int(capture_args[1]) if len(capture_args) > 1 else 50
+            num_lines = int(positionals[0]) if positionals else 50
         except ValueError:
-            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
+            print(
+                "usage: kollab --hub capture <identity|agent@device> [lines] "
+                "[--cursor N] [--follow] [--raw]"
+            )
             sys.exit(2)
         from plugins.hub.device_names import parse_handle
 
@@ -2022,20 +2303,79 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 lines=num_lines,
                 capture_format="json",
                 max_chars=10_000,
+                cursor=cursor,
             )
             if capture_error:
                 print(
                     f"capture failed for '{target}': {capture_error}", file=sys.stderr
                 )
                 sys.exit(1)
-            print(
-                render_transcript(
-                    capture,
-                    identity=target,
-                    max_lines=num_lines,
-                    max_chars=10_000,
-                )
+            printed = render_transcript(
+                capture,
+                identity=target,
+                max_lines=num_lines,
+                max_chars=10_000,
             )
+            print(printed)
+            if follow:
+                # The truncated marker's next_cursor is the only continuation
+                # handle a script has; follow pages until the window is done
+                # or a peer stops advancing the cursor (bounded, one page per
+                # round trip; a stuck cursor keeps its marker instead of
+                # spinning -- sweep-class guard, mirrors the bounded/repeat-
+                # guard philosophy of scripts/pr_gates_dod.py).
+                follow_budget = 50
+                stuck_follow = False
+                while follow_budget > 0:
+                    marker_cursor = (capture or {}).get("next_cursor")
+                    if not capture or not capture.get("truncated") or not marker_cursor:
+                        break
+                    capture, capture_error = await AgentMessenger.request_capture(
+                        socket_path,
+                        lines=num_lines,
+                        capture_format="json",
+                        max_chars=10_000,
+                        cursor=marker_cursor,
+                    )
+                    if capture_error:
+                        print(
+                            f"capture failed for '{target}': {capture_error}",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                    follow_budget -= 1
+                    if capture.get("truncated") and capture.get("next_cursor") == marker_cursor:
+                        # Stuck peer: same marker again. Stop instead of
+                        # looping on an unadvancing cursor; the just-printed
+                        # page already carries the marker.
+                        stuck_follow = True
+                        print(
+                            "... (capture stopped: peer did not advance "
+                            "next_cursor; use --cursor N to retry)"
+                        )
+                        break
+                    page = render_transcript(
+                        capture,
+                        identity=target,
+                        max_lines=num_lines,
+                        max_chars=10_000,
+                    )
+                    if page.strip():
+                        print(page)
+                # Budget exhausted is only a stop reason when the LAST
+                # response is still truncated with a cursor to resume from;
+                # a final untruncated page means the window drained clean
+                # exactly at the budget boundary.
+                if (
+                    follow_budget == 0
+                    and not stuck_follow
+                    and (capture or {}).get("truncated")
+                    and (capture or {}).get("next_cursor")
+                ):
+                    print(
+                        "... (capture stopped: too many pages, use --cursor N "
+                        "to continue)"
+                    )
 
     elif subcmd == "msg":
         if len(rest) < 2:
@@ -3003,11 +3343,40 @@ def _run_async_main_with_sigterm_cleanup(detached_runtime: bool) -> None:
             signal_module.signal(signal_module.SIGTERM, previous_sigterm)
 
 
+def _is_tool_shell_agent_launch(argv: list[str]) -> bool:
+    """Return whether a marked tool child is trying to launch an agent."""
+    if not any(
+        marker in os.environ for marker in ("KOLLAB_TOOL_SHELL", "KOLLAB_AGENT_PID")
+    ):
+        return False
+
+    for argument in argv[1:]:
+        if argument == "--":
+            break
+        option = argument.split("=", 1)[0]
+        if option in {"-a", "-d"} or (
+            option.startswith("--")
+            and ("--agent".startswith(option) or (option.startswith("--det") and "--detached".startswith(option)))
+        ):
+            return True
+        if argument.startswith("-a") and not argument.startswith("--"):
+            return True
+    return False
+
+
 def cli_main() -> None:
     """Synchronous entry point for pip-installed CLI command."""
+    if _is_tool_shell_agent_launch(sys.argv):
+        sys.stderr.write(
+            "error: nested --agent launches are blocked in tool/agent contexts; "
+            "use hub_spawn instead.\n"
+        )
+        raise SystemExit(2)
+
     _update_before_launch()
 
-    # --detached: fork into a fully detached daemon process.
+    # --detached: unless already detached by a supervisor, fork into a fully
+    # detached daemon process.
     # Shell backgrounding (&) doesn't work because zsh suspends
     # processes that touch the TTY (SIGTTOU). Instead, we fork,
     # create a new session (setsid), redirect all fds, and let
@@ -3025,7 +3394,8 @@ def cli_main() -> None:
         )
 
         if os.environ.pop(DETACHED_CHILD_ENV, "") == "1":
-            # Already forked, detached and exec'd by the code below.
+            # Already detached before cli_main; do not create another process
+            # so the supervisor's Popen continues to refer to this agent.
             detached_runtime = True
         elif os.environ.pop(SERVICE_ENV, "") == "1":
             detached_runtime = True
@@ -3117,7 +3487,7 @@ def cli_main() -> None:
     try:
         _run_async_main_with_sigterm_cleanup(detached_runtime)
     except Exception as e:
-        # Can't print if detached (stdout is /dev/null), but try anyway
+        # Some detached launches redirect stdout; try the current stream anyway.
         try:
             print(f"\n\nFatal error: {e}")
         except Exception:

@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from kollabor_ai import acp_options
 
 from .base import PanelError, error_result, make_field, ok_result, unknown_action
-from .llm import provider_display
+from .llm import effort_provider, provider_display
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def model_handler(ctx: Any) -> Any:
 async def _effort_control(handler: Any, profile: Any) -> dict:
     from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
-    provider = (profile.get_provider() or "").lower()
+    provider = (effort_provider(profile) or "").lower()
     if provider not in EFFORT_SUPPORTED_PROVIDERS:
         return make_field(
             "level", "dropdown", "Reasoning Effort", action="effort",
@@ -211,6 +211,15 @@ class ModelPanel:
 
     async def act(self, ctx: Any, action: str, payload: dict) -> dict:
         async with self._changes:
+            active = ctx._profile_manager.get_active_profile() if ctx._profile_manager else None
+            if active is not None and active.get_provider() == "acp":
+                from kollabor.llm.acp_change_lock import change_lock
+
+                bus = getattr(ctx, "_event_bus", None)
+                service = bus.get_service("acp_orchestrator") if bus else None
+                if service is not None:
+                    async with change_lock(service):
+                        return await self._act(ctx, action, payload)
             return await self._act(ctx, action, payload)
 
     async def _act(self, ctx: Any, action: str, payload: dict) -> dict:

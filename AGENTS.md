@@ -32,11 +32,15 @@ Before creating a lane, inspect repository status and all worktrees, verify the
 new path and branch do not exist, fetch the intended base, and record its SHA.
 Avoid concurrent writers to the same paths.
 
-Source work lands through a DRAFT PR from the owning worktree. Keep commits
+Source work lands through a DRAFT PR from the owning worktree. A PR's changelog
+entry is its own file, `changes/<issue>.<section>.md`; only release PRs edit
+`CHANGELOG.md` (see `changes/README.md`). Keep commits
 scoped to owned paths, use Conventional Commits, and require independent review
 and all configured checks on the exact PR head against current `main`. Update
 a PR branch with ordinary merges; never rebase or force-push. Marco authorizes
-a concrete plan or bounded PR batch; within it, the designated integrator may
+a concrete plan or bounded PR batch (a class order in his own words, such as
+"merge as many ready PRs as you can tonight", counts; see
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`); within it, the designated integrator may
 mark ready and merge after its review/base/CI/thread gates pass, without
 repeating permission per listed PR. A different AI agent must review every PR's
 exact final head and record the required GitHub approval as whichever account,
@@ -45,8 +49,12 @@ exact reviewed SHA in private maintainer audit evidence. Keep the GitHub
 approval plain, with no AI attribution or footer. GitHub prohibits authors
 from approving their own PRs; do not attempt self-approval. A new head
 requires fresh independent review and
-CI. All merges use `kollaborai` only, as merge commits; never use `--admin` or a
-ruleset bypass. Verify that identity cannot bypass applicable protection and
+CI. A head moved only by merging `main` keeps its verdict only when an independent
+reviewer posts an addendum pinned to the new head and base, confirming the PR's own
+diff is unchanged apart from changelog lines and that nothing merged from `main`
+touches what the PR changes or relies on. All merges use `kollaborai` only, as merge commits; never use `--admin` or a
+ruleset bypass. GitHub's merge queue needs an organization-owned repo, so it is not on yet (#857); a PR behind `main`
+merges `main` into its branch before it lands. Verify that identity cannot bypass applicable protection and
 stop if identity, bypass status, or gate evidence is uncertain. An emergency
 ruleset change requires separate explicit authorization. Writers never review
 their own changes.

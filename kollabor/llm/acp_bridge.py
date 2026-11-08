@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import secrets
 import shlex
 import shutil
 import subprocess
@@ -35,11 +34,31 @@ from .acp_state import ACPBinding
 
 
 class ACPError(RuntimeError):
-    """A protocol, lifecycle, or adapter error."""
+    """A protocol, lifecycle, or adapter error.
 
-    def __init__(self, message: str, *, code: int | None = None):
+    ``error_class`` carries the boundary classification (``authentication``,
+    ``refusal``, ``queue_full``, ``images_unsupported``, ...) so downstream
+    consumers never parse the rendered message text (#549, #720).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: int | None = None,
+        error_class: str | None = None,
+        cause: str | None = None,
+    ):
         super().__init__(message)
         self.code = code
+        self.error_class = error_class
+        # Safe cause floor: the original exception's TYPE NAME only, never
+        # its message (#720 — the same floor as StructuredErrorInfo.cause).
+        self.cause = cause
+
+
+class ACPSteeringUnconfirmed(ACPError):
+    """A steer was sent but its receipt never arrived, so it may have landed."""
 
 
 def _on_windows() -> bool:
@@ -626,6 +645,7 @@ class ACPRunner:
         self._active_turn_id = 0
         self._active_future: asyncio.Future[ACPResult] | None = None
         self._restart_before_next = False
+        self._restarting = False
         self._active_done = asyncio.Event()
         self._active_done.set()
         self._queue_release = asyncio.Event()
@@ -649,7 +669,6 @@ class ACPRunner:
         self._process_tracker: asyncio.Task[None] | None = None
         self._owned_processes: dict[int, psutil.Process] = {}
         self._adapter_pid: int | None = None
-        self._process_nonce: str | None = None
         self._process_started_at: float | None = None
         self._process_username: str | None = None
         self._teardown_lock = asyncio.Lock()
@@ -752,11 +771,6 @@ class ACPRunner:
                 "The selected Codex adapter could not be identified for this saved session. "
                 "The existing binding was kept; select the previous adapter or start a new session."
             )
-        # An inherited run marker also identifies children that fork, detach
-        # and lose their parent wholly between tree observations. It is not
-        # a credential; avoid names that vendor env policies filter as one.
-        self._process_nonce = secrets.token_hex(32)
-        env["KOLLAB_ACP_PROCESS_NONCE"] = self._process_nonce
         self._process_username = psutil.Process(os.getpid()).username()
         # A rapidly exiting root may disappear before psutil can read it.
         # Allow one second of kernel birth-time rounding in that fallback.
@@ -776,8 +790,6 @@ class ACPRunner:
             birth = owner.create_time()
             if (
                 owner.ppid() == os.getpid() and self._process.returncode is None
-                and owner.is_running()
-                and owner.environ().get("KOLLAB_ACP_PROCESS_NONCE") == self._process_nonce
                 and owner.is_running()
             ):
                 self._process_started_at = birth
@@ -874,9 +886,24 @@ class ACPRunner:
             message = streamed
         message = re.sub(r"\bsk-[A-Za-z0-9_*-]{8,}", "[redacted]", message)
         message = re.sub(r"(?i)\b(bearer|(?:access_)?token[=:])\s*\S+", r"\1 [redacted]", message)
-        if exc.code == -32000 and any(hint in message.lower() for hint in auth_hints):
+        # Boundary classification, computed once from the raw harness payload:
+        # auth verdicts read the pre-render text here, then ride downstream as
+        # a structured field. The rendered message (provider-name prefix,
+        # appended login guidance) is display-only (#549, #720).
+        is_auth = exc.code == -32000 and any(hint in message.lower() for hint in auth_hints)
+        if is_auth:
             message += " " + self.profile.LOGIN_GUIDANCE.get(self.profile.name, "Log in using this harness's CLI.")
-        return ACPError(f"{self.profile.name}: {message[:2000]}", code=exc.code)
+        error_class = (
+            "authentication" if is_auth
+            else "refusal" if any(hint in message.lower() for hint in refusal_hints)
+            else "request_error"
+        )
+        return ACPError(
+            f"{self.profile.name}: {message[:2000]}",
+            code=exc.code,
+            error_class=error_class,
+            cause=type(exc).__name__,
+        )
 
     async def start(self, binding: ACPBinding | None = None) -> str:
         self._closing = False
@@ -929,14 +956,33 @@ class ACPRunner:
             self._refresh_process_tree()
             await asyncio.sleep(0.1)
 
-    def _recover_tagged_processes(self) -> None:
-        """Recover same-user newborns by this run's inherited marker only."""
-        if self._process_nonce is None or self._process_started_at is None:
+    def _recover_session_processes(self) -> None:
+        """Recover same-user newborns still in the adapter's session.
+
+        The adapter starts as a session leader, so descendants that lose
+        their parent keep its pid as their session id. Never read another
+        process's environment to decide ownership (#608). A descendant that
+        calls setsid() before a tree sample sees it is not recovered.
+        """
+        if self._adapter_pid is None or self._process_started_at is None or not hasattr(os, "getsid"):
             return
+        adapter = self._owned_processes.get(self._adapter_pid)
+
+        def session_is_ours() -> bool:
+            # A live process at the adapter's pid that is not the recorded
+            # adapter means the number was reused: that session is not ours.
+            try:
+                return psutil.Process(self._adapter_pid) == adapter
+            except psutil.NoSuchProcess:
+                return True
+            except psutil.Error:
+                return False
+
+        if not session_is_ours():
+            return
+        found: list[psutil.Process] = []
         for owner in psutil.process_iter(("pid", "create_time", "username")):
-            # psutil's macOS environ() raises SystemError, not psutil.Error,
-            # for a process that exits while its environment is read.
-            with contextlib.suppress(psutil.Error, SystemError):
+            with contextlib.suppress(psutil.Error, OSError):
                 birth = owner.info.get("create_time")
                 if (
                     owner.info.get("username") != self._process_username
@@ -945,21 +991,23 @@ class ACPRunner:
                     continue
                 if self._owned_processes.get(owner.pid) == owner:
                     continue
-                # Compare only the marker, without retaining/logging an
-                # environment. Recheck birth identity across that read.
+                # Recheck birth identity across the session-id read.
                 if (
                     owner.is_running()
-                    and owner.environ().get("KOLLAB_ACP_PROCESS_NONCE") == self._process_nonce
+                    and os.getsid(owner.pid) == self._adapter_pid
                     and owner.is_running()
                 ):
                     owner.create_time()
-                    self._owned_processes[owner.pid] = owner
+                    found.append(owner)
+        if session_is_ours():
+            for owner in found:
+                self._owned_processes[owner.pid] = owner
 
     def _live_owned_processes(self) -> list[psutil.Process]:
         self._refresh_process_tree()
-        # Do the process-wide marker lookup at lifecycle boundaries, rather
-        # than reading unrelated environments on every 100ms tree sample.
-        self._recover_tagged_processes()
+        # Do the process-wide session lookup at lifecycle boundaries, rather
+        # than walking every same-user process on every 100ms tree sample.
+        self._recover_session_processes()
         self._refresh_process_tree()
         alive: list[psutil.Process] = []
         for owner in tuple(self._owned_processes.values()):
@@ -991,12 +1039,18 @@ class ACPRunner:
         origin: dict[str, Any] | None = None,
         images: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
-        if not self.session_id or self._connection is None:
-            raise ACPError("ACP runner is not started")
+        # While the harness restarts (after a failed or cancelled prompt) its
+        # connection is briefly gone; a request then waits in the queue like one
+        # admitted before the failure, and the worker settles it.
+        restarting = (self._restarting or self._restart_before_next) and not self._closing
+        if not restarting and (not self.session_id or self._connection is None):
+            raise ACPError("ACP runner is not started", error_class="not_started")
         if not text.strip():
             raise ValueError("prompt must not be empty")
         if images and not self.supports_image_input:
-            raise ACPError("This harness can't take images.")
+            raise ACPError(
+                "This harness can't take images.", error_class="images_unsupported"
+            )
         generation = self.generation
         # A rejected queue admission is not a turn and must not create a hole
         # in the orchestrator's compact completed-turn frontier.
@@ -1008,7 +1062,10 @@ class ACPRunner:
         try:
             self._queue.put_nowait(admission)
         except asyncio.QueueFull as exc:
-            raise ACPError("ACP prompt queue is full") from exc
+            raise ACPError(
+                "ACP prompt queue is full", error_class="queue_full",
+                cause=type(exc).__name__,
+            ) from exc
         self._next_turn_id = turn_id
         return admission
 
@@ -1082,6 +1139,7 @@ class ACPRunner:
         """Replace the owned ACP process, even if SDK close is stuck."""
         if self._closing:
             return
+        self._restarting = True
         try:
             # _terminate_process bounds connection.close and always tears down
             # the process group/stderr task before a fresh session is started.
@@ -1096,6 +1154,8 @@ class ACPRunner:
             # initialization/new_session fails (including cancellation).
             await self._terminate_process()
             raise
+        finally:
+            self._restarting = False
 
     async def _run_prompt(self, admission: ACPAdmission, generation: int) -> ACPResult:
         turn_id, text = admission.turn_id, admission.text
@@ -1114,7 +1174,9 @@ class ACPRunner:
                                   "thread_id": admission.thread_id, "generation": generation})
         try:
             if admission.images and not self.supports_image_input:
-                raise ACPError("This harness can't take images.")
+                raise ACPError(
+                    "This harness can't take images.", error_class="images_unsupported"
+                )
             response = await self._connection.prompt(
                 session_id=self.session_id,
                 prompt=[
@@ -1162,7 +1224,7 @@ class ACPRunner:
                 )
             else:
                 line = f"{self.profile.name}: harness request failed ({type(exc).__name__})"
-            raise ACPError(line) from exc
+            raise ACPError(line, cause=type(exc).__name__) from exc
         finally:
             if self.update_callback is not None:
                 self.update_callback({"kind": "turn_finished", "request_id": admission.request_id,
@@ -1204,9 +1266,14 @@ class ACPRunner:
         if not human and not same_requester:
             return False
         if images and not self.supports_image_input:
-            raise ACPError("This harness can't take images.")
+            raise ACPError(
+                "This harness can't take images.", error_class="images_unsupported"
+            )
+        connection = self._connection
+        if connection is None:
+            return False
         try:
-            await asyncio.wait_for(self._connection.ext_method("session/steering", {
+            await asyncio.wait_for(connection.ext_method("session/steering", {
                 "sessionId": self.session_id,
                 "prompt": [
                     {"type": "text", "text": text},
@@ -1215,20 +1282,29 @@ class ACPRunner:
                 ],
             }), timeout=10)
             return True
-        except Exception:
+        except acp.RequestError:
             return False
+        except Exception as exc:
+            # A timeout or dropped connection after the send is not a refusal:
+            # the harness may already hold this text, so it must not be queued.
+            raise ACPSteeringUnconfirmed(
+                f"{self.profile.name}: steering receipt not confirmed ({type(exc).__name__})"
+            ) from exc
 
-    def cancel_queued(self, request_id: str) -> bool:
-        for admission in tuple(self._queue._queue):
-            if admission is not None and admission.request_id == request_id:
+    def cancel_queued(self, request_id: str, admission: ACPAdmission | None = None) -> bool:
+        """Cancel one queued admission: that exact admission if given, else the first with this id."""
+        for queued in tuple(self._queue._queue):
+            matched = (queued is admission) if admission is not None else (
+                queued is not None and queued.request_id == request_id)
+            if matched:
                 # This synchronous removal cannot race the queue consumer.
                 # Release capacity before settling the future, preserving
                 # every remaining item's order and the active owner's RPC.
-                self._queue._queue.remove(admission)
+                self._queue._queue.remove(queued)
                 self._queue.task_done()
                 self._queue._wakeup_next(self._queue._putters)
-                if not admission.future.done():
-                    admission.future.cancel()
+                if not queued.future.done():
+                    queued.future.cancel()
                 return True
         return False
 
@@ -1678,7 +1754,6 @@ class ACPRunner:
                 if not survivors and not unreaped_adapter:
                     self._owned_processes.clear()
                     self._adapter_pid = None
-                    self._process_nonce = None
                     self._process_started_at = None
                     self._process_username = None
                 else:

@@ -244,7 +244,7 @@ async def test_the_model_tab_offers_the_levels_the_picker_does():
 
     assert await levels("claude-opus-4-6") == ["low", "medium", "high", "max"]
     assert await levels("claude-haiku-4-5") == []
-    assert await levels("claude-opus-4-5") == ["low", "medium", "high"]
+    assert await levels("claude-opus-4-5") == []
 
 
 @pytest.mark.asyncio
@@ -368,6 +368,7 @@ async def test_switching_to_a_harness_answers_with_its_own_model_and_effort(monk
     state = LocalStateService.__new__(LocalStateService)
     state._event_bus = SimpleNamespace(get_service=lambda name: harness if name == "acp_orchestrator" else None)
     state._llm_service = None
+    state._profile_activation_generation = 0
     state._profile_manager = SimpleNamespace(
         get_profile=lambda name: profile, get_active_profile=lambda: profile, set_active_profile=lambda name: True)
 
@@ -384,14 +385,14 @@ async def test_switching_to_a_harness_answers_with_its_own_model_and_effort(monk
 
 def test_a_catalog_that_lists_no_levels_means_none_and_no_row_offers_one_a_request_drops(monkeypatch):
     # Kunzite on #553 round 4: an empty catalog list read as "unknown" and got
-    # low/medium/high, and "none" was offered, then dropped before the request.
+    # low/medium/high; the request path now carries the advertised none/minimal levels.
     manager = _manager(_Profile("openai-oauth", "openai_responses", "gpt-5.1"))
     monkeypatch.setattr(manager, "models_for_profile", lambda p: ["gpt-5.2"])
     monkeypatch.setattr(manager, "_cached_catalog", lambda p, **_: [
         {"id": "gpt-5.1", "efforts": []}, {"id": "gpt-5.2", "efforts": ["none", "minimal", "high"]}])
     levels = _levels(manager.list_choices())
     assert levels[("openai-oauth", "gpt-5.1")] == [""]
-    assert levels[("openai-oauth", "gpt-5.2")] == ["", "high"]
+    assert levels[("openai-oauth", "gpt-5.2")] == ["", "none", "minimal", "high"]
 
 
 @pytest.mark.asyncio

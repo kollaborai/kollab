@@ -11,7 +11,12 @@ from fastapi import APIRouter, HTTPException  # type: ignore
 from pydantic import AfterValidator, BaseModel, Field
 
 from kollabor_ai import APICommunicationService, LLMProfile, ProfileManager
-from kollabor_ai.profile_manager import EFFORT_LEVELS, redact_profile_endpoint
+from kollabor_ai.profile_manager import (
+    EFFORT_LEVELS,
+    effort_unsupported_reason,
+    redact_profile_endpoint,
+    resolve_effort_provider,
+)
 from kollabor_ai.providers import (
     AuthenticationError,
     ProviderError,
@@ -150,6 +155,8 @@ def _safe_acp_adapter(command: Any) -> Optional[str]:
 def _redacted_profile_dict(profile: LLMProfile) -> Dict[str, Any]:
     """Return profile metadata safe for list/get/create/update API responses."""
     result = profile.to_dict()
+    # The key is dropped below, so the browser cannot resolve an auto profile itself.
+    result["effort_provider"] = profile.get_effort_provider()
     for key in (
         "api_key",
         "api_token",
@@ -307,6 +314,12 @@ async def create_profile(body: CreateProfileRequest):
             )
         if not model:
             raise HTTPException(status_code=422, detail="Model is required")
+        reason = effort_unsupported_reason(
+            resolve_effort_provider(provider, body.api_key or "", body.base_url or ""),
+            body.effort,
+        )
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
 
         profile = LLMProfile(
             name=name,
@@ -363,6 +376,19 @@ async def update_profile(name: str, body: UpdateProfileRequest):
             detail="A model is required for non-ACP profiles",
         )
 
+    # A level the provider never sends is refused here, not stored and reported.
+    # Switching to Anthropic checks the level the profile already holds too.
+    reason = effort_unsupported_reason(
+        resolve_effort_provider(
+            target_provider,
+            body.api_key if body.api_key is not None else profile.get_api_key(),
+            body.base_url if body.base_url is not None else profile.get_endpoint(),
+        ),
+        body.effort if body.effort is not None else profile.effort,
+    )
+    if reason:
+        raise HTTPException(status_code=422, detail=reason)
+
     # Build kwargs for fields that were provided
     kwargs: Dict[str, Any] = {}
     if body.provider is not None:
@@ -400,7 +426,10 @@ async def update_profile(name: str, body: UpdateProfileRequest):
 
     # Update (include save_to_config)
     kwargs["save_to_config"] = True
-    ok = pm.update_profile(name, **kwargs)  # type: ignore[arg-type]
+    try:
+        ok = pm.update_profile(name, **kwargs)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if not ok:
         # Likely a rename collision

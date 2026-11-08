@@ -3,6 +3,7 @@
 Handles /model command - quick model selector.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict
 
@@ -20,6 +21,7 @@ from kollabor_events.models import (
 from ..base import BaseCommandHandler
 
 logger = logging.getLogger(__name__)
+_ACP_OPTION_TIMEOUT = 10.0
 
 
 class ModelCommandHandler(BaseCommandHandler):
@@ -188,6 +190,15 @@ class ModelCommandHandler(BaseCommandHandler):
         return option_values(option)
 
     async def _set_acp_option(self, category: str, value: str | bool) -> CommandResult:
+        from kollabor.llm.acp_change_lock import change_lock
+
+        service = self._acp_service()
+        if service is None:
+            return CommandResult(success=False, message="ACP session is not active.", display_type="error")
+        async with change_lock(service):
+            return await self._set_acp_option_locked(service, category, value)
+
+    async def _set_acp_option_locked(self, service, category, value):
         options = self._acp_options()
         option = self._acp_option(options, category)
         if option is None:
@@ -196,10 +207,9 @@ class ModelCommandHandler(BaseCommandHandler):
                 message=f"Active ACP harness does not advertise a {category} option.",
                 display_type="error",
             )
-        service = self._acp_service()
         label = "model" if category == "model" else "reasoning effort"
         try:
-            await service.set_config_option(str(option["id"]), value)
+            await asyncio.wait_for(service.set_config_option(str(option["id"]), value), _ACP_OPTION_TIMEOUT)
         except Exception as exc:
             logger.warning(
                 "ACP %s option update failed (%s)", label, type(exc).__name__
@@ -791,7 +801,11 @@ class ModelCommandHandler(BaseCommandHandler):
         The codex backend publishes them per model; any other model gets the
         registry's levels for it, else what every effort API takes.
         """
-        if (profile.get_provider() or "").lower() == "openai_responses":
+        from kollabor.panels.llm import effort_provider
+        from kollabor_ai.profile_manager import EFFORT_LEVELS
+
+        provider = (effort_provider(profile) or "").lower()
+        if provider == "openai_responses":
             try:
                 from kollabor_ai.oauth import OAuthTokenStorage
                 from kollabor_ai.oauth.openai_oauth import query_codex_model_details
@@ -817,10 +831,11 @@ class ModelCommandHandler(BaseCommandHandler):
             except Exception as e:  # noqa: BLE001 - fall back to the registry
                 self.logger.debug("codex effort levels unavailable: %s", e)
 
-        from kollabor_ai.model_registry import DEFAULT_EFFORT_LEVELS, effort_levels
+        from kollabor_ai.profile_manager import accepted_efforts, effort_unsupported_reason
 
-        levels = effort_levels(profile.get_model())
-        return list(DEFAULT_EFFORT_LEVELS) if levels is None else levels
+        levels = accepted_efforts(provider, profile.get_model())
+        return [level for level in (levels if levels is not None else EFFORT_LEVELS)
+                if not effort_unsupported_reason(provider, level)]
 
     async def _handle_effort(self, level: str) -> CommandResult:
         """Show or set the active profile's reasoning effort.
@@ -837,9 +852,10 @@ class ModelCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
 
+        from kollabor.panels.llm import effort_provider
         from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
-        provider = (profile.get_provider() or "").lower()
+        provider = (effort_provider(profile) or "").lower()
         if provider == "acp":
             category = "thought_level"
             option = self._acp_option(self._acp_options(), category)
@@ -888,7 +904,7 @@ class ModelCommandHandler(BaseCommandHandler):
             )
 
         levels = await self._model_effort_levels(profile)
-        available = ", ".join(levels) or "none, this model takes no effort level"
+        available = ", ".join(levels) or "no effort levels for this model"
         current = profile.get_effort() or "(model default)"
 
         if not level:
@@ -904,7 +920,10 @@ class ModelCommandHandler(BaseCommandHandler):
             )
 
         requested = level.strip().lower()
-        if requested in ("default", "none", "clear", "off"):
+        # none is a level wherever the provider takes it; elsewhere it still clears
+        if requested in ("default", "clear", "off") or (
+            requested == "none" and requested not in levels
+        ):
             requested = ""
         elif requested not in levels:
             return CommandResult(

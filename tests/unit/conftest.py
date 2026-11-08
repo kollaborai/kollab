@@ -3,10 +3,23 @@
 import pytest
 
 from kollabor_config import config_utils
-from plugins.hub import presence, relay_client
+from plugins.hub import halt_runtime, presence, relay_client
 from tests.unit.test_relay_agent_bridge import bridges  # noqa: F401
 
 _REAL_CONFIG_DIR = config_utils.get_config_directory()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_halt_launch_entry():
+    """Each test starts with no launch entry (#642).
+
+    halt_runtime.capture_entry keeps the first argv and environment it sees for the
+    whole process. A test that boots without its own argv pins the runner's, and a
+    later test then reads that stale launch instead of its own.
+    """
+    halt_runtime.ENTRY.clear()
+    yield
+    halt_runtime.ENTRY.clear()
 
 
 @pytest.fixture(autouse=True)

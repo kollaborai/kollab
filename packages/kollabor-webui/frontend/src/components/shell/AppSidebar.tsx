@@ -13,6 +13,7 @@ import { liveAgentOf } from "@/components/shell/live-agent";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { AgentSidebarList, AgentSidebarRow, type AgentRowDrag } from "@/components/shell/AgentSidebarRow";
+import { AgentTypeGlyph, resolveSidebarAgentType } from "@/components/shell/AgentTypeGlyph";
 import { DeviceSidebarList } from "@/components/shell/DeviceSidebarList";
 import { relayDetachedTouches } from "@/components/shell/touch-relay";
 import { sidebarAgentKey } from "@/components/shell/hidden-agents";
@@ -367,11 +368,12 @@ export function AppSidebar({
                   // by the row's instance and the pool only dresses the gem.
                   const agent = liveAgentOf(session, liveAgents);
                   const look = poolByName.get(session.identity || "");
+                  const agentType = resolveSidebarAgentType(look, session.agent);
                   const hubLive = Boolean(agent);
                   const live = hubLive || session.active !== false;
                   const task = agent?.state === "working" ? agent.current_task.trim() : "";
                   const folder = sessionFolder(session);
-                  const heading = sessionHeading(session, poolByName.get(session.identity || "")?.display_name);
+                  const heading = sessionHeading(session, look?.display_name);
                   const harness = cliHarness(session);
                   const note = opening?.id === session.session_id ? opening : null;
                   const openProperties = (tab?: "chat") => {
@@ -420,8 +422,9 @@ export function AppSidebar({
                             />
                           </span>
                           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                            <span className="truncate text-sm leading-snug font-medium">
-                              {heading}
+                            <span className="flex min-w-0 items-baseline text-sm leading-snug font-medium">
+                              <span className="min-w-0 truncate">{heading}</span>
+                              <AgentTypeGlyph type={agentType} />
                             </span>
                             <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-[0.8125rem] leading-snug">
                               {note && !note.error ? (
@@ -482,8 +485,9 @@ export function AppSidebar({
                         size={AVATAR_SIZE}
                       />
                       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span className="text-muted-foreground truncate text-sm leading-snug font-medium">
-                          {offlineName(agent)}
+                        <span className="text-muted-foreground flex min-w-0 items-baseline text-sm leading-snug font-medium">
+                          <span className="min-w-0 truncate">{offlineName(agent)}</span>
+                          <AgentTypeGlyph type={resolveSidebarAgentType(poolByName.get(agent.identity))} />
                         </span>
                         <span className="text-muted-foreground truncate text-[0.8125rem] leading-snug">
                           Offline · {lastRanLabel(agent.last_ran)}
@@ -742,6 +746,7 @@ export function AppSidebar({
                           // Not up, or unknown: no local agent answered the network probe.
                           const up = (net.live !== false && network.live !== false) && agent.state !== "offline";
                           const seen = agent.last_seen ? `Seen ${since(agent.last_seen)}` : "";
+                          // NetworkAgent has no bundle type. Never infer one from a local name match.
 
                           return (
                           <AgentSidebarRow
@@ -778,8 +783,8 @@ export function AppSidebar({
                                 size={AVATAR_SIZE}
                               />
                               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                                <span className="truncate text-sm leading-snug font-medium">
-                                  {remoteName(agent.name)}
+                                <span className="flex min-w-0 items-baseline text-sm leading-snug font-medium">
+                                  <span className="min-w-0 truncate">{remoteName(agent.name)}</span>
                                 </span>
                                 <span className="text-muted-foreground truncate text-[0.8125rem] leading-snug">
                                   {note && !note.error

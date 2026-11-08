@@ -419,7 +419,8 @@ def boot_decision(argv: list[str], env: dict[str, str], folder: str, data: dict[
     """What a launch does under a halt: ``run``, ``exit`` (75), ``waiter`` or ``interactive``.
 
     ``argv``/``env`` are the ones captured at entry; ``--detached`` decides in
-    the forked child (its env carries ``KOLLAB_DETACHED_CHILD``) or a service.
+    the detached child (its env carries ``KOLLAB_DETACHED_CHILD``), whether
+    forked by the CLI or started directly by an owning supervisor, or a service.
     """
     from kollabor.daemon import DETACHED_CHILD_ENV, SERVICE_ENV
 

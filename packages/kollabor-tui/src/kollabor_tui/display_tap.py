@@ -8,6 +8,7 @@ Thread-safe: publish() is called from the main render thread,
 subscribers are managed from asyncio tasks.
 """
 
+import json
 import logging
 import queue
 import threading
@@ -46,6 +47,62 @@ def resolve_tap(source: Any) -> Optional["DisplayTap"]:
 _ERROR_TEXT_LIMIT = 8192
 
 
+def _cut_text(text: str, limit: int) -> str:
+    """``text`` with its middle cut past ``limit`` characters; both ends stay."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]} … ({len(text):,} characters) … {text[-half:]}"
+
+
+# The engine reads each daemon line up to kollabor_rpc.transport.LARGE_BUFFER_LIMIT
+# (16 MiB) and drops a longer one, which left its chat incomplete or waiting (#544).
+# An event over this budget has its long text cut, so the line the attach stream
+# writes stays under that limit, with room for the fields publish adds after the check.
+_FRAME_BUDGET_BYTES = 15 * 1024 * 1024
+# The longest text one string keeps when cut. Cuts halve it until the event fits,
+# and stop at the floor. An event that does not fit even at the floor is not cut.
+_FRAME_TEXT_LIMIT = 1024 * 1024
+_FRAME_TEXT_FLOOR = 1024
+
+
+def _cut_strings(node: Any, limit: int) -> Any:
+    """A copy of ``node`` with every string past ``limit`` characters cut."""
+    if isinstance(node, str):
+        return _cut_text(node, limit)
+    if isinstance(node, dict):
+        return {key: _cut_strings(value, limit) for key, value in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_cut_strings(value, limit) for value in node]
+    return node
+
+
+def _within_frame_budget(event: Dict[str, Any]) -> Dict[str, Any]:
+    """The event to publish: itself, or a copy with its text cut to fit the budget.
+
+    The type, ids and seq are kept, and each cut says how much it removed, so a
+    chat shows the start and end of a long output instead of losing the update.
+    """
+    try:
+        if len(json.dumps(event, default=str)) <= _FRAME_BUDGET_BYTES:
+            return event
+    except (TypeError, ValueError):
+        return event  # not serializable: published as before
+    # Cut everything to the floor once. If even that does not fit, the event's
+    # bulk is not text (a long list of short strings): cutting would lose its
+    # text without rescuing the frame, so it goes out whole, as before.
+    floor_cut = _cut_strings(event, _FRAME_TEXT_FLOOR)
+    if len(json.dumps(floor_cut, default=str)) > _FRAME_BUDGET_BYTES:
+        return event
+    limit = _FRAME_TEXT_LIMIT
+    while limit > _FRAME_TEXT_FLOOR:
+        cut = _cut_strings(event, limit)
+        if len(json.dumps(cut, default=str)) <= _FRAME_BUDGET_BYTES:
+            return cut
+        limit //= 2
+    return floor_cut
+
+
 def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
     """Publish a machine-readable turn event alongside the rendered output.
 
@@ -63,9 +120,8 @@ def publish_semantic(source: Any, event_type: str, **fields: Any) -> None:
     if event_type in ("turn_complete", "error"):
         for key in ("error", "message"):
             text = fields.get(key)
-            if isinstance(text, str) and len(text) > _ERROR_TEXT_LIMIT:
-                half = _ERROR_TEXT_LIMIT // 2
-                fields[key] = f"{text[:half]} … ({len(text):,} characters) … {text[-half:]}"
+            if isinstance(text, str):
+                fields[key] = _cut_text(text, _ERROR_TEXT_LIMIT)
     try:
         tap.publish({"type": event_type, **fields})
     except Exception:
@@ -95,6 +151,31 @@ class DisplayTap:
         # The owner's own view of every event. Not a subscriber: the count of
         # those says whether a window is attached.
         self._on_event = on_event
+        # Names the live conversation (its durable uid). Every event is stamped
+        # with it, and replay and live delivery drop the other conversations'
+        # events, so a /resume or a new session never shows the old text (#525).
+        self.conversation_source: Optional[Callable[[], Optional[str]]] = None
+
+    def _live_conversation(self) -> Optional[str]:
+        source = self.conversation_source
+        if source is None:
+            return None
+        try:
+            return source() or None
+        except Exception:
+            logger.debug("DisplayTap conversation_source failed", exc_info=True)
+            return None
+
+    def in_live_conversation(self, event: Dict[str, Any]) -> bool:
+        """False for an event another conversation produced (or none is named).
+
+        Without a ``conversation_source`` nothing is scoped. With one, an event
+        with no conversation (published before identity existed) is not assumed
+        to belong to the live one.
+        """
+        if self.conversation_source is None:
+            return True
+        return event.get("conversation_uid") == self._live_conversation()
 
     def publish(self, event: Dict[str, Any]) -> None:
         """Publish a display event to all subscribers.
@@ -116,6 +197,11 @@ class DisplayTap:
             if key != "_client_completion" and event.get(key) is None:
                 event[key] = value
         event.setdefault("ts", time.time())
+        if event.get("conversation_uid") is None:
+            conversation = self._live_conversation()
+            if conversation is not None:
+                event["conversation_uid"] = conversation
+        event = _within_frame_budget(event)
         with self._lock:
             if (event.get("type") == "turn_complete" and completion is not None
                     and event.get("request_id") == completion["request_id"]
@@ -174,8 +260,8 @@ class DisplayTap:
         )
 
     def get_snapshot(self) -> List[Dict[str, Any]]:
-        """Get recent history for catch-up on connect."""
-        return list(self._history)
+        """Get the live conversation's recent history for catch-up on connect."""
+        return [event for event in list(self._history) if self.in_live_conversation(event)]
 
     @property
     def subscriber_count(self) -> int:
