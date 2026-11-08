@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 from kollabor_ai import acp_options
@@ -213,13 +214,20 @@ class ModelPanel:
         async with self._changes:
             active = ctx._profile_manager.get_active_profile() if ctx._profile_manager else None
             if active is not None and active.get_provider() == "acp":
+                from kollabor.llm.acp_bridge import ACPError
                 from kollabor.llm.acp_change_lock import change_lock
 
                 bus = getattr(ctx, "_event_bus", None)
                 service = bus.get_service("acp_orchestrator") if bus else None
                 if service is not None:
-                    async with change_lock(service):
-                        return await self._act(ctx, action, payload)
+                    try:
+                        async with change_lock(service):
+                            transition = getattr(service, "transition", None)
+                            with transition() if callable(transition) else nullcontext():
+                                return await self._act(ctx, action, payload)
+                    except ACPError as exc:
+                        logger.warning("ACP panel transition failed (%s)", type(exc).__name__)
+                        return error_result("ACP session is changing; retry when ready.")
             return await self._act(ctx, action, payload)
 
     async def _act(self, ctx: Any, action: str, payload: dict) -> dict:
@@ -289,15 +297,17 @@ class ModelPanel:
         category = _level_category(handler)
         before = (_acp_current(handler, "model"), _acp_current(handler, category))
         if model:
-            outcome = await handler._set_acp_option("model", model)
+            outcome = await handler._set_acp_option("model", model, persist=False)
             if not outcome.success:
                 return error_result(_one_line(outcome.message))
         if level:
-            outcome = await handler._set_acp_option(_level_category(handler), level)
+            outcome = await handler._set_acp_option(_level_category(handler), level, persist=False)
             if not outcome.success:
                 # A model switch can move the level too, so both go back; the engine reads back what runs.
-                if model and before[0] and (await handler._set_acp_option("model", before[0])).success and before[1]:
-                    await handler._set_acp_option(category, before[1])
+                if model and before[0]:
+                    restored = await handler._set_acp_option("model", before[0], persist=False)
+                    if restored.success and before[1]:
+                        await handler._set_acp_option(category, before[1], persist=False)
                 return error_result(_one_line(outcome.message))
         return ok_result(f"ACP set to {' · '.join(filter(None, (model, level)))}.", panel=await self.describe(ctx, {}))
 

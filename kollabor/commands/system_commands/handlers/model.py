@@ -5,6 +5,7 @@ Handles /model command - quick model selector.
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from typing import Any, Dict
 
 from kollabor_ai.profile_manager import redact_profile_endpoint
@@ -189,16 +190,24 @@ class ModelCommandHandler(BaseCommandHandler):
 
         return option_values(option)
 
-    async def _set_acp_option(self, category: str, value: str | bool) -> CommandResult:
+    async def _set_acp_option(self, category: str, value: str | bool, *, persist: bool = True) -> CommandResult:
         from kollabor.llm.acp_change_lock import change_lock
 
         service = self._acp_service()
         if service is None:
             return CommandResult(success=False, message="ACP session is not active.", display_type="error")
-        async with change_lock(service):
-            return await self._set_acp_option_locked(service, category, value)
+        try:
+            async with change_lock(service):
+                transition = getattr(service, "transition", None)
+                with transition() if callable(transition) else nullcontext():
+                    return await self._set_acp_option_locked(service, category, value, persist)
+        except Exception as exc:
+            logger.warning("ACP option transition failed (%s)", type(exc).__name__)
+            return CommandResult(
+                success=False, message="ACP session is changing; retry when ready.", display_type="error"
+            )
 
-    async def _set_acp_option_locked(self, service, category, value):
+    async def _set_acp_option_locked(self, service, category, value, persist):
         options = self._acp_options()
         option = self._acp_option(options, category)
         if option is None:
@@ -209,7 +218,14 @@ class ModelCommandHandler(BaseCommandHandler):
             )
         label = "model" if category == "model" else "reasoning effort"
         try:
-            await asyncio.wait_for(service.set_config_option(str(option["id"]), value), _ACP_OPTION_TIMEOUT)
+            async with asyncio.timeout(_ACP_OPTION_TIMEOUT):
+                if persist:
+                    updated = await service.set_config_option(str(option["id"]), value)
+                else:
+                    updated = await service.set_config_option(str(option["id"]), value, persist=False)
+            actual = next((o.get("currentValue") for o in updated if o.get("id") == option["id"]), None)
+            if actual != value:
+                raise ValueError("ACP harness did not apply the requested value")
         except Exception as exc:
             logger.warning(
                 "ACP %s option update failed (%s)", label, type(exc).__name__

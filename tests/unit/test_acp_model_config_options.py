@@ -40,7 +40,7 @@ class _ACP:
     def advertised_config_options(self):
         return [dict(option) for option in self.options]
 
-    async def set_config_option(self, config_id, value):
+    async def set_config_option(self, config_id, value, *, persist=True):
         self.calls.append((config_id, value))
         for option in self.options:
             if option["id"] == config_id:
@@ -322,7 +322,7 @@ async def test_model_panel_does_not_retry_a_failed_harness_update():
     from kollabor.panels.model import ModelPanel
 
     class FailingACP(_ACP):
-        async def set_config_option(self, config_id, value):
+        async def set_config_option(self, config_id, value, *, persist=True):
             self.calls.append((config_id, value))
             raise OSError("adapter unavailable")
 
@@ -342,13 +342,13 @@ async def test_model_panel_does_not_retry_a_failed_harness_update():
 class _OfferedOnlyACP(_ACP):
     """Takes only a value its option offers, as the runner does, and answers later."""
 
-    async def set_config_option(self, config_id, value):
+    async def set_config_option(self, config_id, value, *, persist=True):
         await asyncio.sleep(0)  # another request can run meanwhile
         option = next(option for option in self.options if option["id"] == config_id)
         if value not in [choice["value"] for choice in option["options"]]:
             self.calls.append((config_id, value))
             raise ValueError(f"{value} is not offered")
-        return await super().set_config_option(config_id, value)
+        return await super().set_config_option(config_id, value, persist=persist)
 
 
 def _panel_ctx(acp):
@@ -416,8 +416,8 @@ async def test_terminal_change_waits_for_picker_rollback():
     changed, resume = asyncio.Event(), asyncio.Event()
 
     class PausingACP(_OfferedOnlyACP):
-        async def set_config_option(self, config_id, value):
-            result = await super().set_config_option(config_id, value)
+        async def set_config_option(self, config_id, value, *, persist=True):
+            result = await super().set_config_option(config_id, value, persist=persist)
             if (config_id, value) == ("model", "gpt-5") and not changed.is_set():
                 changed.set()
                 await resume.wait()
@@ -442,10 +442,10 @@ async def test_stalled_acp_change_releases_picker_for_next_action(monkeypatch):
 
     monkeypatch.setattr(model_module, "_ACP_OPTION_TIMEOUT", 0.02, raising=False)
     class StallingACP(_ACP):
-        async def set_config_option(self, config_id, value):
+        async def set_config_option(self, config_id, value, *, persist=True):
             if value == "gpt-5":
                 await asyncio.Event().wait()
-            return await super().set_config_option(config_id, value)
+            return await super().set_config_option(config_id, value, persist=persist)
 
     acp = StallingACP(_options())
     panel, ctx = ModelPanel(), _panel_ctx(acp)
@@ -455,3 +455,76 @@ async def test_stalled_acp_change_releases_picker_for_next_action(monkeypatch):
     result, next_result = await asyncio.wait_for(asyncio.gather(first, second), 0.5)
     assert not result["ok"]
     assert next_result["ok"]
+
+@pytest.mark.asyncio
+async def test_picker_does_not_persist_harness_options():
+    from kollabor.panels.model import ModelPanel
+
+    class RecordingACP(_ACP):
+        def __init__(self, options):
+            super().__init__(options)
+            self.persist_flags = []
+
+        async def set_config_option(self, config_id, value, *, persist=True):
+            self.persist_flags.append(persist)
+            return await super().set_config_option(config_id, value, persist=persist)
+
+    acp = RecordingACP(_options())
+    result = await ModelPanel().act(_panel_ctx(acp), "pick", {"model": "gpt-5", "level": "low"})
+    assert result["ok"]
+    assert acp.persist_flags == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_picker_reports_harness_that_ignores_value():
+    from kollabor.panels.model import ModelPanel
+
+    class IgnoringACP(_ACP):
+        async def set_config_option(self, config_id, value, *, persist=True):
+            if config_id == "effort":
+                return self.advertised_config_options()
+            return await super().set_config_option(config_id, value, persist=persist)
+
+    acp = IgnoringACP(_options())
+    result = await ModelPanel().act(_panel_ctx(acp), "pick", {"model": "gpt-5", "level": "low"})
+    assert not result["ok"]
+    assert acp.options[0]["currentValue"] == "harness-default"
+
+@pytest.mark.asyncio
+async def test_profile_activation_is_refused_during_picker_transaction():
+    from kollabor.llm.acp_orchestrator import ACPOrchestrator
+    from kollabor.panels.model import ModelPanel
+    from kollabor.state.local import LocalStateService
+
+    changed, resume = asyncio.Event(), asyncio.Event()
+
+    class TransitionACP(_ACP):
+        transition = ACPOrchestrator.transition
+        transitioning = ACPOrchestrator.transitioning
+        transition_owned_by_current_task = ACPOrchestrator.transition_owned_by_current_task
+
+        def __init__(self, options):
+            super().__init__(options)
+            self._transition_owner = None
+            self._transition_depth = 0
+            self._pending_ready_runner = None
+            self.conversation_transitioning = False
+
+        async def set_config_option(self, config_id, value, *, persist=True):
+            result = await super().set_config_option(config_id, value, persist=persist)
+            if config_id == "model" and value == "gpt-5":
+                changed.set()
+                await resume.wait()
+            return result
+
+    acp = TransitionACP(_options())
+    ctx = _panel_ctx(acp)
+    state = LocalStateService.__new__(LocalStateService)
+    state._event_bus = ctx._event_bus
+    state._profile_manager = ctx._profile_manager
+    picker = asyncio.create_task(ModelPanel().act(ctx, "pick", {"model": "gpt-5", "level": "low"}))
+    await asyncio.wait_for(changed.wait(), 1)
+    with pytest.raises(ValueError, match="profile change is in progress"):
+        await state._set_active_profile_serialized("codex")
+    resume.set()
+    assert (await picker)["ok"]

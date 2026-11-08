@@ -13,9 +13,11 @@ and readers never see a partially written file.
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import stat
 import tempfile
 import time
@@ -35,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 # Refresh buffer: refresh 5 minutes before actual expiry
 DEFAULT_EXPIRY_BUFFER = 300
+
+# Accountless markers are process-local and never written to disk.
+_LOGIN_MARK_KEY = secrets.token_bytes(32)
 
 
 def _get_oauth_dir() -> Path:
@@ -56,7 +61,7 @@ def login_mark(tokens: dict) -> str:
     if tokens.get("account_id"):
         return str(tokens["account_id"])
     secret = str(tokens.get("refresh_token") or tokens.get("access_token") or "")
-    return "token:" + hashlib.sha256(secret.encode()).hexdigest()[:16] if secret else ""
+    return "token:" + hmac.new(_LOGIN_MARK_KEY, secret.encode(), hashlib.sha256).hexdigest()[:16] if secret else ""
 
 
 def stored_login_mark(provider: str, profile_name: str | None = None) -> str:
