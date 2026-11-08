@@ -90,3 +90,19 @@ def test_cancelled_direct_compaction_never_stages(tmp_path):
     assert history == before and p._pending_compaction is None
     assert not list(tmp_path.iterdir())
     p._call_summarization_llm.assert_not_awaited()
+
+
+def test_auto_curation_and_overflow_refuse_without_false_ready(tmp_path):
+    p, history = make_plugin(tmp_path)
+    before = list(history)
+    p._build_curation_request = MagicMock(side_effect=AssertionError("curation requested"))
+    async def run():
+        await p._request_model_curation(wake=True, reason="threshold")
+        p._pending_compaction = [object()]
+        await p._on_llm_request_error({"context_window_exceeded": True}, None)
+        assert p._compaction_status == "failed"
+        assert "temporarily unavailable" in p._compaction_status_message
+    asyncio.run(run())
+    assert history == before
+    p._build_curation_request.assert_not_called()
+    assert not list(tmp_path.iterdir())

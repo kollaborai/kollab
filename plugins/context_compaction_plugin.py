@@ -1686,6 +1686,8 @@ class ContextCompactionPlugin(BasePlugin):
         """Recover from a typed context-window failure without replaying it."""
         if not data.get("context_window_exceeded"):
             return data
+        self._refuse_unsafe_compaction()
+        return data
 
         message = (
             "The provider rejected this request because the conversation context is "
@@ -1929,6 +1931,10 @@ class ContextCompactionPlugin(BasePlugin):
         user's next message carries it). wake=True starts a turn now when the
         agent is idle, the /compact path.
         """
+        self._awaiting_model = False
+        self._refuse_unsafe_compaction()
+        return
+
         prompt = self._build_curation_request(reason)
         self._awaiting_model = True
         self._asked_turn = self._turn_count
