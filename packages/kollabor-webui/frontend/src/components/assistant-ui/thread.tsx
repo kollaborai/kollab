@@ -522,7 +522,7 @@ export const Composer: FC<{
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isRunning && !lastBusySubmit.current.sentDraft) {
+    if (!isRunning && !lastBusySubmit.current.queuedDraft) {
       setBusySubmitError(null);
     }
   }, [isRunning]);

@@ -3,6 +3,7 @@ import { imageAttachmentAdapter } from "./attachment-adapter";
 import {
   createBusyComposerSubmitHandler,
   createBusyComposerSubmitTracker,
+  type BusyComposerSubmitHandlerOptions,
   type BusyComposerState,
 } from "./busy-composer-submit";
 
@@ -27,7 +28,7 @@ function attempt(
     Parameters<typeof createBusyComposerSubmitHandler>[0]
   > = {},
 ) {
-  const sendCommand = vi.fn();
+  const sendCommand = vi.fn<BusyComposerSubmitHandlerOptions["sendCommand"]>();
   const resetComposer = vi.fn();
   const onError = vi.fn();
   const event = { preventDefault: vi.fn() };
@@ -115,6 +116,26 @@ describe("busy composer submit", () => {
     expect(test.onError).toHaveBeenLastCalledWith({
       kind: "prepare",
       error: conversionError,
+    });
+    expect(state).toEqual({ text: "retain me", attachments: [attachment] });
+  });
+
+  it("keeps the image draft when the synchronous queue handoff throws", async () => {
+    const attachment = await pendingPng();
+    const state: BusyComposerState = { text: "retain me", attachments: [attachment] };
+    const enqueueError = new Error("synthetic queue handoff failure");
+    const test = attempt(state);
+    test.sendCommand.mockImplementationOnce(() => {
+      throw enqueueError;
+    });
+
+    await test.handleSubmit(test.event);
+
+    expect(test.sendCommand).toHaveBeenCalledTimes(1);
+    expect(test.resetComposer).not.toHaveBeenCalled();
+    expect(test.onError).toHaveBeenLastCalledWith({
+      kind: "enqueue",
+      error: enqueueError,
     });
     expect(state).toEqual({ text: "retain me", attachments: [attachment] });
   });

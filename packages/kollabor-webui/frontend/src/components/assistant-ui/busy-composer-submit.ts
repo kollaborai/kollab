@@ -24,13 +24,13 @@ type BusyAddMessageCommand = {
 export type BusyComposerSubmitTracker = {
   last: { fingerprint: string; at: number } | null;
   inFlight: Set<string>;
-  sentDraft: { fingerprint: string; error: unknown } | null;
+  queuedDraft: { fingerprint: string; error: unknown } | null;
   observedFingerprint: string | null;
   revision: number;
 };
 
 export type BusyComposerSubmitIssue = {
-  kind: "prepare" | "transport" | "reset" | "already-sent";
+  kind: "prepare" | "enqueue" | "reset" | "already-queued";
   error: unknown;
 };
 
@@ -40,12 +40,12 @@ export function busyComposerSubmitErrorMessage(
   switch (issue.kind) {
     case "prepare":
       return "Could not prepare the image. Your draft is still here; try sending again.";
-    case "transport":
-      return "Could not send this message. Your draft is still here; try sending again.";
+    case "enqueue":
+      return "Could not confirm this message was queued. Your draft is still here; check the conversation before retrying.";
     case "reset":
-      return "Message sent, but the draft could not be cleared. Clear or edit it before submitting again.";
-    case "already-sent":
-      return "This draft was already sent. Clear or edit it before submitting again.";
+      return "Message queued, but the draft could not be cleared. Clear or edit it before submitting again.";
+    case "already-queued":
+      return "This draft was already queued. Clear or edit it before submitting again.";
   }
 }
 
@@ -53,7 +53,7 @@ export function createBusyComposerSubmitTracker(): BusyComposerSubmitTracker {
   return {
     last: null,
     inFlight: new Set(),
-    sentDraft: null,
+    queuedDraft: null,
     observedFingerprint: null,
     revision: 0,
   };
@@ -77,8 +77,8 @@ export function observeBusyComposerDraft(
 
   if (changed) {
     tracker.revision += 1;
-    if (tracker.sentDraft) {
-      tracker.sentDraft = null;
+    if (tracker.queuedDraft) {
+      tracker.queuedDraft = null;
       tracker.last = null;
       return true;
     }
@@ -93,7 +93,7 @@ export type BusyComposerSubmitOptions = {
   finalizeImageAttachment: (
     attachment: PendingAttachment,
   ) => Promise<CompleteAttachment>;
-  sendCommand: (command: BusyAddMessageCommand) => void | Promise<void>;
+  sendCommand: (command: BusyAddMessageCommand) => void;
   getCurrentState: () => BusyComposerState;
   resetComposer: () => void | Promise<void>;
   onError: (issue: BusyComposerSubmitIssue | null) => void;
@@ -121,14 +121,14 @@ export function createBusyComposerSubmitHandler(
 
     if (!options.isRunning) {
       const fingerprint = busyComposerFingerprint(state);
-      const alreadySent = options.tracker.sentDraft;
-      if (alreadySent?.fingerprint === fingerprint) {
+      const alreadyQueued = options.tracker.queuedDraft;
+      if (alreadyQueued?.fingerprint === fingerprint) {
         event.preventDefault();
-        options.onError({ kind: "already-sent", error: alreadySent.error });
+        options.onError({ kind: "already-queued", error: alreadyQueued.error });
         return;
       }
-      if (alreadySent) {
-        options.tracker.sentDraft = null;
+      if (alreadyQueued) {
+        options.tracker.queuedDraft = null;
         options.tracker.last = null;
       }
       if (!draftChanged) options.onError(null);
@@ -167,14 +167,14 @@ async function submitBusyComposerMessage(
 
   const fingerprint = busyComposerFingerprint(state);
   const draftRevision = tracker.revision;
-  const alreadySent = tracker.sentDraft;
-  if (alreadySent?.fingerprint === fingerprint) {
+  const alreadyQueued = tracker.queuedDraft;
+  if (alreadyQueued?.fingerprint === fingerprint) {
     event.preventDefault();
-    onError({ kind: "already-sent", error: alreadySent.error });
+    onError({ kind: "already-queued", error: alreadyQueued.error });
     return;
   }
-  if (alreadySent) {
-    tracker.sentDraft = null;
+  if (alreadyQueued) {
+    tracker.queuedDraft = null;
     tracker.last = null;
   }
 
@@ -231,15 +231,17 @@ async function submitBusyComposerMessage(
     }
 
     try {
-      await sendCommand({
+      // The callback acknowledges only a synchronous queue handoff. The runtime
+      // reports any later HTTP failures separately.
+      sendCommand({
         type: "add-message",
         message: { role: "user", parts },
         parentId: null,
         sourceId: null,
       });
     } catch (error) {
-      tracker.last = null;
-      onError({ kind: "transport", error });
+      // The queue may contain the command if scheduling failed after enqueue.
+      onError({ kind: "enqueue", error });
       return;
     }
 
@@ -252,7 +254,7 @@ async function submitBusyComposerMessage(
       }
       await resetComposer();
     } catch (error) {
-      tracker.sentDraft = { fingerprint, error };
+      tracker.queuedDraft = { fingerprint, error };
       onError({ kind: "reset", error });
     }
   } finally {

@@ -1,7 +1,7 @@
 ---
 title: Multimodal Image Input and Generated-Image Output
 created: 2026-08-24
-modified: 2026-09-17
+modified: 2026-11-07
 status: draft
 author: maintainers
 ---
@@ -48,7 +48,11 @@ an editable `[imageN]` token and a removable attachment tile; removing an
 attachment removes its token and renumbers the remaining images. The transport
 submits text and image parts together, the daemon normalizes pasted data URLs
 into bounded process-local media IDs, and provider adapters resolve those IDs
-only while building the provider-native request.
+only while building the provider-native request. During a busy turn, pending
+image attachments are finalized before the synchronous assistant-ui queue
+handoff. The handoff is not an HTTP delivery acknowledgement: later transport
+failures are reported by the runtime, and the composer does not automatically
+restore or retry them.
 
 The model catalog exposes an explicit `supports_vision` boolean per model.
 Image turns are rejected before provider I/O when the active provider/model is

@@ -55,6 +55,7 @@ import { ComposerPrimitive } from "@assistant-ui/react";
 import {
   createBusyComposerSubmitTracker,
   type BusyComposerState,
+  type BusyComposerSubmitHandlerOptions,
   type BusyComposerSubmitTracker,
 } from "./busy-composer-submit";
 
@@ -101,7 +102,7 @@ function setupComposer(
 ) {
   let currentState = initialState;
   let currentError = options.busySubmitError ?? null;
-  const sendCommand = vi.fn();
+  const sendCommand = vi.fn<BusyComposerSubmitHandlerOptions["sendCommand"]>();
   const resetComposer = vi.fn(async () => {
     currentState = { text: "", attachments: [] };
     notifyComposerChange();
@@ -383,62 +384,70 @@ describe("thread Composer busy-send wiring", () => {
     );
   });
 
-  it("keeps the draft and reports transport failure separately from conversion", async () => {
-    const attachment = await pendingPng();
-    const harness = setupComposer({ text: "retain after transport failure", attachments: [attachment] });
-    harness.sendCommand.mockRejectedValueOnce(new Error("transport failed"));
-
-    await (harness.form.props.onSubmit as (event: ReturnType<typeof submitEvent>) => Promise<void>)(submitEvent());
-
-    expect(harness.sendCommand).toHaveBeenCalledOnce();
-    expect(harness.resetComposer).not.toHaveBeenCalled();
-    expect(harness.getCurrentState().text).toBe("retain after transport failure");
-    expect(harness.setBusySubmitError).toHaveBeenLastCalledWith(
-      "Could not send this message. Your draft is still here; try sending again.",
-    );
-  });
-
-  it("allows the same draft to retry after a rejected transport send", async () => {
+  it("keeps the draft and reports a synchronous queue failure separately from conversion", async () => {
     const attachment = await pendingPng();
     const harness = setupComposer({
-      text: "retry after rejection",
+      text: "retain after queue failure",
       attachments: [attachment],
     });
-    harness.sendCommand.mockRejectedValueOnce(new Error("transport failed"));
+    harness.sendCommand.mockImplementationOnce(() => {
+      throw new Error("queue handoff failed");
+    });
 
     await (harness.form.props.onSubmit as (event: SubmitEvent) => Promise<void>)(
       submitEvent(),
     );
+
     expect(harness.sendCommand).toHaveBeenCalledOnce();
     expect(harness.resetComposer).not.toHaveBeenCalled();
     expect(harness.getCurrentState()).toEqual({
-      text: "retry after rejection",
+      text: "retain after queue failure",
       attachments: [attachment],
     });
-    expect(harness.getBusySubmitError()).toBe(
-      "Could not send this message. Your draft is still here; try sending again.",
+    expect(harness.setBusySubmitError).toHaveBeenLastCalledWith(
+      "Could not confirm this message was queued. Your draft is still here; check the conversation before retrying.",
     );
-
-    await (harness.form.props.onSubmit as (event: SubmitEvent) => Promise<void>)(
-      submitEvent(),
-    );
-
-    expect(harness.sendCommand).toHaveBeenCalledTimes(2);
-    expect(harness.resetComposer).toHaveBeenCalledOnce();
-    expect(harness.getCurrentState()).toEqual({ text: "", attachments: [] });
-    expect(harness.getBusySubmitError()).toBeNull();
   });
 
-  it("does not invite retry after transport success when reset fails", async () => {
+  it("suppresses an immediate duplicate after an ambiguous queue handoff throw", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
     const attachment = await pendingPng();
-    const harness = setupComposer({ text: "already sent", attachments: [attachment] });
+    const harness = setupComposer({
+      text: "retain after ambiguous queue failure",
+      attachments: [attachment],
+    });
+    harness.sendCommand.mockImplementationOnce(() => {
+      throw new Error("queue handoff failed");
+    });
+    const submit = harness.form.props.onSubmit as (
+      event: SubmitEvent,
+    ) => Promise<void>;
+
+    await submit(submitEvent());
+    const duplicateEvent = submitEvent();
+    await submit(duplicateEvent);
+
+    expect(duplicateEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(harness.sendCommand).toHaveBeenCalledOnce();
+    expect(harness.resetComposer).not.toHaveBeenCalled();
+    expect(harness.getCurrentState().text).toBe(
+      "retain after ambiguous queue failure",
+    );
+    expect(harness.getBusySubmitError()).toBe(
+      "Could not confirm this message was queued. Your draft is still here; check the conversation before retrying.",
+    );
+  });
+
+  it("does not invite retry after a successful queue handoff when reset fails", async () => {
+    const attachment = await pendingPng();
+    const harness = setupComposer({ text: "already queued", attachments: [attachment] });
     harness.resetComposer.mockRejectedValueOnce(new Error("reset failed"));
     const firstEvent = submitEvent();
 
     await (harness.form.props.onSubmit as (event: SubmitEvent) => Promise<void>)(firstEvent);
     expect(harness.sendCommand).toHaveBeenCalledOnce();
     expect(harness.setBusySubmitError).toHaveBeenLastCalledWith(
-      "Message sent, but the draft could not be cleared. Clear or edit it before submitting again.",
+      "Message queued, but the draft could not be cleared. Clear or edit it before submitting again.",
     );
 
     const retryEvent = submitEvent();
@@ -447,20 +456,22 @@ describe("thread Composer busy-send wiring", () => {
     expect(retryEvent.preventDefault).toHaveBeenCalledOnce();
     expect(harness.sendCommand).toHaveBeenCalledOnce();
     expect(harness.setBusySubmitError).toHaveBeenLastCalledWith(
-      "This draft was already sent. Clear or edit it before submitting again.",
+      "This draft was already queued. Clear or edit it before submitting again.",
     );
   });
 
   it("clears a transient busy-send error at idle and lets the ordinary submit proceed", async () => {
     const attachment = await pendingPng();
     const harness = setupComposer({ text: "retry when idle", attachments: [attachment] });
-    harness.sendCommand.mockRejectedValueOnce(new Error("transport failed"));
+    harness.sendCommand.mockImplementationOnce(() => {
+      throw new Error("queue handoff failed");
+    });
 
     await (harness.form.props.onSubmit as (event: SubmitEvent) => Promise<void>)(
       submitEvent(),
     );
     expect(harness.getBusySubmitError()).toBe(
-      "Could not send this message. Your draft is still here; try sending again.",
+      "Could not confirm this message was queued. Your draft is still here; check the conversation before retrying.",
     );
 
     const idleComposer = harness.render(false);
@@ -478,16 +489,16 @@ describe("thread Composer busy-send wiring", () => {
     });
   });
 
-  it("keeps the sent-but-not-cleared warning after the turn becomes idle", async () => {
+  it("keeps the queued-but-not-cleared warning after the turn becomes idle", async () => {
     const attachment = await pendingPng();
-    const harness = setupComposer({ text: "sent but retained", attachments: [attachment] });
+    const harness = setupComposer({ text: "queued but retained", attachments: [attachment] });
     harness.resetComposer.mockRejectedValueOnce(new Error("reset failed"));
 
     await (harness.form.props.onSubmit as (event: SubmitEvent) => Promise<void>)(
       submitEvent(),
     );
     const resetWarning =
-      "Message sent, but the draft could not be cleared. Clear or edit it before submitting again.";
+      "Message queued, but the draft could not be cleared. Clear or edit it before submitting again.";
     expect(harness.getBusySubmitError()).toBe(resetWarning);
 
     const idleComposer = harness.render(false);
@@ -500,7 +511,7 @@ describe("thread Composer busy-send wiring", () => {
     expect(idleEvent.preventDefault).toHaveBeenCalledOnce();
     expect(harness.sendCommand).toHaveBeenCalledOnce();
     expect(harness.getBusySubmitError()).toBe(
-      "This draft was already sent. Clear or edit it before submitting again.",
+      "This draft was already queued. Clear or edit it before submitting again.",
     );
   });
 
