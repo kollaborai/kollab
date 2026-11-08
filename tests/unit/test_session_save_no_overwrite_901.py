@@ -64,3 +64,46 @@ def test_failed_install_never_exposes_a_partial_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr("kollabor_ai.conversation_manager.os.link", fail_link)
     assert not writer.save_session("new")
     assert not (tmp_path / "new.jsonl").exists()
+
+
+def test_append_during_new_save_survives_after_atomic_install(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    import threading
+
+    from kollabor_ai.conversation_logger import KollaborConversationLogger
+
+    writer = manager(tmp_path)
+    writer.add_message("user", "base synthetic")
+    logger = KollaborConversationLogger(tmp_path)
+    logger.session_id = "same"
+    logger.session_file = tmp_path / "same.jsonl"
+    entered = threading.Event()
+    release = threading.Event()
+    append_started = threading.Event()
+    original_link = os.link
+
+    def blocked_link(source, destination):
+        entered.set()
+        assert release.wait(5)
+        return original_link(source, destination)
+
+    monkeypatch.setattr("kollabor_ai.conversation_manager.os.link", blocked_link)
+
+    def append():
+        append_started.set()
+        asyncio.run(logger._append_to_jsonl({"type": "user", "message": {"role": "user", "content": "tail synthetic"}}))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        saved = pool.submit(writer.save_session, "same")
+        assert entered.wait(5)
+        appended = pool.submit(append)
+        assert append_started.wait(5)
+        release.set()
+        assert saved.result(timeout=5)
+        appended.result(timeout=5)
+
+    rows = [json.loads(line) for line in (tmp_path / "same.jsonl").read_text().splitlines()]
+    assert rows[0]["messages"][0]["content"] == "base synthetic"
+    assert rows[1]["message"]["content"] == "tail synthetic"
+    assert len(rows) == 2
