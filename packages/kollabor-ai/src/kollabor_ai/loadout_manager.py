@@ -348,9 +348,8 @@ class LoadoutManager:
         none: no level is guessed. One endpoint's catalog says nothing about
         another's. An ACP harness offers the models its sessions last reported
         (``acp_options[profile name]``), each at the levels it reported for that
-        model, and a model it has not run yet at the levels it reported for its
-        last one, never a login's or the registry's, which it may not use (a
-        level it refuses puts the model back: model-choice.ts). It keeps its own
+        model. An unobserved model has no advertised effort choices; another
+        model's capabilities do not prove what it supports. It keeps its own
         default, so it gets a blank row only when it reports no levels. Saved
         loadouts are not rows: one saves to its provider profile, which every
         session on it shares, and a pick changes one session.
@@ -372,9 +371,8 @@ class LoadoutManager:
             if provider == "acp":
                 reported = (acp_options or {}).get(profile.name) or {}
                 seen = reported.get("efforts_by_model") or {}
-                last = [str(e) for e in reported.get("efforts") or []]
                 models = [str(m) for m in reported.get("models") or []] or [""]
-                levels = {m: [str(e) for e in seen[m]] if m in seen else last for m in models}
+                levels = {m: [str(e) for e in seen.get(m, [])] for m in models}
             else:
                 own = [profile.get_model()] if profile.get_model() else []
                 models = list(dict.fromkeys(own + self.models_for_profile(profile)))

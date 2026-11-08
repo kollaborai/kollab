@@ -107,11 +107,11 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   row with none, and a session on such a provider shows none, whatever was
   saved. Whichever screen set a level, a level the model doesn't take is never
   sent.
-- An ACP harness offers the models its sessions last reported
-  (`~/.kollab/acp/options.json`), each at the levels the harness reported for
-  it. A model it hasn't run yet gets the levels the harness reported for its
-  last model (Claude Code's include its own `default`), never a login's or the
-  registry's: the harness may not use either. The agent takes a pick's model
+- An ACP harness offers the models discovery reported for it, each at the
+  levels the harness reported for that model. A model not successfully probed
+  has no named effort choices until that model
+  reports them; another model's levels, a login's catalog and the registry do
+  not establish the harness's capabilities. The agent takes a pick's model
   and level as one change, one change at a time, and a level the harness
   refuses puts its model and level back: a pick never half-applies or mixes
   with one made in another window. A pick names its profile, and the agent
@@ -123,8 +123,12 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   window stays. A harness that has reported no model shows its
   profile's name, never the profile's saved model. A model with no
   levels gets one row
-  that keeps the harness's level. A harness never started offers only its
-  default; its models appear after its first session (#557).
+  that keeps the harness's level. For a configured harness, opening the picker
+  discovers its model and effort options in a separate short-lived session.
+  Discovery sends no prompt and does not pass the user's configured MCP servers.
+  It can still create an empty session in the provider's history or refresh the
+  harness's credentials. If discovery is incomplete, the picker says so and
+  offers Retry; model-only choices never claim an unobserved effort.
 - Opening the list fetches any provider catalog older than an hour (up to
   8 s), so an endpoint's models show without opening Settings → Loadouts first.
   A ChatGPT login's list is kept only when the tokens it was fetched with are

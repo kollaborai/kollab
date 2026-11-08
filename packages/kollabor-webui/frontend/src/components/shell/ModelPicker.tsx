@@ -55,6 +55,8 @@ export function ModelPicker({
   const [active, setActive] = useState(0);
   const [loaded, setLoaded] = useState<ModelChoice[] | null>(null);
   const [failed, setFailed] = useState(false);
+  const [incomplete, setIncomplete] = useState<string[]>([]);
+  const [discovering, setDiscovering] = useState<string[]>([]);
   const [attempt, setAttempt] = useState(0); // Retry asks again
   const list = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
@@ -63,14 +65,44 @@ export function ModelPicker({
   useEffect(() => {
     if (!open) return;
     let live = true;
-    api.listModelChoices().then(
-      (result) => live && setLoaded(result.choices),
-      () => live && setFailed(true), // the profile rows stay, and the picker says the full list did not load
-    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let batches = 0;
+    let pending: string[] = [];
+    const load = async () => {
+      try {
+        const result = await api.listModelChoices();
+        if (!live) return;
+        setLoaded(result.choices);
+        setFailed(false);
+        const statuses = Object.entries(result.discovery ?? {});
+        const advancing = statuses.filter(([, info]) => info.more).map(([name]) => name);
+        const stalled = statuses.filter(([, info]) => info.status !== "ready" && !info.more).map(([name]) => name);
+        batches += 1;
+        pending = advancing;
+        if (advancing.length && batches < 16) {
+          setDiscovering(advancing);
+          setIncomplete(stalled);
+          timer = setTimeout(load, 250);
+        } else {
+          setDiscovering([]);
+          setIncomplete([...stalled, ...advancing]);
+        }
+      } catch {
+        if (live) {
+          setDiscovering([]);
+          setIncomplete((current) => [...new Set([...current, ...pending])]);
+          setFailed(true);
+        }
+      }
+    };
+    void load();
     return () => {
       live = false;
+      if (timer) clearTimeout(timer);
       setLoaded(null); // each opening asks again: a list fetched as an earlier login never shows
       setFailed(false);
+      setIncomplete([]);
+      setDiscovering([]);
     };
   }, [open, api, attempt]);
 
@@ -80,7 +112,7 @@ export function ModelPicker({
       profiles.map((profile) => ({
         profile: profile.name,
         provider: profile.provider || "",
-        model: profile.model || "",
+        model: profile.provider === "acp" ? "" : profile.model || "",
         effort: "",
       })),
     [loaded, profiles],
@@ -178,6 +210,22 @@ export function ModelPicker({
                 Retry
               </Button>
             ) : null}
+          </p>
+        ) : null}
+        {loaded !== null && discovering.length > 0 ? (
+          <p role="status" className="text-muted-foreground min-h-8 px-3 py-2 text-xs">
+            Loading more model options: {discovering.join(", ")}…
+          </p>
+        ) : null}
+        {loaded !== null && incomplete.length > 0 ? (
+          <p role="status" className="text-muted-foreground flex min-h-8 items-center gap-2 px-3 text-xs">
+            Some model options did not load: {incomplete.join(", ")}.
+            <Button type="button" variant="ghost" size="xs" onClick={() => {
+              setAttempt((count) => count + 1);
+              search.current?.focus();
+            }}>
+              Retry
+            </Button>
           </p>
         ) : null}
         <div ref={list} id={listId} role="listbox" aria-label="Models" className="max-h-72 overflow-y-auto p-1">

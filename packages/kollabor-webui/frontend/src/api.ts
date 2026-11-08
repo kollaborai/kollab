@@ -1386,7 +1386,10 @@ export class EngineApi {
   }
 
   listModelChoices() {
-    return this.json<{ choices: ModelChoice[] }>("/profiles/choices");
+    return this.json<{
+      choices: ModelChoice[];
+      discovery?: Record<string, { status: "ready" | "partial" | "unavailable"; message?: string; more?: boolean }>;
+    }>("/profiles/choices");
   }
 
   listProfiles() {

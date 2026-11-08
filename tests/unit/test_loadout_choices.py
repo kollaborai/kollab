@@ -109,10 +109,10 @@ def test_saved_loadouts_are_not_rows(monkeypatch):
     assert all("loadout" not in r for r in manager.list_choices())
 
 
-def test_an_acp_harness_offers_each_model_its_own_levels_else_its_last_ones(monkeypatch):
-    # Sodalite on #553 round 2: picking beta at a level only alpha took left the
-    # harness on beta; a refused level now puts the model back (model-choice.ts).
-    # Aragonite on round 5: a login's catalog says nothing about the harness's login.
+def test_an_acp_harness_offers_only_efforts_observed_for_each_model(monkeypatch):
+    # F4: never reuse one harness model's efforts for another unobserved model.
+    # An observed model's effort list says nothing about another model,
+    # even when that other model appears in the same harness's model list.
     manager = _manager(_Profile("codex-cli", "acp", command=("codex-acp",)),
                        _Profile("claude-code", "acp", command=("claude-agent-acp",)),
                        _Profile("openai-oauth", "openai_responses", "gpt-6-luna"))
@@ -126,11 +126,11 @@ def test_an_acp_harness_offers_each_model_its_own_levels_else_its_last_ones(monk
     }
     levels = _levels(manager.list_choices(reported))
     assert levels[("codex-cli", "alpha")] == ["low", "ultra"]  # what it reported for alpha
-    assert levels[("codex-cli", "beta")] == ["low", "max"]  # not run yet: its last model's
+    assert levels[("codex-cli", "beta")] == [""]  # unobserved: another model does not establish capability
     assert levels[("codex-cli", "gamma")] == [""]  # ran with no effort option
-    assert levels[("codex-cli", "gpt-6-luna")] == ["low", "max"]  # "codex luna max", from the harness
-    # "claude code opus max"; Claude Code's own default is one of its levels.
-    assert levels[("claude-code", "opus")] == levels[("claude-code", "claude-opus-4-6")] == ["default", "low", "max"]
+    assert levels[("codex-cli", "gpt-6-luna")] == [""]  # no effort metadata for this model
+    # A harness-level list without model-specific evidence cannot supply levels.
+    assert levels[("claude-code", "opus")] == levels[("claude-code", "claude-opus-4-6")] == [""]
     # Never started: only its own default, until a session reports its options.
     fresh = _manager(_Profile("pi", "acp"))
     monkeypatch.setattr(fresh, "_cached_catalog", lambda p, **_: [])
@@ -207,6 +207,7 @@ def test_harnesses_that_report_at_once_keep_every_entry():
 
 
 def test_a_level_the_model_does_not_take_is_never_sent(monkeypatch):
+    # F1: unsupported Anthropic model/effort combinations must not reach requests.
     # Sodalite on #553 round 2: a blank row on llama-4-scout kept the earlier
     # pick's effort, and the request still carried reasoning_effort=high.
     from kollabor_ai.profile_manager import LLMProfile
@@ -267,9 +268,10 @@ async def test_the_picker_fetches_a_cold_catalog(monkeypatch):
 
     monkeypatch.setattr(LoadoutManager, "refresh_catalogs", refresh)
     monkeypatch.setattr(LoadoutManager, "list_choices", list_choices)
+    monkeypatch.setattr(LoadoutManager, "provider_profiles", lambda self: [])
     monkeypatch.setattr(profiles, "_get_profile_manager", lambda: SimpleNamespace(config=None))
     monkeypatch.setattr(kollabor_config, "ConfigService", lambda *a, **k: _Config({}))
-    assert await profiles.list_choices() == {"choices": [{"profile": "local"}]}
+    assert await profiles.list_choices() == {"choices": [{"profile": "local"}], "discovery": {}}
     assert calls == ["refresh", "list"]
 
 
@@ -310,6 +312,7 @@ async def test_an_acp_session_reports_the_harness_effort(monkeypatch):
 
 
 def test_the_picker_offers_only_levels_its_request_carries(monkeypatch):
+    # F3: an unknown endpoint gets no guessed level; picker and request agree.
     # Aragonite on #553 round 5: a catalog listed gpt-4.1 at high, which its request
     # then dropped, and a custom endpoint's unknown model got guessed levels.
     from kollabor_ai.profile_manager import LLMProfile, accepted_efforts
@@ -329,6 +332,7 @@ def test_the_picker_offers_only_levels_its_request_carries(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_each_chatgpt_login_lists_its_own_models(monkeypatch):
+    # F2: each OAuth profile must fetch the catalog for its own login.
     # Aragonite on #553 round 5: every OAuth profile's catalog was fetched with
     # the default login, so a second account listed the first one's models.
     import kollabor_ai.oauth as oauth
@@ -356,6 +360,7 @@ async def test_each_chatgpt_login_lists_its_own_models(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_switching_to_a_harness_answers_with_its_own_model_and_effort(monkeypatch):
+    # F5: activation must return the live harness snapshot.
     # Aragonite on #553 round 5: the switch answered with the profile's saved model
     # and no effort, and the session mirrored that until the next read.
     from kollabor.state.local import LocalStateService
@@ -397,6 +402,8 @@ def test_a_catalog_that_lists_no_levels_means_none_and_no_row_offers_one_a_reque
 
 @pytest.mark.asyncio
 async def test_a_default_pick_reaches_the_daemon_as_a_reset():
+    # F6: native default resets the prior effort; frontend model-choice tests
+    # separately verify ACP rows do not claim an unsettable default.
     # Kunzite on #553 round 4: the client dropped an empty effort, and so did the
     # daemon's handler, so a pick of the default kept the earlier level.
     from kollabor.state.handlers import register_state_handlers
