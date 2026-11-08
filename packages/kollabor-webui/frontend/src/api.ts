@@ -230,6 +230,17 @@ export type Profile = {
   supports_vision?: boolean;
 };
 
+/** One provider profile x model x effort a session can run on (`GET /profiles/choices`). */
+export type ModelChoice = {
+  profile: string;
+  /** The profile's provider; "acp" is a harness (Codex CLI, Claude Code) that owns its model and effort. */
+  provider: string;
+  /** Empty: the profile's or harness's own model. */
+  model: string;
+  /** Empty: none sent, so the model's (or harness's current) effort applies. */
+  effort: string;
+};
+
 export type ProfileWrite = {
   name: string;
   provider?: string;
@@ -1372,6 +1383,13 @@ export class EngineApi {
       `/sessions/${encodeURIComponent(sessionId)}/cancel-owned`,
       { method: "POST", body: JSON.stringify({ request_id: requestId }) },
     );
+  }
+
+  listModelChoices() {
+    return this.json<{
+      choices: ModelChoice[];
+      discovery?: Record<string, { status: "ready" | "partial" | "unavailable"; message?: string; more?: boolean }>;
+    }>("/profiles/choices");
   }
 
   listProfiles() {

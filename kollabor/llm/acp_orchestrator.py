@@ -227,15 +227,30 @@ class ACPOrchestrator:
     def advertised_config_options(self) -> list[dict[str, Any]]:
         """Return config options advertised by the active ACP session."""
         runner = self._runner
-        if runner is None or self._closed:
+        if runner is None or self._closed or runner is getattr(self, "_unknown_config_runner", None):
             return []
         return runner.advertised_config_options()
+
+    @property
+    def config_outcome_unknown(self) -> bool:
+        runner = self._runner
+        return runner is not None and runner is getattr(self, "_unknown_config_runner", None)
+
+    def quarantine_config_options(self) -> None:
+        """A lost response leaves the current runner's configuration unknown.
+
+        Late notifications cannot clear this guard. A replacement runner from an
+        explicit session restart is the next source of authoritative options.
+        """
+        self._unknown_config_runner = self._runner
 
     async def set_config_option(
         self, config_id: str, value: str | bool, *, persist: bool = True,
     ) -> list[dict[str, Any]]:
         """Set a confirmed ACP option, optionally for this daemon only."""
         runner = self._runner
+        if runner is not None and runner is getattr(self, "_unknown_config_runner", None):
+            raise ACPError("ACP configuration is unknown; restart the harness session")
         if (runner is None or self._closed or getattr(self, "_starting", False)
                 or (self.transitioning and not self.transition_owned_by_current_task)):
             raise ACPError("ACP session is not active")
