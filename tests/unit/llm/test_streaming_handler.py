@@ -114,6 +114,31 @@ class TestStreamingHandler(unittest.TestCase):
         )
         self.api_service.call_llm.assert_called_once()
 
+    @patch("kollabor.llm.streaming_handler.asyncio.wait_for")
+    def test_call_llm_timeout_still_sends_preloaded_native_tools(self, mock_wait):
+        """A slow discovery must not remove built-ins from the first request."""
+        mcp_complete = asyncio.Event()
+        builtin_tools = [{"name": "file_read"}]
+
+        async def _wait_and_timeout(awaitable, timeout):
+            awaitable.close()
+            raise asyncio.TimeoutError
+
+        mock_wait.side_effect = _wait_and_timeout
+
+        self.loop.run_until_complete(
+            self.handler.call_llm(
+                conversation_history=[],
+                native_tools=builtin_tools,
+                mcp_discovery_complete=mcp_complete,
+                is_cancelled_fn=lambda: False,
+            )
+        )
+
+        self.assertEqual(
+            self.api_service.call_llm.call_args.kwargs["tools"], builtin_tools
+        )
+
     def test_call_llm_forwards_provider_options(self):
         """Provider-native options survive the streaming-handler boundary."""
         mcp_complete = asyncio.Event()

@@ -242,7 +242,8 @@ external discovery and schemas while retaining permitted built-in tools, includi
 file and Hub tools. An external discovery error also leaves built-in loading
 available. Built-in schemas are loaded before background discovery begins, so a
 slow server does not leave the first request without them; discovered MCP schemas
-are added after discovery finishes. The active agent's tool scope, `kollabor.llm.native_tool_calling`, and
+are added after discovery finishes. The active agent's tool scope,
+`kollabor.llm.native_tool_calling`, and
 the active profile's tool support still apply. Exposing a schema does not bypass
 the workspace's tool permission policy.
 
