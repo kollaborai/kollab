@@ -14628,7 +14628,7 @@ class HubPlugin(BasePlugin):
         else:
             # MODE 2: spawning by agent_type (e.g. "coder")
             # Find next available gem from pool with matching agent_type
-            effective_agent_type = agent_name
+            effective_agent_type = agent_type_override or agent_name
             resolved_identity = ""
 
             # Get online identities to exclude
