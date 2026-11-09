@@ -1015,6 +1015,25 @@ class RemoteStateService(StateService):
         )
         return _panel_answer(result, "result")
 
+    # A git call on a large repository can take a while; every terminal call is quick.
+    CODE_CALL_TIMEOUT: float = 40.0
+
+    async def code_call(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = await self._rpc.call(
+            "state.code_call",
+            {"op": op, "params": params},
+            timeout=max(self._timeout, self.CODE_CALL_TIMEOUT),
+        )
+        answer = result.get("answer") if isinstance(result, dict) else None
+        if (
+            not isinstance(answer, dict)
+            or not isinstance(answer.get("status"), int)
+            or not isinstance(answer.get("body"), dict)
+        ):
+            # A daemon that outlived an update answers in a shape this engine does not know (compare #955).
+            raise ValueError("daemon code call failed")
+        return answer
+
     async def hub_connect(self, command: str) -> str:
         result = await self._rpc.call(
             "state.hub_connect", {"command": command}, timeout=max(self._timeout, 50.0)

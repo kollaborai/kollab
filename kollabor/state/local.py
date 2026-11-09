@@ -1344,6 +1344,12 @@ class LocalStateService(StateService):
 
         return await require_panel(name).act(self, action, payload or {})
 
+    async def code_call(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Files, git and the terminal of this daemon's folder (``kollabor.code_service``)."""
+        from kollabor import code_service
+
+        return await code_service.call(op, params)
+
     async def open_generated_artifact(self, media_id: str) -> bool:
         """Open a generated image through the daemon-owned API service."""
         api_service = getattr(self._llm_service, "api_service", None)

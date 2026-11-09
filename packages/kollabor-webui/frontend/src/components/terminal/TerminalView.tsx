@@ -10,6 +10,8 @@ import { cn } from "@/lib/utils";
 
 /** Terminal view: one tab per terminal session, and each tab owns one ws connection. */
 export interface TerminalViewProps {
+  /** The session whose daemon runs the shells: a session opened from another computer gets that computer's shell. */
+  sessionId: string;
   workspace: string;
 }
 
@@ -21,6 +23,7 @@ interface TerminalTabState {
 
 interface TerminalTabProps {
   id: number;
+  sessionId: string;
   workspace: string;
   active: boolean;
   onStatus: (id: number, status: TerminalWsStatus) => void;
@@ -34,8 +37,8 @@ interface TerminalTabProps {
  * disconnects: the shell keeps running on the server until the user closes the tab with its X.
  * Inactive tabs stay mounted so their sessions keep streaming while another tab is shown.
  */
-function TerminalTab({ id, workspace, active, onStatus, onRegister, onRetry }: TerminalTabProps) {
-  const connection = useTerminalWsConnection({ workspace });
+function TerminalTab({ id, sessionId, workspace, active, onStatus, onRegister, onRetry }: TerminalTabProps) {
+  const connection = useTerminalWsConnection({ sessionId, workspace });
   const { status, errorMessage, close } = connection;
 
   useEffect(() => {
@@ -74,7 +77,7 @@ function TerminalTab({ id, workspace, active, onStatus, onRegister, onRetry }: T
   );
 }
 
-export function TerminalView({ workspace }: TerminalViewProps) {
+export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
   const [tabs, setTabs] = useState<TerminalTabState[]>(() => [{ id: 1, generation: 0 }]);
   const [activeId, setActiveId] = useState(1);
   const [statuses, setStatuses] = useState<Partial<Record<number, TerminalWsStatus>>>({});
@@ -216,6 +219,7 @@ export function TerminalView({ workspace }: TerminalViewProps) {
             <TerminalTab
               key={`${tab.id}:${tab.generation}`}
               id={tab.id}
+              sessionId={sessionId}
               workspace={workspace}
               active={tab.id === activeId}
               onStatus={reportStatus}

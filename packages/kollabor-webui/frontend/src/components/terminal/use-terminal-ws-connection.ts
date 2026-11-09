@@ -36,7 +36,9 @@ export interface TerminalWsConnection extends TerminalWsState {
 }
 
 export interface UseTerminalWsConnectionOptions {
-  /** Folder the shell opens in (the active chat's workspace). Changing it starts a new session. */
+  /** The engine session whose daemon runs the shell; it opens in that daemon's folder. Changing it starts a new shell. */
+  sessionId: string;
+  /** Folder of that session. Only a change of folder starts a new shell; the daemon does not read it. */
   workspace: string;
   /** Size for the first `open`. Later sizes go through `resize`. */
   cols?: number;
@@ -46,7 +48,8 @@ export interface UseTerminalWsConnectionOptions {
 }
 
 export interface TerminalWsClientOptions {
-  workspace: string;
+  /** The engine session whose daemon runs the shell. */
+  engineSessionId: string;
   cols: number;
   rows: number;
   onState: (state: TerminalWsState) => void;
@@ -112,7 +115,7 @@ function parseServerMessage(raw: string): ServerMessage | null {
  * A dropped socket reconnects with the session it had; a refused open or a rejected token does not.
  */
 export function createTerminalWsClient(options: TerminalWsClientOptions): TerminalWsClient {
-  const { workspace, onState, onOutput, onExit } = options;
+  const { engineSessionId, onState, onOutput, onExit } = options;
   let size = { cols: options.cols, rows: options.rows };
   let socket: WebSocket | null = null;
   let ready = false;
@@ -149,7 +152,7 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
   }
 
   async function connect(): Promise<void> {
-    const endpoint = await Promise.all([codeTerminalUrl(), codeToken()]).catch(() => null);
+    const endpoint = await Promise.all([codeTerminalUrl(engineSessionId), codeToken()]).catch(() => null);
     if (ended) return;
     if (!endpoint) {
       scheduleReconnect();
@@ -172,7 +175,6 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
       ws.send(
         JSON.stringify({
           type: "open",
-          workspace,
           ...size,
           ...(sessionId ? { sessionId } : {}),
         }),
@@ -268,6 +270,7 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
 }
 
 export function useTerminalWsConnection({
+  sessionId: engineSessionId,
   workspace,
   cols = DEFAULT_COLS,
   rows = DEFAULT_ROWS,
@@ -289,7 +292,7 @@ export function useTerminalWsConnection({
     if (!enabled) return undefined;
     // A new workspace or a re-enable always starts a brand-new session; nothing is resumed.
     const client = createTerminalWsClient({
-      workspace,
+      engineSessionId,
       cols: sizeRef.current.cols,
       rows: sizeRef.current.rows,
       onState: setState,
@@ -305,7 +308,7 @@ export function useTerminalWsConnection({
       if (clientRef.current === client) clientRef.current = null;
       client.dispose();
     };
-  }, [enabled, workspace, outputListeners, exitListeners]);
+  }, [enabled, engineSessionId, workspace, outputListeners, exitListeners]);
 
   const send = useCallback((msg: TerminalInputMessage) => {
     clientRef.current?.send(msg);

@@ -3814,6 +3814,14 @@ class TerminalLLMChat:
                 logger.debug(f"widget state refresher stop error: {e}")
             self._widget_state_refresher = None
 
+        # End the code editor's terminal shells (kollabor.code_service); a no-op when none was opened
+        try:
+            from kollabor import code_service
+
+            await code_service.shutdown()
+        except Exception as e:
+            logger.debug(f"code service shutdown error: {e}")
+
         # Close attach proxy socket if active
         if hasattr(self, "_attach_writer") and self._attach_writer:
             try:

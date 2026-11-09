@@ -24,8 +24,6 @@ FOLDER_ROUTES = [
     ("/rosters", "workspace"),
     ("/teams", "workspace"),
     ("/workspaces/browse", "path"),
-    ("/code/fs/tree", "workspace"),
-    ("/code/git", "workspace"),
 ]
 ROUTE_IDS = [url for url, _ in FOLDER_ROUTES]
 

@@ -3,6 +3,7 @@ import { Files, Filter, PanelLeft, Search, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { openWorkspaceFile, readFileContent, fileNameOf, extensionOf } from "@/components/code/open-file";
 import { claimEditorWorkspace } from "@/components/code/workspace-tabs";
+import { setCodeSession } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { GitPanel } from "@/components/code/git/GitPanel";
 import { openWorkspaceDiff } from "@/components/code/open-file";
@@ -15,6 +16,10 @@ import { SearchPanel } from "@/components/code/search-panel";
 import { SplitContainer } from "@/components/code/split-container";
 
 export interface CodeEditorViewProps {
+  /** The session whose daemon serves the files and git: a session opened from another computer shows that computer's. */
+  sessionId: string;
+  /** The session's device ("" for this computer). Tabs opened on another device are dropped like tabs from another folder. */
+  device?: string;
   workspace: string;
   /** "code" shows files, search and settings in the sidebar; "git" shows the git panel there. Same editor panes either way. */
   mode?: "code" | "git";
@@ -53,7 +58,9 @@ function SidebarToggle({
 }
 
 /** The Code Editor view for one chat folder, docked in the chat column: file sidebar, split editor panes, quick open. */
-export function CodeEditorView({ workspace, mode = "code" }: CodeEditorViewProps) {
+export function CodeEditorView({ sessionId, device = "", workspace, mode = "code" }: CodeEditorViewProps) {
+  // Set while rendering, so it is in place before any child effect fetches (see lib/code-fetch.ts).
+  setCodeSession(sessionId);
   const sidebarView = useEditorStore((s) => s.sidebarView);
   const setSidebarView = useEditorStore((s) => s.setSidebarView);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -80,8 +87,8 @@ export function CodeEditorView({ workspace, mode = "code" }: CodeEditorViewProps
 
   // tabs opened in another folder are dropped, except those with unsaved edits; the folder reaches each sibling as the `workspace` prop
   useEffect(() => {
-    claimEditorWorkspace(workspace);
-  }, [workspace]);
+    claimEditorWorkspace(device ? `${device}:${workspace}` : workspace);
+  }, [device, workspace]);
 
   // Tabs come back from storage as paths only. Read each one that has no text yet; a file that cannot be read
   // closes its tab, since an empty tab saved over the file would erase it. Runs after the folder check above.

@@ -6,7 +6,7 @@ import {
 } from "../src/components/terminal/use-terminal-ws-connection";
 
 vi.mock("@/lib/code-fetch", () => ({
-  codeTerminalUrl: async () => "ws://engine.test/code/terminal",
+  codeTerminalUrl: async (sessionId: string) => `ws://engine.test/sessions/${sessionId}/code/terminal`,
   codeToken: async () => "token-123",
 }));
 
@@ -74,7 +74,7 @@ function start() {
   const states: TerminalWsState[] = [];
   const outputs: string[] = [];
   const client = createTerminalWsClient({
-    workspace: "/work/app",
+    engineSessionId: "sess-a",
     cols: 80,
     rows: 24,
     onState: (state) => states.push(state),
@@ -103,12 +103,12 @@ test("auth is the first message and open is the second", async () => {
   start();
   await settle();
   const socket = lastSocket();
-  expect(socket.url).toBe("ws://engine.test/code/terminal");
+  expect(socket.url).toBe("ws://engine.test/sessions/sess-a/code/terminal");
   expect(socket.sent).toEqual([]);
   socket.serverOpen();
   expect(socket.sent.map((raw) => JSON.parse(raw) as unknown)).toEqual([
     { type: "auth", token: "token-123" },
-    { type: "open", workspace: "/work/app", cols: 80, rows: 24 },
+    { type: "open", cols: 80, rows: 24 },
   ]);
 });
 

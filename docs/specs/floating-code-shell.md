@@ -1,59 +1,79 @@
 # Code editor, git panel and terminal views (web UI)
 
-Ported from mentiko (`~/dev/platform/mentiko/web`, Next.js). Two views in the chat column, opened from the session panel's "Session view" group beside Chat and Trajectory
-(`SessionView` in `SessionPanel.tsx`, held by `App.tsx`). They work in the active chat's folder (`Session.workspace`)
-and only show for a chat that has one. The file name keeps "floating" because the engine routes cite it:
+Ported from mentiko (`~/dev/platform/mentiko/web`, Next.js). Three views in the chat column, opened from the session
+panel's "Session view" group beside Chat and Trajectory (`SessionView` in `SessionPanel.tsx`, held by `App.tsx`).
+They only show for a chat that has a folder. The file name keeps "floating" because earlier docs cite it.
 
-| surface | root hook | frontend | engine route file |
-|---|---|---|---|
-| code editor (monaco, tabs, splits, file tree, quick open, search) | `CodeEditorView`, `data-code-view` | `src/components/code/` | `routes/code_files.py` |
-| git panel (status, stage, commit, diff, branches, stash, log) | its own Git view (own icon in the session panel): the git panel sits where the file tree is, beside the same editor panes, so diffs and files open on the right | `src/components/code/git/` | `routes/code_git.py` |
-| terminal (xterm over a PTY) | `TerminalView`, `data-terminal-view`, `data-status` | `src/components/terminal/` | `routes/code_terminal.py` |
+## Who serves them: the daemon of the session
 
-Out of scope on purpose (mentiko-only): peer review (`/api/reviews`, `components/git/*review*`), tasks-db
-view, pill nav, terminal replay, peer split view, ssh/docker PTY transports.
+The files, the git repository and the shell belong to the daemon of the session you are viewing, never to the
+engine. A session opened from another computer (`agent@device`, over the existing device channel) therefore shows
+that computer's files, that computer's git and that computer's shell, the same ones its user gets.
 
-## Shared pieces (already written, do not change)
+```
+browser  ->  engine  /sessions/{id}/code/*   ->  session.state.code_call(op, params)  ->  daemon: kollabor/code_service/
+              (auth, body cap, envelope)            LocalStateService | RemoteStateService          (files, git, PTY shell)
+```
 
-- `src/lib/code-fetch.ts`: `codeFetch(url, init)`, `unwrapCodeData(payload)`, `codeTerminalUrl()`, `codeToken()`.
-  `codeFetch` maps mentiko URLs to the engine: `/api/fs/<x>` -> `/code/fs/<x>`, `/api/git` -> `/code/git`.
-  A ported component changes only `fetch(` to `codeFetch(` and keeps its URL strings.
-- `kollabor_engine/server.py` already includes the three routers; each lane fills in its own stub file.
+- Engine: `routes/code.py` only authenticates, caps bodies and passes the call on. It reads no folder from a request
+  and the engine folder rule (`folder_or_400`) does not apply: it guards folders the engine itself opens.
+- Daemon: `kollabor/code_service/` (`files.py`, `git.py`, `terminal.py`, one `call(op, params)` entry). The folder is
+  the daemon's own working directory (realpath). A `workspace` field in a request is ignored. Every file path is
+  resolved and must sit inside that folder (closed-prefix check, symlinks followed; anything else is 403).
+- RPC: `state.code_call` (`kollabor/state/handlers.py`), answered like every other state call, local or remote.
+- A daemon older than this change answers `RpcMethodNotFound`; the engine turns that into 502 `daemon_unreachable`
+  (never exception text). Restart the agent to pick up the code.
+
+| surface | frontend | daemon op |
+|---|---|---|
+| code editor (monaco, tabs, splits, file tree, quick open, search) | `src/components/code/` | `fs.*` |
+| git panel (status, stage, commit, diff, branches, stash, log) | `src/components/code/git/` (own Git view: the panel sits where the file tree is, beside the same editor panes) | `git` |
+| terminal (xterm over a PTY) | `src/components/terminal/` | `terminal.message`, `terminal.poll`, `terminal.detach` |
+
+Out of scope on purpose (mentiko-only): peer review (`/api/reviews`), tasks-db view, pill nav, terminal replay, peer
+split view, ssh/docker PTY transports.
 
 ## Wire contract
 
-Mentiko's request and response shapes are kept, so mentiko's callers port unchanged. Source of truth for
-each shape is the mentiko route file named in the lane brief.
+Mentiko's request and response shapes are kept, so its callers port unchanged.
 
-- Every route takes the folder as `workspace` (query for GET, JSON body for POST/PUT/DELETE) and passes it
-  through `folder_or_400` (`workspace_folder.py`) first. Every file path in a request is then resolved
-  (`os.path.realpath`) and must sit inside that resolved workspace, using the closed-prefix check
-  (`os.path.join(root, "")` + `startswith`), symlinks followed; anything else is 403. See memory note
-  "CodeQL path-injection idiom": the check must be written inline in the route, not in a helper.
-- Success: HTTP 200 `{"success": true, "data": <payload>}`.
-- Failure: non-2xx and `{"success": false, "error": {"code": "<snake_case>", "message": "<one sentence>"}}`
-  (use `JSONResponse`, not `HTTPException`, so the envelope survives).
-- HTTP routes sit behind the engine's bearer-token middleware. WebSockets do not: the terminal route
-  authenticates itself (see the terminal lane).
+- Routes, all under `/sessions/{session_id}/code`: GET `/fs/tree`, GET and PUT `/fs/file`, POST `/fs/create|mkdir|rename`,
+  DELETE and POST `/fs/delete`, GET `/fs/search`, GET `/fs/git-status`, POST `/git`, GET `/git` (read actions only:
+  `status`, `current_branch`, `list_branches`), WebSocket `/terminal`.
+- Success: HTTP 200 `{"success": true, "data": ...}`. Failure: non-2xx
+  `{"success": false, "error": {"code", "message"}, "detail"}`. Unknown session 404, dead daemon 409, daemon did not
+  answer 502, body over 8 MB 413. Every answer is `Cache-Control: no-store` (it holds file contents).
 - Never log request bodies, file contents or terminal input.
+
+## Terminal
+
+- A PTY login shell in the daemon's folder, as the daemon's user, with `KOLLAB_*` and secret-looking variables removed
+  from its environment. Up to 8 shells and 64 links per daemon. A shell outlives its socket and is reaped 10 minutes
+  after its last link detaches; a reconnecting client resumes it with the `sessionId` from `ready`.
+- The WebSocket is outside the HTTP bearer middleware, so the first message must be `{"type":"auth","token"}` within
+  5 s, else close 4401. Other closes: 4404 no such session, 1011 the daemon stopped answering.
+- The engine bridges the socket to the daemon: each client message goes in as `terminal.message`; output comes back by
+  short polls (`terminal.poll`, daemon wait at most 0.1 s, acknowledged by sequence so a lost reply is resent). The
+  polls are short on purpose: a daemon answers one connection's requests in order, so a long wait would hold up every
+  keystroke behind it.
+- Security: whoever may attach to a session may read and write its files and run commands as the daemon's user, the
+  same power an attached agent has. For another computer, that device's trust setting (`open`, `agents`, `manual`)
+  decides who may attach; this change adds no new gate.
 
 ## Frontend rules
 
-- Icons: `lucide-react` (already a dependency). Not `@aliimam/icons`.
-- Style: the web UI's tokens and look (`src/styles.css`, "no lines: sections separate by shade", `--highlight`,
-  condensed, no pill chips, no bordered icon buttons). Reuse `src/components/ui/*` (button, dropdown-menu,
-  tooltip, scroll-area, ...). Do not hardcode colors; use CSS variables / Tailwind tokens.
-- Views are plain components `({ workspace })`, lazy-loaded by `App.tsx` the first time they open and then kept
-  mounted (hidden) so open files and shells survive a switch to Chat. They fill the chat column; no window chrome,
-  no geometry in localStorage. Ctrl+` opens the terminal view, and a second press returns to Chat.
-- Monaco: bundle locally, never the CDN. `React.lazy` the editor, and wire workers with Vite `?worker`
-  imports (see the floating-shell skill `references/install.md`, "Vite").
-- No `any` in new code; `npm run typecheck` must pass for your files.
+- Icons: `lucide-react`. Style: the web UI's tokens (`src/styles.css`), condensed, no pill chips, no bordered icon
+  buttons; reuse `src/components/ui/*`; no hardcoded colors.
+- Views take `sessionId` (and `workspace` for labels and tab keys), are lazy-loaded the first time they open, then kept
+  mounted (hidden) so open files and shells survive a switch to Chat. Ctrl+` opens the terminal view, a second press
+  returns to Chat. They are keyed by device and folder: another device's session starts with its own tabs.
+- `src/lib/code-fetch.ts` maps mentiko URLs to the session's routes (`/api/fs/x` -> `/sessions/{id}/code/fs/x`); the
+  open Code Editor view sets the session while it renders. The terminal hook gets the session id explicitly.
+- Monaco is bundled locally (Vite `?worker`), never the CDN. No `any` in new code.
 
-## Verification (every lane)
+## Verification
 
-- Python: `ruff check` clean on your files, `pytest` for your tests (`packages/kollabor-engine/tests/`),
-  add your routes to `FOLDER_ROUTES` in `tests/test_workspace_folder_routes.py` when they take a GET folder.
-- Frontend: `npm run typecheck` (errors in files you do not own are other lanes mid-edit; ignore them),
-  vitest for pure logic (`tests/*.test.ts`).
-- Cross-lane live proof is done by the lead afterwards on the real engine and a browser.
+- Python: `ruff check`, `tests/unit/code_service/` (daemon), `tests/unit/test_code_rpc.py` (RPC),
+  `packages/kollabor-engine/tests/test_code_routes.py` (engine).
+- Frontend: `tsc --noEmit`, vitest (`tests/code-fetch-session.test.ts`, `tests/terminal-ws-protocol.test.ts`), build.
+- Live: an isolated stack, a session on a local daemon, then the same views against a session on another computer.

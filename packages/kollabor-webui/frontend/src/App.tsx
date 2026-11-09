@@ -380,14 +380,23 @@ function RuntimeShell({
             {workspace && visited.editor ? (
               <div className={shown === "code" || shown === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
                 <Suspense fallback={<ViewLoading />}>
-                  <CodeEditorView workspace={workspace} mode={shown === "git" ? "git" : "code"} />
+                  <CodeEditorView
+                    key={`${session.device ?? ""}:${workspace}`}
+                    sessionId={session.session_id}
+                    device={session.device ?? ""}
+                    workspace={workspace}
+                    mode={shown === "git" ? "git" : "code"} />
                 </Suspense>
               </div>
             ) : null}
             {workspace && visited.terminal ? (
               <div className={shown === "terminal" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
                 <Suspense fallback={<ViewLoading />}>
-                  <TerminalView workspace={workspace} />
+                  <TerminalView
+                    key={`${session.device ?? ""}:${workspace}`}
+                    sessionId={session.session_id}
+                    workspace={workspace}
+                  />
                 </Suspense>
               </div>
             ) : null}

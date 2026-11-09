@@ -178,6 +178,7 @@ const mainConfig = defineConfig({
     include: [
       "tests/prompts-page.test.ts",
       "tests/terminal-ws-protocol.test.ts",
+      "tests/code-fetch-session.test.ts",
       "tests/history-cache.test.ts",
       "tests/phone-frame.test.ts",
       "tests/phone-audio.test.ts",
