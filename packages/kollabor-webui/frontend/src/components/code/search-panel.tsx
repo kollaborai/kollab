@@ -21,6 +21,7 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   // Bumped by every search and by a cleared query; a response that is no longer the latest is dropped.
   const searchSeq = useRef(0);
@@ -42,12 +43,16 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
         const url = `/api/fs/search?workspace=${encodeURIComponent(workspace)}&query=${encodeURIComponent(q)}`;
         const res = await codeFetch(url);
         const raw: unknown = await res.json();
-        if (res.ok && seq === searchSeq.current) {
-          const data = unwrapCodeData<{ results?: SearchResult[] }>(raw);
+        const data = unwrapCodeData<{ results?: SearchResult[] }>(raw);
+        if (!res.ok) throw new Error("Search failed");
+        if (seq === searchSeq.current) {
           setResults(data.results ?? []);
         }
-      } catch {
-        if (seq === searchSeq.current) setResults([]);
+      } catch (e) {
+        if (seq === searchSeq.current) {
+          setResults([]);
+          setError(e instanceof Error ? e.message : "Search failed");
+        }
       } finally {
         if (seq === searchSeq.current) setLoading(false);
       }
@@ -57,18 +62,23 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
 
   // debounce search
   useEffect(() => {
+    searchSeq.current += 1;
+    setResults([]);
+    setError(null);
     if (!query || query.length < 2) {
-      searchSeq.current += 1; // a search still in flight is now stale
       setLoading(false);
-      setResults([]);
       return;
     }
 
+    setLoading(true);
     const timer = setTimeout(() => {
       void doSearch(query);
     }, 300);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      searchSeq.current += 1;
+    };
   }, [query, doSearch]);
 
   const handleResultClick = useCallback(
@@ -148,6 +158,8 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
           <div className="px-3 py-4 flex justify-center">
             <Loader2 aria-label="Searching" className="h-4 w-4 animate-spin text-muted-foreground" />
           </div>
+        ) : error ? (
+          <div role="alert" className="px-3 py-4 text-xs text-destructive text-center">{error}</div>
         ) : resultCount === 0 ? (
           <div className="px-3 py-4 text-xs text-muted-foreground text-center">
             no results found
