@@ -172,7 +172,7 @@
   .confirm p { margin-top: 0.5rem; font-size: 0.875rem; color: var(--muted-foreground); }
   .confirm .actions { margin-top: 1.5rem; display: flex; justify-content: flex-end; gap: 0.5rem; }
 
-  /* Schedules, v7: file path, info button, agent list, import format, Learn topic */
+  /* Schedules, v8: file path, info button, agent list, import format, Learn topic */
   .where { margin-top: 0.75rem; font-size: 0.75rem; color: var(--muted-foreground); overflow-wrap: anywhere; }
   .where .mono { color: var(--foreground); }
   .title-row { display: flex; align-items: center; gap: 0.25rem; }
@@ -192,7 +192,7 @@
     padding: 0.5rem; border-radius: calc(var(--radius) - 2px); background: oklch(0.1 0 0 / 0.6);
     font: 0.75rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
   }
-  /* Runs in: a trigger that opens the agent list, one switch per agent */
+  /* Runs in: a trigger that opens the agent list. Each agent is a gray button; white means selected. */
   .runs-trigger {
     width: 100%; min-height: 2.25rem; padding: 0.5rem 0.75rem; border: 0;
     border-radius: calc(var(--radius) - 2px); background: oklch(1 0 0 / 5.4%);
@@ -203,18 +203,22 @@
   .agent-panel { margin-top: 0.5rem; padding: 0.25rem 0 0.5rem; border-radius: calc(var(--radius) - 2px); background: oklch(1 0 0 / 3%); }
   .agent-panel-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.25rem 0.75rem; padding: 0.375rem 0.75rem; font-size: 0.75rem; }
   .agent-panel-actions { display: flex; gap: 0.75rem; }
-  .agent-group { padding: 0.5rem 0.75rem 0.125rem; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.025em; color: var(--muted-foreground); }
-  .agent-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; min-height: 2.5rem; padding: 0.25rem 0.75rem; font-size: 0.875rem; }
-  .agent-name { min-width: 0; overflow-wrap: anywhere; }
-  .agent-name .muted { display: block; font-size: 0.75rem; }
-  .agent-panel-foot { display: flex; justify-content: flex-end; padding: 0.5rem 0.75rem 0; }
-  .switch { position: relative; flex: none; width: 2rem; height: 1.125rem; border-radius: 999px; background: var(--muted); }
-  .switch::after {
-    content: ""; position: absolute; top: 0.125rem; left: 0.125rem; width: 0.875rem; height: 0.875rem;
-    border-radius: 50%; background: var(--foreground);
+  .agent-group { padding: 0.5rem 0.75rem 0; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.025em; color: var(--muted-foreground); }
+  .agent-dir { display: grid; grid-template-columns: 8.5rem 1fr; gap: 0.5rem 0.75rem; align-items: start; padding: 0.375rem 0.75rem 0; }
+  .agent-path { padding-top: 0.4375rem; font-size: 0.75rem; color: var(--muted-foreground); overflow-wrap: anywhere; }
+  .agent-buttons { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+  .agent-btn {
+    min-height: 2rem; padding: 0.375rem 0.625rem; border: 0; cursor: pointer;
+    border-radius: calc(var(--radius) - 4px); background: var(--muted); color: var(--foreground);
+    font: inherit; font-size: 0.8125rem; line-height: 1.25; text-align: left;
   }
-  .switch.on { background: var(--primary); }
-  .switch.on::after { left: calc(100% - 1rem); background: var(--primary-foreground); }
+  .agent-btn:hover { box-shadow: inset 0 0 0 999px oklch(1 0 0 / 6%); }
+  .agent-btn[aria-pressed="true"] { background: var(--primary); color: var(--primary-foreground); }
+  .agent-btn:focus-visible { outline: 2px solid var(--ring, var(--foreground)); outline-offset: 2px; }
+  .agent-btn .muted { font-size: 0.6875rem; color: inherit; opacity: 0.7; margin-left: 0.25rem; }
+  .agent-note { padding: 0.5rem 0.75rem 0; font-size: 0.75rem; color: var(--muted-foreground); }
+  .agent-panel-foot { display: flex; justify-content: flex-end; padding: 0.5rem 0.75rem 0; }
+  @media (max-width: 30rem) { .agent-dir { grid-template-columns: 1fr; } .agent-path { padding-top: 0; } }
   /* Learn topic: the same split as the web Learn page, topics on the left, the topic on the right */
   .learn { position: relative; display: grid; background: var(--background); border-radius: var(--radius); overflow: hidden; font-size: 0.875rem; }
   .learn-close {
@@ -289,8 +293,8 @@
 </head>
 <body>
 <div class="wrap">
-  <p class="note">Mockup for #612 · v7 · sample data · nothing here is built. Planned, not built: the Schedules tab, Enable and Disable, Import file, Generate with agent, /schedules in the TUI, the Skill field, the per-agent folder and loadout, one schedule for many agents, the Learn topic, the schedules file at ~/.kollab/schedules.json, and pausing while a device is off the network.</p>
-  <p class="note">v7: Runs in is a list with one switch per agent. Import shows the file format. TUI import has a file picker (T7). The info button opens the Learn topic (L1). The file path shows on the Schedules tab and in the TUI list.</p>
+  <p class="note">Mockup for #612 · v8 · sample data · nothing here is built. Planned, not built: the Schedules tab, Enable and Disable, Import file, Generate with agent, /schedules in the TUI, the Skill field, the per-agent folder and loadout, one schedule for many agents, the Learn topic, the schedules file at ~/.kollab/schedules.json, and pausing while a device is off the network.</p>
+  <p class="note">v8: Runs in groups agents by machine, then folder. Each agent is a gray button, and white means selected. The TUI agent list (T6) uses the same groups.</p>
   <p class="note">Renamed: Cron Jobs is now Schedules in every UI label. Code names (hub cron, hub_cron_* tools, /hub cron) stay until you say otherwise.</p>
   <p class="index">Web: <a href="#f1">1 list</a> <a href="#f2">2 add</a> <a href="#f2b">2b runs in</a> <a href="#f3">3 edit</a> <a href="#f4">4 delete</a> <a href="#f5">5 after delete</a> <a href="#f6">6 empty</a> <a href="#f7">7 import</a> <a href="#f8">8 generate</a> <a href="#l1">L1 learn</a></p>
   <p class="index">TUI, /schedules: <a href="#t1">T1 list</a> <a href="#t2">T2 delete</a> <a href="#t3">T3 edit</a> <a href="#t4">T4 import</a> <a href="#t5">T5 generate</a> <a href="#t6">T6 agents</a> <a href="#t7">T7 choose file</a></p>
@@ -467,7 +471,7 @@
           <span>koordinator</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
         </button>
-        <p class="help">Each agent switched on gets the prompt when the schedule fires.</p>
+        <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
         <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
       </div>
 
@@ -489,7 +493,7 @@
   </section>
 
   <!-- 2b. ADD, RUNS IN OPEN -->
-  <p class="caption" id="f2b">2b · Add schedule with Runs in open: every agent has its own switch. Two are on, and the trigger names both. Done closes the list.</p>
+  <p class="caption" id="f2b">2b · Add schedule with Runs in open: agents are grouped by machine, then folder. Gray is off, white is selected. Two are selected, and the trigger names both. Done closes the list.</p>
   <section class="dialog" aria-label="Settings, add schedule, Runs in open">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -547,16 +551,32 @@
             <span class="agent-panel-actions"><button class="btn-text" type="button">Select all</button><button class="btn-text" type="button">Clear</button></span>
           </div>
           <p class="agent-group">On this machine</p>
-          <div class="agent-row"><span class="agent-name">koordinator <span class="muted">this chat</span></span><span class="switch" role="switch" aria-checked="false" aria-label="koordinator"></span></div>
-          <div class="agent-row"><span class="agent-name">lapis</span><span class="switch on" role="switch" aria-checked="true" aria-label="lapis"></span></div>
-          <div class="agent-row"><span class="agent-name">moonstone</span><span class="switch" role="switch" aria-checked="false" aria-label="moonstone"></span></div>
-          <div class="agent-row"><span class="agent-name">peridot <span class="muted">offline, paused until it's back</span></span><span class="switch" role="switch" aria-checked="false" aria-label="peridot"></span></div>
+          <div class="agent-dir">
+            <span class="agent-path mono">~/dev/kollab</span>
+            <div class="agent-buttons">
+              <button class="agent-btn" type="button" aria-pressed="false">koordinator <span class="muted">this chat</span></button>
+              <button class="agent-btn" type="button" aria-pressed="true">lapis</button>
+            </div>
+          </div>
+          <div class="agent-dir">
+            <span class="agent-path mono">~/dev/mentiko</span>
+            <div class="agent-buttons">
+              <button class="agent-btn" type="button" aria-pressed="false">moonstone</button>
+              <button class="agent-btn" type="button" aria-pressed="false">peridot <span class="muted">offline</span></button>
+            </div>
+          </div>
           <p class="agent-group">On devbox</p>
-          <div class="agent-row"><span class="agent-name">infra@devbox</span><span class="switch on" role="switch" aria-checked="true" aria-label="infra@devbox"></span></div>
-          <div class="agent-row"><span class="agent-name">ops@devbox</span><span class="switch" role="switch" aria-checked="false" aria-label="ops@devbox"></span></div>
+          <div class="agent-dir">
+            <span class="agent-path mono">~/dev/infra</span>
+            <div class="agent-buttons">
+              <button class="agent-btn" type="button" aria-pressed="true">infra</button>
+              <button class="agent-btn" type="button" aria-pressed="false">ops</button>
+            </div>
+          </div>
+          <p class="agent-note">An offline agent can stay selected. Its runs pause until it is back.</p>
           <div class="agent-panel-foot"><button class="btn" type="button">Done</button></div>
         </div>
-        <p class="help">Each agent switched on gets the prompt when the schedule fires.</p>
+        <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
         <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
       </div>
 
@@ -630,7 +650,7 @@
           <span>lapis</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
         </button>
-        <p class="help">Each agent switched on gets the prompt when the schedule fires.</p>
+        <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
         <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
       </div>
 
@@ -1096,7 +1116,7 @@
           <h3 class="learn-h">How to get started</h3>
           <ol class="learn-steps">
             <li><span class="num">1</span><span>Open Settings, then Schedules, and press Add schedule.</span></li>
-            <li><span class="num">2</span><span>Type the prompt, set Every to 30s, 5m, 1h or 2h30m, and switch on the agents under Runs in.</span></li>
+            <li><span class="num">2</span><span>Type the prompt, set Every to 30s, 5m, 1h or 2h30m, and select the agents under Runs in.</span></li>
             <li><span class="num">3</span><span>Keep Enabled on and press Save schedule. For many at once, press Import file.</span></li>
           </ol>
         </section>
@@ -1211,20 +1231,23 @@
 <span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
 
   <!-- T6. TUI AGENTS -->
-  <p class="caption" id="t6">T6 · Enter on Runs in (T3): the full-screen agent list, all six agents. Space switches one agent. Enter done keeps the picks. Esc drops them.</p>
+  <p class="caption" id="t6">T6 · Enter on Runs in (T3): the full-screen agent list, all six agents. Space toggles one agent. Enter done keeps the picks. Esc drops them.</p>
   <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
  Runs in                                                                            2 of 6 selected
- Each agent switched on gets the prompt. An offline agent pauses the schedule until it is back.
+ Each selected agent gets the prompt. An offline agent pauses the schedule until it is back.
 
    On this machine
-     [ ] koordinator  <span class="mute">(this chat)</span>
-<span class="sel">▌    [x] lapis</span>
-     [ ] moonstone
-     [ ] peridot      <span class="mute">offline, paused until it's back</span>
+     ~/dev/kollab
+       [ ] koordinator  <span class="mute">(this chat)</span>
+<span class="sel">▌      [x] lapis</span>
+     ~/dev/mentiko
+       [ ] moonstone
+       [ ] peridot      <span class="mute">offline</span>
 
    On devbox
-     [x] infra@devbox
-     [ ] ops@devbox
+     ~/dev/infra
+       [x] infra
+       [ ] ops
 
  space toggle   a select all   c clear   enter done   esc cancel
 <span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
