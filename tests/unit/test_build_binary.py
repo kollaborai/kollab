@@ -197,3 +197,34 @@ def test_pex_gets_bare_wheel_names_from_the_wheels_folder(tmp_path: Path, monkey
     assert binary == out / build_binary.binary_filename()
     assert binary.read_bytes() == b"scie"
     assert binary.with_name(binary.name + ".sha256").read_text() == "sum"
+
+
+def _failing_run(failures: int):
+    calls: list[list[str]] = []
+
+    def run(cmd: list[str], **kwargs: Any) -> str:
+        calls.append(cmd)
+        if len(calls) <= failures:
+            raise subprocess.CalledProcessError(1, cmd)
+        return "done"
+
+    return run, calls
+
+
+def test_run_with_retry_returns_after_a_transient_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    run, calls = _failing_run(2)
+    monkeypatch.setattr(build_binary, "run", run)
+    monkeypatch.setattr(build_binary.time, "sleep", lambda seconds: None)
+
+    assert build_binary.run_with_retry(["pex"]) == "done"
+    assert len(calls) == 3
+
+
+def test_run_with_retry_gives_up_and_raises_after_the_last_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    run, calls = _failing_run(99)
+    monkeypatch.setattr(build_binary, "run", run)
+    monkeypatch.setattr(build_binary.time, "sleep", lambda seconds: None)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        build_binary.run_with_retry(["pex"], attempts=4)
+    assert len(calls) == 4
