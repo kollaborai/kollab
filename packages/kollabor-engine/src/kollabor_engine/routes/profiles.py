@@ -24,6 +24,8 @@ from kollabor_ai.providers import (
     RateLimitError,
 )
 
+from ..workspace_folder import folder_or_400
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
@@ -294,6 +296,7 @@ _Workspace = Annotated[str, Query(description="Folder whose default loadout appl
 @router.get("")
 async def list_profiles(workspace: _Workspace = ""):
     """List all available profiles."""
+    workspace = folder_or_400(workspace.strip())
     pm = _get_profile_manager()
     profiles = pm.list_profiles()
 
@@ -303,7 +306,7 @@ async def list_profiles(workspace: _Workspace = ""):
         "count": len(profiles),
         "providers": [provider.value for provider in ProviderType],
         "invalid_profiles": getattr(pm, "get_invalid_profiles", lambda: {})(),
-        "default_loadout": _default_loadout(pm, workspace.strip()),
+        "default_loadout": _default_loadout(pm, workspace),
     }
 
 
