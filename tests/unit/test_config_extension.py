@@ -378,11 +378,12 @@ class TestSaveMergedConfigModes:
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.chdir(tmp_path)
-        manager = ConfigManager(tmp_path / "absent.json")
+        saved = tmp_path / ".kollab" / "config.json"
+        # The global config is where an app's loader saves; a made-up path would be the file saved to (#967).
+        manager = ConfigManager(saved)
         loader = ConfigLoader(manager, fast_mode=True)
 
         assert loader.save_merged_config({"kollabor": {"llm": {"x": 1}}}) is True
-        saved = tmp_path / ".kollab" / "config.json"
         assert json.loads(saved.read_text())["kollabor"]["llm"]["x"] == 1
         assert stat.S_IMODE(saved.stat().st_mode) == 0o600
 
@@ -397,7 +398,7 @@ class TestSaveMergedConfigModes:
         saved.parent.mkdir(parents=True)
         saved.write_text('{"terminal": {}}', encoding="utf-8")
         os.chmod(saved, 0o644)
-        manager = ConfigManager(tmp_path / "absent.json")
+        manager = ConfigManager(saved)
         loader = ConfigLoader(manager, fast_mode=True)
 
         assert loader.save_merged_config({"terminal": {"render_fps": 12}}) is True
