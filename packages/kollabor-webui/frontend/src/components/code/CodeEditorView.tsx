@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { openWorkspaceFile, readFileContent, fileNameOf, extensionOf } from "@/components/code/open-file";
 import { claimEditorWorkspace } from "@/components/code/workspace-tabs";
 import { cn } from "@/lib/utils";
+import { GitPanel } from "@/components/code/git/GitPanel";
+import { openWorkspaceDiff } from "@/components/code/open-file";
 import { EditorConfigPanel } from "@/components/code/editor-config";
 import { isDirty, useEditorStore } from "@/components/code/editor-store";
 import { FileTree } from "@/components/code/file-tree";
@@ -14,6 +16,8 @@ import { SplitContainer } from "@/components/code/split-container";
 
 export interface CodeEditorViewProps {
   workspace: string;
+  /** "code" shows files, search and settings in the sidebar; "git" shows the git panel there. Same editor panes either way. */
+  mode?: "code" | "git";
 }
 
 /** Opens a file in the active pane (git panel's "open file"). */
@@ -49,7 +53,7 @@ function SidebarToggle({
 }
 
 /** The Code Editor view for one chat folder, docked in the chat column: file sidebar, split editor panes, quick open. */
-export function CodeEditorView({ workspace }: CodeEditorViewProps) {
+export function CodeEditorView({ workspace, mode = "code" }: CodeEditorViewProps) {
   const sidebarView = useEditorStore((s) => s.sidebarView);
   const setSidebarView = useEditorStore((s) => s.setSidebarView);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -143,29 +147,39 @@ export function CodeEditorView({ workspace }: CodeEditorViewProps) {
           </SidebarToggle>
         )}
         <span className="min-w-0 truncate">
-          Code <span className="font-mono text-[10px] font-normal text-muted-foreground">{folderLabel}</span>
+          {mode === "git" ? "Git" : "Code"} <span className="font-mono text-[10px] font-normal text-muted-foreground">{folderLabel}</span>
         </span>
       </div>
       <div className="relative flex min-h-0 flex-1 gap-2 overflow-hidden p-2">
         <FloatingFileSidebar visible={sidebar.visible} narrow={sidebar.narrow}>
-          <div className="flex shrink-0 items-center gap-0.5 px-3 py-1">
-            <SidebarToggle label="Explorer" active={sidebarView === "files"} onClick={() => setSidebarView("files")}>
-              <Files className="h-4 w-4" />
-            </SidebarToggle>
-            <SidebarToggle label="Search" active={sidebarView === "search"} onClick={() => setSidebarView("search")}>
-              <Search className="h-4 w-4" />
-            </SidebarToggle>
-            <SidebarToggle label="Settings" active={sidebarView === "config"} onClick={() => setSidebarView("config")}>
-              <Settings className="h-4 w-4" />
-            </SidebarToggle>
-            <SidebarToggle label="Filter Files" active={fileFilterOpen} onClick={() => setFileFilterOpen((v) => !v)}>
-              <Filter className="h-4 w-4" />
-            </SidebarToggle>
-          </div>
+          {mode === "git" ? (
+            <GitPanel
+              workspace={workspace}
+              onOpenFile={(absPath) => void openFileInActivePane(workspace, absPath)}
+              onOpenDiff={(absPath, headContent) => void openWorkspaceDiff(workspace, absPath, headContent)}
+            />
+          ) : (
+            <>
+              <div className="flex shrink-0 items-center gap-0.5 px-3 py-1">
+                <SidebarToggle label="Explorer" active={sidebarView === "files"} onClick={() => setSidebarView("files")}>
+                  <Files className="h-4 w-4" />
+                </SidebarToggle>
+                <SidebarToggle label="Search" active={sidebarView === "search"} onClick={() => setSidebarView("search")}>
+                  <Search className="h-4 w-4" />
+                </SidebarToggle>
+                <SidebarToggle label="Settings" active={sidebarView === "config"} onClick={() => setSidebarView("config")}>
+                  <Settings className="h-4 w-4" />
+                </SidebarToggle>
+                <SidebarToggle label="Filter Files" active={fileFilterOpen} onClick={() => setFileFilterOpen((v) => !v)}>
+                  <Filter className="h-4 w-4" />
+                </SidebarToggle>
+              </div>
 
-          {sidebarView === "files" && <FileTree workspace={workspace} filterOpen={fileFilterOpen} />}
-          {sidebarView === "search" && <SearchPanel workspace={workspace} />}
-          {sidebarView === "config" && <EditorConfigPanel />}
+              {sidebarView === "files" && <FileTree workspace={workspace} filterOpen={fileFilterOpen} />}
+              {sidebarView === "search" && <SearchPanel workspace={workspace} />}
+              {sidebarView === "config" && <EditorConfigPanel />}
+            </>
+          )}
         </FloatingFileSidebar>
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">

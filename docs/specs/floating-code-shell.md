@@ -7,7 +7,7 @@ and only show for a chat that has one. The file name keeps "floating" because th
 | surface | root hook | frontend | engine route file |
 |---|---|---|---|
 | code editor (monaco, tabs, splits, file tree, quick open, search) | `CodeEditorView`, `data-code-view` | `src/components/code/` | `routes/code_files.py` |
-| git panel (status, stage, commit, diff, branches, stash, log) | its own Git view (own icon in the session panel); opening a file or diff there switches to the Code Editor | `src/components/code/git/` | `routes/code_git.py` |
+| git panel (status, stage, commit, diff, branches, stash, log) | its own Git view (own icon in the session panel): the git panel sits where the file tree is, beside the same editor panes, so diffs and files open on the right | `src/components/code/git/` | `routes/code_git.py` |
 | terminal (xterm over a PTY) | `TerminalView`, `data-terminal-view`, `data-status` | `src/components/terminal/` | `routes/code_terminal.py` |
 
 Out of scope on purpose (mentiko-only): peer review (`/api/reviews`, `components/git/*review*`), tasks-db

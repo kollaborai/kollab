@@ -12,7 +12,6 @@ import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 const CodeEditorView = lazy(() =>
   import("./components/code/CodeEditorView").then((m) => ({ default: m.CodeEditorView })),
 );
-const GitView = lazy(() => import("./components/code/GitView").then((m) => ({ default: m.GitView })));
 const TerminalView = lazy(() =>
   import("./components/terminal/TerminalView").then((m) => ({ default: m.TerminalView })),
 );
@@ -227,11 +226,11 @@ function RuntimeShell({
   const workspace = session.workspace ?? "";
   // Code Editor, Git and Terminal work in the chat's folder; a chat without one shows Chat.
   const shown: SessionView = !workspace && (view === "code" || view === "git" || view === "terminal") ? "chat" : view;
-  const [visited, setVisited] = useState({ code: false, git: false, terminal: false });
+  const [visited, setVisited] = useState({ editor: false, terminal: false });
   useEffect(() => {
-    if (shown === "code" || shown === "git" || shown === "terminal") {
-      setVisited((seen) => (seen[shown] ? seen : { ...seen, [shown]: true }));
-    }
+    // Code and Git are one editor (same tabs and panes) with a different sidebar
+    const key = shown === "code" || shown === "git" ? "editor" : shown === "terminal" ? "terminal" : null;
+    if (key) setVisited((seen) => (seen[key] ? seen : { ...seen, [key]: true }));
   }, [shown]);
   // Ctrl+` opens the terminal, and a second press goes back to Chat.
   useEffect(() => {
@@ -378,17 +377,10 @@ function RuntimeShell({
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
             ) : null}
             {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
-            {workspace && visited.code ? (
-              <div className={shown === "code" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+            {workspace && visited.editor ? (
+              <div className={shown === "code" || shown === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
                 <Suspense fallback={<ViewLoading />}>
-                  <CodeEditorView workspace={workspace} />
-                </Suspense>
-              </div>
-            ) : null}
-            {workspace && visited.git ? (
-              <div className={shown === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-                <Suspense fallback={<ViewLoading />}>
-                  <GitView workspace={workspace} onShowEditor={() => setView("code")} />
+                  <CodeEditorView workspace={workspace} mode={shown === "git" ? "git" : "code"} />
                 </Suspense>
               </div>
             ) : null}
