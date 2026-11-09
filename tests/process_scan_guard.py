@@ -20,7 +20,7 @@ from typing import Any
 
 HOST_PROCESS_SCAN_MARKER = "host_process_enumeration"
 HOST_PROCESS_SCAN_OPTION = "--allow-host-process-enumeration"
-HOST_PROCESS_SCAN_SKIP_REASON = "host-wide process scans run only in the sanctioned GitHub-hosted CI/tests job"
+HOST_PROCESS_SCAN_SKIP_REASON = "host-wide process scans run only in a sanctioned GitHub-hosted CI test job"
 
 # These exact tests exercise real ACP lifecycles or host-wide process-table scans.
 # Keep them visible so collection can fail closed if a test loses its marker.
@@ -152,18 +152,20 @@ HOST_PROCESS_SCAN_TESTS = {
 EXPECTED_CI_ENVIRONMENT = {
     "GITHUB_ACTIONS": "true",
     "GITHUB_WORKFLOW": "CI",
-    "GITHUB_JOB": "tests",
     "GITHUB_REPOSITORY": "kollaborai/kollab",
     "RUNNER_OS": "Linux",
     "RUNNER_ENVIRONMENT": "github-hosted",
 }
-ALLOWED_GITHUB_EVENTS = frozenset({"pull_request", "push", "workflow_dispatch"})
+ALLOWED_GITHUB_JOBS = frozenset({"tests", "supporting_tests"})
+ALLOWED_GITHUB_EVENTS = frozenset({"pull_request", "push", "workflow_dispatch", "merge_group"})
 EXPECTED_WORKFLOW_REF_PREFIX = "kollaborai/kollab/.github/workflows/ci.yml@"
 
 
 def host_process_scan_environment_errors(environ: Mapping[str, str]) -> tuple[str, ...]:
     """Return missing/mismatched CI metadata names without echoing their values."""
     errors = [name for name, expected in EXPECTED_CI_ENVIRONMENT.items() if environ.get(name) != expected]
+    if environ.get("GITHUB_JOB") not in ALLOWED_GITHUB_JOBS:
+        errors.append("GITHUB_JOB")
     if environ.get("GITHUB_EVENT_NAME") not in ALLOWED_GITHUB_EVENTS:
         errors.append("GITHUB_EVENT_NAME")
     if not environ.get("GITHUB_WORKFLOW_REF", "").startswith(EXPECTED_WORKFLOW_REF_PREFIX):
@@ -524,7 +526,7 @@ def guarded_process_enumeration(operation: str, original: Callable[..., Any], *,
     def blocked(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError(
             f"host process enumeration blocked for unmarked test operation: {operation}; "
-            f"use @{HOST_PROCESS_SCAN_MARKER} only in the sanctioned CI/tests job"
+            f"use @{HOST_PROCESS_SCAN_MARKER} only in a sanctioned CI test job"
         )
 
     return blocked
