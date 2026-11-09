@@ -240,8 +240,12 @@ class DaemonHandle:
         # The daemon replays its recent events on every attach. After a reattach
         # the ones already passed on are dropped by their seq, or the last turn's
         # turn_complete would end the stream of the turn now running (#541). A
-        # daemon process has one tap, so seq only grows while its pid lives.
+        # daemon image has one tap, so seq only grows while that image lives.
+        # /restart execs the daemon in place (same pid, same socket) and the new
+        # image counts from 1 again; its attach_ack names it by agent_id, and a
+        # different one starts the fence over (#968).
         self._last_seq: Optional[int] = None
+        self._daemon_image: Optional[str] = None
         # A cancelled turn's tool may ignore the stop signal and report
         # afterwards. Its late result still flows (the transcript mirror
         # follows it) but carries `cancelled: true`, so no gem reads it as a
@@ -304,6 +308,10 @@ class DaemonHandle:
             raise RuntimeError(
                 f"daemon {self.identity} refused attach: {ack.get('msg', ack)}"
             )
+        image = ack.get("agent_id")
+        if image != self._daemon_image:
+            self._last_seq = None  # another image of this daemon: its seq starts over
+            self._daemon_image = image
 
         # RPC replies and display events share this one connection, so the read
         # loop below is the only thing allowed to consume the reader.
