@@ -15,9 +15,9 @@ from kollabor_ai import LLMProfile, ProfileManager
 class _Manager(ProfileManager):
     """Real profile and loadout logic, no config file."""
 
-    def __init__(self):
+    def __init__(self, effort=""):
         self._profiles = {
-            "oauth": LLMProfile(name="oauth", provider="openai_responses", model="gpt-5.6"),
+            "oauth": LLMProfile(name="oauth", provider="openai_responses", model="gpt-5.6", effort=effort),
         }
         self._active_profile_name = "oauth"
         self._invalid_profile_errors = {}
@@ -56,9 +56,8 @@ async def get_profiles(monkeypatch):
     import kollabor_engine.routes.profiles as profile_routes
     from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 
-    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager())
-
-    async def get(config):
+    async def get(config, profile_effort=""):
+        monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager(profile_effort))
         # the engine reads saved loadouts through ConfigService, as GET /profiles/choices does
         monkeypatch.setattr("kollabor_config.ConfigService", lambda *args, **kwargs: _Config(config))
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
@@ -98,3 +97,40 @@ async def test_a_default_that_names_nothing_saved_lists_none_and_the_profiles_st
 
     assert response.status_code == 200
     assert response.json()["default_loadout"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_default_never_picks_a_loadout_with_a_similar_name(get_profiles):
+    # "luna" was the default and is gone; "luna-max" remains. A lookup that accepts a unique substring
+    # would start New Session on a loadout nobody chose, so the saved name must match exactly.
+    response = await get_profiles(_llm(default_loadout={"name": "luna", "level": "global"}))
+
+    assert response.status_code == 200
+    assert response.json()["default_loadout"] is None
+
+
+def _luna_without_effort(**extra):
+    config = _llm(**extra)
+    config["kollabor"]["llm"]["loadouts"] = {"luna": {"provider_profile": "oauth", "model": "gpt-6-luna"}}
+    return config
+
+
+@pytest.mark.asyncio
+async def test_a_default_loadout_with_no_effort_keeps_the_profiles_own_effort(get_profiles):
+    # The terminal only overrides the effort when the loadout sets one; the web form sends what it shows,
+    # and an empty level would clear the profile's saved one ("model default").
+    config = _luna_without_effort(default_loadout={"name": "luna", "level": "global"})
+
+    body = (await get_profiles(config, profile_effort="high")).json()
+
+    assert body["default_loadout"]["model"] == "gpt-6-luna"
+    assert body["default_loadout"]["effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_a_default_loadout_effort_wins_over_the_profiles_and_none_stays_none(get_profiles):
+    set_on_loadout = _llm(default_loadout={"name": "luna-max", "level": "global"})
+    assert (await get_profiles(set_on_loadout, profile_effort="low")).json()["default_loadout"]["effort"] == "max"
+
+    neither = _luna_without_effort(default_loadout={"name": "luna", "level": "global"})
+    assert (await get_profiles(neither)).json()["default_loadout"]["effort"] == ""

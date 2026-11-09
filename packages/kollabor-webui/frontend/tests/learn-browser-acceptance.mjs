@@ -445,6 +445,9 @@ async function main() {
     // The active profile is "default" (gpt-6-luna); the form shows the loadout before Start.
     await defaultView.page.locator("#new-session-model", { hasText: "claude-haiku" }).waitFor({ state: "visible", timeout: 5000 });
     assert.doesNotMatch(await defaultView.page.locator("#new-session-model").innerText(), /gpt-6-luna/);
+    const switchAnswered = defaultView.page.waitForResponse(
+      (response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/profile"),
+    );
     await defaultView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
     const defaultPayload = await Promise.race([
       onDefault.createRequest,
@@ -453,6 +456,11 @@ async function main() {
     assert.equal(defaultPayload.profile, "review");
     const switches = await until(() => onDefault.profileSwitches().length && onDefault.profileSwitches(), "The loadout's model never reached the session.");
     assert.deepEqual(switches, [{ name: "review", model: "claude-haiku", effort: "low" }]);
+    // The session adopted the pick: the engine's answer to the switch carries the loadout's model and level.
+    // The app compares that answer with the pick and flags a session that kept something else.
+    const answered = await (await switchAnswered).json();
+    assert.equal(answered.model, "claude-haiku");
+    assert.equal(answered.effort, "low");
     await defaultView.context.close();
 
     // A default loadout on a profile that no longer exists leaves the form on the active profile.
