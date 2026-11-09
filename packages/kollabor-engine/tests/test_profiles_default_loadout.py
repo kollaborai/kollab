@@ -40,9 +40,6 @@ class _Config:
             node = node[part]
         return node
 
-    def shutdown(self):
-        """What ConfigService has and the engine calls when a request is done with it."""
-
 
 def _llm(**extra):
     return {
@@ -64,8 +61,8 @@ async def get_profiles(monkeypatch):
 
     async def get(config, profile_effort=""):
         monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager(profile_effort))
-        # the engine reads saved loadouts through ConfigService, as GET /profiles/choices does
-        monkeypatch.setattr("kollabor_config.ConfigService", lambda *args, **kwargs: _Config(config))
+        # the engine reads the saved loadouts from the config layers of the folder asked for
+        monkeypatch.setattr(profile_routes, "_loadout_config", lambda workspace="": _Config(config))
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             return await client.get("/profiles")
 

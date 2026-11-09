@@ -1401,7 +1401,8 @@ export class EngineApi {
     }>("/profiles/choices");
   }
 
-  listProfiles() {
+  /** The profiles, and the default loadout of `workspace` (empty: the engine's own folder). */
+  listProfiles(workspace = "") {
     return this.json<{
       profiles: Profile[];
       active?: string;
@@ -1411,7 +1412,7 @@ export class EngineApi {
       invalid_profiles?: Record<string, string>;
       /** What New Session starts on; null when no default loadout is set. */
       default_loadout?: DefaultLoadout | null;
-    }>("/profiles");
+    }>(workspace ? `/profiles?workspace=${encodeURIComponent(workspace)}` : "/profiles");
   }
 
   createProfile(body: ProfileWrite) {

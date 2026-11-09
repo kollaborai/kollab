@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Annotated, Any, Dict, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException  # type: ignore
+from fastapi import APIRouter, HTTPException, Query  # type: ignore
 from pydantic import AfterValidator, BaseModel, Field
 
 from kollabor_ai import APICommunicationService, LLMProfile, ProfileManager
@@ -209,26 +209,45 @@ class _DictConfig:
         return self._data.get(key, default)
 
 
-def _loadout_config():
-    """The saved config: loadouts and the default loadout live there.
+class _LayeredConfig:
+    """A read-only dotted view (``get("kollabor.llm.loadouts")``) over a folder's user config layers."""
 
-    A ConfigService polls its file every second until ``shutdown()``, so the caller shuts it down.
+    def __init__(self, data: Dict[str, Any]):
+        self._data = data
+
+    def get(self, key: str, default=None):
+        from kollabor_events.dict_utils import safe_get
+
+        return safe_get(self._data, key, default)
+
+
+def _loadout_config(workspace: str = ""):
+    """The saved config as the terminal reads it when started in ``workspace``: loadouts and the default
+    loadout live there. The global config, then that folder's project and local config; an empty
+    ``workspace`` is the engine's own folder.
+
+    Read from the files, not through a ConfigService: a service polls its file every second until it is
+    shut down, and the open web UI lists profiles every few seconds.
     """
-    from kollabor_config import ConfigService
-    from kollabor_config.config_utils import get_global_config_path
+    from pathlib import Path
 
-    return ConfigService(get_global_config_path(), fast_mode=True)
+    from kollabor_config.loader import load_layered_user_config
+
+    folder = Path(workspace).expanduser().resolve() if workspace else None
+    return _LayeredConfig(load_layered_user_config(folder))
 
 
-def _default_loadout(pm: ProfileManager) -> Optional[Dict[str, str]]:
-    """The loadout the terminal starts on (``kollabor.llm.default_loadout``).
+def _default_loadout(pm: ProfileManager, workspace: str = "") -> Optional[Dict[str, str]]:
+    """The loadout the terminal starts on (``kollabor.llm.default_loadout``) in ``workspace``.
 
     A web session always names a profile, which makes the terminal skip its
-    default, so the form needs this to start on it (#957). ``None`` when none is
-    set or its saved name is not a loadout. The name must match exactly: the
-    terminal's forgiving lookup would start on a similarly named loadout nobody
-    chose once the default is deleted. Never an error, the profile list must
-    still answer.
+    default, so the form needs this to start on it (#957). The default belongs to
+    the folder the session starts in: its project and local config can set their
+    own, so it is read for ``workspace``, not for the engine's folder. ``None``
+    when none is set or its saved name is not a loadout. The name must match
+    exactly: the terminal's forgiving lookup would start on a similarly named
+    loadout nobody chose once the default is deleted. Never an error, the profile
+    list must still answer.
     """
     import dataclasses
 
@@ -238,10 +257,8 @@ def _default_loadout(pm: ProfileManager) -> Optional[Dict[str, str]]:
         loadout_sendable_effort,
     )
 
-    config = None
     try:
-        config = _loadout_config()
-        manager = LoadoutManager(pm, config=config)
+        manager = LoadoutManager(pm, config=_loadout_config(workspace))
         name = manager.get_default()
         loadout = manager.get(name) if name else None
         profile = pm.get_profile(loadout.provider_profile) if loadout else None
@@ -266,13 +283,12 @@ def _default_loadout(pm: ProfileManager) -> Optional[Dict[str, str]]:
     except Exception as exc:  # noqa: BLE001 - a broken config must not hide the profiles
         logger.warning("default loadout: could not read it: %s", type(exc).__name__)
         return None
-    finally:
-        if config is not None:
-            config.shutdown()  # the open web UI lists profiles every few seconds: a poller per request would pile up
 
 
 @router.get("")
-async def list_profiles():
+async def list_profiles(
+    workspace: str = Query("", description="Folder whose default loadout applies; empty is the engine's own"),
+):
     """List all available profiles."""
     pm = _get_profile_manager()
     profiles = pm.list_profiles()
@@ -283,7 +299,7 @@ async def list_profiles():
         "count": len(profiles),
         "providers": [provider.value for provider in ProviderType],
         "invalid_profiles": getattr(pm, "get_invalid_profiles", lambda: {})(),
-        "default_loadout": _default_loadout(pm),
+        "default_loadout": _default_loadout(pm, workspace.strip()),
     }
 
 
