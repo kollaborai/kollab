@@ -262,5 +262,97 @@ def test_cli_loadout_startup_resolves_without_profile_error(
     )
 
 
+def _startup_with_default_loadout(
+    tmp_path, monkeypatch, caplog, loadouts, default_loadout
+):
+    """Start a real TerminalLLMChat with no --llm and a persisted default loadout."""
+    from kollabor import application as application_module
+    from kollabor_config import config_utils
+
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    global_config = tmp_path / "global"
+    project.mkdir()
+    home.mkdir()
+    global_config.mkdir()
+    (global_config / "config.json").write_text(
+        json.dumps(
+            {
+                "kollabor": {
+                    "llm": {
+                        "profiles": {
+                            "ghost": {
+                                "provider": "anthropic",
+                                "model": "claude-haiku-4.5",
+                                "api_key": "test-key",
+                            }
+                        },
+                        "loadouts": loadouts,
+                        "default_loadout": default_loadout,
+                        "default_profile": "ghost",
+                    }
+                }
+            }
+        )
+    )
+    registry = SimpleNamespace(
+        get_merged_config=lambda: {},
+        list_plugins=lambda: [],
+        instantiate_plugins=lambda *args, **kwargs: {},
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("KOLLAB_NO_AUTO_DETECT", "1")
+    for env_name in ("KOLLAB_ROOT_SOCKET", "KOLLAB_HUB_PROJECT_SCOPED"):
+        monkeypatch.setenv(env_name, os.environ.get(env_name, ""))
+    caplog.set_level(logging.INFO)
+
+    with patch.object(
+        config_utils, "get_config_directory", return_value=global_config
+    ), patch.object(Path, "home", return_value=home):
+        app = application_module.TerminalLLMChat(
+            args=SimpleNamespace(simple=True),
+            profile_name=None,
+            plugin_registry=registry,
+        )
+    return app
+
+
+def test_deleted_default_loadout_starts_on_the_active_profile(
+    tmp_path, monkeypatch, caplog
+):
+    """The saved default is an exact name (#964): with 'luna' deleted and only
+    'luna-max' saved, the terminal starts on the active profile, not a loadout
+    nobody chose. Adding an unrelated loadout must not move where sessions run."""
+    app = _startup_with_default_loadout(
+        tmp_path,
+        monkeypatch,
+        caplog,
+        loadouts={"luna-max": {"provider_profile": "ghost", "model": "gpt-6-luna"}},
+        default_loadout={"name": "luna", "level": "global"},
+    )
+
+    active = app.profile_manager.get_active_profile()
+    assert app.profile_manager.active_profile_name == "ghost"
+    # the profile's own model: the substring-matching loadout must not apply
+    assert active.model == "claude-haiku-4.5"
+    assert "Applied default loadout" not in caplog.text
+
+
+def test_exact_default_loadout_still_applies_at_startup(tmp_path, monkeypatch, caplog):
+    """The guard for the fix above: an exact saved default keeps applying."""
+    app = _startup_with_default_loadout(
+        tmp_path,
+        monkeypatch,
+        caplog,
+        loadouts={"luna-max": {"provider_profile": "ghost", "model": "gpt-6-luna"}},
+        default_loadout={"name": "luna-max", "level": "global"},
+    )
+
+    active = app.profile_manager.get_active_profile()
+    assert active.model == "gpt-6-luna"
+    assert "Applied default loadout 'luna-max'" in caplog.text
+
+
 if __name__ == "__main__":
     unittest.main()
