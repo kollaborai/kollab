@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web UI: Search configured profiles, models and reasoning efforts from New Session and the session panel. A selection applies only to that session; Manage Profiles opens the profile editor from Loadouts (#552).
 
 ### Fixed
+- A chat with an agent on another computer keeps its messages after you switch to another agent and back, or
+  reopen the web UI; until that agent's history arrives the chat says it is still syncing instead of showing an
+  empty conversation (#927).
 - Read changed regression tests from the pull request's immutable file blobs while keeping the readiness checker on trusted base code.
 - The PR readiness gate keeps every finding-ID mention blocking unless a trusted current-head reviewer annotates that exact comment occurrence; each accepted suppression is audited (#724).
 
