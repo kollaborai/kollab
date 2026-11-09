@@ -656,3 +656,28 @@ async def test_typed_input_is_addressed_to_its_window_and_not_echoed_back():
     assert hub._deliver_to_agent.await_count == 3
     for call in hub._deliver_to_agent.await_args_list:
         assert call.args[1].to == "*"
+
+
+@pytest.mark.asyncio
+async def test_typed_input_address_names_the_source_window():
+    """The peer-visible address names the window where the human typed (#659)."""
+    from unittest.mock import AsyncMock
+
+    hub = HubPlugin()
+    hub._started = True
+    hub._identity = SimpleNamespace(state="idle", identity="lapis")
+    hub._presence = SimpleNamespace(
+        discover_agents_async=AsyncMock(
+            return_value=[SimpleNamespace(identity="koordinator")]
+        )
+    )
+    hub._cli_args = None
+    hub._deliver_to_agent = AsyncMock()
+
+    await hub._broadcast_user_input(
+        {"message": "typed in the lapis window"}, SimpleNamespace(source="user")
+    )
+
+    hub._deliver_to_agent.assert_awaited_once()
+    message = hub._deliver_to_agent.await_args.args[1]
+    assert message.to == "lapis"
