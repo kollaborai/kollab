@@ -9,6 +9,7 @@ who needs the shell. Numbers are clamped to a range that still works.
 """
 
 import json
+import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 PREFIX = "kollabor.code."
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 @dataclass(frozen=True)
@@ -84,20 +85,32 @@ def _number(value: object, kind: str) -> int | float | None:
         return None
     if value != value:  # NaN
         return None
-    number: int | float = int(value) if kind.startswith("int") else float(value)
+    try:
+        number: int | float = int(value) if kind.startswith("int") else float(value)
+    except ValueError, OverflowError:  # infinity, which Python's json accepts
+        return None
+    if number in (float("inf"), float("-inf")):
+        return None
     return max(type(number)(lo), min(type(number)(hi), number))
 
 
 def _names(value: object) -> tuple[str, ...] | None:
     if not isinstance(value, list | tuple):
         return None
-    return tuple(dict.fromkeys(item for item in value if isinstance(item, str) and _ENV_NAME.match(item)))
+    return tuple(dict.fromkeys(item for item in value if isinstance(item, str) and _ENV_NAME.fullmatch(item)))
 
 
 def _paths(value: object) -> tuple[str, ...] | None:
     if not isinstance(value, list | tuple):
         return None
-    return tuple(dict.fromkeys(item for item in value if isinstance(item, str) and item.strip()))
+    paths: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        expanded = os.path.expanduser(item.strip())
+        if os.path.isabs(expanded):  # a relative entry would mean "relative to what?": dropped
+            paths.append(expanded)
+    return tuple(dict.fromkeys(paths))
 
 
 def _env_set(value: object) -> tuple[tuple[str, str], ...] | None:
@@ -106,7 +119,7 @@ def _env_set(value: object) -> tuple[tuple[str, str], ...] | None:
     return tuple(
         (name, str(item))
         for name, item in value.items()
-        if isinstance(name, str) and _ENV_NAME.match(name) and isinstance(item, str | int | float | bool)
+        if isinstance(name, str) and _ENV_NAME.fullmatch(name) and isinstance(item, str | int | float | bool)
     )
 
 
@@ -155,7 +168,10 @@ def resolve(get: Callable[[str, Any], Any] | None, agent_code: object = None) ->
     for key, (field, kind) in SCHEMA.items():
         chosen: Any = None
         if key in agent:
-            chosen = coerce(agent[key], kind)
+            try:
+                chosen = coerce(agent[key], kind)
+            except Exception:
+                chosen = None
         if chosen is None and get is not None:
             try:
                 chosen = coerce(get(PREFIX + key, _MISSING), kind)

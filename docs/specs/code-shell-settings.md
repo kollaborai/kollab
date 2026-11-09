@@ -37,9 +37,9 @@ A setting is read when a request or a shell starts. A running shell keeps the en
 | `terminal.idle_reap_minutes` | 10 | minutes a shell with no viewer lives; 0 = never |
 | `terminal.scrollback_kb` | 256 | output kept for a reconnecting viewer |
 | `files.max_file_kb` | 2048 | largest file the editor opens or saves |
-| `files.show_hidden` | false | list dot-files and the skipped folders (`node_modules`, `.git`, `dist`, ...) in the tree |
+| `files.show_hidden` | false | list dot-files and the skipped folders (`node_modules`, `dist`, ...) in the tree; `.git` itself is never listed |
 | `files.search_max_files` | 20000 | files one search scans |
-| `files.extra_roots` | [] | extra absolute folders the editor may reach besides the daemon's folder |
+| `files.extra_roots` | [] | extra absolute folders the editor may reach besides the daemon's folder (`~` is expanded; a relative entry is dropped) |
 | `files.follow_symlinks` | false | true: a symlink inside the folder is read and listed even if it points outside |
 | `git.allow_outside_workspace` | false | true: commit even when files outside the folder are staged |
 | `git.read_only` | false | true: git writes refused, reads work |

@@ -289,3 +289,35 @@ def test_a_daemon_that_stops_answering_ends_the_socket_with_an_error_and_1011(cl
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_json()
     assert closed.value.code == code.CLOSE_DAEMON_LOST
+
+
+def test_a_terminal_a_setting_turned_off_says_which_setting_not_that_the_daemon_stopped(client, daemon):
+    refusal = {
+        "status": 403,
+        "body": {
+            "success": False,
+            "error": {
+                "code": "terminal_disabled",
+                "message": "Terminals are turned off for this agent. Setting: kollabor.code.terminal.enabled",
+                "setting": "kollabor.code.terminal.enabled",
+            },
+        },
+    }
+    daemon.answers["terminal.message"] = refusal
+    daemon.answers["terminal.poll"] = refusal
+
+    async def refuse(op, params):
+        daemon.calls.append((op, params))
+        if op in ("terminal.message", "terminal.poll"):
+            return refusal
+        return {"status": 200, "body": {"success": True, "data": {}}}
+
+    daemon.session.state.code_call = refuse
+    with client.websocket_connect(_url("terminal")) as ws:
+        _auth(ws)
+        ws.send_json({"type": "open"})
+        message = ws.receive_json()
+
+    assert message["type"] == "error"
+    assert "kollabor.code.terminal.enabled" in message["message"]
+    assert "stopped answering" not in message["message"]

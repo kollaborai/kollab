@@ -31,9 +31,9 @@ The views have on and off switches and limits. Defaults are safe and nothing is 
 | `terminal.idle_reap_minutes` | 10 | minutes a shell with no viewer lives; 0 = never |
 | `terminal.scrollback_kb` | 256 | output kept for a reconnecting viewer |
 | `files.max_file_kb` | 2048 | largest file the editor opens or saves |
-| `files.show_hidden` | false | list dot-files and the skipped folders (`node_modules`, `.git`, `dist`, ...) in the tree |
+| `files.show_hidden` | false | list dot-files and the skipped folders (`node_modules`, `dist`, ...) in the tree; `.git` itself is never listed |
 | `files.search_max_files` | 20000 | files one search scans |
-| `files.extra_roots` | [] | extra absolute folders the editor may reach besides the daemon's folder |
+| `files.extra_roots` | [] | extra absolute folders the editor may reach besides the daemon's folder (`~` is expanded; a relative entry is dropped) |
 | `files.follow_symlinks` | false | true: a symlink inside the folder is read and listed even if it points outside |
 | `git.allow_outside_workspace` | false | true: commit even when files outside the folder are staged |
 | `git.read_only` | false | true: git writes refused, reads work |
@@ -42,7 +42,7 @@ Names are looked up exactly; the env filters compare case-insensitively on the n
 
 ### Where to set them
 
-- **Web UI**: Settings → Configuration, section "Code And Terminal". It saves to the project or the global config file.
+- **Web UI**: Settings → System Configuration, section "Code And Terminal". It saves to the project or the global config file.
 - **Terminal**: `/config`, then Tab until the "Code And Terminal" section shows.
 - **Config files**: `.kollab/config.json` (this project) or `~/.kollab/config.json` (all projects), under `kollabor.code`:
 
@@ -90,6 +90,15 @@ values. The same list comes from `GET /sessions/{id}/code/terminal/env`.
 A daemon that started before this change has no code call. The engine answers 502 `daemon_outdated` with the text
 "This agent runs older code. Restart it to use Code, Git and Terminal." The Terminal view shows that text as a notice.
 Restart the agent to fix it. The Code Editor and Git views do not show the notice yet.
+
+## Behaviors worth knowing
+
+- Delete and rename act on a symlink itself, never on the file or folder it points to.
+- A file that is not UTF-8 opens as Latin-1 and saves back byte for byte. If the new text holds a character Latin-1
+  cannot hold, the save is refused (`encoding_unsafe`) instead of rewriting every other byte; save under another name.
+- The git stash button stashes this folder only, as the panel lists, not the rest of the repository.
+- A commit that would carry staged files from outside this folder is refused unless `git.allow_outside_workspace` is on.
+- `terminal.start_command` does not run when `read_only` is on.
 
 ## Not built yet
 

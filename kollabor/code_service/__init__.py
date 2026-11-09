@@ -49,7 +49,7 @@ def settings_report(settings: CodeSettings) -> dict[str, Any]:
 
 def _gate(kind: str, name: str, params: dict[str, Any], settings: CodeSettings) -> dict[str, Any] | None:
     """The refusal for an operation a setting closes, or None."""
-    if not settings.enabled and kind != "settings":
+    if not settings.enabled and kind != "settings" and not (kind == "terminal" and name == "detach"):
         return _refused(404, "code_disabled", "Code, Git and Terminal are turned off for this agent.", "enabled")
     if kind == "terminal" and not settings.terminal_enabled and name != "detach":
         return _refused(403, "terminal_disabled", "Terminals are turned off for this agent.", "terminal.enabled")

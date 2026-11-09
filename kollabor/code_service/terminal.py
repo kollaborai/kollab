@@ -322,7 +322,8 @@ def _dimension(value: object) -> int | None:
 def _login_shell(configured: str = "") -> str:
     """The shell program: the setting ``terminal.shell`` when it is executable, else $SHELL, else zsh, else sh."""
     for candidate in (configured, os.environ.get("SHELL", ""), "/bin/zsh", "/bin/sh"):
-        if candidate and os.access(candidate, os.X_OK):
+        # An absolute path only: a bare name would be looked up in the project folder, where a clone can plant it.
+        if candidate and os.path.isabs(candidate) and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return "/bin/sh"
 
@@ -462,7 +463,7 @@ def _open_session(
         return [_error("The shell could not start.")]
     _SESSIONS[session.sid] = session
     link.attach(session)
-    if settings.start_command:
+    if settings.start_command and not settings.read_only:  # a read-only agent's shell takes no input, this included
         session.write_input((settings.start_command + "\n").encode("utf-8", errors="replace"))
     return [{"type": "ready", "sessionId": session.sid}]
 

@@ -72,3 +72,8 @@ test("the outdated notice is the plain sentence with no version or code in it", 
   expect(OUTDATED_NOTICE).toBe("This agent runs older code. Restart it to use Code, Git and Terminal.");
   expect(OUTDATED_NOTICE).not.toMatch(/\d+\.\d+|daemon_outdated/);
 });
+
+test("the env report type carries the shell the daemon resolved", () => {
+  const report: TerminalEnvReport = { count: 0, shell: "zsh", hidden: { secret: [], kollab: [], denied: [] } };
+  expect(report.shell).toBe("zsh");
+});

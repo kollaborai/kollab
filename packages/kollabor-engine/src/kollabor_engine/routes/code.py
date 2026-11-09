@@ -218,15 +218,26 @@ class _DaemonLost(Exception):
     ``outdated`` is set when the daemon has no ``state.code_call`` at all: it needs a restart, not a retry.
     """
 
-    def __init__(self, outdated: bool = False) -> None:
+    def __init__(self, outdated: bool = False, message: str | None = None) -> None:
         super().__init__()
         self.outdated = outdated
+        self.message = message  # the daemon's own refusal text when a setting said no, else None
+
+
+class _Refused(_DaemonLost):
+    """The daemon answered, and a setting says no (terminal turned off, for one). ``message`` is the daemon's own
+    refusal text, which names the setting; it is built from fixed text and never holds shell output."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message=message)
 
 
 async def _ask(session: EngineSession, op: str, params: dict[str, Any]) -> dict[str, Any]:
     """One terminal call to the daemon; its data, or ``_DaemonLost`` for any failure (kept apart from socket errors)."""
     try:
         return _data(await session.state.code_call(op, params))
+    except _Refused:
+        raise
     except Exception as exc:
         raise _DaemonLost(_is_outdated(exc)) from None
 
@@ -235,6 +246,14 @@ def _data(answer: dict[str, Any]) -> dict[str, Any]:
     """The ``data`` of a daemon answer; a refusal or an unknown shape is a lost daemon."""
     body = answer.get("body")
     data = body.get("data") if isinstance(body, dict) else None
+    error = body.get("error") if isinstance(body, dict) else None
+    if (
+        answer.get("status") != 200
+        and isinstance(error, dict)
+        and isinstance(error.get("setting"), str)
+        and isinstance(error.get("message"), str)
+    ):
+        raise _Refused(error["message"])
     if answer.get("status") != 200 or not isinstance(data, dict):
         raise ValueError("terminal call refused")
     return data
@@ -275,10 +294,11 @@ async def _pump(ws: WebSocket, session: EngineSession, link: str, wake: asyncio.
             await asyncio.wait_for(wake.wait(), min(IDLE_SLEEP_MAX, IDLE_SLEEP_STEP * idle))
 
 
-async def _lost(ws: WebSocket, session_id: str, outdated: bool = False) -> None:
-    """The daemon stopped answering: say so on the socket and close it."""
-    logger.error("Session %s terminal bridge lost its daemon", session_id)
-    message = OUTDATED_MESSAGE if outdated else "The session's daemon stopped answering."
+async def _lost(ws: WebSocket, session_id: str, outdated: bool = False, refusal: str | None = None) -> None:
+    """The daemon stopped answering, or a setting refused the terminal: say so on the socket and close it."""
+    if refusal is None:
+        logger.error("Session %s terminal bridge lost its daemon", session_id)
+    message = refusal or (OUTDATED_MESSAGE if outdated else "The session's daemon stopped answering.")
     with contextlib.suppress(WebSocketDisconnect, RuntimeError):
         await ws.send_json({"type": "error", "message": message, **({"code": "daemon_outdated"} if outdated else {})})
         await ws.close(code=CLOSE_DAEMON_LOST)
@@ -290,7 +310,7 @@ async def _guarded_pump(
     try:
         await _pump(ws, session, link, wake)
     except _DaemonLost as lost:
-        await _lost(ws, session_id, lost.outdated)  # closing the socket ends the forwarder too
+        await _lost(ws, session_id, lost.outdated, lost.message)  # closing the socket ends the forwarder too
     except (WebSocketDisconnect, RuntimeError):
         pass  # the client has gone
 
@@ -318,7 +338,7 @@ async def code_terminal_ws(ws: WebSocket, session_id: str) -> None:
         # The socket stays open after a shell exits, until the client closes it.
         await _forward(ws, session, link, wake)
     except _DaemonLost as lost:
-        await _lost(ws, session_id, lost.outdated)
+        await _lost(ws, session_id, lost.outdated, lost.message)
     except (WebSocketDisconnect, RuntimeError):
         pass  # the client has gone
     finally:

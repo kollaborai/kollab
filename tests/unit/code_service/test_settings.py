@@ -4,6 +4,7 @@ Resolution (agent.json ``code`` > config > default), the gates in ``code_service
 changes in a real shell. A setting with the wrong type must fall back to the default, never close the door.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -272,3 +273,53 @@ async def test_scrollback_and_idle_reap_follow_the_settings(tmp_path):
         assert session._reap_handle is None  # 0 minutes = never reaped
     finally:
         await session.destroy()
+
+
+# ---------------------------------------------------------------------------------------------- review fixes
+
+
+def test_infinity_in_a_config_file_never_raises_it_falls_back():
+    assert resolve(None, {"files": {"max_file_kb": float("inf")}}).max_file_kb == DEFAULTS.max_file_kb
+    assert resolve(_get({"kollabor.code.files.max_file_kb": float("-inf")})).max_file_kb == DEFAULTS.max_file_kb
+
+
+def test_a_name_with_a_trailing_newline_is_not_an_env_name():
+    assert resolve(None, {"terminal.env_allow": ["GLM_TOKEN\n"]}).env_allow == ()
+    assert resolve(None, {"terminal.env_set": {"EDITOR\n": "vim"}}).env_set == ()
+
+
+def test_extra_roots_expand_home_and_drop_relative_entries():
+    mine = resolve(None, {"files.extra_roots": ["~/proj", "relative/dir", "/srv/data"]})
+
+    assert mine.extra_roots[0].endswith("/proj") and not mine.extra_roots[0].startswith("~")
+    assert "relative/dir" not in mine.extra_roots
+    assert "/srv/data" in mine.extra_roots
+
+
+async def test_start_command_does_not_run_when_read_only_is_on(tmp_path):
+    marker = tmp_path / "ran.txt"
+    link = Link(tmp_path, CodeSettings(read_only=True, start_command=f"touch {marker}"))
+    await link.open()
+    await asyncio.sleep(1.0)
+
+    assert not marker.exists()
+
+
+async def test_detach_still_works_when_the_views_are_turned_off(tmp_path):
+    answer = await _call("terminal.detach", {"link": "x"}, tmp_path, enabled=False)
+
+    assert answer["status"] != 404 or answer["body"]["error"]["code"] != "code_disabled"
+
+
+async def test_a_bare_shell_name_is_not_resolved_in_the_project_folder(tmp_path, monkeypatch):
+    fake = tmp_path / "zsh"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+
+    assert terminal._login_shell("zsh") != "zsh"
+    assert terminal._login_shell("./zsh") != "./zsh"
+
+
+async def test_a_directory_is_not_a_shell(tmp_path):
+    assert terminal._login_shell(str(tmp_path)) != str(tmp_path)

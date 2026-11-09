@@ -222,6 +222,7 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
           // The shell is over: nothing to resume and nothing to reconnect to.
           sessionId = null;
           reconnecting = false;
+          refusal = null;
           release(ws);
           publish("closed");
           ws.close(NORMAL_CLOSE_CODE);
@@ -239,6 +240,7 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
           // an old daemon). It leaves the socket open, so end it here; retrying is the user's call.
           sessionId = null;
           reconnecting = false;
+          refusal = null;
           release(ws);
           publish("error", message.message, message.code);
           ws.close(NORMAL_CLOSE_CODE);

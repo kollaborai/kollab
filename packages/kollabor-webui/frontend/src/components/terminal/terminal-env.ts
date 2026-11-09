@@ -3,6 +3,8 @@
 /** GET /sessions/{id}/code/terminal/env: the variables a new shell would not get, by reason. Names only, never values. */
 export interface TerminalEnvReport {
   count: number;
+  /** The shell the daemon resolved (its basename), whatever `terminal.shell` held. */
+  shell?: string;
   hidden: {
     secret: string[];
     kollab: string[];

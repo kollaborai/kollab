@@ -395,6 +395,7 @@ function RuntimeShell({
                   <TerminalView
                     key={`${session.device ?? ""}:${workspace}`}
                     sessionId={session.session_id}
+                    device={session.device ?? ""}
                     workspace={workspace}
                   />
                 </Suspense>

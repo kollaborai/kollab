@@ -21,6 +21,8 @@ import { cn } from "@/lib/utils";
 export interface TerminalViewProps {
   /** The session whose daemon runs the shells: a session opened from another computer gets that computer's shell. */
   sessionId: string;
+  /** The computer the session runs on; empty for this one. Shown before the folder so the machine is plain. */
+  device?: string;
   workspace: string;
 }
 
@@ -123,10 +125,12 @@ async function readTerminalHeader(): Promise<{ shell: string; env: TerminalEnvRe
     readCodeData<{ shell?: unknown }>("/code/settings"),
     readCodeData<TerminalEnvReport>("/code/terminal/env"),
   ]);
-  return { shell: typeof settings?.shell === "string" ? settings.shell : "", env };
+  // The setting is empty by default; the daemon's report holds the shell it really started.
+  const configured = typeof settings?.shell === "string" ? settings.shell : "";
+  return { shell: configured || env?.shell || "", env };
 }
 
-export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
+export function TerminalView({ sessionId, workspace, device }: TerminalViewProps) {
   const [tabs, setTabs] = useState<TerminalTabState[]>(() => [{ id: 1, generation: 0 }]);
   const [activeId, setActiveId] = useState(1);
   const [reports, setReports] = useState<Partial<Record<number, TerminalTabReport>>>({});
@@ -201,7 +205,8 @@ export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
   const activeStatus: TerminalWsStatus = activeTab ? (activeReport?.status ?? "connecting") : "closed";
 
   const sidebar = useFileSidebarVisibility();
-  const folderLabel = workspace.split("/").filter(Boolean).slice(-2).join("/");
+  const folder = workspace.split("/").filter(Boolean).slice(-2).join("/");
+  const folderLabel = device ? `${device}:${folder}` : folder;
   // A header read that belongs to another session (the view moved) is not shown.
   const info = header?.sessionId === sessionId ? header : null;
   const shell = shellName(info?.shell ?? "");
@@ -214,7 +219,7 @@ export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
       data-terminal-view=""
       data-status={activeStatus}
     >
-      <div className="flex shrink-0 items-center gap-1.5 px-3 py-1.5 text-xs font-medium">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 px-3 py-1.5 text-xs font-medium">
         {sidebar.narrow && (
           <Button
             type="button"
@@ -233,7 +238,9 @@ export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
           Terminal <span className="font-mono text-[10px] font-normal text-muted-foreground">{folderLabel}</span>
         </span>
         {shell && (
-          <span className="shrink-0 font-mono text-[10px] font-normal text-muted-foreground">{shell}</span>
+          <span className="max-w-[8rem] shrink-0 truncate font-mono text-[10px] font-normal text-muted-foreground">
+            {shell}
+          </span>
         )}
         {envLabel && (
           <span className="shrink-0 text-[10px] font-normal text-muted-foreground" title={envTitle}>
@@ -245,8 +252,8 @@ export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
             Reconnecting
           </span>
         )}
-        {activeReport?.refusal && (
-          <span className="min-w-0 truncate text-[10px] font-normal text-muted-foreground" title={activeReport.refusal}>
+        {activeStatus === "attached" && activeReport?.refusal && (
+          <span className="min-w-0 break-words text-[10px] font-normal text-muted-foreground" title={activeReport.refusal}>
             {activeReport.refusal}
           </span>
         )}

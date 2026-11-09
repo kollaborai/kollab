@@ -444,8 +444,14 @@ async def _commit(root: str, body: dict[str, Any], settings: CodeSettings | None
     # The panel lists only the workspace's changes. A commit takes the whole index, so refuse one that would
     # carry staged files from outside the workspace the panel cannot show, unless the setting allows it.
     if not cfg.git_allow_outside_workspace:
-        everything = (await _text(root, ["diff", "--cached", "--name-only", "-z", "--no-relative"])).split("\0")
-        inside = (await _text(root, ["diff", "--cached", "--name-only", "-z", "--relative"])).split("\0")
+        # --no-renames: a rename that crosses the folder boundary must count as a delete and an add, not as one entry.
+        base = ["diff", "--cached", "--name-only", "-z", "--no-renames"]
+        everything_proc = await _git(root, [*base, "--no-relative"])
+        inside_proc = await _git(root, [*base, "--relative"])
+        if everything_proc.returncode != 0 or inside_proc.returncode != 0:  # cannot check: do not let it through
+            raise GitRequestError(409, "git_failed", "Could not check what is staged, so nothing was committed.")
+        everything = everything_proc.stdout.split("\0")
+        inside = inside_proc.stdout.split("\0")
         outside = len([name for name in everything if name]) - len([name for name in inside if name])
         if outside > 0:
             named = f"{outside} staged file(s) lie outside this folder; unstage them first."
@@ -520,7 +526,7 @@ async def _create_stash(root: str, body: dict[str, Any], settings: CodeSettings 
         args += ["-m", message]
     # With nothing to save, `git stash push` exits 0 and makes no stash: compare the top of refs/stash.
     before = (await _text(root, ["rev-parse", "--verify", "-q", "refs/stash"])).strip()
-    await _write(root, args)
+    await _write(root, [*args, "--", "."])  # the workspace only, as the panel lists: not the whole repository
     after = (await _text(root, ["rev-parse", "--verify", "-q", "refs/stash"])).strip()
     if after == before:
         raise GitRequestError(409, "nothing_to_stash", "There are no local changes to stash.")

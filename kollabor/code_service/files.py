@@ -20,6 +20,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -247,6 +248,15 @@ def _search_text(path: str, follow: bool) -> str | None:
     return data.decode("utf-8", errors="replace")
 
 
+def _leaf_path(base: str, path: str) -> str:
+    """``path`` under ``base`` with the folders resolved but the last name left alone, so a symlink is the thing
+    renamed or deleted and never the file it points to."""
+    joined = os.path.normpath(os.path.join(base, path))
+    if os.path.normcase(joined) + os.sep == os.path.normcase(base):
+        return os.path.realpath(joined)  # the workspace root itself
+    return os.path.join(os.path.realpath(os.path.dirname(joined)), os.path.basename(joined))
+
+
 def _decode(data: bytes) -> tuple[str, str]:
     """The text of ``data`` and its encoding: utf-8 when the bytes are valid utf-8, else latin-1 (every byte is one
     character, so nothing is lost)."""
@@ -264,20 +274,27 @@ def _is_utf8(data: bytes) -> bool:
     return True
 
 
+class _EncodingUnsafe(Exception):
+    """The file on disk is not utf-8 and the new text cannot be written the way it is stored."""
+
+
 def _encode(content: str, existing: bytes | None) -> tuple[bytes, str]:
     """``content`` as bytes and the encoding used. An existing file that is not valid utf-8 stays latin-1, so the
-    bytes the editor did not change come back exactly; a character past U+00FF cannot be latin-1 and forces utf-8."""
+    bytes the editor did not change come back exactly. A character past U+00FF cannot be latin-1, and writing the
+    whole file as utf-8 would turn every other byte from 0x80 up into two, so that save is refused."""
     if existing is not None and not _is_utf8(existing):
         try:
             return content.encode("latin-1"), "latin-1"
-        except UnicodeEncodeError:
-            pass
+        except UnicodeEncodeError as exc:
+            raise _EncodingUnsafe from exc
     return content.encode("utf-8"), "utf-8"
 
 
 def _existing_bytes(path: str) -> bytes | None:
     """The bytes of the file at ``path``, or None when there is no such file."""
     try:
+        if not os.path.isfile(path):  # a folder, a FIFO or a device must not be opened for reading
+            return None
         with open(path, "rb") as handle:
             return handle.read()
     except FileNotFoundError:
@@ -287,6 +304,28 @@ def _existing_bytes(path: str) -> bytes | None:
 def _mtime_ms(path: str) -> int:
     """A file's modification time in whole milliseconds, the form the editor sends back to check for a stale write."""
     return os.stat(path).st_mtime_ns // 1_000_000
+
+
+class _StaleWrite(Exception):
+    """The file's modification time is not the one the editor read."""
+
+
+_WRITE_LOCK = threading.Lock()
+
+
+def _checked_write(path: str, data: bytes, expected: int | None) -> int:
+    """Check ``expected`` against the file's mtime and write, as one step, so two saves with the same ``expectedMtime``
+    cannot both pass. Returns the new mtime in ms."""
+    with _WRITE_LOCK:
+        if expected is not None:
+            try:
+                current: int | None = _mtime_ms(path)
+            except FileNotFoundError:
+                current = None
+            if current is not None and current != expected:
+                raise _StaleWrite
+        _write_atomic(path, data)
+        return _mtime_ms(path)
 
 
 def _write_atomic(path: str, data: bytes) -> None:
@@ -321,6 +360,8 @@ def _status_code(xy: str) -> str:
     x, y = xy[0], xy[1]
     if x == "?" and y == "?":
         return "?"
+    if "U" in xy or xy in ("AA", "DD"):  # an unmerged path is a conflict whatever side added or deleted it
+        return "U"
     for code in ("R", "A", "D", "M"):
         if code in (x, y):
             return code
@@ -342,7 +383,7 @@ def _parse_status(output: bytes) -> dict[str, str]:
             continue
         xy = entry[:2]
         status[entry[3:]] = _status_code(xy)
-        if "R" in xy:
+        if "R" in xy or "C" in xy:
             index += 1
     return status
 
@@ -432,6 +473,12 @@ async def write_file(workspace: str, params: dict[str, Any], settings: CodeSetti
     try:
         existing = await asyncio.to_thread(_existing_bytes, full)
         data, encoding = _encode(content, existing)
+    except _EncodingUnsafe:
+        return _fail(
+            409,
+            "encoding_unsafe",
+            "This file is not UTF-8 and the new text has characters it cannot hold. Save it under another name.",
+        )
     except UnicodeEncodeError:
         return _fail(400, "invalid_content", "content must be valid text")
     except OSError as exc:
@@ -439,12 +486,13 @@ async def write_file(workspace: str, params: dict[str, Any], settings: CodeSetti
     if len(data) > cfg.max_file_kb * 1024:
         return _size_refusal("Content", cfg.max_file_kb)
     expected = body.get("expectedMtime")
-    if isinstance(expected, int) and not isinstance(expected, bool) and body.get("force") is not True:
-        if os.path.exists(full) and _mtime_ms(full) != expected:
-            return _fail(409, "stale_write", "The file changed on disk since you opened it.")
+    if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int)):
+        return _fail(400, "invalid_param", "expectedMtime must be an integer (milliseconds).")
+    check = expected if body.get("force") is not True else None
     try:
-        await asyncio.to_thread(_write_atomic, full, data)
-        mtime = _mtime_ms(full)
+        mtime = await asyncio.to_thread(_checked_write, full, data, check)
+    except _StaleWrite:
+        return _fail(409, "stale_write", "The file changed on disk since you opened it.")
     except OSError as exc:
         return _disk_failure(exc)
     return _ok({"success": True, "path": full, "encoding": encoding, "mtime": mtime})
@@ -533,7 +581,7 @@ async def rename_path(workspace: str, params: dict[str, Any], settings: CodeSett
     bases = _bases(folder, cfg)
     source_outside = "The source path is outside the workspace."
     try:
-        old_full = os.path.realpath(os.path.join(base, old_path))
+        old_full = _leaf_path(base, old_path)
     except OSError, ValueError:
         return _outside(source_outside)
     if not os.path.normcase(old_full).startswith(bases):
@@ -543,7 +591,7 @@ async def rename_path(workspace: str, params: dict[str, Any], settings: CodeSett
     if not os.path.lexists(old_full):
         return _fail(404, "not_found", "Source path not found.")
     try:
-        new_full = os.path.realpath(os.path.join(base, new_path))
+        new_full = _leaf_path(base, new_path)
     except OSError, ValueError:
         return _outside("The destination path is outside the workspace.")
     if not os.path.normcase(new_full).startswith(bases):
@@ -573,7 +621,7 @@ async def delete_path(workspace: str, params: dict[str, Any], settings: CodeSett
     base = os.path.join(os.path.realpath(folder), "")
     bases = _bases(folder, cfg)
     try:
-        full = os.path.realpath(os.path.join(base, path))
+        full = _leaf_path(base, path)
     except OSError, ValueError:
         return _outside()
     if not os.path.normcase(full).startswith(bases):
@@ -583,7 +631,7 @@ async def delete_path(workspace: str, params: dict[str, Any], settings: CodeSett
     if not os.path.lexists(full):
         return _fail(404, "not_found", "File not found.")
     try:
-        if not os.path.isdir(full):
+        if os.path.islink(full) or not os.path.isdir(full):
             os.unlink(full)
         elif not os.listdir(full):
             os.rmdir(full)

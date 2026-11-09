@@ -332,13 +332,15 @@ def test_a_latin1_file_read_and_written_back_unchanged_keeps_its_exact_bytes(ws)
     assert (ws.root / "legacy.txt").read_bytes() == original
 
 
-def test_writing_a_character_past_latin1_to_a_latin1_file_saves_it_as_utf8(ws):
-    (ws.root / "legacy.txt").write_bytes("café\n".encode("latin-1"))
+def test_writing_a_character_past_latin1_to_a_latin1_file_is_refused_and_keeps_the_file(ws):
+    original = "caf\u00e9 It\u2019s".encode("cp1252", errors="ignore") + b"\x92\n"
+    (ws.root / "legacy.txt").write_bytes(original)
 
-    wrote = _fs("write_file", ws.root, {"path": "legacy.txt", "content": "price €5\n"})
+    wrote = _fs("write_file", ws.root, {"path": "legacy.txt", "content": "price \u20ac5\n"})
 
-    assert wrote.content["data"]["encoding"] == "utf-8"
-    assert (ws.root / "legacy.txt").read_bytes() == "price €5\n".encode("utf-8")
+    assert wrote.status_code == 409
+    assert wrote.content["error"]["code"] == "encoding_unsafe"
+    assert (ws.root / "legacy.txt").read_bytes() == original
 
 
 def test_a_new_file_is_written_as_utf8_and_the_result_says_so(ws):
@@ -467,3 +469,109 @@ def test_commit_goes_through_when_git_allow_outside_workspace_is_on(repo):
     assert committed.status_code == 200
     assert committed.content["data"]["ok"] is True
     assert sorted(_cli(repo, "show", "--name-only", "--format=", "HEAD").split()) == ["app/inside.txt", "top.txt"]
+
+
+# ---------------------------------------------------------------------------------------------- review fixes
+
+
+def test_delete_of_a_symlink_removes_the_link_and_never_its_target(ws):
+    _write(ws.root / "docs" / "README.md", "keep me")
+    _link(ws.root / "README.md", ws.root / "docs" / "README.md")
+
+    reply = _fs("delete", ws.root, {"path": "README.md"})
+
+    assert reply.status_code == 200
+    assert not os.path.lexists(ws.root / "README.md")
+    assert (ws.root / "docs" / "README.md").read_text() == "keep me"
+
+
+def test_force_delete_of_a_link_to_a_folder_leaves_the_folder(ws):
+    _write(ws.root / "releases" / "v2" / "app.txt")
+    _link(ws.root / "current", ws.root / "releases" / "v2")
+
+    reply = _fs("delete", ws.root, {"path": "current", "force": True})
+
+    assert reply.status_code == 200
+    assert not os.path.lexists(ws.root / "current")
+    assert (ws.root / "releases" / "v2" / "app.txt").exists()
+
+
+def test_rename_of_a_symlink_moves_the_link_and_not_its_target(ws):
+    _write(ws.root / "real.txt", "data")
+    _link(ws.root / "alias", ws.root / "real.txt")
+
+    reply = _fs("rename", ws.root, {"oldPath": "alias", "newPath": "x.txt"})
+
+    assert reply.status_code == 200
+    assert (ws.root / "real.txt").read_text() == "data"
+    assert os.path.islink(ws.root / "x.txt") and not os.path.lexists(ws.root / "alias")
+
+
+def test_a_non_integer_expected_mtime_is_refused_not_ignored(ws):
+    _write(ws.root / "a.txt", "one")
+
+    reply = _fs("write_file", ws.root, {"path": "a.txt", "content": "two", "expectedMtime": "123"})
+
+    assert reply.status_code == 400
+    assert (ws.root / "a.txt").read_text() == "one"
+
+
+def test_two_saves_with_the_same_expected_mtime_cannot_both_win(ws):
+    _write(ws.root / "a.txt", "one")
+    mtime = _fs("file", ws.root, {"path": "a.txt"}).content["data"]["mtime"]
+
+    async def both():
+        params = {"path": "a.txt", "expectedMtime": mtime}
+        return await asyncio.gather(
+            code_files.serve("write_file", str(ws.root), {**params, "content": "A"}, None),
+            code_files.serve("write_file", str(ws.root), {**params, "content": "B"}, None),
+        )
+
+    first, second = asyncio.run(both())
+
+    assert sorted([first.status_code, second.status_code]) == [200, 409]
+
+
+def test_a_write_to_a_fifo_path_does_not_hang(ws):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no FIFOs here")
+    os.mkfifo(ws.root / "pipe")
+
+    attempt = code_files.serve("write_file", str(ws.root), {"path": "pipe", "content": "x"}, None)
+    asyncio.run(asyncio.wait_for(attempt, 5))
+
+
+def test_status_marks_every_unmerged_pair_as_a_conflict():
+    assert {code_files._status_code(xy) for xy in ("UU", "DU", "UD", "AU", "UA", "AA", "DD")} == {"U"}
+
+
+@needs_git
+def test_a_rename_that_crosses_into_the_workspace_still_counts_as_outside(repo):
+    app = repo / "app"
+    _write(repo / "top.txt", "same\n" * 20)
+    _write(app / "keep.txt")
+    _cli(repo, "add", "-A")
+    _cli(repo, "commit", "-q", "-m", "base")
+    _cli(repo, "mv", "top.txt", "app/top.txt")
+
+    refused = _git(app, {"action": "commit", "message": "move"})
+
+    assert refused.status_code == 409
+    assert refused.content["error"]["code"] == "staged_outside_workspace"
+
+
+@needs_git
+def test_a_stash_from_a_subfolder_leaves_the_rest_of_the_repository_alone(repo):
+    app = repo / "app"
+    _write(repo / "top.txt", "one\n")
+    _write(app / "in.txt", "one\n")
+    _cli(repo, "add", "-A")
+    _cli(repo, "commit", "-q", "-m", "base")
+    _write(repo / "top.txt", "two\n")
+    _write(app / "in.txt", "two\n")
+
+    stashed = _git(app, {"action": "create_stash"})
+
+    assert stashed.status_code == 200
+    assert (app / "in.txt").read_text() == "one\n"
+    assert (repo / "top.txt").read_text() == "two\n"

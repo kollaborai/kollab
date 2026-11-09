@@ -411,7 +411,9 @@ def test_a_symlink_pointing_outside_is_403_for_every_route(client, ws):
     _refused(_put(client, ws.root, "link/new.txt", "x"), 403, "outside_workspace")
     _refused(_post(client, "create", ws.root, path="link/made.txt", type="file"), 403, "outside_workspace")
     _refused(_post(client, "mkdir", ws.root, parent="link", name="made"), 403, "outside_workspace")
-    _refused(_delete(client, ws.root, path="peek.txt"), 403, "outside_workspace")
+    # deleting the link itself is allowed (it lives in the workspace); the file it points to is never touched
+    assert _delete(client, ws.root, path="peek.txt").status_code == 200
+    assert not os.path.lexists(ws.root / "peek.txt")
     assert sorted(os.listdir(ws.outside)) == ["secret.txt"]
     assert (ws.outside / "secret.txt").read_text() == "classified"
 
