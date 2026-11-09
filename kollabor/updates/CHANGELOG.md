@@ -7,7 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-11-08
+
+### Fixed
+- New Session in the web UI now starts on your default loadout (the model and level you set as the default), as the
+  terminal does. Before, it started on the active profile's own saved model, so a default such as Luna at max was
+  skipped and a saved model the provider no longer serves could be used instead. A default loadout that sets no
+  level keeps its profile's own, and a default whose saved name matches no loadout is ignored instead of being
+  matched to a similarly named one. The default is the one of the folder the session starts in, so a folder
+  whose own config sets a different default starts on that one, whichever folder the engine runs in (#957).
+- New Session now says so in the chat when the model you picked did not apply and the session runs another one, with a
+  Try Again button; before, the message was kept but only shown on the empty screen with no session open. The notices
+  above the chat (failed pick, page and engine on different versions, update available, context compaction) are now one
+  compact, muted line each with a button for the way out, and the versions no longer show in the line (#956).
+
+## [0.21.0] - 2026-11-08
+
 ### Added
+- Web UI: Search configured profiles, models and reasoning efforts from New Session and the session panel. A selection applies only to that session; Manage Profiles opens the profile editor from Loadouts (#552).
+
+### Fixed
+- A chat with an agent on another computer keeps its messages after you switch to another agent and back, or
+  reopen the web UI; until that agent's history arrives the chat says it is still syncing instead of showing an
+  empty conversation (#927).
+- Read changed regression tests from the pull request's immutable file blobs while keeping the readiness checker on trusted base code.
+- The PR readiness gate keeps every finding-ID mention blocking unless a trusted current-head reviewer annotates that exact comment occurrence; each accepted suppression is audited (#724).
+
+## [0.20.0] - 2026-11-08
+
+### Added
+- Retrospective page generator skeleton (`.github/scripts/build_retro.py`, opt-in via `retro.enabled`, default off): repo-agnostic standalone script in the `build_dedup_report.py` form factor that renders all six retro sections (shipped, dragging, incidents, KPIs vs explicit `retro.kpi_targets` with no-target-labeled, agent activity, issues/plan status) with missing collector data rendered as "missing", never zero, and every future number linked to its source; collectors land in follow-up slices (#730).
+- Usage ledger (off by default, `plugins.usage_ledger.enabled`) records token counts, cache counts, wall time and estimated cost for every LLM turn, per agent, lane, PR, model and day, in a local owner-only JSONL file. Missing provider usage reads as missing, and models without a known price read as unpriced, never zero. `/usage` and `/usage json` report rollups, and optional budget alerts fire once per window (#723).
+- Real-object lifecycle tests cover TUI subscribers, EventBus hooks and HookRegistrar teardown (#713).
+- Startup sweeps `~/.kollab/projects` for session directories orphaned by
+  removed or renamed projects: each entry is proven live by round-trip decode,
+  an owner marker, a tmp-path match or a pruned prefix search; ambiguous
+  look-alike slugs are only reported, never moved. On boot, confirmed orphans
+  are quarantined under `projects/_trash` and empty orphan directories are
+  removed, never while the project still exists or a session is active; set
+  `kollabor.projects.sweep_boot_enabled` to false to turn this off.
+  `kollab --cleanup-projects` previews the sweep without touching anything;
+  add `--execute` to apply it and purge quarantined entries older than the
+  14-day retention, `--retention-days N` to tune it (#647).
+- The `hub_queue` tool accepts optional explicit `upstream_refs` for GitHub issues and PRs; refs are never inferred from task descriptions (#640).
 - PR throughput KPI report (`.github/scripts/pr_throughput_kpi.py`, opt-in via `kpi.enabled`, default off): closed PRs per hour against a target of 3 on 1h, 8h and 24h rolling windows, with supporting open-PR, review, first-push CI and per-author/lane metrics. Missing data is reported as missing, never zero (#729).
 - Scheduled stale-PR sweeper (daily workflow) lists open PRs with no commit and no review activity for 5+ days in a single digest with head-versus-main state, qualified CI verdicts, and suggested actions, and applies the `status/stale` label to flagged PRs (honoring `status/no-stale` exemptions, with close suggestions escalating at the rulebook 45/60-day marks) without ever closing, commenting, or unlabeling. A best-effort ntfy ping links the operator to the digest and is skipped with a warning when NTFY_TOPIC is unset (#718).
 - Optional merge bot for maintainers: `.github/workflows/auto-merge.yml` can merge a PR once CI, an independent review of its exact head, approval and resolved conversations all hold. It ships off; `docs/operations/pr-gates-auto-merge.md` has the steps to turn it on (#736).
@@ -15,7 +57,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Contributor docs now state the productization rule: every enhancement ships as an opt-in, default-off, repo-agnostic product surface (skill, extension, agent, or plugin), with the policy, checklist, and a mapping of every issue in the #711-#730 batch to its surface in `docs/productization.md` (#731).
 - A definition-of-done check (`pr-gates`) runs configurable hygiene checks on every PR -- docs-path rules, unresolved threads, base currency, Conventional Commit title, linked issue, and regression-test coverage of review finding ids -- and reports every failed item in exactly one check run (default `dod/ready-for-review`), never comments. Every commits, files, and comments page is read and review-thread pagination is followed, so nothing beyond the first page is silently skipped; pagination is bounded and repeat-guarded (identical pages, null or repeated cursors, and runaway loops fail closed with a loud error -- hang never, silently truncate never); base currency is judged by the PR head's merge-base against the target branch tip, so a branch missing commits from main fails. This repository runs it enabled (`pr_gates.dod.enabled = true` in `.github/pr-gates.toml`), with signed-commit validation left out until agent commits are signed (#755); the feature defaults to off elsewhere, and it is usable as a local CLI before pushing (#724).
 
+### Changed
+- CI also runs on GitHub merge-queue groups (`merge_group`), so a merge queue can be turned on for `main` once the repository is owned by an organization; GitHub does not offer merge queues on personal-account repositories (#857).
+- Changelog entries now go in one file per PR under `changes/` instead of `CHANGELOG.md`, so open PRs no longer conflict on it; a release PR folds them in with `python scripts/changelog.py build`, and `ci/standards-check` refuses a direct `CHANGELOG.md` edit outside `release/` and `changelog/` branches (#855).
+- The `LLM_REQUEST_POST` event payload carries the `provider` and a `usage_source` (`provider`, `estimated` or `none`) so consumers can tell reported usage from its absence.
+
 ### Fixed
+- Fix peer exchange failures when gossip exceeds the message size limit (#881).
+- Agents on another device opened from the web UI no longer fail with "rpc call timed out after 10.0s": their state calls get 60 seconds, since their replies cross the relay.
+- Keep operator stop-all scoped to the current folder and block abbreviated agent launch options in tool shells (#875).
+- Prevent the project cleanup sweep from quarantining live workspaces whose names share a prefix with a sibling directory (#873).
+- When a reply is cut at the output limit and the model's last continuation comes back without token usage, the cut call's tokens and cost are now counted in the session totals and the status bar instead of being dropped (#421).
+- A Windows local IPC connection no longer fails with `local IPC handshake failed` when the machine is busy: the handshake now has 30 seconds to finish instead of 5, which loaded CI runners could exceed (#774).
+- fix(errors): structured error type/code propagates provider -> engine -> UI/ACP; classification reads type/code first and falls back to bounded text markers for untyped exceptions — it never classifies from free-form rendered text (#720, closes #549 misclassification class).
+- Hub recurring jobs: the coordinator can now send five opt-in jobs on a schedule (koordinator refresh, idle sweep, re-review check, KPI rebuild, hub heartbeat) from `plugins.hub.hub_jobs.<name>` config, all off by default. Each message ends with the rule to never merge, approve, close, push or restart; jobs keep their last run across restarts, skip a run that is still sending, and stop at a per-hour message cap (#728).
+- Hub agents can now be woken by opt-in event hooks (review verdict on the current head, a blocking issue or PR clearing, an idle agent with open work, a new commit on a PR with open findings, a message left undelivered, a missed koordinator heartbeat). Every hook is off by default (`plugins.hub.hooks.<name>.enabled`) with its own targets, thresholds, cooldown and hourly cap; each event is acted on once per PR and head, an agent is never woken by its own action, and a hook never starts another hook. `docs/features/hub-wake-hooks.md` lists the settings. Event sources for each hook are not connected yet (#727).
+- Adversarial cross-agent review has a policy engine, off by default (`adversarial_review.enabled`): one review per head SHA, round caps by finding severity (low 1, medium 2, high or critical 3) after which the owner is asked, only new or regressed findings reopen a round, a cooldown between rounds, a reviewer who is never the author, lane or fixer, and a PR verdict that records head SHA, base SHA, commands and PASS/FAIL without reviewer identity (#726).
+- A promotion gate keeps agents out of shared checkouts until their scratch change has passed validation: with `sandbox_gate.enabled` on (default off), writes and commands that touch a protected root are refused and logged unless the agent first runs `sandbox-promote`, which runs the configured validation commands in a clean scratch checkout and issues a one-use, 15-minute token tied to that commit and root; the owner's time-boxed override is environment-only and every decision goes to an audit log (#725).
+- A message sent to an ACP agent while its harness is restarting after a failed turn is now queued and answered by the restarted harness instead of being refused as "ACP runner is not started" (#714).
+- The engine's streams now have contract tests that pin the exact event order and counts a caller reads (tokens, one `turn_complete`, errors, cancels, a model fallback inside a turn, unsubscribe and reconnect), so a stream that drops its caller before the whole turn arrives, as in #549 round 1, fails a test (#712)
+- A halt no longer leaves background processes running when the system's process list reports their start a second or two before the agent's own record of it; the sweep tolerates the same clock drift as its other start checks (#710).
+- Connect explains why it cannot create a device code for a non-HTTPS relay address or a relay using a port other than 443 (#693).
+- `kollab --as <name>` now refuses a name that a busy hub agent still holds (live process, slow to answer) instead of starting a second agent under the same identity, and a plain launch skips that name too (#673).
+- POSIX Hub presence now uses the shared runtime directory immediately for
+  new and restarted agents (project-scoped when enabled). Agents already
+  running during the upgrade keep heartbeating under their original
+  HOME-scoped path and remain undiscoverable from a different HOME until
+  restarted; Windows presence remains HOME-scoped.
+- Hub presence is advertised only after the local IPC endpoint answers a handshake: the gating probe awaits the handshake off the event loop (the answering server runs on that same loop, which a blocking probe starves of the turns needed to answer), and when the endpoint never answers within 30s the record still publishes, degraded, with an error logged. The daemon-ready signal for the fork parent fires before the gate (the parent's 15s ready budget is mostly consumed by plugin startup), and the gate deadline (10s) nests inside that budget so a never-answering socket cannot delay the signal or the degraded publish past it (#692).
+- An agent running `/hub stop all` in a TUI session now stops only the agents that session started: peers launched by other sessions or the operator are immune and reported in the result, and the command is advertised only to sessions that started agents. The operator CLI remains mesh-wide, but refuses normal foreground or background tool children by checking ancestry against Hub presence in any local project, even when a terminal tool filters context markers or changes the working directory. Stop-all ownership uses the live Popen child and its OS process creation time, with no 120-second timestamp window (#669).
+- Terminal-tool children and agents cannot launch a nested CLI agent with `--agent`: the terminal spawn guard inspects PowerShell/pwsh and `cmd /c` wrappers, including encoded PowerShell commands, and CLI startup refuses launches when its shell/agent markers are present (#669).
+- A loadout that was rejected after it started (for example because the `--effort` given with it is not offered) no longer comes back as the model on the next plain start of the same ACP profile when no earlier harness was running; the profile's own model is used (#651).
+- Hub stale-queue sweeps recheck closed issues and unmerged closed PRs; only
+  merged PRs count as terminal. Completed slots retire; pending slots retire
+  when their linked TaskLedger card is terminal or all explicit GitHub refs are
+  terminal. Assigned slots stay assigned, active linked cards keep their slot
+  status with an idempotent stale-upstream note, and legacy slots without refs
+  or a linked card are report-only (#640).
+- `kollab hub capture` now shows an agent's streamed answer as one Assistant block when the model's reasoning chunks arrive between the words, instead of one Assistant line per word (#632).
+- Development and live checkouts no longer masquerade as release builds:
+  the CLI, application info, and the engine's `/version` and `/status`
+  report a PEP 440 local segment (`0.18.5+<short-sha>`) derived from the
+  checkout, while installed releases and release artifacts keep the exact
+  base version, and an unresolvable revision reports `+unknown` instead
+  of hiding (#630).
+- A message steered into a running ACP turn is accepted. The send no longer shows "input not accepted" for a message that was delivered (#616, #583).
+- Saving a provider profile with no usable OS keyring (`KOLLAB_NO_KEYRING`, a headless machine, a container) no longer writes the API key into `config.json` as plain text: the key goes to an encrypted password vault at `~/.kollab/vault/` and the config keeps only its `secret:keyring:<profile>` reference, which resolves in pipe mode and `--detached` without a prompt (#610).
+- Closing an ACP session no longer reads the environment of other processes to find the ones it started, so their API keys and other variables never enter Kollab's memory. It now finds leftover child processes by the adapter's session id and checks that the adapter's pid was not reused; a child that leaves that session with setsid() before Kollab sees it is no longer found. On Windows, which has no session ids, this lookup is skipped, so a child whose parent exits before Kollab sees it is not found either (#608).
+- A stalled ACP runner close no longer holds the session activation indefinitely: after 30 seconds the close is set aside to finish on its own, so switching to another profile works, and the old runner can no longer close or write into its replacement (#602).
+- Voice no longer loses a spoken request that a restart caught mid-delivery: on the next start a request the agent never received is delivered again, one the agent already accepted is never sent twice, and one whose outcome cannot be known is listed in `/voice status` and cleared with `/voice dismiss` (#599)
+- A message steered into a busy ACP harness is no longer sent a second time when the harness's receipt times out or the connection drops: Kollab now reports the steer as unconfirmed instead of queueing the same text as a new turn, and still queues it when the harness explicitly refuses steering (#588).
+- ACP harnesses no longer get the Hub child binding token on their command line: the `kollab-hub` MCP server entry names an owner-only credential file instead of carrying the token in its env, which adapters such as the Claude one copy into a `--mcp-config` process argument. The file is replaced on every binding rotation and removed when the session closes (#587).
+- Switching profiles with `/model` while another activation (the state service, used by the Web UI and setup) is in progress no longer leaves the selected profile and the request provider on different profiles: the two now take turns, and a switch that fails or is cancelled after the provider moved puts the previous provider back (#585).
+- Attaching a window, or one already attached, after `/resume` or a new session no longer shows the previous conversation's messages, goal status, replies, errors or completions: each live-view event now carries the conversation that produced it, and only the live conversation's events are replayed or delivered (#525).
+- A rejected ACP model, effort or loadout switch now says so when the rollback cannot resume the previous harness session (its earlier context is lost), and says the previous harness could not be restarted when that restart fails, instead of only logging it (#502).
 - Google API keys in provider errors and logs are now redacted even when the key was not submitted by the user, and every log file (the app's `kollab.log` and the engine's log) now redacts provider keys whichever code wrote the line, including exception tracebacks (#835, #843).
 - Profile setup now reports state-service provider startup failures instead of claiming success, restores the previous profile when possible, and keeps provider secrets out of errors and logs (#832).
 - Voice-turn rewrites now coordinate with transcript appends (the logger's and compaction's summaries and checkpoints) and session snapshots across processes; rows appended after a rewrite reads its cut survive the atomic replacement (#834).

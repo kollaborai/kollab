@@ -301,6 +301,28 @@ as individual peer messages only when persisted source is `observation`; human
 examples remain user text. Routing ids and raw prompt text stay in history without
 being printed in chat bubbles, and distinct replies are not deduplicated.
 
+Opening a chat answers from the engine's mirror at once (`GET
+/sessions/{id}/history`); a background refresh then asks the daemon. A caller
+that waits (opening the agent, a turn's end, the synced claim) gives the daemon
+`HISTORY_REFRESH_TIMEOUT_SECONDS` (0.75 s) for the history lock and again for
+the answer, and otherwise keeps the cached mirror; a notifying refresh that got
+no answer in that time (a turn's end behind an older answer, or a slow remote)
+is handed to the background refresh, so the finished turn is still announced. The background refresh has no
+caller waiting, so it lets the daemon answer (`HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS`,
+30 s, normally ended first by the state client's own RPC timeout): an agent on
+another computer answers over the relay in seconds. Until the daemon has answered
+once, an empty mirror is unknown, not an empty chat: the history answer says
+`stale`, the page shows that history is still syncing instead of "No conversation
+messages yet", and the first answer is announced with `history_updated` (#927).
+The page replaces what it built from the seed by rebuilding the thread (the runtime
+reads its initial state only on mount), which would empty the message box, so
+`ComposerKeeper` (`components/assistant-ui/composer-keeper.tsx`) keeps each chat's
+typed text in memory and puts it back when that chat's runtime mounts again (#976).
+The page polls the session list, not history, so while the daemon has never
+answered a failed background answer is tried again after
+`HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS` (1, 2 and 4 s); after those the next
+history request starts a new refresh.
+
 Online notices are quiet, transparent activity rows with optional details, without
 a background or border. Markdown list-item containers use normal whitespace so
 the renderer's structural newlines do not put a marker on an empty first line;
