@@ -38,6 +38,14 @@ This file holds the rules that apply to every change. The reference for each are
 | version numbers, cutting a release, release binaries, code that starts kollab again | `docs/reference/agent-guide/releases.md` |
 | pipe mode, tool permissions and voice approvals, terminal colors, slash commands | `docs/reference/agent-guide/features-and-commands.md` |
 
+### Traps the reference pages explain
+
+These three live in the reference pages and are easy to break without reading them:
+
+- Code that starts kollab again uses `kollabor.binary.kollab_argv()`, never `sys.executable -m kollabor_cli_main` (`releases.md`).
+- `kollab --hub msg <name> <text>` reaches every online agent and wakes only the named one; send one message per agent you need to act (`hub.md`).
+- An engine route that takes a folder calls `folder_or_400` first and uses what it returns (`components.md`).
+
 #### CRITICAL: Render State Management Rules
 
 **NEVER directly manipulate these `terminal_renderer` properties:**
