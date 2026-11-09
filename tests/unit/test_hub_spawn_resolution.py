@@ -230,7 +230,10 @@ class TestHubSpawnResolution(IsolatedAsyncioTestCase):
                     plugin._presence = _FakePresence()
                     personas = [SimpleNamespace(name="jasper", agent="coder")]
                     with (
-                        patch("plugins.hub.plugin.find_persona", side_effect=lambda ref: personas[0] if ref == "jasper" else None),
+                        patch(
+                            "plugins.hub.plugin.find_persona",
+                            side_effect=lambda ref: personas[0] if ref == "jasper" else None,
+                        ),
                         patch("plugins.hub.plugin.roster_personas", return_value=personas),
                     ):
                         await plugin._handle_spawn_command(
