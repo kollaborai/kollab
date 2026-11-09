@@ -166,6 +166,21 @@ def test_a_body_over_the_cap_is_413(client, daemon):
     assert daemon.calls == []
 
 
+@pytest.mark.asyncio
+async def test_chunked_body_stops_reading_at_the_cap(monkeypatch):
+    monkeypatch.setattr(code, "MAX_BODY_BYTES", 8)
+    consumed = []
+
+    async def stream():
+        for chunk in (b"12345", b"6789", b"never read"):
+            consumed.append(chunk)
+            yield chunk
+
+    response = await code._body(SimpleNamespace(headers={}, stream=stream))
+    assert response.status_code == 413
+    assert consumed == [b"12345", b"6789"]
+
+
 def test_an_unknown_session_is_404_and_a_stopped_daemon_is_409(client, daemon):
     assert client.get(_url("fs/tree", "nobody")).status_code == 404
     daemon.session.alive = False
