@@ -186,6 +186,7 @@ const mainConfig = defineConfig({
       "tests/voice-turn-groups.test.ts",
       "tests/history-reconciliation.test.ts",
       "tests/path-text.test.ts",
+      "tests/todo-list-cache.test.ts",
       "tests/gem-headshot.test.ts",
       "tests/field-renderer-textarea.test.tsx",
       "tests/hub-note-recipient.test.tsx",
