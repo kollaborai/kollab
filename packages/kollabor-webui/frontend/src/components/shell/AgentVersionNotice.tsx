@@ -16,7 +16,7 @@ export type AgentVersionNoticeState = {
 
 /** The line for an agent that cannot restart itself: the stop-and-start command, in plain words (#968). */
 function tooOldLine(name: string): string {
-  return `This agent started before Restart Agent existed. Run kollab --hub stop ${name} in a terminal, then start it again.`;
+  return `This agent started before Restart Agent existed. Run kollab --hub stop ${name} in a terminal, then select its Offline row in the sidebar to start it again.`;
 }
 
 /**

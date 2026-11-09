@@ -359,7 +359,7 @@ agent that publishes no version started before agents did and counts as older.
 |---|---|---|
 | on | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
 | off (default) | "Run /restart to update the agent version running." | Type `/restart` in the chat |
-| either, when the agent publishes no version (it started before Restart Agent existed) | "This agent started before Restart Agent existed. Run kollab --hub stop <name> in a terminal, then start it again." No button | Stop the agent in a terminal, then start it again |
+| either, when the agent publishes no version (it started before Restart Agent existed) | "This agent started before Restart Agent existed. Run kollab --hub stop <name> in a terminal, then select its Offline row in the sidebar to start it again." No button | Stop it in a terminal, then select its Offline row in the sidebar |
 
 Both versions are in the line's hover text, never in the line. The setting is in
 `/config` under Updates as "Restart Agent Button".
