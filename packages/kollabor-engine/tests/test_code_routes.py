@@ -187,6 +187,27 @@ def test_a_daemon_that_fails_is_502_and_the_error_text_stays_out_of_the_answer(c
     assert "secret" not in response.text
 
 
+def test_a_daemon_without_code_support_answers_a_plain_restart_notice(client, daemon):
+    class RpcMethodNotFound(Exception):
+        """Stands in for kollabor_rpc's error of the same name: the engine matches on the type's name."""
+
+    daemon.fail = RpcMethodNotFound("method not found: state.code_call")
+
+    response = client.get(_url("fs/tree"))
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "daemon_outdated"
+    assert "Restart it" in response.json()["error"]["message"]
+    assert "state.code_call" not in response.text
+
+
+def test_settings_and_the_terminal_env_report_pass_through_to_the_daemon(client, daemon):
+    assert client.get(_url("settings")).status_code == 200
+    assert client.get(_url("terminal/env")).status_code == 200
+
+    assert [call[0] for call in daemon.calls[-2:]] == ["settings", "terminal.env_report"]
+
+
 # --------------------------------------------------------------------------------------------------- terminal
 
 

@@ -43,6 +43,7 @@ IDLE_SLEEP_MAX = 0.4
 CLOSE_UNAUTHORIZED = 4401
 CLOSE_NO_SESSION = 4404
 CLOSE_DAEMON_LOST = 1011
+OUTDATED_MESSAGE = "This agent runs older code. Restart it to use Code, Git and Terminal."
 # What GET /git answers: read-only, no body.
 GET_GIT_ACTIONS = ("status", "current_branch", "list_branches")
 
@@ -62,6 +63,11 @@ def _live_session(session_id: str) -> EngineSession | JSONResponse:
     return session
 
 
+def _is_outdated(exc: BaseException) -> bool:
+    """A daemon that started before this feature has no ``state.code_call`` method (``RpcMethodNotFound``)."""
+    return type(exc).__name__ == "RpcMethodNotFound"
+
+
 async def _run(session_id: str, op: str, params: dict[str, Any]) -> JSONResponse:
     """Ask the session's daemon to run ``op`` and pass its answer on unchanged."""
     session = _live_session(session_id)
@@ -72,6 +78,8 @@ async def _run(session_id: str, op: str, params: dict[str, Any]) -> JSONResponse
     except Exception as exc:
         # The type name only: the exception text can carry a path or file content.
         logger.error("Session %s code call %s failed: %s", session_id, op, type(exc).__name__)
+        if _is_outdated(exc):
+            return _fail(502, "daemon_outdated", OUTDATED_MESSAGE)
         return _fail(502, "daemon_unreachable", f"The session's daemon did not answer ({type(exc).__name__}).")
     return JSONResponse(answer["body"], status_code=answer["status"], headers=_NO_STORE)
 
@@ -166,6 +174,21 @@ async def git_read(session_id: str, request: Request) -> JSONResponse:
     return await _run(session_id, "git", params)
 
 
+# ---------------------------------------------------------------------------------------------------- settings
+
+
+@router.get("/settings")
+async def code_settings(session_id: str) -> JSONResponse:
+    """The Code, Git and Terminal settings in effect on the session's daemon (``env_set`` shows names only)."""
+    return await _run(session_id, "settings", {})
+
+
+@router.get("/terminal/env")
+async def terminal_env(session_id: str) -> JSONResponse:
+    """The variable names a new shell on the session's daemon would not get, by reason. Names only."""
+    return await _run(session_id, "terminal.env_report", {})
+
+
 # -------------------------------------------------------------------------------------------------- terminal
 
 
@@ -190,15 +213,22 @@ async def _authenticated(ws: WebSocket) -> bool:
 
 
 class _DaemonLost(Exception):
-    """The session's daemon failed or refused a terminal call. Carries no text: that could hold shell output."""
+    """The session's daemon failed or refused a terminal call. Carries no text: that could hold shell output.
+
+    ``outdated`` is set when the daemon has no ``state.code_call`` at all: it needs a restart, not a retry.
+    """
+
+    def __init__(self, outdated: bool = False) -> None:
+        super().__init__()
+        self.outdated = outdated
 
 
 async def _ask(session: EngineSession, op: str, params: dict[str, Any]) -> dict[str, Any]:
     """One terminal call to the daemon; its data, or ``_DaemonLost`` for any failure (kept apart from socket errors)."""
     try:
         return _data(await session.state.code_call(op, params))
-    except Exception:
-        raise _DaemonLost from None
+    except Exception as exc:
+        raise _DaemonLost(_is_outdated(exc)) from None
 
 
 def _data(answer: dict[str, Any]) -> dict[str, Any]:
@@ -245,11 +275,12 @@ async def _pump(ws: WebSocket, session: EngineSession, link: str, wake: asyncio.
             await asyncio.wait_for(wake.wait(), min(IDLE_SLEEP_MAX, IDLE_SLEEP_STEP * idle))
 
 
-async def _lost(ws: WebSocket, session_id: str) -> None:
+async def _lost(ws: WebSocket, session_id: str, outdated: bool = False) -> None:
     """The daemon stopped answering: say so on the socket and close it."""
     logger.error("Session %s terminal bridge lost its daemon", session_id)
+    message = OUTDATED_MESSAGE if outdated else "The session's daemon stopped answering."
     with contextlib.suppress(WebSocketDisconnect, RuntimeError):
-        await ws.send_json({"type": "error", "message": "The session's daemon stopped answering."})
+        await ws.send_json({"type": "error", "message": message, **({"code": "daemon_outdated"} if outdated else {})})
         await ws.close(code=CLOSE_DAEMON_LOST)
 
 
@@ -258,8 +289,8 @@ async def _guarded_pump(
 ) -> None:
     try:
         await _pump(ws, session, link, wake)
-    except _DaemonLost:
-        await _lost(ws, session_id)  # closing the socket ends the forwarder too
+    except _DaemonLost as lost:
+        await _lost(ws, session_id, lost.outdated)  # closing the socket ends the forwarder too
     except (WebSocketDisconnect, RuntimeError):
         pass  # the client has gone
 
@@ -286,8 +317,8 @@ async def code_terminal_ws(ws: WebSocket, session_id: str) -> None:
     try:
         # The socket stays open after a shell exits, until the client closes it.
         await _forward(ws, session, link, wake)
-    except _DaemonLost:
-        await _lost(ws, session_id)
+    except _DaemonLost as lost:
+        await _lost(ws, session_id, lost.outdated)
     except (WebSocketDisconnect, RuntimeError):
         pass  # the client has gone
     finally:
