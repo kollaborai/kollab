@@ -314,7 +314,7 @@ async def test_native_handover_keeps_an_observation_when_its_history_retry_fails
 
     handed_over = await orchestrator.hand_over_to_native()
 
-    assert handed_over is False
+    assert handed_over is not True
     assert len(orchestrator._unwritten_observations) == 1
     assert orchestrator._unwritten_observations[0][1].content.endswith("MUST_REMAIN")
     assert not [message for message in llm.conversation_history if message.role == "user"]

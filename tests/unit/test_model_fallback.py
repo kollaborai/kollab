@@ -317,6 +317,7 @@ async def test_native_handover_does_not_wake_after_history_write_failure(monkeyp
         monkeypatch, {"plugins.model_fallback.loadout": "codex"}
     )
     harness = _Harness(kept=1)
+    harness.active = False
 
     async def no_history(self):
         self.held = False
