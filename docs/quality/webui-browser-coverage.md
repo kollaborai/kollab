@@ -22,10 +22,10 @@ The runner executes six independent browser suites using two workers by
 default. Each has its own scratch home, temporary directory, browser context,
 and dynamically allocated local listener. It does not inherit unrelated
 environment variables. `KOLLAB_BROWSER_WORKERS` accepts 1–4;
-`KOLLAB_BROWSER_TIMEOUT_MS` bounds each worker. `CHROME_PATH` may select an
-existing Chromium executable. Results, captured worker output, and any suite
-screenshots are written under a unique temporary directory, or under
-`KOLLAB_BROWSER_RESULTS_DIR` when specified. A failed or timed-out suite makes
+`KOLLAB_BROWSER_TIMEOUT_MS` bounds each worker (300 seconds by default).
+`CHROME_PATH` may select an existing Chromium executable. Results, captured
+worker output, and suite screenshots go under a unique temporary directory or
+under `KOLLAB_BROWSER_RESULTS_DIR` when specified. A failed or timed-out suite makes
 the command fail. A timeout stops dispatch, requests graceful shutdown of all
 active workers, and marks queued suites as `skipped`. On POSIX, the runner
 checks that each owned process group has exited before reporting cleanup
