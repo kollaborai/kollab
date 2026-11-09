@@ -100,25 +100,59 @@
   .muted { color: var(--muted-foreground); }
   .hint { margin-top: 0.75rem; font-size: 0.75rem; color: var(--muted-foreground); }
 
-  /* List: table at 1024px and up, cards below */
-  .table-wrap { display: none; margin-top: 0.5rem; }
+  /* Schedules, v10: a split panel. Left: the schedule list. Right: the picked schedule, or its form.
+     Under 768px the list sits above the pane. From 1024px the form and the details use two columns. */
   table { border-collapse: collapse; font-size: 0.875rem; line-height: 1.25rem; text-align: left; }
   th { padding: 0.5rem 0.75rem 0.5rem 0; font-weight: 500; color: var(--muted-foreground); white-space: nowrap; }
   td { padding: 0.5rem 0.75rem 0.5rem 0; vertical-align: top; }
   th:last-child, td:last-child { padding-right: 0; }
-  .cards { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.5rem; }
-  .card { padding: 0.75rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); font-size: 0.875rem; }
-  .card dl { display: grid; grid-template-columns: auto 1fr; column-gap: 0.75rem; row-gap: 0.25rem; margin-top: 0.5rem; }
-  .card dt { color: var(--muted-foreground); }
-  .card dd { overflow-wrap: anywhere; }
-  .card .err { color: var(--destructive); }
-  .card-actions { display: flex; gap: 1rem; margin-top: 0.5rem; }
-  .row-actions { display: inline-flex; gap: 0.5rem; }
   .empty {
-    margin-top: 0.5rem; padding: 1.5rem 0.75rem; border-radius: var(--radius);
+    margin-top: 0.25rem; padding: 1rem 0.75rem; border-radius: var(--radius);
     background: oklch(0.269 0 0 / 0.3); text-align: center; font-size: 0.875rem; color: var(--muted-foreground);
   }
   .empty strong { display: block; margin-bottom: 0.25rem; font-weight: 500; color: var(--foreground); }
+  .split { display: grid; margin-top: 0.75rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.2); overflow: hidden; }
+  .split-list { display: grid; align-content: start; min-width: 0; border-bottom: 1px solid oklch(1 0 0 / 8%); }
+  .split-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.625rem 0.75rem; }
+  .split-head .summary { font-size: 0.75rem; }
+  .sched-list { list-style: none; display: grid; }
+  .sched-list li + li { border-top: 1px solid oklch(1 0 0 / 6%); }
+  .sched-item {
+    display: grid; gap: 0.125rem; width: 100%; padding: 0.625rem 0.75rem; border: 0; background: none; cursor: pointer;
+    color: var(--muted-foreground); font: inherit; font-size: 0.8125rem; line-height: 1.25rem; text-align: left;
+  }
+  .sched-title { color: var(--foreground); overflow-wrap: anywhere; }
+  .sched-meta, .sched-note { font-size: 0.75rem; overflow-wrap: anywhere; }
+  .sched-item[aria-current="true"] .sched-title {
+    font-weight: 500; text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 0.375rem;
+  }
+  .split-foot { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; padding: 0.5rem 0.75rem 0.625rem; }
+  .split-detail { display: grid; align-content: start; gap: 0.75rem; min-width: 0; padding: 0.75rem; }
+  .split-detail > .footer { margin: 0.25rem -0.75rem -0.75rem; padding: 0.75rem; }
+  .detail-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 0.5rem 1rem; }
+  .detail-title { font-size: 1rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+  .detail-actions { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; }
+  .detail-confirm { padding: 0.75rem; border-radius: var(--radius); background: oklch(0.704 0.191 22.216 / 0.1); font-size: 0.875rem; }
+  .detail-confirm h3 { font-size: 0.875rem; font-weight: 600; }
+  .detail-confirm p { margin-top: 0.25rem; color: var(--muted-foreground); }
+  .detail-confirm .actions { margin-top: 0.75rem; display: flex; justify-content: flex-end; gap: 0.5rem; }
+  .facts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem 1.5rem; font-size: 0.875rem; }
+  .facts > div { display: grid; gap: 0.125rem; min-width: 0; }
+  .facts dt { font-size: 0.75rem; color: var(--muted-foreground); }
+  .facts dd { overflow-wrap: anywhere; }
+  .form-grid { display: grid; gap: 1.25rem 1rem; }
+  .form-part { display: grid; align-content: start; gap: 0.75rem; min-width: 0; }
+  .form-part > .group, .form-part > .field { margin-top: 0; }
+  @media (min-width: 768px) {
+    .split { grid-template-columns: 15rem minmax(0, 1fr); }
+    .split-list { border-bottom: 0; border-right: 1px solid oklch(1 0 0 / 8%); }
+  }
+  @media (min-width: 1024px) {
+    .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .facts > .wide { grid-column: 1 / -1; }
+    .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: dense; }
+    .form-part.span-2 { grid-column: 1 / -1; }
+  }
 
   /* Add, edit and generate forms */
   .form-title { font-size: 0.875rem; font-weight: 600; }
@@ -158,19 +192,6 @@
   .draft { margin-top: 0.5rem; padding: 0.75rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); font-size: 0.875rem; }
   .draft dl { display: grid; grid-template-columns: auto 1fr; column-gap: 0.75rem; row-gap: 0.25rem; }
   .draft dt { color: var(--muted-foreground); }
-
-  /* Delete confirmation, over the list frame */
-  .scrim {
-    position: absolute; inset: 0; z-index: 1; display: grid; place-items: center;
-    padding: 1rem; background: rgb(0 0 0 / 0.5);
-  }
-  .confirm {
-    width: min(28rem, 100%); padding: 1.5rem; border-radius: var(--radius);
-    background: var(--background); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-  }
-  .confirm h3 { font-size: 1.125rem; font-weight: 600; line-height: 1.25; }
-  .confirm p { margin-top: 0.5rem; font-size: 0.875rem; color: var(--muted-foreground); }
-  .confirm .actions { margin-top: 1.5rem; display: flex; justify-content: flex-end; gap: 0.5rem; }
 
   /* Schedules, v8: file path, info button, agent list, import format, Learn topic */
   .where { margin-top: 0.75rem; font-size: 0.75rem; color: var(--muted-foreground); overflow-wrap: anywhere; }
@@ -299,16 +320,12 @@
   @media (min-width: 768px) {
     .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
   }
-  @media (min-width: 1024px) {
-    .table-wrap { display: block; overflow-x: auto; }
-    .cards { display: none; }
-  }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <p class="note">Mockup for #612 · v9 · sample data · nothing here is built. Planned, not built: the Schedules tab, Enable and Disable, Import file, Generate with agent, /schedules in the TUI, the Skill field, the per-agent folder and loadout, one schedule for many agents, the Learn topic, the schedules file at ~/.kollab/schedules.json, and pausing while a device is off the network.</p>
-  <p class="note">v9: Runs in is a split panel. Left: the machines, each with its selected count. Right: the folders on the picked machine and their agent buttons. White means selected. The TUI list (T6) is unchanged.</p>
+  <p class="note">Mockup for #612 · v10 · sample data · nothing here is built. Planned, not built: the Schedules tab, Enable and Disable, Import file, Generate with agent, /schedules in the TUI, the Skill field, the per-agent folder and loadout, one schedule for many agents, the Learn topic, the schedules file at ~/.kollab/schedules.json, and pausing while a device is off the network.</p>
+  <p class="note">v10: every web Schedules frame is a split panel. Left: the schedules. Right: the picked schedule, or its form. Runs in is still a split panel inside the form. The TUI frames (T1 to T7) and Learn (L1) are unchanged.</p>
   <p class="note">Renamed: Cron Jobs is now Schedules in every UI label. Code names (hub cron, hub_cron_* tools, /hub cron) stay until you say otherwise.</p>
   <p class="index">Web: <a href="#f1">1 list</a> <a href="#f2">2 add</a> <a href="#f2b">2b runs in</a> <a href="#f2c">2c devbox</a> <a href="#f3">3 edit</a> <a href="#f4">4 delete</a> <a href="#f5">5 after delete</a> <a href="#f6">6 empty</a> <a href="#f7">7 import</a> <a href="#f8">8 generate</a> <a href="#l1">L1 learn</a></p>
   <p class="index">TUI, /schedules: <a href="#t1">T1 list</a> <a href="#t2">T2 delete</a> <a href="#t3">T3 edit</a> <a href="#t4">T4 import</a> <a href="#t5">T5 generate</a> <a href="#t6">T6 agents</a> <a href="#t7">T7 choose file</a></p>
@@ -316,7 +333,7 @@
   <p class="section">Web: Settings, Schedules tab</p>
 
   <!-- 1. LIST -->
-  <p class="caption" id="f1">1 · List, the default view. One schedule is off. One is paused, the planned behavior when its device is off the network. Runs in shows names up to two, then a count, so 6 agents means all six.</p>
+  <p class="caption" id="f1">1 · List and detail, the default view. Left: the schedules, the picked one underlined. Right: its details and actions. One is off. One is paused, the planned behavior when its device is off the network. Runs in shows names up to two, then a count, so 6 agents means all six.</p>
   <section class="dialog" aria-label="Settings, schedules list">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -339,101 +356,47 @@
     </nav>
 
     <div class="panel inset">
-      <div class="bar">
-        <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
-        <div class="bar-actions">
-          <button class="btn" type="button">Refresh</button>
-          <button class="btn" type="button">Import file</button>
-          <button class="btn" type="button">Generate with agent</button>
-          <button class="btn-primary" type="button">Add schedule</button>
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
+            <button class="btn-primary" type="button">Add schedule</button>
+          </div>
+          <ul class="sched-list">
+            <li><button class="sched-item" type="button" aria-current="true"><span class="sched-title">report the pulse</span><span class="sched-meta">moonstone · every 1h · lapis</span><span class="sched-note err">error: peer has no conversation grant for this agent</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">check the tunnel</span><span class="sched-meta">moonstone · every 5m · infra@devbox</span><span class="sched-note muted">paused: infra@devbox not on this network</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">standup: one-line status</span><span class="sched-meta">koordinator · every 6h · 6 agents</span><span class="sched-note muted">off</span></button></li>
+          </ul>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+          <div class="detail-head">
+            <div>
+              <h3 class="detail-title">report the pulse</h3>
+              <p class="form-sub">Scheduled by moonstone <span class="id mono">ab12cd34</span></p>
+            </div>
+            <div class="detail-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></div>
+          </div>
+          <dl class="facts">
+            <div><dt>Every</dt><dd>1h</dd></div>
+            <div><dt>Runs in</dt><dd>lapis</dd></div>
+            <div><dt>Next fire</dt><dd>in 30m</dd></div>
+            <div><dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd></div>
+            <div class="wide"><dt>Status</dt><dd class="err">error: peer has no conversation grant for this agent</dd></div>
+          </dl>
         </div>
       </div>
-
-      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Scheduled by</th><th>Every</th><th>Runs in</th><th>Prompt</th><th>Skill <span class="new">(planned)</span></th><th>Next fire</th><th>Status</th><th></th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td class="nw">moonstone <span class="id mono">ab12cd34</span></td>
-              <td class="nw">1h</td>
-              <td class="nw">lapis</td>
-              <td><div class="msg">report the pulse</div></td>
-              <td class="nw muted">none</td>
-              <td class="nw">in 30m</td>
-              <td class="err msg">error: peer has no conversation grant for this agent</td>
-              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></span></td>
-            </tr>
-            <tr>
-              <td class="nw">moonstone <span class="id mono">9876fedc</span></td>
-              <td class="nw">5m</td>
-              <td class="nw">infra@devbox</td>
-              <td><div class="msg">check the tunnel</div></td>
-              <td class="nw">tunnel-check</td>
-              <td class="nw muted">paused</td>
-              <td class="muted msg">paused: infra@devbox not on this network</td>
-              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></span></td>
-            </tr>
-            <tr>
-              <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
-              <td class="nw">6h</td>
-              <td class="nw">6 agents</td>
-              <td><div class="msg">standup: one-line status</div></td>
-              <td class="nw muted">none</td>
-              <td class="nw muted">off</td>
-              <td></td>
-              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Enable</button><button class="btn-text danger" type="button">Delete</button></span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div class="cards">
-        <article class="card">
-          <div>moonstone <span class="id mono">ab12cd34</span></div>
-          <dl>
-            <dt>Every</dt><dd>1h</dd>
-            <dt>Runs in</dt><dd>lapis</dd>
-            <dt>Prompt</dt><dd>report the pulse</dd>
-            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
-            <dt>Next fire</dt><dd>in 30m</dd>
-            <dt class="err">Status</dt><dd class="err">error: peer has no conversation grant for this agent</dd>
-          </dl>
-          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></div>
-        </article>
-        <article class="card">
-          <div>moonstone <span class="id mono">9876fedc</span></div>
-          <dl>
-            <dt>Every</dt><dd>5m</dd>
-            <dt>Runs in</dt><dd>infra@devbox</dd>
-            <dt>Prompt</dt><dd>check the tunnel</dd>
-            <dt>Skill <span class="new">(planned)</span></dt><dd>tunnel-check</dd>
-            <dt>Next fire</dt><dd class="muted">paused</dd>
-            <dt>Status</dt><dd class="muted">paused: infra@devbox not on this network</dd>
-          </dl>
-          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></div>
-        </article>
-        <article class="card">
-          <div>koordinator <span class="id mono">5a5b5c5d</span></div>
-          <dl>
-            <dt>Every</dt><dd>6h</dd>
-            <dt>Runs in</dt><dd>6 agents</dd>
-            <dt>Prompt</dt><dd>standup: one-line status</dd>
-            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
-            <dt>Next fire</dt><dd class="muted">off</dd>
-          </dl>
-          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Enable</button><button class="btn-text danger" type="button">Delete</button></div>
-        </article>
-      </div>
-
       <p class="hint">Today: schedules live in memory, in the agent that made them. They don't sync to other machines, and they are lost when that agent stops. Planned: a schedule pauses while its device is off the network and resumes when it is back.</p>
     </div>
   </section>
 
   <!-- 2. ADD -->
-  <p class="caption" id="f2">2 · Add schedule: empty form. Enabled starts on, because you typed it yourself. Runs in starts on koordinator, the agent in this chat. Click it to open the agent list (2b).</p>
+  <p class="caption" id="f2">2 · Add schedule: the form opens on the right and the list stays on the left. Enabled starts on, because you typed it yourself. Runs in starts on koordinator, the agent in this chat. Click it to open the agent list (2b).</p>
   <section class="dialog" aria-label="Settings, add schedule">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -456,58 +419,81 @@
     </nav>
 
     <div class="panel inset">
-      <h3 class="form-title">New schedule</h3>
-      <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
-
-      <p class="group">What to send</p>
-      <div class="field">
-        <label class="label" for="a-prompt">Prompt</label>
-        <textarea class="input" id="a-prompt" rows="3" placeholder="What should the agent do?"></textarea>
-        <p class="help">Sent as a message to the agent that runs it.</p>
-      </div>
-      <div class="field">
-        <label class="label" for="a-skill">Skill <span class="new">(planned)</span></label>
-        <div class="select-wrap">
-          <select class="input" id="a-skill">
-            <option selected>No skill</option>
-            <option>pulse-report</option>
-            <option>tunnel-check</option>
-          </select>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
+            <button class="btn-primary" type="button">Add schedule</button>
+          </div>
+          <ul class="sched-list">
+            <li><button class="sched-item" type="button"><span class="sched-title">report the pulse</span><span class="sched-meta">moonstone · every 1h · lapis</span><span class="sched-note err">error: peer has no conversation grant for this agent</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">check the tunnel</span><span class="sched-meta">moonstone · every 5m · infra@devbox</span><span class="sched-note muted">paused: infra@devbox not on this network</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">standup: one-line status</span><span class="sched-meta">koordinator · every 6h · 6 agents</span><span class="sched-note muted">off</span></button></li>
+          </ul>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">New schedule</h3>
+        <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">What to send</p>
+            <div class="field">
+              <label class="label" for="a-prompt">Prompt</label>
+              <textarea class="input" id="a-prompt" rows="3" placeholder="What should the agent do?"></textarea>
+              <p class="help">Sent as a message to the agent that runs it.</p>
+            </div>
+            <div class="field">
+              <label class="label" for="a-skill">Skill <span class="new">(planned)</span></label>
+              <div class="select-wrap">
+                <select class="input" id="a-skill">
+                  <option selected>No skill</option>
+                  <option>pulse-report</option>
+                  <option>tunnel-check</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+              <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+            </div>
+          </div>
+          <div class="form-part span-2">
+            <p class="group">Where it runs</p>
+            <div class="field">
+              <label class="label" for="a-runs">Runs in</label>
+              <button class="runs-trigger" id="a-runs" type="button" aria-expanded="false"><span>koordinator</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+              <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
+              <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">When</p>
+            <div class="field">
+              <label class="label" for="a-every">Every</label>
+              <input class="input mono" id="a-every" type="text" placeholder="e.g. 1h">
+              <p class="help">30s, 5m, 1h or 2h30m. Repeats until you turn it off or delete it.</p>
+            </div>
+            <div class="field">
+              <label class="check"><input type="checkbox" checked> Enabled</label>
+              <p class="help">Off keeps the schedule without running it.</p>
+            </div>
+          </div>
         </div>
-        <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Save schedule</button>
+        </div>
+        </div>
       </div>
-
-      <p class="group">Where it runs</p>
-      <div class="field">
-        <label class="label" for="a-runs">Runs in</label>
-        <button class="runs-trigger" id="a-runs" type="button" aria-expanded="false">
-          <span>koordinator</span>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-        </button>
-        <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
-        <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
-      </div>
-
-      <p class="group">When</p>
-      <div class="field">
-        <label class="label" for="a-every">Every</label>
-        <input class="input mono" id="a-every" type="text" placeholder="e.g. 1h">
-        <p class="help">30s, 5m, 1h or 2h30m. Repeats until you turn it off or delete it.</p>
-      </div>
-      <div class="field">
-        <label class="check"><input type="checkbox" checked> Enabled</label>
-        <p class="help">Off keeps the schedule without running it.</p>
-      </div>
-    </div>
-    <div class="footer">
-      <button class="btn" type="button">Cancel</button>
-      <button class="btn-primary" type="button">Save schedule</button>
     </div>
   </section>
 
   <!-- 2b. ADD, RUNS IN OPEN -->
-  <p class="caption" id="f2b">2b · Add schedule with Runs in open: a split panel. Left: the machines, each with how many agents are selected. Right: the folders on that machine and their agents. Gray is off, white is selected. Done closes the list.</p>
+  <p class="caption" id="f2b">2b · Add schedule with Runs in open: the agent list opens inside the form, on the right. Left of it: the machines, each with how many agents are selected. Right of that: the folders on that machine and their agents. Gray is off, white is selected. Done closes the list.</p>
   <section class="dialog" aria-label="Settings, add schedule, Runs in open">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -530,83 +516,106 @@
     </nav>
 
     <div class="panel inset">
-      <h3 class="form-title">New schedule</h3>
-      <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
-
-      <p class="group">What to send</p>
-      <div class="field">
-        <label class="label" for="b-prompt">Prompt</label>
-        <textarea class="input" id="b-prompt" rows="3" placeholder="What should the agent do?"></textarea>
-        <p class="help">Sent as a message to the agent that runs it.</p>
-      </div>
-      <div class="field">
-        <label class="label" for="b-skill">Skill <span class="new">(planned)</span></label>
-        <div class="select-wrap">
-          <select class="input" id="b-skill">
-            <option selected>No skill</option>
-            <option>pulse-report</option>
-            <option>tunnel-check</option>
-          </select>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-        </div>
-        <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
-      </div>
-
-      <p class="group">Where it runs</p>
-      <div class="field">
-        <label class="label" for="b-runs">Runs in</label>
-        <button class="runs-trigger" id="b-runs" type="button" aria-expanded="true">
-          <span>lapis, infra@devbox</span>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
-        </button>
-        <div class="agent-panel">
-          <div class="agent-panel-head">
-            <span class="muted">2 of 6 selected</span>
-            <span class="agent-panel-actions"><button class="btn-text" type="button">Select all</button><button class="btn-text" type="button">Clear</button></span>
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
+            <button class="btn-primary" type="button">Add schedule</button>
           </div>
-          <div class="agent-split">
-            <div class="agent-env">
-              <button type="button" aria-current="true"><span class="env-name">On this machine</span><span class="muted">1 of 4 selected</span></button>
-              <button type="button"><span class="env-name">On devbox</span><span class="muted">1 of 2 selected</span></button>
+          <ul class="sched-list">
+            <li><button class="sched-item" type="button"><span class="sched-title">report the pulse</span><span class="sched-meta">moonstone · every 1h · lapis</span><span class="sched-note err">error: peer has no conversation grant for this agent</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">check the tunnel</span><span class="sched-meta">moonstone · every 5m · infra@devbox</span><span class="sched-note muted">paused: infra@devbox not on this network</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">standup: one-line status</span><span class="sched-meta">koordinator · every 6h · 6 agents</span><span class="sched-note muted">off</span></button></li>
+          </ul>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">New schedule</h3>
+        <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">What to send</p>
+            <div class="field">
+              <label class="label" for="b-prompt">Prompt</label>
+              <textarea class="input" id="b-prompt" rows="3" placeholder="What should the agent do?"></textarea>
+              <p class="help">Sent as a message to the agent that runs it.</p>
             </div>
-            <div class="agent-env-pane">
-              <div class="agent-dir">
-                <span class="agent-path mono">~/dev/kollab</span>
-                <div class="agent-buttons">
-                  <button class="agent-btn" type="button" aria-pressed="false">koordinator <span class="muted">this chat</span></button>
-                  <button class="agent-btn" type="button" aria-pressed="true">lapis</button>
-                </div>
+            <div class="field">
+              <label class="label" for="b-skill">Skill <span class="new">(planned)</span></label>
+              <div class="select-wrap">
+                <select class="input" id="b-skill">
+                  <option selected>No skill</option>
+                  <option>pulse-report</option>
+                  <option>tunnel-check</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
               </div>
-              <div class="agent-dir">
-                <span class="agent-path mono">~/dev/mentiko</span>
-                <div class="agent-buttons">
-                  <button class="agent-btn" type="button" aria-pressed="false">moonstone</button>
-                  <button class="agent-btn" type="button" aria-pressed="false">peridot <span class="muted">offline</span></button>
-                </div>
-              </div>
+              <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
             </div>
           </div>
-          <p class="agent-note">An offline agent can stay selected. Its runs pause until it is back.</p>
-          <div class="agent-panel-foot"><button class="btn" type="button">Done</button></div>
+          <div class="form-part span-2">
+            <p class="group">Where it runs</p>
+            <div class="field">
+              <label class="label" for="b-runs">Runs in</label>
+              <button class="runs-trigger" id="b-runs" type="button" aria-expanded="true"><span>lapis, infra@devbox</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg></button>
+              <div class="agent-panel">
+                <div class="agent-panel-head">
+                  <span class="muted">2 of 6 selected</span>
+                  <span class="agent-panel-actions"><button class="btn-text" type="button">Select all</button><button class="btn-text" type="button">Clear</button></span>
+                </div>
+                <div class="agent-split">
+                  <div class="agent-env">
+                    <button type="button" aria-current="true"><span class="env-name">On this machine</span><span class="muted">1 of 4 selected</span></button>
+                    <button type="button"><span class="env-name">On devbox</span><span class="muted">1 of 2 selected</span></button>
+                  </div>
+                  <div class="agent-env-pane">
+                    <div class="agent-dir">
+                      <span class="agent-path mono">~/dev/kollab</span>
+                      <div class="agent-buttons">
+                        <button class="agent-btn" type="button" aria-pressed="false">koordinator <span class="muted">this chat</span></button>
+                        <button class="agent-btn" type="button" aria-pressed="true">lapis</button>
+                      </div>
+                    </div>
+                    <div class="agent-dir">
+                      <span class="agent-path mono">~/dev/mentiko</span>
+                      <div class="agent-buttons">
+                        <button class="agent-btn" type="button" aria-pressed="false">moonstone</button>
+                        <button class="agent-btn" type="button" aria-pressed="false">peridot <span class="muted">offline</span></button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <p class="agent-note">An offline agent can stay selected. Its runs pause until it is back.</p>
+                <div class="agent-panel-foot"><button class="btn" type="button">Done</button></div>
+              </div>
+              <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
+              <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">When</p>
+            <div class="field">
+              <label class="label" for="b-every">Every</label>
+              <input class="input mono" id="b-every" type="text" placeholder="e.g. 1h">
+              <p class="help">30s, 5m, 1h or 2h30m. Repeats until you turn it off or delete it.</p>
+            </div>
+            <div class="field">
+              <label class="check"><input type="checkbox" checked> Enabled</label>
+              <p class="help">Off keeps the schedule without running it.</p>
+            </div>
+          </div>
         </div>
-        <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
-        <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Save schedule</button>
+        </div>
+        </div>
       </div>
-
-      <p class="group">When</p>
-      <div class="field">
-        <label class="label" for="b-every">Every</label>
-        <input class="input mono" id="b-every" type="text" placeholder="e.g. 1h">
-        <p class="help">30s, 5m, 1h or 2h30m. Repeats until you turn it off or delete it.</p>
-      </div>
-      <div class="field">
-        <label class="check"><input type="checkbox" checked> Enabled</label>
-        <p class="help">Off keeps the schedule without running it.</p>
-      </div>
-    </div>
-    <div class="footer">
-      <button class="btn" type="button">Cancel</button>
-      <button class="btn-primary" type="button">Save schedule</button>
     </div>
   </section>
 
@@ -634,81 +643,104 @@
     </nav>
 
     <div class="panel inset">
-      <h3 class="form-title">New schedule</h3>
-      <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
-
-      <p class="group">What to send</p>
-      <div class="field">
-        <label class="label" for="c-prompt">Prompt</label>
-        <textarea class="input" id="c-prompt" rows="3" placeholder="What should the agent do?"></textarea>
-        <p class="help">Sent as a message to the agent that runs it.</p>
-      </div>
-      <div class="field">
-        <label class="label" for="c-skill">Skill <span class="new">(planned)</span></label>
-        <div class="select-wrap">
-          <select class="input" id="c-skill">
-            <option selected>No skill</option>
-            <option>pulse-report</option>
-            <option>tunnel-check</option>
-          </select>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-        </div>
-        <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
-      </div>
-
-      <p class="group">Where it runs</p>
-      <div class="field">
-        <label class="label" for="c-runs">Runs in</label>
-        <button class="runs-trigger" id="c-runs" type="button" aria-expanded="true">
-          <span>lapis, infra@devbox</span>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
-        </button>
-        <div class="agent-panel">
-          <div class="agent-panel-head">
-            <span class="muted">2 of 6 selected</span>
-            <span class="agent-panel-actions"><button class="btn-text" type="button">Select all</button><button class="btn-text" type="button">Clear</button></span>
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
+            <button class="btn-primary" type="button">Add schedule</button>
           </div>
-          <div class="agent-split">
-            <div class="agent-env">
-              <button type="button"><span class="env-name">On this machine</span><span class="muted">1 of 4 selected</span></button>
-              <button type="button" aria-current="true"><span class="env-name">On devbox</span><span class="muted">1 of 2 selected</span></button>
+          <ul class="sched-list">
+            <li><button class="sched-item" type="button"><span class="sched-title">report the pulse</span><span class="sched-meta">moonstone · every 1h · lapis</span><span class="sched-note err">error: peer has no conversation grant for this agent</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">check the tunnel</span><span class="sched-meta">moonstone · every 5m · infra@devbox</span><span class="sched-note muted">paused: infra@devbox not on this network</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">standup: one-line status</span><span class="sched-meta">koordinator · every 6h · 6 agents</span><span class="sched-note muted">off</span></button></li>
+          </ul>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">New schedule</h3>
+        <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">What to send</p>
+            <div class="field">
+              <label class="label" for="c-prompt">Prompt</label>
+              <textarea class="input" id="c-prompt" rows="3" placeholder="What should the agent do?"></textarea>
+              <p class="help">Sent as a message to the agent that runs it.</p>
             </div>
-            <div class="agent-env-pane">
-              <div class="agent-dir">
-                <span class="agent-path mono">~/dev/infra</span>
-                <div class="agent-buttons">
-                  <button class="agent-btn" type="button" aria-pressed="true">infra</button>
-                  <button class="agent-btn" type="button" aria-pressed="false">ops</button>
-                </div>
+            <div class="field">
+              <label class="label" for="c-skill">Skill <span class="new">(planned)</span></label>
+              <div class="select-wrap">
+                <select class="input" id="c-skill">
+                  <option selected>No skill</option>
+                  <option>pulse-report</option>
+                  <option>tunnel-check</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
               </div>
+              <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
             </div>
           </div>
-          <p class="agent-note">An offline agent can stay selected. Its runs pause until it is back.</p>
-          <div class="agent-panel-foot"><button class="btn" type="button">Done</button></div>
+          <div class="form-part span-2">
+            <p class="group">Where it runs</p>
+            <div class="field">
+              <label class="label" for="c-runs">Runs in</label>
+              <button class="runs-trigger" id="c-runs" type="button" aria-expanded="true"><span>lapis, infra@devbox</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg></button>
+              <div class="agent-panel">
+                <div class="agent-panel-head">
+                  <span class="muted">2 of 6 selected</span>
+                  <span class="agent-panel-actions"><button class="btn-text" type="button">Select all</button><button class="btn-text" type="button">Clear</button></span>
+                </div>
+                <div class="agent-split">
+                  <div class="agent-env">
+                    <button type="button"><span class="env-name">On this machine</span><span class="muted">1 of 4 selected</span></button>
+                    <button type="button" aria-current="true"><span class="env-name">On devbox</span><span class="muted">1 of 2 selected</span></button>
+                  </div>
+                  <div class="agent-env-pane">
+                    <div class="agent-dir">
+                      <span class="agent-path mono">~/dev/infra</span>
+                      <div class="agent-buttons">
+                        <button class="agent-btn" type="button" aria-pressed="true">infra</button>
+                        <button class="agent-btn" type="button" aria-pressed="false">ops</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <p class="agent-note">An offline agent can stay selected. Its runs pause until it is back.</p>
+                <div class="agent-panel-foot"><button class="btn" type="button">Done</button></div>
+              </div>
+              <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
+              <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">When</p>
+            <div class="field">
+              <label class="label" for="c-every">Every</label>
+              <input class="input mono" id="c-every" type="text" placeholder="e.g. 1h">
+              <p class="help">30s, 5m, 1h or 2h30m. Repeats until you turn it off or delete it.</p>
+            </div>
+            <div class="field">
+              <label class="check"><input type="checkbox" checked> Enabled</label>
+              <p class="help">Off keeps the schedule without running it.</p>
+            </div>
+          </div>
         </div>
-        <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
-        <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Save schedule</button>
+        </div>
+        </div>
       </div>
-
-      <p class="group">When</p>
-      <div class="field">
-        <label class="label" for="c-every">Every</label>
-        <input class="input mono" id="c-every" type="text" placeholder="e.g. 1h">
-        <p class="help">30s, 5m, 1h or 2h30m. Repeats until you turn it off or delete it.</p>
-      </div>
-      <div class="field">
-        <label class="check"><input type="checkbox" checked> Enabled</label>
-        <p class="help">Off keeps the schedule without running it.</p>
-      </div>
-    </div>
-    <div class="footer">
-      <button class="btn" type="button">Cancel</button>
-      <button class="btn-primary" type="button">Save schedule</button>
     </div>
   </section>
 
   <!-- 3. EDIT -->
-  <p class="caption" id="f3">3 · Edit schedule: same form, filled from the row's Edit button. Edit goes to moonstone, the agent that scheduled it. Runs in opens the same list as 2b.</p>
+  <p class="caption" id="f3">3 · Edit schedule: the form on the right is filled from the Edit button. Edit goes to moonstone, the agent that scheduled it. Runs in opens the same list as 2b.</p>
   <section class="dialog" aria-label="Settings, edit schedule">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -731,58 +763,81 @@
     </nav>
 
     <div class="panel inset">
-      <h3 class="form-title">Edit schedule</h3>
-      <p class="form-sub">Scheduled by moonstone. To move it, delete it and add it again.</p>
-
-      <p class="group">What to send</p>
-      <div class="field">
-        <label class="label" for="e-prompt">Prompt</label>
-        <textarea class="input" id="e-prompt" rows="3">report the pulse</textarea>
-        <p class="help">Sent as a message to the agent that runs it.</p>
-      </div>
-      <div class="field">
-        <label class="label" for="e-skill">Skill <span class="new">(planned)</span></label>
-        <div class="select-wrap">
-          <select class="input" id="e-skill">
-            <option selected>No skill</option>
-            <option>pulse-report</option>
-            <option>tunnel-check</option>
-          </select>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
+            <button class="btn-primary" type="button">Add schedule</button>
+          </div>
+          <ul class="sched-list">
+            <li><button class="sched-item" type="button" aria-current="true"><span class="sched-title">report the pulse</span><span class="sched-meta">moonstone · every 1h · lapis</span><span class="sched-note err">error: peer has no conversation grant for this agent</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">check the tunnel</span><span class="sched-meta">moonstone · every 5m · infra@devbox</span><span class="sched-note muted">paused: infra@devbox not on this network</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">standup: one-line status</span><span class="sched-meta">koordinator · every 6h · 6 agents</span><span class="sched-note muted">off</span></button></li>
+          </ul>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">Edit schedule</h3>
+        <p class="form-sub">Scheduled by moonstone. To move it, delete it and add it again.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">What to send</p>
+            <div class="field">
+              <label class="label" for="e-prompt">Prompt</label>
+              <textarea class="input" id="e-prompt" rows="3">report the pulse</textarea>
+              <p class="help">Sent as a message to the agent that runs it.</p>
+            </div>
+            <div class="field">
+              <label class="label" for="e-skill">Skill <span class="new">(planned)</span></label>
+              <div class="select-wrap">
+                <select class="input" id="e-skill">
+                  <option selected>No skill</option>
+                  <option>pulse-report</option>
+                  <option>tunnel-check</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+              <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+            </div>
+          </div>
+          <div class="form-part span-2">
+            <p class="group">Where it runs</p>
+            <div class="field">
+              <label class="label" for="e-runs">Runs in</label>
+              <button class="runs-trigger" id="e-runs" type="button" aria-expanded="false"><span>lapis</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+              <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
+              <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">When</p>
+            <div class="field">
+              <label class="label" for="e-every">Every</label>
+              <input class="input mono" id="e-every" type="text" value="1h">
+              <p class="help">30s, 5m, 1h or 2h30m. Repeats until you turn it off or delete it.</p>
+            </div>
+            <div class="field">
+              <label class="check"><input type="checkbox" checked> Enabled</label>
+              <p class="help">Off keeps the schedule without running it.</p>
+            </div>
+          </div>
         </div>
-        <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Save schedule</button>
+        </div>
+        </div>
       </div>
-
-      <p class="group">Where it runs</p>
-      <div class="field">
-        <label class="label" for="e-runs">Runs in</label>
-        <button class="runs-trigger" id="e-runs" type="button" aria-expanded="false">
-          <span>lapis</span>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-        </button>
-        <p class="help">Each selected agent gets the prompt when the schedule fires.</p>
-        <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
-      </div>
-
-      <p class="group">When</p>
-      <div class="field">
-        <label class="label" for="e-every">Every</label>
-        <input class="input mono" id="e-every" type="text" value="1h">
-        <p class="help">30s, 5m, 1h or 2h30m. Repeats until you turn it off or delete it.</p>
-      </div>
-      <div class="field">
-        <label class="check"><input type="checkbox" checked> Enabled</label>
-        <p class="help">Off keeps the schedule without running it.</p>
-      </div>
-    </div>
-    <div class="footer">
-      <button class="btn" type="button">Cancel</button>
-      <button class="btn-primary" type="button">Save schedule</button>
     </div>
   </section>
 
   <!-- 4. DELETE CONFIRM -->
-  <p class="caption" id="f4">4 · Delete: the confirm sits over the list. Cancel closes it. Delete removes the row (frame 5).</p>
+  <p class="caption" id="f4">4 · Delete: the confirm opens above the details of the picked schedule. Cancel closes it. Delete removes the schedule (frame 5).</p>
   <section class="dialog" aria-label="Settings, delete schedule">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -805,112 +860,51 @@
     </nav>
 
     <div class="panel inset">
-      <div class="bar">
-        <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
-        <div class="bar-actions">
-          <button class="btn" type="button">Refresh</button>
-          <button class="btn" type="button">Import file</button>
-          <button class="btn" type="button">Generate with agent</button>
-          <button class="btn-primary" type="button">Add schedule</button>
-        </div>
-      </div>
-
       <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Scheduled by</th><th>Every</th><th>Runs in</th><th>Prompt</th><th>Skill <span class="new">(planned)</span></th><th>Next fire</th><th>Status</th><th></th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td class="nw">moonstone <span class="id mono">ab12cd34</span></td>
-              <td class="nw">1h</td>
-              <td class="nw">lapis</td>
-              <td><div class="msg">report the pulse</div></td>
-              <td class="nw muted">none</td>
-              <td class="nw">in 30m</td>
-              <td class="err msg">error: peer has no conversation grant for this agent</td>
-              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></span></td>
-            </tr>
-            <tr>
-              <td class="nw">moonstone <span class="id mono">9876fedc</span></td>
-              <td class="nw">5m</td>
-              <td class="nw">infra@devbox</td>
-              <td><div class="msg">check the tunnel</div></td>
-              <td class="nw">tunnel-check</td>
-              <td class="nw muted">paused</td>
-              <td class="muted msg">paused: infra@devbox not on this network</td>
-              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></span></td>
-            </tr>
-            <tr>
-              <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
-              <td class="nw">6h</td>
-              <td class="nw">6 agents</td>
-              <td><div class="msg">standup: one-line status</div></td>
-              <td class="nw muted">none</td>
-              <td class="nw muted">off</td>
-              <td></td>
-              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Enable</button><button class="btn-text danger" type="button">Delete</button></span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div class="cards">
-        <article class="card">
-          <div>moonstone <span class="id mono">ab12cd34</span></div>
-          <dl>
-            <dt>Every</dt><dd>1h</dd>
-            <dt>Runs in</dt><dd>lapis</dd>
-            <dt>Prompt</dt><dd>report the pulse</dd>
-            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
-            <dt>Next fire</dt><dd>in 30m</dd>
-            <dt class="err">Status</dt><dd class="err">error: peer has no conversation grant for this agent</dd>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
+            <button class="btn-primary" type="button">Add schedule</button>
+          </div>
+          <ul class="sched-list">
+            <li><button class="sched-item" type="button" aria-current="true"><span class="sched-title">report the pulse</span><span class="sched-meta">moonstone · every 1h · lapis</span><span class="sched-note err">error: peer has no conversation grant for this agent</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">check the tunnel</span><span class="sched-meta">moonstone · every 5m · infra@devbox</span><span class="sched-note muted">paused: infra@devbox not on this network</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">standup: one-line status</span><span class="sched-meta">koordinator · every 6h · 6 agents</span><span class="sched-note muted">off</span></button></li>
+          </ul>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+          <div class="detail-head">
+            <div>
+              <h3 class="detail-title">report the pulse</h3>
+              <p class="form-sub">Scheduled by moonstone <span class="id mono">ab12cd34</span></p>
+            </div>
+            <div class="detail-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></div>
+          </div>
+          <div class="detail-confirm" role="alertdialog" aria-labelledby="confirm-title-4">
+            <h3 id="confirm-title-4">Delete this schedule?</h3>
+            <p>moonstone ab12cd34 runs every 1h and sends to lapis. Its timer stops on moonstone and it won't fire again. This can't be undone.</p>
+            <div class="actions"><button class="btn" type="button">Cancel</button><button class="btn-danger" type="button">Delete</button></div>
+          </div>
+          <dl class="facts">
+            <div><dt>Every</dt><dd>1h</dd></div>
+            <div><dt>Runs in</dt><dd>lapis</dd></div>
+            <div><dt>Next fire</dt><dd>in 30m</dd></div>
+            <div><dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd></div>
+            <div class="wide"><dt>Status</dt><dd class="err">error: peer has no conversation grant for this agent</dd></div>
           </dl>
-          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></div>
-        </article>
-        <article class="card">
-          <div>moonstone <span class="id mono">9876fedc</span></div>
-          <dl>
-            <dt>Every</dt><dd>5m</dd>
-            <dt>Runs in</dt><dd>infra@devbox</dd>
-            <dt>Prompt</dt><dd>check the tunnel</dd>
-            <dt>Skill <span class="new">(planned)</span></dt><dd>tunnel-check</dd>
-            <dt>Next fire</dt><dd class="muted">paused</dd>
-            <dt>Status</dt><dd class="muted">paused: infra@devbox not on this network</dd>
-          </dl>
-          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></div>
-        </article>
-        <article class="card">
-          <div>koordinator <span class="id mono">5a5b5c5d</span></div>
-          <dl>
-            <dt>Every</dt><dd>6h</dd>
-            <dt>Runs in</dt><dd>6 agents</dd>
-            <dt>Prompt</dt><dd>standup: one-line status</dd>
-            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
-            <dt>Next fire</dt><dd class="muted">off</dd>
-          </dl>
-          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Enable</button><button class="btn-text danger" type="button">Delete</button></div>
-        </article>
-      </div>
-
-      <p class="hint">Today: schedules live in memory, in the agent that made them. They don't sync to other machines, and they are lost when that agent stops. Planned: a schedule pauses while its device is off the network and resumes when it is back.</p>
-    </div>
-
-    <div class="scrim">
-      <div class="confirm" role="alertdialog" aria-labelledby="confirm-title-4">
-        <h3 id="confirm-title-4">Delete this schedule?</h3>
-        <p>moonstone ab12cd34 runs every 1h and sends to lapis. Its timer stops on moonstone and it won't fire again. This can't be undone.</p>
-        <div class="actions">
-          <button class="btn" type="button">Cancel</button>
-          <button class="btn-danger" type="button">Delete</button>
         </div>
       </div>
     </div>
   </section>
 
   <!-- 5. AFTER DELETE -->
-  <p class="caption" id="f5">5 · After Delete: moonstone ab12cd34 is gone and the count drops to 2.</p>
+  <p class="caption" id="f5">5 · After Delete: moonstone ab12cd34 is gone, the list has 2, and the next schedule is picked on the right.</p>
   <section class="dialog" aria-label="Settings, schedules list after delete">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -933,79 +927,46 @@
     </nav>
 
     <div class="panel inset">
-      <div class="bar">
-        <p class="summary">2 schedules across 2 live agents, 1 off, 1 paused</p>
-        <div class="bar-actions">
-          <button class="btn" type="button">Refresh</button>
-          <button class="btn" type="button">Import file</button>
-          <button class="btn" type="button">Generate with agent</button>
-          <button class="btn-primary" type="button">Add schedule</button>
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">2 schedules across 2 live agents, 1 off, 1 paused</p>
+            <button class="btn-primary" type="button">Add schedule</button>
+          </div>
+          <ul class="sched-list">
+            <li><button class="sched-item" type="button" aria-current="true"><span class="sched-title">check the tunnel</span><span class="sched-meta">moonstone · every 5m · infra@devbox</span><span class="sched-note muted">paused: infra@devbox not on this network</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">standup: one-line status</span><span class="sched-meta">koordinator · every 6h · 6 agents</span><span class="sched-note muted">off</span></button></li>
+          </ul>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+          <div class="detail-head">
+            <div>
+              <h3 class="detail-title">check the tunnel</h3>
+              <p class="form-sub">Scheduled by moonstone <span class="id mono">9876fedc</span></p>
+            </div>
+            <div class="detail-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></div>
+          </div>
+          <dl class="facts">
+            <div><dt>Every</dt><dd>5m</dd></div>
+            <div><dt>Runs in</dt><dd>infra@devbox</dd></div>
+            <div><dt>Next fire</dt><dd class="muted">paused</dd></div>
+            <div><dt>Skill <span class="new">(planned)</span></dt><dd>tunnel-check</dd></div>
+            <div class="wide"><dt>Status</dt><dd class="muted">paused: infra@devbox not on this network</dd></div>
+          </dl>
         </div>
       </div>
-
-      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Scheduled by</th><th>Every</th><th>Runs in</th><th>Prompt</th><th>Skill <span class="new">(planned)</span></th><th>Next fire</th><th>Status</th><th></th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td class="nw">moonstone <span class="id mono">9876fedc</span></td>
-              <td class="nw">5m</td>
-              <td class="nw">infra@devbox</td>
-              <td><div class="msg">check the tunnel</div></td>
-              <td class="nw">tunnel-check</td>
-              <td class="nw muted">paused</td>
-              <td class="muted msg">paused: infra@devbox not on this network</td>
-              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></span></td>
-            </tr>
-            <tr>
-              <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
-              <td class="nw">6h</td>
-              <td class="nw">6 agents</td>
-              <td><div class="msg">standup: one-line status</div></td>
-              <td class="nw muted">none</td>
-              <td class="nw muted">off</td>
-              <td></td>
-              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Enable</button><button class="btn-text danger" type="button">Delete</button></span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div class="cards">
-        <article class="card">
-          <div>moonstone <span class="id mono">9876fedc</span></div>
-          <dl>
-            <dt>Every</dt><dd>5m</dd>
-            <dt>Runs in</dt><dd>infra@devbox</dd>
-            <dt>Prompt</dt><dd>check the tunnel</dd>
-            <dt>Skill <span class="new">(planned)</span></dt><dd>tunnel-check</dd>
-            <dt>Next fire</dt><dd class="muted">paused</dd>
-            <dt>Status</dt><dd class="muted">paused: infra@devbox not on this network</dd>
-          </dl>
-          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Disable</button><button class="btn-text danger" type="button">Delete</button></div>
-        </article>
-        <article class="card">
-          <div>koordinator <span class="id mono">5a5b5c5d</span></div>
-          <dl>
-            <dt>Every</dt><dd>6h</dd>
-            <dt>Runs in</dt><dd>6 agents</dd>
-            <dt>Prompt</dt><dd>standup: one-line status</dd>
-            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
-            <dt>Next fire</dt><dd class="muted">off</dd>
-          </dl>
-          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text" type="button">Enable</button><button class="btn-text danger" type="button">Delete</button></div>
-        </article>
-      </div>
-
       <p class="hint">Today: schedules live in memory, in the agent that made them. They don't sync to other machines, and they are lost when that agent stops. Planned: a schedule pauses while its device is off the network and resumes when it is back.</p>
     </div>
   </section>
 
   <!-- 6. EMPTY -->
-  <p class="caption" id="f6">6 · Empty: no schedule on any live agent. Add, import and generate still show.</p>
+  <p class="caption" id="f6">6 · Empty: no schedule on any live agent. The list says so, and the right side names the three ways to add one.</p>
   <section class="dialog" aria-label="Settings, schedules empty">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -1028,25 +989,29 @@
     </nav>
 
     <div class="panel inset">
-      <div class="bar">
-        <p class="summary">0 schedules across 2 live agents</p>
-        <div class="bar-actions">
-          <button class="btn" type="button">Refresh</button>
-          <button class="btn" type="button">Import file</button>
-          <button class="btn" type="button">Generate with agent</button>
-          <button class="btn-primary" type="button">Add schedule</button>
-        </div>
-      </div>
       <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
-      <div class="empty">
-        <strong>No schedules</strong>
-        No live agent on this machine has a schedule. Add one, import a file, or generate one with an agent.
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">0 schedules across 2 live agents</p>
+            <button class="btn-primary" type="button">Add schedule</button>
+          </div>
+          <div class="empty"><strong>No schedules</strong>No live agent on this machine has a schedule.</div>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+          <div class="empty"><strong>No schedule selected</strong>Add one, import a file, or generate one with an agent. The picked schedule shows here.</div>
+        </div>
       </div>
     </div>
   </section>
 
   <!-- 7. IMPORT -->
-  <p class="caption" id="f7">7 · Import file: the file format is at the top. Pick a file and check the preview, then press Import. Imported schedules start off. The info button opens Learn, Schedules.</p>
+  <p class="caption" id="f7">7 · Import file: the format and the file sit side by side, with the preview under them. Pick a file and check the preview, then press Import. Imported schedules start off. The info button opens Learn, Schedules.</p>
   <section class="dialog" aria-label="Settings, import schedules">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -1069,71 +1034,97 @@
     </nav>
 
     <div class="panel inset">
-      <div class="title-row">
-        <h3 class="form-title">Import schedules</h3>
-        <button class="info-btn" type="button" aria-label="What schedules are: open the Schedules topic in Learn" title="What schedules are">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-        </button>
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
+            <button class="btn-primary" type="button">Add schedule</button>
+          </div>
+          <ul class="sched-list">
+            <li><button class="sched-item" type="button"><span class="sched-title">report the pulse</span><span class="sched-meta">moonstone · every 1h · lapis</span><span class="sched-note err">error: peer has no conversation grant for this agent</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">check the tunnel</span><span class="sched-meta">moonstone · every 5m · infra@devbox</span><span class="sched-note muted">paused: infra@devbox not on this network</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">standup: one-line status</span><span class="sched-meta">koordinator · every 6h · 6 agents</span><span class="sched-note muted">off</span></button></li>
+          </ul>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+        <div class="title-row">
+          <h3 class="form-title">Import schedules</h3>
+          <button class="info-btn" type="button" aria-label="What schedules are: open the Schedules topic in Learn" title="What schedules are">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          </button>
+        </div>
+        <p class="form-sub">Load a schedules file from another machine. Nothing is added until you press Import.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">File format</p>
+            <div class="format">
+              <p>A JSON list. Each schedule needs three fields:</p>
+              <dl>
+                <dt>prompt</dt><dd>the message the agent gets</dd>
+                <dt>every</dt><dd>30s, 5m, 1h or 2h30m</dd>
+                <dt>runs_in</dt><dd>one or more agents, as a list</dd>
+              </dl>
+              <pre>[{"prompt": "summarize the day", "every": "2h", "runs_in": ["koordinator", "lapis"]}]</pre>
+              <p>Skill, folder and loadout are not in the file yet (planned).</p>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">File</p>
+            <div class="file-row">
+              <button class="btn" type="button">Choose file</button>
+              <span class="file-name mono">schedules-devbox.json</span>
+              <span class="muted">3 schedules</span>
+            </div>
+          </div>
+          <div class="form-part span-2">
+            <p class="group">Preview</p>
+            <div class="preview">
+              <table>
+                <thead>
+                  <tr><th>Prompt</th><th>Every</th><th>Runs in</th><th>Result</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><div class="msg">summarize the day</div></td>
+                    <td class="nw">2h</td>
+                    <td class="nw">koordinator</td>
+                    <td class="nw muted">ready, starts off</td>
+                  </tr>
+                  <tr>
+                    <td><div class="msg">check the tunnel</div></td>
+                    <td class="nw">5m</td>
+                    <td class="nw">infra@devbox</td>
+                    <td class="muted msg">skipped, same as 9876fedc</td>
+                  </tr>
+                  <tr>
+                    <td><div class="msg">rebuild the index</div></td>
+                    <td class="nw">12h</td>
+                    <td class="nw">lapis, koordinator</td>
+                    <td class="nw muted">ready, starts off</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <p class="help">Imported schedules start off. Turn each one on after you check its prompt. They are scheduled by koordinator, the agent in this chat.</p>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Import 2 schedules</button>
+        </div>
+        </div>
       </div>
-      <p class="form-sub">Load a schedules file from another machine. Nothing is added until you press Import.</p>
-
-      <p class="group">File format</p>
-      <div class="format">
-        <p>A JSON list. Each schedule needs three fields:</p>
-        <dl>
-          <dt>prompt</dt><dd>the message the agent gets</dd>
-          <dt>every</dt><dd>30s, 5m, 1h or 2h30m</dd>
-          <dt>runs_in</dt><dd>one or more agents, as a list</dd>
-        </dl>
-        <pre>[{"prompt": "summarize the day", "every": "2h", "runs_in": ["koordinator", "lapis"]}]</pre>
-        <p>Skill, folder and loadout are not in the file yet (planned).</p>
-      </div>
-
-      <p class="group">File</p>
-      <div class="file-row">
-        <button class="btn" type="button">Choose file</button>
-        <span class="file-name mono">schedules-devbox.json</span>
-        <span class="muted">3 schedules</span>
-      </div>
-
-      <p class="group">Preview</p>
-      <div class="preview">
-        <table>
-          <thead>
-            <tr><th>Prompt</th><th>Every</th><th>Runs in</th><th>Result</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><div class="msg">summarize the day</div></td>
-              <td class="nw">2h</td>
-              <td class="nw">koordinator</td>
-              <td class="nw muted">ready, starts off</td>
-            </tr>
-            <tr>
-              <td><div class="msg">check the tunnel</div></td>
-              <td class="nw">5m</td>
-              <td class="nw">infra@devbox</td>
-              <td class="muted msg">skipped, same as 9876fedc</td>
-            </tr>
-            <tr>
-              <td><div class="msg">rebuild the index</div></td>
-              <td class="nw">12h</td>
-              <td class="nw">lapis, koordinator</td>
-              <td class="nw muted">ready, starts off</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="help">Imported schedules start off. Turn each one on after you check its prompt. They are scheduled by koordinator, the agent in this chat.</p>
-    </div>
-    <div class="footer">
-      <button class="btn" type="button">Cancel</button>
-      <button class="btn-primary" type="button">Import 2 schedules</button>
     </div>
   </section>
 
   <!-- 8. GENERATE -->
-  <p class="caption" id="f8">8 · Generate with agent: the agent drafts, you review. A draft starts off and saves nothing until you press Save schedule in the form.</p>
+  <p class="caption" id="f8">8 · Generate with agent: describe the schedule on the left, review the draft on the right. A draft starts off and saves nothing until you press Save schedule in the form.</p>
   <section class="dialog" aria-label="Settings, generate schedule with agent">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -1156,45 +1147,70 @@
     </nav>
 
     <div class="panel inset">
-      <h3 class="form-title">Generate with agent</h3>
-      <p class="form-sub">An agent drafts the schedule from your words. You review it before anything is saved.</p>
-
-      <p class="group">Describe it</p>
-      <div class="field">
-        <label class="label" for="g-describe">Describe the schedule</label>
-        <textarea class="input" id="g-describe" rows="2">every 2 hours, ask lapis for a one-line status</textarea>
-        <p class="help">Repeats on an interval only: 30s, 5m, 1h or 2h30m. Clock times like 9am aren't supported.</p>
-      </div>
-      <div class="field">
-        <label class="label" for="g-agent">Ask agent</label>
-        <div class="select-wrap">
-          <select class="input" id="g-agent">
-            <option selected>koordinator</option>
-            <option>lapis</option>
-            <option>infra@devbox</option>
-          </select>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
+      <div class="split">
+        <aside class="split-list" aria-label="Schedules">
+          <div class="split-head">
+            <p class="summary">3 schedules across 2 live agents, 1 off, 1 paused</p>
+            <button class="btn-primary" type="button">Add schedule</button>
+          </div>
+          <ul class="sched-list">
+            <li><button class="sched-item" type="button"><span class="sched-title">report the pulse</span><span class="sched-meta">moonstone · every 1h · lapis</span><span class="sched-note err">error: peer has no conversation grant for this agent</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">check the tunnel</span><span class="sched-meta">moonstone · every 5m · infra@devbox</span><span class="sched-note muted">paused: infra@devbox not on this network</span></button></li>
+            <li><button class="sched-item" type="button"><span class="sched-title">standup: one-line status</span><span class="sched-meta">koordinator · every 6h · 6 agents</span><span class="sched-note muted">off</span></button></li>
+          </ul>
+          <div class="split-foot">
+            <button class="btn-text" type="button">Refresh</button>
+            <button class="btn-text" type="button">Import file</button>
+            <button class="btn-text" type="button">Generate with agent</button>
+          </div>
+        </aside>
+        <div class="split-detail">
+        <h3 class="form-title">Generate with agent</h3>
+        <p class="form-sub">An agent drafts the schedule from your words. You review it before anything is saved.</p>
+        <div class="form-grid">
+          <div class="form-part">
+            <p class="group">Describe it</p>
+            <div class="field">
+              <label class="label" for="g-describe">Describe the schedule</label>
+              <textarea class="input" id="g-describe" rows="2">every 2 hours, ask lapis for a one-line status</textarea>
+              <p class="help">Repeats on an interval only: 30s, 5m, 1h or 2h30m. Clock times like 9am aren't supported.</p>
+            </div>
+            <div class="field">
+              <label class="label" for="g-agent">Ask agent</label>
+              <div class="select-wrap">
+                <select class="input" id="g-agent">
+                  <option selected>koordinator</option>
+                  <option>lapis</option>
+                  <option>infra@devbox</option>
+                </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+            </div>
+            <div class="field">
+              <div><button class="btn" type="button">Draft schedule</button></div>
+            </div>
+          </div>
+          <div class="form-part">
+            <p class="group">Draft from koordinator</p>
+            <div class="draft">
+              <dl>
+                <dt>Prompt</dt><dd>Give me a one-line status.</dd>
+                <dt>Runs in</dt><dd>lapis</dd>
+                <dt>Every</dt><dd>2h</dd>
+                <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
+                <dt>Enabled</dt><dd class="muted">no, starts off</dd>
+              </dl>
+            </div>
+            <p class="help">Nothing is saved yet. Review in form opens the new schedule form with these values, and Save schedule saves it.</p>
+          </div>
+        </div>
+        <div class="footer">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-primary" type="button">Review in form</button>
+        </div>
         </div>
       </div>
-      <div class="field">
-        <div><button class="btn" type="button">Draft schedule</button></div>
-      </div>
-
-      <p class="group">Draft from koordinator</p>
-      <div class="draft">
-        <dl>
-          <dt>Prompt</dt><dd>Give me a one-line status.</dd>
-          <dt>Runs in</dt><dd>lapis</dd>
-          <dt>Every</dt><dd>2h</dd>
-          <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
-          <dt>Enabled</dt><dd class="muted">no, starts off</dd>
-        </dl>
-      </div>
-      <p class="help">Nothing is saved yet. Review in form opens the new schedule form with these values, and Save schedule saves it.</p>
-    </div>
-    <div class="footer">
-      <button class="btn" type="button">Cancel</button>
-      <button class="btn-primary" type="button">Review in form</button>
     </div>
   </section>
 
