@@ -838,11 +838,30 @@ class ConfigLoader:
 
         return base_config
 
+    def _custom_config_path(self) -> Optional[Path]:
+        """The file this loader was given when it is not one of the layered config files, else None.
+
+        A test, a probe or a tool builds a service on a file of its own. Loads read only that file
+        (see _load_user_config_with_fallback) and saves must write only that file, so one never
+        reaches into the user's real config (#967). Existence does not matter here: a service on a
+        file that is not there yet creates that file.
+        """
+        given = self.config_manager.config_path if self.config_manager else None
+        if not given:
+            return None
+        standard_paths = [
+            *get_global_config_path_candidates(),
+            *(path / "config.json" for path in get_project_data_dir_candidates()),
+            *get_local_config_path_candidates(),
+        ]
+        return None if given in standard_paths else given
+
     def _load_user_config_with_fallback(self) -> Dict[str, Any]:
         """Load user configuration with layered resolution.
 
         Priority order (new layered system):
-        1. Explicit config_manager.config_path (if provided and exists)
+        1. Explicit config_manager.config_path, when it is not one of the three layer files below: loaded alone,
+           or blank when it does not exist yet
         2. Global config (~/.kollab/config.json) - base layer
         3. Project config (~/.kollab/projects/<encoded>/config.json) - project defaults
         4. Local config (.kollab/config.json) - local override
@@ -854,23 +873,19 @@ class ConfigLoader:
         """
         import json
 
-        # Check if an explicit config path was provided (e.g., for testing)
-        explicit_path = None
-        if self.config_manager and self.config_manager.config_path:
-            explicit_path = self.config_manager.config_path
-            # If explicit path exists and is not in standard locations, load only from it
-            standard_paths = [
-                *get_global_config_path_candidates(),
-                *(path / "config.json" for path in get_project_data_dir_candidates()),
-                *get_local_config_path_candidates(),
-            ]
-            if explicit_path.exists() and explicit_path not in standard_paths:
-                try:
-                    with open(explicit_path, "r") as f:
-                        return json.load(f) or {}
-                except Exception as e:
-                    logger.warning(f"Failed to load explicit config: {e}")
-                    return {}
+        # A file of its own (e.g., for testing): load only from it. One that is not there yet starts blank:
+        # falling through to the layers below would copy the user's settings, keys included, into it when
+        # it is created (#967).
+        explicit_path = self._custom_config_path()
+        if explicit_path is not None:
+            if not explicit_path.exists():
+                return {}
+            try:
+                with open(explicit_path, "r") as f:
+                    return json.load(f) or {}
+            except Exception as e:
+                logger.warning(f"Failed to load explicit config: {e}")
+                return {}
 
         return load_layered_user_config()
 
@@ -1017,9 +1032,17 @@ class ConfigLoader:
         2. Project config (if exists) - project defaults
         3. Global config - fallback
 
+        A file of its own (not one of the three layers) is the exception: loads
+        read only it, so saves write only it (#967).
+
         Returns:
             Path where config should be saved.
         """
+        custom_path = self._custom_config_path()
+        if custom_path is not None:
+            logger.debug(f"Saving to the given config: {custom_path}")
+            return custom_path
+
         # Check local override first (highest priority)
         if any(path.exists() for path in get_local_config_path_candidates()):
             local_path = get_local_config_path()
