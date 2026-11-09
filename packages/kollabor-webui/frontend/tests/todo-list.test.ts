@@ -54,6 +54,10 @@ test("code fences are left alone", () => {
   assert.deepEqual(todoBlocks("```\ntodo:\n  [x] inside a fence\n```"), []);
 });
 
+test("tilde fences are left alone", () => {
+  assert.deepEqual(todoBlocks("~~~\ntodo:\n  [x] inside a tilde fence\n~~~"), []);
+});
+
 // A fence closes only on a line of the same character that is at least as long as the one that opened it, with
 // nothing after it (CommonMark), so an example fence inside a longer one, or one of the other character, is text.
 test("a shorter fence inside a longer one does not close it", () => {
@@ -137,6 +141,18 @@ test("a fence with Windows line endings hides its text and the list after it is 
   const text = ["```", "todo:", "  [ ] example only", "```", "", REAL].join("\r\n");
 
   assert.deepEqual(todoBlocks(text), [REAL]);
+});
+
+test("a fence with old Mac line endings hides its text and the list after it is read", () => {
+  const text = ["```", "todo:", "  [ ] example only", "```", "", REAL].join("\r");
+
+  assert.deepEqual(todoBlocks(text), [REAL]);
+});
+
+test("the blocks of a text are a fresh array on every call", () => {
+  todoBlocks(REAL).push("not a block");
+
+  assert.deepEqual(todoBlocks(REAL), [REAL]);
 });
 
 test("a blank line between the label and its first item is tolerated, one after the items ends the block", () => {
