@@ -5,6 +5,9 @@ session always names one, so without this the form could only show the active pr
 own saved model, which is not what the person set as the default.
 """
 
+import asyncio
+import json
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -36,6 +39,9 @@ class _Config:
                 return default
             node = node[part]
         return node
+
+    def shutdown(self):
+        """What ConfigService has and the engine calls when a request is done with it."""
 
 
 def _llm(**extra):
@@ -134,3 +140,61 @@ async def test_a_default_loadout_effort_wins_over_the_profiles_and_none_stays_no
 
     neither = _luna_without_effort(default_loadout={"name": "luna", "level": "global"})
     assert (await get_profiles(neither)).json()["default_loadout"]["effort"] == ""
+
+
+def _pollers():
+    """Config services still polling their file on this loop."""
+    return [task for task in asyncio.all_tasks() if task.get_name() == "config-mtime-poll" and not task.done()]
+
+
+@pytest.fixture
+def saved_default(monkeypatch, tmp_path):
+    """A real saved config under a scratch HOME: the real ConfigService runs, the developer's file is not touched."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".kollab").mkdir()
+    saved = _llm(default_loadout={"name": "luna-max", "level": "global"})
+    (tmp_path / ".kollab" / "config.json").write_text(json.dumps(saved))
+    return tmp_path
+
+
+async def _list_profiles_five_times():
+    from kollabor_engine.server import create_app  # type: ignore[import-not-found]
+
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+        responses = [await client.get("/profiles") for _ in range(5)]
+        await asyncio.sleep(0.05)  # a cancelled task ends on the loop's next turns
+    return responses
+
+
+@pytest.mark.asyncio
+async def test_listing_profiles_leaves_no_config_poller_running(monkeypatch, saved_default):
+    # A ConfigService polls its file every second until it is shut down. The open web UI lists profiles
+    # every few seconds, so a poller left behind by each request piles up for as long as the tab stays open.
+    import kollabor_engine.routes.profiles as profile_routes
+
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager())
+
+    responses = await _list_profiles_five_times()
+
+    assert [response.status_code for response in responses] == [200] * 5
+    assert responses[-1].json()["default_loadout"]["name"] == "luna-max"
+    assert _pollers() == []
+
+
+@pytest.mark.asyncio
+async def test_a_default_that_cannot_be_read_leaves_no_config_poller_running(monkeypatch, saved_default):
+    # The lookup is allowed to fail (the profile list must still answer), and a failed one is the path
+    # that is easiest to forget to clean up after.
+    import kollabor_engine.routes.profiles as profile_routes
+
+    class Broken(_Manager):
+        def get_profile(self, name):
+            raise RuntimeError("profile store unreadable")
+
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: Broken())
+
+    responses = await _list_profiles_five_times()
+
+    assert [response.status_code for response in responses] == [200] * 5
+    assert responses[-1].json()["default_loadout"] is None
+    assert _pollers() == []
