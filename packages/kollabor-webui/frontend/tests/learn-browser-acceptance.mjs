@@ -185,10 +185,11 @@ export function makeFixtures(options = {}) {
       return json(route, { home: { path: "/learn-demo", name: "Learn demo", live: false }, recent: [] });
     }
     if (endpoint.endsWith("/history")) {
+      const history = options.history ?? [];
       return json(route, {
-        history: [],
+        history,
         start_index: 0,
-        end_index: 0,
+        end_index: history.length,
         has_more_older: false,
         older_cursor: null,
         has_more_newer: false,
