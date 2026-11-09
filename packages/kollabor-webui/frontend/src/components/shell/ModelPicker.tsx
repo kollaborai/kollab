@@ -40,6 +40,7 @@ export function ModelPicker({
   onPick,
   disabled,
   className,
+  folder,
 }: {
   id?: string;
   api: EngineApi;
@@ -49,6 +50,8 @@ export function ModelPicker({
   onPick: (choice: ModelChoice) => void;
   disabled?: boolean;
   className?: string;
+  /** The workspace the picker lists for; empty is the engine's own folder. */
+  folder?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -70,7 +73,7 @@ export function ModelPicker({
     let pending: string[] = [];
     const load = async () => {
       try {
-        const result = await api.listModelChoices();
+        const result = await api.listModelChoices(folder?.trim() || "");
         if (!live) return;
         setLoaded(result.choices);
         setFailed(false);
@@ -104,7 +107,7 @@ export function ModelPicker({
       setIncomplete([]);
       setDiscovering([]);
     };
-  }, [open, api, attempt]);
+  }, [open, api, attempt, folder]);
 
   const choices = useMemo<ModelChoice[]>(
     () =>

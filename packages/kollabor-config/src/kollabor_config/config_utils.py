@@ -82,11 +82,15 @@ def get_local_config_path() -> Path:
     return get_local_config_directory() / "config.json"
 
 
-def get_local_config_path_candidates() -> list[Path]:
-    """Return project-local config.json candidates in read precedence order."""
+def get_local_config_path_candidates(project_path: Optional[Path] = None) -> list[Path]:
+    """Return project-local config.json candidates in read precedence order.
+
+    ``project_path`` reads another folder's own layers (the web UI lists the
+    chosen workspace); None is this process's working directory.
+    """
     return [
         directory / "config.json"
-        for directory in get_local_config_directory_candidates()
+        for directory in get_local_config_directory_candidates(project_path)
     ]
 
 

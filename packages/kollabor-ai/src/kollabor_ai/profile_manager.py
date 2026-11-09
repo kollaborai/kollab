@@ -1330,7 +1330,12 @@ class ProfileManager:
         },
     }
 
-    def __init__(self, config=None, cli_profile: Optional[str] = None):
+    def __init__(
+        self,
+        config=None,
+        cli_profile: Optional[str] = None,
+        local_folder: Optional[Path] = None,
+    ):
         """
         Initialize profile manager.
 
@@ -1338,8 +1343,13 @@ class ProfileManager:
             config: Configuration object with get() method
             cli_profile: CLI --llm override (auto-detected profiles are
                 registered but never activated over it)
+            local_folder: another folder whose own ``.kollab`` local layer
+                overrides the shared ones when reading profiles (the web UI
+                lists the chosen workspace). None is this process's
+                working directory.
         """
         self.config = config
+        self._local_folder = local_folder
         self._profiles: Dict[str, LLMProfile] = {}
         self._invalid_profile_errors: Dict[str, str] = {}
         self._active_profile_name: str = "default"
@@ -1836,7 +1846,11 @@ class ProfileManager:
                 logger.debug(f"Loaded profiles from: {global_config}")
 
         local_config = next(
-            (path for path in get_local_config_path_candidates() if path.exists()),
+            (
+                path
+                for path in get_local_config_path_candidates(self._local_folder)
+                if path.exists()
+            ),
             get_local_config_path(),
         )
         if local_config.exists():

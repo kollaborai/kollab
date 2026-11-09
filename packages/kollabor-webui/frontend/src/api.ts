@@ -1394,11 +1394,12 @@ export class EngineApi {
     );
   }
 
-  listModelChoices() {
+  /** Choices for `workspace`'s own profiles and loadouts (empty: the engine's folder). */
+  listModelChoices(workspace = "") {
     return this.json<{
       choices: ModelChoice[];
       discovery?: Record<string, { status: "ready" | "partial" | "unavailable"; message?: string; more?: boolean }>;
-    }>("/profiles/choices");
+    }>(workspace ? `/profiles/choices?workspace=${encodeURIComponent(workspace)}` : "/profiles/choices");
   }
 
   /** The profiles, and the default loadout of `workspace` (empty: the engine's own folder). */
