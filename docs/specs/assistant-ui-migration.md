@@ -244,6 +244,28 @@ Closing a dialog returns focus to the row that opened it. The sidebar has no
 hide button on a computer. On a phone a one-row header keeps the sidebar button,
 the session's name and a **Session** button that opens the panel as a sheet.
 
+A **Todo** card sits under the panel while the agent has a task list
+(`TodoCard.tsx`). Agents write the list as plain text, a `todo:` label with `[x]`
+and `[ ]` lines (`bundles/agents/_base/sections/meta/terminal-formatting.md`), and
+the card shows the latest one (`latestTodoBlock` in `utils/todo-list.ts`): a count
+("3 of 5") and the items, done ones dimmed and struck through, the next open one
+at full strength. Only the agent's own messages count; a hub note, another agent's
+text, never does. The header opens and closes the card and the browser remembers
+the choice (`kollab.session-panel.todo`); a list with every item done starts
+closed. A chat with no list has no card. Text the thread draws as code is never read
+as a list: a fenced block, also one that a list item or a quote holds, or an indented
+block. `codeLines` asks the same CommonMark parser the thread renders through
+(`mdast-util-from-markdown`), so no container rule is written twice, and skips it
+for a text with no fence mark and no line indented by four columns. The lookup runs on
+every update of the thread, so it keeps what the last lookup read, by whole text, and
+reads again only a text that is new or edited; it holds no more than the thread's own
+texts that say `todo:`, however many a lookup visits. The card's list
+stops at 18rem or half the window's height and scrolls
+inside the card; in a short window the docked column, panel and card together,
+scrolls as a whole, so no row of the panel is squeezed out of reach. On a phone
+the card is the last part of the Session sheet. The thread keeps showing the
+agent's text as written.
+
 Once a chat has messages, its agent's live gem docks immediately beside the input
 bar and stays visible while the conversation scrolls. It shares the selected
 session's real activity with the sidebar (thinking, tools, speaking and errors),
