@@ -68,6 +68,101 @@ def _entry(status, path):
 
 
 @pytest.mark.asyncio
+async def test_successful_stage_reports_when_followup_status_is_too_large(client, machine, monkeypatch):
+    from kollabor.code_service import git
+
+    monkeypatch.setattr(git, "MAX_STATUS_ENTRIES", 1)
+    (machine.repo / "first.txt").write_text("one")
+    (machine.repo / "second.txt").write_text("two")
+    response = await _act(client, machine, "stage", paths=["first.txt"])
+    assert response.status_code == 502
+    assert _error_code(response) == "git_status_after_write_failed"
+    assert "operation ran" in response.json()["error"]["message"]
+    assert "first.txt" in _git(machine.repo, "diff", "--cached", "--name-only")
+
+
+@pytest.mark.asyncio
+async def test_branch_creation_reports_when_followup_read_fails(client, machine, monkeypatch):
+    from kollabor.code_service import git
+
+    original = git._git
+
+    async def fail_head(root, args, **kwargs):
+        if args[0] in ("symbolic-ref", "rev-parse"):
+            return subprocess.CompletedProcess(args, 1, "", "failed")
+        return await original(root, args, **kwargs)
+
+    monkeypatch.setattr(git, "_git", fail_head)
+    response = await _act(client, machine, "create_branch", branchName="new-branch")
+    assert response.status_code == 502
+    assert "operation ran" in response.json()["error"]["message"]
+    assert "new-branch" in _git(machine.repo, "branch", "--list")
+
+
+@pytest.mark.asyncio
+async def test_stage_reports_nonzero_followup_status(client, machine, monkeypatch):
+    from kollabor.code_service import git
+
+    original = git._git
+
+    async def fail_status(root, args, **kwargs):
+        if args[0] == "status":
+            return subprocess.CompletedProcess(args, 1, "", "failed")
+        return await original(root, args, **kwargs)
+
+    monkeypatch.setattr(git, "_git", fail_status)
+    (machine.repo / "first.txt").write_text("one")
+    response = await _act(client, machine, "stage", paths=["first.txt"])
+    assert response.status_code == 502
+    assert "operation ran" in response.json()["error"]["message"]
+    assert "first.txt" in _git(machine.repo, "diff", "--cached", "--name-only")
+
+
+@pytest.mark.asyncio
+async def test_stash_apply_refuses_when_scope_prefix_cannot_be_read(client, machine, monkeypatch):
+    from kollabor.code_service import git
+
+    (machine.repo / "tracked.txt").write_text("stashed\n")
+    created = await _act(client, machine, "create_stash")
+    assert created.status_code == 200
+    original = git._run_git
+
+    def fail_prefix(root, args, read, timeout=git.GIT_TIMEOUT, **kwargs):
+        if args == ["rev-parse", "--show-prefix"]:
+            return subprocess.CompletedProcess(args, 1, "", "failed")
+        return original(root, args, read, timeout, **kwargs)
+
+    monkeypatch.setattr(git, "_run_git", fail_prefix)
+    result = await _act(client, machine, "apply_stash", stashId="stash@{0}")
+    assert result.status_code == 502
+    assert (machine.repo / "tracked.txt").read_text() == "hello\n"
+
+
+@pytest.mark.asyncio
+async def test_stash_apply_refuses_failed_untracked_parent_probe(client, machine, monkeypatch):
+    from kollabor.code_service import git
+
+    inside = machine.repo / "inside"
+    outside = machine.repo / "outside.txt"
+    outside.write_text("outside")
+    _git(machine.repo, "stash", "push", "-u")
+    inside.mkdir(exist_ok=True)
+    original = git._git
+
+    async def fail_probe(root, args, **kwargs):
+        if args[0] == "rev-parse" and args[-1].endswith("^3"):
+            return subprocess.CompletedProcess(args, 128, "", "probe failed")
+        return await original(root, args, **kwargs)
+
+    monkeypatch.setattr(git, "_git", fail_probe)
+    response = await client.post("/code/git", json={
+        "workspace": str(inside), "action": "apply_stash", "stashId": "stash@{0}",
+    })
+    assert response.status_code == 409
+    assert not outside.exists()
+
+
+@pytest.mark.asyncio
 async def test_stage_unstage_and_commit_round_trip(client, machine):
     (machine.repo / "new.txt").write_text("x\n")
 

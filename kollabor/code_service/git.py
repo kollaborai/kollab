@@ -16,7 +16,7 @@ import signal
 import subprocess
 import threading
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, TypeVar
 
 from .reply import Reply
 from .settings import DEFAULTS, PREFIX, CodeSettings
@@ -169,6 +169,23 @@ async def _head_name(root: str) -> str:
     return branch or (await _text(root, ["rev-parse", "--abbrev-ref", "HEAD"])).strip() or "HEAD"
 
 
+async def _strict_head_name(root: str) -> str:
+    branch = await _git(root, ["symbolic-ref", "--short", "-q", "HEAD"])
+    if branch.returncode == 0 and branch.stdout.strip():
+        return branch.stdout.strip()
+    head = await _git(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    if head.returncode != 0 or not head.stdout.strip():
+        raise GitRequestError(502, "git_failed", "Could not read HEAD.")
+    return head.stdout.strip()
+
+
+async def _workspace_prefix(root: str) -> str:
+    proc = await _git(root, ["rev-parse", "--show-prefix"])
+    if proc.returncode != 0:
+        raise GitRequestError(502, "git_failed", "Could not read the Git workspace prefix.")
+    return proc.stdout.removesuffix("\n")
+
+
 def _fields(line: str, sep: str, count: int) -> list[str]:
     """``line`` split on ``sep`` into exactly ``count`` fields, missing ones empty."""
     return (line.split(sep) + [""] * count)[:count]
@@ -225,10 +242,15 @@ async def _status(root: str, body: dict[str, Any], settings: CodeSettings | None
     files: list[dict[str, Any]] = []
     # Porcelain paths are relative to the repository's top; the workspace may be a folder inside it. Scope the
     # status to the workspace and give back workspace-relative paths, the form stage, unstage and diff take.
-    prefix = (await _text(root, ["rev-parse", "--show-prefix"])).removesuffix("\n")
     # -z: each name comes back exactly as it is (no quoting, no escapes). A rename or copy record is "XY new\0old\0",
     # so the old name, which is its own record, is skipped.
-    records = iter((await _text(root, ["status", "--porcelain=v1", "-z", "-u", "--", "."])).split("\0"))
+    status_proc = await _git(root, ["status", "--porcelain=v1", "-z", "-u", "--", "."])
+    if status_proc.returncode != 0:
+        if not body.get("require_repo") and "not a git repository" in status_proc.stderr.lower():
+            return {"branch": "HEAD", "upstream": None, "ahead": 0, "behind": 0, "files": []}
+        raise GitRequestError(502, "git_failed", "Could not read Git status.")
+    prefix = await _workspace_prefix(root)
+    records = iter(status_proc.stdout.split("\0"))
     for line in records:
         if len(line) < 4:
             continue
@@ -478,6 +500,23 @@ async def _write(root: str, args: list[str], timeout: int = GIT_TIMEOUT) -> subp
     return proc
 
 
+_T = TypeVar("_T")
+
+
+async def _after_write(read: Awaitable[_T]) -> _T:
+    try:
+        return await read
+    except GitRequestError as exc:
+        raise GitRequestError(
+            502, "git_status_after_write_failed",
+            "The Git operation ran, but its result could not be refreshed. Check the repository before retrying.",
+        ) from exc
+
+
+async def _status_after_write(root: str) -> dict[str, Any]:
+    return await _after_write(_status(root, {"require_repo": True}))
+
+
 async def _change_index(root: str, body: dict[str, Any], command: list[str]) -> dict[str, Any]:
     """Run ``command`` over the files a request names. Every path is checked before git runs."""
     rels = _rel_paths(body.get("paths"))
@@ -491,7 +530,7 @@ async def _change_index(root: str, body: dict[str, Any], command: list[str]) -> 
         if full != base and not full.startswith(os.path.join(base, "")):
             raise GitRequestError(403, "path_outside_workspace", "That path is outside the workspace.")
     await _write(base, ["--literal-pathspecs", *command, "--", *rels])
-    return {"ok": True, "status": await _status(base, {})}
+    return {"ok": True, "status": await _status_after_write(base)}
 
 
 async def _stage(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
@@ -504,12 +543,12 @@ async def _unstage(root: str, body: dict[str, Any], settings: CodeSettings | Non
 
 async def _stage_all(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     await _write(root, ["add", "-A", "--", "."])  # the workspace only, not the whole repository
-    return {"ok": True, "status": await _status(root, {})}
+    return {"ok": True, "status": await _status_after_write(root)}
 
 
 async def _unstage_all(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     await _write(root, ["restore", "--staged", "--", "."])
-    return {"ok": True, "status": await _status(root, {})}
+    return {"ok": True, "status": await _status_after_write(root)}
 
 
 async def _commit(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
@@ -548,7 +587,7 @@ async def _commit(root: str, body: dict[str, Any], settings: CodeSettings | None
                 f"Open the repository root, or opt in with {PREFIX}git.allow_outside_workspace.",
             )
     proc = await _write(root, ["commit", "-m", message])
-    return {"ok": True, "output": proc.stdout, "status": await _status(root, {})}
+    return {"ok": True, "output": proc.stdout, "status": await _status_after_write(root)}
 
 
 async def _push(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
@@ -565,20 +604,23 @@ async def _push(root: str, body: dict[str, Any], settings: CodeSettings | None =
     elif branch is not None:
         raise GitRequestError(400, "remote_required", "A branch can only be pushed to a named remote.")
     proc = await _write(root, args, PUSH_TIMEOUT)
-    return {"ok": True, "output": f"{proc.stderr}{proc.stdout}", "status": await _status(root, {})}
+    return {"ok": True, "output": f"{proc.stderr}{proc.stdout}", "status": await _status_after_write(root)}
 
 
 async def _create_branch(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     name = _branch_name(body)
     await _write(root, ["branch", name])
-    return {"ok": True, "branch": name, "current": await _head_name(root)}
+    return {"ok": True, "branch": name, "current": await _after_write(_strict_head_name(root))}
 
 
 async def _switch_branch(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     name = _branch_name(body)
     previous = await _head_name(root)
     await _write(root, ["switch", name])
-    return {"ok": True, "current": await _head_name(root), "previous": previous, "hasUncommittedChanges": False}
+    return {
+        "ok": True, "current": await _after_write(_strict_head_name(root)),
+        "previous": previous, "hasUncommittedChanges": False,
+    }
 
 
 async def _delete_branch(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
@@ -607,10 +649,24 @@ async def _create_stash(root: str, body: dict[str, Any], settings: CodeSettings 
     # With nothing to save, `git stash push` exits 0 and makes no stash: compare the top of refs/stash.
     before = (await _text(root, ["rev-parse", "--verify", "-q", "refs/stash"])).strip()
     await _write(root, [*args, "--", "."])  # the workspace only, as the panel lists: not the whole repository
-    after = (await _text(root, ["rev-parse", "--verify", "-q", "refs/stash"])).strip()
+    after_proc = await _after_write(_git(root, ["rev-parse", "--verify", "-q", "refs/stash"]))
+    if after_proc.returncode != 0:
+        if after_proc.returncode == 1 and not before and not after_proc.stderr:
+            raise GitRequestError(409, "nothing_to_stash", "There are no local changes to stash.")
+        raise GitRequestError(
+            502, "git_status_after_write_failed", "The stash operation ran, but its result is unavailable."
+        )
+    after = after_proc.stdout.strip()
     if after == before:
-        raise GitRequestError(409, "nothing_to_stash", "There are no local changes to stash.")
-    top: dict[str, Any] = (await _list_stashes(root, {}))["stashes"][0]
+        raise GitRequestError(
+            409, "nothing_to_stash", "No new stash was detected. Check the repository before retrying."
+        )
+    stashes = (await _after_write(_list_stashes(root, {})))["stashes"]
+    if not stashes:
+        raise GitRequestError(
+            502, "git_status_after_write_failed", "The stash operation ran, but its result is unavailable."
+        )
+    top: dict[str, Any] = stashes[0]
     return {"ok": True, "stashId": f"stash@{{{top['id']}}}", "message": message or top["message"]}
 
 
@@ -638,9 +694,13 @@ async def _apply_stash(root: str, body: dict[str, Any], settings: CodeSettings |
     ref = f"stash@{{{position}}}"
     cfg = DEFAULTS if settings is None else settings
     if not cfg.git_allow_outside_workspace:
-        prefix = (await _text(root, ["rev-parse", "--show-prefix"])).removesuffix("\n")
+        prefix = await _workspace_prefix(root)
         changed = await _git(root, ["diff-tree", "-r", "--no-renames", "--name-only", "-z", f"{commit}^1", commit])
         untracked_parent = await _git(root, ["rev-parse", "--verify", "-q", f"{commit}^3"])
+        if untracked_parent.returncode != 0 and not (
+            untracked_parent.returncode == 1 and not untracked_parent.stderr
+        ):
+            raise GitRequestError(409, "git_failed", "Could not check the stash, so nothing was applied.")
         untracked = (
             await _git(root, ["ls-tree", "-r", "--name-only", "-z", untracked_parent.stdout.strip()])
             if untracked_parent.returncode == 0
@@ -656,7 +716,7 @@ async def _apply_stash(root: str, body: dict[str, Any], settings: CodeSettings |
                 f"Stash includes files outside this folder. Setting: {PREFIX}git.allow_outside_workspace",
             )
     proc = await _git(root, ["stash", "apply", commit], read=False)
-    status = await _status(root, {})
+    status = await _status_after_write(root)
     if proc.returncode == 0:
         return {"ok": True, "appliedStashId": ref, "status": status}
     conflicts = [

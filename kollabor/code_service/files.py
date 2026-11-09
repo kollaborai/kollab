@@ -825,7 +825,9 @@ def git_status(workspace: str, params: dict[str, Any], settings: CodeSettings | 
         if "not a git repository" in done.stderr.lower():
             return _ok({"error": "Not a git repository", "status": {}})
         return _fail(500, "git_failed", "Failed to get git status.")
-    prefix = top.stdout.strip() if top.returncode == 0 else ""
+    if top.returncode != 0:
+        return _fail(500, "git_failed", "Failed to get the Git workspace prefix.")
+    prefix = top.stdout.removesuffix("\n")
     status = _parse_status(done.stdout.encode("utf-8"))
     if len(status) > git.MAX_STATUS_ENTRIES:
         return _fail(413, "git_output_too_large", "Git status has too many entries to display.")

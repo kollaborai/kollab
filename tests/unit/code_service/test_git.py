@@ -111,6 +111,24 @@ async def test_both_status_surfaces_refuse_too_many_entries(client, machine, mon
 
 
 @pytest.mark.asyncio
+async def test_status_refuses_failed_workspace_prefix(client, machine, monkeypatch):
+    from kollabor.code_service import git
+
+    original = git._run_git
+
+    def fail_prefix(root, args, read, timeout=git.GIT_TIMEOUT, **kwargs):
+        if args == ["rev-parse", "--show-prefix"]:
+            return subprocess.CompletedProcess(args, 1, "", "failed")
+        return original(root, args, read, timeout, **kwargs)
+
+    monkeypatch.setattr(git, "_run_git", fail_prefix)
+    result = await client.post("/code/git", json=_body(machine, "status"))
+    assert result.status_code == 502
+    result = await client.get("/code/fs/git-status", params={"workspace": str(machine.repo)})
+    assert result.status_code == 500
+
+
+@pytest.mark.asyncio
 async def test_status_reports_the_branch_and_an_untracked_file(client, machine):
     (machine.repo / "new.txt").write_text("x\n")
 
