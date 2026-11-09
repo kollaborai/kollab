@@ -346,6 +346,41 @@ If Delete stops the agent but cannot update its saved record, the agent stays in
 the sidebar with a warning (also shown in its session panel) and a retried
 Delete clears it without stopping the agent again.
 
+## Restart After Upgrade
+
+A detached agent keeps the code it started with, so it can run an older Kollab
+than the engine after an upgrade. Each agent publishes the version and build it
+runs in its presence record; `GET /agents` (its `live` rows) and the agent
+network rows carry them. When the open chat's agent runs a version other than
+the engine's (`GET /version`), the web UI shows one line above the chat. An
+agent that publishes no version started before agents did and counts as older.
+
+| `kollabor.updates.restart_agents` | The line says | You do |
+|---|---|---|
+| on | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
+| off (default) | "Run /restart to update the agent version running." | Type `/restart` in the chat |
+
+Both versions are in the line's hover text, never in the line. The setting is in
+`/config` under Updates as "Restart Agent Button".
+
+`/restart` (the button calls the same code through `POST /sessions/{id}/restart-agent`,
+the state RPC `state.restart_agent`) restarts the agent in place:
+
+1. The agent answers at once. If a turn is running it waits for the turn to end,
+   so a running tool is never cut.
+2. It saves the conversation and runs its normal graceful shutdown.
+3. It replaces its own process image with `kollab --detached ...` (same pid,
+   folder, identity and flags; the command comes from `kollabor.binary.kollab_argv()`,
+   so a binary install starts the file on disk, which holds the upgrade).
+4. The new image resumes the conversation it was told to pick back up. The hub
+   socket path is named by the identity, so the web UI reattaches to the same
+   path on its own and the open chat needs no reload.
+
+`/restart` no longer clears the conversation. `/new` (alias `/clear`) does that.
+A window started with `--no-daemon` has no daemon to replace: `/restart` there
+says so and changes nothing; quit and start Kollab again. An agent started
+before `/restart` existed answers that it is too old to restart itself.
+
 
 ## Using Agents
 

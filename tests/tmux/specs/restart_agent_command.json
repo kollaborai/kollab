@@ -1,0 +1,67 @@
+{
+  "name": "restart-agent-command",
+  "description": "/restart restarts a detached agent in place and keeps its conversation, so a window started with --no-daemon (no daemon to replace) says so and clears nothing, while /new still clears (#968). Throwaway HOME from the harness, --no-daemon, no keyring.",
+  "config": {
+    "command": "python main.py --no-daemon",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "\u276f",
+      "timeout": 20,
+      "description": "app ready at the input prompt"
+    },
+    {
+      "action": "section",
+      "title": "/restart without a daemon changes nothing"
+    },
+    {
+      "action": "slash_command",
+      "command": "restart"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Failed to restart",
+      "description": "/restart says it cannot restart this window"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Session cleared|Cleared:",
+      "description": "/restart no longer clears the conversation"
+    },
+    {
+      "action": "section",
+      "title": "/new still clears"
+    },
+    {
+      "action": "slash_command",
+      "command": "new"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Session cleared|Cleared",
+      "description": "/new clears and says so"
+    }
+  ]
+}
