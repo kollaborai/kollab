@@ -31,6 +31,8 @@ from .reply import Reply
 from .settings import DEFAULTS, PREFIX, CodeSettings
 
 TREE_MAX_DEPTH = 8
+TREE_MAX_ENTRIES = 10000
+TREE_MAX_PATH_BYTES = 1024 * 1024
 SEARCH_MAX_RESULTS = 200
 SEARCH_MAX_FILE_BYTES = 1024 * 1024
 SEARCH_MAX_QUERY = 200
@@ -219,11 +221,23 @@ def _extension(name: str) -> str:
     return name[dot:] if dot > 0 else ""
 
 
-def _entries(folder: str) -> list[os.DirEntry[str]]:
+class _TreeTooLarge(Exception):
+    pass
+
+
+def _entries(folder: str, budget: list[int] | None = None) -> list[os.DirEntry[str]]:
     """The entries of ``folder`` in name order; none when the folder cannot be read."""
     try:
         with os.scandir(folder) as scan:
-            return sorted(scan, key=lambda entry: (entry.name.casefold(), entry.name))
+            entries = []
+            for entry in scan:
+                if budget is not None:
+                    budget[0] -= 1
+                    budget[1] -= len(entry.path.encode("utf-8", errors="replace"))
+                    if budget[0] < 0 or budget[1] < 0:
+                        raise _TreeTooLarge
+                entries.append(entry)
+            return sorted(entries, key=lambda entry: (entry.name.casefold(), entry.name))
     except OSError:
         return []
 
@@ -260,7 +274,9 @@ def _search_file_listed(name: str, show_hidden: bool) -> bool:
     return (show_hidden or not name.startswith(".")) and _extension(name) not in BINARY_EXTENSIONS
 
 
-def _tree(folder: str, depth: int, settings: CodeSettings, chain: frozenset[str]) -> list[dict[str, Any]]:
+def _tree(
+    folder: str, depth: int, settings: CodeSettings, chain: frozenset[str], budget: list[int]
+) -> list[dict[str, Any]]:
     """mentiko's buildTree: folders first, then files, each in name order, down to TREE_MAX_DEPTH.
 
     ``folder`` lies inside a workspace the route has already checked. Symlinks are listed and followed only when
@@ -269,13 +285,13 @@ def _tree(folder: str, depth: int, settings: CodeSettings, chain: frozenset[str]
     if depth > TREE_MAX_DEPTH:
         return []
     follow = settings.follow_symlinks
-    listed = [(entry, _kind(entry, follow)) for entry in _entries(folder)]
+    listed = [(entry, _kind(entry, follow)) for entry in _entries(folder, budget)]
     nodes: list[dict[str, Any]] = []
     for entry, kind in listed:
         if kind == "dir" and _folder_listed(entry.name, settings.show_hidden):
             below = _descend(entry, chain, follow)
             if below is not None:
-                children = _tree(entry.path, depth + 1, settings, below)
+                children = _tree(entry.path, depth + 1, settings, below, budget)
                 nodes.append({"name": entry.name, "path": entry.path, "type": "dir", "children": children})
     for entry, kind in listed:
         if kind == "file" and _tree_file_listed(entry.name, settings.show_hidden):
@@ -289,10 +305,11 @@ def _search_files(root: str, settings: CodeSettings) -> Iterator[str]:
     follow = settings.follow_symlinks
     pending: list[tuple[str, frozenset[str]]] = [(root, _start_chain(root, settings))]
     scanned = 0
+    budget = [TREE_MAX_ENTRIES, TREE_MAX_PATH_BYTES]
     while pending:
         folder, chain = pending.pop()
         folders: list[tuple[str, frozenset[str]]] = []
-        for entry in _entries(folder):
+        for entry in _entries(folder, budget):
             kind = _kind(entry, follow)
             if kind == "dir" and _folder_listed(entry.name, settings.show_hidden):
                 below = _descend(entry, chain, follow)
@@ -501,7 +518,11 @@ def tree(workspace: str, params: dict[str, Any], settings: CodeSettings | None =
     if isinstance(folder, Reply):
         return folder
     root = os.path.realpath(folder)
-    return _ok({"path": root, "tree": _tree(root, 0, cfg, _start_chain(root, cfg))})
+    try:
+        nodes = _tree(root, 0, cfg, _start_chain(root, cfg), [TREE_MAX_ENTRIES, TREE_MAX_PATH_BYTES])
+    except _TreeTooLarge:
+        return _fail(413, "tree_too_large", "This folder is too large to show. Choose a smaller subfolder.")
+    return _ok({"path": root, "tree": nodes})
 
 
 def read_file(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
@@ -784,7 +805,11 @@ def search_files(workspace: str, params: dict[str, Any], settings: CodeSettings 
         return _fail(400, "invalid_query", "query too long (max 200 chars)")
     root = os.path.realpath(folder)
     results: list[dict[str, Any]] = []
-    for path in _search_files(root, cfg):
+    try:
+        paths = list(_search_files(root, cfg))
+    except _TreeTooLarge:
+        return _fail(413, "search_too_large", "This folder is too large to search. Choose a smaller subfolder.")
+    for path in paths:
         text = _search_text(path, cfg.follow_symlinks)
         if text is None:
             continue

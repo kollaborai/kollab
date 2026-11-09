@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
 
-type Listing = { path: string; parent: string; folders: { name: string; path: string }[] };
+type Listing = { path: string; parent: string; folders: { name: string; path: string }[]; next: string | null };
 
 export function FolderBrowser({ open, initialPath, onClose, onSelect }: {
   open: boolean; initialPath: string; onClose: () => void; onSelect: (path: string) => void;
@@ -13,15 +13,19 @@ export function FolderBrowser({ open, initialPath, onClose, onSelect }: {
   const [listing, setListing] = useState<Listing | null>(null);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const generation = useRef(0);
   const navigate = (next: string) => {
     if (next === path && listing) return;
+    generation.current += 1;
+    setLoadingMore(false);
     setListing(null);
     setError("");
     setInput(next);
     if (next === path) setRetry((value) => value + 1);
     else setPath(next);
   };
-  useEffect(() => { if (open) { setPath(initialPath); setInput(initialPath); } }, [open, initialPath]);
+  useEffect(() => { if (open) { setPath(initialPath); setInput(initialPath); setLoadingMore(false); } }, [open, initialPath]);
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -33,8 +37,24 @@ export function FolderBrowser({ open, initialPath, onClose, onSelect }: {
       const data = unwrapCodeData<Listing>(raw);
       if (!cancelled) setListing(data);
     }).catch(() => { if (!cancelled) setError("That folder is unavailable or cannot be read."); });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; generation.current += 1; };
   }, [open, path, retry]);
+  const loadMore = async () => {
+    if (!listing?.next || loadingMore) return;
+    const current = generation.current;
+    setLoadingMore(true);
+    setError("");
+    try {
+      const response = await codeFetch(`/code/folders/browse?path=${encodeURIComponent(path)}&after=${encodeURIComponent(listing.next)}`);
+      const data = unwrapCodeData<Listing>(await response.json());
+      if (!response.ok) throw new Error("Could not load more folders.");
+      if (current === generation.current) setListing((old) => old ? { ...data, folders: [...old.folders, ...data.folders] } : old);
+    } catch (e) {
+      if (current === generation.current) setError(e instanceof Error ? e.message : "Could not load more folders.");
+    } finally {
+      if (current === generation.current) setLoadingMore(false);
+    }
+  };
   return (
     <Dialog open={open} onOpenChange={(value) => { if (!value) onClose(); }}>
       <DialogContent>
@@ -48,6 +68,7 @@ export function FolderBrowser({ open, initialPath, onClose, onSelect }: {
         <div className="max-h-64 min-h-24 overflow-y-auto rounded border">
           {listing && listing.parent !== listing.path && <button type="button" className="block w-full px-3 py-2 text-left text-sm hover:bg-muted" onClick={() => navigate(listing.parent)}>..</button>}
           {listing?.folders.map((folder) => <button type="button" key={`${folder.name}:${folder.path}`} className="block w-full truncate px-3 py-2 text-left text-sm hover:bg-muted" onClick={() => navigate(folder.path)}>{folder.name}/</button>)}
+          {listing?.next && <button type="button" disabled={loadingMore} className="block w-full px-3 py-2 text-left text-sm hover:bg-muted" onClick={() => void loadMore()}>{loadingMore ? "Loading…" : "Load more folders"}</button>}
           {!listing && !error && <p className="p-3 text-sm text-muted-foreground">Loading folders…</p>}
           {listing && listing.folders.length === 0 && <p className="p-3 text-sm text-muted-foreground">No subfolders</p>}
         </div>

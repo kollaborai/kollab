@@ -59,3 +59,24 @@ def test_browse_rejects_missing_and_relative_directories(tmp_path):
     for path in ("relative", str(tmp_path / "missing"), "\0"):
         answer = asyncio.run(code_service.call("folders.browse", {"path": path}, root=str(tmp_path)))
         assert answer["status"] in (400, 404)
+
+
+def test_browse_pages_all_directories_in_order(tmp_path, monkeypatch):
+    from kollabor.code_service import folders
+
+    monkeypatch.setattr(folders, "FOLDER_PAGE_SIZE", 2)
+    for name in ("zebra", "alpha", "Beta", "delta", "gamma"):
+        (tmp_path / name).mkdir()
+    names = []
+    cursor = ""
+    while True:
+        answer = asyncio.run(
+            code_service.call("folders.browse", {"path": str(tmp_path), "after": cursor}, root=str(tmp_path))
+        )
+        data = answer["body"]["data"]
+        assert len(data["folders"]) <= 2
+        names.extend(item["name"] for item in data["folders"])
+        cursor = data["next"]
+        if cursor is None:
+            break
+    assert names == ["alpha", "Beta", "delta", "gamma", "zebra"]

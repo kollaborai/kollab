@@ -89,13 +89,16 @@ async def call(
         if not isinstance(path, str) or "\0" in path or not os.path.isabs(path):
             return _bad(400, "invalid_folder", "The folder path must be absolute.").as_wire()
         path = os.path.realpath(path)
+        after = params.get("after", "")
+        if not isinstance(after, str) or "\0" in after or len(after) > 4096:
+            return _bad(400, "invalid_cursor", "The folder cursor is invalid.").as_wire()
         if not os.path.isdir(path):
             return _bad(404, "folder_not_found", "That folder is not available.").as_wire()
         try:
-            entries = await asyncio.to_thread(folders.browse, path)
+            entries, next_cursor = await asyncio.to_thread(folders.browse, path, after)
         except OSError:
             return _bad(403, "folder_unreadable", "That folder cannot be read.").as_wire()
-        data = {"path": path, "parent": os.path.dirname(path), "folders": entries}
+        data = {"path": path, "parent": os.path.dirname(path), "folders": entries, "next": next_cursor}
         return Reply({"success": True, "data": data}).as_wire()
     if kind == "folders":
         try:

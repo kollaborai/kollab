@@ -1,5 +1,6 @@
 """Discover linked Git worktrees on the session daemon's machine."""
 
+import heapq
 import os
 
 from . import git
@@ -35,14 +36,24 @@ def linked_folders(root: str) -> list[dict[str, str]]:
     return folders
 
 
-def browse(path: str) -> list[dict[str, str]]:
-    """List directories, including hidden directories, on the daemon's machine."""
+FOLDER_PAGE_SIZE = 200
+
+
+def browse(path: str, after: str = "") -> tuple[list[dict[str, str]], str | None]:
+    """Return one sorted page while retaining only a bounded number of entries."""
     with os.scandir(path) as entries:
-        result = []
-        for entry in entries:
-            try:
-                if entry.is_dir():
-                    result.append({"name": entry.name, "path": os.path.realpath(entry.path)})
-            except OSError:
-                continue
-    return sorted(result, key=lambda item: (item["name"].casefold(), item["name"]))
+        def candidates():
+            for entry in entries:
+                try:
+                    if entry.is_dir() and (
+                        not after or (entry.name.casefold(), entry.name) > (after.casefold(), after)
+                    ):
+                        yield entry.name
+                except OSError:
+                    continue
+
+        names = heapq.nsmallest(FOLDER_PAGE_SIZE + 1, candidates(), key=lambda name: (name.casefold(), name))
+    more = len(names) > FOLDER_PAGE_SIZE
+    names = names[:FOLDER_PAGE_SIZE]
+    return ([{"name": name, "path": os.path.realpath(os.path.join(path, name))} for name in names],
+            names[-1] if more else None)

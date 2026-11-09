@@ -64,6 +64,7 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
   const [query, setQuery] = useState("");
   const [files, setFiles] = useState<FlatFile[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -72,15 +73,19 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
   useEffect(() => {
     if (!open || !workspace) return;
     setQuery("");
+    setFiles([]);
+    setError("");
     setSelectedIndex(0);
+    let cancelled = false;
     codeFetch(`/api/fs/tree?workspace=${encodeURIComponent(workspace)}`)
       .then((r) => r.json())
       .then((raw: unknown) => {
         const data = unwrapCodeData<{ tree?: TreeNode[] }>(raw);
-        if (data.tree) setFiles(flattenTree(data.tree, workspace));
+        if (!cancelled && data.tree) setFiles(flattenTree(data.tree, workspace));
       })
-      .catch(() => {});
-    setTimeout(() => inputRef.current?.focus(), 50);
+      .catch((e: unknown) => { if (!cancelled) setError(e instanceof Error ? e.message : "Could not load files."); });
+    const timer = setTimeout(() => inputRef.current?.focus(), 50);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [open, workspace]);
 
   const filtered = query
@@ -154,6 +159,7 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
           className="h-10 w-full bg-card px-4 text-sm text-foreground outline-none placeholder:text-foreground/30"
         />
         <div ref={listRef} className="flex-1 overflow-y-auto">
+          {error && <div role="alert" className="px-4 py-3 text-xs text-destructive">{error}</div>}
           {filtered.slice(0, 50).map((file, i) => (
             <div
               key={file.path}
@@ -175,7 +181,7 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
               </div>
             </div>
           ))}
-          {filtered.length === 0 && (
+          {!error && filtered.length === 0 && (
             <div className="px-4 py-6 text-center text-xs text-foreground/30">
               No files found
             </div>

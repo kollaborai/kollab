@@ -193,6 +193,14 @@ def test_a_write_over_two_megabytes_is_refused(client, ws):
     assert not (ws.root / "big.txt").exists()
 
 
+def test_tree_refuses_large_directories_without_returning_partial_results(client, ws, monkeypatch):
+    monkeypatch.setattr(code_files, "TREE_MAX_ENTRIES", 2)
+    for name in ("a.txt", "b.txt", "c.txt"):
+        _write(ws.root / name, "x")
+    _refused(_get(client, "tree", ws.root), 413, "tree_too_large")
+    _refused(_get(client, "search", ws.root, query="test"), 413, "search_too_large")
+
+
 def test_write_does_not_replace_an_oversized_existing_file(client, ws):
     path = ws.root / "big.txt"
     path.write_bytes(b"a" * (TWO_MB + 1))
