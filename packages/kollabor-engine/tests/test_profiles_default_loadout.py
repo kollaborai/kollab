@@ -230,8 +230,9 @@ async def test_listing_choices_leaves_no_config_poller_running(monkeypatch, save
 
 
 @pytest.mark.asyncio
-async def test_choices_reads_no_config_file_per_request(monkeypatch, saved_default):
-    # The picker lists no saved loadouts, so a request has no reason to read the config layers at all.
+async def test_choices_route_never_calls_the_layered_config_reader(monkeypatch, saved_default):
+    # The picker lists no saved loadouts, so the route never calls the layered config reader. It does
+    # still read profile definitions from the config files through ProfileManager, which is stubbed here.
     import kollabor_engine.routes.profiles as profile_routes
 
     import kollabor_ai.loadout_manager as loadout_manager_module
