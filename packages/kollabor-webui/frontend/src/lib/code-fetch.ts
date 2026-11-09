@@ -21,6 +21,8 @@ export const OUTDATED_NOTICE = "This agent runs older code. Restart it to use Co
 // The session the open Code Editor view belongs to. One view is shown at a time and it sets this while it renders,
 // before any of its children fetch, so the many call sites keep mentiko's single-argument codeFetch.
 let activeCodeSession = "";
+let activeCodeRoot = "";
+export function setCodeRoot(root: string): void { activeCodeRoot = root; }
 
 export function setCodeSession(sessionId: string): void {
   activeCodeSession = sessionId;
@@ -37,9 +39,18 @@ export function codeUrl(url: string, sessionId: string = activeCodeSession): str
   return url.startsWith("/code/") ? `${base}${url.slice("/code".length)}` : `${base}${url}`;
 }
 
-export async function codeFetch(url: string, init: RequestInit = {}): Promise<Response> {
+export function codeRequestUrl(url: string, context?: { sessionId: string; root: string }): string {
+  const root = context?.root ?? activeCodeRoot;
+  let target = codeUrl(url, context?.sessionId);
+  if (root && (url.startsWith("/api/fs/") || url === "/api/git" || url.startsWith("/api/git?"))) {
+    target += `${target.includes("?") ? "&" : "?"}codeRoot=${encodeURIComponent(root)}`;
+  }
+  return target;
+}
+
+export async function codeFetch(url: string, init: RequestInit = {}, context?: { sessionId: string; root: string }): Promise<Response> {
   try {
-    return await api.request(codeUrl(url), init);
+    return await api.request(codeRequestUrl(url, context), init);
   } catch (error) {
     // EngineApi.request throws on non-2xx; hand the response shape back so mentiko-style
     // `if (!res.ok)` call sites keep working.

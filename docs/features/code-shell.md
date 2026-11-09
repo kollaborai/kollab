@@ -96,7 +96,9 @@ Restart the agent to fix it. The Code Editor and Git views do not show the notic
 - Delete and rename act on a symlink itself, never on the file or folder it points to.
 - A file that is not UTF-8 opens as Latin-1 and saves back byte for byte. If the new text holds a character Latin-1
   cannot hold, the save is refused (`encoding_unsafe`) instead of rewriting every other byte; save under another name.
-- The git stash button stashes this folder only, as the panel lists, not the rest of the repository.
+- Stash deletion from the UI is unavailable: Git selects a positional entry, which can change during a concurrent stash operation. List, create, and apply remain available.
+- The git stash button stashes this folder only. Applying a stash that includes paths outside the folder is refused unless `git.allow_outside_workspace` is enabled.
+- A save checks for a file changed or deleted since it was opened and offers an explicit overwrite when it detects a conflict. An external writer can still race the final replacement. Unsaved tabs kept after switching folders or devices can only be saved from their original workspace.
 - A commit that would carry staged files from outside this folder is refused unless `git.allow_outside_workspace` is on.
 - `terminal.start_command` does not run when `read_only` is on.
 
@@ -113,3 +115,7 @@ Restart the agent to fix it. The Code Editor and Git views do not show the notic
 - `docs/specs/code-shell-settings.md`: the settings, their resolution and the rules.
 - `docs/specs/code-shell-windows.md`: the Windows design.
 - `tests/tmux/specs/code-shell.json`: the `/config` check for the Code And Terminal section.
+
+## Worktrees
+
+The Code and Git views list the agent computer's linked Git worktrees in the folder selector, which can also browse any readable folder on that computer. A single delivered assignment that names an available linked worktree opens it initially. When no unique assignment is available, the daemon's folder opens first. Selecting a folder changes the editor and Git view; terminal shells still start in the daemon's folder.

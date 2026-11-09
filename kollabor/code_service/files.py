@@ -3,7 +3,7 @@
 Mentiko's /api/fs/* contract inside the spec envelope (docs/specs/floating-code-shell.md): success is
 {"success": true, "data": ...}; a failure carries a non-2xx status and {"success": false, "error": {"code", "message"}}.
 
-The daemon serves its own folder (its working directory) and nothing else: a request's ``workspace`` is not read.
+The daemon passes the selected, validated folder as the workspace; a request's ``workspace`` is not read.
 Every path a request names is resolved with os.path.realpath and must sit inside that resolved folder or one of the
 ``extra_roots`` the settings name. The check is written inline in each operation, in the closed-prefix form (CodeQL's
 path-injection idiom). Symlinks are not followed unless ``follow_symlinks`` is on. Request bodies and file contents are
@@ -39,24 +39,93 @@ ALWAYS_HIDDEN = ".git"
 # mentiko's lists, unchanged, plus .venv (dot names are skipped anyway).
 ALLOWED_EXTENSIONS = frozenset(
     {
-        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".jsonl", ".yaml", ".yml",
-        ".sh", ".bash", ".zsh", ".md", ".mdx", ".txt", ".css", ".scss", ".env", ".env.example",
-        ".env.local", ".py", ".go", ".rs", ".rb", ".html", ".svg", ".xml", ".toml", ".ini", ".conf",
-        ".graphql", ".gql", ".sql", ".dockerfile",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".cjs",
+        ".json",
+        ".jsonl",
+        ".yaml",
+        ".yml",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".md",
+        ".mdx",
+        ".txt",
+        ".css",
+        ".scss",
+        ".env",
+        ".env.example",
+        ".env.local",
+        ".py",
+        ".go",
+        ".rs",
+        ".rb",
+        ".html",
+        ".svg",
+        ".xml",
+        ".toml",
+        ".ini",
+        ".conf",
+        ".graphql",
+        ".gql",
+        ".sql",
+        ".dockerfile",
     }
 )
 SKIP_DIRS = frozenset(
     {
-        "node_modules", ".git", ".next", "dist", "build", "__pycache__", ".cache", ".turbo",
-        "coverage", ".claude", ".vscode", ".gitlab", ".venv",
+        "node_modules",
+        ".git",
+        ".next",
+        "dist",
+        "build",
+        "__pycache__",
+        ".cache",
+        ".turbo",
+        "coverage",
+        ".claude",
+        ".vscode",
+        ".gitlab",
+        ".venv",
     }
 )
 # search's binary skips (mentiko's list): never read as text.
 BINARY_EXTENSIONS = frozenset(
     {
-        ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp", ".woff", ".woff2", ".ttf", ".eot",
-        ".zip", ".tar", ".gz", ".bz2", ".xz", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".mp4", ".mp3",
-        ".mov", ".avi", ".pyc", ".so", ".dylib", ".dll", ".exe",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".ico",
+        ".svg",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".mp4",
+        ".mp3",
+        ".mov",
+        ".avi",
+        ".pyc",
+        ".so",
+        ".dylib",
+        ".dll",
+        ".exe",
     }
 )
 
@@ -157,7 +226,7 @@ def _entries(folder: str) -> list[os.DirEntry[str]]:
 
 
 def _kind(entry: os.DirEntry[str], follow: bool = False) -> str:
-    """"dir" or "file" for an entry that is one. A symlink is neither unless ``follow`` is set, then it counts as what
+    """ "dir" or "file" for an entry that is one. A symlink is neither unless ``follow`` is set, then it counts as what
     it points at; a dangling link is neither."""
     with contextlib.suppress(OSError):
         if entry.is_dir(follow_symlinks=follow):
@@ -301,6 +370,11 @@ def _existing_bytes(path: str) -> bytes | None:
         return None
 
 
+def _version(st: os.stat_result) -> str:
+    """Opaque identity for a file revision, including sub-millisecond and replacement changes."""
+    return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}"
+
+
 def _mtime_ms(path: str) -> int:
     """A file's modification time in whole milliseconds, the form the editor sends back to check for a stale write."""
     return os.stat(path).st_mtime_ns // 1_000_000
@@ -313,19 +387,26 @@ class _StaleWrite(Exception):
 _WRITE_LOCK = threading.Lock()
 
 
-def _checked_write(path: str, data: bytes, expected: int | None) -> int:
+def _checked_write(path: str, data: bytes, expected: int | None, version: str | None) -> tuple[int, str]:
     """Check ``expected`` against the file's mtime and write, as one step, so two saves with the same ``expectedMtime``
     cannot both pass. Returns the new mtime in ms."""
     with _WRITE_LOCK:
+        if version is not None:
+            try:
+                if _version(os.stat(path)) != version:
+                    raise _StaleWrite
+            except FileNotFoundError:
+                raise _StaleWrite from None
         if expected is not None:
             try:
                 current: int | None = _mtime_ms(path)
             except FileNotFoundError:
                 current = None
-            if current is not None and current != expected:
+            if current != expected:
                 raise _StaleWrite
         _write_atomic(path, data)
-        return _mtime_ms(path)
+        st = os.stat(path)
+        return st.st_mtime_ns // 1_000_000, _version(st)
 
 
 def _write_atomic(path: str, data: bytes) -> None:
@@ -427,7 +508,9 @@ def read_file(workspace: str, params: dict[str, Any], settings: CodeSettings | N
         if os.path.getsize(full) > limit:
             return _size_refusal("File", cfg.max_file_kb)
         with open(full, "rb") as handle:
-            mtime = os.fstat(handle.fileno()).st_mtime_ns // 1_000_000
+            st = os.fstat(handle.fileno())
+            mtime = st.st_mtime_ns // 1_000_000
+            version = _version(st)
             data = handle.read(limit + 1)
     except OSError as exc:
         return _disk_failure(exc)
@@ -436,7 +519,9 @@ def read_file(workspace: str, params: dict[str, Any], settings: CodeSettings | N
     if b"\0" in data:
         return _fail(400, "not_text", "Not a text file.")
     text, encoding = _decode(data)
-    return _ok({"path": full, "content": text, "size": len(data), "encoding": encoding, "mtime": mtime})
+    return _ok(
+        {"path": full, "content": text, "size": len(data), "encoding": encoding, "mtime": mtime, "version": version}
+    )
 
 
 async def write_file(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
@@ -488,14 +573,18 @@ async def write_file(workspace: str, params: dict[str, Any], settings: CodeSetti
     expected = body.get("expectedMtime")
     if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int)):
         return _fail(400, "invalid_param", "expectedMtime must be an integer (milliseconds).")
+    version = body.get("expectedVersion")
+    if version is not None and (not isinstance(version, str) or not version or len(version) > 256):
+        return _fail(400, "invalid_param", "expectedVersion must be a version token.")
     check = expected if body.get("force") is not True else None
+    version = version if body.get("force") is not True else None
     try:
-        mtime = await asyncio.to_thread(_checked_write, full, data, check)
+        mtime, version = await asyncio.to_thread(_checked_write, full, data, check, version)
     except _StaleWrite:
         return _fail(409, "stale_write", "The file changed on disk since you opened it.")
     except OSError as exc:
         return _disk_failure(exc)
-    return _ok({"success": True, "path": full, "encoding": encoding, "mtime": mtime})
+    return _ok({"success": True, "path": full, "encoding": encoding, "mtime": mtime, "version": version})
 
 
 async def create_path(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:

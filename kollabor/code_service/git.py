@@ -30,7 +30,7 @@ LOG_SEP = "||GITSEP||"
 LOG_FORMAT = f"%H{LOG_SEP}%h{LOG_SEP}%s{LOG_SEP}%an{LOG_SEP}%ar{LOG_SEP}%D"
 STASH_SEP = "||STASHSEP||"
 # git-log placeholders: `stash list` runs over the stash reflog, and for-each-ref ones would print literally.
-STASH_FORMAT = f"%gd{STASH_SEP}%s{STASH_SEP}%cr{STASH_SEP}%h"
+STASH_FORMAT = f"%gd{STASH_SEP}%s{STASH_SEP}%cr{STASH_SEP}%H"
 BRANCH_FORMAT = "%(refname:short)|%(HEAD)|%(upstream:short)|%(objectname:short)|%(committerdate:relative)"
 REMOTE_FORMAT = "%(refname:short)|%(HEAD)|%(objectname:short)|%(committerdate:relative)"
 COMMIT_ID = re.compile(r"[0-9a-fA-F]{4,40}")
@@ -92,7 +92,8 @@ async def _text(root: str, args: list[str]) -> str:
 
 
 async def _head_name(root: str) -> str:
-    return (await _text(root, ["rev-parse", "--abbrev-ref", "HEAD"])).strip() or "HEAD"
+    branch = (await _text(root, ["symbolic-ref", "--short", "-q", "HEAD"])).strip()
+    return branch or (await _text(root, ["rev-parse", "--abbrev-ref", "HEAD"])).strip() or "HEAD"
 
 
 def _fields(line: str, sep: str, count: int) -> list[str]:
@@ -151,7 +152,7 @@ async def _status(root: str, body: dict[str, Any], settings: CodeSettings | None
     files: list[dict[str, Any]] = []
     # Porcelain paths are relative to the repository's top; the workspace may be a folder inside it. Scope the
     # status to the workspace and give back workspace-relative paths, the form stage, unstage and diff take.
-    prefix = (await _text(root, ["rev-parse", "--show-prefix"])).strip()
+    prefix = (await _text(root, ["rev-parse", "--show-prefix"])).removesuffix("\n")
     # -z: each name comes back exactly as it is (no quoting, no escapes). A rename or copy record is "XY new\0old\0",
     # so the old name, which is its own record, is skipped.
     records = iter((await _text(root, ["status", "--porcelain=v1", "-z", "-u", "--", "."])).split("\0"))
@@ -534,31 +535,48 @@ async def _create_stash(root: str, body: dict[str, Any], settings: CodeSettings 
     return {"ok": True, "stashId": f"stash@{{{top['id']}}}", "message": message or top["message"]}
 
 
-async def _named_stash(root: str, body: dict[str, Any]) -> str:
-    """The position of the stash a request names (it must exist). A stashCommit wins and never falls back."""
+async def _named_stash(root: str, body: dict[str, Any]) -> tuple[str, str]:
+    """Resolve one reflog snapshot to its position and full object id."""
     stashes = (await _list_stashes(root, {}))["stashes"]
     commit = body.get("stashCommit")
     if commit not in (None, ""):
         wanted = _commit_id(commit).lower()
-        hits = [
-            stash["id"]
-            for stash in stashes
-            if stash["commitHash"] and wanted.startswith(stash["commitHash"].lower())
-        ]
+        hits = [stash for stash in stashes if stash["commitHash"] and stash["commitHash"].lower().startswith(wanted)]
     elif body.get("stashId") not in (None, ""):
         position = str(int(_stash_index(body.get("stashId"))))
-        hits = [position] if any(stash["id"] == position for stash in stashes) else []
+        hits = [stash for stash in stashes if stash["id"] == position]
     else:
         raise GitRequestError(400, "stash_required", "stashId or stashCommit is required.")
     if not hits:
         raise GitRequestError(404, "stash_not_found", "That stash does not exist; it may have been applied or dropped.")
-    return hits[0]
+    if len(hits) != 1:
+        raise GitRequestError(409, "ambiguous_stash", "That stash id is ambiguous; refresh the list.")
+    return hits[0]["id"], hits[0]["commitHash"]
 
 
 async def _apply_stash(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
-    position = await _named_stash(root, body)
+    position, commit = await _named_stash(root, body)
     ref = f"stash@{{{position}}}"
-    proc = await _git(root, ["stash", "apply", ref], read=False)
+    cfg = DEFAULTS if settings is None else settings
+    if not cfg.git_allow_outside_workspace:
+        prefix = (await _text(root, ["rev-parse", "--show-prefix"])).removesuffix("\n")
+        changed = await _git(root, ["diff-tree", "-r", "--no-renames", "--name-only", "-z", f"{commit}^1", commit])
+        untracked_parent = await _git(root, ["rev-parse", "--verify", "-q", f"{commit}^3"])
+        untracked = (
+            await _git(root, ["ls-tree", "-r", "--name-only", "-z", untracked_parent.stdout.strip()])
+            if untracked_parent.returncode == 0
+            else None
+        )
+        if changed.returncode != 0 or (untracked is not None and untracked.returncode != 0):
+            raise GitRequestError(409, "git_failed", "Could not check the stash, so nothing was applied.")
+        paths = changed.stdout.split("\0") + (untracked.stdout.split("\0") if untracked else [])
+        if prefix and any(path and not path.startswith(prefix) for path in paths):
+            raise GitRequestError(
+                409,
+                "stash_outside_workspace",
+                f"Stash includes files outside this folder. Setting: {PREFIX}git.allow_outside_workspace",
+            )
+    proc = await _git(root, ["stash", "apply", commit], read=False)
     status = await _status(root, {})
     if proc.returncode == 0:
         return {"ok": True, "appliedStashId": ref, "status": status}
@@ -579,10 +597,13 @@ async def _apply_stash(root: str, body: dict[str, Any], settings: CodeSettings |
 
 
 async def _drop_stash(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
-    position = await _named_stash(root, body)
-    ref = f"stash@{{{position}}}"
-    await _write(root, ["stash", "drop", ref])
-    return {"ok": True, "droppedId": ref}
+    # Git only deletes a positional reflog entry. Another process can insert a stash between a check and the
+    # deletion, so refuse until deletion by object identity can be made atomic across all Git writers.
+    raise GitRequestError(
+        409,
+        "stash_drop_unavailable",
+        "Stash deletion is unavailable because concurrent Git activity can change its position.",
+    )
 
 
 ACTIONS.update(

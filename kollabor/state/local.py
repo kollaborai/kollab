@@ -1364,7 +1364,28 @@ class LocalStateService(StateService):
         """Files, git and the terminal of this daemon's folder (``kollabor.code_service``)."""
         from kollabor import code_service
 
-        return await code_service.call(op, params, settings=self._code_settings())
+        answer = await code_service.call(op, params, settings=self._code_settings())
+        if op == "folders" and answer.get("status") == 200:
+            # Only an unambiguous delivered assignment to this identity may pick a worktree.
+            # Git discovery still determines which paths are valid on this daemon's machine.
+            try:
+                hub = self._resolve_hub_plugin()
+                identity = getattr(getattr(hub, "_identity", None), "identity", "")
+                ledger = getattr(hub, "_task_ledger", None)
+                if identity and ledger:
+                    import asyncio
+                    import os
+
+                    records = await asyncio.to_thread(ledger.get_in_flight_dispatches_for_assignee, identity)
+                    data = answer["body"]["data"]
+                    available = {entry["path"] for entry in data["folders"]}
+                    assigned = {os.path.realpath(item["worktree"]) for item in records
+                                if isinstance(item.get("worktree"), str) and os.path.isabs(item["worktree"])}
+                    if len(assigned) == 1 and assigned <= available:
+                        data["default"] = next(iter(assigned))
+            except Exception:
+                logger.debug("could not determine assigned code folder", exc_info=True)
+        return answer
 
     async def open_generated_artifact(self, media_id: str) -> bool:
         """Open a generated image through the daemon-owned API service."""

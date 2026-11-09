@@ -236,12 +236,10 @@ async def test_stash_create_apply_and_drop(client, machine):
     assert by_commit["ok"] is True
     _git(machine.repo, "checkout", "--", "tracked.txt")
 
-    dropped = (await _act(client, machine, "drop_stash", stashCommit=commit)).json()["data"]
-    gone = await _act(client, machine, "drop_stash", stashId="0")
-    assert dropped == {"ok": True, "droppedId": "stash@{0}"}
-    assert gone.status_code == 404
-    assert _error_code(gone) == "stash_not_found"
-    assert _git(machine.repo, "stash", "list") == ""
+    dropped = await _act(client, machine, "drop_stash", stashCommit=commit)
+    assert dropped.status_code == 409
+    assert _error_code(dropped) == "stash_drop_unavailable"
+    assert len(_git(machine.repo, "stash", "list").splitlines()) == 1
 
 
 @pytest.mark.asyncio
@@ -325,3 +323,22 @@ async def test_push_refuses_a_forced_refspec_and_a_branch_without_a_remote(clien
     assert _error_code(forced) == "invalid_branch"
     assert loose.status_code == 400
     assert _error_code(loose) == "remote_required"
+
+
+@pytest.mark.asyncio
+async def test_stash_apply_uses_object_selected_before_reflog_moves(client, machine, monkeypatch):
+    from kollabor.code_service import git as service_git
+
+    (machine.repo / "tracked.txt").write_text("first stash\n")
+    _git(machine.repo, "stash", "push", "-m", "first")
+    commit = _git(machine.repo, "rev-parse", "stash@{0}").strip()
+    original = service_git._list_stashes
+    async def list_then_insert(root, body, settings=None):
+        result = await original(root, body, settings)
+        (machine.repo / "tracked.txt").write_text("second stash\n")
+        _git(machine.repo, "stash", "push", "-m", "second")
+        return result
+    monkeypatch.setattr(service_git, "_list_stashes", list_then_insert)
+    result = await _act(client, machine, "apply_stash", stashCommit=commit)
+    assert result.status_code == 200
+    assert (machine.repo / "tracked.txt").read_text() == "first stash\n"

@@ -39,6 +39,7 @@ import type {
 } from "./git-types";
 
 interface BranchSelectorProps {
+  sessionId: string;
   /** Absolute path of the chat's folder (the workspace the git panel works in). */
   workspace: string;
   /** Called after a branch switch succeeds. */
@@ -72,7 +73,7 @@ function validateBranchName(name: string): string | null {
   return null;
 }
 
-export function BranchSelector({ workspace, onBranchSwitch }: BranchSelectorProps) {
+export function BranchSelector({ sessionId, workspace, onBranchSwitch }: BranchSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [branches, setBranches] = useState<GitBranch[]>([]);
   const [currentBranch, setCurrentBranch] = useState("");
@@ -96,14 +97,14 @@ export function BranchSelector({ workspace, onBranchSwitch }: BranchSelectorProp
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspace, action, ...payload }),
-      });
+      }, { sessionId, root: workspace });
       const body: unknown = await res.json().catch(() => null);
       if (!res.ok) {
         throw new Error(errorText(body) ?? `HTTP ${res.status}: git error`);
       }
       return unwrapCodeData<T>(body);
     },
-    [workspace]
+    [sessionId, workspace]
   );
 
   const refreshBranches = useCallback(async () => {

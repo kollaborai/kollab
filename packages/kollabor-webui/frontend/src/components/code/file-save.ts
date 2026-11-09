@@ -1,3 +1,5 @@
+import { bufferBelongsHere, editorOwner } from "@/components/code/workspace-tabs";
+import { useEditorStore } from "@/components/code/editor-store";
 import { codeFetch } from "@/lib/code-fetch";
 
 /**
@@ -6,17 +8,23 @@ import { codeFetch } from "@/lib/code-fetch";
  * part of what the user sees or edits.
  */
 const mtimes = new Map<string, number>();
+const versions = new Map<string, string>();
+const keyFor = (path: string, owner = editorOwner()) => `${owner}\0${path}`;
+export function rememberVersion(path: string, version: unknown): void {
+  if (typeof version === "string" && version) versions.set(keyFor(path), version);
+}
 
 export function rememberMtime(path: string, mtime: unknown): void {
-  if (typeof mtime === "number" && Number.isFinite(mtime)) mtimes.set(path, mtime);
+  if (typeof mtime === "number" && Number.isFinite(mtime)) mtimes.set(keyFor(path), mtime);
 }
 
 export function mtimeOf(path: string): number | undefined {
-  return mtimes.get(path);
+  return mtimes.get(keyFor(path));
 }
 
 export function forgetMtime(path: string): void {
-  mtimes.delete(path);
+  mtimes.delete(keyFor(path));
+  versions.delete(keyFor(path));
 }
 
 export type SaveResult = { ok: true } | { ok: false; stale: boolean; message: string };
@@ -37,9 +45,14 @@ export async function saveWorkspaceFile(
   content: string,
   options: { force?: boolean } = {},
 ): Promise<SaveResult> {
+  if (!bufferBelongsHere(path)) return { ok: false, stale: false, message: "Switch back to the original device and folder to save this file." };
+  const owner = editorOwner();
+  const bufferId = useEditorStore.getState().fileCache.get(path)?.bufferId;
   const body: Record<string, unknown> = { workspace, content };
-  const expected = mtimes.get(path);
-  if (expected !== undefined) body.expectedMtime = expected;
+  const version = versions.get(keyFor(path));
+  if (version !== undefined) body.expectedVersion = version;
+  const expected = mtimes.get(keyFor(path));
+  if (expected !== undefined && version === undefined) body.expectedMtime = expected;
   if (options.force) body.force = true;
   try {
     const res = await codeFetch(`/api/fs/file?path=${encodeURIComponent(path)}`, {
@@ -48,9 +61,13 @@ export async function saveWorkspaceFile(
       body: JSON.stringify(body),
     });
     const raw: unknown = await res.json().catch(() => null);
+    if (owner !== editorOwner() || bufferId !== useEditorStore.getState().fileCache.get(path)?.bufferId) {
+      return { ok: false, stale: false, message: "The original file is no longer active." };
+    }
     if (res.ok) {
       const data = raw && typeof raw === "object" && "data" in raw ? raw.data : raw;
       if (data && typeof data === "object" && "mtime" in data) rememberMtime(path, data.mtime);
+      if (data && typeof data === "object" && "version" in data) rememberVersion(path, data.version);
       return { ok: true };
     }
     const { code, message } = errorOf(raw);

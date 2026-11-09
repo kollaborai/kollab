@@ -18,7 +18,7 @@ browser  ->  engine  /sessions/{id}/code/*   ->  session.state.code_call(op, par
 - Engine: `routes/code.py` only authenticates, caps bodies and passes the call on. It reads no folder from a request
   and the engine folder rule (`folder_or_400`) does not apply: it guards folders the engine itself opens.
 - Daemon: `kollabor/code_service/` (`files.py`, `git.py`, `terminal.py`, one `call(op, params)` entry). The folder is
-  the daemon's own working directory (realpath). A `workspace` field in a request is ignored. Every file path is
+  the daemon's working directory or another folder selected on the daemon's computer. A `workspace` field in a request is ignored; `codeRoot` is validated as an existing absolute directory on each request. Every file path is
   resolved and must sit inside that folder (closed-prefix check, symlinks followed; anything else is 403).
 - RPC: `state.code_call` (`kollabor/state/handlers.py`), answered like every other state call, local or remote.
 - A daemon older than this change answers `RpcMethodNotFound`; the engine turns that into 502 `daemon_outdated` ("This agent runs older code. Restart it to use Code, Git and Terminal.")
@@ -81,3 +81,13 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
   `packages/kollabor-engine/tests/test_code_routes.py` (engine).
 - Frontend: `tsc --noEmit`, vitest (`tests/code-fetch-session.test.ts`, `tests/terminal-ws-protocol.test.ts`), build.
 - Live: an isolated stack, a session on a local daemon, then the same views against a session on another computer.
+
+## Save and workspace boundaries
+
+File reads return an opaque revision token. Saves send that token and refuse a changed or deleted file detected before the replacement unless the user explicitly overwrites it. External writers are not serialized by this check and can still race the replacement. Dirty buffers retained when switching devices or folders remain owned by their original workspace and can only be saved there. The tab-bar save control reports failures.
+
+Stash deletion is refused because Git's positional reflog deletion cannot be guarded by the selected object identity against concurrent writers. Applying a stash from a workspace inside a repository checks tracked and untracked stash paths and refuses one that reaches outside the workspace unless `git.allow_outside_workspace` is enabled.
+
+## Folder selection
+
+The daemon discovers its own Git worktrees and returns their real paths and branch names to the Code and Git views. A single delivered Hub assignment with a valid linked worktree selects it initially; ambiguous or unavailable assignments leave the daemon's folder selected. The folder selector also browses any readable directory on that computer. Code and Git use the same selected folder; the terminal continues in the daemon's original folder. Missing or removed folders are rejected on subsequent requests.

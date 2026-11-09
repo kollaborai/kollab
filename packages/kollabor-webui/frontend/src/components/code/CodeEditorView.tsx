@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Files, Filter, PanelLeft, Search, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { openWorkspaceFile, readFileContent, fileNameOf, extensionOf } from "@/components/code/open-file";
-import { claimEditorWorkspace } from "@/components/code/workspace-tabs";
-import { setCodeSession } from "@/lib/code-fetch";
+import { openWorkspaceFile, readFileContent, rememberFileRead, fileNameOf, extensionOf } from "@/components/code/open-file";
+import { FolderBrowser } from "@/components/code/folder-browser";
+import { claimEditorWorkspace, setEditorOwner } from "@/components/code/workspace-tabs";
+import { codeFetch, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { GitPanel } from "@/components/code/git/GitPanel";
 import { openWorkspaceDiff } from "@/components/code/open-file";
@@ -58,9 +59,39 @@ function SidebarToggle({
 }
 
 /** The Code Editor view for one chat folder, docked in the chat column: file sidebar, split editor panes, quick open. */
-export function CodeEditorView({ sessionId, device = "", workspace, mode = "code" }: CodeEditorViewProps) {
+export function CodeEditorView(props: CodeEditorViewProps) {
+  const [folders, setFolders] = useState<{ path: string; branch: string }[] | null>(null);
+  const [selected, setSelected] = useState("");
+  const [browsing, setBrowsing] = useState(false);
+  const [error, setError] = useState("");
+  setCodeSession(props.sessionId);
+  useEffect(() => {
+    let cancelled = false;
+    setFolders(null);
+    setError("");
+    void codeFetch("/code/folders").then(async (response) => {
+      if (!response.ok) throw new Error("Could not load folders from this agent.");
+      const data = unwrapCodeData<{ folders: { path: string; branch: string }[]; default: string }>(await response.json());
+      if (!cancelled) { setFolders(data.folders); setSelected(data.default); }
+    }).catch(() => { if (!cancelled) setError("Could not load folders from this agent. Restart it and try again."); });
+    return () => { cancelled = true; };
+  }, [props.sessionId]);
+  if (error) return <div role="alert" className="p-3 text-sm text-destructive">{error}</div>;
+  if (!folders || !selected) return <div className="p-3 text-sm text-muted-foreground">Loading folders…</div>;
+  const choices = folders.some((folder) => folder.path === selected) ? folders : [...folders, { path: selected, branch: "" }];
+  return <>
+    <CodeEditorFolder key={`${props.sessionId}:${props.device ?? ""}:${selected}`} {...props} workspace={selected} folders={choices} onFolderChange={setSelected} onBrowse={() => setBrowsing(true)} />
+    <FolderBrowser open={browsing} initialPath={selected} onClose={() => setBrowsing(false)} onSelect={(path) => { setSelected(path); setBrowsing(false); }} />
+  </>;
+}
+
+function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", folders, onFolderChange, onBrowse }: CodeEditorViewProps & {
+  folders: { path: string; branch: string }[]; onFolderChange: (path: string) => void; onBrowse: () => void;
+}) {
   // Set while rendering, so it is in place before any child effect fetches (see lib/code-fetch.ts).
   setCodeSession(sessionId);
+  setCodeRoot(workspace);
+  setEditorOwner(device ? `${device}:${workspace}` : workspace);
   const sidebarView = useEditorStore((s) => s.sidebarView);
   const setSidebarView = useEditorStore((s) => s.setSidebarView);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -98,17 +129,18 @@ export function CodeEditorView({ sessionId, device = "", workspace, mode = "code
     for (const pane of panes) {
       for (const path of pane.openPaths) {
         if (fileCache.has(path)) continue;
-        void readFileContent(workspace, path).then((content) => {
+        void readFileContent(workspace, path).then((read) => {
           if (cancelled) return;
           const store = useEditorStore.getState();
           if (store.fileCache.has(path)) return;
-          if (content === null) {
+          if (read === null) {
             store.closeFile(pane.id, path);
             return;
           }
           const name = fileNameOf(path);
           const active = store.panes.find((p) => p.id === pane.id)?.activePath ?? null;
-          store.openFile(pane.id, path, name, extensionOf(name), content);
+          rememberFileRead(path, read);
+          store.openFile(pane.id, path, name, extensionOf(name), read.content);
           if (active && active !== path) store.setActiveFile(pane.id, active);
         });
       }
@@ -143,7 +175,6 @@ export function CodeEditorView({ sessionId, device = "", workspace, mode = "code
     setQuickOpenOpen(false);
   };
 
-  const folderLabel = workspace.split("/").filter(Boolean).slice(-2).join("/");
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col overflow-hidden" data-code-view="" onKeyDown={guardEscape}>
@@ -153,14 +184,19 @@ export function CodeEditorView({ sessionId, device = "", workspace, mode = "code
             <PanelLeft className="h-4 w-4" />
           </SidebarToggle>
         )}
-        <span className="min-w-0 truncate">
-          {mode === "git" ? "Git" : "Code"} <span className="font-mono text-[10px] font-normal text-muted-foreground">{folderLabel}</span>
-        </span>
+        <span>{mode === "git" ? "Git" : "Code"}</span>
+        <select aria-label="Code and Git folder" value={workspace} onChange={(event) => {
+          if (event.target.value === "__browse__") onBrowse(); else onFolderChange(event.target.value);
+        }} className="min-w-0 max-w-full bg-transparent font-mono text-xs text-muted-foreground">
+          {folders.map((folder) => <option key={folder.path} value={folder.path}>{folder.path}{folder.branch ? ` (${folder.branch})` : ""}</option>)}
+          <option value="__browse__">Browse folders…</option>
+        </select>
       </div>
       <div className="relative flex min-h-0 flex-1 gap-2 overflow-hidden p-2">
         <FloatingFileSidebar visible={sidebar.visible} narrow={sidebar.narrow}>
           {mode === "git" ? (
             <GitPanel
+              sessionId={sessionId}
               workspace={workspace}
               onOpenFile={(absPath) => void openFileInActivePane(workspace, absPath)}
               onOpenDiff={(absPath, headContent) => void openWorkspaceDiff(workspace, absPath, headContent)}

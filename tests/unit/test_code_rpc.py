@@ -151,3 +151,38 @@ def test_local_state_resolves_code_settings_from_config_and_the_agents_json(tmp_
     (tmp_path / "agent.json").write_text("{not json")
     assert settings({}, Agents(tmp_path)).read_only is False  # a broken agent file never closes the door
     assert LocalStateService(Llm(None), None)._code_settings().enabled is True
+
+
+def test_folder_default_uses_only_an_unambiguous_available_assignment(wire, tmp_path, monkeypatch):
+    remote, _, _, service = wire
+    from kollabor.code_service import folders
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    monkeypatch.setattr(folders, "linked_folders", lambda root: [
+        {"path": str(tmp_path), "branch": "main"}, {"path": str(worktree), "branch": "worker"},
+    ])
+    class Ledger:
+        def get_in_flight_dispatches_for_assignee(self, identity):
+            assert identity == "worker"
+            return [{"worktree": str(worktree)}]
+    hub = SimpleNamespace(_identity=SimpleNamespace(identity="worker"), _task_ledger=Ledger())
+    service._event_bus = SimpleNamespace(get_service=lambda name: hub)
+    answer = run(remote.code_call("folders", {}))
+    assert answer["body"]["data"]["default"] == str(worktree)
+    hub._task_ledger.get_in_flight_dispatches_for_assignee = lambda _: [
+        {"worktree": str(worktree)}, {"worktree": str(tmp_path)},
+    ]
+    answer = run(remote.code_call("folders", {}))
+    assert answer["body"]["data"]["default"] == str(tmp_path)
+
+
+def test_remote_folder_browser_and_selected_tree_use_daemon_files(wire, tmp_path):
+    remote, _, _, _ = wire
+    folder = tmp_path / "another"
+    folder.mkdir()
+    (folder / "remote.txt").write_text("remote")
+    listing = run(remote.code_call("folders.browse", {"path": str(tmp_path)}))
+    assert str(folder) in [entry["path"] for entry in listing["body"]["data"]["folders"]]
+    tree = run(remote.code_call("fs.tree", {"codeRoot": str(folder)}))
+    assert [entry["name"] for entry in tree["body"]["data"]["tree"]] == ["remote.txt"]

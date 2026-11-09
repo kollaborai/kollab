@@ -2,17 +2,18 @@
 
 The web UI's Code Editor, Git and Terminal views reach this through the engine's ``/code/*`` routes, which proxy to
 ``state.code_call`` on the session's daemon. A daemon on another computer answers over the same device channel as the
-rest of its state, so a remote session shows that computer's files, git and shell. The daemon serves its own folder:
-it never reads a folder from a request.
+rest of its state, so a remote session shows that computer's files, git and shell. Code and Git can select any
+existing folder on that machine; linked Git worktrees are discovered automatically.
 
 Spec: ``docs/specs/floating-code-shell.md``.
 """
 
+import asyncio
 import dataclasses
 import os
 from typing import Any
 
-from . import files, git, terminal
+from . import files, folders, git, terminal
 from .reply import Reply
 from .settings import DEFAULTS, CodeSettings, refusal
 
@@ -22,7 +23,7 @@ __all__ = ["call", "shutdown", "OPS", "CodeSettings"]
 TERMINAL_OPS = ("message", "poll", "detach", "env_report")
 OPS = (
     tuple(f"fs.{name}" for name in files.OPS)
-    + ("git", "settings")
+    + ("git", "settings", "folders", "folders.browse")
     + tuple(f"terminal.{name}" for name in TERMINAL_OPS)
 )
 # The operations that change something. ``read_only`` refuses them; ``git.read_only`` refuses the git ones.
@@ -83,6 +84,30 @@ async def call(
     if kind == "settings":
         return Reply({"success": True, "data": settings_report(settings)}).as_wire()
     folder = os.path.realpath(root or os.getcwd())
+    if op == "folders.browse":
+        path = params.get("path", folder)
+        if not isinstance(path, str) or "\0" in path or not os.path.isabs(path):
+            return _bad(400, "invalid_folder", "The folder path must be absolute.").as_wire()
+        path = os.path.realpath(path)
+        if not os.path.isdir(path):
+            return _bad(404, "folder_not_found", "That folder is not available.").as_wire()
+        try:
+            entries = await asyncio.to_thread(folders.browse, path)
+        except OSError:
+            return _bad(403, "folder_unreadable", "That folder cannot be read.").as_wire()
+        data = {"path": path, "parent": os.path.dirname(path), "folders": entries}
+        return Reply({"success": True, "data": data}).as_wire()
+    if kind == "folders":
+        entries = await asyncio.to_thread(folders.linked_folders, folder)
+        return Reply({"success": True, "data": {"folders": entries, "default": folder}}).as_wire()
+    selected = params.get("codeRoot")
+    if kind in ("fs", "git") and selected is not None:
+        if not isinstance(selected, str) or "\0" in selected or not os.path.isabs(selected):
+            return _bad(400, "invalid_folder", "The selected folder is invalid.").as_wire()
+        selected = os.path.realpath(selected)
+        if not os.path.isdir(selected):
+            return _bad(404, "folder_not_found", "That folder is not available.").as_wire()
+        folder = selected
     if kind == "fs":
         reply = await files.serve(name, folder, params, settings)
     elif kind == "git":

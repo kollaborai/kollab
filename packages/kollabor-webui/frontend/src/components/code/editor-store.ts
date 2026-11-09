@@ -4,6 +4,7 @@ import { create } from "zustand";
 // a diff tab is a file tab that carries `headContent`: the HEAD version of the
 // file, or null when the file has no HEAD version (a new file).
 export interface FileData {
+  bufferId: number;
   path: string;
   name: string;
   ext: string;
@@ -13,6 +14,8 @@ export interface FileData {
   pinned: boolean;
   headContent?: string | null; // diff tabs only
 }
+
+let nextBufferId = 1;
 
 // a single pane's view state (paths only, content from fileCache)
 export interface EditorPane {
@@ -360,7 +363,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         ? isDirty(existing)
           ? { ...existing, loading: false }
           : { ...existing, content, savedContent: content, loading: false }
-        : { path, name, ext, content, savedContent: content, loading: false, pinned: false };
+        : { bufferId: nextBufferId++, path, name, ext, content, savedContent: content, loading: false, pinned: false };
 
       const newCache = new Map(store.fileCache);
       newCache.set(path, fileData);
@@ -379,7 +382,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       const fileData: FileData =
         existing && isDirty(existing)
           ? { ...existing, loading: false, headContent }
-          : { path, name, ext, content: modified, savedContent: modified, loading: false, pinned: false, headContent };
+          : { bufferId: nextBufferId++, path, name, ext, content: modified, savedContent: modified, loading: false, pinned: false, headContent };
 
       const newCache = new Map(store.fileCache);
       newCache.set(path, fileData);
@@ -444,7 +447,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         const newCache = new Map(s.fileCache);
         const existing = newCache.get(path);
         if (existing) {
-          newCache.set(path, { ...existing, savedContent: content, content });
+          newCache.set(path, { ...existing, savedContent: content });
         }
         return { fileCache: newCache };
       });

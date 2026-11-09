@@ -575,3 +575,37 @@ def test_a_stash_from_a_subfolder_leaves_the_rest_of_the_repository_alone(repo):
     assert stashed.status_code == 200
     assert (app / "in.txt").read_text() == "one\n"
     assert (repo / "top.txt").read_text() == "two\n"
+
+
+def test_version_rejects_deleted_file_and_same_millisecond_replacement(ws):
+    path = ws.root / "a.txt"
+    _write(path, "old")
+    version = _fs("file", ws.root, {"path": "a.txt"}).content["data"]["version"]
+    path.unlink()
+    reply = _fs("write_file", ws.root, {"path": "a.txt", "content": "mine", "expectedVersion": version})
+    assert reply.status_code == 409
+    assert not path.exists()
+    _write(path, "old")
+    version = _fs("file", ws.root, {"path": "a.txt"}).content["data"]["version"]
+    first = _fs("write_file", ws.root, {"path": "a.txt", "content": "one", "expectedVersion": version})
+    second = _fs("write_file", ws.root, {"path": "a.txt", "content": "two", "expectedVersion": version})
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert path.read_text() == "one"
+
+
+@needs_git
+def test_applying_stash_cannot_modify_sibling_folder(repo):
+    app = repo / "app"
+    _write(repo / "outside.txt", "base")
+    _write(app / "inside.txt", "base")
+    _cli(repo, "add", "-A")
+    _cli(repo, "commit", "-q", "-m", "base")
+    _write(repo / "outside.txt", "changed")
+    _write(app / "inside.txt", "changed")
+    _write(repo / "untracked.txt", "untracked")
+    _cli(repo, "stash", "push", "-u")
+    reply = _git(app, {"action": "apply_stash", "stashId": "0"})
+    assert reply.status_code == 409
+    assert (repo / "outside.txt").read_text() == "base"
+    assert not (repo / "untracked.txt").exists()

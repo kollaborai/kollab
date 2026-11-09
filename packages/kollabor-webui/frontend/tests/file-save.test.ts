@@ -9,7 +9,7 @@ vi.mock("../src/lib/code-fetch", () => ({
   },
 }));
 
-import { forgetMtime, mtimeOf, rememberMtime, saveWorkspaceFile } from "../src/components/code/file-save";
+import { forgetMtime, mtimeOf, rememberMtime, rememberVersion, saveWorkspaceFile } from "../src/components/code/file-save";
 
 function reply(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -66,4 +66,32 @@ test("another failure is not stale", async () => {
 test("a network failure says save failed", async () => {
   fetchMock.mockRejectedValue(new Error("down"));
   expect(await saveWorkspaceFile("/w", "/w/a.txt", "x")).toEqual({ ok: false, stale: false, message: "save failed" });
+});
+
+
+test("a version token takes precedence over the coarse mtime", async () => {
+  rememberMtime("/w/a.txt", 1000);
+  rememberVersion("/w/a.txt", "revision-one");
+  fetchMock.mockResolvedValue(reply(200, { success: true, data: { version: "revision-two" } }));
+  await saveWorkspaceFile("/w", "/w/a.txt", "x");
+  const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+  expect(body.expectedVersion).toBe("revision-one");
+  expect(body.expectedMtime).toBeUndefined();
+});
+
+test("a delayed save cannot update the version after the owner changes", async () => {
+  const { setEditorOwner } = await import("../src/components/code/workspace-tabs");
+  setEditorOwner("device-a:/w");
+  rememberVersion("/w/a.txt", "a-version");
+  let finish!: (response: Response) => void;
+  fetchMock.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const saving = saveWorkspaceFile("/w", "/w/a.txt", "a");
+  setEditorOwner("device-b:/w");
+  rememberVersion("/w/a.txt", "b-version");
+  finish(reply(200, { success: true, data: { version: "a-after" } }));
+  expect((await saving).ok).toBe(false);
+  fetchMock.mockResolvedValue(reply(200, { success: true, data: {} }));
+  await saveWorkspaceFile("/w", "/w/a.txt", "b");
+  const body = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
+  expect(body.expectedVersion).toBe("b-version");
 });

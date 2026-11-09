@@ -2,8 +2,8 @@
 
 Every route names a session, and the engine only passes the request on (``session.state.code_call``): the files,
 the git repository and the shell belong to that session's daemon, so a session opened from another computer shows
-that computer's. The folder is the daemon's own working directory; nothing here reads one from a request, and the
-engine's folder rule does not apply (it guards folders the engine itself opens).
+that computer's. The daemon resolves the selected folder on its own computer; the engine's folder rule does not
+apply (it guards folders the engine itself opens).
 
 Success is ``{"success": true, "data": ...}``; a failure is a non-2xx ``{"success": false, "error": {"code",
 "message"}}`` (docs/specs/floating-code-shell.md). Bodies and terminal input are never logged. Every answer carries
@@ -175,6 +175,17 @@ async def git_read(session_id: str, request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------------------------------- settings
+
+
+@router.get("/folders")
+async def code_folders(session_id: str) -> JSONResponse:
+    """Folders the daemon has discovered for its code editor."""
+    return await _run(session_id, "folders", {})
+
+
+@router.get("/folders/browse")
+async def browse_folders(session_id: str, request: Request) -> JSONResponse:
+    return await _run(session_id, "folders.browse", dict(request.query_params))
 
 
 @router.get("/settings")

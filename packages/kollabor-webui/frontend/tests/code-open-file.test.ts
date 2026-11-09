@@ -7,7 +7,8 @@ vi.mock("../src/lib/code-fetch", () => ({
 }));
 
 import { isDirty, useEditorStore } from "../src/components/code/editor-store";
-import { openWorkspaceFile } from "../src/components/code/open-file";
+import { openWorkspaceDiff, openWorkspaceFile } from "../src/components/code/open-file";
+import { mtimeOf } from "../src/components/code/file-save";
 
 const PANE = "pane-test";
 const WS = "/work";
@@ -60,4 +61,30 @@ test("opening a dirty file in a second pane shows the edited buffer and reads no
   expect(file?.content).toBe("edited");
   expect(file ? isDirty(file) : false).toBe(true);
   expect(codeFetch).not.toHaveBeenCalled();
+});
+
+test("a delayed failed read cannot close a replacement buffer for the same path", async () => {
+  let finish!: (value: ReturnType<typeof reply>) => void;
+  codeFetch.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const opening = openWorkspaceFile(WS, "/work/a.ts");
+  useEditorStore.getState().closeFile(PANE, "/work/a.ts");
+  useEditorStore.getState().openFile(PANE, "/work/a.ts", "a.ts", "ts", "new buffer");
+  useEditorStore.getState().updateContent("/work/a.ts", "new edits");
+  finish(reply(false));
+  await opening;
+  expect(useEditorStore.getState().fileCache.get("/work/a.ts")?.content).toBe("new edits");
+  expect(useEditorStore.getState().panes[0]?.openPaths).toContain("/work/a.ts");
+});
+
+
+test("a delayed diff read cannot replace a newly opened buffer's revision", async () => {
+  let finish!: (value: unknown) => void;
+  codeFetch.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const diff = openWorkspaceDiff(WS, "/work/race.ts", "head");
+  codeFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: { content: "new", mtime: 200 } }) });
+  await openWorkspaceFile(WS, "/work/race.ts");
+  finish({ ok: true, json: async () => ({ data: { content: "old", mtime: 100 } }) });
+  await diff;
+  expect(mtimeOf("/work/race.ts")).toBe(200);
+  expect(useEditorStore.getState().fileCache.get("/work/race.ts")?.content).toBe("new");
 });

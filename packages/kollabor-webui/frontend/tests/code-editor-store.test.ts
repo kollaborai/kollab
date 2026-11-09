@@ -216,3 +216,13 @@ test("opening a diff tab over a file with unsaved edits keeps the file dirty", (
   expect(isDirty(file)).toBe(true);
   expect(file.headContent).toBe("head");
 });
+
+test("save acknowledgement preserves edits made while the save was pending", () => {
+  store().openFile(PANE, "a.ts", "a.ts", "ts", "old");
+  store().updateContent("a.ts", "sent");
+  store().updateContent("a.ts", "typed while saving");
+  store().markSaved("a.ts", "sent");
+  expect(fileState("a.ts").content).toBe("typed while saving");
+  expect(fileState("a.ts").savedContent).toBe("sent");
+  expect(isDirty(fileState("a.ts"))).toBe(true);
+});

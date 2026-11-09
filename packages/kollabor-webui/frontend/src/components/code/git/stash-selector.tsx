@@ -25,6 +25,7 @@ import type {
 // ── types ──────────────────────────────────────────────────────────────────
 
 interface StashSelectorProps {
+  sessionId: string;
   /** The chat's folder; every git request sends it as `workspace`. */
   workspace: string;
   onStashApplied?: (stashId: string) => void;
@@ -146,6 +147,7 @@ function envelopeMessage(body: unknown): string | null {
 /** POST one git action for the folder. Resolves to the envelope's `data`; rejects with its message. */
 async function gitPost<T>(
   workspace: string,
+  sessionId: string,
   action: string,
   payload?: Record<string, unknown>
 ): Promise<T> {
@@ -153,7 +155,7 @@ async function gitPost<T>(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workspace, action, ...payload }),
-  });
+  }, { sessionId, root: workspace });
 
   const body: unknown = await res.json().catch(() => null);
   if (!res.ok) {
@@ -218,7 +220,9 @@ function StashRow({
         <button
           type="button"
           onClick={() => onDrop(stash.id)}
-          aria-label={`Delete ${stashLabel}`}
+          disabled
+          title="Stash deletion is unavailable while concurrent Git activity can change stash positions."
+          aria-label={`Delete ${stashLabel} unavailable`}
           className={cn(
             "flex h-5 w-5 items-center justify-center rounded text-foreground/25 transition-colors hover:bg-foreground/5 hover:text-destructive",
             FOCUS_RING
@@ -711,6 +715,7 @@ function DropStashConfirmDialog({
 // ── main stash panel ───────────────────────────────────────────────────────
 
 export function StashSelector({
+  sessionId,
   workspace,
   onStashApplied,
 }: StashSelectorProps) {
@@ -745,7 +750,7 @@ export function StashSelector({
   // ── fetch stashes ─────────────────────────────────────────────────────────
   const fetchStashes = useCallback(async () => {
     try {
-      const result = await gitPost<GitStashListResult>(workspace, "list_stashes");
+      const result = await gitPost<GitStashListResult>(workspace, sessionId, "list_stashes");
       setStashes(result.stashes || []);
       setError(null);
     } catch (e) {
@@ -754,7 +759,7 @@ export function StashSelector({
     } finally {
       setLoading(false);
     }
-  }, [workspace]);
+  }, [workspace, sessionId]);
 
   // ── create stash ──────────────────────────────────────────────────────────
   const handleCreateStash = useCallback(
@@ -762,7 +767,7 @@ export function StashSelector({
       setCreateLoading(true);
       setCreateError(null);
       try {
-        const result = await gitPost<GitStashCreateResult>(workspace, "create_stash", {
+        const result = await gitPost<GitStashCreateResult>(workspace, sessionId, "create_stash", {
           stashMessage: message,
         });
 
@@ -806,7 +811,7 @@ export function StashSelector({
       const stash = stashes.find((s) => s.id === stashId);
 
       try {
-        const result = await gitPost<GitStashApplyResult>(workspace, "apply_stash", {
+        const result = await gitPost<GitStashApplyResult>(workspace, sessionId, "apply_stash", {
           stashId: `stash@{${stashId}}`,
           stashCommit: stash?.commitHash,
         });
@@ -843,7 +848,7 @@ export function StashSelector({
       const stash = stashes.find((s) => s.id === stashId);
 
       try {
-        const result = await gitPost<GitStashDropResult>(workspace, "drop_stash", {
+        const result = await gitPost<GitStashDropResult>(workspace, sessionId, "drop_stash", {
           stashId: `stash@{${stashId}}`,
           stashCommit: stash?.commitHash,
         });
@@ -966,6 +971,7 @@ export function StashSelector({
 
         {!loading && !error && stashes.length > 0 && (
           <div role="list" aria-label="Git stashes">
+            <p className="px-3 py-2 text-xs text-muted-foreground">Stash deletion is unavailable while concurrent Git activity can change stash positions.</p>
             {stashes.map((stash) => (
               <StashRow
                 key={stash.id}

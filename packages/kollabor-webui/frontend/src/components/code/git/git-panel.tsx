@@ -1,3 +1,4 @@
+import { editorOwner } from "@/components/code/workspace-tabs";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Archive, Clock, GitBranch, Loader2, Minus, Plus, RefreshCw } from "lucide-react";
 import { useEditorStore } from "@/components/code/editor-store";
@@ -230,6 +231,7 @@ function LogView({
 type ActiveView = "status" | "stash" | "log";
 
 export interface GitPanelProps {
+  sessionId: string;
   /** Absolute path of the folder the chat runs in (the session's workspace). */
   workspace: string;
   /** Open a file (absolute path) in the editor. */
@@ -238,7 +240,7 @@ export interface GitPanelProps {
   onOpenDiff: (absPath: string, headContent: string | null) => void;
 }
 
-export function GitPanel({ workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
+export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
   // A commit's patch is a read-only tab with no file on disk behind it, and the diff props
   // cannot open one, so that tab goes to the editor store directly.
   const openFile = useEditorStore((s) => s.openFile);
@@ -260,11 +262,11 @@ export function GitPanel({ workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspace, ...body }),
-      });
+      }, { sessionId, root: workspace });
       const payload: unknown = await res.json();
       return unwrapCodeData<T>(payload);
     },
-    [workspace],
+    [sessionId, workspace],
   );
 
   const refresh = useCallback(async () => {
@@ -364,11 +366,12 @@ export function GitPanel({ workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
         onOpenDiff(absPath, null);
         return;
       }
+      const owner = editorOwner();
       try {
         const head = await gitPost<{ content: string }>({ action: "show", path: file.path });
-        onOpenDiff(absPath, head.content);
+        if (owner === editorOwner()) onOpenDiff(absPath, head.content);
       } catch {
-        onOpenFile(absPath);
+        if (owner === editorOwner()) onOpenFile(absPath);
       }
     },
     [gitPost, onOpenDiff, onOpenFile, workspace],
@@ -383,15 +386,19 @@ export function GitPanel({ workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
       const virtualPath = `${base}/.diffs/${entry.shortHash}.diff`;
       const name = `${entry.shortHash} ${entry.message}`.slice(0, 60);
 
+      const owner = editorOwner();
       openFile(activePaneId, virtualPath, name, "diff", "");
       setFileLoading(virtualPath, true);
+      const bufferId = useEditorStore.getState().fileCache.get(virtualPath)?.bufferId;
+      const isCurrent = () => owner === editorOwner() && useEditorStore.getState().fileCache.get(virtualPath)?.bufferId === bufferId;
       try {
         const data = await gitPost<{ content?: string }>({
           action: "show_commit",
           commitHash: entry.hash,
         });
-        openFile(activePaneId, virtualPath, name, "diff", data.content ?? "");
+        if (isCurrent()) openFile(activePaneId, virtualPath, name, "diff", data.content ?? "");
       } catch (e) {
+        if (!isCurrent()) return;
         const reason = e instanceof Error ? e.message : String(e);
         openFile(
           activePaneId,
@@ -401,7 +408,7 @@ export function GitPanel({ workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
           `Failed to load commit ${entry.shortHash}: ${reason}`,
         );
       } finally {
-        setFileLoading(virtualPath, false);
+        if (isCurrent()) setFileLoading(virtualPath, false);
       }
     },
     [activePaneId, gitPost, openFile, setFileLoading, workspace],
@@ -428,7 +435,7 @@ export function GitPanel({ workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
   return (
     <div className="flex h-full flex-col">
       <div className="shrink-0 px-2 py-1.5">
-        <BranchSelector workspace={workspace} />
+        <BranchSelector sessionId={sessionId} workspace={workspace} />
       </div>
 
       {/* view tabs and header actions */}
@@ -480,7 +487,7 @@ export function GitPanel({ workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
 
       {activeView === "stash" && (
         <div className="flex-1 overflow-hidden">
-          <StashSelector workspace={workspace} onStashApplied={() => void refresh()} />
+          <StashSelector sessionId={sessionId} workspace={workspace} onStashApplied={() => void refresh()} />
         </div>
       )}
 

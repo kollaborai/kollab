@@ -1,3 +1,4 @@
+import { editorOwner } from "@/components/code/workspace-tabs";
 import { useState, useCallback, type DragEvent } from "react";
 import { ChevronRight, CircleX, Save } from "lucide-react";
 import { saveWorkspaceFile } from "@/components/code/file-save";
@@ -17,10 +18,20 @@ export function TabBar({ paneId, rootPath }: TabBarProps) {
   const markSaved = useEditorStore((s) => s.markSaved);
   const reorderFiles = useEditorStore((s) => s.reorderFiles);
 
+  const [saveError, setSaveError] = useState("");
   const handleSave = useCallback(async (filePath: string, content: string) => {
+    const owner = editorOwner();
+    const bufferId = useEditorStore.getState().fileCache.get(filePath)?.bufferId;
     const result = await saveWorkspaceFile(rootPath, filePath, content);
-    if (result.ok) markSaved(filePath, content);
-  }, [markSaved, rootPath]);
+    if (owner !== editorOwner() || useEditorStore.getState().fileCache.get(filePath)?.bufferId !== bufferId) return;
+    if (result.ok) {
+      markSaved(filePath, content);
+      setSaveError("");
+    } else {
+      setActiveFile(paneId, filePath);
+      setSaveError(`${filePath}: ${result.message}${result.stale ? " Use the editor save control to review or overwrite." : ""}`);
+    }
+  }, [markSaved, paneId, rootPath, setActiveFile]);
 
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropTarget, setDropTarget] = useState<number | null>(null);
@@ -85,6 +96,7 @@ export function TabBar({ paneId, rootPath }: TabBarProps) {
       className="flex flex-1 min-w-0 items-center gap-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       onDragOver={(e) => e.preventDefault()}
     >
+      {saveError && <span role="alert" className="shrink-0 text-xs text-destructive px-2">{saveError}</span>}
       {openFiles.map((file, index) => {
         const isActive = activeFile?.path === file.path;
         const dirty = isDirty(file);
