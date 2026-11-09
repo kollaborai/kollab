@@ -287,6 +287,13 @@ def test_a_remembered_folder_written_with_a_trailing_separator_is_the_same_folde
     assert checked_folder(str(machine.elsewhere)) == str(machine.elsewhere)
 
 
+def test_a_remembered_entry_that_cannot_be_a_path_is_skipped_and_the_others_still_count(machine, monkeypatch):
+    monkeypatch.setattr(workspaces, "_stored", lambda: ["broken\0entry", str(machine.elsewhere)])
+
+    assert checked_folder(str(machine.elsewhere)) == str(machine.elsewhere)
+    _refuses(str(machine.root / "nowhere-known"), saying="outside")
+
+
 # --- case ---------------------------------------------------------------------------------------------
 # macOS and Windows volumes call /Users/me/Dev and /users/me/dev one folder, so a request in either spelling must
 # meet the same roots. A volume that tells them apart keeps them apart.
