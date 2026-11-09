@@ -66,12 +66,13 @@ export function TodoCard({ block, className }: { block: string; className?: stri
         <ul id={listId} className="mt-2 flex max-h-72 min-w-0 flex-col gap-1.5 overflow-y-auto">
           {items.map((item, index) => (
             <li key={index} data-testid="session-todo-item" data-done={item.done} className="flex items-start gap-2">
+              {/* The thread's own task box (markdown-text.tsx): the same two shades, so a list reads alike in both. */}
               <span
                 role="img"
                 aria-label={item.done ? "Done" : "Open"}
                 className={cn(
                   "mt-px flex size-3.5 shrink-0 items-center justify-center rounded-[4px]",
-                  item.done ? "bg-foreground text-background" : "bg-muted",
+                  item.done ? "bg-primary text-primary-foreground" : "bg-muted-foreground/30",
                 )}
               >
                 {item.done && <Check aria-hidden className="size-2.5" strokeWidth={3} />}
