@@ -1,6 +1,7 @@
 // Real-browser coverage for the Todo card under the Session Controls panel (issue #973): the card shows the
 // agent's latest `todo:` list, opens and closes from its header, remembers the choice, sits on a filled surface
-// with no line borders, never shows another agent's list, and is absent when the chat has none.
+// with no line borders, never shows another agent's list, is absent when the chat has none, and in a short window
+// keeps the panel's controls and the whole list within a person's reach.
 // Run after `npm ci` and `npx playwright-core install chromium`:
 //   npm run test:e2e:todo-card
 // Browser resolution: CHROME_PATH if set, else the Chrome app on macOS, else playwright's own chromium.
@@ -39,6 +40,9 @@ const LATEST_LIST = [
 const DONE_LIST = "todo:\n  [x] inspected both units\n  [x] checked the host\n  [x] assessed the evidence";
 const OTHER_AGENTS_LIST =
   "<agent_hud>\n[hub:sapphire->local-coder]\n+ [hub channel: sapphire -> local-coder]\n  status: ok\n  todo:\n    [ ] someone else's task\n</agent_hud>";
+
+// Sixty steps: far more than the card shows at once.
+const LONG_LIST = ["todo:", ...Array.from({ length: 60 }, (_, index) => `  [${index < 20 ? "x" : " "}] step ${index + 1} of the long plan`)].join("\n");
 
 const history = (...rows) => makeFixtures({ sessions: [SESSION], history: rows });
 const withLists = () =>
@@ -105,6 +109,37 @@ async function waitForCard(page) {
   } catch {
     assert.fail("no Todo card appeared under the Session Controls panel");
   }
+}
+
+// A person can use an element when all of it is inside the window and nothing covers or clips it there.
+const shown = (locator) =>
+  locator.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    if (!box.width || !box.height) return false;
+    if (box.top < 0 || box.left < 0 || box.bottom > window.innerHeight || box.right > window.innerWidth) return false;
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return !!hit && (hit === node || node.contains(hit));
+  });
+
+// Scrolls the way a person does, with the mouse wheel over `over`, until `target` is shown. Scrolling by script reaches
+// into boxes that clip with no scrollbar and no wheel, so it would call an unreachable row reachable.
+async function wheelTo(page, over, target) {
+  for (let step = 0; step < 14; step += 1) {
+    if (await shown(target)) return true;
+    const spot = await over.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const [top, bottom] = [Math.max(box.top, 0), Math.min(box.bottom, window.innerHeight)];
+      const [left, right] = [Math.max(box.left, 0), Math.min(box.right, window.innerWidth)];
+      return bottom > top && right > left ? { x: (left + right) / 2, y: (top + bottom) / 2 } : null;
+    });
+    if (!spot) return false;
+    await page.mouse.move(spot.x, spot.y);
+    await page.mouse.wheel(0, 300);
+    // Chrome keeps a wheel gesture on the box it began scrolling until the wheel rests, so a list that has reached its
+    // end would hold every later tick. A person's next flick is a new gesture; so is this one.
+    await page.waitForTimeout(600);
+  }
+  return shown(target);
 }
 
 async function main() {
@@ -221,6 +256,31 @@ async function main() {
         await narrow.context.close();
       }
     }
+    // 4. A long list in a short window: the panel's controls and the whole list stay within reach.
+    const problems = [];
+    for (const { width, height, where } of [
+      { width: 1280, height: 300, where: "docked panel" },
+      { width: 820, height: 300, where: "sheet" },
+    ]) {
+      const short = await openChat(browser, baseUrl, history(row("user", "plan it"), row("assistant", `Plan\n\n${LONG_LIST}`)), { width, height });
+      try {
+        const page = short.page;
+        const check = (ok, message) => ok || problems.push(`${where}, ${height}px tall: ${message}`);
+        if (where === "sheet") await openControls(page, width);
+        await waitForCard(page);
+        const panel = page.getByRole("complementary", { name: "Session Controls" }).or(page.getByRole("dialog"));
+        const size = await todoCard(page).evaluate((node) => ({ card: node.getBoundingClientRect().height, window: window.innerHeight }));
+        check(size.card <= size.window, `the card is ${Math.round(size.card)}px tall, taller than the window, so its header and the end of its list cannot be on screen together`);
+        check(await wheelTo(page, panel, panel.getByTestId("chat-tab")), "the Chat button at the top of the panel cannot be brought on screen");
+        check(await wheelTo(page, panel, panel.getByRole("button", { name: "Clear History" })), "the panel's last row, Clear History, cannot be brought on screen");
+        check(await wheelTo(page, panel, todoToggle(page)), "the Todo header cannot be brought on screen");
+        check(await wheelTo(page, todoCard(page).locator("ul"), todoItems(page).last()), "the last of the 60 steps cannot be brought on screen");
+        assert.deepEqual(short.pageErrors, []);
+      } finally {
+        await short.context.close();
+      }
+    }
+    assert.deepEqual(problems, [], "a long list in a short window leaves something out of reach");
     console.log("todo card browser acceptance: ok");
   } finally {
     await browser?.close();

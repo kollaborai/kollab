@@ -54,6 +54,45 @@ test("code fences are left alone", () => {
   assert.deepEqual(todoBlocks("```\ntodo:\n  [x] inside a fence\n```"), []);
 });
 
+// A fence closes only on a line of the same character that is at least as long as the one that opened it, with
+// nothing after it (CommonMark), so an example fence inside a longer one, or one of the other character, is text.
+test("a shorter fence inside a longer one does not close it", () => {
+  const text = ["````md", "```", "todo:", "  [x] inside the outer fence", "```", "````"].join("\n");
+
+  assert.deepEqual(todoBlocks(text), []);
+});
+
+test("a fence of the other character does not close a fence", () => {
+  assert.deepEqual(todoBlocks(["~~~", "```", "todo:", "  [x] inside the tilde fence", "```", "~~~"].join("\n")), []);
+  assert.deepEqual(todoBlocks(["```", "~~~", "todo:", "  [x] inside the backtick fence", "~~~", "```"].join("\n")), []);
+});
+
+test("a fence with text after it does not close a fence", () => {
+  assert.deepEqual(todoBlocks(["```", "```js", "todo:", "  [x] still inside", "```"].join("\n")), []);
+});
+
+test("a longer fence closes a fence", () => {
+  const text = ["```", "code", "`````", "", "todo:", "  [x] after the fence"].join("\n");
+
+  assert.deepEqual(todoBlocks(text).map((block) => todoItems(block).length), [1]);
+});
+
+test("an unclosed fence hides everything after it", () => {
+  assert.deepEqual(todoBlocks("```\ntodo:\n  [x] the reply was cut off in a fence"), []);
+});
+
+test("backticks on one line are inline code, not a fence", () => {
+  const text = "```code``` is how it was written\n\ntodo:\n  [x] a\n  [ ] b";
+
+  assert.deepEqual(todoBlocks(text).map((block) => todoItems(block).length), [2]);
+});
+
+test("a fence line ends a block and the text after it is read again", () => {
+  const text = ["todo:", "  [x] a", "```", "code", "```", "", "todo:", "  [ ] b"].join("\n");
+
+  assert.deepEqual(todoBlocks(text).map((block) => todoItems(block).map((item) => item.text)), [["a"], ["b"]]);
+});
+
 test("a blank line between the label and its first item is tolerated, one after the items ends the block", () => {
   const text = "todo:\n\n  [x] a\n  [ ] b\n\n  [ ] not part of it";
 
