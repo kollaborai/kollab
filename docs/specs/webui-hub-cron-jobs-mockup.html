@@ -172,6 +172,94 @@
   .confirm p { margin-top: 0.5rem; font-size: 0.875rem; color: var(--muted-foreground); }
   .confirm .actions { margin-top: 1.5rem; display: flex; justify-content: flex-end; gap: 0.5rem; }
 
+  /* Schedules, v7: file path, info button, agent list, import format, Learn topic */
+  .where { margin-top: 0.75rem; font-size: 0.75rem; color: var(--muted-foreground); overflow-wrap: anywhere; }
+  .where .mono { color: var(--foreground); }
+  .title-row { display: flex; align-items: center; gap: 0.25rem; }
+  .info-btn {
+    flex: none; width: 1.75rem; height: 1.75rem; display: grid; place-items: center;
+    border: 0; background: none; cursor: pointer; color: var(--muted-foreground);
+    border-radius: calc(var(--radius) - 2px);
+  }
+  .info-btn svg { width: 1rem; height: 1rem; }
+  .format { margin-top: 0.5rem; padding: 0.75rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); font-size: 0.875rem; }
+  .format > * + * { margin-top: 0.5rem; }
+  .format p { font-size: 0.75rem; color: var(--muted-foreground); }
+  .format dl { display: grid; grid-template-columns: auto 1fr; column-gap: 0.75rem; row-gap: 0.25rem; }
+  .format dt { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; color: var(--foreground); }
+  .format dd { font-size: 0.75rem; color: var(--muted-foreground); }
+  .format pre {
+    padding: 0.5rem; border-radius: calc(var(--radius) - 2px); background: oklch(0.1 0 0 / 0.6);
+    font: 0.75rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  /* Runs in: a trigger that opens the agent list, one switch per agent */
+  .runs-trigger {
+    width: 100%; min-height: 2.25rem; padding: 0.5rem 0.75rem; border: 0;
+    border-radius: calc(var(--radius) - 2px); background: oklch(1 0 0 / 5.4%);
+    color: var(--foreground); font: inherit; font-size: 0.875rem; text-align: left;
+    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; cursor: pointer;
+  }
+  .runs-trigger svg { width: 1rem; height: 1rem; flex: none; color: var(--muted-foreground); }
+  .agent-panel { margin-top: 0.5rem; padding: 0.25rem 0 0.5rem; border-radius: calc(var(--radius) - 2px); background: oklch(1 0 0 / 3%); }
+  .agent-panel-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.25rem 0.75rem; padding: 0.375rem 0.75rem; font-size: 0.75rem; }
+  .agent-panel-actions { display: flex; gap: 0.75rem; }
+  .agent-group { padding: 0.5rem 0.75rem 0.125rem; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.025em; color: var(--muted-foreground); }
+  .agent-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; min-height: 2.5rem; padding: 0.25rem 0.75rem; font-size: 0.875rem; }
+  .agent-name { min-width: 0; overflow-wrap: anywhere; }
+  .agent-name .muted { display: block; font-size: 0.75rem; }
+  .agent-panel-foot { display: flex; justify-content: flex-end; padding: 0.5rem 0.75rem 0; }
+  .switch { position: relative; flex: none; width: 2rem; height: 1.125rem; border-radius: 999px; background: var(--muted); }
+  .switch::after {
+    content: ""; position: absolute; top: 0.125rem; left: 0.125rem; width: 0.875rem; height: 0.875rem;
+    border-radius: 50%; background: var(--foreground);
+  }
+  .switch.on { background: var(--primary); }
+  .switch.on::after { left: calc(100% - 1rem); background: var(--primary-foreground); }
+  /* Learn topic: the same split as the web Learn page, topics on the left, the topic on the right */
+  .learn { position: relative; display: grid; background: var(--background); border-radius: var(--radius); overflow: hidden; font-size: 0.875rem; }
+  .learn-close {
+    position: absolute; top: 0.5rem; right: 0.5rem; z-index: 1; width: 2rem; height: 2rem;
+    display: grid; place-items: center; border: 0; background: none; cursor: pointer;
+    color: var(--muted-foreground); border-radius: calc(var(--radius) - 2px);
+  }
+  .learn-nav { display: flex; gap: 0.25rem; padding: 2.25rem 0.5rem 0.5rem; overflow-x: auto; background: oklch(0.269 0 0 / 0.2); }
+  .learn-nav a {
+    flex: none; padding: 0.5rem 0.75rem; border-radius: calc(var(--radius) - 2px);
+    color: var(--muted-foreground); white-space: nowrap;
+  }
+  .learn-nav a[aria-current="page"] {
+    color: var(--foreground); font-weight: 500;
+    text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 0.5rem;
+  }
+  .learn-main { display: grid; gap: 1rem; min-width: 0; padding: 1rem; }
+  .learn-card { padding: 1.25rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); }
+  .learn-title { font-size: 1.125rem; font-weight: 600; line-height: 1.25; padding-right: 2rem; }
+  .learn-summary { margin-top: 0.75rem; color: var(--muted-foreground); }
+  .learn-cols { display: grid; gap: 1rem; }
+  .learn-h { font-size: 0.875rem; font-weight: 600; }
+  .learn-steps { margin-top: 1rem; list-style: none; display: grid; gap: 0.75rem; }
+  .learn-steps li { display: flex; align-items: flex-start; gap: 0.75rem; }
+  .learn-steps .num {
+    flex: none; width: 1.5rem; height: 1.5rem; display: grid; place-items: center;
+    border-radius: 999px; background: oklch(0.922 0 0 / 0.1); font-size: 0.75rem; font-weight: 600;
+  }
+  .learn-example {
+    margin-top: 0.75rem; padding: 0.875rem; border-radius: var(--radius);
+    background: oklch(0.1 0 0 / 0.6); white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .learn-note {
+    margin-top: 0.75rem; padding: 0.5rem 0.75rem; border-radius: calc(var(--radius) - 2px);
+    background: oklch(0.8 0.15 80 / 0.05); font-size: 0.75rem; color: var(--muted-foreground);
+  }
+  .learn-note strong { color: var(--foreground); font-weight: 600; }
+  @media (min-width: 768px) {
+    .learn { grid-template-columns: 15rem minmax(0, 1fr); }
+    .learn-nav { flex-direction: column; padding: 0.75rem; overflow: visible; }
+  }
+  @media (min-width: 1024px) {
+    .learn-cols { grid-template-columns: minmax(0, 1.2fr) minmax(15rem, 0.8fr); }
+  }
+
   /* TUI: the fullscreen /schedules view. Monospace, solid-block bands, no box-drawing. */
   .term { margin-top: 0.25rem; border-radius: var(--radius); background: oklch(0.1 0 0); overflow-x: auto; }
   .term pre {
@@ -201,15 +289,16 @@
 </head>
 <body>
 <div class="wrap">
-  <p class="note">Mockup for #612 · v5 · sample data · nothing here is built. Planned, not built: the Schedules tab, Enable and Disable, Import file, Generate with agent, /schedules in the TUI, the Skill field, the Folder and loadout line, and pausing while a device is off the network.</p>
+  <p class="note">Mockup for #612 · v7 · sample data · nothing here is built. Planned, not built: the Schedules tab, Enable and Disable, Import file, Generate with agent, /schedules in the TUI, the Skill field, the per-agent folder and loadout, one schedule for many agents, the Learn topic, the schedules file at ~/.kollab/schedules.json, and pausing while a device is off the network.</p>
+  <p class="note">v7: Runs in is a list with one switch per agent. Import shows the file format. TUI import has a file picker (T7). The info button opens the Learn topic (L1). The file path shows on the Schedules tab and in the TUI list.</p>
   <p class="note">Renamed: Cron Jobs is now Schedules in every UI label. Code names (hub cron, hub_cron_* tools, /hub cron) stay until you say otherwise.</p>
-  <p class="index">Web: <a href="#f1">1 list</a> <a href="#f2">2 add</a> <a href="#f3">3 edit</a> <a href="#f4">4 delete</a> <a href="#f5">5 after delete</a> <a href="#f6">6 empty</a> <a href="#f7">7 import</a> <a href="#f8">8 generate</a></p>
-  <p class="index">TUI, /schedules: <a href="#t1">T1 list</a> <a href="#t2">T2 delete</a> <a href="#t3">T3 edit</a> <a href="#t4">T4 import</a> <a href="#t5">T5 generate</a></p>
+  <p class="index">Web: <a href="#f1">1 list</a> <a href="#f2">2 add</a> <a href="#f2b">2b runs in</a> <a href="#f3">3 edit</a> <a href="#f4">4 delete</a> <a href="#f5">5 after delete</a> <a href="#f6">6 empty</a> <a href="#f7">7 import</a> <a href="#f8">8 generate</a> <a href="#l1">L1 learn</a></p>
+  <p class="index">TUI, /schedules: <a href="#t1">T1 list</a> <a href="#t2">T2 delete</a> <a href="#t3">T3 edit</a> <a href="#t4">T4 import</a> <a href="#t5">T5 generate</a> <a href="#t6">T6 agents</a> <a href="#t7">T7 choose file</a></p>
 
   <p class="section">Web: Settings, Schedules tab</p>
 
   <!-- 1. LIST -->
-  <p class="caption" id="f1">1 · List, the default view. One schedule is off. One is paused because its device is not on the network.</p>
+  <p class="caption" id="f1">1 · List, the default view. One schedule is off. One is paused, the planned behavior when its device is off the network. Runs in shows names up to two, then a count, so 6 agents means all six.</p>
   <section class="dialog" aria-label="Settings, schedules list">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -242,6 +331,7 @@
         </div>
       </div>
 
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
       <div class="table-wrap">
         <table>
           <thead>
@@ -271,7 +361,7 @@
             <tr>
               <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
               <td class="nw">6h</td>
-              <td class="nw">All agents</td>
+              <td class="nw">6 agents</td>
               <td><div class="msg">standup: one-line status</div></td>
               <td class="nw muted">none</td>
               <td class="nw muted">off</td>
@@ -311,7 +401,7 @@
           <div>koordinator <span class="id mono">5a5b5c5d</span></div>
           <dl>
             <dt>Every</dt><dd>6h</dd>
-            <dt>Runs in</dt><dd>All agents</dd>
+            <dt>Runs in</dt><dd>6 agents</dd>
             <dt>Prompt</dt><dd>standup: one-line status</dd>
             <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
             <dt>Next fire</dt><dd class="muted">off</dd>
@@ -320,12 +410,12 @@
         </article>
       </div>
 
-      <p class="hint">Schedules live on this machine, in the agent that made them. They don't sync to other machines and are lost when that agent stops. A schedule pauses while its device is off the network and resumes when it is back.</p>
+      <p class="hint">Today: schedules live in memory, in the agent that made them. They don't sync to other machines, and they are lost when that agent stops. Planned: a schedule pauses while its device is off the network and resumes when it is back.</p>
     </div>
   </section>
 
   <!-- 2. ADD -->
-  <p class="caption" id="f2">2 · Add schedule: empty form. Enabled starts on, because you typed it yourself.</p>
+  <p class="caption" id="f2">2 · Add schedule: empty form. Enabled starts on, because you typed it yourself. Runs in starts on koordinator, the agent in this chat. Click it to open the agent list (2b).</p>
   <section class="dialog" aria-label="Settings, add schedule">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -373,17 +463,12 @@
       <p class="group">Where it runs</p>
       <div class="field">
         <label class="label" for="a-runs">Runs in</label>
-        <div class="select-wrap">
-          <select class="input" id="a-runs">
-            <option selected>koordinator</option>
-            <option>lapis</option>
-            <option>All agents</option>
-            <option>infra@devbox</option>
-          </select>
+        <button class="runs-trigger" id="a-runs" type="button" aria-expanded="false">
+          <span>koordinator</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-        </div>
-        <p class="help">The agent that runs the prompt, with its own folder, loadout and tools.</p>
-        <p class="env">Folder /srv/app · loadout default <span class="new">(planned)</span></p>
+        </button>
+        <p class="help">Each agent switched on gets the prompt when the schedule fires.</p>
+        <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
       </div>
 
       <p class="group">When</p>
@@ -403,8 +488,97 @@
     </div>
   </section>
 
+  <!-- 2b. ADD, RUNS IN OPEN -->
+  <p class="caption" id="f2b">2b · Add schedule with Runs in open: every agent has its own switch. Two are on, and the trigger names both. Done closes the list.</p>
+  <section class="dialog" aria-label="Settings, add schedule, Runs in open">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Scheduled prompts on every live agent</p>
+    </div>
+    <nav class="tabs inset" aria-label="Settings sections">
+      <span class="tab">Session</span>
+      <span class="tab">Configuration</span>
+      <span class="tab">Loadouts</span>
+      <span class="tab">Model</span>
+      <span class="tab">Setup</span>
+      <span class="tab">Network</span>
+      <span class="tab">PhoneLink</span>
+      <span class="tab">Voice</span>
+      <span class="tab">Prompts</span>
+      <span class="tab on" aria-current="page">Schedules</span>
+    </nav>
+
+    <div class="panel inset">
+      <h3 class="form-title">New schedule</h3>
+      <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
+
+      <p class="group">What to send</p>
+      <div class="field">
+        <label class="label" for="b-prompt">Prompt</label>
+        <textarea class="input" id="b-prompt" rows="3" placeholder="What should the agent do?"></textarea>
+        <p class="help">Sent as a message to the agent that runs it.</p>
+      </div>
+      <div class="field">
+        <label class="label" for="b-skill">Skill <span class="new">(planned)</span></label>
+        <div class="select-wrap">
+          <select class="input" id="b-skill">
+            <option selected>No skill</option>
+            <option>pulse-report</option>
+            <option>tunnel-check</option>
+          </select>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+        <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+      </div>
+
+      <p class="group">Where it runs</p>
+      <div class="field">
+        <label class="label" for="b-runs">Runs in</label>
+        <button class="runs-trigger" id="b-runs" type="button" aria-expanded="true">
+          <span>lapis, infra@devbox</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+        </button>
+        <div class="agent-panel">
+          <div class="agent-panel-head">
+            <span class="muted">2 selected of 6</span>
+            <span class="agent-panel-actions"><button class="btn-text" type="button">Select all</button><button class="btn-text" type="button">Clear</button></span>
+          </div>
+          <p class="agent-group">On this machine</p>
+          <div class="agent-row"><span class="agent-name">koordinator <span class="muted">this chat</span></span><span class="switch" role="switch" aria-checked="false" aria-label="koordinator"></span></div>
+          <div class="agent-row"><span class="agent-name">lapis</span><span class="switch on" role="switch" aria-checked="true" aria-label="lapis"></span></div>
+          <div class="agent-row"><span class="agent-name">moonstone</span><span class="switch" role="switch" aria-checked="false" aria-label="moonstone"></span></div>
+          <div class="agent-row"><span class="agent-name">peridot <span class="muted">offline, paused until it's back</span></span><span class="switch" role="switch" aria-checked="false" aria-label="peridot"></span></div>
+          <p class="agent-group">On devbox</p>
+          <div class="agent-row"><span class="agent-name">infra@devbox</span><span class="switch on" role="switch" aria-checked="true" aria-label="infra@devbox"></span></div>
+          <div class="agent-row"><span class="agent-name">ops@devbox</span><span class="switch" role="switch" aria-checked="false" aria-label="ops@devbox"></span></div>
+          <div class="agent-panel-foot"><button class="btn" type="button">Done</button></div>
+        </div>
+        <p class="help">Each agent switched on gets the prompt when the schedule fires.</p>
+        <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
+      </div>
+
+      <p class="group">When</p>
+      <div class="field">
+        <label class="label" for="b-every">Every</label>
+        <input class="input mono" id="b-every" type="text" placeholder="e.g. 1h">
+        <p class="help">30s, 5m, 1h or 2h30m. Repeats until you turn it off or delete it.</p>
+      </div>
+      <div class="field">
+        <label class="check"><input type="checkbox" checked> Enabled</label>
+        <p class="help">Off keeps the schedule without running it.</p>
+      </div>
+    </div>
+    <div class="footer">
+      <button class="btn" type="button">Cancel</button>
+      <button class="btn-primary" type="button">Save schedule</button>
+    </div>
+  </section>
+
   <!-- 3. EDIT -->
-  <p class="caption" id="f3">3 · Edit schedule: same form, filled from the row's Edit button. Edit goes to moonstone, the agent that scheduled it.</p>
+  <p class="caption" id="f3">3 · Edit schedule: same form, filled from the row's Edit button. Edit goes to moonstone, the agent that scheduled it. Runs in opens the same list as 2b.</p>
   <section class="dialog" aria-label="Settings, edit schedule">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -452,17 +626,12 @@
       <p class="group">Where it runs</p>
       <div class="field">
         <label class="label" for="e-runs">Runs in</label>
-        <div class="select-wrap">
-          <select class="input" id="e-runs">
-            <option>koordinator</option>
-            <option selected>lapis</option>
-            <option>All agents</option>
-            <option>infra@devbox</option>
-          </select>
+        <button class="runs-trigger" id="e-runs" type="button" aria-expanded="false">
+          <span>lapis</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-        </div>
-        <p class="help">The agent that runs the prompt, with its own folder, loadout and tools.</p>
-        <p class="env">Folder /srv/app · loadout default <span class="new">(planned)</span></p>
+        </button>
+        <p class="help">Each agent switched on gets the prompt when the schedule fires.</p>
+        <p class="env">Each agent uses its own folder and loadout <span class="new">(planned)</span></p>
       </div>
 
       <p class="group">When</p>
@@ -516,6 +685,7 @@
         </div>
       </div>
 
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
       <div class="table-wrap">
         <table>
           <thead>
@@ -545,7 +715,7 @@
             <tr>
               <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
               <td class="nw">6h</td>
-              <td class="nw">All agents</td>
+              <td class="nw">6 agents</td>
               <td><div class="msg">standup: one-line status</div></td>
               <td class="nw muted">none</td>
               <td class="nw muted">off</td>
@@ -585,7 +755,7 @@
           <div>koordinator <span class="id mono">5a5b5c5d</span></div>
           <dl>
             <dt>Every</dt><dd>6h</dd>
-            <dt>Runs in</dt><dd>All agents</dd>
+            <dt>Runs in</dt><dd>6 agents</dd>
             <dt>Prompt</dt><dd>standup: one-line status</dd>
             <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
             <dt>Next fire</dt><dd class="muted">off</dd>
@@ -594,7 +764,7 @@
         </article>
       </div>
 
-      <p class="hint">Schedules live on this machine, in the agent that made them. They don't sync to other machines and are lost when that agent stops. A schedule pauses while its device is off the network and resumes when it is back.</p>
+      <p class="hint">Today: schedules live in memory, in the agent that made them. They don't sync to other machines, and they are lost when that agent stops. Planned: a schedule pauses while its device is off the network and resumes when it is back.</p>
     </div>
 
     <div class="scrim">
@@ -643,6 +813,7 @@
         </div>
       </div>
 
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
       <div class="table-wrap">
         <table>
           <thead>
@@ -662,7 +833,7 @@
             <tr>
               <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
               <td class="nw">6h</td>
-              <td class="nw">All agents</td>
+              <td class="nw">6 agents</td>
               <td><div class="msg">standup: one-line status</div></td>
               <td class="nw muted">none</td>
               <td class="nw muted">off</td>
@@ -690,7 +861,7 @@
           <div>koordinator <span class="id mono">5a5b5c5d</span></div>
           <dl>
             <dt>Every</dt><dd>6h</dd>
-            <dt>Runs in</dt><dd>All agents</dd>
+            <dt>Runs in</dt><dd>6 agents</dd>
             <dt>Prompt</dt><dd>standup: one-line status</dd>
             <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
             <dt>Next fire</dt><dd class="muted">off</dd>
@@ -699,7 +870,7 @@
         </article>
       </div>
 
-      <p class="hint">Schedules live on this machine, in the agent that made them. They don't sync to other machines and are lost when that agent stops. A schedule pauses while its device is off the network and resumes when it is back.</p>
+      <p class="hint">Today: schedules live in memory, in the agent that made them. They don't sync to other machines, and they are lost when that agent stops. Planned: a schedule pauses while its device is off the network and resumes when it is back.</p>
     </div>
   </section>
 
@@ -736,6 +907,7 @@
           <button class="btn-primary" type="button">Add schedule</button>
         </div>
       </div>
+      <p class="where">Schedules file: <span class="mono">~/.kollab/schedules.json</span> on this machine <span class="new">(planned, not written yet)</span></p>
       <div class="empty">
         <strong>No schedules</strong>
         No live agent on this machine has a schedule. Add one, import a file, or generate one with an agent.
@@ -744,7 +916,7 @@
   </section>
 
   <!-- 7. IMPORT -->
-  <p class="caption" id="f7">7 · Import file: pick a file, check the preview, press Import. Imported schedules start off.</p>
+  <p class="caption" id="f7">7 · Import file: the file format is at the top. Pick a file and check the preview, then press Import. Imported schedules start off. The info button opens Learn, Schedules.</p>
   <section class="dialog" aria-label="Settings, import schedules">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -767,8 +939,25 @@
     </nav>
 
     <div class="panel inset">
-      <h3 class="form-title">Import schedules</h3>
+      <div class="title-row">
+        <h3 class="form-title">Import schedules</h3>
+        <button class="info-btn" type="button" aria-label="What schedules are: open the Schedules topic in Learn" title="What schedules are">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+        </button>
+      </div>
       <p class="form-sub">Load a schedules file from another machine. Nothing is added until you press Import.</p>
+
+      <p class="group">File format</p>
+      <div class="format">
+        <p>A JSON list. Each schedule needs three fields:</p>
+        <dl>
+          <dt>prompt</dt><dd>the message the agent gets</dd>
+          <dt>every</dt><dd>30s, 5m, 1h or 2h30m</dd>
+          <dt>runs_in</dt><dd>one or more agents, as a list</dd>
+        </dl>
+        <pre>[{"prompt": "summarize the day", "every": "2h", "runs_in": ["koordinator", "lapis"]}]</pre>
+        <p>Skill, folder and loadout are not in the file yet (planned).</p>
+      </div>
 
       <p class="group">File</p>
       <div class="file-row">
@@ -799,7 +988,7 @@
             <tr>
               <td><div class="msg">rebuild the index</div></td>
               <td class="nw">12h</td>
-              <td class="nw">lapis</td>
+              <td class="nw">lapis, koordinator</td>
               <td class="nw muted">ready, starts off</td>
             </tr>
           </tbody>
@@ -879,6 +1068,47 @@
     </div>
   </section>
 
+  <!-- L1. LEARN, SCHEDULES TOPIC -->
+  <p class="caption" id="l1">L1 · Learn, Schedules topic. The info button on Import schedules (7) opens it. It is a new topic in the Learn catalog, placed after Hub messaging, with the same layout as the other topics. Nothing is built.</p>
+  <section class="learn" aria-label="Learn, Schedules">
+    <button class="learn-close" type="button" aria-label="Close Learn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    <nav class="learn-nav" aria-label="Learn topics">
+      <a href="#l1">Kollab networks</a>
+      <a href="#l1">Devices</a>
+      <a href="#l1">Workspaces</a>
+      <a href="#l1">Agents</a>
+      <a href="#l1">Provider profiles</a>
+      <a href="#l1">Context compaction</a>
+      <a href="#l1">Koordinator</a>
+      <a href="#l1">Hub messaging</a>
+      <a href="#l1" aria-current="page">Schedules</a>
+      <a href="#l1">Voice mode</a>
+      <a href="#l1">System prompts</a>
+      <a href="#l1">PhoneLink</a>
+    </nav>
+    <div class="learn-main">
+      <section class="learn-card">
+        <h2 class="learn-title">Schedules</h2>
+        <p class="learn-summary">A schedule sends one prompt to one or more agents on a timer.</p>
+      </section>
+      <div class="learn-cols">
+        <section class="learn-card">
+          <h3 class="learn-h">How to get started</h3>
+          <ol class="learn-steps">
+            <li><span class="num">1</span><span>Open Settings, then Schedules, and press Add schedule.</span></li>
+            <li><span class="num">2</span><span>Type the prompt, set Every to 30s, 5m, 1h or 2h30m, and switch on the agents under Runs in.</span></li>
+            <li><span class="num">3</span><span>Keep Enabled on and press Save schedule. For many at once, press Import file.</span></li>
+          </ol>
+        </section>
+        <section class="learn-card">
+          <h3 class="learn-h">Try an example</h3>
+          <p class="learn-example">Settings, Schedules, Generate with agent. Type: every 2 hours, ask lapis for a one-line status</p>
+          <p class="learn-note"><strong>Good to know: </strong>Today schedules are in memory and are lost when the agent stops. Planned: a file at ~/.kollab/schedules.json on this machine, and a schedule pauses while its device is off the network.</p>
+        </section>
+      </div>
+    </div>
+  </section>
+
   <p class="section">TUI: /schedules, full alt screen (same options and keys as the web tab)</p>
 
   <!-- T1. TUI LIST -->
@@ -886,13 +1116,14 @@
   <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
  Schedules   3 across 2 live agents, 1 off, 1 paused
  Scheduled prompts on every live agent
+ Schedules file: ~/.kollab/schedules.json (planned, not written yet). Today: in memory only.
 
    Scheduled by            Every  Runs in        Prompt                   Next fire
 <span class="sel">▌  moonstone ab12cd34      1h     lapis          report the pulse         in 30m</span>
    <span class="err">error: peer has no conversation grant for this agent</span>
    moonstone 9876fedc      5m     infra@devbox   check the tunnel         paused
    <span class="mute">paused: infra@devbox not on this network</span>
-   koordinator 5a5b5c5d    6h     All agents     standup: one-line status off
+   koordinator 5a5b5c5d    6h     6 agents       standup: one-line status off
 
  a add   g generate   i import file   e edit   t enable/disable   d delete   r refresh   esc close
 <span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
@@ -902,19 +1133,20 @@
   <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
  Schedules   3 across 2 live agents, 1 off, 1 paused
  Scheduled prompts on every live agent
+ Schedules file: ~/.kollab/schedules.json (planned, not written yet). Today: in memory only.
 
    Scheduled by            Every  Runs in        Prompt                   Next fire
 <span class="sel">▌  moonstone ab12cd34      1h     lapis          report the pulse         in 30m</span>
    <span class="err">error: peer has no conversation grant for this agent</span>
    moonstone 9876fedc      5m     infra@devbox   check the tunnel         paused
    <span class="mute">paused: infra@devbox not on this network</span>
-   koordinator 5a5b5c5d    6h     All agents     standup: one-line status off
+   koordinator 5a5b5c5d    6h     6 agents       standup: one-line status off
 
  Delete moonstone ab12cd34? It won't fire again.   y delete   n keep
 <span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
 
   <!-- T3. TUI EDIT -->
-  <p class="caption" id="t3">T3 · Press e to edit, or a to add: the form, full screen. Same fields as the web form.</p>
+  <p class="caption" id="t3">T3 · Press e to edit, or a to add: the form, full screen. Same fields as the web form. Enter on Runs in opens the agent list (T6).</p>
   <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
  Edit schedule
  Scheduled by moonstone. To move it, delete it and add it again.
@@ -924,9 +1156,9 @@
      Skill         none  (planned)
 
    Where it runs
-     Runs in       lapis
-     Folder        /srv/app  (planned)
-     Loadout       default  (planned)
+     Runs in       lapis   <span class="mute">(enter opens the agent list, T6)</span>
+     Folder        each agent's own folder  (planned)
+     Loadout       each agent's own loadout  (planned)
 
    When
 <span class="sel">▌    Every         1h</span>
@@ -936,21 +1168,25 @@
 <span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
 
   <!-- T4. TUI IMPORT -->
-  <p class="caption" id="t4">T4 · Press i: import preview. Enter imports. Imported schedules start off.</p>
+  <p class="caption" id="t4">T4 · Shows after a file is picked in T7. Enter imports. Imported schedules start off. ? opens Learn, Schedules, in the web UI.</p>
   <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
- Import schedules
+ Import schedules   <span class="mute">? learn</span>
  Load a schedules file from another machine. Nothing is added until you press enter.
 
    File          ~/Downloads/schedules-devbox.json  (3 schedules)
 
-   Prompt                    Every  Runs in       Result
-   summarize the day         2h     koordinator   ready, starts off
-   check the tunnel          5m     infra@devbox  <span class="mute">skipped, same as 9876fedc</span>
-   rebuild the index         12h    lapis         ready, starts off
+   Prompt                    Every  Runs in              Result
+   summarize the day         2h     koordinator          ready, starts off
+   check the tunnel          5m     infra@devbox         <span class="mute">skipped, same as 9876fedc</span>
+   rebuild the index         12h    lapis, koordinator   ready, starts off
 
    Imported schedules start off. Turn each one on after you check its prompt.
 
- enter import 2   p change file   esc cancel
+   File format: a JSON list. Each item has prompt, every and runs_in (a list of agents).
+   Example:  [{"prompt": "summarize the day", "every": "2h", "runs_in": ["koordinator", "lapis"]}]
+   Skill, folder and loadout are not in the file yet (planned).
+
+ enter import 2   p change file   ? learn   esc cancel
 <span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
 
   <!-- T5. TUI GENERATE -->
@@ -972,6 +1208,42 @@
      Enabled       <span class="mute">no, starts off</span>
 
  enter draft   r review in form   d discard   esc cancel
+<span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
+
+  <!-- T6. TUI AGENTS -->
+  <p class="caption" id="t6">T6 · Enter on Runs in (T3): the full-screen agent list, all six agents. Space switches one agent. Enter done keeps the picks. Esc drops them.</p>
+  <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
+ Runs in                                                                            2 of 6 selected
+ Each agent switched on gets the prompt. An offline agent pauses the schedule until it is back.
+
+   On this machine
+     [ ] koordinator  <span class="mute">(this chat)</span>
+<span class="sel">▌    [x] lapis</span>
+     [ ] moonstone
+     [ ] peridot      <span class="mute">offline, paused until it's back</span>
+
+   On devbox
+     [x] infra@devbox
+     [ ] ops@devbox
+
+ space toggle   a select all   c clear   enter done   esc cancel
+<span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
+
+  <!-- T7. TUI FILE PICKER -->
+  <p class="caption" id="t7">T7 · Press i in the list (or p on T4): the file selector. Only .json files are listed. Enter on a file opens the preview (T4).</p>
+  <div class="term"><pre><span class="band">▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄</span>
+ Import schedules: choose a file                                                        <span class="mute">? learn</span>
+ Only .json files are listed. Enter opens a folder or picks a file.
+
+   Folder  ~/Downloads
+
+   Name                                Size      Modified
+   ../
+<span class="sel">▌  schedules-devbox.json               1.2 KB    today 09:14</span>
+   schedules-old.json                  0.4 KB    Nov 2
+   notes/
+
+ arrows move   enter open or pick   / type a path   esc back to schedules
 <span class="band">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span></pre></div>
 </div>
 </body>
