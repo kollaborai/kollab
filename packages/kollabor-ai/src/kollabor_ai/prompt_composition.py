@@ -91,10 +91,24 @@ def list_user_libraries() -> List[str]:
     )
 
 
+def _below(root: Path, name: str, suffix: str = "") -> Path:
+    """``<root>/<name><suffix>``, held below ``root`` (#980).
+
+    The name is already a plain name (``is_valid_bundle``: letters, digits, ``_`` and ``-``); this keeps the joined
+    path below the root as a second check. It is a lexical check on purpose: a role file may be a symlink into a
+    dotfiles folder, and only the name decides where under the root a file goes.
+    """
+    base = os.path.join(os.path.abspath(root), "")
+    path = os.path.abspath(os.path.join(base, name + suffix))
+    if not path.startswith(base):
+        raise CompositionError(f"invalid name: {name!r}")
+    return Path(path)
+
+
 def create_library(name: str) -> Path:
     if not is_valid_bundle(name) or name == DEFAULTS_LIBRARY:
         raise CompositionError(f"invalid library name: {name!r}")
-    path = get_libraries_dir() / name
+    path = _below(get_libraries_dir(), name)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -150,7 +164,7 @@ def clean_composition(data: Any) -> Dict[str, Any]:
 def _role_path(role: str) -> Path:
     if not is_valid_bundle(role):
         raise CompositionError(f"invalid role name: {role!r}")
-    return get_roles_dir() / f"{role}.json"
+    return _below(get_roles_dir(), role, ".json")
 
 
 def load_composition(role: str) -> Dict[str, Any]:
