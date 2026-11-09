@@ -1608,12 +1608,16 @@ class AgentSocketServer:
                         # is accepted, while the snapshot can still be draining.
                         sub_queue = self._display_tap.subscribe(client_id)
 
-                        # Send ack
+                        # Send ack. The version is the one this image runs: a window
+                        # that attaches again after a restart in place (#968) says it.
+                        from kollabor_agent.runtime import own_build
+
                         ack = (
                             json.dumps(
                                 {
                                     "type": "attach_ack",
                                     "agent_id": self.agent_id,
+                                    "version": own_build()[0],
                                     "mode": mode,
                                     "uptime": int(time.time() - self._started_at),
                                     "hub": hub_info,

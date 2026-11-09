@@ -39,6 +39,10 @@ DETACHED_CHILD_ENV = "KOLLAB_DETACHED_CHILD"
 # A restart in place (#968) names the conversation the new image resumes; the new
 # image reads it once at boot and drops it, so a later restart names its own.
 RESUME_SESSION_ENV = "KOLLAB_RESUME_SESSION"
+# Seconds an attached terminal window keeps trying to attach again once its daemon's
+# connection ended and the daemon is still alive (a restart in place, #968) before it
+# tells the user to run kollab again.
+REATTACH_WAIT = 30.0
 
 
 class DaemonExited(RuntimeError):

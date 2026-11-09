@@ -87,10 +87,14 @@ SPAWN_TIMEOUT_SECONDS = 45.0
 # behind the attach stream's frame budget: give its state calls longer (#880).
 REMOTE_STATE_TIMEOUT_SECONDS = 60.0
 
-# Events the daemon publishes that are rendered ANSI rather than structured
-# data. Web clients cannot use them, and forwarding them would double every
-# message, so the pool drops them at the boundary.
-_RENDERED_EVENT_TYPES = frozenset({"output", "active_area", "heartbeat", "clear"})
+# Events the daemon publishes for terminal windows only. Most are rendered ANSI
+# rather than structured data: web clients cannot use them, and forwarding them
+# would double every message. ``daemon_restarting`` tells a window a restart in
+# place is coming so it waits and attaches again (#968); the pool reattaches by
+# itself and its chats say it their own way. The pool drops them at the boundary.
+_TERMINAL_ONLY_EVENT_TYPES = frozenset(
+    {"output", "active_area", "heartbeat", "clear", "daemon_restarting"}
+)
 
 # The start of an ``rpc_reply`` frame as the daemon writes it (RpcResponse.to_wire).
 _REPLY_HEAD = re.compile(rb'\{"action":\s*"rpc_reply",\s*"request_id":\s*"([^"\\]+)"')
@@ -351,7 +355,7 @@ class DaemonHandle:
                         continue  # replayed on a reattach, already passed on
                     self._last_seq = seq
 
-                if message.get("type") in _RENDERED_EVENT_TYPES:
+                if message.get("type") in _TERMINAL_ONLY_EVENT_TYPES:
                     continue
 
                 if message.get("type") == "error" and message.get("phase") == "startup":
@@ -399,7 +403,7 @@ class DaemonHandle:
                         "dropped an oversized %s frame (%d bytes) from daemon %s",
                         etype, size, self.identity,
                     )
-                    if self._replayed(tail) or etype in _RENDERED_EVENT_TYPES:
+                    if self._replayed(tail) or etype in _TERMINAL_ONLY_EVENT_TYPES:
                         continue  # passed on before a reattach, or terminal-only
                     # Say so in the chat (a silently missing tool result reads as
                     # a complete reply), to the request the frame names: an old
