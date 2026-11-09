@@ -1,0 +1,151 @@
+{
+  "name": "restart-window-reattaches",
+  "description": "A terminal window attached to a daemon stays open when that daemon restarts in place (#968): /restart makes it print Restarting <agent>..., it attaches again by itself and prints Restarted on <version>, the scrollback from before stays exactly once (the new image does not replay it), a message typed afterwards reaches the new image and is answered, and daemon exited never appears while the daemon runs. Daemon-first launch in a throwaway HOME with a local fake model (tests/tmux/lib/fake_llm.py), no keyring, no network.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-restart-reattach.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a local fake model",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-restart-reattach.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && [ -d \"$O/ws\" ] && (cd \"$O/ws\" && HOME=\"$O\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1; kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null); H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-restart-reattach.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on port $(cat \"$H/fake.port\")\""
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up (daemon forked, this window attached)"
+    },
+    {
+      "action": "shell",
+      "description": "this really is daemon mode: one agent online",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-restart-reattach.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub status 2>&1",
+      "assert_contains": "1 agent\\(s\\) online",
+      "show": true
+    },
+    {
+      "action": "shell",
+      "description": "remember the daemon's pid",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-restart-reattach.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub status 2>&1 | grep -o \"pid=[0-9]*\" | head -1 | tee \"$H/pid.before\"",
+      "assert_contains": "pid=[0-9]+"
+    },
+    {
+      "action": "section",
+      "label": "a turn before the restart"
+    },
+    {
+      "action": "type",
+      "text": "hello restart"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong: hello restart",
+      "timeout": 60,
+      "description": "the fake model answered, so there is scrollback to keep"
+    },
+    {
+      "action": "section",
+      "label": "restart the daemon in place"
+    },
+    {
+      "action": "slash_command",
+      "command": "restart"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Restarting [a-z]+\\.\\.\\.",
+      "timeout": 30,
+      "description": "the window announces the restart"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Restarted on [0-9]+\\.[0-9]+",
+      "timeout": 90,
+      "description": "the window attached again to the new image by itself"
+    },
+    {
+      "action": "capture",
+      "show": true
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "daemon exited",
+      "description": "never reported as an exit while the daemon runs"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Run kollab again",
+      "description": "no give-up line, the re-attach worked"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "pong: hello restart",
+      "description": "scrollback from before the restart is still on screen"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "pong: hello restart[\\s\\S]*pong: hello restart",
+      "description": "the new image did not replay it a second time"
+    },
+    {
+      "action": "shell",
+      "description": "still exactly one agent online after the restart",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-restart-reattach.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub status 2>&1",
+      "assert_contains": "1 agent\\(s\\) online",
+      "show": true
+    },
+    {
+      "action": "shell",
+      "description": "the restart was in place: the daemon kept its pid",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-restart-reattach.path\"); cd \"$H/ws\" && NOW=$(HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub status 2>&1 | grep -o \"pid=[0-9]*\" | head -1); if [ -n \"$NOW\" ] && [ \"$NOW\" = \"$(cat \"$H/pid.before\")\" ]; then echo \"same daemon process: $NOW\"; else echo \"daemon process changed: before $(cat \"$H/pid.before\") now $NOW\"; fi",
+      "assert_contains": "same daemon process",
+      "show": true
+    },
+    {
+      "action": "section",
+      "label": "the window still works"
+    },
+    {
+      "action": "type",
+      "text": "second message"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong: second message",
+      "timeout": 60,
+      "description": "input reaches the new image and its answer comes back"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "daemon exited",
+      "description": "still no exit report"
+    },
+    {
+      "action": "section",
+      "label": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the agent and the fake model",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-restart-reattach.path\"); (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all 2>&1 | tail -1); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}
