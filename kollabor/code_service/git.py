@@ -17,10 +17,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .reply import Reply
+from .settings import DEFAULTS, PREFIX, CodeSettings
 
 MAX_PATH = 4096  # characters in a file path
 
-Handler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+# An action handler: (root, body, settings). The settings are None when the caller has none (= DEFAULTS).
+Handler = Callable[[str, dict[str, Any], CodeSettings | None], Awaitable[dict[str, Any]]]
 
 GIT_TIMEOUT = 30  # seconds for one git call
 LOG_LIMIT = 20
@@ -139,7 +141,7 @@ def _rel_path(value: object) -> str:
     return text
 
 
-async def _status(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _status(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     branch = await _head_name(root)
     upstream = (await _text(root, ["rev-parse", "--abbrev-ref", "@{upstream}"])).strip() or None
     ahead = behind = 0
@@ -150,13 +152,17 @@ async def _status(root: str, body: dict[str, Any]) -> dict[str, Any]:
     # Porcelain paths are relative to the repository's top; the workspace may be a folder inside it. Scope the
     # status to the workspace and give back workspace-relative paths, the form stage, unstage and diff take.
     prefix = (await _text(root, ["rev-parse", "--show-prefix"])).strip()
-    for line in (await _text(root, ["status", "--porcelain", "-u", "--", "."])).split("\n"):
-        if not line:
+    # -z: each name comes back exactly as it is (no quoting, no escapes). A rename or copy record is "XY new\0old\0",
+    # so the old name, which is its own record, is skipped.
+    records = iter((await _text(root, ["status", "--porcelain=v1", "-z", "-u", "--", "."])).split("\0"))
+    for line in records:
+        if len(line) < 4:
             continue
         code = line[:2]
         index, worktree = code[:1], code[1:2]
-        raw_path = line[3:]
-        path = raw_path.split(" -> ")[1] if " -> " in raw_path else raw_path  # a rename reads "old -> new"
+        path = line[3:]
+        if "R" in code or "C" in code:
+            next(records, None)
         if prefix and path.startswith(prefix):
             path = path[len(prefix) :]
         files.append(
@@ -172,7 +178,7 @@ async def _status(root: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"branch": branch, "upstream": upstream, "ahead": ahead, "behind": behind, "files": files}
 
 
-async def _log(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _log(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     entries: list[dict[str, str]] = []
     for line in (await _text(root, ["log", f"--format={LOG_FORMAT}", "-n", str(LOG_LIMIT)])).split("\n"):
         if not line:
@@ -184,7 +190,7 @@ async def _log(root: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"entries": entries}
 
 
-async def _show(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _show(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     """A file's content at HEAD; empty for a file HEAD does not have (a new file)."""
     rel = _rel_path(body.get("path"))
     base = os.path.realpath(root)
@@ -200,7 +206,7 @@ async def _show(root: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"content": proc.stdout if proc.returncode == 0 else ""}
 
 
-async def _diff(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _diff(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     """The unstaged diff of one file, or the staged one when ``staged`` is true."""
     rel = _rel_path(body.get("path"))
     base = os.path.realpath(root)
@@ -219,14 +225,14 @@ async def _diff(root: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"diff": await _text(base, args)}
 
 
-async def _show_commit(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _show_commit(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     proc = await _git(root, ["show", "--no-color", _commit_id(body.get("commitHash"))])
     if proc.returncode != 0:
         raise GitRequestError(404, "commit_not_found", "That commit is not in this repository.")
     return {"content": proc.stdout}
 
 
-async def _list_branches(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _list_branches(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     current = await _head_name(root)
     default_ref = (await _text(root, ["symbolic-ref", "refs/remotes/origin/HEAD"])).strip()
     branches: list[dict[str, Any]] = []
@@ -264,11 +270,11 @@ async def _list_branches(root: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"branches": branches, "current": current, "defaultBranch": default_branch}
 
 
-async def _current_branch(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _current_branch(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     return {"ok": True, "current": await _head_name(root)}
 
 
-async def _list_stashes(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _list_stashes(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     stashes: list[dict[str, Any]] = []
     for line in (await _text(root, ["stash", "list", f"--format={STASH_FORMAT}"])).split("\n"):
         if not line:
@@ -286,7 +292,7 @@ async def _list_stashes(root: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "stashes": stashes}
 
 
-async def _show_stash(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _show_stash(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     index = _stash_index(body.get("stashId"))
     proc = await _git(root, ["stash", "show", "-p", f"stash@{{{index}}}"])
     if proc.returncode != 0:
@@ -307,15 +313,16 @@ ACTIONS: dict[str, Handler] = {
 }
 
 
-async def serve(root: str, body: dict[str, Any]) -> Reply:
-    """Run the named action in ``root``. Failures answer the envelope; success is {success, data}."""
+async def serve(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
+    """Run the named action in ``root`` with ``settings`` (None = defaults). Failures answer the envelope; success is
+    {success, data}."""
     try:
         if not root or not os.path.isdir(root):
             raise GitRequestError(400, "bad_workspace", "The session's folder is not available.")
         action = body.get("action")
         if not isinstance(action, str) or action not in ACTIONS:
             raise GitRequestError(400, "unknown_action", "That git action is not available here.")
-        data = await ACTIONS[action](root, body)
+        data = await ACTIONS[action](root, body, DEFAULTS if settings is None else settings)
     except GitRequestError as exc:
         return _fail(exc.status, exc.code, exc.message)
     return Reply({"success": True, "data": data})
@@ -411,42 +418,47 @@ async def _change_index(root: str, body: dict[str, Any], command: list[str]) -> 
     return {"ok": True, "status": await _status(base, {})}
 
 
-async def _stage(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _stage(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     return await _change_index(root, body, ["add"])
 
 
-async def _unstage(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _unstage(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     return await _change_index(root, body, ["restore", "--staged"])
 
 
-async def _stage_all(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _stage_all(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     await _write(root, ["add", "-A", "--", "."])  # the workspace only, not the whole repository
     return {"ok": True, "status": await _status(root, {})}
 
 
-async def _unstage_all(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _unstage_all(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     await _write(root, ["restore", "--staged", "--", "."])
     return {"ok": True, "status": await _status(root, {})}
 
 
-async def _commit(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _commit(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     message = _message(body.get("message"))
     if not message:
         raise GitRequestError(400, "message_required", "A commit message is required.")
+    cfg = DEFAULTS if settings is None else settings
     # The panel lists only the workspace's changes. A commit takes the whole index, so refuse one that would
-    # carry staged files from outside the workspace the panel cannot show.
-    everything = (await _text(root, ["diff", "--cached", "--name-only", "-z", "--no-relative"])).split("\0")
-    inside = (await _text(root, ["diff", "--cached", "--name-only", "-z", "--relative"])).split("\0")
-    outside = len([name for name in everything if name]) - len([name for name in inside if name])
-    if outside > 0:
-        raise GitRequestError(
-            409, "staged_outside_workspace", f"{outside} staged file(s) lie outside this folder; unstage them first."
-        )
+    # carry staged files from outside the workspace the panel cannot show, unless the setting allows it.
+    if not cfg.git_allow_outside_workspace:
+        everything = (await _text(root, ["diff", "--cached", "--name-only", "-z", "--no-relative"])).split("\0")
+        inside = (await _text(root, ["diff", "--cached", "--name-only", "-z", "--relative"])).split("\0")
+        outside = len([name for name in everything if name]) - len([name for name in inside if name])
+        if outside > 0:
+            named = f"{outside} staged file(s) lie outside this folder; unstage them first."
+            raise GitRequestError(
+                409,
+                "staged_outside_workspace",
+                f"{named} Setting: {PREFIX}git.allow_outside_workspace",
+            )
     proc = await _write(root, ["commit", "-m", message])
     return {"ok": True, "output": proc.stdout, "status": await _status(root, {})}
 
 
-async def _push(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _push(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     """Push to the branch's remote, or to a named remote and branch. Names only: never a URL or an option."""
     remote, branch = body.get("remote"), body.get("branch")
     args = ["push"]
@@ -463,13 +475,13 @@ async def _push(root: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "output": f"{proc.stderr}{proc.stdout}", "status": await _status(root, {})}
 
 
-async def _create_branch(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _create_branch(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     name = _branch_name(body)
     await _write(root, ["branch", name])
     return {"ok": True, "branch": name, "current": await _head_name(root)}
 
 
-async def _switch_branch(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _switch_branch(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     name = _branch_name(body)
     previous = await _head_name(root)
     proc = await _git(root, ["switch", name], read=False)
@@ -483,7 +495,7 @@ async def _switch_branch(root: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "current": await _head_name(root), "previous": previous, "hasUncommittedChanges": carried}
 
 
-async def _delete_branch(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _delete_branch(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     """Delete a local branch with ``-d``, or ``-D`` when ``force`` is true. The checked-out branch is never deleted."""
     name = _branch_name(body)
     if name == await _head_name(root):
@@ -499,7 +511,7 @@ async def _delete_branch(root: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "deleted": name, "forceUsed": force}
 
 
-async def _create_stash(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _create_stash(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     message = _message(body.get("stashMessage")) or None
     args = ["stash", "push"]
     if body.get("includeUntracked") is True:
@@ -537,7 +549,7 @@ async def _named_stash(root: str, body: dict[str, Any]) -> str:
     return hits[0]
 
 
-async def _apply_stash(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _apply_stash(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     position = await _named_stash(root, body)
     ref = f"stash@{{{position}}}"
     proc = await _git(root, ["stash", "apply", ref], read=False)
@@ -560,7 +572,7 @@ async def _apply_stash(root: str, body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _drop_stash(root: str, body: dict[str, Any]) -> dict[str, Any]:
+async def _drop_stash(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     position = await _named_stash(root, body)
     ref = f"stash@{{{position}}}"
     await _write(root, ["stash", "drop", ref])

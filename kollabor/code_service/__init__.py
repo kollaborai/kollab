@@ -84,9 +84,9 @@ async def call(
         return Reply({"success": True, "data": settings_report(settings)}).as_wire()
     folder = os.path.realpath(root or os.getcwd())
     if kind == "fs":
-        reply = await files.serve(name, folder, params)
+        reply = await files.serve(name, folder, params, settings)
     elif kind == "git":
-        reply = await git.serve(folder, params)
+        reply = await git.serve(folder, params, settings)
     else:
         reply = await terminal.serve(name, folder, params, settings)
     return reply.as_wire()

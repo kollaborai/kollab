@@ -114,10 +114,15 @@ def test_read_returns_the_content_path_and_size(client, ws):
 
     response = _get(client, "file", ws.root, path="notes/a.txt")
 
-    assert response.json() == {
-        "success": True,
-        "data": {"path": str(ws.root / "notes" / "a.txt"), "content": "hello", "size": 5},
+    data = response.json()["data"]
+    assert response.json()["success"] is True
+    assert {k: data[k] for k in ("path", "content", "size", "encoding")} == {
+        "path": str(ws.root / "notes" / "a.txt"),
+        "content": "hello",
+        "size": 5,
+        "encoding": "utf-8",
     }
+    assert isinstance(data["mtime"], int)
 
 
 def test_read_refuses_a_binary_file(client, ws):
@@ -146,7 +151,9 @@ def test_write_replaces_the_content(client, ws):
 
     response = _put(client, ws.root, "a.txt", "new")
 
-    assert response.json() == {"success": True, "data": {"success": True, "path": str(ws.root / "a.txt")}}
+    data = response.json()["data"]
+    assert response.json()["success"] is True and data["success"] is True
+    assert data["path"] == str(ws.root / "a.txt") and data["encoding"] == "utf-8" and isinstance(data["mtime"], int)
     assert (ws.root / "a.txt").read_text() == "new"
 
 

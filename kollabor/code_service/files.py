@@ -4,9 +4,13 @@ Mentiko's /api/fs/* contract inside the spec envelope (docs/specs/floating-code-
 {"success": true, "data": ...}; a failure carries a non-2xx status and {"success": false, "error": {"code", "message"}}.
 
 The daemon serves its own folder (its working directory) and nothing else: a request's ``workspace`` is not read.
-Every path a request names is resolved with os.path.realpath and must sit inside that resolved folder. The check is
-written inline in each operation, in the closed-prefix form (CodeQL's path-injection idiom). tree and search never
-follow a symlink. Request bodies and file contents are never logged.
+Every path a request names is resolved with os.path.realpath and must sit inside that resolved folder or one of the
+``extra_roots`` the settings name. The check is written inline in each operation, in the closed-prefix form (CodeQL's
+path-injection idiom). Symlinks are not followed unless ``follow_symlinks`` is on. Request bodies and file contents are
+never logged.
+
+The limits and switches come from ``settings.CodeSettings`` (docs/specs/code-shell-settings.md, #987); a handler
+called without settings uses ``settings.DEFAULTS``.
 """
 
 import asyncio
@@ -20,15 +24,16 @@ from collections.abc import Iterator
 from typing import Any
 
 from .reply import Reply
+from .settings import DEFAULTS, PREFIX, CodeSettings
 
-MAX_FILE_BYTES = 2 * 1024 * 1024
 TREE_MAX_DEPTH = 8
 SEARCH_MAX_RESULTS = 200
 SEARCH_MAX_FILE_BYTES = 1024 * 1024
-SEARCH_MAX_FILES = 20_000
 SEARCH_MAX_QUERY = 200
 SEARCH_LINE_CHARS = 500
 OUTSIDE = "That path is outside the workspace."
+# Never listed, read or searched, whatever the settings say.
+ALWAYS_HIDDEN = ".git"
 
 # mentiko's lists, unchanged, plus .venv (dot names are skipped anyway).
 ALLOWED_EXTENSIONS = frozenset(
@@ -54,12 +59,30 @@ BINARY_EXTENSIONS = frozenset(
     }
 )
 
+
 def _ok(data: dict[str, Any]) -> Reply:
     return Reply({"success": True, "data": data})
 
 
 def _fail(status: int, code: str, message: str) -> Reply:
     return Reply(status_code=status, content={"success": False, "error": {"code": code, "message": message}})
+
+
+def _setting(message: str, name: str) -> str:
+    """``message`` with the setting that controls it named at the end, worded as settings.refusal words it."""
+    return f"{message} Setting: {PREFIX}{name}"
+
+
+def _outside(message: str = OUTSIDE) -> Reply:
+    return _fail(403, "outside_workspace", _setting(message, "files.extra_roots"))
+
+
+def _size_text(kb: int) -> str:
+    return f"{kb // 1024}MB" if kb % 1024 == 0 else f"{kb}KB"
+
+
+def _size_refusal(word: str, kb: int) -> Reply:
+    return _fail(400, "file_too_large", _setting(f"{word} too large (max {_size_text(kb)}).", "files.max_file_kb"))
 
 
 def _disk_failure(exc: OSError) -> Reply:
@@ -83,6 +106,34 @@ def _checked_workspace(workspace: str) -> str | Reply:
     return workspace
 
 
+def _config(settings: CodeSettings | None) -> CodeSettings:
+    return DEFAULTS if settings is None else settings
+
+
+def _bases(folder: str, settings: CodeSettings) -> tuple[str, ...]:
+    """Where a request path may resolve: the folder, then each absolute extra root, each as realpath + separator.
+
+    Compared after os.path.normcase, on both sides (case-folded on Windows, unchanged elsewhere). The first entry is
+    always the workspace.
+    """
+    roots = [folder, *(root for root in settings.extra_roots if os.path.isabs(root))]
+    return tuple(os.path.normcase(os.path.join(os.path.realpath(root), "")) for root in roots)
+
+
+def _start_chain(root: str, settings: CodeSettings) -> frozenset[str]:
+    """The real folders on the way down from the workspace. Kept only when links are followed, to cut a loop."""
+    return frozenset({root}) if settings.follow_symlinks else frozenset()
+
+
+def _descend(entry: os.DirEntry[str], chain: frozenset[str], follow: bool) -> frozenset[str] | None:
+    """The chain to pass into the folder ``entry`` names, or None when it is a link back to a folder already on the
+    way down (a loop, which is not descended into)."""
+    if not follow:
+        return chain
+    real = os.path.realpath(entry.path)
+    return None if real in chain else chain | {real}
+
+
 def _text(params: dict[str, Any], key: str) -> str:
     """A request field that must be text; anything else reads as missing."""
     value = params.get(key)
@@ -104,71 +155,89 @@ def _entries(folder: str) -> list[os.DirEntry[str]]:
         return []
 
 
-def _kind(entry: os.DirEntry[str]) -> str:
-    """"dir" or "file" for an entry that is one. A symlink is neither: it is never followed or listed."""
+def _kind(entry: os.DirEntry[str], follow: bool = False) -> str:
+    """"dir" or "file" for an entry that is one. A symlink is neither unless ``follow`` is set, then it counts as what
+    it points at; a dangling link is neither."""
     with contextlib.suppress(OSError):
-        if entry.is_dir(follow_symlinks=False):
+        if entry.is_dir(follow_symlinks=follow):
             return "dir"
-        if entry.is_file(follow_symlinks=False):
+        if entry.is_file(follow_symlinks=follow):
             return "file"
     return ""
 
 
-def _folder_listed(name: str) -> bool:
-    return not name.startswith(".") and name not in SKIP_DIRS
+def _folder_listed(name: str, show_hidden: bool) -> bool:
+    if name == ALWAYS_HIDDEN:
+        return False
+    return show_hidden or (not name.startswith(".") and name not in SKIP_DIRS)
 
 
-def _tree_file_listed(name: str) -> bool:
+def _tree_file_listed(name: str, show_hidden: bool) -> bool:
+    if name == ALWAYS_HIDDEN:
+        return False
+    if show_hidden:
+        return True
     ext = _extension(name)
     return not name.startswith(".") and (ext == "" or ext in ALLOWED_EXTENSIONS)
 
 
-def _search_file_listed(name: str) -> bool:
-    return not name.startswith(".") and _extension(name) not in BINARY_EXTENSIONS
+def _search_file_listed(name: str, show_hidden: bool) -> bool:
+    if name == ALWAYS_HIDDEN:
+        return False
+    return (show_hidden or not name.startswith(".")) and _extension(name) not in BINARY_EXTENSIONS
 
 
-def _tree(folder: str, depth: int) -> list[dict[str, Any]]:
+def _tree(folder: str, depth: int, settings: CodeSettings, chain: frozenset[str]) -> list[dict[str, Any]]:
     """mentiko's buildTree: folders first, then files, each in name order, down to TREE_MAX_DEPTH.
 
-    ``folder`` lies inside a workspace the route has already checked, and no symlink is followed.
+    ``folder`` lies inside a workspace the route has already checked. Symlinks are listed and followed only when
+    ``follow_symlinks`` is on, and then a folder already on the way down is not entered again.
     """
     if depth > TREE_MAX_DEPTH:
         return []
-    listed = [(entry, _kind(entry)) for entry in _entries(folder)]
+    follow = settings.follow_symlinks
+    listed = [(entry, _kind(entry, follow)) for entry in _entries(folder)]
     nodes: list[dict[str, Any]] = []
     for entry, kind in listed:
-        if kind == "dir" and _folder_listed(entry.name):
-            children = _tree(entry.path, depth + 1)
-            nodes.append({"name": entry.name, "path": entry.path, "type": "dir", "children": children})
+        if kind == "dir" and _folder_listed(entry.name, settings.show_hidden):
+            below = _descend(entry, chain, follow)
+            if below is not None:
+                children = _tree(entry.path, depth + 1, settings, below)
+                nodes.append({"name": entry.name, "path": entry.path, "type": "dir", "children": children})
     for entry, kind in listed:
-        if kind == "file" and _tree_file_listed(entry.name):
+        if kind == "file" and _tree_file_listed(entry.name, settings.show_hidden):
             nodes.append({"name": entry.name, "path": entry.path, "type": "file", "ext": _extension(entry.name)})
     return nodes
 
 
-def _search_files(root: str) -> Iterator[str]:
-    """The files search may read under ``root``: folder by folder, names in order, no symlink followed, and at most
-    SEARCH_MAX_FILES of them. ``root`` is a checked workspace."""
-    pending = [root]
+def _search_files(root: str, settings: CodeSettings) -> Iterator[str]:
+    """The files search may read under ``root``: folder by folder, names in order, and at most
+    ``settings.search_max_files`` of them. ``root`` is a checked workspace."""
+    follow = settings.follow_symlinks
+    pending: list[tuple[str, frozenset[str]]] = [(root, _start_chain(root, settings))]
     scanned = 0
     while pending:
-        folders: list[str] = []
-        for entry in _entries(pending.pop()):
-            kind = _kind(entry)
-            if kind == "dir" and _folder_listed(entry.name):
-                folders.append(entry.path)
-            elif kind == "file" and _search_file_listed(entry.name):
+        folder, chain = pending.pop()
+        folders: list[tuple[str, frozenset[str]]] = []
+        for entry in _entries(folder):
+            kind = _kind(entry, follow)
+            if kind == "dir" and _folder_listed(entry.name, settings.show_hidden):
+                below = _descend(entry, chain, follow)
+                if below is not None:
+                    folders.append((entry.path, below))
+            elif kind == "file" and _search_file_listed(entry.name, settings.show_hidden):
                 scanned += 1
-                if scanned > SEARCH_MAX_FILES:
+                if scanned > settings.search_max_files:
                     return
                 yield entry.path
         pending.extend(reversed(folders))
 
 
-def _search_text(path: str) -> str | None:
-    """A file's text when search may read it: at most 1 MB, no NUL byte, and never through a symlink."""
+def _search_text(path: str, follow: bool) -> str | None:
+    """A file's text when search may read it: at most 1 MB and no NUL byte. Never through a symlink unless follow."""
+    flags = os.O_RDONLY | (0 if follow else getattr(os, "O_NOFOLLOW", 0))
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, flags)
         with os.fdopen(fd, "rb") as handle:
             data = handle.read(SEARCH_MAX_FILE_BYTES + 1)
     except OSError:
@@ -176,6 +245,48 @@ def _search_text(path: str) -> str | None:
     if len(data) > SEARCH_MAX_FILE_BYTES or b"\0" in data:
         return None
     return data.decode("utf-8", errors="replace")
+
+
+def _decode(data: bytes) -> tuple[str, str]:
+    """The text of ``data`` and its encoding: utf-8 when the bytes are valid utf-8, else latin-1 (every byte is one
+    character, so nothing is lost)."""
+    try:
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return data.decode("latin-1"), "latin-1"
+
+
+def _is_utf8(data: bytes) -> bool:
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _encode(content: str, existing: bytes | None) -> tuple[bytes, str]:
+    """``content`` as bytes and the encoding used. An existing file that is not valid utf-8 stays latin-1, so the
+    bytes the editor did not change come back exactly; a character past U+00FF cannot be latin-1 and forces utf-8."""
+    if existing is not None and not _is_utf8(existing):
+        try:
+            return content.encode("latin-1"), "latin-1"
+        except UnicodeEncodeError:
+            pass
+    return content.encode("utf-8"), "utf-8"
+
+
+def _existing_bytes(path: str) -> bytes | None:
+    """The bytes of the file at ``path``, or None when there is no such file."""
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return None
+
+
+def _mtime_ms(path: str) -> int:
+    """A file's modification time in whole milliseconds, the form the editor sends back to check for a stale write."""
+    return os.stat(path).st_mtime_ns // 1_000_000
 
 
 def _write_atomic(path: str, data: bytes) -> None:
@@ -236,17 +347,19 @@ def _parse_status(output: bytes) -> dict[str, str]:
     return status
 
 
-def tree(workspace: str, params: dict[str, Any]) -> Reply:
+def tree(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
     """The workspace as a tree of files and folders, mentiko's /api/fs/tree."""
+    cfg = _config(settings)
     folder = _checked_workspace(workspace)
     if isinstance(folder, Reply):
         return folder
     root = os.path.realpath(folder)
-    return _ok({"path": root, "tree": _tree(root, 0)})
+    return _ok({"path": root, "tree": _tree(root, 0, cfg, _start_chain(root, cfg))})
 
 
-def read_file(workspace: str, params: dict[str, Any]) -> Reply:
-    """One text file in the workspace, at most 2 MB, mentiko's /api/fs/file."""
+def read_file(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
+    """One text file in the workspace, at most ``max_file_kb`` (2 MB by default), mentiko's /api/fs/file."""
+    cfg = _config(settings)
     folder = _checked_workspace(workspace)
     if isinstance(folder, Reply):
         return folder
@@ -254,33 +367,45 @@ def read_file(workspace: str, params: dict[str, Any]) -> Reply:
     if not path:
         return _fail(400, "missing_param", "path param required")
     base = os.path.join(os.path.realpath(folder), "")
+    bases = _bases(folder, cfg)
     try:
         full = os.path.realpath(os.path.join(base, path))
+        lexical = os.path.normpath(os.path.join(base, path))
     except OSError, ValueError:
-        return _fail(403, "outside_workspace", OUTSIDE)
-    if not full.startswith(base):
-        return _fail(403, "outside_workspace", OUTSIDE)
+        return _outside()
+    if not os.path.normcase(full).startswith(bases) and not (
+        cfg.follow_symlinks and os.path.normcase(lexical).startswith(bases)
+    ):
+        return _outside()
     if not os.path.exists(full):
         return _fail(404, "not_found", "File not found.")
     if not os.path.isfile(full):
         return _fail(400, "not_a_file", "Not a file.")
+    limit = cfg.max_file_kb * 1024
     try:
-        if os.path.getsize(full) > MAX_FILE_BYTES:
-            return _fail(400, "file_too_large", "File too large (max 2MB).")
+        if os.path.getsize(full) > limit:
+            return _size_refusal("File", cfg.max_file_kb)
         with open(full, "rb") as handle:
-            data = handle.read(MAX_FILE_BYTES + 1)
+            mtime = os.fstat(handle.fileno()).st_mtime_ns // 1_000_000
+            data = handle.read(limit + 1)
     except OSError as exc:
         return _disk_failure(exc)
-    if len(data) > MAX_FILE_BYTES:
-        return _fail(400, "file_too_large", "File too large (max 2MB).")
+    if len(data) > limit:
+        return _size_refusal("File", cfg.max_file_kb)
     if b"\0" in data:
         return _fail(400, "not_text", "Not a text file.")
-    return _ok({"path": full, "content": data.decode("utf-8", errors="replace"), "size": len(data)})
+    text, encoding = _decode(data)
+    return _ok({"path": full, "content": text, "size": len(data), "encoding": encoding, "mtime": mtime})
 
 
-async def write_file(workspace: str, params: dict[str, Any]) -> Reply:
+async def write_file(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
     """Replace one file's content, atomically, mentiko's PUT /api/fs/file. The path is the query; the body
-    carries ``workspace`` and ``content``."""
+    carries ``workspace`` and ``content``.
+
+    With an integer ``expectedMtime`` (the ``mtime`` the editor read, in ms) the write is refused with 409 when the file
+    changed since, unless ``force`` is true. Without it there is no check.
+    """
+    cfg = _config(settings)
     body = params
     folder = _checked_workspace(workspace)
     if isinstance(folder, Reply):
@@ -291,30 +416,43 @@ async def write_file(workspace: str, params: dict[str, Any]) -> Reply:
     content = body.get("content")
     if not isinstance(content, str):
         return _fail(400, "invalid_content", "content must be a string")
-    try:
-        data = content.encode("utf-8")
-    except UnicodeEncodeError:
-        return _fail(400, "invalid_content", "content must be valid text")
-    if len(data) > MAX_FILE_BYTES:
-        return _fail(400, "file_too_large", "Content too large (max 2MB).")
     base = os.path.join(os.path.realpath(folder), "")
+    bases = _bases(folder, cfg)
     try:
         full = os.path.realpath(os.path.join(base, path))
+        lexical = os.path.normpath(os.path.join(base, path))
     except OSError, ValueError:
-        return _fail(403, "outside_workspace", OUTSIDE)
-    if not full.startswith(base):
-        return _fail(403, "outside_workspace", OUTSIDE)
+        return _outside()
+    if not os.path.normcase(full).startswith(bases) and not (
+        cfg.follow_symlinks and os.path.normcase(lexical).startswith(bases)
+    ):
+        return _outside()
     if os.path.isdir(full):
         return _fail(400, "not_a_file", "Not a file.")
     try:
-        await asyncio.to_thread(_write_atomic, full, data)
+        existing = await asyncio.to_thread(_existing_bytes, full)
+        data, encoding = _encode(content, existing)
+    except UnicodeEncodeError:
+        return _fail(400, "invalid_content", "content must be valid text")
     except OSError as exc:
         return _disk_failure(exc)
-    return _ok({"success": True, "path": full})
+    if len(data) > cfg.max_file_kb * 1024:
+        return _size_refusal("Content", cfg.max_file_kb)
+    expected = body.get("expectedMtime")
+    if isinstance(expected, int) and not isinstance(expected, bool) and body.get("force") is not True:
+        if os.path.exists(full) and _mtime_ms(full) != expected:
+            return _fail(409, "stale_write", "The file changed on disk since you opened it.")
+    try:
+        await asyncio.to_thread(_write_atomic, full, data)
+        mtime = _mtime_ms(full)
+    except OSError as exc:
+        return _disk_failure(exc)
+    return _ok({"success": True, "path": full, "encoding": encoding, "mtime": mtime})
 
 
-async def create_path(workspace: str, params: dict[str, Any]) -> Reply:
+async def create_path(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
     """A new empty file or a new folder, mentiko's /api/fs/create. An existing path is a 409, never overwritten."""
+    cfg = _config(settings)
     body = params
     folder = _checked_workspace(workspace)
     if isinstance(folder, Reply):
@@ -326,12 +464,13 @@ async def create_path(workspace: str, params: dict[str, Any]) -> Reply:
     if kind not in ("file", "dir"):
         return _fail(400, "invalid_type", 'type must be "file" or "dir"')
     base = os.path.join(os.path.realpath(folder), "")
+    bases = _bases(folder, cfg)
     try:
         full = os.path.realpath(os.path.join(base, path))
     except OSError, ValueError:
-        return _fail(403, "outside_workspace", OUTSIDE)
-    if not full.startswith(base):
-        return _fail(403, "outside_workspace", OUTSIDE)
+        return _outside()
+    if not os.path.normcase(full).startswith(bases):
+        return _outside()
     if os.path.lexists(full):
         return _fail(409, "already_exists", "Path already exists.")
     try:
@@ -346,8 +485,9 @@ async def create_path(workspace: str, params: dict[str, Any]) -> Reply:
     return _ok({"success": True, "path": full})
 
 
-async def make_folder(workspace: str, params: dict[str, Any]) -> Reply:
+async def make_folder(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
     """A new folder inside ``parent``, mentiko's /api/fs/mkdir."""
+    cfg = _config(settings)
     body = params
     folder = _checked_workspace(workspace)
     if isinstance(folder, Reply):
@@ -359,12 +499,13 @@ async def make_folder(workspace: str, params: dict[str, Any]) -> Reply:
     if name in (".", "..") or "/" in name or "\\" in name or ".." in name or "\0" in name:
         return _fail(400, "invalid_name", "invalid folder name")
     base = os.path.join(os.path.realpath(folder), "")
+    bases = _bases(folder, cfg)
     try:
         full = os.path.realpath(os.path.join(base, parent, name))
     except OSError, ValueError:
-        return _fail(403, "outside_workspace", OUTSIDE)
-    if not full.startswith(base):
-        return _fail(403, "outside_workspace", OUTSIDE)
+        return _outside()
+    if not os.path.normcase(full).startswith(bases):
+        return _outside()
     if os.path.lexists(full):
         return _fail(409, "already_exists", "Folder already exists.")
     try:
@@ -374,8 +515,10 @@ async def make_folder(workspace: str, params: dict[str, Any]) -> Reply:
     return _ok({"path": full})
 
 
-async def rename_path(workspace: str, params: dict[str, Any]) -> Reply:
-    """Move or rename one path inside the workspace, mentiko's /api/fs/rename. The workspace root cannot move."""
+async def rename_path(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
+    """Move or rename one path inside the workspace or an extra root, mentiko's /api/fs/rename. The workspace root
+    cannot move."""
+    cfg = _config(settings)
     body = params
     folder = _checked_workspace(workspace)
     if isinstance(folder, Reply):
@@ -387,22 +530,24 @@ async def rename_path(workspace: str, params: dict[str, Any]) -> Reply:
     if not new_path or not isinstance(new_path, str):
         return _fail(400, "missing_param", "newPath is required")
     base = os.path.join(os.path.realpath(folder), "")
+    bases = _bases(folder, cfg)
+    source_outside = "The source path is outside the workspace."
     try:
         old_full = os.path.realpath(os.path.join(base, old_path))
     except OSError, ValueError:
-        return _fail(403, "outside_workspace", "The source path is outside the workspace.")
-    if not old_full.startswith(base):
-        if old_full + os.sep == base:
+        return _outside(source_outside)
+    if not os.path.normcase(old_full).startswith(bases):
+        if os.path.normcase(old_full) + os.sep == bases[0]:
             return _fail(403, "workspace_root", "Cannot rename the workspace root.")
-        return _fail(403, "outside_workspace", "The source path is outside the workspace.")
+        return _outside(source_outside)
     if not os.path.lexists(old_full):
         return _fail(404, "not_found", "Source path not found.")
     try:
         new_full = os.path.realpath(os.path.join(base, new_path))
     except OSError, ValueError:
-        return _fail(403, "outside_workspace", "The destination path is outside the workspace.")
-    if not new_full.startswith(base):
-        return _fail(403, "outside_workspace", "The destination path is outside the workspace.")
+        return _outside("The destination path is outside the workspace.")
+    if not os.path.normcase(new_full).startswith(bases):
+        return _outside("The destination path is outside the workspace.")
     if os.path.lexists(new_full):
         return _fail(409, "already_exists", "Destination path already exists.")
     try:
@@ -412,11 +557,12 @@ async def rename_path(workspace: str, params: dict[str, Any]) -> Reply:
     return _ok({"success": True, "path": new_full})
 
 
-async def delete_path(workspace: str, params: dict[str, Any]) -> Reply:
+async def delete_path(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
     """Remove one file or folder, mentiko's /api/fs/delete. A folder must be empty unless ``force`` is true.
 
     mentiko's route is a POST; the engine answers both verbs with this one handler so the ported callers keep working.
     """
+    cfg = _config(settings)
     body = params
     folder = _checked_workspace(workspace)
     if isinstance(folder, Reply):
@@ -425,14 +571,15 @@ async def delete_path(workspace: str, params: dict[str, Any]) -> Reply:
     if not path or not isinstance(path, str):
         return _fail(400, "missing_param", "path is required")
     base = os.path.join(os.path.realpath(folder), "")
+    bases = _bases(folder, cfg)
     try:
         full = os.path.realpath(os.path.join(base, path))
     except OSError, ValueError:
-        return _fail(403, "outside_workspace", OUTSIDE)
-    if not full.startswith(base):
-        if full + os.sep == base:
+        return _outside()
+    if not os.path.normcase(full).startswith(bases):
+        if os.path.normcase(full) + os.sep == bases[0]:
             return _fail(403, "workspace_root", "Cannot delete a workspace root.")
-        return _fail(403, "outside_workspace", OUTSIDE)
+        return _outside()
     if not os.path.lexists(full):
         return _fail(404, "not_found", "File not found.")
     try:
@@ -449,13 +596,14 @@ async def delete_path(workspace: str, params: dict[str, Any]) -> Reply:
     return _ok({"success": True})
 
 
-def search_files(workspace: str, params: dict[str, Any]) -> Reply:
+def search_files(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
     """Lines of text files that contain ``query`` as plain text, mentiko's /api/fs/search without its regex mode.
 
     A user-supplied regular expression is not run: Python's ``re`` has no time limit, so a pattern could hold the
-    engine for good. At most 200 results. Hidden, skipped and binary files are not read; neither are files over
-    1 MB or symlinks.
+    engine for good. At most 200 results. Binary files and files over 1 MB are not read, and neither is ``.git``;
+    hidden and skipped folders are read only when ``show_hidden`` is on, and symlinks only when ``follow_symlinks`` is.
     """
+    cfg = _config(settings)
     folder = _checked_workspace(workspace)
     if isinstance(folder, Reply):
         return folder
@@ -468,8 +616,8 @@ def search_files(workspace: str, params: dict[str, Any]) -> Reply:
         return _fail(400, "invalid_query", "query too long (max 200 chars)")
     root = os.path.realpath(folder)
     results: list[dict[str, Any]] = []
-    for path in _search_files(root):
-        text = _search_text(path)
+    for path in _search_files(root, cfg):
+        text = _search_text(path, cfg.follow_symlinks)
         if text is None:
             continue
         for number, line in enumerate(text.split("\n"), 1):
@@ -490,7 +638,7 @@ def search_files(workspace: str, params: dict[str, Any]) -> Reply:
     return _ok({"results": results})
 
 
-def git_status(workspace: str, params: dict[str, Any]) -> Reply:
+def git_status(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
     """The git status of the workspace as {path: code}, mentiko's /api/fs/git-status."""
     folder = _checked_workspace(workspace)
     if isinstance(folder, Reply):
@@ -537,11 +685,13 @@ OPS: dict[str, Any] = {
 }
 
 
-async def serve(op: str, workspace: str, params: dict[str, Any]) -> Reply:
-    """Run one file operation in the daemon's folder. Blocking ones run in a thread, off the daemon's event loop."""
+async def serve(op: str, workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
+    """Run one file operation in the daemon's folder with ``settings`` (None = defaults). Blocking ones run in a
+    thread, off the daemon's event loop."""
     handler = OPS.get(op)
     if handler is None:
         return _fail(404, "unknown_op", "That file operation is not available.")
+    cfg = _config(settings)
     if asyncio.iscoroutinefunction(handler):
-        return await handler(workspace, params)
-    return await asyncio.to_thread(handler, workspace, params)
+        return await handler(workspace, params, cfg)
+    return await asyncio.to_thread(handler, workspace, params, cfg)
