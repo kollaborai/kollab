@@ -162,13 +162,18 @@ async def _status(root: str, body: dict[str, Any]) -> dict[str, Any]:
     if len(counts) == 2 and all(count.isdigit() for count in counts):
         ahead, behind = int(counts[0]), int(counts[1])
     files: list[dict[str, Any]] = []
-    for line in (await _text(root, ["status", "--porcelain", "-u"])).split("\n"):
+    # Porcelain paths are relative to the repository's top; the workspace may be a folder inside it. Scope the
+    # status to the workspace and give back workspace-relative paths, the form stage, unstage and diff take.
+    prefix = (await _text(root, ["rev-parse", "--show-prefix"])).strip()
+    for line in (await _text(root, ["status", "--porcelain", "-u", "--", "."])).split("\n"):
         if not line:
             continue
         code = line[:2]
         index, worktree = code[:1], code[1:2]
         raw_path = line[3:]
         path = raw_path.split(" -> ")[1] if " -> " in raw_path else raw_path  # a rename reads "old -> new"
+        if prefix and path.startswith(prefix):
+            path = path[len(prefix) :]
         files.append(
             {
                 "path": path,
@@ -450,7 +455,7 @@ async def _unstage(root: str, body: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _stage_all(root: str, body: dict[str, Any]) -> dict[str, Any]:
-    await _write(root, ["add", "-A"])
+    await _write(root, ["add", "-A", "--", "."])  # the workspace only, not the whole repository
     return {"ok": True, "status": await _status(root, {})}
 
 

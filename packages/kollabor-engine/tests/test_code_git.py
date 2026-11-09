@@ -282,10 +282,10 @@ async def test_a_path_from_a_subfolder_status_can_be_staged_and_diffed(client, s
     workspace = str(subfolder.app)
     await client.post("/code/git", json={"action": "stage", "workspace": workspace, "paths": ["inside.txt"]})
 
-    staged = (await client.post("/code/git", json={"action": "status", "workspace": workspace})).json()["data"]["files"]
-    diff = (
-        await client.post("/code/git", json={"action": "diff", "workspace": workspace, "path": "inside.txt", "staged": True})
-    ).json()["data"]["diff"]
+    status = await client.post("/code/git", json={"action": "status", "workspace": workspace})
+    staged = status.json()["data"]["files"]
+    diff_body = {"action": "diff", "workspace": workspace, "path": "inside.txt", "staged": True}
+    diff = (await client.post("/code/git", json=diff_body)).json()["data"]["diff"]
 
     assert [(f["path"], f["staged"]) for f in staged] == [("inside.txt", True)]
     assert "+inside edited" in diff
@@ -295,8 +295,7 @@ async def test_a_path_from_a_subfolder_status_can_be_staged_and_diffed(client, s
 async def test_stage_all_in_a_subfolder_leaves_changes_outside_it_alone(client, subfolder):
     await client.post("/code/git", json={"action": "stage_all", "workspace": str(subfolder.app)})
 
-    cached = subprocess.run(
-        ["git", "-C", str(subfolder.repo), "diff", "--cached", "--name-only"], capture_output=True, text=True, check=True
-    ).stdout.split()
+    command = ["git", "-C", str(subfolder.repo), "diff", "--cached", "--name-only"]
+    cached = subprocess.run(command, capture_output=True, text=True, check=True).stdout.split()
 
     assert cached == ["app/inside.txt"]
