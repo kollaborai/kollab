@@ -40,6 +40,11 @@ posix_only = pytest.mark.skipif(
 )
 
 
+def _ps() -> dict[int, str]:
+    out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,command="], capture_output=True, text=True).stdout
+    return {int(a): b for a, b in (line.strip().split(None, 1) for line in out.splitlines() if line.strip())}
+
+
 def _record_last_background_pid(command: str, pids_file) -> str:
     """Record the exact PID started by one controlled shell command."""
     path = shlex.quote(str(pids_file))

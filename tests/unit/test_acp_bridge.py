@@ -15,7 +15,6 @@ from kollabor.llm import acp_bridge as bridge_mod
 from kollabor.llm.acp_bridge import ACPError, ACPPermissionBridge, ACPProfile, ACPRunner
 from tests.unit._owned_processes import (
     asyncio_child_signal_is_reap_serialized,
-    bounded_child_command,
     wait_for_recorded_identities,
 )
 
@@ -832,7 +831,7 @@ async def test_orphan_fixture_defers_cleanup_when_runner_close_raises(
     monkeypatch.setattr(sys.modules[__name__], "_cleanup_orphan_test", observe_cleanup)
     try:
         with pytest.raises(RuntimeError, match="injected close failure"):
-            await test_close_recovers_fast_detached_orphan_and_preserves_wrong_nonce_process(
+            await test_close_recovers_fast_detached_orphan_and_preserves_other_session_process(
                 tmp_path, "prompt", monkeypatch
             )
         assert len(captured_processes) >= 2  # adapter and independently spawned outsider
