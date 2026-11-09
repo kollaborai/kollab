@@ -71,8 +71,9 @@ export async function saveWorkspaceFile(
       return { ok: true };
     }
     const { code, message } = errorOf(raw);
-    return { ok: false, stale: code === "stale_write", message };
+    return { ok: false, stale: code === "stale_write", message: res.status >= 500
+      ? `${message} The save may have completed; check the file before retrying.` : message };
   } catch {
-    return { ok: false, stale: false, message: "save failed" };
+    return { ok: false, stale: false, message: "The save result is unknown; check the file before retrying." };
   }
 }

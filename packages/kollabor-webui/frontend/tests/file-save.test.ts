@@ -63,9 +63,18 @@ test("another failure is not stale", async () => {
   expect(result).toEqual({ ok: false, stale: false, message: "Read-only. Setting: kollabor.code.read_only" });
 });
 
-test("a network failure says save failed", async () => {
+test("a network failure reports an unknown save outcome", async () => {
   fetchMock.mockRejectedValue(new Error("down"));
-  expect(await saveWorkspaceFile("/w", "/w/a.txt", "x")).toEqual({ ok: false, stale: false, message: "save failed" });
+  expect(await saveWorkspaceFile("/w", "/w/a.txt", "x")).toEqual({
+    ok: false, stale: false, message: "The save result is unknown; check the file before retrying.",
+  });
+});
+
+test("a daemon failure warns that the save may have completed", async () => {
+  fetchMock.mockResolvedValue(reply(502, { success: false, error: { code: "daemon_unreachable", message: "No reply." } }));
+  const result = await saveWorkspaceFile("/w", "/w/a.txt", "x");
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.message).toContain("save may have completed");
 });
 
 

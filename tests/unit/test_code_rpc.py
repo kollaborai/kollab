@@ -193,3 +193,50 @@ def test_code_rpc_timeout_exceeds_git_push_and_status_budget(wire):
     remote, rpc, _, _ = wire
     run(remote.code_call("git", {"action": "status"}))
     assert rpc.last_timeout > PUSH_TIMEOUT + 10
+
+
+def test_bulk_code_rpc_allows_for_paced_remote_file_transfer(wire):
+    remote, rpc, _, _ = wire
+    run(remote.code_call("fs.file", {"path": "large.txt"}))
+    assert rpc.last_timeout >= 1200
+
+
+def test_code_rpc_deadline_includes_a_stalled_writer(wire, monkeypatch):
+    remote, rpc, _, _ = wire
+    remote._timeout = 0.01
+    remote.BULK_CODE_CALL_TIMEOUT = 0.01
+
+    async def stalled(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(rpc, "call", stalled)
+    with pytest.raises(TimeoutError):
+        run(remote.code_call("fs.write_file", {"path": "a", "content": "x"}))
+
+
+def test_code_rpc_timeout_releases_real_client_writer_lock():
+    from kollabor_rpc.client import RpcClient
+
+    class StalledWriter:
+        def __init__(self):
+            self.writes = 0
+
+        def write(self, data):
+            self.writes += 1
+
+        async def drain(self):
+            await asyncio.Event().wait()
+
+    async def exercise():
+        writer = StalledWriter()
+        rpc = RpcClient(writer)
+        remote = RemoteStateService(rpc)
+        remote._timeout = 0.01
+        remote.BULK_CODE_CALL_TIMEOUT = 0.01
+        for _ in range(2):
+            with pytest.raises(TimeoutError):
+                await remote.code_call("fs.write_file", {"path": "a", "content": "x"})
+            assert rpc.pending_count == 0
+        assert writer.writes == 2
+
+    run(exercise())
