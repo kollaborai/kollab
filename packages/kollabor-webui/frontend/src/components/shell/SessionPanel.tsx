@@ -494,8 +494,11 @@ export function SessionPanel({
         </Sheet>
       ) : open ? (
         // One column that scrolls as a whole when the window is short: the panel keeps its height, so no row is
-        // squeezed out of reach, and the card below it is reached by scrolling the column (#973).
-        <div className="m-2 ml-0 flex max-h-[calc(100%-1rem)] w-60 shrink-0 flex-col gap-2 self-start overflow-y-auto">
+        // squeezed out of reach, and the card below it is reached by scrolling the column (#973). A scroll box cuts
+        // off what is drawn outside its edge, so this one carries padding for the shadows (8px at the sides, 24px
+        // below) and the negative margin that leaves the panel and the card where they were: the column still
+        // takes 248px beside the chat, 240px of it the panel's own width.
+        <div className="mt-2 -ml-2 flex max-h-[calc(100%-0.5rem)] w-64 shrink-0 flex-col gap-2 self-start overflow-y-auto px-2 pb-6">
           <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground flex shrink-0 flex-col rounded-xl p-3 shadow-lg">
             {body(
               <TooltipIconButton tooltip="Hide Session Panel" side="left" className="text-muted-foreground size-7 shrink-0 p-1.5" onClick={() => toggle(false)}>
