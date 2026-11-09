@@ -3,6 +3,10 @@
 import asyncio
 import json
 import logging
+import os
+import shlex
+import signal
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -539,4 +543,112 @@ class TestAliasCompleteness:
 
     def test_all_kollabor_aliases_resolve(self):
         for name, expected_type in _KOLLAB_ALIASES.items():
-            assert isinstance(expected_type, EventType), f"{name} is not EventType"
+            assert isinstance(expected_type, EventType)
+
+
+class TestHookProcessReaping:
+    """A cancelled or timed-out hook must not leave its child running (#930).
+
+    Every case here starts a real isolated child (its own session, via the
+    loader's own _run_command) that writes its pid and sleeps, then proves
+    the child cannot continue.
+    """
+
+    CHILD_SCRIPT = (
+        "import os, sys, time\n"
+        "with open(sys.argv[1], 'w') as handle:\n"
+        "    handle.write(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+
+    async def _start_child(self, loader, pid_path):
+        command = f"{sys.executable} -c {shlex.quote(self.CHILD_SCRIPT)} {shlex.quote(str(pid_path))}"
+        task = asyncio.create_task(loader._run_command(command, "{}", timeout=30))
+        for _ in range(100):
+            if pid_path.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert pid_path.exists(), "child never wrote its pid"
+        return task, int(pid_path.read_text())
+
+    @staticmethod
+    async def _assert_gone(pid, deadline=8.0):
+        loop = asyncio.get_running_loop()
+        end = loop.time() + deadline
+        while loop.time() < end:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            await asyncio.sleep(0.1)
+        pytest.fail(f"hook child {pid} still running after cancellation")
+
+    @pytest.mark.asyncio
+    async def test_cancelled_hook_child_is_reaped(self, loader, tmp_path):
+        task, pid = await self._start_child(loader, tmp_path / "child.pid")
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        await self._assert_gone(pid)
+
+    @pytest.mark.asyncio
+    async def test_timed_out_hook_child_is_reaped(self, loader, tmp_path):
+        command = f"{sys.executable} -c {shlex.quote(self.CHILD_SCRIPT)} {shlex.quote(str(tmp_path / 'child.pid'))}"
+        task = asyncio.create_task(loader._run_command(command, "{}", timeout=1))
+        for _ in range(100):
+            if (tmp_path / "child.pid").exists():
+                break
+            await asyncio.sleep(0.05)
+        pid = int((tmp_path / "child.pid").read_text())
+
+        with pytest.raises(asyncio.TimeoutError):
+            await task
+
+        await self._assert_gone(pid)
+
+    @pytest.mark.asyncio
+    async def test_loader_shutdown_reaps_through_cleanup(self, loader, tmp_path):
+        task, pid = await self._start_child(loader, tmp_path / "child.pid")
+        loader._pending_tasks.add(task)
+
+        await asyncio.wait_for(loader.shutdown(), timeout=15)
+
+        assert task.done()
+        await self._assert_gone(pid)
+        assert loader._pending_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_repeated_shutdown_is_quiet(self, loader):
+        await loader.shutdown()
+        await loader.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_already_exited_child_counts_as_reaped(self, loader):
+        proc = await asyncio.create_subprocess_exec("true")
+        await proc.wait()
+
+        assert await ConfigHookLoader._reap_child(proc) is True
+
+    @pytest.mark.asyncio
+    async def test_cleanup_failure_is_reported_not_silent(
+        self, loader, tmp_path, caplog, monkeypatch
+    ):
+        async def refusing_reap(proc):
+            return False
+
+        monkeypatch.setattr(ConfigHookLoader, "_reap_child", staticmethod(refusing_reap))
+        pid_path = tmp_path / "child.pid"
+        task, pid = await self._start_child(loader, pid_path)
+        caplog.set_level(logging.WARNING)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        try:
+            assert "left its child running" in caplog.text
+        finally:
+            os.kill(pid, signal.SIGKILL)  # the stub refused; clean the child up here
+            await self._assert_gone(pid)
