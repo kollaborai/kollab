@@ -7,7 +7,7 @@ export function LearnDialog(props: ComponentProps<typeof LearnPage>) {
     <Dialog open onOpenChange={(open) => { if (!open) props.onExit(); }}>
       <DialogContent
         showCloseButton={false}
-        className="flex h-[min(40rem,80dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(64rem,calc(100%-2rem))]"
+        className="flex h-[min(48rem,88dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(64rem,calc(100%-2rem))]"
         onOpenAutoFocus={(event) => event.preventDefault()}
       >
         <DialogTitle className="sr-only">Learn</DialogTitle>

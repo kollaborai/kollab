@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { learnPhoneMediaPlugin } from "./scripts/learn-phone-media-plugin";
 import pkg from "./package.json";
 
 
@@ -80,6 +81,14 @@ export function buildIdentity(
 
 const BUILD_IDENTITY = buildIdentity();
 
+const phoneLearnMedia = (enabled: boolean) =>
+  learnPhoneMediaPlugin({
+    enabled,
+    topicsDir: path.resolve(frontendDir, "src/learn/topics"),
+    publicDir: path.resolve(frontendDir, "public"),
+  });
+
+
 const KOLLAB_CHANGELOG_MODULE = "virtual:kollab-changelog";
 const RESOLVED_KOLLAB_CHANGELOG_MODULE = `\0${KOLLAB_CHANGELOG_MODULE}`;
 
@@ -111,7 +120,7 @@ const PHONE_BUILDS: Record<string, { entry: string; name: string; plugins: Plugi
   "phone-app": {
     entry: "src/phonelink/app-main.tsx",
     name: "KollabPhoneApp",
-    plugins: [kollabCanonicalChangelogPlugin(), react(), tailwindcss()],
+    plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(true), react(), tailwindcss()],
   },
 };
 
@@ -144,7 +153,7 @@ export default defineConfig(({ mode }) => {
 });
 
 const mainConfig = defineConfig({
-  plugins: [kollabCanonicalChangelogPlugin(), react(), tailwindcss()],
+  plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(false), react(), tailwindcss()],
   base: "./",
   define: {
     __APP_VERSION__: __APP_VERSION__,
