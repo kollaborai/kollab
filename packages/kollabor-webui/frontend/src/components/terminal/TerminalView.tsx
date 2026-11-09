@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, PanelLeft, Plus, Terminal, X } from "lucide-react";
 
+import { DaemonNotice } from "@/components/code/DaemonNotice";
 import { FloatingFileSidebar, useFileSidebarVisibility } from "@/components/code/floating-sidebar";
 
 import { TerminalViewer } from "@/components/terminal/terminal-viewer";
+import {
+  DAEMON_OUTDATED_CODE,
+  envHiddenLabel,
+  envHiddenTitle,
+  shellName,
+  type TerminalEnvReport,
+} from "@/components/terminal/terminal-env";
 import { useTerminalWsConnection, type TerminalWsStatus } from "@/components/terminal/use-terminal-ws-connection";
 import { Button } from "@/components/ui/button";
+import { codeFetch, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 
 /** Terminal view: one tab per terminal session, and each tab owns one ws connection. */
@@ -21,12 +30,19 @@ interface TerminalTabState {
   generation: number;
 }
 
+/** What a tab tells the view about its connection: enough for the header and nothing more. */
+interface TerminalTabReport {
+  status: TerminalWsStatus;
+  reconnecting: boolean;
+  refusal: string | null;
+}
+
 interface TerminalTabProps {
   id: number;
   sessionId: string;
   workspace: string;
   active: boolean;
-  onStatus: (id: number, status: TerminalWsStatus) => void;
+  onReport: (id: number, report: TerminalTabReport) => void;
   /** Hands the panel the function that ends this tab's shell; null when the tab unmounts. */
   onRegister: (id: number, endSession: (() => void) | null) => void;
   onRetry: (id: number) => void;
@@ -37,13 +53,13 @@ interface TerminalTabProps {
  * disconnects: the shell keeps running on the server until the user closes the tab with its X.
  * Inactive tabs stay mounted so their sessions keep streaming while another tab is shown.
  */
-function TerminalTab({ id, sessionId, workspace, active, onStatus, onRegister, onRetry }: TerminalTabProps) {
+function TerminalTab({ id, sessionId, workspace, active, onReport, onRegister, onRetry }: TerminalTabProps) {
   const connection = useTerminalWsConnection({ sessionId, workspace });
-  const { status, errorMessage, close } = connection;
+  const { status, errorMessage, errorCode, reconnecting, refusal, close } = connection;
 
   useEffect(() => {
-    onStatus(id, status);
-  }, [id, onStatus, status]);
+    onReport(id, { status, reconnecting, refusal });
+  }, [id, onReport, status, reconnecting, refusal]);
 
   useEffect(() => {
     onRegister(id, close);
@@ -58,18 +74,24 @@ function TerminalTab({ id, sessionId, workspace, active, onStatus, onRegister, o
           {status === "connecting" && (
             <>
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-              <p className="text-xs text-muted-foreground">Connecting...</p>
+              <p className="text-xs text-muted-foreground" aria-live="polite">
+                {reconnecting ? "Reconnecting..." : "Connecting..."}
+              </p>
             </>
           )}
-          {(status === "closed" || status === "error") && (
-            <>
+          {status === "closed" && <p className="text-xs text-muted-foreground">Shell ended.</p>}
+          {status === "error" &&
+            (errorCode === DAEMON_OUTDATED_CODE ? (
+              <DaemonNotice />
+            ) : (
               <p className="text-xs text-muted-foreground">
-                {status === "closed" ? "Shell ended." : (errorMessage ?? "Could not reach the terminal server.")}
+                {errorMessage ?? "Could not reach the terminal server."}
               </p>
-              <Button type="button" variant="ghost" size="sm" onClick={() => onRetry(id)}>
-                Retry
-              </Button>
-            </>
+            ))}
+          {(status === "closed" || status === "error") && (
+            <Button type="button" variant="ghost" size="sm" onClick={() => onRetry(id)}>
+              Retry
+            </Button>
           )}
         </div>
       )}
@@ -77,16 +99,67 @@ function TerminalTab({ id, sessionId, workspace, active, onStatus, onRegister, o
   );
 }
 
+/** What the header reads once per session from the daemon. `sessionId` says which session it belongs to. */
+interface TerminalHeaderInfo {
+  sessionId: string;
+  shell: string;
+  env: TerminalEnvReport | null;
+}
+
+/** GET {session}/code/{path}. A failed read is null: the header just leaves that part out. */
+async function readCodeData<T>(path: string): Promise<T | null> {
+  try {
+    const res = await codeFetch(path);
+    if (!res.ok) return null;
+    return unwrapCodeData<T>(await res.json());
+  } catch {
+    return null;
+  }
+}
+
+/** The shell's configured path (settings) and the hidden-variable report (env). Both reads run together. */
+async function readTerminalHeader(): Promise<{ shell: string; env: TerminalEnvReport | null }> {
+  const [settings, env] = await Promise.all([
+    readCodeData<{ shell?: unknown }>("/code/settings"),
+    readCodeData<TerminalEnvReport>("/code/terminal/env"),
+  ]);
+  return { shell: typeof settings?.shell === "string" ? settings.shell : "", env };
+}
+
 export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
   const [tabs, setTabs] = useState<TerminalTabState[]>(() => [{ id: 1, generation: 0 }]);
   const [activeId, setActiveId] = useState(1);
-  const [statuses, setStatuses] = useState<Partial<Record<number, TerminalWsStatus>>>({});
+  const [reports, setReports] = useState<Partial<Record<number, TerminalTabReport>>>({});
+  const [header, setHeader] = useState<TerminalHeaderInfo | null>(null);
   const nextIdRef = useRef(2);
   // Each tab's end-session function. Closing or retrying a tab calls it; closing the panel does not.
   const sessionEndersRef = useRef(new Map<number, () => void>());
 
-  const reportStatus = useCallback((id: number, next: TerminalWsStatus) => {
-    setStatuses((current) => (current[id] === next ? current : { ...current, [id]: next }));
+  // Read once per mount and per session. setCodeSession first: codeFetch resolves the session from it.
+  useEffect(() => {
+    let current = true;
+    setCodeSession(sessionId);
+    void readTerminalHeader().then((info) => {
+      if (current) setHeader({ sessionId, ...info });
+    });
+    return () => {
+      current = false;
+    };
+  }, [sessionId]);
+
+  const reportTab = useCallback((id: number, next: TerminalTabReport) => {
+    setReports((current) => {
+      const prev = current[id];
+      if (
+        prev &&
+        prev.status === next.status &&
+        prev.reconnecting === next.reconnecting &&
+        prev.refusal === next.refusal
+      ) {
+        return current;
+      }
+      return { ...current, [id]: next };
+    });
   }, []);
 
   const registerTab = useCallback((id: number, endSession: (() => void) | null) => {
@@ -123,11 +196,17 @@ export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
   };
 
   const activeTab = tabs.find((tab) => tab.id === activeId);
+  const activeReport = activeTab ? reports[activeTab.id] : undefined;
   // With no tab open there is no session, so the window reads "closed".
-  const activeStatus: TerminalWsStatus = activeTab ? (statuses[activeTab.id] ?? "connecting") : "closed";
+  const activeStatus: TerminalWsStatus = activeTab ? (activeReport?.status ?? "connecting") : "closed";
 
   const sidebar = useFileSidebarVisibility();
   const folderLabel = workspace.split("/").filter(Boolean).slice(-2).join("/");
+  // A header read that belongs to another session (the view moved) is not shown.
+  const info = header?.sessionId === sessionId ? header : null;
+  const shell = shellName(info?.shell ?? "");
+  const envLabel = envHiddenLabel(info?.env ?? null);
+  const envTitle = envHiddenTitle(info?.env ?? null);
 
   return (
     <div
@@ -153,6 +232,24 @@ export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
         <span className="min-w-0 truncate">
           Terminal <span className="font-mono text-[10px] font-normal text-muted-foreground">{folderLabel}</span>
         </span>
+        {shell && (
+          <span className="shrink-0 font-mono text-[10px] font-normal text-muted-foreground">{shell}</span>
+        )}
+        {envLabel && (
+          <span className="shrink-0 text-[10px] font-normal text-muted-foreground" title={envTitle}>
+            {envLabel}
+          </span>
+        )}
+        {activeReport?.reconnecting && (
+          <span className="shrink-0 text-[10px] font-normal text-muted-foreground" aria-live="polite">
+            Reconnecting
+          </span>
+        )}
+        {activeReport?.refusal && (
+          <span className="min-w-0 truncate text-[10px] font-normal text-muted-foreground" title={activeReport.refusal}>
+            {activeReport.refusal}
+          </span>
+        )}
       </div>
       <div className="relative flex min-h-0 flex-1 gap-2 overflow-hidden p-2">
         <FloatingFileSidebar visible={sidebar.visible} narrow={sidebar.narrow}>
@@ -173,7 +270,7 @@ export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
             {tabs.map((tab, index) => {
               const label = `Terminal ${index + 1}`;
               const isActive = tab.id === activeId;
-              const status = statuses[tab.id] ?? "connecting";
+              const status = reports[tab.id]?.status ?? "connecting";
               return (
                 <div
                   key={tab.id}
@@ -222,7 +319,7 @@ export function TerminalView({ sessionId, workspace }: TerminalViewProps) {
               sessionId={sessionId}
               workspace={workspace}
               active={tab.id === activeId}
-              onStatus={reportStatus}
+              onReport={reportTab}
               onRegister={registerTab}
               onRetry={retryTab}
             />

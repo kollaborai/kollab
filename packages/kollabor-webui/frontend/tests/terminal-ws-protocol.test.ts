@@ -2,6 +2,8 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import {
   createTerminalWsClient,
+  parseServerMessage,
+  type TerminalWsDetail,
   type TerminalWsState,
 } from "../src/components/terminal/use-terminal-ws-connection";
 
@@ -72,12 +74,16 @@ async function settle(): Promise<void> {
 
 function start() {
   const states: TerminalWsState[] = [];
+  const details: TerminalWsDetail[] = [];
   const outputs: string[] = [];
   const client = createTerminalWsClient({
     engineSessionId: "sess-a",
     cols: 80,
     rows: 24,
-    onState: (state) => states.push(state),
+    onState: (state, detail) => {
+      states.push(state);
+      details.push(detail);
+    },
     onOutput: (data) => outputs.push(data),
     onExit: () => undefined,
   });
@@ -85,8 +91,12 @@ function start() {
     client,
     outputs,
     state: (): TerminalWsState => states[states.length - 1],
+    detail: (): TerminalWsDetail => details[details.length - 1],
   };
 }
+
+const OUTDATED = "This agent runs older code. Restart it to use Code, Git and Terminal.";
+const REFUSAL = "Read only is on for this agent. Setting: kollabor.code.read_only";
 
 beforeEach(() => {
   FakeWebSocket.sockets = [];
@@ -175,4 +185,95 @@ test("close ends the shell on the server; dispose only drops the socket", async 
   kept.client.dispose();
   expect(sentTypes(keptSocket)).not.toContain("close");
   expect(keptSocket.closedWith).toBe(1000);
+});
+
+test("parseServerMessage keeps an error's code and sets it to null when there is none", () => {
+  expect(parseServerMessage(JSON.stringify({ type: "error", message: OUTDATED, code: "daemon_outdated" }))).toEqual({
+    type: "error",
+    message: OUTDATED,
+    code: "daemon_outdated",
+  });
+  expect(parseServerMessage(JSON.stringify({ type: "error", message: REFUSAL }))).toEqual({
+    type: "error",
+    message: REFUSAL,
+    code: null,
+  });
+  expect(parseServerMessage(JSON.stringify({ type: "error", message: "x", code: 7 }))).toEqual({
+    type: "error",
+    message: "x",
+    code: null,
+  });
+  expect(parseServerMessage(JSON.stringify({ type: "error", message: "" }))).toEqual({
+    type: "error",
+    message: "The terminal server refused the request.",
+    code: null,
+  });
+});
+
+test("an old daemon's refused open reports daemon_outdated and never reconnects", async () => {
+  const { state, detail } = start();
+  await settle();
+  const socket = lastSocket();
+  socket.serverOpen();
+  socket.serverSend({ type: "error", message: OUTDATED, code: "daemon_outdated" });
+  expect(state()).toEqual({ status: "error", sessionId: null, errorMessage: OUTDATED });
+  expect(detail()).toEqual({ errorCode: "daemon_outdated", reconnecting: false, refusal: null });
+  expect(socket.closedWith).toBe(1000);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(FakeWebSocket.sockets).toHaveLength(1);
+});
+
+test("reconnecting is on from a dropped socket's retry until ready arrives again", async () => {
+  const { detail } = start();
+  await settle();
+  const first = lastSocket();
+  first.serverOpen();
+  first.serverSend({ type: "ready", sessionId: "sess-1" });
+  expect(detail().reconnecting).toBe(false);
+  first.serverClose(1006);
+  expect(detail().reconnecting).toBe(true);
+  await vi.advanceTimersByTimeAsync(1000);
+  await settle();
+  const second = lastSocket();
+  second.serverOpen();
+  expect(detail().reconnecting).toBe(true);
+  second.serverSend({ type: "ready", sessionId: "sess-1" });
+  expect(detail()).toEqual({ errorCode: null, reconnecting: false, refusal: null });
+});
+
+test("reconnecting turns off when the retries run out", async () => {
+  const { state, detail } = start();
+  await settle();
+  const first = lastSocket();
+  first.serverOpen();
+  first.serverSend({ type: "ready", sessionId: "sess-1" });
+  first.serverClose(1006);
+  for (let i = 0; i < 10 && state().status !== "error"; i += 1) {
+    await vi.advanceTimersByTimeAsync(4000);
+    await settle();
+    if (state().status === "error") break;
+    lastSocket().serverClose(1006);
+  }
+  expect(state().status).toBe("error");
+  expect(state().errorMessage).toBe("Lost the connection to the terminal server.");
+  expect(detail()).toEqual({ errorCode: null, reconnecting: false, refusal: null });
+});
+
+test("a refusal while attached keeps the status and is cleared by the next ready", async () => {
+  const { state, detail } = start();
+  await settle();
+  const socket = lastSocket();
+  socket.serverOpen();
+  socket.serverSend({ type: "ready", sessionId: "sess-1" });
+  socket.serverSend({ type: "error", message: REFUSAL });
+  expect(state().status).toBe("attached");
+  expect(detail().refusal).toBe(REFUSAL);
+  expect(socket.closedWith).toBeNull();
+  socket.serverClose(1006);
+  await vi.advanceTimersByTimeAsync(1000);
+  await settle();
+  const second = lastSocket();
+  second.serverOpen();
+  second.serverSend({ type: "ready", sessionId: "sess-1" });
+  expect(detail().refusal).toBeNull();
 });

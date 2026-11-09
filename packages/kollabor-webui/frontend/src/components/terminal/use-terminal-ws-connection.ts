@@ -17,12 +17,22 @@ export interface TerminalWsState {
   errorMessage: string | null;
 }
 
+/** What the header and overlay need beyond status. Reported with every state change, never alone. */
+export interface TerminalWsDetail {
+  /** The `code` of the server error that set status "error" (e.g. "daemon_outdated"); null otherwise. */
+  errorCode: string | null;
+  /** True from a dropped socket's scheduled retry until `ready` arrives again or the retries run out. */
+  reconnecting: boolean;
+  /** The last error the server sent while the shell was attached (a refused input or size). Cleared by the next `ready`. */
+  refusal: string | null;
+}
+
 export interface TerminalInputMessage {
   type: "input";
   data: string;
 }
 
-export interface TerminalWsConnection extends TerminalWsState {
+export interface TerminalWsConnection extends TerminalWsState, TerminalWsDetail {
   /** Sends keystrokes. Dropped unless status is "attached". */
   send: (msg: TerminalInputMessage) => void;
   /** Sets the shell size. Sent at once when attached; otherwise it goes out with the next `ready`. */
@@ -52,7 +62,7 @@ export interface TerminalWsClientOptions {
   engineSessionId: string;
   cols: number;
   rows: number;
-  onState: (state: TerminalWsState) => void;
+  onState: (state: TerminalWsState, detail: TerminalWsDetail) => void;
   onOutput: (data: string) => void;
   onExit: () => void;
 }
@@ -75,13 +85,13 @@ const SOCKET_OPEN = 1;
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
-type ServerMessage =
+export type ServerMessage =
   | { type: "ready"; sessionId: string }
   | { type: "output"; data: string }
   | { type: "exit" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; code: string | null };
 
-function parseServerMessage(raw: string): ServerMessage | null {
+export function parseServerMessage(raw: string): ServerMessage | null {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -104,6 +114,7 @@ function parseServerMessage(raw: string): ServerMessage | null {
           typeof record.message === "string" && record.message
             ? record.message
             : "The terminal server refused the request.",
+        code: typeof record.code === "string" && record.code ? record.code : null,
       };
     default:
       return null;
@@ -122,11 +133,17 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
   let sessionId: string | null = null;
   let attempts = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let reconnecting = false;
+  let refusal: string | null = null;
   // Set by close() or dispose(): nothing connects, reports or forwards after this.
   let ended = false;
 
-  function publish(status: TerminalWsStatus, errorMessage: string | null = null): void {
-    onState({ status, sessionId, errorMessage });
+  function publish(
+    status: TerminalWsStatus,
+    errorMessage: string | null = null,
+    errorCode: string | null = null,
+  ): void {
+    onState({ status, sessionId, errorMessage }, { errorCode, reconnecting, refusal });
   }
 
   // The socket is no longer this client's: it closed, or this client ended it.
@@ -139,11 +156,13 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
     if (ended) return;
     if (attempts >= MAX_RECONNECT_TRIES) {
       sessionId = null;
+      reconnecting = false;
       publish("error", "Lost the connection to the terminal server.");
       return;
     }
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** attempts, RECONNECT_MAX_MS);
     attempts += 1;
+    reconnecting = true;
     publish("connecting");
     timer = setTimeout(() => {
       timer = undefined;
@@ -192,6 +211,8 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
         case "ready":
           attempts = 0;
           ready = true;
+          reconnecting = false;
+          refusal = null;
           sessionId = message.sessionId;
           publish("attached");
           // A resize made between `open` and `ready` never reached the server.
@@ -200,19 +221,26 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
         case "exit":
           // The shell is over: nothing to resume and nothing to reconnect to.
           sessionId = null;
+          reconnecting = false;
           release(ws);
           publish("closed");
           ws.close(NORMAL_CLOSE_CODE);
           onExit();
           return;
         case "error":
-          // Refused input or size while attached: the shell is still there.
-          if (ready) return;
-          // The server refused the open itself (bad folder, too many terminals, a session id that is gone).
-          // It leaves the socket open, so end it here; retrying is the user's call.
+          // Refused input or size while attached: the shell is still there, so the status stays and the
+          // refusal (which names its setting) is kept for the view.
+          if (ready) {
+            refusal = message.message;
+            publish("attached");
+            return;
+          }
+          // The server refused the open itself (bad folder, too many terminals, a session id that is gone,
+          // an old daemon). It leaves the socket open, so end it here; retrying is the user's call.
           sessionId = null;
+          reconnecting = false;
           release(ws);
-          publish("error", message.message);
+          publish("error", message.message, message.code);
           ws.close(NORMAL_CLOSE_CODE);
           return;
       }
@@ -224,6 +252,7 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
       if (event.code === AUTH_FAILED_CLOSE_CODE) {
         // The same token would be rejected again, so do not retry.
         sessionId = null;
+        reconnecting = false;
         publish("error", "The engine rejected the terminal token.");
         return;
       }
@@ -244,6 +273,7 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
       ws.close(NORMAL_CLOSE_CODE);
     }
     sessionId = null;
+    reconnecting = false;
     publish("closed");
   }
 
@@ -276,10 +306,13 @@ export function useTerminalWsConnection({
   rows = DEFAULT_ROWS,
   enabled = true,
 }: UseTerminalWsConnectionOptions): TerminalWsConnection {
-  const [state, setState] = useState<TerminalWsState>(() => ({
+  const [state, setState] = useState<TerminalWsState & TerminalWsDetail>(() => ({
     status: enabled ? "connecting" : "closed",
     sessionId: null,
     errorMessage: null,
+    errorCode: null,
+    reconnecting: false,
+    refusal: null,
   }));
   // Listeners live here, not in the client, so a view can subscribe before the socket exists.
   const [outputListeners] = useState(() => new Set<(data: string) => void>());
@@ -295,7 +328,7 @@ export function useTerminalWsConnection({
       engineSessionId,
       cols: sizeRef.current.cols,
       rows: sizeRef.current.rows,
-      onState: setState,
+      onState: (next, detail) => setState({ ...next, ...detail }),
       onOutput: (data) => {
         for (const listener of outputListeners) listener(data);
       },

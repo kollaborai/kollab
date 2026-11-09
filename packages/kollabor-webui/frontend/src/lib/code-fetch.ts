@@ -15,6 +15,9 @@ import { EngineApi } from "@/api";
  */
 const api = new EngineApi();
 
+/** Shown in place of the error when a session's daemon predates Code, Git and Terminal. No version or code in it. */
+export const OUTDATED_NOTICE = "This agent runs older code. Restart it to use Code, Git and Terminal.";
+
 // The session the open Code Editor view belongs to. One view is shown at a time and it sets this while it renders,
 // before any of its children fetch, so the many call sites keep mentiko's single-argument codeFetch.
 let activeCodeSession = "";
