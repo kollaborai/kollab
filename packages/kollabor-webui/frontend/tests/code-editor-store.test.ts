@@ -137,6 +137,21 @@ test("editing marks a tab dirty, and saving clears it", () => {
   expect(isDirty(fileState("a.ts"))).toBe(false);
 });
 
+test("opening a file that has unsaved edits keeps those edits, in every pane that shows it", () => {
+  openPinned(PANE, "a.ts");
+  store().updateContent("a.ts", "my unsaved edit");
+  store().splitRight(PANE);
+  const second = store().activePaneId;
+
+  // quick open, search and the file tree open a path with empty content first, then fill it from disk
+  store().openFile(second, "a.ts", "a.ts", "ts", "");
+  store().openFile(second, "a.ts", "a.ts", "ts", "disk text");
+
+  expect(fileState("a.ts").content).toBe("my unsaved edit");
+  expect(isDirty(fileState("a.ts"))).toBe(true);
+  expect(paneState(second).openPaths).toContain("a.ts");
+});
+
 test("the layout written to localStorage holds tab paths only, never file contents", () => {
   store().openFile(PANE, "src/secret.ts", "secret.ts", "ts", "TOP-SECRET-BODY");
   const raw = must(storage.get(CODE_EDITOR_LAYOUT_KEY), "saved layout");
