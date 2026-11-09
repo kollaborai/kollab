@@ -197,3 +197,27 @@ def test_pex_gets_bare_wheel_names_from_the_wheels_folder(tmp_path: Path, monkey
     assert binary == out / build_binary.binary_filename()
     assert binary.read_bytes() == b"scie"
     assert binary.with_name(binary.name + ".sha256").read_text() == "sum"
+
+
+def test_run_retrying_recovers_from_a_transient_failure() -> None:
+    calls: list[list[str]] = []
+
+    def flaky(cmd: list[str], **_: Any) -> subprocess.CompletedProcess:
+        calls.append(cmd)
+        if len(calls) < 3:
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    with patch.object(build_binary, "run", flaky), patch.object(build_binary.time, "sleep"):
+        assert build_binary.run_retrying(["pex"], attempts=3).returncode == 0
+    assert len(calls) == 3
+
+
+def test_run_retrying_raises_after_the_last_attempt() -> None:
+    def broken(cmd: list[str], **_: Any) -> subprocess.CompletedProcess:
+        raise subprocess.CalledProcessError(1, cmd)
+
+    with patch.object(build_binary, "run", broken), patch.object(build_binary.time, "sleep") as nap:
+        with pytest.raises(subprocess.CalledProcessError):
+            build_binary.run_retrying(["pex"], attempts=2)
+    assert nap.call_count == 1

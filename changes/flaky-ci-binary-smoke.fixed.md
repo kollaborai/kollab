@@ -1,0 +1,1 @@
+- The CI binary build tries its download step up to three times, so a gateway timeout from the package host no longer fails it (flaky-ci-binary-smoke).

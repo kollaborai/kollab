@@ -77,6 +77,20 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kwargs)
 
 
+def run_retrying(cmd: list[str], attempts: int = 3, delay: float = 15.0, **kwargs) -> subprocess.CompletedProcess:
+    """`run`, trying again when it fails: the pex step downloads the portable CPython and
+    wheels, and a 504 from the host (seen in CI) fails a build that passes on the next try."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return run(cmd, **kwargs)
+        except subprocess.CalledProcessError:
+            if attempt == attempts:
+                raise
+            print(f"build step failed (try {attempt} of {attempts}); retrying in {delay:.0f}s", flush=True)
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
 def kollab_version(wheels: list[Path]) -> str:
     for wheel in wheels:
         match = re.fullmatch(r"kollab-([^-]+)-.+\.whl", wheel.name)
@@ -215,7 +229,7 @@ def build(wheels: list[Path], out: Path, scratch: Path) -> Path:
     # relative to that folder, which Windows refuses across drives, so the scie is
     # written there and then moved to out.
     folder = wheels[0].parent
-    run(
+    run_retrying(
         [
             *UVX_PEX, "pex",
             *(wheel.name for wheel in wheels),
