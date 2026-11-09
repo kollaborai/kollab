@@ -1,12 +1,29 @@
 import { refreshesOnEvent, tracksStreamedRequest } from "./live-follow";
 import type { SessionEvent } from "./api";
 import { createHistoryReconciliation } from "./history-reconciliation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { ComposerKeeper } from "./components/assistant-ui/composer-keeper";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
+
+// Monaco and xterm are large: each view loads the first time it is opened, not with the main bundle.
+const CodeEditorView = lazy(() =>
+  import("./components/code/CodeEditorView").then((m) => ({ default: m.CodeEditorView })),
+);
+const TerminalView = lazy(() =>
+  import("./components/terminal/TerminalView").then((m) => ({ default: m.TerminalView })),
+);
+
+function ViewLoading() {
+  return (
+    <div className="text-muted-foreground flex flex-1 items-center justify-center gap-2 text-xs">
+      <Loader2 className="size-4 animate-spin" />
+      Loading
+    </div>
+  );
+}
 import { AppsDialog } from "@/components/apps/AppsDialog";
 import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
 import type { StreamEvent } from "@/supervisor-alerts";
@@ -95,7 +112,6 @@ import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
 import { startingChoice } from "@/components/shell/starting-choice";
 import { LearnDialog } from "@/components/learn/LearnDialog";
-import { FloatingShellHost } from "@/components/code/FloatingShellHost";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";
 import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
@@ -207,6 +223,27 @@ function RuntimeShell({
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
   const [panelSheetOpen, setPanelSheetOpen] = useState(false);
+  const workspace = session.workspace ?? "";
+  // Code Editor and Terminal work in the chat's folder; a chat without one shows Chat.
+  const shown: SessionView = !workspace && (view === "code" || view === "terminal") ? "chat" : view;
+  const [visited, setVisited] = useState({ code: false, terminal: false });
+  useEffect(() => {
+    if (shown === "code" || shown === "terminal") {
+      setVisited((seen) => (seen[shown] ? seen : { ...seen, [shown]: true }));
+    }
+  }, [shown]);
+  // Ctrl+` opens the terminal, and a second press goes back to Chat.
+  useEffect(() => {
+    if (!workspace) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === "`") {
+        event.preventDefault();
+        setView(shown === "terminal" ? "chat" : "terminal");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [workspace, shown, setView]);
   // An agent on another computer reads @names in that computer's mesh.
   // The #158 signature also narrows by network/workspace once rows carry them;
   // rows without those fields (pre-aggregate engines) ignore the filters.
@@ -315,7 +352,7 @@ function RuntimeShell({
           )}
           <SupervisorAlertBanner events={supervisorEvents} />
           <div className="flex min-h-0 flex-1 flex-col">
-            {view === "chat" ? (
+            {shown === "chat" ? (
               <Thread
                 agents={targets.agents}
                 commands={commands}
@@ -336,9 +373,24 @@ function RuntimeShell({
                 onRetryHistory={onRetryHistory}
                 historyStartIndex={historyStartIndex}
               />
-            ) : (
+            ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
-            )}
+            ) : null}
+            {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
+            {workspace && visited.code ? (
+              <div className={shown === "code" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+                <Suspense fallback={<ViewLoading />}>
+                  <CodeEditorView workspace={workspace} />
+                </Suspense>
+              </div>
+            ) : null}
+            {workspace && visited.terminal ? (
+              <div className={shown === "terminal" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+                <Suspense fallback={<ViewLoading />}>
+                  <TerminalView workspace={workspace} />
+                </Suspense>
+              </div>
+            ) : null}
           </div>
         </div>
         <SessionPanel
@@ -1949,7 +2001,6 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           </div>
         </SidebarInset>
       </SidebarProvider>
-      <FloatingShellHost workspace={activeSession?.workspace ?? null} />
       </AvatarImageProvider>
     </GemAppearanceProvider>
   );

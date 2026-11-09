@@ -1,4 +1,4 @@
-"""Files for the floating code editor: the engine's port of mentiko's /api/fs/* routes.
+"""Files for the code editor view: the engine's port of mentiko's /api/fs/* routes.
 
 Spec: docs/specs/floating-code-shell.md. Request and response shapes are mentiko's, inside the spec envelope:
 success is {"success": true, "data": ...}; a failure is a non-2xx {"success": false, "error": {"code", "message"}}.

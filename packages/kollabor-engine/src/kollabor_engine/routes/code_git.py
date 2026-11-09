@@ -1,4 +1,4 @@
-"""Git for the floating code panel: the engine's git API, part 1 (the read actions).
+"""Git for the code editor view: the engine's git API, part 1 (the read actions).
 
 One POST route takes ``{"action": ..., "workspace": ..., ...}`` and dispatches to a handler in ``ACTIONS``, so later
 actions only add entries there. A GET route answers the three read actions that take no body. Request and response

@@ -1,4 +1,4 @@
-"""The engine's git API for the floating code panel, part 1: the read actions and the checks around them.
+"""The engine's git API for the code editor view, part 1: the read actions and the checks around them.
 
 Covers the envelope and failure codes of docs/specs/floating-code-shell.md, the folder rule on ``workspace``, and the
 refusals in routes/code_git.py: option-like values, control characters, and paths that leave the workspace.

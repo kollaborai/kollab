@@ -1,20 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Plus, Terminal, X } from "lucide-react";
 
-import { FloatingWindowManager } from "@/components/code/floating-window-manager";
 import { TerminalViewer } from "@/components/terminal/terminal-viewer";
 import { useTerminalWsConnection, type TerminalWsStatus } from "@/components/terminal/use-terminal-ws-connection";
 import { Button } from "@/components/ui/button";
-import { FLOATING_SURFACE_Z } from "@/lib/floating-surface-z";
 import { cn } from "@/lib/utils";
 
-/** Floating terminal window: one tab per terminal session, and each tab owns one ws connection. */
-export interface FloatingTerminalPanelProps {
+/** Terminal view: one tab per terminal session, and each tab owns one ws connection. */
+export interface TerminalViewProps {
   workspace: string;
-  onClose: () => void;
 }
-
-const STORAGE_KEY = "kollab:floating-terminal-geometry:v1";
 
 interface TerminalTabState {
   id: number;
@@ -77,7 +72,7 @@ function TerminalTab({ id, workspace, active, onStatus, onRegister, onRetry }: T
   );
 }
 
-export function FloatingTerminalPanel({ workspace, onClose }: FloatingTerminalPanelProps) {
+export function TerminalView({ workspace }: TerminalViewProps) {
   const [tabs, setTabs] = useState<TerminalTabState[]>(() => [{ id: 1, generation: 0 }]);
   const [activeId, setActiveId] = useState(1);
   const [statuses, setStatuses] = useState<Partial<Record<number, TerminalWsStatus>>>({});
@@ -175,13 +170,12 @@ export function FloatingTerminalPanel({ workspace, onClose }: FloatingTerminalPa
   );
 
   return (
-    <FloatingWindowManager
-      storageKey={STORAGE_KEY}
-      zIndex={FLOATING_SURFACE_Z.terminalPanel}
-      title={tabStrip}
-      onClose={onClose}
-      dataAttr={{ "data-floating-terminal-panel": "", "data-status": activeStatus }}
+    <div
+      className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      data-terminal-view=""
+      data-status={activeStatus}
     >
+      <div className="shrink-0 px-3 py-1.5">{tabStrip}</div>
       <div className="relative min-h-0 flex-1 overflow-hidden">
         {tabs.map((tab) => (
           <TerminalTab
@@ -203,6 +197,6 @@ export function FloatingTerminalPanel({ workspace, onClose }: FloatingTerminalPa
           </div>
         )}
       </div>
-    </FloatingWindowManager>
+    </div>
   );
 }

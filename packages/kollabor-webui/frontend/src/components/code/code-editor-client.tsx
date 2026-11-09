@@ -8,7 +8,7 @@ import "@/components/code/monaco-setup";
 
 /**
  * Monaco editor surface for one workspace folder: the tabbed, split editor panes and the cmd+p quick
- * open that opens files into them. The sidebar, git panel and search are composed by FloatingCodePanel.
+ * open that opens files into them. The sidebar, git panel and search are composed by CodeEditorView.
  */
 export function CodeEditorClient({ workspace }: { workspace: string }) {
   const [quickOpenVisible, setQuickOpenVisible] = useState(false);

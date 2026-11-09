@@ -14,7 +14,6 @@ import {
 import { ChevronsDownUp, FilePlus, Folder, FolderOpen, FolderPlus, Loader2, LocateFixed } from "lucide-react";
 import { useEditorStore } from "@/components/code/editor-store";
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
-import { FLOATING_SURFACE_Z } from "@/lib/floating-surface-z";
 import { cn } from "@/lib/utils";
 import {
   ContextMenu,
@@ -696,7 +695,6 @@ function NodeMenu({ node, children }: { node: FileNode; children: ReactElement }
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
       <ContextMenuContent
         data-editor-overlay
-        style={{ zIndex: FLOATING_SURFACE_Z.terminalPanel + 1 }}
         // rename and create focus their input on the next frame; the menu must not hand focus back to the row first
         onCloseAutoFocus={(event) => event.preventDefault()}
       >

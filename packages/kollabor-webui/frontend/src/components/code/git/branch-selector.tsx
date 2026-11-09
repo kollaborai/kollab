@@ -11,7 +11,6 @@ import {
   X,
 } from "lucide-react";
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
-import { FLOATING_SURFACE_Z } from "@/lib/floating-surface-z";
 import { cn } from "@/lib/utils";
 import {
   AlertDialog,
@@ -268,7 +267,6 @@ export function BranchSelector({ workspace, onBranchSwitch }: BranchSelectorProp
         <DropdownMenuContent
           className="w-72"
           aria-label="Available branches"
-          style={{ zIndex: FLOATING_SURFACE_Z.codePanel + 1 }}
         >
           {error && (
             <div className="mx-1 mb-1 flex items-start justify-between gap-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[10px] text-destructive">
@@ -378,7 +376,7 @@ export function BranchSelector({ workspace, onBranchSwitch }: BranchSelectorProp
           if (!open && actionLoading === null) setShowDeleteConfirm(null);
         }}
       >
-        <AlertDialogContent size="sm" style={{ zIndex: FLOATING_SURFACE_Z.codePanel + 1 }}>
+        <AlertDialogContent size="sm">
           <AlertDialogHeader>
             <AlertDialogTitle>Delete branch?</AlertDialogTitle>
             <AlertDialogDescription>

@@ -1,25 +1,21 @@
-import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Files, Filter, GitBranch, PanelLeft, Search, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
-import { FLOATING_SURFACE_Z } from "@/lib/floating-surface-z";
 import { cn } from "@/lib/utils";
 import { EditorConfigPanel } from "@/components/code/editor-config";
 import { type FileData, useEditorStore } from "@/components/code/editor-store";
 import { FileTree } from "@/components/code/file-tree";
 import { FloatingFileSidebar, useFileSidebarVisibility } from "@/components/code/floating-sidebar";
-import { FloatingWindowManager } from "@/components/code/floating-window-manager";
 import { GitPanel } from "@/components/code/git/GitPanel";
 import { QuickOpen } from "@/components/code/quick-open";
 import { SearchPanel } from "@/components/code/search-panel";
 import { SplitContainer } from "@/components/code/split-container";
 
-export interface FloatingCodePanelProps {
+export interface CodeEditorViewProps {
   workspace: string;
-  onClose: () => void;
 }
 
-const GEOMETRY_KEY = "kollab:floating-code-geometry:v1";
 // the folder the saved editor tabs were opened in; a reload into another folder starts with no tabs
 const TABS_WORKSPACE_KEY = "kollab:code-editor-tabs-workspace:v1";
 
@@ -139,13 +135,14 @@ function SidebarToggle({
   );
 }
 
-/** The floating code editor window for one chat folder: file sidebar, split editor panes, quick open. */
-export function FloatingCodePanel({ workspace, onClose }: FloatingCodePanelProps) {
+/** The Code Editor view for one chat folder, docked in the chat column: file sidebar, split editor panes, quick open. */
+export function CodeEditorView({ workspace }: CodeEditorViewProps) {
   const sidebarView = useEditorStore((s) => s.sidebarView);
   const setSidebarView = useEditorStore((s) => s.setSidebarView);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [fileFilterOpen, setFileFilterOpen] = useState(false);
   const sidebar = useFileSidebarVisibility();
+  const rootRef = useRef<HTMLDivElement>(null);
 
   // tabs opened in another folder are dropped; the folder reaches each sibling as the `workspace` prop
   useEffect(() => {
@@ -186,6 +183,8 @@ export function FloatingCodePanel({ workspace, onClose }: FloatingCodePanelProps
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
+      // the view stays mounted while hidden behind Chat; its shortcuts only work while it shows
+      if (!rootRef.current || rootRef.current.offsetParent === null) return;
       if (e.key === "p") {
         e.preventDefault();
         setQuickOpenOpen((open) => !open);
@@ -198,7 +197,7 @@ export function FloatingCodePanel({ workspace, onClose }: FloatingCodePanelProps
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // Escape closes quick open first; the window closes only when no overlay is open
+  // Escape closes quick open
   const guardEscape = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     if (e.key !== "Escape" || !quickOpenOpen) return;
     e.preventDefault();
@@ -208,66 +207,55 @@ export function FloatingCodePanel({ workspace, onClose }: FloatingCodePanelProps
   const folderLabel = workspace.split("/").filter(Boolean).slice(-2).join("/");
 
   return (
-    <FloatingWindowManager
-      storageKey={GEOMETRY_KEY}
-      zIndex={FLOATING_SURFACE_Z.codePanel}
-      title={
-        <span className="flex min-w-0 items-center gap-1.5">
-          {sidebar.narrow && (
-            <span className="flex shrink-0">
-              <SidebarToggle label="Files sidebar" active={sidebar.visible} onClick={sidebar.toggle}>
-                <PanelLeft className="h-4 w-4" />
-              </SidebarToggle>
-            </span>
-          )}
-          <span className="min-w-0 truncate">
-            Code <span className="font-mono text-[10px] font-normal text-muted-foreground">{folderLabel}</span>
-          </span>
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col overflow-hidden" data-code-view="" onKeyDown={guardEscape}>
+      <div className="flex shrink-0 items-center gap-1.5 px-3 py-1.5 text-xs font-medium">
+        {sidebar.narrow && (
+          <SidebarToggle label="Files sidebar" active={sidebar.visible} onClick={sidebar.toggle}>
+            <PanelLeft className="h-4 w-4" />
+          </SidebarToggle>
+        )}
+        <span className="min-w-0 truncate">
+          Code <span className="font-mono text-[10px] font-normal text-muted-foreground">{folderLabel}</span>
         </span>
-      }
-      onClose={onClose}
-      dataAttr={{ "data-floating-code-panel": "" }}
-    >
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden" onKeyDown={guardEscape}>
-        <div className="relative flex min-h-0 flex-1 gap-2 overflow-hidden p-2">
-          <FloatingFileSidebar visible={sidebar.visible} narrow={sidebar.narrow}>
-            <div className="flex shrink-0 items-center gap-0.5 px-3 py-1">
-              <SidebarToggle label="Explorer" active={sidebarView === "files"} onClick={() => setSidebarView("files")}>
-                <Files className="h-4 w-4" />
-              </SidebarToggle>
-              <SidebarToggle label="Search" active={sidebarView === "search"} onClick={() => setSidebarView("search")}>
-                <Search className="h-4 w-4" />
-              </SidebarToggle>
-              <SidebarToggle label="Settings" active={sidebarView === "config"} onClick={() => setSidebarView("config")}>
-                <Settings className="h-4 w-4" />
-              </SidebarToggle>
-              <SidebarToggle label="Filter Files" active={fileFilterOpen} onClick={() => setFileFilterOpen((v) => !v)}>
-                <Filter className="h-4 w-4" />
-              </SidebarToggle>
-              <SidebarToggle label="Source Control" active={sidebarView === "git"} onClick={() => setSidebarView("git")}>
-                <GitBranch className="h-4 w-4" />
-              </SidebarToggle>
-            </div>
-
-            {sidebarView === "files" && <FileTree workspace={workspace} filterOpen={fileFilterOpen} />}
-            {sidebarView === "search" && <SearchPanel workspace={workspace} />}
-            {sidebarView === "config" && <EditorConfigPanel />}
-            {sidebarView === "git" && (
-              <GitPanel
-                workspace={workspace}
-                onOpenFile={(absPath) => void openFileInActivePane(workspace, absPath)}
-                onOpenDiff={(absPath, headContent) => void openDiffInActivePane(workspace, absPath, headContent)}
-              />
-            )}
-          </FloatingFileSidebar>
-
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-            <SplitContainer workspace={workspace} />
-          </div>
-        </div>
-
-        <QuickOpen open={quickOpenOpen} onClose={() => setQuickOpenOpen(false)} workspace={workspace} />
       </div>
-    </FloatingWindowManager>
+      <div className="relative flex min-h-0 flex-1 gap-2 overflow-hidden p-2">
+        <FloatingFileSidebar visible={sidebar.visible} narrow={sidebar.narrow}>
+          <div className="flex shrink-0 items-center gap-0.5 px-3 py-1">
+            <SidebarToggle label="Explorer" active={sidebarView === "files"} onClick={() => setSidebarView("files")}>
+              <Files className="h-4 w-4" />
+            </SidebarToggle>
+            <SidebarToggle label="Search" active={sidebarView === "search"} onClick={() => setSidebarView("search")}>
+              <Search className="h-4 w-4" />
+            </SidebarToggle>
+            <SidebarToggle label="Settings" active={sidebarView === "config"} onClick={() => setSidebarView("config")}>
+              <Settings className="h-4 w-4" />
+            </SidebarToggle>
+            <SidebarToggle label="Filter Files" active={fileFilterOpen} onClick={() => setFileFilterOpen((v) => !v)}>
+              <Filter className="h-4 w-4" />
+            </SidebarToggle>
+            <SidebarToggle label="Source Control" active={sidebarView === "git"} onClick={() => setSidebarView("git")}>
+              <GitBranch className="h-4 w-4" />
+            </SidebarToggle>
+          </div>
+
+          {sidebarView === "files" && <FileTree workspace={workspace} filterOpen={fileFilterOpen} />}
+          {sidebarView === "search" && <SearchPanel workspace={workspace} />}
+          {sidebarView === "config" && <EditorConfigPanel />}
+          {sidebarView === "git" && (
+            <GitPanel
+              workspace={workspace}
+              onOpenFile={(absPath) => void openFileInActivePane(workspace, absPath)}
+              onOpenDiff={(absPath, headContent) => void openDiffInActivePane(workspace, absPath, headContent)}
+            />
+          )}
+        </FloatingFileSidebar>
+
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <SplitContainer workspace={workspace} />
+        </div>
+      </div>
+
+      <QuickOpen open={quickOpenOpen} onClose={() => setQuickOpenOpen(false)} workspace={workspace} />
+    </div>
   );
 }
