@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Plus, Terminal, X } from "lucide-react";
+import { Loader2, PanelLeft, Plus, Terminal, X } from "lucide-react";
+
+import { FloatingFileSidebar, useFileSidebarVisibility } from "@/components/code/floating-sidebar";
 
 import { TerminalViewer } from "@/components/terminal/terminal-viewer";
 import { useTerminalWsConnection, type TerminalWsStatus } from "@/components/terminal/use-terminal-ws-connection";
@@ -121,53 +123,8 @@ export function TerminalView({ workspace }: TerminalViewProps) {
   // With no tab open there is no session, so the window reads "closed".
   const activeStatus: TerminalWsStatus = activeTab ? (statuses[activeTab.id] ?? "connecting") : "closed";
 
-  const tabStrip = (
-    <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
-      {tabs.map((tab, index) => {
-        const label = `Terminal ${index + 1}`;
-        const isActive = tab.id === activeId;
-        return (
-          <div
-            key={tab.id}
-            className={cn(
-              "flex shrink-0 items-center gap-1 rounded-md py-0.5 pl-2 pr-1 text-xs",
-              isActive
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-            )}
-          >
-            <button
-              type="button"
-              onClick={() => setActiveId(tab.id)}
-              className="flex items-center gap-1.5"
-            >
-              <Terminal className="h-3.5 w-3.5" />
-              <span>{label}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => closeTab(tab.id)}
-              aria-label={`Close ${label}`}
-              title="Close terminal"
-              className="rounded p-0.5 hover:bg-muted"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </div>
-        );
-      })}
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-xs"
-        aria-label="New terminal"
-        title="New terminal"
-        onClick={newTab}
-      >
-        <Plus className="h-4 w-4" />
-      </Button>
-    </div>
-  );
+  const sidebar = useFileSidebarVisibility();
+  const folderLabel = workspace.split("/").filter(Boolean).slice(-2).join("/");
 
   return (
     <div
@@ -175,27 +132,106 @@ export function TerminalView({ workspace }: TerminalViewProps) {
       data-terminal-view=""
       data-status={activeStatus}
     >
-      <div className="shrink-0 px-3 py-1.5">{tabStrip}</div>
-      <div className="relative min-h-0 flex-1 overflow-hidden">
-        {tabs.map((tab) => (
-          <TerminalTab
-            key={`${tab.id}:${tab.generation}`}
-            id={tab.id}
-            workspace={workspace}
-            active={tab.id === activeId}
-            onStatus={reportStatus}
-            onRegister={registerTab}
-            onRetry={retryTab}
-          />
-        ))}
-        {tabs.length === 0 && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
-            <p className="text-xs text-muted-foreground">No terminal open.</p>
-            <Button type="button" variant="ghost" size="sm" onClick={newTab}>
-              New terminal
+      <div className="flex shrink-0 items-center gap-1.5 px-3 py-1.5 text-xs font-medium">
+        {sidebar.narrow && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Terminals sidebar"
+            aria-pressed={sidebar.visible}
+            title="Terminals sidebar"
+            className={cn(sidebar.visible ? "bg-accent text-accent-foreground" : "text-muted-foreground")}
+            onClick={sidebar.toggle}
+          >
+            <PanelLeft className="h-4 w-4" />
+          </Button>
+        )}
+        <span className="min-w-0 truncate">
+          Terminal <span className="font-mono text-[10px] font-normal text-muted-foreground">{folderLabel}</span>
+        </span>
+      </div>
+      <div className="relative flex min-h-0 flex-1 gap-2 overflow-hidden p-2">
+        <FloatingFileSidebar visible={sidebar.visible} narrow={sidebar.narrow}>
+          <div className="flex shrink-0 items-center gap-0.5 px-3 py-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label="New terminal"
+              title="New terminal"
+              className="text-muted-foreground"
+              onClick={newTab}
+            >
+              <Plus className="h-4 w-4" />
             </Button>
           </div>
-        )}
+          <div className="flex flex-col gap-0.5 px-2 pb-2" role="tablist" aria-label="Terminals">
+            {tabs.map((tab, index) => {
+              const label = `Terminal ${index + 1}`;
+              const isActive = tab.id === activeId;
+              const status = statuses[tab.id] ?? "connecting";
+              return (
+                <div
+                  key={tab.id}
+                  className={cn(
+                    "group flex items-center gap-1 rounded-md py-1 pl-2 pr-1 text-xs",
+                    isActive
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                  )}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    onClick={() => setActiveId(tab.id)}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                  >
+                    <Terminal className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{label}</span>
+                    {status !== "attached" && (
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {status === "connecting" ? "connecting" : "ended"}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => closeTab(tab.id)}
+                    aria-label={`Close ${label}`}
+                    title="Close terminal"
+                    className="rounded p-0.5 hover:bg-muted"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </FloatingFileSidebar>
+
+        <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+          {tabs.map((tab) => (
+            <TerminalTab
+              key={`${tab.id}:${tab.generation}`}
+              id={tab.id}
+              workspace={workspace}
+              active={tab.id === activeId}
+              onStatus={reportStatus}
+              onRegister={registerTab}
+              onRetry={retryTab}
+            />
+          ))}
+          {tabs.length === 0 && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+              <p className="text-xs text-muted-foreground">No terminal open.</p>
+              <Button type="button" variant="ghost" size="sm" onClick={newTab}>
+                New terminal
+              </Button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
