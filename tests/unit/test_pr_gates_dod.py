@@ -39,6 +39,7 @@ ALL_CHECKS = [
     "conventional_title",
     "linked_issue",
     "regression_test",
+    "spec_or_fix_brief",
 ]
 
 
@@ -305,6 +306,90 @@ def test_linked_issue_pass_and_fail(tmp_path: Path) -> None:
     assert "linked_issue" not in ok.failed_names()
     bad = pr_gates_dod.evaluate(cfg, make_data(body="no links here"))
     assert "linked_issue" in bad.failed_names()
+
+
+def spec_gate_config(tmp_path: Path, mode="warn"):
+    return pr_gates_dod.load_config(
+        make_config(
+            tmp_path,
+            ENABLED
+            + '\nchecks = ["spec_or_fix_brief"]\n'
+            + f'spec_or_fix_brief_mode = "{mode}"\n',
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        lambda: make_data(
+            title="feat(cli): add a command",
+            changed_files=["docs/specs/command.md"],
+        ),
+        lambda: make_data(
+            title="feat(cli): add a command",
+            body="Fixes #984",
+            linked_issue_bodies={984: "Spec: docs/specs/command.md"},
+        ),
+    ],
+)
+def test_spec_or_fix_brief_feature_passes_with_pr_or_issue_spec(tmp_path: Path, data) -> None:
+    report = pr_gates_dod.evaluate(spec_gate_config(tmp_path), data())
+    assert "spec_or_fix_brief" not in report.failed_names()
+    assert report.warnings == []
+
+
+def test_spec_or_fix_brief_feature_without_spec_warns(tmp_path: Path) -> None:
+    report = pr_gates_dod.evaluate(
+        spec_gate_config(tmp_path), make_data(title="feat(cli): add a command")
+    )
+    assert "spec_or_fix_brief" not in report.failed_names()
+    assert [name for name, _ in report.warnings] == ["spec_or_fix_brief"]
+    assert report.exit_code == 0
+    assert "warning" in report.summary().lower()
+
+
+@pytest.mark.parametrize(
+    "body,issue_bodies",
+    [
+        (
+            "Fixes #984\n\n## Fix brief\nRoot cause: wrong source.\nRegression test: tests/unit/test_x.py.",
+            {},
+        ),
+        ("Fixes #984", {984: "## Fix brief\nRoot cause: wrong source.\nRegression test: tests/unit/test_x.py."}),
+    ],
+)
+def test_spec_or_fix_brief_fix_passes_with_pr_or_issue_brief(
+    tmp_path: Path, body, issue_bodies
+) -> None:
+    report = pr_gates_dod.evaluate(
+        spec_gate_config(tmp_path),
+        make_data(title="fix(cli): correct the command", body=body, linked_issue_bodies=issue_bodies),
+    )
+    assert report.failed_names() == []
+    assert report.warnings == []
+
+
+def test_spec_or_fix_brief_fix_without_brief_warns_or_blocks(tmp_path: Path) -> None:
+    data = make_data(title="fix(cli): correct the command")
+    warn = pr_gates_dod.evaluate(spec_gate_config(tmp_path, "warn"), data)
+    assert warn.failed_names() == []
+    assert [name for name, _ in warn.warnings] == ["spec_or_fix_brief"]
+    block = pr_gates_dod.evaluate(spec_gate_config(tmp_path, "block"), data)
+    assert block.failed_names() == ["spec_or_fix_brief"]
+
+
+@pytest.mark.parametrize("title", [
+    "docs: clarify command guide",
+    "chore(ci): tidy workflow",
+    "test(cli): cover parser",
+    "ci: update checks",
+    "release: publish 1.2.3",
+])
+def test_spec_or_fix_brief_exempts_non_feature_and_fix_types(tmp_path: Path, title) -> None:
+    report = pr_gates_dod.evaluate(spec_gate_config(tmp_path), make_data(title=title))
+    assert report.failed_names() == []
+    assert report.warnings == []
 
 
 def test_regression_test_no_findings_passes(tmp_path: Path) -> None:
