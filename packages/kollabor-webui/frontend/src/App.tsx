@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
+import { ComposerKeeper } from "./components/assistant-ui/composer-keeper";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
 import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
@@ -38,6 +39,7 @@ import type {
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
 import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
+import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
 import {
@@ -231,6 +233,8 @@ function RuntimeShell({
       ?.parts.find((item) => item.type === "text");
     return part?.type === "text" ? part.text.trim() : "";
   });
+  // The agent's latest todo list, for the card under the session panel. A string, so the selector stays stable.
+  const todo = useAuiState((s) => latestTodoBlock(s.thread.messages));
   const wasRunning = useRef(false);
   useEffect(() => {
     if (wasRunning.current && !running && RESTART_COMMAND.test(lastPrompt)) {
@@ -274,6 +278,7 @@ function RuntimeShell({
 
   return (
     <>
+      <ComposerKeeper sessionId={session.session_id} />
       {/* Below the shared sidebar breakpoint the sidebar and the session panel are sheets. */}
       <ShellHeader className="bg-background flex min-h-12 shrink-0 items-center gap-2 px-3 py-1.5 lg:hidden">
         <SidebarTrigger className="-ml-1 shrink-0" />
@@ -347,6 +352,7 @@ function RuntimeShell({
           onSessionUpdated={onSessionUpdated}
           onOpenSettings={() => onOpenSettings()}
           onHistoryCleared={onHistoryCleared}
+          todo={todo}
           view={view}
           onViewChange={setView}
           sheetOpen={panelSheetOpen}

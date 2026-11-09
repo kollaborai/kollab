@@ -12,6 +12,8 @@
     "test:e2e:learn": "node tests/learn-browser-acceptance.mjs",
     "test:e2e:agent-sidebar-glyph": "node tests/agent-sidebar-glyph-browser-acceptance.mjs",
     "test:e2e:team-launch": "node tests/team-launch-browser-acceptance.mjs",
+    "test:e2e:todo-card": "node tests/todo-card-browser-acceptance.mjs",
+    "test:e2e:composer-draft-rebuild": "node tests/composer-draft-rebuild-browser-acceptance.mjs",
     "test:e2e:profile-rows": "node tests/acceptance/profile-rows.browser.mjs"
   },
   "dependencies": {
@@ -29,6 +31,7 @@
     "libsodium-wrappers": "^0.8.4",
     "livekit-client": "2.22.3",
     "lucide-react": "^1.55.0",
+    "mdast-util-from-markdown": "^2.0.3",
     "radix-ui": "^1.6.7",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
