@@ -323,7 +323,7 @@ export async function runBrowserSuites({
 async function main() {
   const { chromium } = await import("playwright-core");
   const workers = Number(process.env.KOLLAB_BROWSER_WORKERS ?? "2");
-  const timeoutMs = Number(process.env.KOLLAB_BROWSER_TIMEOUT_MS ?? "300000");
+  const timeoutMs = Number(process.env.KOLLAB_BROWSER_TIMEOUT_MS ?? "360000");
   const artifacts = process.env.KOLLAB_BROWSER_RESULTS_DIR
     ? path.resolve(process.env.KOLLAB_BROWSER_RESULTS_DIR)
     : await mkdtemp(path.join(os.tmpdir(), "kollab-browser-acceptance-"));

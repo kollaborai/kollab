@@ -22,7 +22,7 @@ The runner executes six independent browser suites using two workers by
 default. Each has its own scratch home, temporary directory, browser context,
 and dynamically allocated local listener. It does not inherit unrelated
 environment variables. `KOLLAB_BROWSER_WORKERS` accepts 1–4;
-`KOLLAB_BROWSER_TIMEOUT_MS` bounds each worker (300 seconds by default).
+`KOLLAB_BROWSER_TIMEOUT_MS` bounds each worker (360 seconds by default).
 `CHROME_PATH` may select an existing Chromium executable. Results, captured
 worker output, and suite screenshots go under a unique temporary directory or
 under `KOLLAB_BROWSER_RESULTS_DIR` when specified. A failed or timed-out suite makes

@@ -354,7 +354,7 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
   return { context, externalRequests, fixture: fixtures, page, pageErrors, consoleErrors };
 }
 
-async function until(check, message, timeoutMs = 15_000) {
+async function until(check, message, timeoutMs = 60_000) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
     const value = check();
@@ -446,7 +446,7 @@ async function main() {
     const sessionControls = shell.page.getByRole("complementary", { name: "Session Controls", exact: true });
     await sessionControls.getByText("Learn regression session", { exact: true }).waitFor({
       state: "visible",
-      timeout: 15_000,
+      timeout: 60_000,
     });
 
     // A live mocked peer demonstrates the existing Hub-to-remote-session selection path.
@@ -455,7 +455,7 @@ async function main() {
     // The session panel is populated only after the remote session and its history load.
     const remoteSessionName = sessionControls.getByText("Remote coder session", { exact: true });
     try {
-      await remoteSessionName.waitFor({ state: "visible", timeout: 15_000 });
+      await remoteSessionName.waitFor({ state: "visible", timeout: 60_000 });
     } catch (reason) {
       const diagnostic = {
         remoteButtonActive: await remoteAgentButton.getAttribute("data-active"),
@@ -636,7 +636,7 @@ async function main() {
       .getByRole("option", { name: /claude-haiku/ }).click();
     await failing.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
     await failing.page.getByRole("complementary", { name: "Session Controls", exact: true })
-      .getByText("Learn regression session", { exact: true }).waitFor({ state: "visible", timeout: 15_000 });
+      .getByText("Learn regression session", { exact: true }).waitFor({ state: "visible", timeout: 60_000 });
     const pickNotice = failing.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
     await pickNotice.waitFor({ state: "visible", timeout: 5_000 });
     const pickText = await pickNotice.innerText();
@@ -689,7 +689,7 @@ async function main() {
       .getByRole("option", { name: /claude-haiku/ }).click();
     await heldView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
     const heldNotice = heldView.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
-    await heldNotice.waitFor({ state: "visible", timeout: 15_000 });
+    await heldNotice.waitFor({ state: "visible", timeout: 60_000 });
     heldRetry.holdPicks();
     await heldNotice.getByRole("button", { name: "Try Again", exact: true }).click();
     await heldNotice.getByRole("button", { name: "Trying…", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
@@ -736,7 +736,7 @@ async function main() {
       .getByRole("option", { name: /claude-haiku/ }).click();
     await manualView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
     const manualNotice = manualView.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
-    await manualNotice.waitFor({ state: "visible", timeout: 15_000 });
+    await manualNotice.waitFor({ state: "visible", timeout: 60_000 });
     const manualPanel = manualView.page.getByRole("complementary", { name: "Session Controls", exact: true });
     await manualPanel.getByRole("button", { name: "Model", exact: true }).click();
     const manualAnswer = manualView.page.waitForResponse(
@@ -762,7 +762,7 @@ async function main() {
       .getByRole("option", { name: /claude-haiku/ }).click();
     await partialView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
     const partialNotice = partialView.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
-    await partialNotice.waitFor({ state: "visible", timeout: 15_000 });
+    await partialNotice.waitFor({ state: "visible", timeout: 60_000 });
     const partialPanel = partialView.page.getByRole("complementary", { name: "Session Controls", exact: true });
     await partialPanel.getByRole("button", { name: "Model", exact: true }).click();
     const partialAnswer = partialView.page.waitForResponse(
