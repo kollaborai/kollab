@@ -215,6 +215,8 @@ export type Effort = (typeof EFFORT_LEVELS)[number];
 export type Profile = {
   name: string;
   provider?: string;
+  /** Opaque hash of the ACP launch inputs that decide model discovery. */
+  choices_fingerprint?: string;
   model?: string;
   description?: string;
   base_url?: string;

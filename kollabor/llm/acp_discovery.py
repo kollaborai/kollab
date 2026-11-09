@@ -601,8 +601,26 @@ def known_outcomes(profiles: Iterable[Any]) -> dict[str, ACPDiscoveryOutcome]:
             continue
         name = _name(profile)
         record = _warm.get(name)
-        current = record is not None and record.fingerprint == launch_fingerprint(profile)
-        shown[name] = record.outcome if current and record is not None else _PENDING
+        fingerprint = launch_fingerprint(profile)
+        current = record is not None and record.fingerprint == fingerprint
+        running = _warm_tasks.get(name)
+        refreshing = (
+            current
+            and running is not None
+            and not running.task.done()
+            and running.fingerprint == fingerprint
+            and record is not None
+            and record.outcome.status != "ready"
+        )
+        if current and record is not None and refreshing:
+            shown[name] = replace(
+                record.outcome,
+                status="partial",
+                message="Loading more model options.",
+                more=True,
+            )
+        else:
+            shown[name] = record.outcome if current and record is not None else _PENDING
     return shown
 
 

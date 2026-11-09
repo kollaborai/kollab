@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState, type ComponentProps, type React
 import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, ModelChoice, OfflineAgent, Profile, Session } from "@/api";
 import { ModelPicker } from "@/components/shell/ModelPicker";
-import { loadModelChoices } from "@/components/shell/model-choices";
+import { loadModelChoices, profileChoicesKey } from "@/components/shell/model-choices";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
 import type { LaunchChoice } from "@/components/agents/launch-choices";
@@ -266,7 +266,7 @@ export function AppSidebar({
   useEffect(() => relayDetachedTouches(window), []);
   // The model picker's list is asked for as the shell loads, and again when the profiles change, so the Model
   // button opens on a list that is already complete (#953). The engine has been learning it since it started.
-  const profilesKey = profiles.map((profile) => `${profile.name}\u0000${profile.provider ?? ""}`).join("\n");
+  const profilesKey = profileChoicesKey(profiles);
   useEffect(() => {
     void loadModelChoices(api);
   }, [api, profilesKey]);

@@ -1,5 +1,5 @@
 import { useCallback, useSyncExternalStore } from "react";
-import type { EngineApi, ModelChoice } from "@/api";
+import type { EngineApi, ModelChoice, Profile } from "@/api";
 
 /**
  * The model picker's list, kept for the whole page instead of one popover. The shell asks for it when it
@@ -35,6 +35,17 @@ type Store = {
 };
 
 const stores = new WeakMap<EngineApi, Store>();
+
+/** Profile changes that can alter the engine's model catalog or ACP warm result. */
+export function profileChoicesKey(
+  profiles: readonly Pick<Profile, "name" | "provider" | "choices_fingerprint">[],
+): string {
+  return profiles
+    .map(({ name, provider, choices_fingerprint }) =>
+      `${name}\u0000${provider ?? ""}\u0000${choices_fingerprint ?? ""}`,
+    )
+    .join("\n");
+}
 
 function storeOf(api: EngineApi): Store {
   let store = stores.get(api);
@@ -119,10 +130,11 @@ async function poll(api: EngineApi, store: Store): Promise<void> {
     const statuses = Object.entries(answer.discovery ?? {});
     const advancing = statuses.filter(([, info]) => info.more).map(([name]) => name);
     const stalled = statuses.filter(([, info]) => info.status !== "ready" && !info.more).map(([name]) => name);
-    const again = advancing.length > 0 && polls < MAX_POLLS;
+    const retryQueued = store.retryNext;
+    const again = retryQueued || (advancing.length > 0 && polls < MAX_POLLS);
     publish(store, {
       choices: mergeChoices(store.view.choices, answer.choices, answer.discovery),
-      discovering: again ? advancing : [],
+      discovering: again ? [...new Set([...advancing, ...(retryQueued ? stalled : [])])] : [],
       incomplete: again ? stalled : [...stalled, ...advancing],
       failed: false,
     });
