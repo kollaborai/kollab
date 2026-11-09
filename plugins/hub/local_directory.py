@@ -134,6 +134,11 @@ def _json_file(parent: int, name: str) -> dict:
     return value
 
 
+def _short_text(value: object) -> str:
+    """A presence string a peer may see (a version, a build id), bounded; anything else is empty."""
+    return value[:128] if isinstance(value, str) else ""
+
+
 def _running_tool(value) -> tuple[str, str]:
     """A presence record's ``current_tool`` as (bare name, type); ("", "") between tools."""
     if not isinstance(value, dict):
@@ -164,6 +169,8 @@ class LocalAgent:
     acp_waiting: bool = False
     tool_name: str = ""
     tool_type: str = ""
+    version: str = ""
+    build: str = ""
 
     @property
     def global_id(self) -> str:
@@ -544,6 +551,8 @@ class LocalAgentDirectory:
                         if isinstance(data.get("tags"), dict) else False,
             tool_name=tool_name,
             tool_type=tool_type,
+            version=_short_text(data.get("version")),
+            build=_short_text(data.get("build")),
         )
 
     def agents(self, workspace: Path | None = None) -> list[LocalAgent]:
@@ -609,6 +618,7 @@ class LocalAgentDirectory:
                     if item.tool_name
                     else {}
                 ),
+                **({"version": item.version, "build": item.build} if item.version else {}),
                 "device": device,
             }
             for item in self.agents(workspace)
