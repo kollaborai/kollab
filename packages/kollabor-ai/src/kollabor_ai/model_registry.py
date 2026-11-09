@@ -147,6 +147,28 @@ def supports_sampling(model: str) -> bool:
     return _best_match(model, "supports_sampling") is not False
 
 
+def supports_thinking(model: str) -> bool:
+    """Whether a model reasons, so it takes an effort level. Unmarked models are assumed to."""
+    return _best_match(model, "supports_thinking") is not False
+
+
+# What every effort API takes, for a model the registry gives no levels for.
+DEFAULT_EFFORT_LEVELS = ("low", "medium", "high")
+
+
+def effort_levels(model: str) -> Optional[List[str]]:
+    """The effort levels a model takes: ``[]`` for none, None when the registry does not say.
+
+    ``effort_levels`` lists them where a family differs: Anthropic added xhigh
+    and max with later models, and Claude Haiku 4.5 takes no effort at all. A
+    model that does not reason (``supports_thinking: false``) takes none.
+    """
+    if not supports_thinking(model):
+        return []
+    levels = _best_match(model, "effort_levels")
+    return [str(level) for level in levels] if isinstance(levels, list) else None
+
+
 def thinking_default(model: str) -> Optional[str]:
     """What a model does with no ``thinking`` field: ``"adaptive"`` or None.
 

@@ -12,9 +12,11 @@ and readers never see a partially written file.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import secrets
 import stat
 import tempfile
 import time
@@ -35,6 +37,9 @@ logger = logging.getLogger(__name__)
 # Refresh buffer: refresh 5 minutes before actual expiry
 DEFAULT_EXPIRY_BUFFER = 300
 
+# Accountless markers are process-local and never written to disk.
+_LOGIN_MARK_KEY = secrets.token_bytes(32)
+
 
 def _get_oauth_dir() -> Path:
     """Get the OAuth token storage directory."""
@@ -46,6 +51,36 @@ def _get_oauth_dir() -> Path:
     except OSError:
         pass
     return base
+
+
+def login_mark(tokens: dict) -> str:
+    """Who a login is, to keep what it fetched apart from another login's: its
+    account id, or for one that names none a digest of its refresh token, never
+    the token itself. "" for no login (#553)."""
+    if tokens.get("account_id"):
+        return str(tokens["account_id"])
+    secret = str(tokens.get("refresh_token") or tokens.get("access_token") or "")
+    if not secret:
+        return ""
+    marker = hashlib.pbkdf2_hmac("sha256", secret.encode(), _LOGIN_MARK_KEY, 100_000)
+    return "token:" + marker.hex()[:16]
+
+
+def stored_login_mark(provider: str, profile_name: str | None = None) -> str:
+    """login_mark of the login stored for a provider, or for one profile's own
+    login; "" when there is none. Reads only: never refreshes, never raises."""
+    try:
+        if profile_name is not None:
+            from kollabor_config.provisioned_state import ProvisionedStateFile
+
+            data = ProvisionedStateFile().get_profile_oauth_tokens(profile_name)
+        else:
+            paths = [d / "oauth" / f"{provider}.json" for d in get_config_directory_candidates()]
+            path = next((p for p in paths if p.exists()), None)
+            data = json.loads(path.read_text(encoding="utf-8")) if path else None
+        return login_mark(data if isinstance(data, dict) else {})
+    except Exception:
+        return ""
 
 
 class OAuthTokenStorage:

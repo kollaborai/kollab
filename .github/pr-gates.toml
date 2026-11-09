@@ -28,3 +28,4 @@ checks = [
 [pr_gates.dod.regression_profile]
 finding_id_pattern = "\\bF\\d+\\b"
 test_paths = ["tests/"]
+trusted_reviewers = ["kollaborai", "maarco"]
