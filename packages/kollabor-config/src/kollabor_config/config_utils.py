@@ -295,13 +295,22 @@ def _windows_project_state_dir(
     return current.resolve()
 
 
-def get_project_data_dir_candidates(project_path: Optional[Path] = None) -> list[Path]:
-    """Return project data directories in read precedence order."""
+def get_project_data_dir_candidates(
+    project_path: Optional[Path] = None, *, create_new: bool = True
+) -> list[Path]:
+    """Return project data directories in read precedence order.
+
+    Windows creates and claims a project's state directory the first time it is looked up;
+    ``create_new=False`` only reads, for a folder nobody has started in.
+    """
     if project_path is None:
         project_path = Path.cwd()
 
     if IS_WINDOWS:
-        return [_windows_project_state_dir(project_path, directory) for directory in get_config_directory_candidates()]
+        return [
+            _windows_project_state_dir(project_path, directory, create_new=create_new)
+            for directory in get_config_directory_candidates()
+        ]
     encoded = encode_project_path(project_path)
     return [
         directory / "projects" / encoded

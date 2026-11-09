@@ -5,7 +5,7 @@ from kollabor_ai import LLMProfile
 
 
 def _snapshot(**fields):
-    profile = LLMProfile(name="p", provider="anthropic", model="claude-opus-4-5", **fields)
+    profile = LLMProfile(name="p", provider="anthropic", model="claude-opus-4-6", **fields)
     # _profile_to_snapshot never reads self
     return LocalStateService._profile_to_snapshot(None, profile, is_active=True)
 

@@ -7,7 +7,10 @@ one check run, and never posts comments.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -56,12 +59,18 @@ def make_data(**overrides):
         changed_files=["kollabor/x.py", "tests/unit/test_x.py"],
         unresolved_threads=0,
         review_comment_bodies=[],
+        comments=(),
+        reviews=(),
+        pull_author_login="pr-author",
+        head_sha="c" * 40,
         default_branch="main",
         default_branch_head="d" * 40,
         merge_base_sha="d" * 40,
         commits_behind_base=0,
     )
     base.update(overrides)
+    if "comments" in overrides and "review_comment_bodies" not in overrides:
+        base["review_comment_bodies"] = [comment.body for comment in base["comments"]]
     return pr_gates_dod.PRData(**base)
 
 
@@ -69,6 +78,61 @@ ENABLED = """
 [pr_gates.dod]
 enabled = true
 """
+
+
+def regression_cfg(tmp_path: Path, trusted_reviewers=("trusted-reviewer",)):
+    trusted = json.dumps(list(trusted_reviewers))
+    config = make_config(
+        tmp_path,
+        ENABLED
+        + '\nchecks = ["regression_test"]\n'
+        + "\n[pr_gates.dod.regression_profile]\n"
+        + f"trusted_reviewers = {trusted}\n",
+    )
+    return pr_gates_dod.load_config(config)
+
+
+def source_comment(kind, comment_id, body, author="reviewer"):
+    return pr_gates_dod.PRComment(
+        kind=kind, comment_id=comment_id, body=body, author_login=author
+    )
+
+
+def approved_review(review_id=9, author="trusted-reviewer", state="APPROVED", head=None):
+    return pr_gates_dod.PRReview(
+        review_id=review_id,
+        author_login=author,
+        state=state,
+        commit_id=head or "c" * 40,
+        submitted_at=f"2026-11-08T00:{review_id // 60:02d}:{review_id % 60:02d}Z",
+    )
+
+
+def ignore_reference_comment(
+    marker_id,
+    *,
+    source_kind,
+    source_id,
+    source_body,
+    finding_id,
+    occurrence,
+    author="trusted-reviewer",
+    body_hash=None,
+    extra=None,
+):
+    payload = {
+        "source_kind": source_kind,
+        "source_id": source_id,
+        "source_body_sha256": body_hash
+        or hashlib.sha256(source_body.encode("utf-8")).hexdigest(),
+        "finding_id": finding_id,
+        "occurrence": occurrence,
+        "reason": "This exact occurrence names a test result, not a review finding.",
+    }
+    if extra:
+        payload.update(extra)
+    body = "<!-- pr-gates-ignore-reference:v1\n" + json.dumps(payload) + "\n-->"
+    return source_comment("issue_comment", marker_id, body, author=author)
 
 
 # --- config loading --------------------------------------------------------
@@ -82,6 +146,7 @@ def test_config_defaults_disabled(tmp_path: Path) -> None:
     assert cfg.docs_paths == {}
     assert cfg.regression.finding_id_pattern == pr_gates_dod.DEFAULT_FINDING_PATTERN
     assert cfg.regression.test_paths == pr_gates_dod.DEFAULT_TEST_PATHS
+    assert cfg.regression.trusted_reviewers == list(pr_gates_dod.DEFAULT_TRUSTED_REVIEWERS)
 
 
 def test_config_enabled_and_custom(tmp_path: Path) -> None:
@@ -99,6 +164,7 @@ checks = ["signed_commits", "docs_paths"]
 [pr_gates.dod.regression_profile]
 finding_id_pattern = "BUG-\\\\d+"
 test_paths = ["tests/regressions/"]
+trusted_reviewers = ["trusted-reviewer"]
 """,
     )
     cfg = pr_gates_dod.load_config(path)
@@ -108,6 +174,23 @@ test_paths = ["tests/regressions/"]
     assert cfg.docs_paths == {"^packages/": ["CHANGELOG.md"]}
     assert cfg.regression.finding_id_pattern == r"BUG-\d+"
     assert cfg.regression.test_paths == ["tests/regressions/"]
+    assert cfg.regression.trusted_reviewers == ["trusted-reviewer"]
+
+
+def test_config_rejects_duplicate_trusted_reviewers(tmp_path: Path) -> None:
+    path = make_config(
+        tmp_path,
+        ENABLED
+        + '\n[pr_gates.dod.regression_profile]\n'
+        + 'trusted_reviewers = ["Maarco", "maarco"]\n',
+    )
+    with pytest.raises(pr_gates_dod.ConfigError, match="duplicates"):
+        pr_gates_dod.load_config(path)
+
+
+def test_repo_config_allows_only_the_two_owner_accounts_to_annotate():
+    cfg = pr_gates_dod.load_config(CONFIG_FILE)
+    assert cfg.regression.trusted_reviewers == ["kollaborai", "maarco"]
 
 
 def test_config_rejects_unknown_check(tmp_path: Path) -> None:
@@ -430,6 +513,8 @@ def _install_fake_gh(monkeypatch, calls, pull_payload, branch_tip, pages):
                 }
             return graph_pages[cursor]
         endpoint = args[1]
+        if endpoint.startswith("repos/o/r/git/trees/"):
+            return {"truncated": False, "tree": []}
         if endpoint.startswith("repos/o/r/compare/"):
             if "compare" not in pages:  # default: head contains base tip
                 return {
@@ -521,6 +606,181 @@ def test_collect_files_and_comments_read_every_page(monkeypatch):
     data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
     assert len(data.changed_files) == 101 and "late.py" in data.changed_files
     assert "late-finding" in data.review_comment_bodies
+
+
+def test_collect_reads_test_blob_from_pr_head_not_base_checkout(monkeypatch, tmp_path):
+    blob_sha = "a" * 40
+    pull = {"title": "t", "body": "Fixes #1", "base": {"ref": "main"}, "head": {"sha": HEAD_SHA}}
+    pages = {"rest": {f"repos/o/r/pulls/{PR_NUM}/files": {1: [
+        # The mutable PR listing may have seen a transient different head.
+        {"filename": "tests/test_x.py", "sha": "b" * 40, "status": "modified"},
+    ]}}}
+    _install_fake_gh(monkeypatch, [], pull, BASE_TIP, pages)
+    old_gh = pr_gates_dod._gh
+
+    def fake_gh(*args):
+        if args[1] == f"repos/o/r/git/trees/{HEAD_SHA}?recursive=1":
+            return {"truncated": False, "tree": [{"path": "tests/test_x.py", "type": "blob", "mode": "100644",
+                                                   "sha": blob_sha, "size": len(b"# F1 head test")}]}
+        return old_gh(*args)
+
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", lambda endpoint, limit: {
+        "sha": blob_sha, "size": len(b"# F1 head test"), "encoding": "base64",
+        "content": base64.b64encode(b"# F1 head test").decode(),
+    })
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_x.py").write_text("# base without the finding")
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root=str(tmp_path))
+    assert data.changed_file_contents == {"tests/test_x.py": "# F1 head test"}
+
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", lambda endpoint, limit: {
+        "sha": "b" * 40, "encoding": "base64", "content": "",
+    })
+    with pytest.raises(RuntimeError, match="invalid blob response"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM, root=str(tmp_path))
+
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", lambda endpoint, limit: {
+        "sha": blob_sha, "size": len(b"# F1 head test"), "encoding": "base64",
+        "content": base64.b64encode(b"# F1 head test").decode(),
+    })
+
+    pull_reads = 0
+
+    def changed_head(*args):
+        nonlocal pull_reads
+        if args[1] == f"repos/o/r/pulls/{PR_NUM}":
+            pull_reads += 1
+            if pull_reads == 2:
+                return {**pull, "head": {"sha": "b" * 40}}
+        return fake_gh(*args)
+
+    monkeypatch.setattr(pr_gates_dod, "_gh", changed_head)
+    with pytest.raises(RuntimeError, match="head changed"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM, root=str(tmp_path))
+
+
+def test_blob_response_is_bounded_before_json_decode(monkeypatch):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def read1(self, size): return b"x" * size
+
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
+    monkeypatch.setattr(pr_gates_dod.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    with pytest.raises(RuntimeError, match="exceeds limit"):
+        pr_gates_dod._gh_blob("fake", 8)
+
+
+def test_blob_deadline_ends_slow_stream(monkeypatch):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def read1(self, _size): return b"x"
+
+    ticks = iter((0, 1, 31))
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
+    monkeypatch.setattr(pr_gates_dod.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(pr_gates_dod.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    with pytest.raises(RuntimeError, match="timed out"):
+        pr_gates_dod._gh_blob("fake", 100)
+
+
+def test_changed_test_tree_excludes_unchanged_and_deleted_and_rejects_truncation(monkeypatch):
+    pull = {"title": "t", "body": "Fixes #1", "base": {"ref": "main"}, "head": {"sha": HEAD_SHA}}
+    _install_fake_gh(monkeypatch, [], pull, BASE_TIP, {"rest": {}})
+    old_gh = pr_gates_dod._gh
+    def entry(path, sha):
+        return {"path": path, "type": "blob", "mode": "100644", "sha": sha, "size": 1}
+    base = [entry("tests/same.py", "a" * 40), entry("tests/deleted.py", "b" * 40),
+            entry("tests/changed.py", "c" * 40)]
+    head = [entry("tests/same.py", "a" * 40), entry("tests/changed.py", "d" * 40),
+            entry("tests/added.py", "e" * 40)]
+    truncated = False
+    def fake_gh(*args):
+        if args[1] == f"repos/o/r/git/trees/{BASE_TIP}?recursive=1":
+            return {"truncated": truncated, "tree": base}
+        if args[1] == f"repos/o/r/git/trees/{HEAD_SHA}?recursive=1":
+            return {"truncated": False, "tree": head}
+        return old_gh(*args)
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", lambda endpoint, limit: {
+        "sha": endpoint.rsplit("/", 1)[1], "size": 1, "encoding": "base64", "content": "eA==",
+    })
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM)
+    assert data.changed_file_contents == {"tests/changed.py": "x", "tests/added.py": "x"}
+    truncated = True
+    with pytest.raises(RuntimeError, match="incomplete commit tree"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM)
+
+
+def test_oversized_test_tree_entry_is_rejected_before_blob_fetch(monkeypatch):
+    pull = {"title": "t", "body": "Fixes #1", "base": {"ref": "main"}, "head": {"sha": HEAD_SHA}}
+    _install_fake_gh(monkeypatch, [], pull, BASE_TIP, {"rest": {}})
+    old_gh = pr_gates_dod._gh
+    def fake_gh(*args):
+        if args[1] == f"repos/o/r/git/trees/{HEAD_SHA}?recursive=1":
+            return {"truncated": False, "tree": [{"path": "tests/huge.py", "type": "blob", "mode": "100644",
+                                                   "sha": "a" * 40, "size": 1_000_001}]}
+        return old_gh(*args)
+    monkeypatch.setattr(pr_gates_dod, "_gh", fake_gh)
+    def unexpected_blob(*_args):
+        pytest.fail("oversized blob must not be fetched")
+    monkeypatch.setattr(pr_gates_dod, "_gh_blob", unexpected_blob)
+    with pytest.raises(RuntimeError, match="invalid test blob size"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM)
+
+
+def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(monkeypatch):
+    calls: list[list] = []
+    pull = {
+        "title": "t",
+        "body": "Fixes #1",
+        "user": {"login": "pr-author"},
+        "base": {"ref": "main", "sha": BASE_TIP},
+        "head": {"sha": HEAD_SHA},
+    }
+    review_comment = {
+        "id": 100,
+        "body": "F11 was reported by the test suite.",
+        "user": {"login": "inline-reviewer"},
+    }
+    issue_comment = {
+        "id": 200,
+        "body": "<!-- pr-gates-ignore-reference:v1 -->",
+        "user": {"login": "trusted-reviewer"},
+    }
+    review = {
+        "id": 300,
+        "body": "",
+        "user": {"login": "trusted-reviewer"},
+        "state": "APPROVED",
+        "commit_id": HEAD_SHA,
+        "submitted_at": "2026-11-08T01:02:03Z",
+    }
+    pages = {
+        "rest": {
+            f"repos/o/r/pulls/{PR_NUM}/comments": {1: [review_comment]},
+            f"repos/o/r/issues/{PR_NUM}/comments": {1: [issue_comment]},
+            f"repos/o/r/pulls/{PR_NUM}/reviews": {1: [review]},
+            f"repos/o/r/pulls/{PR_NUM}/commits": {1: []},
+        }
+    }
+    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+    assert data.pull_author_login == "pr-author"
+    assert data.head_sha == HEAD_SHA
+    assert data.comments == (
+        pr_gates_dod.PRComment("review_comment", 100, review_comment["body"], "inline-reviewer"),
+        pr_gates_dod.PRComment("issue_comment", 200, issue_comment["body"], "trusted-reviewer"),
+    )
+    assert data.reviews == (
+        pr_gates_dod.PRReview(300, "trusted-reviewer", "APPROVED", HEAD_SHA, "2026-11-08T01:02:03Z"),
+    )
+    assert any(
+        args[0] == "api" and args[1].startswith(f"repos/o/r/pulls/{PR_NUM}/reviews?")
+        for args in calls
+    )
 
 
 def test_collect_threads_follow_graphql_pagination(monkeypatch):
@@ -806,6 +1066,369 @@ def test_default_finding_pattern_ignores_words_that_contain_an_id(tmp_path) -> N
         changed_file_contents={},
     )
     assert pr_gates_dod.evaluate(cfg, data).failed == []
+
+
+def test_regression_suppressions_require_exact_trusted_annotation(tmp_path):
+    cfg = regression_cfg(tmp_path)
+    source = "F11 had one failure and three errors. F11 rerun alone passed."
+    markers = tuple(
+        ignore_reference_comment(
+            500 + occurrence,
+            source_kind="issue_comment",
+            source_id=100,
+            source_body=source,
+            finding_id="F11",
+            occurrence=occurrence,
+        )
+        for occurrence in (1, 2)
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), *markers),
+        reviews=(approved_review(),),
+        changed_file_contents={},
+    )
+    report = pr_gates_dod.evaluate(cfg, data)
+    assert report.detail_for("regression_test") == ""
+    assert len(report.audit_notes) == 2
+    assert "F11 occurrence 1 in issue_comment 100" in report.summary()
+    assert all(
+        note.source_body_sha256 == hashlib.sha256(source.encode()).hexdigest()
+        for note in report.audit_notes
+    )
+
+
+def test_regression_code_default_trusts_no_reviewer(tmp_path):
+    cfg = pr_gates_dod.load_config(make_config(tmp_path, ENABLED + '\nchecks = ["regression_test"]\n'))
+    source = "F11 test suite failed."
+    marker = ignore_reference_comment(
+        501,
+        source_kind="issue_comment",
+        source_id=100,
+        source_body=source,
+        finding_id="F11",
+        occurrence=1,
+        author="kollaborai",
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), marker),
+        reviews=(approved_review(author="kollaborai"),),
+        changed_file_contents={},
+    )
+    assert cfg.regression.trusted_reviewers == []
+    assert "F11" in pr_gates_dod.evaluate(cfg, data).detail_for("regression_test")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"body_hash": "0" * 64},
+        {"author": "untrusted"},
+        {"author": "pr-author"},
+        {"source_id": 999},
+        {"source_kind": "review_comment"},
+        {"occurrence": 3},
+    ],
+)
+def test_regression_rejects_invalid_or_untrusted_suppressions(tmp_path, changes):
+    cfg = regression_cfg(tmp_path, trusted_reviewers=("trusted-reviewer", "pr-author"))
+    source = "F14: test failed."
+    marker_args = {
+        "source_kind": "issue_comment",
+        "source_id": 100,
+        "source_body": source,
+        "finding_id": "F14",
+        "occurrence": 1,
+    }
+    marker_args.update(changes)
+    marker = ignore_reference_comment(501, **marker_args)
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), marker),
+        reviews=(approved_review(),),
+        changed_file_contents={},
+    )
+    assert "F14" in pr_gates_dod.evaluate(cfg, data).detail_for("regression_test")
+
+
+@pytest.mark.parametrize(
+    "review_changes",
+    [
+        {"state": "DISMISSED"},
+        {"state": "CHANGES_REQUESTED"},
+        {"stale_head": True},
+    ],
+)
+def test_regression_requires_latest_trusted_approval_on_current_head(tmp_path, review_changes):
+    cfg = regression_cfg(tmp_path)
+    source = "F11 test suite had one failure."
+    marker = ignore_reference_comment(
+        501,
+        source_kind="issue_comment",
+        source_id=100,
+        source_body=source,
+        finding_id="F11",
+        occurrence=1,
+    )
+    if review_changes.get("stale_head"):
+        reviews = (approved_review(),)
+        head_sha = "a" * 40
+    else:
+        reviews = (approved_review(), approved_review(10, **review_changes))
+        head_sha = "c" * 40
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), marker),
+        reviews=reviews,
+        head_sha=head_sha,
+        changed_file_contents={},
+    )
+    assert "F11" in pr_gates_dod.evaluate(cfg, data).detail_for("regression_test")
+
+
+def test_regression_keeps_pr553_f1_f6_and_requires_all_f11_occurrences(tmp_path):
+    cfg = regression_cfg(tmp_path)
+    findings = """\
+[P1] Unsupported model effort can reach the API (F1)
+[P2] Effort catalogs regress across profiles (F3 / F2 regression)
+[P2] A no-effort backend retains stale state (F4)
+[P2] Polling omits the current effort (F4)
+[P2] F5 remains open: activation returns a stale snapshot
+[P2] F6 is only partly fixed: default selection is skipped
+"""
+    full_unit = (
+        "- Full unit suite: 8,990 passed, 23 failed, 3 errors; all 26 failures "
+        "also failed on origin/main. F11 rerun alone on each revision: "
+        "1 failed, 8 passed, 3 errors."
+    )
+    rerun_file = (
+        "F11 and the\nprovider-registry file were also run separately on both "
+        "revisions: F11 had one failure and three errors on each."
+    )
+    markers = (
+        ignore_reference_comment(
+            601,
+            source_kind="issue_comment",
+            source_id=201,
+            source_body=full_unit,
+            finding_id="F11",
+            occurrence=1,
+        ),
+        ignore_reference_comment(
+            602,
+            source_kind="issue_comment",
+            source_id=202,
+            source_body=rerun_file,
+            finding_id="F11",
+            occurrence=1,
+        ),
+        ignore_reference_comment(
+            603,
+            source_kind="issue_comment",
+            source_id=202,
+            source_body=rerun_file,
+            finding_id="F11",
+            occurrence=2,
+        ),
+    )
+    sources = (
+        source_comment("issue_comment", 200, findings),
+        source_comment("issue_comment", 201, full_unit),
+        source_comment("issue_comment", 202, rerun_file),
+    )
+    valid = make_data(
+        comments=(*sources, *markers), reviews=(approved_review(),), changed_file_contents={}
+    )
+    detail = pr_gates_dod.evaluate(cfg, valid).detail_for("regression_test")
+    assert detail == "no regression test covers finding id(s): F1, F2, F3, F4, F5, F6 under tests/"
+    assert "F11" not in detail
+
+    unannotated = make_data(comments=sources, changed_file_contents={})
+    assert "F11" in pr_gates_dod.evaluate(cfg, unannotated).detail_for("regression_test")
+
+
+def test_regression_one_annotation_does_not_suppress_repeated_id(tmp_path):
+    cfg = regression_cfg(tmp_path)
+    source = "F11 failed here; F11 failed again."
+    marker = ignore_reference_comment(
+        501,
+        source_kind="issue_comment",
+        source_id=100,
+        source_body=source,
+        finding_id="F11",
+        occurrence=1,
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), marker),
+        reviews=(approved_review(),),
+        changed_file_contents={},
+    )
+    assert "F11" in pr_gates_dod.evaluate(cfg, data).detail_for("regression_test")
+
+
+def test_regression_duplicate_annotations_are_ambiguous_and_do_not_suppress(tmp_path):
+    cfg = regression_cfg(tmp_path)
+    source = "F11 test suite failed."
+    markers = tuple(
+        ignore_reference_comment(
+            marker_id,
+            source_kind="issue_comment",
+            source_id=100,
+            source_body=source,
+            finding_id="F11",
+            occurrence=1,
+        )
+        for marker_id in (501, 502)
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), *markers),
+        reviews=(approved_review(),),
+        changed_file_contents={},
+    )
+    assert "F11" in pr_gates_dod.evaluate(cfg, data).detail_for("regression_test")
+
+
+def test_regression_missing_pr_author_metadata_fails_closed(tmp_path):
+    cfg = regression_cfg(tmp_path)
+    source = "F11 test suite failed."
+    marker = ignore_reference_comment(
+        501,
+        source_kind="issue_comment",
+        source_id=100,
+        source_body=source,
+        finding_id="F11",
+        occurrence=1,
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), marker),
+        reviews=(approved_review(),),
+        pull_author_login="",
+        changed_file_contents={},
+    )
+    assert "F11" in pr_gates_dod.evaluate(cfg, data).detail_for("regression_test")
+
+
+def test_regression_pending_review_does_not_override_approved_review(tmp_path):
+    cfg = regression_cfg(tmp_path)
+    source = "F11 test suite failed."
+    marker = ignore_reference_comment(
+        501,
+        source_kind="issue_comment",
+        source_id=100,
+        source_body=source,
+        finding_id="F11",
+        occurrence=1,
+    )
+    pending = pr_gates_dod.PRReview(
+        review_id=10,
+        author_login="trusted-reviewer",
+        state="PENDING",
+        commit_id="c" * 40,
+        submitted_at="",
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), marker),
+        reviews=(approved_review(), pending),
+        changed_file_contents={},
+    )
+    assert pr_gates_dod.evaluate(cfg, data).detail_for("regression_test") == ""
+
+
+def test_main_audits_accepted_exact_reference_suppression(tmp_path, monkeypatch, capsys):
+    cfg = make_config(
+        tmp_path,
+        ENABLED
+        + '\nchecks = ["regression_test"]\n'
+        + '\n[pr_gates.dod.regression_profile]\n'
+        + 'trusted_reviewers = ["trusted-reviewer"]\n',
+    )
+    source = "F11 test suite failed."
+    marker = ignore_reference_comment(
+        501,
+        source_kind="issue_comment",
+        source_id=100,
+        source_body=source,
+        finding_id="F11",
+        occurrence=1,
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), marker),
+        reviews=(approved_review(),),
+        changed_file_contents={},
+    )
+    monkeypatch.setattr(pr_gates_dod, "collect_pr_data", lambda *_args, **_kwargs: data)
+    assert pr_gates_dod.main(
+        ["--config", str(cfg), "--repo", "o/r", "--pr", "1"]
+    ) == 0
+    output = capsys.readouterr().out
+    assert "Audited finding-reference suppressions" in output
+    assert "pr-gates action=finding_reference_suppressed" in output
+    assert "source_body_sha256=" in output
+    assert "approval_review_id=9" in output
+
+
+def test_regression_malformed_or_non_marker_only_comment_cannot_suppress(tmp_path):
+    cfg = regression_cfg(tmp_path)
+    source = "F11 test suite failed."
+    malformed = source_comment(
+        "issue_comment",
+        501,
+        '<!-- pr-gates-ignore-reference:v1\n{"finding_id":"F11",\n-->\nF11 is harmless',
+        author="trusted-reviewer",
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), malformed),
+        reviews=(approved_review(),),
+        changed_file_contents={},
+    )
+    assert "F11" in pr_gates_dod.evaluate(cfg, data).detail_for("regression_test")
+
+
+def test_regression_metadata_mismatch_disables_all_suppressions(tmp_path):
+    cfg = regression_cfg(tmp_path)
+    source = "F11 test suite failed."
+    marker = ignore_reference_comment(
+        501,
+        source_kind="issue_comment",
+        source_id=100,
+        source_body=source,
+        finding_id="F11",
+        occurrence=1,
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), marker),
+        review_comment_bodies=(source,),
+        reviews=(approved_review(),),
+        changed_file_contents={},
+    )
+    assert "F11" in pr_gates_dod.evaluate(cfg, data).detail_for("regression_test")
+
+
+def test_regression_custom_pattern_and_legacy_comments_stay_fail_closed(tmp_path):
+    config = make_config(
+        tmp_path,
+        ENABLED
+        + '\nchecks = ["regression_test"]\n'
+        + '\n[pr_gates.dod.regression_profile]\n'
+        + 'finding_id_pattern = "BUG-[0-9]+"\n'
+        + 'trusted_reviewers = ["trusted-reviewer"]\n',
+    )
+    cfg = pr_gates_dod.load_config(config)
+    source = "BUG-42 remains exploitable."
+    marker = ignore_reference_comment(
+        501,
+        source_kind="issue_comment",
+        source_id=100,
+        source_body=source,
+        finding_id="BUG-42",
+        occurrence=1,
+    )
+    data = make_data(
+        comments=(source_comment("issue_comment", 100, source), marker),
+        reviews=(approved_review(),),
+        changed_file_contents={},
+    )
+    assert pr_gates_dod.evaluate(cfg, data).detail_for("regression_test") == ""
+
+    legacy = make_data(review_comment_bodies=("BUG-42 remains exploitable",), changed_file_contents={})
+    assert "BUG-42" in pr_gates_dod.evaluate(cfg, legacy).detail_for("regression_test")
 
 
 @pytest.mark.parametrize(
