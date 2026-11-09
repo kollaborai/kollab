@@ -85,6 +85,8 @@ export function makeFixtures(options = {}) {
   const profiles = {
     active: "default",
     providers: [],
+    // The loadout the terminal would start on; null when none is set (#957).
+    default_loadout: options.defaultLoadout ?? null,
     profiles: [
       {
         name: "default",
@@ -119,6 +121,17 @@ export function makeFixtures(options = {}) {
   let pickFailuresLeft = options.pickFails === true ? Infinity : (options.pickFails ?? 0);
   // Once held, profile switches wait until released, so a test can act while one is in flight.
   let pickHold = null;
+  // The folders `GET /profiles?workspace=` was asked for, and a gate that holds those answers (#957).
+  const profileListings = [];
+  let folderHold = null;
+  const holdFolderDefaults = () => {
+    let release;
+    folderHold = { promise: new Promise((resolve) => { release = resolve; }), release };
+  };
+  const releaseFolderDefaults = () => {
+    folderHold?.release();
+    folderHold = null;
+  };
   const holdPicks = () => {
     let release;
     pickHold = { promise: new Promise((resolve) => { release = resolve; }), release };
@@ -144,7 +157,7 @@ export function makeFixtures(options = {}) {
     const url = new URL(request.url());
     const endpoint = url.pathname.replace(/^\/api(?=\/)/, "");
     const method = request.method();
-    requests.push({ method, endpoint });
+    requests.push({ method, endpoint, body: method === "POST" ? request.postData() : null });
 
     if (endpoint === "/sessions" && method === "POST") {
       createPayload = request.postDataJSON();
@@ -161,7 +174,14 @@ export function makeFixtures(options = {}) {
       return json(route, createdSession);
     }
     if (endpoint === "/sessions" && method === "GET") return json(route, session());
-    if (endpoint === "/profiles") return json(route, profiles);
+    if (endpoint === "/profiles") {
+      const folder = url.searchParams.get("workspace") ?? "";
+      profileListings.push(folder);
+      if (folder && folderHold) await folderHold.promise;
+      // Each folder's own config can set its own default loadout; an unlisted folder has none.
+      const byFolder = options.defaultLoadoutsByFolder;
+      return json(route, byFolder ? { ...profiles, default_loadout: byFolder[folder] ?? null } : profiles);
+    }
     if (endpoint === "/profiles/choices") {
       discoveryRequests += 1;
       const more = discoveryProgressPending;
@@ -182,7 +202,12 @@ export function makeFixtures(options = {}) {
     if (endpoint === "/agents/bundles") return json(route, { bundles: [{ name: "coder", agent_type: "coder" }] });
     if (endpoint.startsWith("/agents")) return json(route, agents);
     if (endpoint === "/workspaces") {
-      return json(route, { home: { path: "/learn-demo", name: "Learn demo", live: false }, recent: [] });
+      const recent = (options.recentFolders ?? []).map((folder) => ({ path: folder, name: folder.split("/").pop(), live: 0 }));
+      return json(route, { home: { path: "/learn-demo", name: "Learn demo", live: false }, recent });
+    }
+    if (endpoint === "/workspaces/browse") {
+      const asked = url.searchParams.get("path") ?? "";
+      return json(route, { path: asked, name: asked.split("/").pop(), parent: null, dirs: [] });
     }
     if (endpoint.endsWith("/history")) {
       const history = options.history ?? [];
@@ -229,6 +254,11 @@ export function makeFixtures(options = {}) {
         remoteSessionOpened = true;
         return json(route, remoteSession);
       }
+      if (method === "POST" && endpoint.endsWith("/profile")) {
+        // A session put on a pick answers with what it now runs, as the engine does.
+        const body = request.postDataJSON();
+        return json(route, { ...(createdSession ?? {}), profile: body.name, model: body.model, effort: body.effort });
+      }
       return json(route, createdSession ?? {});
     }
     return json(route, {});
@@ -240,6 +270,11 @@ export function makeFixtures(options = {}) {
     discoveryRequests: () => discoveryRequests,
     createRequest,
     network,
+    // The bodies of the profile switches a page asked for, in order.
+    profileSwitches: () =>
+      requests
+        .filter((request) => request.method === "POST" && request.endpoint.endsWith("/profile"))
+        .map((request) => JSON.parse(request.body)),
     profiles,
     remoteAgent,
     requests,
@@ -247,6 +282,9 @@ export function makeFixtures(options = {}) {
     session,
     holdPicks,
     releasePicks,
+    holdFolderDefaults,
+    releaseFolderDefaults,
+    profileListings: () => profileListings,
   };
 }
 
@@ -315,6 +353,16 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
   });
 
   return { context, externalRequests, fixture: fixtures, page, pageErrors, consoleErrors };
+}
+
+async function until(check, message, timeoutMs = 15_000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const value = check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(message);
 }
 
 async function waitForLesson(page, title) {
@@ -453,6 +501,111 @@ async function main() {
     await shell.page.waitForFunction(() => location.search === "?topic=networks");
     await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/");
+
+    // New Session starts on the default loadout, not on the active profile's own saved model (#957).
+    const defaultLoadout = { name: "haiku-low", profile: "review", provider: "anthropic", model: "claude-haiku", effort: "low" };
+    const onDefault = makeFixtures({ defaultLoadout });
+    const defaultView = await openPage(browser, baseUrl, onDefault);
+    await defaultView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await defaultView.page.getByTestId("new-session-options").click();
+    // The active profile is "default" (gpt-6-luna); the form shows the loadout before Start.
+    await defaultView.page.locator("#new-session-model", { hasText: "claude-haiku" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.doesNotMatch(await defaultView.page.locator("#new-session-model").innerText(), /gpt-6-luna/);
+    const switchAnswered = defaultView.page.waitForResponse(
+      (response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/profile"),
+    );
+    await defaultView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
+    const defaultPayload = await Promise.race([
+      onDefault.createRequest,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Default-loadout launch request did not arrive.")), 15000)),
+    ]);
+    assert.equal(defaultPayload.profile, "review");
+    const switches = await until(() => onDefault.profileSwitches().length && onDefault.profileSwitches(), "The loadout's model never reached the session.");
+    assert.deepEqual(switches, [{ name: "review", model: "claude-haiku", effort: "low" }]);
+    // The session adopted the pick: the engine's answer to the switch carries the loadout's model and level.
+    // The app compares that answer with the pick and flags a session that kept something else.
+    const answered = await (await switchAnswered).json();
+    assert.equal(answered.model, "claude-haiku");
+    assert.equal(answered.effort, "low");
+    await defaultView.context.close();
+
+    // A default loadout on a profile that no longer exists leaves the form on the active profile.
+    const staleFixtures = makeFixtures({ defaultLoadout: { ...defaultLoadout, profile: "deleted" } });
+    const stale = await openPage(browser, baseUrl, staleFixtures);
+    await stale.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await stale.page.getByTestId("new-session-options").click();
+    await stale.page.locator("#new-session-model", { hasText: "gpt-6-luna" }).waitFor({ state: "visible", timeout: 5000 });
+    await stale.context.close();
+
+    // A default loadout belongs to the folder a session starts in: the engine's folder may set one and another
+    // folder its own. The form follows the folder picked, a deliberate model pick stays, and Start Session never
+    // outruns the answer (the clean-room review of #961, round 3).
+    const demoDefault = { name: "luna-max", profile: "default", provider: "openai_responses", model: "gpt-6-luna", effort: "max" };
+    const otherFolderFixtures = (byFolder) =>
+      makeFixtures({ defaultLoadoutsByFolder: byFolder, recentFolders: ["/learn-other"] });
+    const chooseOtherFolder = async (page) => {
+      await page.locator("#new-session-workspace").click();
+      await page.locator('button[title="/learn-other"]').click();
+    };
+    const launchPayload = (fixture, what) =>
+      Promise.race([
+        fixture.createRequest,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} launch request did not arrive.`)), 15000)),
+      ]);
+
+    const perFolder = otherFolderFixtures({ "": demoDefault, "/learn-other": defaultLoadout });
+    const folderView = await openPage(browser, baseUrl, perFolder);
+    await folderView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await folderView.page.getByTestId("new-session-options").click();
+    await folderView.page.locator("#new-session-model", { hasText: "gpt-6-luna" }).waitFor({ state: "visible", timeout: 5000 });
+    await chooseOtherFolder(folderView.page);
+    // The other folder sets claude-haiku: the form shows it, not the engine folder's gpt-6-luna.
+    await folderView.page.locator("#new-session-model", { hasText: "claude-haiku" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.doesNotMatch(await folderView.page.locator("#new-session-model").innerText(), /gpt-6-luna/);
+    assert.ok(perFolder.profileListings().includes("/learn-other"), "the other folder's default was never asked for");
+    await folderView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
+    const folderPayload = await launchPayload(perFolder, "Other-folder");
+    assert.equal(folderPayload.workspace, "/learn-other");
+    assert.equal(folderPayload.profile, "review");
+    const folderSwitches = await until(() => perFolder.profileSwitches().length && perFolder.profileSwitches(), "The other folder's model never reached the session.");
+    assert.deepEqual(folderSwitches, [{ name: "review", model: "claude-haiku", effort: "low" }]);
+    await folderView.context.close();
+
+    // A model picked by hand is not undone by a change of folder.
+    const keptPick = otherFolderFixtures({ "/learn-other": demoDefault });
+    const keptView = await openPage(browser, baseUrl, keptPick);
+    await keptView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await keptView.page.getByTestId("new-session-options").click();
+    await keptView.page.locator("#new-session-model").click();
+    await keptView.page.getByRole("group", { name: "review", exact: true })
+      .getByRole("option", { name: /claude-haiku/ }).click();
+    await chooseOtherFolder(keptView.page);
+    await keptView.page.waitForTimeout(500); // an answer that replaced the pick would be drawn by now
+    assert.match(await keptView.page.locator("#new-session-model").innerText(), /claude-haiku/);
+    await keptView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
+    const keptPayload = await launchPayload(keptPick, "Kept-pick");
+    assert.equal(keptPayload.workspace, "/learn-other");
+    assert.equal(keptPayload.profile, "review");
+    await keptView.context.close();
+
+    // Start Session pressed before the new folder's default has arrived still starts on that default.
+    const racing = otherFolderFixtures({ "": demoDefault, "/learn-other": defaultLoadout });
+    const racingView = await openPage(browser, baseUrl, racing);
+    await racingView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await racingView.page.getByTestId("new-session-options").click();
+    await racingView.page.locator("#new-session-model", { hasText: "gpt-6-luna" }).waitFor({ state: "visible", timeout: 5000 });
+    racing.holdFolderDefaults();
+    await chooseOtherFolder(racingView.page);
+    await racingView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
+    await racingView.page.waitForTimeout(300);
+    assert.equal(racing.createPayload(), null, "Start Session outran the other folder's default");
+    racing.releaseFolderDefaults();
+    const racingPayload = await launchPayload(racing, "Racing");
+    assert.equal(racingPayload.workspace, "/learn-other");
+    assert.equal(racingPayload.profile, "review");
+    const racingSwitches = await until(() => racing.profileSwitches().length && racing.profileSwitches(), "The other folder's model never reached the session.");
+    assert.deepEqual(racingSwitches, [{ name: "review", model: "claude-haiku", effort: "low" }]);
+    await racingView.context.close();
 
     // Release updates have their own route, close control, and retry path.
     await shell.page.getByRole("button", { name: "What’s New", exact: true }).click();
