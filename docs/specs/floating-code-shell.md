@@ -8,7 +8,7 @@ They only show for a chat that has a folder. The file name keeps "floating" beca
 
 The files, the git repository and the shell belong to the daemon of the session you are viewing, never to the
 engine. A session opened from another computer (`agent@device`, over the existing device channel) therefore shows
-that computer's files, that computer's git and that computer's shell, the same ones its user gets.
+that computer's files, that computer's git and that computer's shell, the same ones its user gets. The switches and limits these views read from that daemon's config and agent: `code-shell-settings.md`.
 
 ```
 browser  ->  engine  /sessions/{id}/code/*   ->  session.state.code_call(op, params)  ->  daemon: kollabor/code_service/
@@ -21,7 +21,7 @@ browser  ->  engine  /sessions/{id}/code/*   ->  session.state.code_call(op, par
   the daemon's own working directory (realpath). A `workspace` field in a request is ignored. Every file path is
   resolved and must sit inside that folder (closed-prefix check, symlinks followed; anything else is 403).
 - RPC: `state.code_call` (`kollabor/state/handlers.py`), answered like every other state call, local or remote.
-- A daemon older than this change answers `RpcMethodNotFound`; the engine turns that into 502 `daemon_unreachable`
+- A daemon older than this change answers `RpcMethodNotFound`; the engine turns that into 502 `daemon_outdated` ("This agent runs older code. Restart it to use Code, Git and Terminal.")
   (never exception text). Restart the agent to pick up the code.
 
 | surface | frontend | daemon op |
@@ -47,9 +47,13 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
 
 ## Terminal
 
-- A PTY login shell in the daemon's folder, as the daemon's user, with `KOLLAB_*` and secret-looking variables removed
-  from its environment. Up to 8 shells and 64 links per daemon. A shell outlives its socket and is reaped 10 minutes
-  after its last link detaches; a reconnecting client resumes it with the `sessionId` from `ready`.
+- A PTY login shell in the daemon's folder, as the daemon's user. `KOLLAB_*` and secret-looking variables are removed
+  from its environment unless `terminal.pass_kollab_env` or `terminal.pass_secret_env` lets them through;
+  `terminal.env_allow`, `terminal.env_deny` and `terminal.env_set` adjust the list. Up to `terminal.max_shells` shells
+  (default 8) and 64 links per daemon (fixed). A shell outlives its socket and is reaped `terminal.idle_reap_minutes`
+  (default 10) after its last link detaches; a reconnecting client resumes it with the `sessionId` from `ready`.
+  `enabled` refuses every call, `terminal.enabled` opens no shells, `read_only` refuses terminal input
+  (`code-shell-settings.md`).
 - The WebSocket is outside the HTTP bearer middleware, so the first message must be `{"type":"auth","token"}` within
   5 s, else close 4401. Other closes: 4404 no such session, 1011 the daemon stopped answering.
 - The engine bridges the socket to the daemon: each client message goes in as `terminal.message`; output comes back by
