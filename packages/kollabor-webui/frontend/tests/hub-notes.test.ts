@@ -41,6 +41,13 @@ test("hub messages come out of the HUD; status entries and model guidance stay i
   assert.equal(rest, "what did they say?");
 });
 
+test("a message typed in another agent's window is addressed to that agent and observed (#659)", () => {
+  const turn = "<agent_hud>\n[hub:user->lapis]\n+ [hub channel: user -> lapis]\n  what changed in the parser?\n  (the human is typing in lapis's window. do NOT relay, repeat, or respond to lapis about this message — they already see it.)\n</agent_hud>\n\nok";
+  assert.deepEqual(splitAgentHud(turn).notes, [
+    { from: "user", to: "lapis", text: "what changed in the parser?", observed: true },
+  ]);
+});
+
 test("a turn without a HUD is left alone", () => {
   assert.deepEqual(splitAgentHud("plain message"), { notes: [], rest: "plain message" });
 });
