@@ -39,6 +39,7 @@ import type {
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
 import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
+import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
 import {
@@ -232,6 +233,8 @@ function RuntimeShell({
       ?.parts.find((item) => item.type === "text");
     return part?.type === "text" ? part.text.trim() : "";
   });
+  // The agent's latest todo list, for the card under the session panel. A string, so the selector stays stable.
+  const todo = useAuiState((s) => latestTodoBlock(s.thread.messages));
   const wasRunning = useRef(false);
   useEffect(() => {
     if (wasRunning.current && !running && RESTART_COMMAND.test(lastPrompt)) {
@@ -349,6 +352,7 @@ function RuntimeShell({
           onSessionUpdated={onSessionUpdated}
           onOpenSettings={() => onOpenSettings()}
           onHistoryCleared={onHistoryCleared}
+          todo={todo}
           view={view}
           onViewChange={setView}
           sheetOpen={panelSheetOpen}
