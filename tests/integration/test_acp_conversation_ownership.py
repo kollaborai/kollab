@@ -79,7 +79,7 @@ def _web(state, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('surface', ['rpc-restart', 'rpc-resume', 'web-clear', 'tui-restart', 'modal-resume'])
+@pytest.mark.parametrize('surface', ['rpc-restart', 'rpc-resume', 'web-clear', 'tui-new', 'modal-resume'])
 async def test_effort_owner_rejects_conversation_change_before_mutation_and_retry_succeeds(
     tmp_path, monkeypatch, surface
 ):
@@ -110,8 +110,8 @@ async def test_effort_owner_rejects_conversation_change_before_mutation_and_retr
             return await _rpc(server, 'state.restart_session')
         if surface == 'rpc-resume':
             return await _rpc(server, 'state.resume_conversation', {'session_id': 'saved'})
-        if surface == 'tui-restart':
-            return await handler.handle_restart(SimpleNamespace())
+        if surface == 'tui-new':
+            return await handler.handle_new(SimpleNamespace())
         if surface == 'modal-resume':
             return await plugin._handle_modal_command(
                 {'command': {'action': 'resume_session', 'session_id': 'saved'}}, SimpleNamespace()
