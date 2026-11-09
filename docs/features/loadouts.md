@@ -83,6 +83,13 @@ one searchable list of every set-up profile × model × effort. Type words in
 any order: `codex luna max` finds Codex CLI's gpt-6-luna
 at max, `claude code opus max` finds Claude Code's opus at max.
 
+- New Session starts on your default loadout (`kollabor.llm.default_loadout`),
+  as the terminal does: its profile, model and effort are selected when the
+  form opens. The default is the one of the folder the session will run in
+  (the global config, then that folder's project and local config), so choosing
+  another folder shows that folder's default, unless you already picked a model
+  yourself. A default that names a deleted loadout or profile, or an ACP
+  harness, leaves the active profile's own model.
 - A pick changes only that session. A native profile takes the model and
   effort as the session's own override (never saved); an ACP harness (Codex
   CLI, Claude Code) owns its model and effort, so they go to its own options,
