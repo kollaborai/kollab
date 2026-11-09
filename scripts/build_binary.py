@@ -77,7 +77,7 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kwargs)
 
 
-def run_with_retry(cmd: list[str], attempts: int = 3, **kwargs) -> subprocess.CompletedProcess:
+def run_with_retry(cmd: list[str], attempts: int = 4, **kwargs) -> subprocess.CompletedProcess:
     """`run`, tried again when it fails: pex downloads the portable CPython from
     GitHub, and a read timeout there failed CI on a commit that passed on re-run."""
     for attempt in range(1, attempts + 1):
@@ -87,7 +87,7 @@ def run_with_retry(cmd: list[str], attempts: int = 3, **kwargs) -> subprocess.Co
             if attempt == attempts:
                 raise
             print(f"build step failed (attempt {attempt}/{attempts}); retrying", flush=True)
-            time.sleep(5 * attempt)
+            time.sleep(15 * attempt)
     raise AssertionError("unreachable")
 
 
