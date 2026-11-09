@@ -180,6 +180,7 @@ const mainConfig = defineConfig({
       "tests/terminal-ws-protocol.test.ts",
       "tests/code-fetch-session.test.ts",
       "tests/terminal-env.test.ts",
+      "tests/file-save.test.ts",
       "tests/history-cache.test.ts",
       "tests/phone-frame.test.ts",
       "tests/phone-audio.test.ts",

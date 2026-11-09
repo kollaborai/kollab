@@ -4,7 +4,8 @@ import { useEditorStore } from "@/components/code/editor-store";
 import { BranchSelector } from "@/components/code/git/branch-selector";
 import { StashSelector } from "@/components/code/git/stash-selector";
 import { Button } from "@/components/ui/button";
-import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
+import { codeFetch, OUTDATED_NOTICE, unwrapCodeData } from "@/lib/code-fetch";
+import { DaemonNotice } from "@/components/code/DaemonNotice";
 import type {
   GitLogEntry,
   GitStatusEntry,
@@ -415,6 +416,7 @@ export function GitPanel({ workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
   }
 
   if (error && !status) {
+    if (error === OUTDATED_NOTICE) return <DaemonNotice />;
     return <div className="px-3 py-4 text-center text-[11px] text-destructive">{error}</div>;
   }
 

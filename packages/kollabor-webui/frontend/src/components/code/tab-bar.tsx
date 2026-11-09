@@ -1,6 +1,6 @@
 import { useState, useCallback, type DragEvent } from "react";
 import { ChevronRight, CircleX, Save } from "lucide-react";
-import { codeFetch } from "@/lib/code-fetch";
+import { saveWorkspaceFile } from "@/components/code/file-save";
 import { useEditorStore, usePane, isDirty } from "@/components/code/editor-store";
 import { getFileAccentColor } from "@/components/code/file-tree";
 
@@ -18,14 +18,8 @@ export function TabBar({ paneId, rootPath }: TabBarProps) {
   const reorderFiles = useEditorStore((s) => s.reorderFiles);
 
   const handleSave = useCallback(async (filePath: string, content: string) => {
-    try {
-      const res = await codeFetch(`/api/fs/file?path=${encodeURIComponent(filePath)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace: rootPath, content }),
-      });
-      if (res.ok) markSaved(filePath, content);
-    } catch {}
+    const result = await saveWorkspaceFile(rootPath, filePath, content);
+    if (result.ok) markSaved(filePath, content);
   }, [markSaved, rootPath]);
 
   const [dragIndex, setDragIndex] = useState<number | null>(null);

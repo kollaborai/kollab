@@ -1,5 +1,6 @@
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
 import { useEditorStore } from "@/components/code/editor-store";
+import { rememberMtime } from "@/components/code/file-save";
 
 export function fileNameOf(absPath: string): string {
   return absPath.slice(absPath.lastIndexOf("/") + 1);
@@ -16,7 +17,9 @@ export async function readFileContent(workspace: string, absPath: string): Promi
     const res = await codeFetch(`/api/fs/file?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(absPath)}`);
     if (!res.ok) return null;
     const raw: unknown = await res.json();
-    return unwrapCodeData<{ content?: string }>(raw).content ?? "";
+    const data = unwrapCodeData<{ content?: string; mtime?: number }>(raw);
+    rememberMtime(absPath, data.mtime);
+    return data.content ?? "";
   } catch {
     return null;
   }

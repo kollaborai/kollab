@@ -4,7 +4,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { editor } from "monaco-editor";
 import { Button } from "@/components/ui/button";
-import { codeFetch } from "@/lib/code-fetch";
+import { saveWorkspaceFile } from "@/components/code/file-save";
 import { isDiffTab, isDirty, usePane, useEditorStore } from "@/components/code/editor-store";
 import { getFileAccentColor } from "./file-tree";
 import { StatusBar } from "./status-bar";
@@ -164,6 +164,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [saveStale, setSaveStale] = useState(false);
   const [cursorLine, setCursorLine] = useState(1);
   const [cursorColumn, setCursorColumn] = useState(1);
   const [selectionLength, setSelectionLength] = useState(0);
@@ -198,31 +199,20 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
     }
   }, [accent]);
 
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(async (force = false) => {
     if (!file || !isDirty(file)) return;
     setSaving(true);
     setSaveError("");
-    try {
-      const res = await codeFetch(
-        `/api/fs/file?path=${encodeURIComponent(file.path)}`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspace: rootPath, content: file.content }),
-        }
-      );
-      if (res.ok) {
-        markSaved(file.path, file.content);
-      } else {
-        const raw: unknown = await res.json();
-        setSaveError(errorMessageOf(raw, "save failed"));
-      }
-    } catch {
-      setSaveError("save failed");
-    } finally {
-      setSaving(false);
+    setSaveStale(false);
+    const result = await saveWorkspaceFile(rootPath, file.path, file.content, { force });
+    if (result.ok) {
+      markSaved(file.path, file.content);
+    } else {
+      setSaveError(result.message);
+      setSaveStale(result.stale);
     }
-  }, [file, markSaved]);
+    setSaving(false);
+  }, [file, markSaved, rootPath]);
 
   // keyboard shortcuts
   useEffect(() => {
@@ -437,14 +427,24 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
           </div>
         )}
         {!saving && saveError && (
-          <button
-            type="button"
-            title={saveError}
-            onClick={() => setSaveError("")}
-            className={`absolute top-2 z-10 cursor-pointer font-mono text-[10px] text-destructive ${statusRight}`}
-          >
-            ✕ {saveError.length > 40 ? saveError.slice(0, 40) + "…" : saveError}
-          </button>
+          <div className={`absolute top-2 z-10 flex items-center gap-2 font-mono text-[10px] text-destructive ${statusRight}`}>
+            <button
+              type="button"
+              title={saveError}
+              onClick={() => {
+                setSaveError("");
+                setSaveStale(false);
+              }}
+              className="cursor-pointer"
+            >
+              ✕ {saveError.length > 40 ? saveError.slice(0, 40) + "…" : saveError}
+            </button>
+            {saveStale && (
+              <button type="button" onClick={() => void handleSave(true)} className="cursor-pointer underline">
+                Overwrite
+              </button>
+            )}
+          </div>
         )}
       </div>
 

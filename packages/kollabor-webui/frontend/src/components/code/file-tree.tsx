@@ -13,7 +13,8 @@ import {
 } from "react";
 import { ChevronsDownUp, FilePlus, Folder, FolderOpen, FolderPlus, Loader2, LocateFixed } from "lucide-react";
 import { useEditorStore } from "@/components/code/editor-store";
-import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
+import { codeFetch, OUTDATED_NOTICE, unwrapCodeData } from "@/lib/code-fetch";
+import { DaemonNotice } from "@/components/code/DaemonNotice";
 import { cn } from "@/lib/utils";
 import {
   ContextMenu,
@@ -506,7 +507,11 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
 
   if (error) {
     return (
-      <div className="px-3 py-3 text-xs text-muted-foreground">{error}</div>
+      error === OUTDATED_NOTICE ? (
+        <DaemonNotice />
+      ) : (
+        <div className="px-3 py-3 text-xs text-muted-foreground">{error}</div>
+      )
     );
   }
 
