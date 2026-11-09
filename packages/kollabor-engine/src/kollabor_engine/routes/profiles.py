@@ -233,7 +233,9 @@ def _loadout_config(workspace: str = ""):
 
     from kollabor_config.loader import load_layered_user_config
 
-    folder = Path(workspace).expanduser().resolve() if workspace else None
+    # Always a concrete folder: with none, the reader behaves as the terminal starting up and, on Windows,
+    # claims the folder's project state directory. Listing profiles must never create one.
+    folder = Path(workspace).expanduser().resolve() if workspace else Path.cwd()
     return _LayeredConfig(load_layered_user_config(folder))
 
 
@@ -285,10 +287,12 @@ def _default_loadout(pm: ProfileManager, workspace: str = "") -> Optional[Dict[s
         return None
 
 
+# Annotated, not ``= Query(...)``: a direct call (the unit tests make them) then gets the real default "".
+_Workspace = Annotated[str, Query(description="Folder whose default loadout applies; empty is the engine's own")]
+
+
 @router.get("")
-async def list_profiles(
-    workspace: str = Query("", description="Folder whose default loadout applies; empty is the engine's own"),
-):
+async def list_profiles(workspace: _Workspace = ""):
     """List all available profiles."""
     pm = _get_profile_manager()
     profiles = pm.list_profiles()
