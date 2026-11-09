@@ -15,11 +15,14 @@ called without settings uses ``settings.DEFAULTS``.
 
 import asyncio
 import contextlib
+import ctypes
+import errno
 import os
 import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from typing import Any
@@ -325,6 +328,28 @@ def _leaf_path(base: str, path: str) -> str:
         return os.path.realpath(joined)  # the workspace root itself
     return os.path.join(os.path.realpath(os.path.dirname(joined)), os.path.basename(joined))
 
+
+
+def _rename_without_replacement(source: str, destination: str) -> None:
+    """Move a path atomically only if the destination is absent; never fall back to replacing rename."""
+    if os.name == "nt":
+        os.rename(source, destination)  # Windows rename refuses an existing destination.
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes, dest_bytes = os.fsencode(source), os.fsencode(destination)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        fn = libc.renamex_np
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        result = fn(source_bytes, dest_bytes, 0x00000004)  # RENAME_EXCL
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        fn = libc.renameat2
+        fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = fn(-100, source_bytes, -100, dest_bytes, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    else:
+        raise OSError(errno.ENOTSUP, "Atomic non-replacing rename is unavailable")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
 
 def _decode(data: bytes) -> tuple[str, str]:
     """The text of ``data`` and its encoding: utf-8 when the bytes are valid utf-8, else latin-1 (every byte is one
@@ -688,8 +713,12 @@ async def rename_path(workspace: str, params: dict[str, Any], settings: CodeSett
     if os.path.lexists(new_full):
         return _fail(409, "already_exists", "Destination path already exists.")
     try:
-        os.rename(old_full, new_full)
+        _rename_without_replacement(old_full, new_full)
     except OSError as exc:
+        if exc.errno in (errno.ENOTSUP, errno.ENOSYS, errno.EINVAL):
+            return _fail(
+                409, "rename_unavailable", "This file system cannot safely rename without replacing a destination."
+            )
         return _disk_failure(exc)
     return _ok({"success": True, "path": new_full})
 

@@ -626,3 +626,20 @@ def test_subfolder_commit_refuses_when_scope_cannot_be_guaranteed(repo):
     assert result.content["error"]["code"] == "subfolder_commit_unavailable"
     assert _cli(repo, "rev-parse", "HEAD").strip() == before
     assert _cli(repo, "diff", "--cached", "--name-only").splitlines() == ["app/inside.txt"]
+
+
+def test_rename_does_not_replace_destination_created_after_precheck(ws, monkeypatch):
+    _write(ws.root / "source.txt", "source")
+    destination = ws.root / "target.txt"
+    real_lexists = os.path.lexists
+    def race(path):
+        exists = real_lexists(path)
+        if str(path) == str(destination) and not exists:
+            _write(destination, "other writer")
+            return False
+        return exists
+    monkeypatch.setattr(os.path, "lexists", race)
+    result = _fs("rename", ws.root, {"oldPath": "source.txt", "newPath": "target.txt"})
+    assert result.status_code == 409
+    assert destination.read_text() == "other writer"
+    assert (ws.root / "source.txt").read_text() == "source"

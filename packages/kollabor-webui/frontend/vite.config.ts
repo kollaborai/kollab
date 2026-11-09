@@ -204,6 +204,7 @@ const mainConfig = defineConfig({
       "tests/code-editor-store.test.ts",
       "tests/code-open-file.test.ts",
       "tests/workspace-ownership.test.ts",
+      "tests/file-mutations.test.ts",
 
       "tests/team-model.test.ts",
       "tests/team-selection.test.ts",

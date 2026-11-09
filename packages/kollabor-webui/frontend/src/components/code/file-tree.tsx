@@ -1,3 +1,4 @@
+import { mutateFileTree } from "@/components/code/file-mutations";
 import {
   createContext,
   useCallback,
@@ -162,6 +163,9 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   const [tree, setTree] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [mutationBusy, setMutationBusy] = useState(false);
+  const mutationInFlight = useRef(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [initialized, setInitialized] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -393,24 +397,31 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   }, [refreshGitStatus]);
 
   const commitInlineCreate = useCallback(async (name: string) => {
+    if (mutationInFlight.current) return;
     if (!inlineCreate || !name.trim()) {
       setInlineCreate(null);
       return;
     }
     const path = `${inlineCreate.parentDir}/${name.trim()}`;
+    mutationInFlight.current = true;
+    setMutationBusy(true);
+    setActionError("");
     try {
-      await codeFetch("/api/fs/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace, path, type: inlineCreate.type }),
-      });
+      await mutateFileTree("create", { workspace, path, type: inlineCreate.type });
+      setInlineCreate(null);
       fetchTree();
       refreshGitStatus();
-    } catch {}
-    setInlineCreate(null);
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "Could not create the path.");
+    } finally {
+      mutationInFlight.current = false;
+      setMutationBusy(false);
+    }
   }, [inlineCreate, workspace, fetchTree, refreshGitStatus]);
 
   const handleCreateFile = useCallback((parentDir: string) => {
+    if (mutationInFlight.current) return;
+    setActionError("");
     setInlineCreate({ parentDir, type: "file" });
     // expand parent so the input is visible
     if (parentDir !== workspace) {
@@ -419,6 +430,8 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   }, [workspace]);
 
   const handleCreateFolder = useCallback((parentDir: string) => {
+    if (mutationInFlight.current) return;
+    setActionError("");
     setInlineCreate({ parentDir, type: "dir" });
     if (parentDir !== workspace) {
       setExpanded((prev) => new Set([...prev, parentDir]));
@@ -439,25 +452,32 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   }, [inlineRename]);
 
   const commitRename = useCallback(async (newName: string) => {
+    if (mutationInFlight.current) return;
     if (!inlineRename || !newName.trim() || newName.trim() === inlineRename.name) {
       setInlineRename(null);
       return;
     }
     const dir = inlineRename.path.slice(0, inlineRename.path.length - inlineRename.name.length);
     const newPath = `${dir}${newName.trim()}`;
+    mutationInFlight.current = true;
+    setMutationBusy(true);
+    setActionError("");
     try {
-      await codeFetch("/api/fs/rename", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace, oldPath: inlineRename.path, newPath }),
-      });
+      await mutateFileTree("rename", { workspace, oldPath: inlineRename.path, newPath });
+      setInlineRename(null);
       fetchTree();
       refreshGitStatus();
-    } catch {}
-    setInlineRename(null);
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "Could not rename the path.");
+    } finally {
+      mutationInFlight.current = false;
+      setMutationBusy(false);
+    }
   }, [inlineRename, workspace, fetchTree, refreshGitStatus]);
 
   const handleRename = useCallback((oldPath: string, currentName: string) => {
+    if (mutationInFlight.current) return;
+    setActionError("");
     setInlineRename({ path: oldPath, name: currentName });
   }, []);
 
@@ -465,21 +485,27 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   const [deleteConfirm, setDeleteConfirm] = useState<{ path: string; name: string } | null>(null);
 
   const handleDelete = useCallback((path: string, name: string) => {
+    if (mutationInFlight.current) return;
+    setActionError("");
     setDeleteConfirm({ path, name });
   }, []);
 
   const confirmDelete = useCallback(async () => {
-    if (!deleteConfirm) return;
+    if (!deleteConfirm || mutationInFlight.current) return;
+    mutationInFlight.current = true;
+    setMutationBusy(true);
+    setActionError("");
     try {
-      await codeFetch("/api/fs/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace, path: deleteConfirm.path }),
-      });
+      await mutateFileTree("delete", { workspace, path: deleteConfirm.path });
+      setDeleteConfirm(null);
       fetchTree();
       refreshGitStatus();
-    } catch {}
-    setDeleteConfirm(null);
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "Could not delete the path.");
+    } finally {
+      mutationInFlight.current = false;
+      setMutationBusy(false);
+    }
   }, [deleteConfirm, workspace, fetchTree, refreshGitStatus]);
 
   const treeActions = useMemo<TreeActions>(
@@ -557,6 +583,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
 
         {/* accordion folders */}
         <div ref={treeRef} className="flex-1 overflow-y-auto px-1 pb-1">
+          {actionError && <div role="alert" className="px-2 py-1 text-xs text-destructive">{actionError}</div>}
           {/* inline delete confirmation */}
           {deleteConfirm && (
             <div className="mb-0.5 flex items-center gap-1.5 rounded bg-destructive/10 px-2 py-1">
@@ -564,6 +591,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
               <button
                 type="button"
                 onClick={confirmDelete}
+                disabled={mutationBusy}
                 className="rounded bg-destructive/20 px-2 py-0.5 font-mono text-[10px] text-destructive transition-colors hover:bg-destructive/30"
                 autoFocus
               >
@@ -571,6 +599,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
               </button>
               <button
                 type="button"
+                disabled={mutationBusy}
                 onClick={() => setDeleteConfirm(null)}
                 className="rounded px-2 py-0.5 font-mono text-[10px] text-muted-foreground transition-colors hover:bg-accent"
               >
@@ -585,13 +614,14 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
               <span className="shrink-0 text-[10px] text-muted-foreground">rename</span>
               <input
                 ref={renameRef}
+                disabled={mutationBusy}
                 type="text"
                 defaultValue={inlineRename.name}
                 className={INLINE_INPUT}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     commitRename((e.target as HTMLInputElement).value);
-                  } else if (e.key === "Escape") {
+                  } else if (e.key === "Escape" && !mutationInFlight.current) {
                     setInlineRename(null);
                   }
                 }}
@@ -610,13 +640,14 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
               )}
               <input
                 ref={inlineRef}
+                disabled={mutationBusy}
                 type="text"
                 placeholder={inlineCreate.type === "dir" ? "folder name..." : "file name..."}
                 className={INLINE_INPUT}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     commitInlineCreate((e.target as HTMLInputElement).value);
-                  } else if (e.key === "Escape") {
+                  } else if (e.key === "Escape" && !mutationInFlight.current) {
                     setInlineCreate(null);
                   }
                 }}
