@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions/{session_id}/code", tags=["code"])
 
 _NO_STORE = {"Cache-Control": "no-store"}
-MAX_BODY_BYTES = 8 * 1024 * 1024  # a 2 MB file with every character escaped is still below this
+MAX_BODY_BYTES = 16 * 1024 * 1024  # a default-size 2 MiB file can expand to 12 MiB when JSON-escaped
 AUTH_TIMEOUT_SECONDS = 5.0
 # The daemon answers one connection's requests in order, so each poll waits only this long there; the pump then
 # sleeps (IDLE_SLEEP_MAX at most, less after output, and none after the client typed) before it asks again.

@@ -5,6 +5,7 @@ comes back must be exactly what ``kollabor.code_service.call`` answers on that c
 """
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -199,6 +200,15 @@ def test_bulk_code_rpc_allows_for_paced_remote_file_transfer(wire):
     remote, rpc, _, _ = wire
     run(remote.code_call("fs.file", {"path": "large.txt"}))
     assert rpc.last_timeout >= 1200
+
+
+def test_default_sized_escaped_file_fits_one_rpc_frame():
+    from kollabor_rpc.models import RpcRequest
+    from kollabor_rpc.transport import LARGE_BUFFER_LIMIT
+
+    content = "\x01" * (2 * 1024 * 1024)
+    request = RpcRequest("a" * 32, "state.code_call", {"op": "fs.write_file", "params": {"content": content}})
+    assert len((json.dumps(request.to_wire()) + "\n").encode()) < LARGE_BUFFER_LIMIT
 
 
 def test_code_rpc_deadline_includes_a_stalled_writer(wire, monkeypatch):

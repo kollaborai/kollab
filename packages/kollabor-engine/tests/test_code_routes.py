@@ -166,6 +166,13 @@ def test_a_body_over_the_cap_is_413(client, daemon):
     assert daemon.calls == []
 
 
+def test_default_sized_escaped_file_can_reach_the_daemon(client, daemon):
+    content = "\x01" * (2 * 1024 * 1024)
+    response = client.put(_url("fs/file"), params={"path": "escaped.txt"}, json={"content": content})
+    assert response.status_code == 200
+    assert daemon.calls[-1][1]["content"] == content
+
+
 @pytest.mark.asyncio
 async def test_chunked_body_stops_reading_at_the_cap(monkeypatch):
     monkeypatch.setattr(code, "MAX_BODY_BYTES", 8)
