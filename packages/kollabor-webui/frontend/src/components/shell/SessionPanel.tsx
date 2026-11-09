@@ -1,4 +1,5 @@
 import { Avatar } from "@/components/agents/Avatar";
+import { useFloatingShell } from "@/components/code/floating-shell-store";
 import {
   useCallback,
   useEffect,
@@ -8,6 +9,7 @@ import {
 } from "react";
 import {
   CircleAlert,
+  Code,
   Eraser,
   MessageSquare,
   PanelRightClose,
@@ -19,6 +21,7 @@ import {
   Settings2,
   ShieldCheck,
   ShieldOff,
+  SquareTerminal,
   Terminal,
   Trash2,
   Users,
@@ -156,6 +159,8 @@ export function SessionPanel({
   onSheetOpenChange: (open: boolean) => void;
 }) {
   const isMobile = useIsMobile(SIDEBAR_BREAKPOINT);
+  const { codeOpen, terminalOpen, toggleCode, toggleTerminal } = useFloatingShell();
+  const hasFolder = Boolean(session.workspace);
   const [open, setOpen] = useState(storedOpen);
   const [clearOpen, setClearOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
@@ -399,6 +404,22 @@ export function SessionPanel({
           </Button>
         ))}
       </div>
+      {hasFolder ? (
+        <div className="flex flex-col gap-0.5" role="group" aria-label="Workspace tools">
+          <Button type="button" variant="ghost" size="sm" aria-pressed={codeOpen} data-testid="code-editor-toggle"
+            onClick={() => { toggleCode(); onSheetOpenChange(false); }}
+            className={cn(ROW, codeOpen && "bg-accent text-accent-foreground font-medium")}>
+            <Code className="size-3.5" />
+            <span>Code Editor</span>
+          </Button>
+          <Button type="button" variant="ghost" size="sm" aria-pressed={terminalOpen} data-testid="terminal-toggle"
+            onClick={() => { toggleTerminal(); onSheetOpenChange(false); }}
+            className={cn(ROW, terminalOpen && "bg-accent text-accent-foreground font-medium")}>
+            <SquareTerminal className="size-3.5" />
+            <span>Terminal</span>
+          </Button>
+        </div>
+      ) : null}
       <Separator />
       <div className="flex min-w-0 flex-col gap-1">
         <p className="text-muted-foreground font-medium">Model and Profile</p>
@@ -526,6 +547,20 @@ export function SessionPanel({
               <Icon className="size-4" />
             </TooltipIconButton>
           ))}
+          {hasFolder ? (
+            <>
+              <TooltipIconButton tooltip="Code Editor" side="left" aria-pressed={codeOpen} data-testid="code-editor-toggle"
+                className={cn("size-7 p-1.5", codeOpen ? "bg-accent text-accent-foreground" : "text-muted-foreground")}
+                onClick={toggleCode}>
+                <Code className="size-4" />
+              </TooltipIconButton>
+              <TooltipIconButton tooltip="Terminal" side="left" aria-pressed={terminalOpen} data-testid="terminal-toggle"
+                className={cn("size-7 p-1.5", terminalOpen ? "bg-accent text-accent-foreground" : "text-muted-foreground")}
+                onClick={toggleTerminal}>
+                <SquareTerminal className="size-4" />
+              </TooltipIconButton>
+            </>
+          ) : null}
         </aside>
       )}
 

@@ -211,6 +211,12 @@ async def _engine_lifespan(app: FastAPI):
             except Exception:
                 logger.exception("Voice shutdown failed")
         try:
+            from .routes.code_terminal import shutdown_terminals
+
+            await shutdown_terminals()
+        except Exception:
+            logger.exception("Code terminal shutdown failed")
+        try:
             for session in list(_sessions.values()):
                 try:
                     await session.shutdown(stop_daemon=not session.webui_owned)
@@ -375,6 +381,14 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     from .routes.hub_ws import router as hub_ws_router
 
     app.include_router(hub_ws_router)
+
+    from .routes.code_files import router as code_files_router
+    from .routes.code_git import router as code_git_router
+    from .routes.code_terminal import router as code_terminal_router
+
+    app.include_router(code_files_router)
+    app.include_router(code_git_router)
+    app.include_router(code_terminal_router)
 
     @app.get("/health")
     async def health():

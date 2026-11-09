@@ -95,6 +95,7 @@ import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
 import { startingChoice } from "@/components/shell/starting-choice";
 import { LearnDialog } from "@/components/learn/LearnDialog";
+import { FloatingShellHost } from "@/components/code/FloatingShellHost";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";
 import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
@@ -1948,6 +1949,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           </div>
         </SidebarInset>
       </SidebarProvider>
+      <FloatingShellHost workspace={activeSession?.workspace ?? null} />
       </AvatarImageProvider>
     </GemAppearanceProvider>
   );
