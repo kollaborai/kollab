@@ -248,14 +248,12 @@ def load_layered_user_config(project_path: Optional[Path] = None) -> Dict[str, A
         except Exception as e:
             logger.warning(f"Failed to load global config: {e}")
 
-    # Layer 2: Project config (defaults for this project)
+    # Layer 2: Project config (defaults for this project). The working directory's state is claimed as it
+    # always was; another folder is only read, so asking about it leaves nothing behind.
+    project_dirs = get_project_data_dir_candidates(project_path, create_new=project_path is None)
     project_config_path = next(
-        (
-            path / "config.json"
-            for path in get_project_data_dir_candidates(project_path)
-            if (path / "config.json").exists()
-        ),
-        get_project_data_dir(project_path) / "config.json",
+        (path / "config.json" for path in project_dirs if (path / "config.json").exists()),
+        project_dirs[0] / "config.json",
     )
     if project_config_path.exists():
         try:
