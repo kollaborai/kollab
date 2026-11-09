@@ -93,6 +93,52 @@ test("a fence line ends a block and the text after it is read again", () => {
   assert.deepEqual(todoBlocks(text).map((block) => todoItems(block).map((item) => item.text)), [["a"], ["b"]]);
 });
 
+// Markdown reads a fence wherever a container holds it: on a list item's own line (its text and its close are indented
+// by the item's content offset), under a numbered item and a nested bullet, or in a quote. An indented block after a
+// blank line is code too. The thread draws all of these as code, so none of them is the agent's list.
+const REAL = ["todo:", "  [x] the real list"].join("\n");
+
+test("a fence opened on a list item line is code, and so is its indented close", () => {
+  const text = ["- ```", "  todo:", "    [ ] example only", "  ```", "", REAL].join("\n");
+
+  assert.deepEqual(todoBlocks(text), [REAL]);
+});
+
+test("a tilde fence opened on a list item line is code too", () => {
+  const text = ["* ~~~", "  todo:", "    [ ] example only", "  ~~~", "", REAL].join("\n");
+
+  assert.deepEqual(todoBlocks(text), [REAL]);
+});
+
+test("a fence under a numbered item and a nested bullet is code", () => {
+  const text = ["1. step one", "   - ```md", "     todo:", "       [ ] example only", "     ```", "", REAL].join("\n");
+
+  assert.deepEqual(todoBlocks(text), [REAL]);
+});
+
+test("a fence in a quote is code", () => {
+  const text = ["> ```", "> todo:", ">   [ ] example only", "> ```", "", REAL].join("\n");
+
+  assert.deepEqual(todoBlocks(text), [REAL]);
+});
+
+test("an indented block after a blank line is code", () => {
+  assert.deepEqual(todoBlocks(["Plan:", "", "    todo:", "      [ ] example only", "", REAL].join("\n")), [REAL]);
+  assert.deepEqual(todoBlocks(["Plan:", "", "\ttodo:", "\t  [ ] example only", "", REAL].join("\n")), [REAL]);
+});
+
+test("a list item that is not code still holds a list, next to a fence", () => {
+  const text = ["```", "code", "```", "", "- notes", "  todo:", "    [x] inside the item"].join("\n");
+
+  assert.deepEqual(todoItems(todoBlocks(text)[0]).map((item) => item.text), ["inside the item"]);
+});
+
+test("a fence with Windows line endings hides its text and the list after it is read", () => {
+  const text = ["```", "todo:", "  [ ] example only", "```", "", REAL].join("\r\n");
+
+  assert.deepEqual(todoBlocks(text), [REAL]);
+});
+
 test("a blank line between the label and its first item is tolerated, one after the items ends the block", () => {
   const text = "todo:\n\n  [x] a\n  [ ] b\n\n  [ ] not part of it";
 
@@ -141,6 +187,12 @@ test("inside one message the last text part that holds a block wins", () => {
   const parts = [{ type: "text", text: OLD }, { type: "tool-call" }, { type: "text", text: NEW }];
 
   assert.equal(latestTodoBlock([{ role: "assistant", parts }]), NEW);
+});
+
+test("an example list in a list item's fence is not the latest list", () => {
+  const example = ["- ```", "  todo:", "    [ ] example only", "  ```"].join("\n");
+
+  assert.equal(latestTodoBlock([assistant(OLD), assistant(`how a list looks:\n\n${example}`)]), OLD);
 });
 
 test("hub notes and user messages never count as the agent's own list", () => {
