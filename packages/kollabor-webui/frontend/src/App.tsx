@@ -63,7 +63,7 @@ import {
   type SlashCommand,
   type Session,
 } from "./api";
-import { applyModelChoice, pickLabel } from "@/components/shell/model-choice";
+import { applyModelChoice, pickLabel, runningKey, stateAfterPick } from "@/components/shell/model-choice";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import {
   EngineRuntimeProvider,
@@ -178,7 +178,7 @@ function RuntimeShell({
   liveAgents: LiveAgent[];
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
-  onSessionUpdated: (session: Session, options?: { failed?: boolean }) => void;
+  onSessionUpdated: (session: Session) => void;
   onOpenSettings: (request?: PanelOpenRequest) => void;
   /** Reloads this session's conversation after the engine cleared it. */
   onHistoryCleared: () => Promise<void>;
@@ -469,6 +469,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     sessionId: string;
     pick: ModelChoice;
     reason: string;
+    /** What the chat ran when the notice was raised (`runningKey`): the notice describes that. */
+    ran: string;
     retrying: boolean;
   } | null>(null);
   const [creationError, setCreationError] = useState<string | null>(null);
@@ -1323,7 +1325,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         // A session starts on a profile; the picked model and effort go on next.
         const pick = { ...selectedPick, profile: selectedProfile };
         await applyModelChoice(api, session, pick).catch((reason) =>
-          setPickFailure({ sessionId: session.session_id, pick, reason: errorText(reason), retrying: false }),
+          setPickFailure({
+            sessionId: session.session_id,
+            pick,
+            reason: errorText(reason),
+            ran: runningKey(stateAfterPick(reason, session)),
+            retrying: false,
+          }),
         );
       }
       const result = await loadSessions();
@@ -1534,13 +1542,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     setStudioOpen(true);
   };
 
-  const handleSessionUpdated = useCallback((updated: Session, options?: { failed?: boolean }) => {
+  const handleSessionUpdated = useCallback((updated: Session) => {
     sessionGate.recordApply();
-    // The model was changed by hand since: the failed pick is no longer news. A change that failed is not one:
-    // the chat still runs what it ran, so the notice and its Try Again stay.
-    if (!options?.failed) {
-      setPickFailure((current) => (current?.sessionId === updated.session_id ? null : current));
-    }
+    // The notice for a failed New Session pick describes what the chat ran then. Once it runs anything else (a
+    // change made by hand, even one that only partly applied) the notice is no longer news; a change that did not
+    // move it leaves the notice and its Try Again as they were.
+    setPickFailure((current) =>
+      current?.sessionId === updated.session_id && runningKey(updated) !== current.ran ? null : current,
+    );
     setSessions((current) =>
       current.map((item) =>
         item.session_id === updated.session_id ? updated : item,
@@ -1556,12 +1565,15 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     const trying = { ...failed, retrying: true };
     setPickFailure(trying);
     try {
-      handleSessionUpdated(await applyModelChoice(api, session, failed.pick)); // applied: the notice goes
+      handleSessionUpdated(await applyModelChoice(api, session, failed.pick));
+      setPickFailure((current) => (current === trying ? null : current)); // applied: the notice goes
     } catch (reason) {
       // Only the notice this retry started takes its failure: one dismissed meanwhile stays gone, and a newer
       // notice, raised for another chat, is left alone.
       setPickFailure((current) =>
-        current === trying ? { ...failed, reason: errorText(reason), retrying: false } : current,
+        current === trying
+          ? { ...failed, reason: errorText(reason), ran: runningKey(stateAfterPick(reason, session)), retrying: false }
+          : current,
       );
       void loadSessions(); // what runs may have changed
     }

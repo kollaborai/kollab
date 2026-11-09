@@ -18,6 +18,14 @@ export class PickError extends Error {
   }
 }
 
+/** What a chat runs, as one comparable value: the three things a pick sets. */
+export const runningKey = (session: Pick<Session, "profile" | "model" | "effort">) =>
+  [session.profile, session.model, session.effort].map((part) => part ?? "").join("\n");
+
+/** What a chat runs after a pick failed: the engine's read-back when it gave one, else the chat as it was. */
+export const stateAfterPick = (reason: unknown, session: Session): Session =>
+  reason instanceof PickError && reason.session ? reason.session : session;
+
 const label = (state?: { model?: string; effort?: string }) =>
   [state?.model, state?.effort].filter(Boolean).join(" · ");
 

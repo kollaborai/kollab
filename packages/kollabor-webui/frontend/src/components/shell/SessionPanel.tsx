@@ -141,7 +141,7 @@ export function SessionPanel({
   statusError?: boolean;
   onStatus: (message: string) => void;
   /** `failed`: the session is read back after a change that did not apply; it still runs what it ran. */
-  onSessionUpdated: (session: Session, options?: { failed?: boolean }) => void;
+  onSessionUpdated: (session: Session) => void;
   onOpenSettings: () => void;
   /** Called once the engine has cleared the history; resets the open thread. */
   onHistoryCleared: () => Promise<void>;
@@ -315,8 +315,8 @@ export function SessionPanel({
       onSessionUpdated(updated);
       onStatus(`Model: ${[updated.model || choice.profile, updated.effort].filter(Boolean).join(" · ")}`);
     } catch (error) {
-      // What runs now: shown, but not a change, so it does not retire the notice of a failed New Session pick.
-      if (error instanceof PickError && error.session) onSessionUpdated(error.session, { failed: true });
+      // What runs now: shown, and the notice of a failed New Session pick follows it.
+      if (error instanceof PickError && error.session) onSessionUpdated(error.session);
       fail(error);
     }
   };
