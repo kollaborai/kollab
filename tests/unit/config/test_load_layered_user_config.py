@@ -82,3 +82,14 @@ def test_it_reads_what_a_config_service_reads_in_that_folder(folders, monkeypatc
         service.shutdown()
 
     assert load_layered_user_config(b)["kollabor"]["llm"]["default_loadout"] == seen
+
+
+def test_reading_another_folder_creates_nothing_where_project_state_is_claimed(folders, monkeypatch):
+    # Windows creates and claims a project's state directory the first time it looks it up. Reading a folder's
+    # layers only to show its default must leave nothing behind in ~/.kollab/projects.
+    home, _, b = folders
+    monkeypatch.setattr("kollabor_config.config_utils.IS_WINDOWS", True)
+
+    load_layered_user_config(b)
+
+    assert not (home / ".kollab" / "projects").exists()
