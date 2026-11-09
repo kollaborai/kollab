@@ -891,7 +891,11 @@ class ConfigLoader:
         return result
 
     def save_merged_config(
-        self, config: Dict[str, Any], save_target: Optional[str] = None
+        self,
+        config: Dict[str, Any],
+        save_target: Optional[str] = None,
+        *,
+        path: Optional[Path] = None,
     ) -> bool:
         """Save only user-modified configuration values to file.
 
@@ -907,6 +911,9 @@ class ConfigLoader:
             config: Configuration dictionary to save.
             save_target: Optional target override ("local" or "global").
                          None uses existing auto-detect behavior.
+            path: Write exactly this file, whatever the layers say. A service
+                  creating its own config file passes the one it was given, so
+                  it never writes into another config file (#967).
 
         Returns:
             True if save successful, False otherwise.
@@ -962,7 +969,9 @@ class ConfigLoader:
             logger.warning(f"Could not compute config defaults for diff: {e}")
 
         # Determine save path based on explicit target or auto-detect
-        if save_target == "local":
+        if path is not None:
+            save_path = Path(path)
+        elif save_target == "local":
             save_path = get_local_config_path()
         elif save_target == "global":
             save_path = get_global_config_path()

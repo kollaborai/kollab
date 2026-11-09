@@ -86,7 +86,11 @@ class ConfigService:
                 complete_config = self.config_loader.load_complete_config()
                 self.config_manager.config = complete_config
                 self._cached_config = complete_config.copy()
-                self.config_loader.save_merged_config(complete_config)
+                # The file this service was asked for, not wherever the layers point: a service built on
+                # another path must never write the user's real config (#967).
+                self.config_loader.save_merged_config(
+                    complete_config, path=self.config_manager.config_path
+                )
                 self._migrate_config_if_needed()
                 self._cached_config = self.config_manager.config.copy()
                 self._config_error = None
@@ -124,7 +128,9 @@ class ConfigService:
             app_version = "unknown"
 
         missing = object()
-        save_path = get_global_config_path()
+        # This service's own file: reading and rewriting the global one would stamp (or replace) the
+        # real config from a service built on some other path (#967).
+        save_path = self.config_manager.config_path
         try:
             if save_path.exists():
                 raw = json.loads(save_path.read_text(encoding="utf-8"))
