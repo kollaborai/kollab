@@ -431,10 +431,12 @@ class GoalStore:
                 self._rollback()
                 raise
 
-    def _prune_attachment_submissions(self) -> None:
+    def _prune_attachment_submissions(self, cutoff: Optional[float] = None) -> None:
+        if cutoff is None:
+            cutoff = self._now() - ATTACHMENT_SUBMISSION_REPLAY_S
         self._conn.execute(
             "DELETE FROM goal_attachment_submissions WHERE settled_at IS NOT NULL AND settled_at < ?",
-            (self._now() - ATTACHMENT_SUBMISSION_REPLAY_S,),
+            (cutoff,),
         )
 
     def _now(self) -> float:
@@ -699,14 +701,17 @@ class GoalStore:
             )
         return request_id
 
-    def _attachment_submission(self, key: str, uid: str, fingerprint: str) -> Optional[Dict[str, Any]]:
+    def _attachment_submission(self, key: str, uid: str, fingerprint: str,
+                               cutoff: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        if cutoff is None:
+            cutoff = self._now() - ATTACHMENT_SUBMISSION_REPLAY_S
         row = self._conn.execute(
             "SELECT s.conversation_uid, s.fingerprint, s.request_id, "
             "r.request_id AS existing_request, r.goal_id "
             "FROM goal_attachment_submissions s LEFT JOIN goal_attachment_requests r "
             "ON r.request_id = s.request_id WHERE s.submission_key = ? "
             "AND (s.settled_at IS NULL OR s.settled_at >= ?)",
-            (key, self._now() - ATTACHMENT_SUBMISSION_REPLAY_S),
+            (key, cutoff),
         ).fetchone()
         if row is None:
             return None
@@ -726,8 +731,9 @@ class GoalStore:
         with self._lock:
             self._begin()
             try:
-                self._prune_attachment_submissions()
-                existing = self._attachment_submission(key, uid, fingerprint)
+                cutoff = self._now() - ATTACHMENT_SUBMISSION_REPLAY_S
+                self._prune_attachment_submissions(cutoff)
+                existing = self._attachment_submission(key, uid, fingerprint, cutoff)
                 if existing is not None:
                     self._commit()
                     return {**existing, "created": False}
