@@ -208,9 +208,15 @@ export function makeFixtures(options = {}) {
         pickFailuresLeft -= 1;
         return json(route, { detail: "The agent could not switch models." }, 502);
       }
-      // A session put on a pick answers with what it now runs, as the engine does.
+      // A session put on a pick answers with what it now runs, as the engine does. A profile whose environment
+      // sets the model answers with that one instead of the pick.
       const body = request.postDataJSON();
-      return json(route, { ...(createdSession ?? {}), profile: body.name, model: body.model, effort: body.effort });
+      return json(route, {
+        ...(createdSession ?? {}),
+        profile: body.name,
+        model: options.environmentModels?.[body.name] ?? body.model,
+        effort: body.effort,
+      });
     }
     if (endpoint === "/config" && options.engineVersion) return json(route, { engine_version: options.engineVersion });
     if (endpoint === "/update/check" && options.update) {
@@ -536,13 +542,29 @@ async function main() {
     await heldNotice.getByRole("button", { name: "Trying…", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
     await heldNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
     await heldNotice.waitFor({ state: "hidden", timeout: 5_000 });
-    // The held switch now fails. The page reloads the sessions right after it handles that failure.
-    const heldReload = heldView.page.waitForRequest(
-      (request) => request.method() === "GET" && new URL(request.url()).pathname.endsWith("/sessions"),
-    );
+    // The held switch now fails, and the page reloads the sessions right after its catch has run. Record the
+    // order the page saw (the answer, then a session list request after it) so the assertion below waits for the
+    // retry's own end: any earlier session poll would not do.
+    const heldEvents = [];
+    heldView.page.on("response", (response) => {
+      if (response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/profile")) {
+        heldEvents.push("answer");
+      }
+    });
+    heldView.page.on("request", (request) => {
+      if (request.method() === "GET" && new URL(request.url()).pathname.endsWith("/sessions")) heldEvents.push("list");
+    });
     heldRetry.releasePicks();
-    await heldReload;
-    await heldView.page.waitForTimeout(300);
+    const heldListedAfterAnswer = () => {
+      const answeredAt = heldEvents.indexOf("answer");
+      return answeredAt >= 0 && heldEvents.indexOf("list", answeredAt) >= 0;
+    };
+    const heldDeadline = Date.now() + 10_000;
+    while (!heldListedAfterAnswer()) {
+      assert.ok(Date.now() < heldDeadline, "the held switch was never answered and followed by a session reload");
+      await heldView.page.waitForTimeout(25);
+    }
+    await heldView.page.waitForTimeout(300); // the notice, if it came back, is drawn by now
     assert.equal(
       await heldView.page.getByRole("alert").filter({ hasText: "Couldn't switch to" }).count(),
       0,
@@ -574,6 +596,30 @@ async function main() {
     await manualNotice.waitFor({ state: "visible", timeout: 5_000 });
     await manualNotice.getByRole("button", { name: "Try Again", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
     await manualView.context.close();
+
+    // A model change made by hand that only partly applies (the profile's environment sets another model) leaves
+    // the chat on something the notice for the failed New Session pick no longer describes: the notice goes
+    // (the clean-room review of #959, round 2).
+    const partialChange = makeFixtures({ pickFails: 1, environmentModels: { default: "environment-model" } });
+    const partialView = await openPage(browser, baseUrl, partialChange);
+    await partialView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await partialView.page.getByTestId("new-session-options").click();
+    await partialView.page.locator("#new-session-model").click();
+    await partialView.page.getByRole("group", { name: "review", exact: true })
+      .getByRole("option", { name: /claude-haiku/ }).click();
+    await partialView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
+    const partialNotice = partialView.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
+    await partialNotice.waitFor({ state: "visible", timeout: 15_000 });
+    const partialPanel = partialView.page.getByRole("complementary", { name: "Session Controls", exact: true });
+    await partialPanel.getByRole("button", { name: "Model", exact: true }).click();
+    const partialAnswer = partialView.page.waitForResponse(
+      (response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/profile"),
+    );
+    await partialView.page.getByRole("group", { name: "default", exact: true })
+      .getByRole("option", { name: /gpt-6-luna/ }).click();
+    assert.equal((await partialAnswer).status(), 200, "the profile switch itself was meant to apply");
+    await partialNotice.waitFor({ state: "hidden", timeout: 5_000 });
+    await partialView.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
       const captures = [
