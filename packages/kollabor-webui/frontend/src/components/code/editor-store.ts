@@ -354,8 +354,12 @@ export const useEditorStore = create<EditorStore>((set, get) => {
 
       // add or update file cache
       const existing = store.fileCache.get(path);
+      // A buffer with unsaved edits is the user's work: opening the path again (another pane, quick open,
+      // search, the tree) only shows its tab. It never replaces the buffer with what the caller read.
       const fileData: FileData = existing
-        ? { ...existing, content, savedContent: content, loading: false }
+        ? isDirty(existing)
+          ? { ...existing, loading: false }
+          : { ...existing, content, savedContent: content, loading: false }
         : { path, name, ext, content, savedContent: content, loading: false, pinned: false };
 
       const newCache = new Map(store.fileCache);
