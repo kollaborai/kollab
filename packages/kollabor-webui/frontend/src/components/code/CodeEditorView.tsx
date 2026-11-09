@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { openWorkspaceFile, readFileContent, fileNameOf, extensionOf } from "@/components/code/open-file";
 import { cn } from "@/lib/utils";
 import { EditorConfigPanel } from "@/components/code/editor-config";
-import { type FileData, useEditorStore } from "@/components/code/editor-store";
+import { type FileData, isDirty, useEditorStore } from "@/components/code/editor-store";
 import { FileTree } from "@/components/code/file-tree";
 import { FloatingFileSidebar, useFileSidebarVisibility } from "@/components/code/floating-sidebar";
 import { GitPanel } from "@/components/code/git/GitPanel";
@@ -35,15 +35,22 @@ function rememberTabsWorkspace(workspace: string): void {
   }
 }
 
-/** Closes every tab and split, keeping the first pane. The editor store has no reset action. */
+/**
+ * Closes every tab and split, keeping the first pane. Tabs with unsaved edits stay open (the editor store has no
+ * reset action): dropping them silently would lose the user's work.
+ */
 function resetEditorTabs(): void {
-  const first = useEditorStore.getState().panes[0];
+  const { panes, fileCache } = useEditorStore.getState();
+  const first = panes[0];
   if (!first) return;
+  const kept = new Map<string, FileData>();
+  for (const [path, file] of fileCache) if (isDirty(file)) kept.set(path, file);
+  const openPaths = [...kept.keys()];
   useEditorStore.setState({
-    panes: [{ id: first.id, openPaths: [], activePath: null }],
+    panes: [{ id: first.id, openPaths, activePath: openPaths[0] ?? null }],
     activePaneId: first.id,
     splitTree: { type: "leaf", paneId: first.id },
-    fileCache: new Map<string, FileData>(),
+    fileCache: kept,
   });
 }
 
@@ -98,7 +105,19 @@ export function CodeEditorView({ workspace }: CodeEditorViewProps) {
   const sidebar = useFileSidebarVisibility();
   const rootRef = useRef<HTMLDivElement>(null);
 
-  // tabs opened in another folder are dropped; the folder reaches each sibling as the `workspace` prop
+  // a reload or a closed tab would lose unsaved edits: ask the browser to confirm while any buffer is dirty
+  useEffect(() => {
+    const guard = (event: BeforeUnloadEvent) => {
+      const dirty = [...useEditorStore.getState().fileCache.values()].some((file) => isDirty(file));
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, []);
+
+  // tabs opened in another folder are dropped, except those with unsaved edits; the folder reaches each sibling as the `workspace` prop
   useEffect(() => {
     const owner = savedTabsWorkspace();
     if (owner !== null && owner !== workspace) resetEditorTabs();

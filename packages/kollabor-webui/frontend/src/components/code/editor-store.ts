@@ -373,16 +373,13 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       const pane = store.panes.find((p) => p.id === paneId);
       if (!pane) return;
 
-      const fileData: FileData = {
-        path,
-        name,
-        ext,
-        content: modified,
-        savedContent: modified,
-        loading: false,
-        pinned: false,
-        headContent,
-      };
+      // A buffer with unsaved edits stays as it is: the diff only adds the HEAD side. Resetting savedContent to
+      // the buffer would mark it clean, and closing the tab would then drop the edits with no prompt.
+      const existing = store.fileCache.get(path);
+      const fileData: FileData =
+        existing && isDirty(existing)
+          ? { ...existing, loading: false, headContent }
+          : { path, name, ext, content: modified, savedContent: modified, loading: false, pinned: false, headContent };
 
       const newCache = new Map(store.fileCache);
       newCache.set(path, fileData);
