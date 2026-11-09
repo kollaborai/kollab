@@ -12,6 +12,12 @@ it exists, is a directory, and sits inside one of:
 
 Everything else is refused, whatever the way in: ``/etc``, ``~/../other-user``, a symlink in home that
 points out, a sibling that only shares a name prefix with a root.
+
+Two details keep the rule honest. A remembered folder (3 and 4) counts only while its pathname still leads to
+itself: it was recorded as a real path, so a symlink put in its place, or in one of its parents, makes it grant
+nothing, not even what it leads to now. And on a volume that ignores case (macOS and Windows by default)
+``/Users/me/Dev`` and ``/users/me/dev`` are one folder, so a request meets the same roots in either spelling; a
+volume that tells them apart keeps them apart.
 """
 
 import os
@@ -33,6 +39,49 @@ def _closed(folder: str) -> str:
     Without the separator ``/home/me/proj`` would also admit ``/home/me/project2``.
     """
     return os.path.join(os.path.realpath(folder), "")
+
+
+def _pinned(folder: str) -> Optional[str]:
+    """A remembered ``folder`` as a closed real path, or None once its pathname no longer leads to itself.
+
+    Every source of remembered folders records a real path: a recent folder is saved as one, a session runs in
+    the checked one, an agent reports its resolved project folder. If the real path of that text is not the text
+    any more, a symlink now stands in the folder's place or in one of its parents. The folder that was
+    remembered is not the one the pathname reaches, so the entry grants nothing, and neither does its new target.
+    An entry that cannot be a path at all (a NUL byte in a hand-edited list) grants nothing either.
+    """
+    try:
+        real = os.path.realpath(folder)
+    except OSError, ValueError:
+        return None
+    if os.path.normcase(real) != os.path.normcase(os.path.normpath(folder)):
+        return None
+    return os.path.join(real, "")
+
+
+def _ignores_case(root: str) -> bool:
+    """Whether the volume ``root`` is on treats names that differ only in case as one name.
+
+    Asked of a root, which kollab knows, and never of the request, and only when a request spelled a root in
+    other letters. A volume that does not ignore case has no folder of the other spelling, so the same path with
+    its case swapped is missing there, or is a different folder.
+    """
+    other = root.swapcase()
+    if other == root:
+        return False
+    try:
+        return os.path.samefile(root, other)
+    except OSError:
+        return False
+
+
+def _respelled(probe: str, root: str) -> str:
+    """``probe`` with the start that names ``root`` spelled as ``root`` is, when only the case differs and the
+    volume ignores it; otherwise ``probe`` as it was, for the prefix check to decide."""
+    head = probe[: len(root)]
+    if head != root and head.casefold() == root.casefold() and _ignores_case(root):
+        return root + probe[len(root) :]
+    return probe
 
 
 def _known_folders() -> Iterator[str]:
@@ -66,7 +115,9 @@ def _roots() -> Iterator[str]:
     yield _closed(os.getcwd())
     yield _closed(os.path.expanduser("~"))
     for folder in _known_folders():
-        yield _closed(folder)
+        root = _pinned(folder)
+        if root is not None:
+            yield root
 
 
 def _shown(text: str) -> str:
@@ -86,8 +137,9 @@ def checked_folder(path: Optional[str]) -> str:
     # The separator on the end is part of the check: a root is its own folder and what is inside it.
     probe = os.path.join(folder, "")
     for root in _roots():
-        if probe.startswith(root):
-            checked = os.path.normpath(probe)
+        spelled = _respelled(probe, root)
+        if spelled.startswith(root):
+            checked = os.path.normpath(spelled)
             if not os.path.exists(checked):
                 raise FolderError(f"Folder does not exist: {_shown(text)}")
             if not os.path.isdir(checked):
