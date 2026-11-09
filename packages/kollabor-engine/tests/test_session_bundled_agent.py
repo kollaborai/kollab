@@ -12,9 +12,11 @@ from kollabor_engine.server import create_app, get_session_registry  # type: ign
 
 @pytest.fixture
 def empty_home(tmp_path, monkeypatch):
-    """No ~/.kollab, no project .kollab: the bundled agents are all there is."""
-    home, project = tmp_path / "home", tmp_path / "proj"
-    home.mkdir()
+    """No ~/.kollab, no project .kollab: the bundled agents are all there is.
+
+    Home is tmp_path itself, so the folders a test makes beside the project are inside it (the engine's folder rule).
+    """
+    home, project = tmp_path, tmp_path / "proj"
     project.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(project)
