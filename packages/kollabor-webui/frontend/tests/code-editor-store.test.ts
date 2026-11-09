@@ -203,3 +203,16 @@ test("a malformed or inconsistent saved layout is ignored", () => {
     )
   ).toBeNull();
 });
+
+test("opening a diff tab over a file with unsaved edits keeps the file dirty", () => {
+  store().openFile(PANE, "/w/a.ts", "a.ts", ".ts", "disk");
+  store().updateContent("/w/a.ts", "edited");
+
+  store().openDiffFile(PANE, "/w/a.ts", "a.ts", ".ts", "edited", "head");
+
+  const file = must(store().fileCache.get("/w/a.ts"), "file");
+  expect(file.content).toBe("edited");
+  expect(file.savedContent).toBe("disk");
+  expect(isDirty(file)).toBe(true);
+  expect(file.headContent).toBe("head");
+});
