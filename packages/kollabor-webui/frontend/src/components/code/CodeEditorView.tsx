@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { Files, Filter, GitBranch, PanelLeft, Search, Settings } from "lucide-react";
+import { Files, Filter, PanelLeft, Search, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { openWorkspaceFile, readFileContent, fileNameOf, extensionOf } from "@/components/code/open-file";
+import { claimEditorWorkspace } from "@/components/code/workspace-tabs";
 import { cn } from "@/lib/utils";
 import { EditorConfigPanel } from "@/components/code/editor-config";
-import { type FileData, isDirty, useEditorStore } from "@/components/code/editor-store";
+import { isDirty, useEditorStore } from "@/components/code/editor-store";
 import { FileTree } from "@/components/code/file-tree";
 import { FloatingFileSidebar, useFileSidebarVisibility } from "@/components/code/floating-sidebar";
-import { GitPanel } from "@/components/code/git/GitPanel";
 import { QuickOpen } from "@/components/code/quick-open";
 import { SearchPanel } from "@/components/code/search-panel";
 import { SplitContainer } from "@/components/code/split-container";
@@ -16,57 +16,9 @@ export interface CodeEditorViewProps {
   workspace: string;
 }
 
-// the folder the saved editor tabs were opened in; a reload into another folder starts with no tabs
-const TABS_WORKSPACE_KEY = "kollab:code-editor-tabs-workspace:v1";
-
-function savedTabsWorkspace(): string | null {
-  try {
-    return window.localStorage.getItem(TABS_WORKSPACE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function rememberTabsWorkspace(workspace: string): void {
-  try {
-    window.localStorage.setItem(TABS_WORKSPACE_KEY, workspace);
-  } catch {
-    // storage blocked or full: the tabs are not tied to a folder across a reload
-  }
-}
-
-/**
- * Closes every tab and split, keeping the first pane. Tabs with unsaved edits stay open (the editor store has no
- * reset action): dropping them silently would lose the user's work.
- */
-function resetEditorTabs(): void {
-  const { panes, fileCache } = useEditorStore.getState();
-  const first = panes[0];
-  if (!first) return;
-  const kept = new Map<string, FileData>();
-  for (const [path, file] of fileCache) if (isDirty(file)) kept.set(path, file);
-  const openPaths = [...kept.keys()];
-  useEditorStore.setState({
-    panes: [{ id: first.id, openPaths, activePath: openPaths[0] ?? null }],
-    activePaneId: first.id,
-    splitTree: { type: "leaf", paneId: first.id },
-    fileCache: kept,
-  });
-}
-
 /** Opens a file in the active pane (git panel's "open file"). */
 async function openFileInActivePane(workspace: string, absPath: string): Promise<void> {
   await openWorkspaceFile(workspace, absPath, { pin: true });
-}
-
-/** Opens a diff tab: working copy against the HEAD content the git panel passes (null = new file). */
-async function openDiffInActivePane(workspace: string, absPath: string, headContent: string | null): Promise<void> {
-  const name = fileNameOf(absPath);
-  const cached = useEditorStore.getState().fileCache.get(absPath);
-  const modified = cached ? cached.content : await readFileContent(workspace, absPath);
-  if (modified === null) return;
-  const store = useEditorStore.getState();
-  store.openDiffFile(store.activePaneId, absPath, name, extensionOf(name), modified, headContent);
 }
 
 function SidebarToggle({
@@ -105,6 +57,11 @@ export function CodeEditorView({ workspace }: CodeEditorViewProps) {
   const sidebar = useFileSidebarVisibility();
   const rootRef = useRef<HTMLDivElement>(null);
 
+  // Git has its own view now: a sidebar choice saved as "git" falls back to the file tree
+  useEffect(() => {
+    if (sidebarView === "git") setSidebarView("files");
+  }, [sidebarView, setSidebarView]);
+
   // a reload or a closed tab would lose unsaved edits: ask the browser to confirm while any buffer is dirty
   useEffect(() => {
     const guard = (event: BeforeUnloadEvent) => {
@@ -119,9 +76,7 @@ export function CodeEditorView({ workspace }: CodeEditorViewProps) {
 
   // tabs opened in another folder are dropped, except those with unsaved edits; the folder reaches each sibling as the `workspace` prop
   useEffect(() => {
-    const owner = savedTabsWorkspace();
-    if (owner !== null && owner !== workspace) resetEditorTabs();
-    rememberTabsWorkspace(workspace);
+    claimEditorWorkspace(workspace);
   }, [workspace]);
 
   // Tabs come back from storage as paths only. Read each one that has no text yet; a file that cannot be read
@@ -206,21 +161,11 @@ export function CodeEditorView({ workspace }: CodeEditorViewProps) {
             <SidebarToggle label="Filter Files" active={fileFilterOpen} onClick={() => setFileFilterOpen((v) => !v)}>
               <Filter className="h-4 w-4" />
             </SidebarToggle>
-            <SidebarToggle label="Source Control" active={sidebarView === "git"} onClick={() => setSidebarView("git")}>
-              <GitBranch className="h-4 w-4" />
-            </SidebarToggle>
           </div>
 
           {sidebarView === "files" && <FileTree workspace={workspace} filterOpen={fileFilterOpen} />}
           {sidebarView === "search" && <SearchPanel workspace={workspace} />}
           {sidebarView === "config" && <EditorConfigPanel />}
-          {sidebarView === "git" && (
-            <GitPanel
-              workspace={workspace}
-              onOpenFile={(absPath) => void openFileInActivePane(workspace, absPath)}
-              onOpenDiff={(absPath, headContent) => void openDiffInActivePane(workspace, absPath, headContent)}
-            />
-          )}
         </FloatingFileSidebar>
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">

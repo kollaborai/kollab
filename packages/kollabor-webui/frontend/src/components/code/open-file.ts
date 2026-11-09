@@ -62,3 +62,13 @@ export async function openWorkspaceFile(
   useEditorStore.getState().openFile(paneId, absPath, name, ext, content);
   return true;
 }
+
+/** Opens a diff tab: working copy against the HEAD content the git panel passes (null = new file). */
+export async function openWorkspaceDiff(workspace: string, absPath: string, headContent: string | null): Promise<void> {
+  const name = fileNameOf(absPath);
+  const cached = useEditorStore.getState().fileCache.get(absPath);
+  const modified = cached ? cached.content : await readFileContent(workspace, absPath);
+  if (modified === null) return;
+  const store = useEditorStore.getState();
+  store.openDiffFile(store.activePaneId, absPath, name, extensionOf(name), modified, headContent);
+}

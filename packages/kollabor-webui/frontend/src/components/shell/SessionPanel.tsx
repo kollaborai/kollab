@@ -9,6 +9,7 @@ import {
 import {
   CircleAlert,
   Code,
+  GitBranch,
   Eraser,
   MessageSquare,
   PanelRightClose,
@@ -83,17 +84,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export type SessionView = "chat" | "trajectory" | "code" | "terminal";
+export type SessionView = "chat" | "trajectory" | "code" | "git" | "terminal";
 
 const VIEWS = [
   ["chat", "Chat", MessageSquare],
   ["trajectory", "Trajectory", Waypoints],
   ["code", "Code Editor", Code],
+  ["git", "Git", GitBranch],
   ["terminal", "Terminal", SquareTerminal],
 ] as const;
 
-// Code Editor and Terminal work in the chat's folder, so a chat with no folder has neither.
-const FOLDER_VIEWS: readonly SessionView[] = ["code", "terminal"];
+// Code Editor, Git and Terminal work in the chat's folder, so a chat with no folder has none of them.
+const FOLDER_VIEWS: readonly SessionView[] = ["code", "git", "terminal"];
 
 // Whether the docked panel is open, per browser. Open unless closed here before.
 const PANEL_KEY = "kollab.session-panel";
