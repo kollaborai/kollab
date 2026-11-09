@@ -532,12 +532,29 @@ def git_status(workspace: str = Query("")) -> JSONResponse:
     if isinstance(folder, JSONResponse):
         return folder
     root = os.path.realpath(folder)
+    # A repository's own GIT_* variables would send git elsewhere; the workspace may also sit below the repository's
+    # top, where porcelain paths are relative to the top: scope the status to the workspace and key it relative to it.
+    repo_env = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+    env = {k: v for k, v in os.environ.items() if k not in repo_env}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     try:
-        done = subprocess.run(["git", "-C", root, "status", "--porcelain=v1", "-z"], timeout=10, capture_output=True)
+        done = subprocess.run(
+            ["git", "-C", root, "status", "--porcelain=v1", "-z", "--", "."],
+            timeout=10,
+            capture_output=True,
+            env=env,
+        )
+        top = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--show-prefix"], timeout=10, capture_output=True, text=True, env=env
+        )
     except OSError, subprocess.SubprocessError:
         return _fail(500, "git_failed", "Failed to get git status.")
     if done.returncode != 0:
         if b"not a git repository" in done.stderr.lower():
             return _ok({"error": "Not a git repository", "status": {}})
         return _fail(500, "git_failed", "Failed to get git status.")
-    return _ok({"status": _parse_status(done.stdout)})
+    prefix = top.stdout.strip() if top.returncode == 0 else ""
+    status = _parse_status(done.stdout)
+    if prefix:
+        status = {(key[len(prefix) :] if key.startswith(prefix) else key): code for key, code in status.items()}
+    return _ok({"status": status})

@@ -352,10 +352,11 @@ def test_git_status_in_a_subfolder_keys_workspace_paths_and_skips_the_rest(clien
     subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
     _write(repo / "top.txt")
     _write(repo / "app" / "inside.txt")
+    subprocess.run(["git", "-C", str(repo), "add", "app/inside.txt"], check=True)
     # the workspace is the subfolder: top.txt is outside it and must not show, inside.txt keys as "inside.txt"
     data = _get(client, "git-status", repo / "app").json()["data"]
 
-    assert data == {"status": {"inside.txt": "?"}}
+    assert data == {"status": {"inside.txt": "A"}}
 
 
 def test_git_status_outside_a_repository_says_so(client, ws):

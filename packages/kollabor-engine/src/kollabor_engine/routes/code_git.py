@@ -468,6 +468,15 @@ async def _commit(root: str, body: dict[str, Any]) -> dict[str, Any]:
     message = _message(body.get("message"))
     if not message:
         raise GitRequestError(400, "message_required", "A commit message is required.")
+    # The panel lists only the workspace's changes. A commit takes the whole index, so refuse one that would
+    # carry staged files from outside the workspace the panel cannot show.
+    everything = (await _text(root, ["diff", "--cached", "--name-only", "-z", "--no-relative"])).split("\0")
+    inside = (await _text(root, ["diff", "--cached", "--name-only", "-z", "--relative"])).split("\0")
+    outside = len([name for name in everything if name]) - len([name for name in inside if name])
+    if outside > 0:
+        raise GitRequestError(
+            409, "staged_outside_workspace", f"{outside} staged file(s) lie outside this folder; unstage them first."
+        )
     proc = await _write(root, ["commit", "-m", message])
     return {"ok": True, "output": proc.stdout, "status": await _status(root, {})}
 
