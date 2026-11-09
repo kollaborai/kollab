@@ -203,6 +203,7 @@ const mainConfig = defineConfig({
       "tests/session-refresh-gate.test.ts",
       "tests/code-editor-store.test.ts",
       "tests/code-open-file.test.ts",
+      "tests/workspace-ownership.test.ts",
 
       "tests/team-model.test.ts",
       "tests/team-selection.test.ts",
