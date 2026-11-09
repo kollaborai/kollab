@@ -198,6 +198,11 @@ export function makeFixtures(options = {}) {
         remoteSessionOpened = true;
         return json(route, remoteSession);
       }
+      if (method === "POST" && endpoint.endsWith("/profile")) {
+        // A session put on a pick answers with what it now runs, as the engine does.
+        const body = request.postDataJSON();
+        return json(route, { ...(createdSession ?? {}), profile: body.name, model: body.model, effort: body.effort });
+      }
       return json(route, createdSession ?? {});
     }
     return json(route, {});

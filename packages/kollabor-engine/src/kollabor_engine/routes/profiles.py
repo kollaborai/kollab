@@ -222,9 +222,13 @@ def _default_loadout(pm: ProfileManager) -> Optional[Dict[str, str]]:
 
     A web session always names a profile, which makes the terminal skip its
     default, so the form needs this to start on it (#957). ``None`` when none is
-    set or it names no saved loadout, as in the terminal; never an error, the
-    profile list must still answer.
+    set or its saved name is not a loadout. The name must match exactly: the
+    terminal's forgiving lookup would start on a similarly named loadout nobody
+    chose once the default is deleted. Never an error, the profile list must
+    still answer.
     """
+    import dataclasses
+
     from kollabor_ai.loadout_manager import (
         LoadoutManager,
         acp_loadout_model,
@@ -234,17 +238,25 @@ def _default_loadout(pm: ProfileManager) -> Optional[Dict[str, str]]:
     try:
         manager = LoadoutManager(pm, config=_loadout_config())
         name = manager.get_default()
-        loadout = manager.resolve(name)[0] if name else None
+        loadout = manager.get(name) if name else None
         profile = pm.get_profile(loadout.provider_profile) if loadout else None
         if loadout is None or profile is None:
             return None
         harness = profile.get_provider() == "acp"
+        if harness:
+            effort = loadout.effort
+        else:
+            # A loadout with no level keeps its profile's own, as in the terminal. The form sends what it
+            # shows, and an empty level would clear the profile's saved one, so report the one that runs.
+            effort = loadout_sendable_effort(pm, loadout) or dataclasses.replace(
+                profile, model=loadout.model
+            ).get_effort()
         return {
             "name": loadout.name,
             "profile": loadout.provider_profile,
             "provider": profile.get_provider(),
             "model": acp_loadout_model(loadout, profile) if harness else loadout.model,
-            "effort": loadout.effort if harness else loadout_sendable_effort(pm, loadout),
+            "effort": effort,
         }
     except Exception as exc:  # noqa: BLE001 - a broken config must not hide the profiles
         logger.warning("default loadout: could not read it: %s", type(exc).__name__)
