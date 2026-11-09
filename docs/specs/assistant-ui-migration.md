@@ -256,7 +256,10 @@ closed. A chat with no list has no card. Text the thread draws as code is never 
 as a list: a fenced block, also one that a list item or a quote holds, or an indented
 block. `codeLines` asks the same CommonMark parser the thread renders through
 (`mdast-util-from-markdown`), so no container rule is written twice, and skips it
-for a text with no fence mark and no line indented by four columns. The card's list
+for a text with no fence mark and no line indented by four columns. The lookup runs on
+every update of the thread, so it keeps what the last lookup read, by whole text, and
+reads again only a text that is new or edited; it holds no more than the thread's own
+texts that say `todo:`, however many a lookup visits. The card's list
 stops at 18rem or half the window's height and scrolls
 inside the card; in a short window the docked column, panel and card together,
 scrolls as a whole, so no row of the panel is squeezed out of reach. On a phone

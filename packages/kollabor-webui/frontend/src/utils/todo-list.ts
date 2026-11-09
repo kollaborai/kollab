@@ -42,10 +42,6 @@ function codeLines(text: string): Set<number> {
   return lines;
 }
 
-// The latest list is looked up on every update of the thread, so a text that was read once is not read again.
-const MEMO_LIMIT = 8;
-const memo = new Map<string, string[]>();
-
 /**
  * Every todo block of a text, in order, as written: the label line, then its
  * checkbox lines (a line indented deeper than its checkbox continues that
@@ -55,15 +51,6 @@ const memo = new Map<string, string[]>();
  * (see `codeLines`).
  */
 export function todoBlocks(text: string): string[] {
-  const known = memo.get(text);
-  if (known) return known.slice();
-  const blocks = readBlocks(text);
-  if (memo.size >= MEMO_LIMIT) memo.delete(memo.keys().next().value as string);
-  memo.set(text, blocks);
-  return blocks.slice();
-}
-
-function readBlocks(text: string): string[] {
   const source = text.replace(/\r\n?/g, "\n");
   const lines = source.split("\n");
   const code = codeLines(source);
@@ -128,6 +115,13 @@ export type TodoMessage = {
   metadata?: { custom?: Record<string, unknown> };
 };
 
+// The thread asks for the latest list on every update, newest text first, and a lookup that finds no list visits every
+// text that says "todo:" (examples in code, or a thread that never had a list). A cache of a few entries would be
+// emptied by that one lookup before the next one came back for the entries it needs. So the cache is what the last
+// lookup visited: no larger than the thread's own texts, which it already holds, and never evicting its own entries.
+// Keys are whole texts, so an edited text is read again and an unchanged one never is.
+let lastLookup = new Map<string, string[]>();
+
 /**
  * The agent's current list: the last block of the newest text of its own that
  * holds one, as written, or "" when there is none. A person's message and a
@@ -135,15 +129,21 @@ export type TodoMessage = {
  * can return it without a new object per update.
  */
 export function latestTodoBlock(messages: readonly TodoMessage[]): string {
-  for (let m = messages.length - 1; m >= 0; m -= 1) {
-    const message = messages[m];
-    if (message.role !== "assistant" || message.metadata?.custom?.hub) continue;
-    for (let p = message.parts.length - 1; p >= 0; p -= 1) {
-      const part = message.parts[p];
-      if (part.type !== "text" || !part.text || !/todo:/i.test(part.text)) continue;
-      const blocks = todoBlocks(part.text);
-      if (blocks.length) return blocks[blocks.length - 1];
+  const visited = new Map<string, string[]>();
+  try {
+    for (let m = messages.length - 1; m >= 0; m -= 1) {
+      const message = messages[m];
+      if (message.role !== "assistant" || message.metadata?.custom?.hub) continue;
+      for (let p = message.parts.length - 1; p >= 0; p -= 1) {
+        const part = message.parts[p];
+        if (part.type !== "text" || !part.text || !/todo:/i.test(part.text)) continue;
+        const blocks = visited.get(part.text) ?? lastLookup.get(part.text) ?? todoBlocks(part.text);
+        visited.set(part.text, blocks);
+        if (blocks.length) return blocks[blocks.length - 1];
+      }
     }
+    return "";
+  } finally {
+    lastLookup = visited;
   }
-  return "";
 }
