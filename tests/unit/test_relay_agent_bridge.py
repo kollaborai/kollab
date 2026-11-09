@@ -2281,6 +2281,26 @@ async def test_remote_directory_falls_back_for_older_peer(bridges):
 
 
 @pytest.mark.asyncio
+async def test_remote_directory_falls_back_after_secure_error_from_old_peer(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    requests = []
+
+    async def old_peer(_peer, method, payload, *, timeout=10):
+        requests.append(payload)
+        if payload:
+            # SecureConversationTransport sanitizes remote application errors.
+            raise RelayError("secure conversation transport failed")
+        return _directory_reply(right)
+
+    left.secure_transport.request = old_peer
+
+    await left._rpc_directory({"peer": right.commands.client.public_key})
+
+    assert requests == [{"agent_type": True}, {}]
+
+
+@pytest.mark.asyncio
 async def test_remote_directory_row_without_agent_type_has_an_empty_one(bridges):
     members, _ = bridges
     (left, _, _, _), (right, _, _, _) = members
