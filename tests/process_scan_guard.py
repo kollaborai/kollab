@@ -49,6 +49,9 @@ HOST_PROCESS_SCAN_TESTS = {
         {
             "test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_replacement_updates",
             "test_history_error_after_assistant_write_does_not_retry_or_duplicate_terminal",
+            "test_failed_user_row_write_keeps_the_finished_reply",
+            "test_failed_user_row_write_is_shown_not_swallowed",
+            "test_failed_reply_row_write_keeps_the_finished_reply",
         }
     ),
     "unit/test_acp_cancel_transcript.py": frozenset(
@@ -84,6 +87,7 @@ HOST_PROCESS_SCAN_TESTS = {
     "unit/test_halt_confirmed.py": frozenset({"test_the_daemon_refuses_an_unconfirmed_act"}),
     "unit/test_hub_enrollment_commands.py": frozenset({"test_revoke_drops_the_peer_device_binding"}),
     "unit/test_hub_network_surface.py": frozenset({"test_connect_revoke_rejects_an_unknown_device"}),
+    "unit/test_network_halt.py": frozenset({"test_read_process_reads_this_process"}),
     "unit/test_network_halt_windows.py": frozenset({"test_win_processes_links_this_process_to_its_parent"}),
     "unit/test_stranger_delivery.py": frozenset({"test_revoke_removes_the_link_at_the_relay_and_nothing_is_delivered"}),
     "unit/test_halt_runtime_review_f2.py": frozenset(
