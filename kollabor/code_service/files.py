@@ -384,13 +384,13 @@ def _encode(content: str, existing: bytes | None) -> tuple[bytes, str]:
     return content.encode("utf-8"), "utf-8"
 
 
-def _existing_bytes(path: str) -> bytes | None:
+def _existing_bytes(path: str, limit: int) -> bytes | None:
     """The bytes of the file at ``path``, or None when there is no such file."""
     try:
         if not os.path.isfile(path):  # a folder, a FIFO or a device must not be opened for reading
             return None
         with open(path, "rb") as handle:
-            return handle.read()
+            return handle.read(limit + 1)
     except FileNotFoundError:
         return None
 
@@ -581,7 +581,9 @@ async def write_file(workspace: str, params: dict[str, Any], settings: CodeSetti
     if os.path.isdir(full):
         return _fail(400, "not_a_file", "Not a file.")
     try:
-        existing = await asyncio.to_thread(_existing_bytes, full)
+        existing = await asyncio.to_thread(_existing_bytes, full, cfg.max_file_kb * 1024)
+        if existing is not None and len(existing) > cfg.max_file_kb * 1024:
+            return _size_refusal("File", cfg.max_file_kb)
         data, encoding = _encode(content, existing)
     except _EncodingUnsafe:
         return _fail(

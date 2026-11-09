@@ -193,6 +193,13 @@ def test_a_write_over_two_megabytes_is_refused(client, ws):
     assert not (ws.root / "big.txt").exists()
 
 
+def test_write_does_not_replace_an_oversized_existing_file(client, ws):
+    path = ws.root / "big.txt"
+    path.write_bytes(b"a" * (TWO_MB + 1))
+    _refused(_put(client, ws.root, "big.txt", "small"), 400, "file_too_large")
+    assert path.stat().st_size == TWO_MB + 1
+
+
 # --- create, mkdir, rename, delete -------------------------------------------------------------------
 
 
