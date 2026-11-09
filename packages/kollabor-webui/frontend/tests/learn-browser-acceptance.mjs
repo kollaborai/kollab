@@ -210,10 +210,11 @@ export function makeFixtures(options = {}) {
       return json(route, { path: asked, name: asked.split("/").pop(), parent: null, dirs: [] });
     }
     if (endpoint.endsWith("/history")) {
+      const history = options.history ?? [];
       return json(route, {
-        history: [],
+        history,
         start_index: 0,
-        end_index: 0,
+        end_index: history.length,
         has_more_older: false,
         older_cursor: null,
         has_more_newer: false,
