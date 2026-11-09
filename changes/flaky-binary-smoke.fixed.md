@@ -1,1 +1,1 @@
-The binary build retries the pex step up to three times, so a network timeout fetching the portable CPython no longer fails `ci/binary-smoke`.
+- The binary build retries its pex step up to three times, so a network timeout while fetching the portable CPython no longer fails `ci/binary-smoke` (#985).
