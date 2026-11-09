@@ -1,3 +1,4 @@
+import { editorShortcutEnabled } from "@/components/code/editor-shortcuts";
 import { useRef, useCallback, useState, useEffect } from "react";
 import { useEditorStore, type SplitNode } from "@/components/code/editor-store";
 import { TabBar } from "./tab-bar";
@@ -17,6 +18,7 @@ export function SplitContainer({ workspace }: SplitContainerProps) {
   // keyboard shortcuts: cmd+\ split right, cmd+shift+\ split down
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (!editorShortcutEnabled()) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key === "\\") {
         e.preventDefault();
@@ -33,7 +35,7 @@ export function SplitContainer({ workspace }: SplitContainerProps) {
 
   // click anywhere in container sets active pane
   const handleContainerClick = useCallback(
-    (e: React.MouseEvent) => {
+    (e: React.SyntheticEvent) => {
       const target = e.target as HTMLElement;
       const paneLeaf = target.closest("[data-pane-id]");
       if (paneLeaf) {
@@ -48,6 +50,7 @@ export function SplitContainer({ workspace }: SplitContainerProps) {
     <div
       className="flex-1 flex flex-col overflow-hidden"
       onClick={handleContainerClick}
+      onFocus={handleContainerClick}
     >
       <SplitRender node={splitTree} workspace={workspace} isActivePaneId={activePaneId} />
     </div>

@@ -1,3 +1,4 @@
+import { editorShortcutEnabled } from "@/components/code/editor-shortcuts";
 import { editorOwner } from "@/components/code/workspace-tabs";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
@@ -224,6 +225,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
   // keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (!editorShortcutEnabled(paneId)) return;
       const mod = e.metaKey || e.ctrlKey;
 
       // cmd+s save

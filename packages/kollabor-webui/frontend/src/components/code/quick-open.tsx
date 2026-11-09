@@ -130,6 +130,9 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
 
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Quick open"
       className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[15vh]"
       onClick={onClose}
     >

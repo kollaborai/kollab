@@ -1,3 +1,4 @@
+import { editorShortcutEnabled } from "@/components/code/editor-shortcuts";
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Files, Filter, PanelLeft, Search, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -155,7 +156,7 @@ function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", fo
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
       // the view stays mounted while hidden behind Chat; its shortcuts only work while it shows
-      if (!rootRef.current || rootRef.current.offsetParent === null) return;
+      if (!editorShortcutEnabled()) return;
       if (e.key === "p") {
         e.preventDefault();
         setQuickOpenOpen((open) => !open);

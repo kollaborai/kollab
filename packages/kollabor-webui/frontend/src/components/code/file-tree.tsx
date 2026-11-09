@@ -1,3 +1,4 @@
+import { editorShortcutEnabled } from "@/components/code/editor-shortcuts";
 import { mutateFileTree } from "@/components/code/file-mutations";
 import {
   createContext,
@@ -305,6 +306,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       const target = e.target as HTMLElement | null;
+      if (!editorShortcutEnabled() || !target || !treeRef.current?.contains(target) || !target.closest("[data-file-row-id]")) return;
       const tag = target?.tagName;
       if (tag === "TEXTAREA" || tag === "INPUT") return;
       // an open context menu owns the arrow keys
@@ -312,16 +314,21 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
       if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
       if (flatRows.length === 0) return;
 
-      const currentIndex = flatRows.findIndex((r) => r.path === selectedPath);
+      const focusedPath = target.closest("[data-file-row-id]")?.getAttribute("data-file-row-id");
+      const currentIndex = flatRows.findIndex((row) => row.path === focusedPath);
+      const selectRow = (path: string) => {
+        setSelectedPath(path);
+        treeRef.current?.querySelector<HTMLElement>(`[data-file-row-id="${CSS.escape(path)}"]`)?.focus();
+      };
 
       if (e.key === "ArrowDown") {
         e.preventDefault();
         const nextIndex = currentIndex === -1 ? 0 : Math.min(currentIndex + 1, flatRows.length - 1);
-        setSelectedPath(flatRows[nextIndex].path);
+        selectRow(flatRows[nextIndex].path);
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         const prevIndex = currentIndex <= 0 ? 0 : currentIndex - 1;
-        setSelectedPath(flatRows[prevIndex].path);
+        selectRow(flatRows[prevIndex].path);
       } else if (e.key === "ArrowRight") {
         if (currentIndex === -1) return;
         const row = flatRows[currentIndex];
@@ -333,7 +340,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
           toggleExpand(row.path);
         } else {
           const child = flatRows[currentIndex + 1];
-          if (child?.parentPath === row.path) setSelectedPath(child.path);
+          if (child?.parentPath === row.path) selectRow(child.path);
         }
       } else if (e.key === "ArrowLeft") {
         if (currentIndex === -1) return;
@@ -345,7 +352,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
           toggleExpand(row.path);
         } else if (row.parentPath) {
           e.preventDefault();
-          setSelectedPath(row.parentPath);
+          selectRow(row.parentPath);
         }
       }
     }
