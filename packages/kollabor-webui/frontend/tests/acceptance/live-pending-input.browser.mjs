@@ -122,6 +122,48 @@ try {
       await t.waitShown("AlphaBeta");
       await t.page.close();
     },
+    // Cancellation is terminal for this request even though this page's send
+    // still owns the thread. Its buffered text is shown once; a late token is
+    // not allowed to restart the cancelled reply.
+    async "keeps a followed reply cancelled during the pending window"() {
+      const t = await open();
+      await t.emit(token("Alpha"));
+      await t.waitShown("Alpha");
+      await t.submit();
+      await t.emit(token("Beta"));
+      await t.emit({ type: "turn_cancelled", request_id: "r1" });
+      await t.finishSubmission();
+      await t.emit(token("late"));
+      await t.waitShown("AlphaBeta");
+      await t.page.close();
+    },
+    // A queued request has its own identity. It cannot replace the followed
+    // request while our send is pending, but can start normally once idle.
+    async "keeps a queued request separate from the followed reply"() {
+      const t = await open();
+      await t.emit(token("Alpha"));
+      await t.waitShown("Alpha");
+      await t.submit();
+      await t.emit({ type: "turn_complete", request_id: "r1" });
+      await t.emit(token("Queued", "r2"));
+      await t.finishSubmission();
+      assert.equal(await t.page.locator("#assistant").innerText(), "Alpha");
+      await t.page.close();
+    },
+    // A followed stream can close without a terminal event. The text remains
+    // live and can continue if that same request resumes later.
+    async "retains a followed reply when its terminal event is missing"() {
+      const t = await open();
+      await t.emit(token("Alpha"));
+      await t.waitShown("Alpha");
+      await t.submit();
+      await t.emit(token("Beta"));
+      await t.finishSubmission();
+      await t.waitShown("AlphaBeta");
+      await t.emit(token("Gamma"));
+      await t.waitShown("AlphaBetaGamma");
+      await t.page.close();
+    },
     // Output of a turn this page never saw start is not guessed at.
     async "ignores events of an unseen turn while pending"() {
       const t = await open();
