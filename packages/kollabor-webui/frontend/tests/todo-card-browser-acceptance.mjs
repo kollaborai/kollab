@@ -254,6 +254,42 @@ async function main() {
       await none.context.close();
     }
 
+    // 2b. A list written as an example inside code, wherever Markdown puts that code (a list item's fence, a tilde
+    // fence under a nested item, an indented block), is not the agent's list: the card keeps the one before it.
+    const EXAMPLES = [
+      "How a list looks:",
+      "",
+      "- ```",
+      "  todo:",
+      "    [ ] example in a list item's fence",
+      "  ```",
+      "",
+      "1. step one",
+      "   - ~~~",
+      "     todo:",
+      "       [ ] example in a nested item's tilde fence",
+      "     ~~~",
+      "",
+      "And indented:",
+      "",
+      "    todo:",
+      "      [ ] example in an indented block",
+    ].join("\n");
+    const sampled = await openChat(browser, baseUrl, history(row("user", "go"), row("assistant", FIRST_LIST), row("assistant", EXAMPLES)));
+    try {
+      await openControls(sampled.page, 1280);
+      await waitForCard(sampled.page);
+      const texts = await todoItems(sampled.page).evaluateAll((nodes) => nodes.map((node) => node.textContent.trim()));
+      assert.deepEqual(
+        texts,
+        ["confirm scope", "inspect unit states", "inspect recent logs", "assess the evidence"],
+        `an example list inside code became the card's list: ${JSON.stringify(texts)}`,
+      );
+      assert.deepEqual(sampled.pageErrors, []);
+    } finally {
+      await sampled.context.close();
+    }
+
     // 3. Narrow windows keep it in the Session Controls sheet, inside the window.
     for (const { width, height, isMobile } of [{ width: 390, height: 844, isMobile: true }, { width: 820, height: 1180, isMobile: false }]) {
       const narrow = await openChat(browser, baseUrl, withLists(), { width, height, isMobile });
