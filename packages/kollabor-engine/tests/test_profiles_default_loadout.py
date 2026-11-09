@@ -198,3 +198,93 @@ async def test_a_default_that_cannot_be_read_leaves_no_config_poller_running(mon
     assert [response.status_code for response in responses] == [200] * 5
     assert responses[-1].json()["default_loadout"] is None
     assert _pollers() == []
+
+
+# --- the default of the folder New Session starts in, not of the folder the engine runs in ---
+
+
+def _write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
+
+
+def _loadout(model):
+    return {"provider_profile": "oauth", "model": model, "effort": "max"}
+
+
+@pytest.fixture
+def folders(monkeypatch, tmp_path):
+    """The engine runs in folder A; New Session can start in folder B. Both loadouts live in the global config."""
+    home, a, b = tmp_path / "home", tmp_path / "a", tmp_path / "b"
+    for folder in (home, a, b):
+        folder.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(a)
+    _write_json(
+        home / ".kollab" / "config.json",
+        {"kollabor": {"llm": {"loadouts": {"for-a": _loadout("model-a"), "for-b": _loadout("model-b")}}}},
+    )
+    return a, b
+
+
+def _project_default(name):
+    return {"kollabor": {"llm": {"default_loadout": {"name": name, "level": "project"}}}}
+
+
+async def _default_of(monkeypatch, workspace=None):
+    import kollabor_engine.routes.profiles as profile_routes
+    from kollabor_engine.server import create_app  # type: ignore[import-not-found]
+
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager())
+    params = {"workspace": str(workspace)} if workspace is not None else {}
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+        response = await client.get("/profiles", params=params)
+    assert response.status_code == 200
+    return response.json()["default_loadout"]
+
+
+@pytest.mark.asyncio
+async def test_a_folder_lists_its_own_default_not_the_engines_folders(monkeypatch, folders):
+    a, b = folders
+    _write_json(a / ".kollab" / "config.json", _project_default("for-a"))
+    _write_json(b / ".kollab" / "config.json", _project_default("for-b"))
+
+    in_b = await _default_of(monkeypatch, b)
+    in_a = await _default_of(monkeypatch, a)
+    engines_own = await _default_of(monkeypatch)
+
+    assert in_b["model"] == "model-b"
+    assert in_a["model"] == "model-a"
+    assert engines_own["model"] == "model-a"  # no folder named: the engine's own, as before
+
+
+@pytest.mark.asyncio
+async def test_a_folder_with_no_default_of_its_own_does_not_inherit_the_engines_folders(monkeypatch, folders):
+    a, b = folders
+    _write_json(a / ".kollab" / "config.json", _project_default("for-a"))
+
+    assert await _default_of(monkeypatch, b) is None
+    assert (await _default_of(monkeypatch))["model"] == "model-a"
+
+
+@pytest.mark.asyncio
+async def test_the_project_config_of_a_folder_sets_its_default(monkeypatch, folders):
+    from kollabor_config.config_utils import get_project_data_dir
+
+    a, b = folders
+    _write_json(a / ".kollab" / "config.json", _project_default("for-a"))
+    _write_json(get_project_data_dir(b) / "config.json", _project_default("for-b"))
+
+    assert (await _default_of(monkeypatch, b))["model"] == "model-b"
+
+
+@pytest.mark.asyncio
+async def test_a_folder_that_does_not_exist_gets_the_global_default(monkeypatch, folders, tmp_path):
+    a, _ = folders
+    _write_json(a / ".kollab" / "config.json", _project_default("for-a"))
+    home_config = tmp_path / "home" / ".kollab" / "config.json"
+    saved = json.loads(home_config.read_text())
+    saved["kollabor"]["llm"]["default_loadout"] = {"name": "for-b", "level": "global"}
+    home_config.write_text(json.dumps(saved))
+
+    assert (await _default_of(monkeypatch, tmp_path / "gone"))["model"] == "model-b"
