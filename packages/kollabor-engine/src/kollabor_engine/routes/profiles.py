@@ -210,7 +210,10 @@ class _DictConfig:
 
 
 def _loadout_config():
-    """The saved config: loadouts and the default loadout live there."""
+    """The saved config: loadouts and the default loadout live there.
+
+    A ConfigService polls its file every second until ``shutdown()``, so the caller shuts it down.
+    """
     from kollabor_config import ConfigService
     from kollabor_config.config_utils import get_global_config_path
 
@@ -235,8 +238,10 @@ def _default_loadout(pm: ProfileManager) -> Optional[Dict[str, str]]:
         loadout_sendable_effort,
     )
 
+    config = None
     try:
-        manager = LoadoutManager(pm, config=_loadout_config())
+        config = _loadout_config()
+        manager = LoadoutManager(pm, config=config)
         name = manager.get_default()
         loadout = manager.get(name) if name else None
         profile = pm.get_profile(loadout.provider_profile) if loadout else None
@@ -261,6 +266,9 @@ def _default_loadout(pm: ProfileManager) -> Optional[Dict[str, str]]:
     except Exception as exc:  # noqa: BLE001 - a broken config must not hide the profiles
         logger.warning("default loadout: could not read it: %s", type(exc).__name__)
         return None
+    finally:
+        if config is not None:
+            config.shutdown()  # the open web UI lists profiles every few seconds: a poller per request would pile up
 
 
 @router.get("")
