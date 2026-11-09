@@ -252,8 +252,13 @@ the card shows the latest one (`latestTodoBlock` in `utils/todo-list.ts`): a cou
 at full strength. Only the agent's own messages count; a hub note, another agent's
 text, never does. The header opens and closes the card and the browser remembers
 the choice (`kollab.session-panel.todo`); a list with every item done starts
-closed. A chat with no list has no card. On a phone the card is the last part of
-the Session sheet. The thread keeps showing the agent's text as written.
+closed. A chat with no list has no card. Text inside a code fence is never read as
+a list; a fence closes only on the same character, at least as long, with nothing
+after it. The card's list stops at 18rem or half the window's height and scrolls
+inside the card; in a short window the docked column, panel and card together,
+scrolls as a whole, so no row of the panel is squeezed out of reach. On a phone
+the card is the last part of the Session sheet. The thread keeps showing the
+agent's text as written.
 
 Once a chat has messages, its agent's live gem docks immediately beside the input
 bar and stays visible while the conversation scrolls. It shares the selected

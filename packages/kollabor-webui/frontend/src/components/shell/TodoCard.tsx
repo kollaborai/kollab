@@ -27,7 +27,8 @@ function storeOpen(open: boolean) {
  * The agent's latest task list (`latestTodoBlock`) under the Session Controls
  * panel: a count, and the items when it is open. Open unless every item is done
  * or it was closed here before; the header opens and closes it. A filled
- * surface like the panel, no line borders.
+ * surface like the panel, no line borders. The list scrolls inside the card past
+ * 18rem or half the window's height, so the card always fits in the window.
  */
 export function TodoCard({ block, className }: { block: string; className?: string }) {
   const items = useMemo(() => todoItems(block), [block]);
@@ -63,7 +64,7 @@ export function TodoCard({ block, className }: { block: string; className?: stri
         </span>
       </button>
       {open && (
-        <ul id={listId} className="mt-2 flex max-h-72 min-w-0 flex-col gap-1.5 overflow-y-auto">
+        <ul id={listId} className="mt-2 flex max-h-[min(18rem,50vh)] min-w-0 flex-col gap-1.5 overflow-y-auto">
           {items.map((item, index) => (
             <li key={index} data-testid="session-todo-item" data-done={item.done} className="flex items-start gap-2">
               {/* The thread's own task box (markdown-text.tsx): the same two shades, so a list reads alike in both. */}

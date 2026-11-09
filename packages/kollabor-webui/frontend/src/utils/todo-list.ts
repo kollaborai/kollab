@@ -9,30 +9,51 @@ export type TodoItem = { done: boolean; text: string };
 
 const LABEL = /^(\s*)todo:\s*(.*)$/i;
 const ITEM = /^(\s*)\[([ xX])\]\s+(\S.*)$/;
-const FENCE = /^\s*(```|~~~)/;
+// A code fence (CommonMark): three or more backticks or tildes, then an info string. A backtick fence's info string
+// holds no backtick, or the line is inline code, not a fence.
+const FENCE = /^\s*(`{3,}|~{3,})(.*)$/;
 // "assessment:", "next:": another label ends the wrapped text of an item.
 const OTHER_LABEL = /^\s*[a-z][a-z ()/-]*:\s*$/i;
 
 const indentOf = (line: string) => line.length - line.trimStart().length;
+
+type Fence = { char: string; length: number; closing: boolean };
+
+/** The fence a line draws, or null. `closing` is true when nothing follows the marks, the only form that can close a fence. */
+function fenceOf(line: string): Fence | null {
+  const match = FENCE.exec(line);
+  if (!match) return null;
+  const [, marks, info] = match;
+  if (marks[0] === "`" && info.includes("`")) return null;
+  return { char: marks[0], length: marks.length, closing: !info.trim() };
+}
+
+/** A fence closes only on the same character, at least as many of it, and nothing after: the rest of the text is still code. */
+const closes = (open: Fence, line: Fence) => line.closing && line.char === open.char && line.length >= open.length;
 
 /**
  * Every todo block of a text, in order, as written: the label line, then its
  * checkbox lines (a line indented deeper than its checkbox continues that
  * item). A blank line, any other line or a code fence ends it. "todo:" with no
  * checkbox line under it is prose, not a block, and a checklist under another
- * label is not a todo list.
+ * label is not a todo list. Nothing inside a code fence counts, and a fence
+ * that is never closed runs to the end of the text.
  */
 export function todoBlocks(text: string): string[] {
   const lines = text.split(/\r?\n/);
   const blocks: string[] = [];
-  let fenced = false;
+  let open: Fence | null = null;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
-    if (FENCE.test(line)) {
-      fenced = !fenced;
+    const fence = fenceOf(line);
+    if (open) {
+      if (fence && closes(open, fence)) open = null;
       continue;
     }
-    if (fenced) continue;
+    if (fence) {
+      open = fence;
+      continue;
+    }
     const label = LABEL.exec(line);
     if (!label) continue;
     // "todo: [x] item" is the one-line form; "todo: finish the report" is prose.
@@ -43,7 +64,7 @@ export function todoBlocks(text: string): string[] {
     let end = i + 1;
     for (; end < lines.length; end += 1) {
       const next = lines[end];
-      if (FENCE.test(next)) break;
+      if (fenceOf(next)) break;
       if (!next.trim()) {
         if (count === 0) continue; // a blank line before the first item is tolerated
         break;
