@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { sameVersionBase } from "./engine-version";
@@ -21,5 +22,17 @@ describe("sameVersionBase", () => {
 
   it("is symmetric when only the bundle carries a local segment", () => {
     expect(sameVersionBase("0.18.5", "0.18.5+local")).toBe(true);
+  });
+});
+
+// App.tsx mounts the banner check inside a large component, so the guard is
+// pinned at its source: it must call sameVersionBase, not compare strings.
+describe("App version-mismatch guard", () => {
+  it("flags a mismatch only after the base-version compare, not strict equality", () => {
+    const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    expect(app).toMatch(
+      /if \(!engine \|\| !bundle \|\| sameVersionBase\(engine, bundle\)\) return;/,
+    );
+    expect(app).not.toMatch(/engine === bundle/);
   });
 });
