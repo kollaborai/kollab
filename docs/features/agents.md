@@ -381,6 +381,24 @@ A window started with `--no-daemon` has no daemon to replace: `/restart` there
 says so and changes nothing; quit and start Kollab again. An agent started
 before `/restart` existed answers that it is too old to restart itself.
 
+A terminal window attached to the agent stays open through the restart. Just
+before it shuts down, the agent publishes `daemon_restarting` to its attached
+terminal windows; the engine drops that event, so a web chat never receives it.
+The window prints "Restarting <agent>...", keeps its scrollback and tries to
+attach to the same socket again every half second while the agent's pid is alive
+or the restart was announced. When the new image answers, the window prints
+"Restarted on <version>" (the attach reply names the image's `version` and a new
+`agent_id`) and goes on. It shows an event once per image: the new image numbers
+its events from 1 again, so the window starts counting over. A connection that
+closes with no announcement while the pid is alive prints "lost connection to
+<agent>, reconnecting..." and tries the same way. After 30 seconds
+(`kollabor.daemon.REATTACH_WAIT`) without an answer it prints "Restarted. Run
+kollab again to attach." (or "lost connection to <agent>. Run kollab again to
+attach." when nothing announced a restart). A pid that is gone prints
+"<agent> disconnected — daemon exited", and Ctrl+Z (detach) or quitting never
+attaches again. `tests/tmux/specs/restart_window_reattaches.json` drives this
+end to end.
+
 
 ## Using Agents
 
