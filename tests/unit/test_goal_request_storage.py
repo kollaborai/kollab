@@ -406,3 +406,21 @@ def test_documented_replay_window_is_seven_days():
     from kollabor.state.goal_store import ATTACHMENT_SUBMISSION_REPLAY_S as window
 
     assert window == ATTACHMENT_SUBMISSION_REPLAY_S
+
+
+def test_submission_expiry_crossing_boundary_prunes_and_reuses_key_atomically(tmp_path):
+    db, clock = tmp_path / "goals.db", _Clock()
+    store = GoalStore(db, clock=clock)
+    first = _stage(store)
+    assert store.discard_attachment_request("a", first["request_id"])
+    settled_at = clock.now
+
+    reads = iter((settled_at + ATTACHMENT_SUBMISSION_REPLAY_S,
+                  settled_at + ATTACHMENT_SUBMISSION_REPLAY_S + 0.001,
+                  settled_at + ATTACHMENT_SUBMISSION_REPLAY_S + 0.001))
+    store._clock = lambda: next(reads)
+    replay = _stage(store)
+
+    assert not replay["created"] and replay["discarded"]
+    assert replay["request_id"] == first["request_id"]
+    store.close()
