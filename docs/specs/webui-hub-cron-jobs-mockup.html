@@ -7,7 +7,7 @@
 <style>
   /* Tokens and type scale copied from packages/kollabor-webui/frontend/src/styles.css:
      .dark tokens, the pointer-fine 90% root size, border = transparent, input = 18% white.
-     Sample data only. Nothing here is built. */
+     Sample data only. Nothing here is built. No scripts: every state is its own frame. */
   :root {
     color-scheme: dark;
     --background: oklch(0.145 0 0);
@@ -24,7 +24,6 @@
   @media (pointer: fine) {
     :root { font-size: 90%; }
   }
-  [hidden] { display: none !important; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     min-height: 100vh;
@@ -39,12 +38,11 @@
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .wrap { max-width: 72rem; margin: 0 auto; }
   .note { font-size: 0.75rem; color: var(--muted-foreground); margin-bottom: 0.25rem; }
-  .switch { font-size: 0.75rem; color: var(--muted-foreground); margin-bottom: 0.75rem; }
-  .switch a { margin-right: 0.875rem; color: var(--muted-foreground); text-decoration: none; }
-  .switch a[aria-current="true"] { color: var(--foreground); text-decoration: underline; }
-  .caption { margin: 1.5rem 0 0.5rem; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.025em; color: var(--muted-foreground); }
+  .index { font-size: 0.75rem; color: var(--muted-foreground); margin-bottom: 0.5rem; }
+  .index a { color: var(--foreground); margin-right: 0.5rem; }
+  .caption { margin: 1.75rem 0 0.5rem; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.025em; color: var(--muted-foreground); }
 
-  /* Dialog frame: the Settings dialog */
+  /* Dialog frame: the Settings dialog. One frame per state. */
   .dialog {
     position: relative;
     display: flex;
@@ -88,14 +86,12 @@
     font: inherit; font-size: 0.875rem; font-weight: 500; white-space: nowrap; cursor: pointer;
   }
   .btn { border: 1px solid var(--input); background: oklch(1 0 0 / 5.4%); color: var(--foreground); }
-  .btn:hover { background: oklch(1 0 0 / 9%); }
   .btn-primary { border: 0; background: var(--primary); color: var(--primary-foreground); }
   .btn-danger { border: 0; background: oklch(0.704 0.191 22.216 / 0.6); color: #fff; }
   .btn-text {
     border: 0; background: none; padding: 0 0.25rem; height: auto;
     font: inherit; font-size: 0.875rem; color: var(--muted-foreground); cursor: pointer;
   }
-  .btn-text:hover { color: var(--foreground); }
   .btn-text.danger:hover { color: var(--destructive); }
   .btn svg, .btn-primary svg, .btn-danger svg { width: 1rem; height: 1rem; flex: none; }
   .err { color: var(--destructive); }
@@ -112,13 +108,12 @@
   th:last-child, td:last-child { padding-right: 0; }
   .cards { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.5rem; }
   .card { padding: 0.75rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); font-size: 0.875rem; }
-  .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
-  .card-mode { font-size: 0.75rem; color: var(--muted-foreground); }
   .card dl { display: grid; grid-template-columns: auto 1fr; column-gap: 0.75rem; row-gap: 0.25rem; margin-top: 0.5rem; }
   .card dt { color: var(--muted-foreground); }
   .card dd { overflow-wrap: anywhere; }
   .card .err { color: var(--destructive); }
   .card-actions { display: flex; gap: 1rem; margin-top: 0.5rem; }
+  .row-actions { display: inline-flex; gap: 0.5rem; }
   .empty {
     margin-top: 0.5rem; padding: 1.5rem 0.75rem; border-radius: var(--radius);
     background: oklch(0.269 0 0 / 0.3); text-align: center; font-size: 0.875rem; color: var(--muted-foreground);
@@ -150,9 +145,8 @@
     margin-top: auto; display: flex; justify-content: flex-end; gap: 0.5rem;
     padding: 0.75rem 1rem; background: oklch(0.269 0 0 / 0.3);
   }
-  [data-view="form"] { display: flex; flex-direction: column; flex: 1; }
 
-  /* Delete confirmation, over the list */
+  /* Delete confirmation, over the list frame */
   .scrim {
     position: absolute; inset: 0; z-index: 1; display: grid; place-items: center;
     padding: 1rem; background: rgb(0 0 0 / 0.5);
@@ -182,25 +176,19 @@
 </head>
 <body>
 <div class="wrap">
-  <p class="note">Mockup for #612 · v3 · sample data · not built. New in this design: Add job, Edit, Delete, the Skill field, and the folder and loadout line.</p>
-  <p class="switch">Show:
-    <a href="#list" data-state-link="list">list</a>
-    <a href="#add" data-state-link="add">add</a>
-    <a href="#edit" data-state-link="edit">edit</a>
-    <a href="#delete" data-state-link="delete">delete</a>
-    <a href="#empty" data-state-link="empty">empty</a>
-  </p>
+  <p class="note">Mockup for #612 · v4 · sample data · nothing here is built. Planned, not built (web UI): Add job, Edit, Delete, the Skill field, and the Folder and loadout line.</p>
+  <p class="index">Frames, top to bottom: <a href="#f1">1 list</a> <a href="#f2">2 add</a> <a href="#f3">3 edit</a> <a href="#f4">4 delete</a> <a href="#f5">5 after delete</a> <a href="#f6">6 empty</a></p>
 
-  <section class="dialog" aria-label="Settings">
+  <!-- 1. LIST -->
+  <p class="caption" id="f1">1 · List, the default view</p>
+  <section class="dialog" aria-label="Settings, cron jobs list">
     <button class="close" type="button" aria-label="Close settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
     </button>
-
     <div class="dlg-head">
       <h2 class="dlg-title">Settings</h2>
       <p class="dlg-desc">Every live agent's scheduled hub jobs</p>
     </div>
-
     <nav class="tabs inset" aria-label="Settings sections">
       <span class="tab">Session</span>
       <span class="tab">Configuration</span>
@@ -214,8 +202,7 @@
       <span class="tab on" aria-current="page">Cron Jobs</span>
     </nav>
 
-    <!-- LIST (also the backdrop for delete) -->
-    <div class="panel inset" data-view="list">
+    <div class="panel inset">
       <div class="bar">
         <p class="summary">3 jobs across 2 live agents</p>
         <div class="bar-actions">
@@ -223,45 +210,45 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
             Refresh
           </button>
-          <button class="btn-primary" type="button" data-go="add">Add job</button>
+          <button class="btn-primary" type="button">Add job</button>
         </div>
       </div>
 
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>Scheduled by</th><th>Schedule</th><th>Runs in</th><th>Prompt</th><th>Skill <span class="new">(new)</span></th><th>Next fire</th><th>Last error</th><th></th></tr>
+            <tr><th>Scheduled by</th><th>Every</th><th>Runs in</th><th>Prompt</th><th>Skill <span class="new">(planned)</span></th><th>Next fire</th><th>Last error</th><th></th></tr>
           </thead>
           <tbody>
             <tr>
               <td class="nw">moonstone <span class="id mono">ab12cd34</span></td>
-              <td class="nw">every 1h</td>
+              <td class="nw">1h</td>
               <td class="nw">lapis</td>
               <td><div class="msg">report the pulse</div></td>
               <td class="nw muted">none</td>
               <td class="nw">in 30m</td>
               <td class="err">peer has no conversation grant for this agent</td>
-              <td class="nw"><span class="bar-actions"><button class="btn-text" type="button" data-go="edit">Edit</button><button class="btn-text danger" type="button" data-go="delete">Delete</button></span></td>
+              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></span></td>
             </tr>
             <tr>
               <td class="nw">moonstone <span class="id mono">9876fedc</span></td>
-              <td class="nw">every 5m</td>
+              <td class="nw">5m</td>
               <td class="nw">infra@devbox</td>
               <td><div class="msg">check the tunnel</div></td>
               <td class="nw">tunnel-check</td>
               <td class="nw">in 2m 10s</td>
               <td></td>
-              <td class="nw"><span class="bar-actions"><button class="btn-text" type="button" data-go="edit">Edit</button><button class="btn-text danger" type="button" data-go="delete">Delete</button></span></td>
+              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></span></td>
             </tr>
             <tr>
               <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
-              <td class="nw">every 6h</td>
+              <td class="nw">6h</td>
               <td class="nw">All agents</td>
               <td><div class="msg">standup: one-line status</div></td>
               <td class="nw muted">none</td>
               <td class="nw">in 2h 14m</td>
               <td></td>
-              <td class="nw"><span class="bar-actions"><button class="btn-text" type="button" data-go="edit">Edit</button><button class="btn-text danger" type="button" data-go="delete">Delete</button></span></td>
+              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></span></td>
             </tr>
           </tbody>
         </table>
@@ -269,118 +256,440 @@
 
       <div class="cards">
         <article class="card">
-          <div class="card-head">
-            <span>moonstone <span class="id mono">ab12cd34</span></span>
-            <span class="card-mode">every 1h</span>
-          </div>
+          <div>moonstone <span class="id mono">ab12cd34</span></div>
           <dl>
+            <dt>Every</dt><dd>1h</dd>
             <dt>Runs in</dt><dd>lapis</dd>
             <dt>Prompt</dt><dd>report the pulse</dd>
-            <dt>Skill <span class="new">(new)</span></dt><dd class="muted">none</dd>
+            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
             <dt>Next fire</dt><dd>in 30m</dd>
             <dt class="err">Error</dt><dd class="err">peer has no conversation grant for this agent</dd>
           </dl>
-          <div class="card-actions"><button class="btn-text" type="button" data-go="edit">Edit</button><button class="btn-text danger" type="button" data-go="delete">Delete</button></div>
+          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></div>
         </article>
         <article class="card">
-          <div class="card-head">
-            <span>moonstone <span class="id mono">9876fedc</span></span>
-            <span class="card-mode">every 5m</span>
-          </div>
+          <div>moonstone <span class="id mono">9876fedc</span></div>
           <dl>
+            <dt>Every</dt><dd>5m</dd>
             <dt>Runs in</dt><dd>infra@devbox</dd>
             <dt>Prompt</dt><dd>check the tunnel</dd>
-            <dt>Skill <span class="new">(new)</span></dt><dd>tunnel-check</dd>
+            <dt>Skill <span class="new">(planned)</span></dt><dd>tunnel-check</dd>
             <dt>Next fire</dt><dd>in 2m 10s</dd>
           </dl>
-          <div class="card-actions"><button class="btn-text" type="button" data-go="edit">Edit</button><button class="btn-text danger" type="button" data-go="delete">Delete</button></div>
+          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></div>
         </article>
         <article class="card">
-          <div class="card-head">
-            <span>koordinator <span class="id mono">5a5b5c5d</span></span>
-            <span class="card-mode">every 6h</span>
-          </div>
+          <div>koordinator <span class="id mono">5a5b5c5d</span></div>
           <dl>
+            <dt>Every</dt><dd>6h</dd>
             <dt>Runs in</dt><dd>All agents</dd>
             <dt>Prompt</dt><dd>standup: one-line status</dd>
-            <dt>Skill <span class="new">(new)</span></dt><dd class="muted">none</dd>
+            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
             <dt>Next fire</dt><dd>in 2h 14m</dd>
           </dl>
-          <div class="card-actions"><button class="btn-text" type="button" data-go="edit">Edit</button><button class="btn-text danger" type="button" data-go="delete">Delete</button></div>
+          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></div>
+        </article>
+      </div>
+
+      <p class="hint">Edit and delete go to the agent that scheduled the job. Jobs live in that agent's memory, so they stop when it stops.</p>
+    </div>
+  </section>
+
+  <!-- 2. ADD JOB -->
+  <p class="caption" id="f2">2 · Add job: empty form, opened from the Add job button</p>
+  <section class="dialog" aria-label="Settings, add cron job">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Every live agent's scheduled hub jobs</p>
+    </div>
+    <nav class="tabs inset" aria-label="Settings sections">
+      <span class="tab">Session</span>
+      <span class="tab">Configuration</span>
+      <span class="tab">Loadouts</span>
+      <span class="tab">Model</span>
+      <span class="tab">Setup</span>
+      <span class="tab">Network</span>
+      <span class="tab">PhoneLink</span>
+      <span class="tab">Voice</span>
+      <span class="tab">Prompts</span>
+      <span class="tab on" aria-current="page">Cron Jobs</span>
+    </nav>
+
+    <div class="panel inset">
+      <h3 class="form-title">New job</h3>
+      <p class="form-sub">Scheduled by koordinator, the agent in this chat.</p>
+
+      <p class="group">What to send</p>
+      <div class="field">
+        <label class="label" for="a-prompt">Prompt</label>
+        <textarea class="input" id="a-prompt" rows="3" placeholder="What should the agent do?"></textarea>
+        <p class="help">Sent as a message to the agent that runs it.</p>
+      </div>
+      <div class="field">
+        <label class="label" for="a-skill">Skill <span class="new">(planned)</span></label>
+        <div class="select-wrap">
+          <select class="input" id="a-skill">
+            <option selected>No skill</option>
+            <option>pulse-report</option>
+            <option>tunnel-check</option>
+          </select>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+        <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+      </div>
+
+      <p class="group">Where it runs</p>
+      <div class="field">
+        <label class="label" for="a-runs">Runs in</label>
+        <div class="select-wrap">
+          <select class="input" id="a-runs">
+            <option selected>koordinator</option>
+            <option>lapis</option>
+            <option>All agents</option>
+            <option>infra@devbox</option>
+          </select>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+        <p class="help">The agent that runs the prompt, with its own folder, loadout and tools.</p>
+        <p class="env">Folder /srv/app · loadout default <span class="new">(planned)</span></p>
+      </div>
+
+      <p class="group">When</p>
+      <div class="field">
+        <label class="label" for="a-every">Every</label>
+        <input class="input mono" id="a-every" type="text" placeholder="e.g. 1h">
+        <p class="help">30s, 5m, 1h or 2h30m. Repeats until you delete it.</p>
+      </div>
+    </div>
+    <div class="footer">
+      <button class="btn" type="button">Cancel</button>
+      <button class="btn-primary" type="button">Save job</button>
+    </div>
+  </section>
+
+  <!-- 3. EDIT JOB -->
+  <p class="caption" id="f3">3 · Edit job: same form, filled from the row's Edit button. Edit goes to moonstone, the agent that scheduled the job.</p>
+  <section class="dialog" aria-label="Settings, edit cron job">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Every live agent's scheduled hub jobs</p>
+    </div>
+    <nav class="tabs inset" aria-label="Settings sections">
+      <span class="tab">Session</span>
+      <span class="tab">Configuration</span>
+      <span class="tab">Loadouts</span>
+      <span class="tab">Model</span>
+      <span class="tab">Setup</span>
+      <span class="tab">Network</span>
+      <span class="tab">PhoneLink</span>
+      <span class="tab">Voice</span>
+      <span class="tab">Prompts</span>
+      <span class="tab on" aria-current="page">Cron Jobs</span>
+    </nav>
+
+    <div class="panel inset">
+      <h3 class="form-title">Edit job</h3>
+      <p class="form-sub">Scheduled by moonstone. To move it, delete it and add it again.</p>
+
+      <p class="group">What to send</p>
+      <div class="field">
+        <label class="label" for="e-prompt">Prompt</label>
+        <textarea class="input" id="e-prompt" rows="3">report the pulse</textarea>
+        <p class="help">Sent as a message to the agent that runs it.</p>
+      </div>
+      <div class="field">
+        <label class="label" for="e-skill">Skill <span class="new">(planned)</span></label>
+        <div class="select-wrap">
+          <select class="input" id="e-skill">
+            <option selected>No skill</option>
+            <option>pulse-report</option>
+            <option>tunnel-check</option>
+          </select>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+        <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
+      </div>
+
+      <p class="group">Where it runs</p>
+      <div class="field">
+        <label class="label" for="e-runs">Runs in</label>
+        <div class="select-wrap">
+          <select class="input" id="e-runs">
+            <option>koordinator</option>
+            <option selected>lapis</option>
+            <option>All agents</option>
+            <option>infra@devbox</option>
+          </select>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+        <p class="help">The agent that runs the prompt, with its own folder, loadout and tools.</p>
+        <p class="env">Folder /srv/app · loadout default <span class="new">(planned)</span></p>
+      </div>
+
+      <p class="group">When</p>
+      <div class="field">
+        <label class="label" for="e-every">Every</label>
+        <input class="input mono" id="e-every" type="text" value="1h">
+        <p class="help">30s, 5m, 1h or 2h30m. Repeats until you delete it.</p>
+      </div>
+    </div>
+    <div class="footer">
+      <button class="btn" type="button">Cancel</button>
+      <button class="btn-primary" type="button">Save job</button>
+    </div>
+  </section>
+
+  <!-- 4. DELETE CONFIRM -->
+  <p class="caption" id="f4">4 · Delete: confirm over the list. Cancel closes it. Delete removes the row (frame 5).</p>
+  <section class="dialog" aria-label="Settings, delete cron job">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Every live agent's scheduled hub jobs</p>
+    </div>
+    <nav class="tabs inset" aria-label="Settings sections">
+      <span class="tab">Session</span>
+      <span class="tab">Configuration</span>
+      <span class="tab">Loadouts</span>
+      <span class="tab">Model</span>
+      <span class="tab">Setup</span>
+      <span class="tab">Network</span>
+      <span class="tab">PhoneLink</span>
+      <span class="tab">Voice</span>
+      <span class="tab">Prompts</span>
+      <span class="tab on" aria-current="page">Cron Jobs</span>
+    </nav>
+
+    <div class="panel inset">
+      <div class="bar">
+        <p class="summary">3 jobs across 2 live agents</p>
+        <div class="bar-actions">
+          <button class="btn" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+            Refresh
+          </button>
+          <button class="btn-primary" type="button">Add job</button>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Scheduled by</th><th>Every</th><th>Runs in</th><th>Prompt</th><th>Skill <span class="new">(planned)</span></th><th>Next fire</th><th>Last error</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="nw">moonstone <span class="id mono">ab12cd34</span></td>
+              <td class="nw">1h</td>
+              <td class="nw">lapis</td>
+              <td><div class="msg">report the pulse</div></td>
+              <td class="nw muted">none</td>
+              <td class="nw">in 30m</td>
+              <td class="err">peer has no conversation grant for this agent</td>
+              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></span></td>
+            </tr>
+            <tr>
+              <td class="nw">moonstone <span class="id mono">9876fedc</span></td>
+              <td class="nw">5m</td>
+              <td class="nw">infra@devbox</td>
+              <td><div class="msg">check the tunnel</div></td>
+              <td class="nw">tunnel-check</td>
+              <td class="nw">in 2m 10s</td>
+              <td></td>
+              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></span></td>
+            </tr>
+            <tr>
+              <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
+              <td class="nw">6h</td>
+              <td class="nw">All agents</td>
+              <td><div class="msg">standup: one-line status</div></td>
+              <td class="nw muted">none</td>
+              <td class="nw">in 2h 14m</td>
+              <td></td>
+              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="cards">
+        <article class="card">
+          <div>moonstone <span class="id mono">ab12cd34</span></div>
+          <dl>
+            <dt>Every</dt><dd>1h</dd>
+            <dt>Runs in</dt><dd>lapis</dd>
+            <dt>Prompt</dt><dd>report the pulse</dd>
+            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
+            <dt>Next fire</dt><dd>in 30m</dd>
+            <dt class="err">Error</dt><dd class="err">peer has no conversation grant for this agent</dd>
+          </dl>
+          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></div>
+        </article>
+        <article class="card">
+          <div>moonstone <span class="id mono">9876fedc</span></div>
+          <dl>
+            <dt>Every</dt><dd>5m</dd>
+            <dt>Runs in</dt><dd>infra@devbox</dd>
+            <dt>Prompt</dt><dd>check the tunnel</dd>
+            <dt>Skill <span class="new">(planned)</span></dt><dd>tunnel-check</dd>
+            <dt>Next fire</dt><dd>in 2m 10s</dd>
+          </dl>
+          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></div>
+        </article>
+        <article class="card">
+          <div>koordinator <span class="id mono">5a5b5c5d</span></div>
+          <dl>
+            <dt>Every</dt><dd>6h</dd>
+            <dt>Runs in</dt><dd>All agents</dd>
+            <dt>Prompt</dt><dd>standup: one-line status</dd>
+            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
+            <dt>Next fire</dt><dd>in 2h 14m</dd>
+          </dl>
+          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></div>
         </article>
       </div>
 
       <p class="hint">Edit and delete go to the agent that scheduled the job. Jobs live in that agent's memory, so they stop when it stops.</p>
     </div>
 
-    <!-- DELETE CONFIRMATION (scrim over the list) -->
-    <div class="scrim" data-view="delete">
-      <div class="confirm" role="alertdialog" aria-labelledby="confirm-title">
-        <h3 id="confirm-title">Delete this job?</h3>
+    <div class="scrim">
+      <div class="confirm" role="alertdialog" aria-labelledby="confirm-title-4">
+        <h3 id="confirm-title-4">Delete this job?</h3>
         <p>moonstone ab12cd34 runs every 1h and sends to lapis. Its timer stops on moonstone and it won't fire again. This can't be undone.</p>
         <div class="actions">
-          <button class="btn" type="button" data-go="list">Cancel</button>
-          <button class="btn-danger" type="button" data-go="list">Delete</button>
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn-danger" type="button">Delete</button>
         </div>
       </div>
     </div>
+  </section>
 
-    <!-- ADD OR EDIT -->
-    <div data-view="form">
-      <div class="panel inset">
-        <h3 class="form-title" id="form-title">Edit job</h3>
-        <p class="form-sub" id="form-sub">Scheduled by moonstone. To move it, delete it and add it again.</p>
-
-        <p class="group">What to send</p>
-        <div class="field">
-          <label class="label" for="f-prompt">Prompt</label>
-          <textarea class="input" id="f-prompt" rows="3">report the pulse</textarea>
-          <p class="help">Sent as a message to the agent that runs it.</p>
-        </div>
-        <div class="field">
-          <label class="label" for="f-skill">Skill <span class="new">(new)</span></label>
-          <div class="select-wrap">
-            <select class="input" id="f-skill">
-              <option>No skill</option>
-              <option>pulse-report</option>
-              <option>tunnel-check</option>
-            </select>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-          </div>
-          <p class="help">Loaded before the prompt runs. The agent that runs it must have this skill.</p>
-        </div>
-
-        <p class="group">Where it runs</p>
-        <div class="field">
-          <label class="label" for="f-runs">Runs in</label>
-          <div class="select-wrap">
-            <select class="input" id="f-runs">
-              <option>lapis</option>
-              <option>koordinator</option>
-              <option>All agents</option>
-              <option>infra@devbox</option>
-            </select>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-          </div>
-          <p class="help">The agent that runs the prompt, with its own folder, loadout and tools.</p>
-          <p class="env">Folder /srv/app · loadout default <span class="new">(new)</span></p>
-        </div>
-
-        <p class="group">When</p>
-        <div class="field">
-          <label class="label" for="f-every">Every</label>
-          <input class="input mono" id="f-every" type="text" value="1h">
-          <p class="help">30s, 5m, 1h or 2h30m. Repeats until you delete it.</p>
-        </div>
-      </div>
-      <div class="footer">
-        <button class="btn" type="button" data-go="list">Cancel</button>
-        <button class="btn-primary" type="button" data-go="list">Save job</button>
-      </div>
+  <!-- 5. AFTER DELETE -->
+  <p class="caption" id="f5">5 · After Delete: the moonstone ab12cd34 row is gone and the count drops to 2</p>
+  <section class="dialog" aria-label="Settings, cron jobs list after delete">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Every live agent's scheduled hub jobs</p>
     </div>
+    <nav class="tabs inset" aria-label="Settings sections">
+      <span class="tab">Session</span>
+      <span class="tab">Configuration</span>
+      <span class="tab">Loadouts</span>
+      <span class="tab">Model</span>
+      <span class="tab">Setup</span>
+      <span class="tab">Network</span>
+      <span class="tab">PhoneLink</span>
+      <span class="tab">Voice</span>
+      <span class="tab">Prompts</span>
+      <span class="tab on" aria-current="page">Cron Jobs</span>
+    </nav>
 
-    <!-- EMPTY -->
-    <div class="panel inset" data-view="empty">
+    <div class="panel inset">
+      <div class="bar">
+        <p class="summary">2 jobs across 2 live agents</p>
+        <div class="bar-actions">
+          <button class="btn" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+            Refresh
+          </button>
+          <button class="btn-primary" type="button">Add job</button>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Scheduled by</th><th>Every</th><th>Runs in</th><th>Prompt</th><th>Skill <span class="new">(planned)</span></th><th>Next fire</th><th>Last error</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="nw">moonstone <span class="id mono">9876fedc</span></td>
+              <td class="nw">5m</td>
+              <td class="nw">infra@devbox</td>
+              <td><div class="msg">check the tunnel</div></td>
+              <td class="nw">tunnel-check</td>
+              <td class="nw">in 2m 10s</td>
+              <td></td>
+              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></span></td>
+            </tr>
+            <tr>
+              <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
+              <td class="nw">6h</td>
+              <td class="nw">All agents</td>
+              <td><div class="msg">standup: one-line status</div></td>
+              <td class="nw muted">none</td>
+              <td class="nw">in 2h 14m</td>
+              <td></td>
+              <td class="nw"><span class="row-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="cards">
+        <article class="card">
+          <div>moonstone <span class="id mono">9876fedc</span></div>
+          <dl>
+            <dt>Every</dt><dd>5m</dd>
+            <dt>Runs in</dt><dd>infra@devbox</dd>
+            <dt>Prompt</dt><dd>check the tunnel</dd>
+            <dt>Skill <span class="new">(planned)</span></dt><dd>tunnel-check</dd>
+            <dt>Next fire</dt><dd>in 2m 10s</dd>
+          </dl>
+          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></div>
+        </article>
+        <article class="card">
+          <div>koordinator <span class="id mono">5a5b5c5d</span></div>
+          <dl>
+            <dt>Every</dt><dd>6h</dd>
+            <dt>Runs in</dt><dd>All agents</dd>
+            <dt>Prompt</dt><dd>standup: one-line status</dd>
+            <dt>Skill <span class="new">(planned)</span></dt><dd class="muted">none</dd>
+            <dt>Next fire</dt><dd>in 2h 14m</dd>
+          </dl>
+          <div class="card-actions"><button class="btn-text" type="button">Edit</button><button class="btn-text danger" type="button">Delete</button></div>
+        </article>
+      </div>
+
+      <p class="hint">Edit and delete go to the agent that scheduled the job. Jobs live in that agent's memory, so they stop when it stops.</p>
+    </div>
+  </section>
+
+  <!-- 6. EMPTY -->
+  <p class="caption" id="f6">6 · Empty: no job on any live agent. Add job still shows.</p>
+  <section class="dialog" aria-label="Settings, cron jobs empty">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Every live agent's scheduled hub jobs</p>
+    </div>
+    <nav class="tabs inset" aria-label="Settings sections">
+      <span class="tab">Session</span>
+      <span class="tab">Configuration</span>
+      <span class="tab">Loadouts</span>
+      <span class="tab">Model</span>
+      <span class="tab">Setup</span>
+      <span class="tab">Network</span>
+      <span class="tab">PhoneLink</span>
+      <span class="tab">Voice</span>
+      <span class="tab">Prompts</span>
+      <span class="tab on" aria-current="page">Cron Jobs</span>
+    </nav>
+
+    <div class="panel inset">
       <div class="bar">
         <p class="summary">0 jobs across 2 live agents</p>
         <div class="bar-actions">
@@ -388,7 +697,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
             Refresh
           </button>
-          <button class="btn-primary" type="button" data-go="add">Add job</button>
+          <button class="btn-primary" type="button">Add job</button>
         </div>
       </div>
       <div class="empty">
@@ -398,50 +707,5 @@
     </div>
   </section>
 </div>
-
-<script>
-  // Mockup only: the URL hash picks a state so each one can be reviewed.
-  // #list  #add  #edit  #delete  #empty
-  (function () {
-    var SHOW = { list: ['list'], empty: ['empty'], add: ['form'], edit: ['form'], delete: ['list', 'delete'] };
-    var FORM = {
-      add: { title: 'New job', sub: 'Scheduled by koordinator, the agent in this chat.', prompt: '', every: '' },
-      edit: { title: 'Edit job', sub: 'Scheduled by moonstone. To move it, delete it and add it again.', prompt: 'report the pulse', every: '1h' }
-    };
-    function current() {
-      var s = (location.hash || '#list').slice(1);
-      return SHOW[s] ? s : 'list';
-    }
-    function render() {
-      var s = current();
-      var want = SHOW[s];
-      document.querySelectorAll('[data-view]').forEach(function (el) {
-        el.hidden = want.indexOf(el.getAttribute('data-view')) === -1;
-      });
-      if (FORM[s]) {
-        var f = FORM[s];
-        document.getElementById('form-title').textContent = f.title;
-        document.getElementById('form-sub').textContent = f.sub;
-        var prompt = document.getElementById('f-prompt');
-        prompt.value = f.prompt;
-        prompt.placeholder = 'What should the agent do?';
-        var every = document.getElementById('f-every');
-        every.value = f.every;
-        every.placeholder = 'e.g. 1h';
-      }
-      document.querySelectorAll('[data-state-link]').forEach(function (a) {
-        a.setAttribute('aria-current', a.getAttribute('data-state-link') === s ? 'true' : 'false');
-      });
-    }
-    document.addEventListener('click', function (ev) {
-      var go = ev.target.closest('[data-go]');
-      if (!go) return;
-      ev.preventDefault();
-      location.hash = go.getAttribute('data-go');
-    });
-    window.addEventListener('hashchange', render);
-    render();
-  })();
-</script>
 </body>
 </html>
