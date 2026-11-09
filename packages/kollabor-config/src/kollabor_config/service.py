@@ -86,11 +86,7 @@ class ConfigService:
                 complete_config = self.config_loader.load_complete_config()
                 self.config_manager.config = complete_config
                 self._cached_config = complete_config.copy()
-                # The file this service was asked for, not wherever the layers point: a service built on
-                # another path must never write the user's real config (#967).
-                self.config_loader.save_merged_config(
-                    complete_config, path=self.config_manager.config_path
-                )
+                self.config_loader.save_merged_config(complete_config)
                 self._migrate_config_if_needed()
                 self._cached_config = self.config_manager.config.copy()
                 self._config_error = None

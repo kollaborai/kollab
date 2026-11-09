@@ -776,6 +776,24 @@ class ConfigLoader:
 
         return base_config
 
+    def _custom_config_path(self) -> Optional[Path]:
+        """The file this loader was given when it is not one of the layered config files, else None.
+
+        A test, a probe or a tool builds a service on a file of its own. Loads read only that file
+        (see _load_user_config_with_fallback) and saves must write only that file, so one never
+        reaches into the user's real config (#967). Existence does not matter here: a service on a
+        file that is not there yet creates that file.
+        """
+        given = self.config_manager.config_path if self.config_manager else None
+        if not given:
+            return None
+        standard_paths = [
+            *get_global_config_path_candidates(),
+            *(path / "config.json" for path in get_project_data_dir_candidates()),
+            *get_local_config_path_candidates(),
+        ]
+        return None if given in standard_paths else given
+
     def _load_user_config_with_fallback(self) -> Dict[str, Any]:
         """Load user configuration with layered resolution.
 
@@ -794,23 +812,15 @@ class ConfigLoader:
 
         merged_config = {}
 
-        # Check if an explicit config path was provided (e.g., for testing)
-        explicit_path = None
-        if self.config_manager and self.config_manager.config_path:
-            explicit_path = self.config_manager.config_path
-            # If explicit path exists and is not in standard locations, load only from it
-            standard_paths = [
-                *get_global_config_path_candidates(),
-                *(path / "config.json" for path in get_project_data_dir_candidates()),
-                *get_local_config_path_candidates(),
-            ]
-            if explicit_path.exists() and explicit_path not in standard_paths:
-                try:
-                    with open(explicit_path, "r") as f:
-                        return json.load(f) or {}
-                except Exception as e:
-                    logger.warning(f"Failed to load explicit config: {e}")
-                    return {}
+        # A file of its own (e.g., for testing): if it exists, load only from it
+        explicit_path = self._custom_config_path()
+        if explicit_path is not None and explicit_path.exists():
+            try:
+                with open(explicit_path, "r") as f:
+                    return json.load(f) or {}
+            except Exception as e:
+                logger.warning(f"Failed to load explicit config: {e}")
+                return {}
 
         # Layer 1: Global config (base)
         global_config_path = get_existing_global_config_path()
@@ -891,11 +901,7 @@ class ConfigLoader:
         return result
 
     def save_merged_config(
-        self,
-        config: Dict[str, Any],
-        save_target: Optional[str] = None,
-        *,
-        path: Optional[Path] = None,
+        self, config: Dict[str, Any], save_target: Optional[str] = None
     ) -> bool:
         """Save only user-modified configuration values to file.
 
@@ -911,9 +917,6 @@ class ConfigLoader:
             config: Configuration dictionary to save.
             save_target: Optional target override ("local" or "global").
                          None uses existing auto-detect behavior.
-            path: Write exactly this file, whatever the layers say. A service
-                  creating its own config file passes the one it was given, so
-                  it never writes into another config file (#967).
 
         Returns:
             True if save successful, False otherwise.
@@ -969,9 +972,7 @@ class ConfigLoader:
             logger.warning(f"Could not compute config defaults for diff: {e}")
 
         # Determine save path based on explicit target or auto-detect
-        if path is not None:
-            save_path = Path(path)
-        elif save_target == "local":
+        if save_target == "local":
             save_path = get_local_config_path()
         elif save_target == "global":
             save_path = get_global_config_path()
@@ -1012,9 +1013,17 @@ class ConfigLoader:
         2. Project config (if exists) - project defaults
         3. Global config - fallback
 
+        A file of its own (not one of the three layers) is the exception: loads
+        read only it, so saves write only it (#967).
+
         Returns:
             Path where config should be saved.
         """
+        custom_path = self._custom_config_path()
+        if custom_path is not None:
+            logger.debug(f"Saving to the given config: {custom_path}")
+            return custom_path
+
         # Check local override first (highest priority)
         if any(path.exists() for path in get_local_config_path_candidates()):
             local_path = get_local_config_path()
