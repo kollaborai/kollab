@@ -25,6 +25,18 @@ def appearance_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def tmp_path_is_home(tmp_path, monkeypatch):
+    """A test's tmp_path is the user's home folder.
+
+    The engine's folder rule (workspace_folder.py, #980) trusts home, so the folders a test makes under
+    tmp_path are valid workspaces, and ~/.kollab is never the developer's real one. A test that needs
+    folders outside home sets its own HOME (test_workspace_folder*.py).
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
 def no_picker_warm(monkeypatch):
     """The model picker's background warm launches real harnesses (#953): a test that wants it sets 1."""
     monkeypatch.setenv("KOLLAB_PICKER_WARM", "0")
