@@ -336,6 +336,10 @@ another computer answers over the relay in seconds. Until the daemon has answere
 once, an empty mirror is unknown, not an empty chat: the history answer says
 `stale`, the page shows that history is still syncing instead of "No conversation
 messages yet", and the first answer is announced with `history_updated` (#927).
+The page replaces what it built from the seed by rebuilding the thread (the runtime
+reads its initial state only on mount), which would empty the message box, so
+`ComposerKeeper` (`components/assistant-ui/composer-keeper.tsx`) keeps each chat's
+typed text in memory and puts it back when that chat's runtime mounts again (#976).
 The page polls the session list, not history, so while the daemon has never
 answered a failed background answer is tried again after
 `HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS` (1, 2 and 4 s); after those the next
