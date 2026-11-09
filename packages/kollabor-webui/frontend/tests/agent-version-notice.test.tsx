@@ -54,7 +54,7 @@ describe("AgentVersionNotice", () => {
 });
 
 describe("agents that cannot restart themselves (#968)", () => {
-  const sentence = "This agent started before Restart Agent existed. Run kollab --hub stop lapis in a terminal, then start it again.";
+  const sentence = "This agent started before Restart Agent existed. Run kollab --hub stop lapis in a terminal, then select its Offline row in the sidebar to start it again.";
   const noVersion = { engineVersion: "0.21.0+aaaa1111", agent: { ...agent, version: "" } };
   const older = { engineVersion: "0.21.0+aaaa1111", agent: { ...agent, version: "0.20.0+bbbb2222" } };
 
