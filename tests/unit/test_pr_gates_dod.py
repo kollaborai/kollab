@@ -145,6 +145,7 @@ def test_config_defaults_disabled(tmp_path: Path) -> None:
     assert cfg.check_name == "dod/ready-for-review"
     assert cfg.checks == ALL_CHECKS
     assert cfg.docs_paths == {}
+    assert cfg.spec_or_fix_brief_mode == "block"
     assert cfg.regression.finding_id_pattern == pr_gates_dod.DEFAULT_FINDING_PATTERN
     assert cfg.regression.test_paths == pr_gates_dod.DEFAULT_TEST_PATHS
     assert cfg.regression.trusted_reviewers == list(pr_gates_dod.DEFAULT_TRUSTED_REVIEWERS)
@@ -379,6 +380,23 @@ def test_spec_or_fix_brief_fix_without_brief_warns_or_blocks(tmp_path: Path) -> 
     assert block.failed_names() == ["spec_or_fix_brief"]
 
 
+def test_warn_mode_posts_a_successful_check_with_warning_details(tmp_path, monkeypatch):
+    cfg = spec_gate_config(tmp_path, "warn")
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(title="feat(cli): add a command")
+    )
+    payloads = []
+    monkeypatch.setattr(
+        pr_gates_dod,
+        "github_api",
+        lambda endpoint, payload: payloads.append(payload) or {"id": 1},
+    )
+    pr_gates_dod.post_check_run(cfg, report, repo="o/r", head_sha="c" * 40)
+    assert payloads[0]["conclusion"] == "success"
+    assert payloads[0]["output"]["title"] == "Definition of done: passed with warnings"
+    assert "WARNING spec_or_fix_brief" in payloads[0]["output"]["summary"]
+
+
 @pytest.mark.parametrize("title", [
     "docs: clarify command guide",
     "chore(ci): tidy workflow",
@@ -513,6 +531,8 @@ def test_disabled_never_posts(tmp_path, monkeypatch) -> None:
 def test_repo_config_is_on_without_signed_commits() -> None:
     cfg = pr_gates_dod.load_config(CONFIG_FILE)
     assert cfg.enabled is True
+    assert cfg.spec_or_fix_brief_mode == "warn"
+    assert "spec_or_fix_brief" in cfg.checks
     # Agent commits are not signed yet (#755), so this would fail every agent PR.
     assert "signed_commits" not in cfg.checks
 
@@ -522,6 +542,7 @@ def test_workflow_file_exists_least_privilege() -> None:
     # Only what a check run needs; no comment posting, no admin surface.
     assert "checks: write" in text
     assert "pull-requests: write" not in text
+    assert "issues: read" in text
     assert "contents: read" in text
 
 
@@ -691,6 +712,30 @@ def test_collect_files_and_comments_read_every_page(monkeypatch):
     data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
     assert len(data.changed_files) == 101 and "late.py" in data.changed_files
     assert "late-finding" in data.review_comment_bodies
+
+
+def test_collect_reads_bodies_of_explicitly_linked_issues(monkeypatch, tmp_path):
+    calls: list[list] = []
+    pull = {
+        "title": "feat(cli): add a command",
+        "body": "Fixes #984 and references #985",
+        "base": {"ref": "main", "sha": BASE_TIP},
+        "head": {"sha": HEAD_SHA},
+    }
+    pages = {
+        "rest": {
+            "repos/o/r/issues/984": {1: {"body": "Spec: docs/specs/command.md"}},
+            "repos/o/r/issues/985": {1: {"body": "No specification link"}},
+        }
+    }
+    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
+    data = pr_gates_dod.collect_pr_data(
+        "o/r", PR_NUM, root="/nonexistent", need_spec_or_fix_brief=True
+    )
+    assert data.linked_issue_bodies == {984: "Spec: docs/specs/command.md", 985: "No specification link"}
+    assert "spec_or_fix_brief" not in pr_gates_dod.evaluate(
+        spec_gate_config(tmp_path, mode="warn"), data
+    ).failed_names()
 
 
 def test_collect_reads_test_blob_from_pr_head_not_base_checkout(monkeypatch, tmp_path):

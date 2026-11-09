@@ -33,7 +33,8 @@ Configuration lives in ``.github/pr-gates.toml`` and is repo-agnostic:
    check_name = "dod/ready-for-review"              # posted check name
    checks = ["signed_commits", "docs_paths", "threads_resolved",
              "base_current", "conventional_title", "linked_issue",
-             "regression_test"]                     # each toggleable
+             "regression_test", "spec_or_fix_brief"] # each toggleable
+   spec_or_fix_brief_mode = "warn"                    # warn or block
 
    [pr_gates.dod.docs_paths]
    "^packages/" = ["CHANGELOG.md"]                  # regex -> required docs
@@ -75,6 +76,7 @@ ALL_CHECKS: tuple[str, ...] = (
     "conventional_title",
     "linked_issue",
     "regression_test",
+    "spec_or_fix_brief",
 )
 
 DEFAULT_CHECK_NAME = "dod/ready-for-review"
@@ -101,7 +103,7 @@ CONVENTIONAL_TITLE_RE = re.compile(
     r"(\([^)]+\))?!?:\s+.+"
 )
 LINKED_ISSUE_RE = re.compile(
-    r"\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|references?|refs?)\s+#\d+",
+    r"\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|references?|refs?)\s+#(?P<number>\d+)",
     re.IGNORECASE,
 )
 TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
@@ -132,6 +134,7 @@ class DodConfig:
     docs_paths: dict[str, list[str]] = field(default_factory=dict)
     check_name: str = DEFAULT_CHECK_NAME
     regression: RegressionProfile = field(default_factory=RegressionProfile)
+    spec_or_fix_brief_mode: str = "block"
 
 
 def _as_str_tuple(value: Any, what: str) -> tuple[str, ...]:
@@ -174,6 +177,15 @@ def load_config(path: str | os.PathLike[str]) -> DodConfig:
     for pattern, required in raw_docs.items():
         docs_paths[str(pattern)] = list(
             _as_str_tuple(required, f"pr_gates.dod.docs_paths[{pattern!r}]")
+        )
+
+    spec_or_fix_brief_mode = section.get("spec_or_fix_brief_mode", "block")
+    if not isinstance(spec_or_fix_brief_mode, str) or spec_or_fix_brief_mode not in {
+        "warn",
+        "block",
+    }:
+        raise ConfigError(
+            "pr_gates.dod.spec_or_fix_brief_mode must be 'warn' or 'block'"
         )
 
     raw_profile = section.get("regression_profile", {})
@@ -220,6 +232,7 @@ def load_config(path: str | os.PathLike[str]) -> DodConfig:
         docs_paths=docs_paths,
         check_name=check_name,
         regression=regression,
+        spec_or_fix_brief_mode=spec_or_fix_brief_mode,
     )
 
 
@@ -252,6 +265,7 @@ class PRData:
     reviews: tuple["PRReview", ...] = ()
     pull_author_login: str = ""
     head_sha: str = ""
+    linked_issue_bodies: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -289,6 +303,7 @@ class DoDReport:
     evaluated: list[str]
     failed: list[tuple[str, str]]  # (check name, detail)
     audit_notes: list[FindingSuppression] = field(default_factory=list)
+    warnings: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def outcome(self) -> str:
@@ -317,6 +332,9 @@ class DoDReport:
             lines = [f"pr-gates DoD: {len(self.failed)} failed item(s):"]
             for name, detail in self.failed:
                 lines.append(f"- {name}: {detail}")
+        if self.warnings:
+            lines.append(f"Warnings: {len(self.warnings)} item(s) need attention:")
+            lines.extend(f"- WARNING {name}: {detail}" for name, detail in self.warnings)
         if self.audit_notes:
             lines.append("Audited finding-reference suppressions:")
             lines.extend(
@@ -379,6 +397,42 @@ def _check_conventional_title(data: PRData) -> str:
 def _check_linked_issue(data: PRData) -> str:
     if not LINKED_ISSUE_RE.search(data.body or ""):
         return "no 'Fixes #N' / 'Closes #N' / 'Refs #N' link in the body"
+    return ""
+
+
+def _has_feature_spec(data: PRData) -> bool:
+    if any(re.fullmatch(r"docs/specs/[^/]+\.md", path) for path in data.changed_files):
+        return True
+    return any(
+        re.search(r"docs/specs/[^\s)>\]]+\.md", body, re.IGNORECASE)
+        for body in data.linked_issue_bodies.values()
+    )
+
+
+def _has_fix_brief(text: str) -> bool:
+    heading = re.search(r"(?im)^\s*(?P<level>#{1,6})\s+fix brief\s*:?\s*$", text)
+    if not heading:
+        return False
+    level = len(heading.group("level"))
+    next_section = re.search(rf"(?m)^\s*#{{1,{level}}}\s+\S.*$", text[heading.end() :])
+    end = heading.end() + next_section.start() if next_section else len(text)
+    section = text[heading.end() : end]
+    return bool(
+        re.search(r"\broot cause\b", section, re.IGNORECASE)
+        and re.search(r"\bregression test\b", section, re.IGNORECASE)
+    )
+
+
+def _check_spec_or_fix_brief(data: PRData) -> str:
+    title_type = re.match(r"^([a-z]+)(?:\([^)]*\))?!?:", data.title.strip())
+    if not title_type:
+        return ""
+    if title_type.group(1) == "feat" and not _has_feature_spec(data):
+        return "feature PR needs a changed docs/specs/*.md file or a linked issue that links one"
+    if title_type.group(1) == "fix":
+        sources = (data.body or "", *data.linked_issue_bodies.values())
+        if not any(_has_fix_brief(source) for source in sources):
+            return "fix PR needs a Fix brief section with Root cause and Regression test"
     return ""
 
 
@@ -623,6 +677,7 @@ def evaluate(cfg: DodConfig, data: PRData) -> DoDReport:
     if not cfg.enabled:
         return DoDReport(ran=False, evaluated=[], failed=[])
     failed: list[tuple[str, str]] = []
+    warnings: list[tuple[str, str]] = []
     audit_notes: list[FindingSuppression] = []
     for name in cfg.checks:
         if name == "signed_commits":
@@ -640,6 +695,11 @@ def evaluate(cfg: DodConfig, data: PRData) -> DoDReport:
         elif name == "regression_test":
             detail, suppression_notes = _check_regression_test(cfg, data)
             audit_notes.extend(suppression_notes)
+        elif name == "spec_or_fix_brief":
+            detail = _check_spec_or_fix_brief(data)
+            if detail and cfg.spec_or_fix_brief_mode == "warn":
+                warnings.append((name, detail))
+                detail = ""
         else:  # load_config rejects unknowns; defensive here
             detail = f"unknown check {name!r}"
         if detail:
@@ -649,6 +709,7 @@ def evaluate(cfg: DodConfig, data: PRData) -> DoDReport:
         evaluated=list(cfg.checks),
         failed=failed,
         audit_notes=audit_notes,
+        warnings=warnings,
     )
 
 
@@ -708,7 +769,9 @@ def post_check_run(
         "conclusion": "success" if not report.failed else "failure",
         "output": {
             "title": (
-                "Definition of done: passed"
+                "Definition of done: passed with warnings"
+                if report.warnings and not report.failed
+                else "Definition of done: passed"
                 if not report.failed
                 else f"Definition of done: {len(report.failed)} item(s) missing"
             ),
@@ -818,9 +881,29 @@ def _gh_paginate(endpoint: str) -> list[dict[str, Any]]:
         page += 1
 
 
-def collect_pr_data(repo: str, pr: int, *, root: str = ".", test_paths: tuple[str, ...] = ("tests/",)) -> PRData:
+def collect_pr_data(
+    repo: str,
+    pr: int,
+    *,
+    root: str = ".",
+    test_paths: tuple[str, ...] = ("tests/",),
+    need_spec_or_fix_brief: bool = False,
+) -> PRData:
     """Collect PR facts without checking out or executing PR-controlled code."""
     pull = _gh("api", f"repos/{repo}/pulls/{pr}")
+    body = pull.get("body") or ""
+    linked_issue_bodies: dict[int, str] = {}
+    title = pull.get("title") or ""
+    title_type = re.match(r"^([a-z]+)(?:\([^)]*\))?!?:", title.strip())
+    if need_spec_or_fix_brief and title_type and title_type.group(1) in {"feat", "fix"}:
+        issue_numbers = {
+            int(match.group("number")) for match in LINKED_ISSUE_RE.finditer(body)
+        }
+        for issue_number in sorted(issue_numbers):
+            issue = _gh("api", f"repos/{repo}/issues/{issue_number}")
+            issue_body = issue.get("body") if isinstance(issue, dict) else None
+            if isinstance(issue_body, str):
+                linked_issue_bodies[issue_number] = issue_body
     commits_raw = _gh_paginate(f"repos/{repo}/pulls/{pr}/commits")
     files_raw = _gh_paginate(f"repos/{repo}/pulls/{pr}/files")
     review_comments = _gh_paginate(f"repos/{repo}/pulls/{pr}/comments")
@@ -997,8 +1080,8 @@ def collect_pr_data(repo: str, pr: int, *, root: str = ".", test_paths: tuple[st
         raise RuntimeError("PR head changed while collecting facts; failing closed")
 
     return PRData(
-        title=pull.get("title") or "",
-        body=pull.get("body") or "",
+        title=title,
+        body=body,
         commits=commits,
         changed_files=changed_files,
         unresolved_threads=unresolved,
@@ -1012,6 +1095,7 @@ def collect_pr_data(repo: str, pr: int, *, root: str = ".", test_paths: tuple[st
         reviews=reviews,
         pull_author_login=login(pull),
         head_sha=head_sha,
+        linked_issue_bodies=linked_issue_bodies,
     )
 
 
@@ -1039,7 +1123,12 @@ def main(argv: list[str] | None = None) -> int:
         if not cfg.enabled:
             print("pr-gates DoD is disabled (pr_gates.dod.enabled = false); exit 0.")
             return 0
-        data = collect_pr_data(args.repo, args.pr, test_paths=tuple(cfg.regression.test_paths))
+        data = collect_pr_data(
+            args.repo,
+            args.pr,
+            test_paths=tuple(cfg.regression.test_paths),
+            need_spec_or_fix_brief="spec_or_fix_brief" in cfg.checks,
+        )
         if args.post and data.head_sha != args.head_sha:
             raise RuntimeError("event head differs from collected PR head; failing closed")
     except (ConfigError, RuntimeError, KeyError, ValueError) as exc:
